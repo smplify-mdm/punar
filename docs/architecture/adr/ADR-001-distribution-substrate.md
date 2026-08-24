@@ -1,6 +1,6 @@
 # ADR-001: Distribution Substrate
 
-- Status: **Proposed — awaiting ratification by Smplify**
+- Status: **Accepted** — ratified by Smplify (Spurti Preetham Gurram), 2026-08-24
 - Date: 2026-08-24
 - Spec references: `docs/product/SPEC_v0.2.md` sections 5, 6, 7, 8 (8.1–8.4), 30, 38–43, 44, 57, 58, 66, 75, 76, 80
 - Research inputs (read these for evidence and citations; this ADR does not duplicate their detail):

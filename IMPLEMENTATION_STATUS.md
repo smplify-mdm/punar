@@ -13,7 +13,7 @@ Deliverables (spec section 76, Milestone 0):
 - [x] Substrate ADR — `ADR-001 Distribution Substrate` comparing Arch, NixOS,
   and Fedora Atomic/image-based approaches (spec section 8.4) exists at
   [`docs/architecture/adr/ADR-001-distribution-substrate.md`](docs/architecture/adr/ADR-001-distribution-substrate.md)
-  (status: Proposed — awaiting ratification by Smplify).
+  (status: Accepted — ratified 2026-08-24).
 - [ ] Resource-budget baseline — budgets documented in
   [`PERFORMANCE_BUDGETS.md`](PERFORMANCE_BUDGETS.md); no measurements exist yet.
 - [ ] VM build — reproducible bootable VM image. The containerized mkosi
