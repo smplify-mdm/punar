@@ -89,11 +89,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lint pipeline shell scripts (shellcheck)
+      # Pinned shellcheck container — same tool and version as local dev
+      # (ubuntu's apt shellcheck 0.9.x drifts: SC2317 false-positives on
+      # trap-invoked cleanup). Local/CI parity over distro convenience.
+      - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
-          shellcheck tools/build-image.sh tools/boot-test.sh os/images/scripts/container-build.sh
+          docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
+            tools/build-image.sh tools/boot-test.sh os/images/scripts/container-build.sh
 
       - name: Build punar-dev image (containerized mkosi)
         run: ./tools/build-image.sh
