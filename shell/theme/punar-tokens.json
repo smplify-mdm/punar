@@ -1,0 +1,145 @@
+{
+  "$comment": "Punar design tokens \u2014 Field Note design language. Machine-readable source for the Quickshell/QML shell and any non-CSS consumer. Keep in sync with punar-tokens.css. See docs/design/DESIGN_LANGUAGE.md.",
+  "meta": {
+    "name": "punar-field-note",
+    "version": "0.1.0",
+    "adopted": "2026-08-24",
+    "source": "https://www.smplify.com/blog/field-note-001-the-study-of-intent"
+  },
+  "font": {
+    "sans": {
+      "family": "Instrument Sans",
+      "license": "OFL",
+      "fallback": [
+        "ui-sans-serif",
+        "system-ui",
+        "sans-serif"
+      ]
+    },
+    "mono": {
+      "family": "Geist Mono",
+      "license": "OFL-1.1",
+      "fallback": [
+        "ui-monospace",
+        "SFMono-Regular",
+        "monospace"
+      ]
+    },
+    "trackingDisplayEm": -0.028,
+    "trackingLabelEm": 0.12,
+    "labelSizePx": 12,
+    "metaSizePx": 10,
+    "rules": {
+      "labelsAndData": "mono, uppercase labels, tabular-nums data",
+      "statementsAndProse": "sans"
+    }
+  },
+  "color": {
+    "paper": {
+      "surface": "#FAF9F6",
+      "ink": "#000000",
+      "ink2": "#333333",
+      "ink3": "#666666",
+      "muted": "#F4F2EC",
+      "raise2": "#EDEAE2",
+      "border": "#E6E4DE",
+      "inputBorder": "#8C8880",
+      "status": {
+        "ok": "#2E6B21",
+        "warn": "#8A5A00",
+        "bad": "#A31F2C"
+      }
+    },
+    "panel": {
+      "surface": "#08090A",
+      "fg": "#F2F3F5",
+      "ink2": "#A8ADB6",
+      "ink3": "#7B8290",
+      "edge": "#26282E",
+      "status": {
+        "ok": "#A3E047",
+        "warn": "#F2BE85",
+        "bad": "#FF7A7A"
+      }
+    },
+    "semantics": {
+      "ok": [
+        "allow",
+        "compliant",
+        "active"
+      ],
+      "warn": [
+        "approval_required",
+        "remediating",
+        "expiring"
+      ],
+      "bad": [
+        "deny",
+        "non_compliant",
+        "blocked"
+      ]
+    },
+    "action": {
+      "$comment": "Consequential affirmative primaries (Approve, Unlock, Enroll, Commit). Max one colored button per surface; destructive = bad-family ghost, filled only on final confirmation.",
+      "paper": {
+        "bg": "#2E6B21",
+        "fg": "#FAF9F6"
+      },
+      "panel": {
+        "bg": "#A3E047",
+        "fg": "#08090A"
+      },
+      "destructive": {
+        "paper": "#A31F2C",
+        "panel": "#FF7A7A"
+      }
+    }
+  },
+  "shape": {
+    "radiusPx": 10,
+    "radiusTagPx": 6,
+    "hairlinePx": 1
+  },
+  "shadow": {
+    "elegant": "0 18px 36px -18px rgb(28 24 16 / 0.16), 0 2px 6px rgb(28 24 16 / 0.07)",
+    "glow": "0 30px 70px -30px rgb(28 24 16 / 0.2)"
+  },
+  "motion": {
+    "ease": [
+      0.2,
+      0,
+      0,
+      1
+    ],
+    "durationMs": {
+      "micro": 150,
+      "standard": 300,
+      "spatial": 450
+    },
+    "principle": "fluid, not decorative (spec 13.4)"
+  },
+  "terminal": {
+    "$comment": "v0 draft \u2014 blue/magenta/cyan pending Milestone 1 tuning; scheme stays near-monochrome, lime is the single accent.",
+    "background": "#08090A",
+    "foreground": "#F2F3F5",
+    "cursor": "#A3E047",
+    "ansi": {
+      "black": "#26282E",
+      "red": "#FF7A7A",
+      "green": "#A3E047",
+      "yellow": "#F2BE85",
+      "blue": "#8FA3C4",
+      "magenta": "#B0A8C4",
+      "cyan": "#8FBCC4",
+      "white": "#F2F3F5",
+      "brightBlack": "#7B8290",
+      "brightRed": "#FF9B9B",
+      "brightGreen": "#BCEA75",
+      "brightYellow": "#F7D2A8",
+      "brightBlue": "#AFC0DB",
+      "brightMagenta": "#C8C0DB",
+      "brightCyan": "#AFD5DB",
+      "brightWhite": "#FFFFFF"
+    }
+  }
+}

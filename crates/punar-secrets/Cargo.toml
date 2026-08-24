@@ -1,0 +1,9 @@
+[package]
+name = "punar-secrets"
+description = "Short-lived credential broker (SPEC section 11.4) — Milestone 0 placeholder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

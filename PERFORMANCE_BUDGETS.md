@@ -1,0 +1,331 @@
+# Performance Budgets
+
+Status: **budgets defined, nothing measured yet.** Every number in the baseline
+table below is `not yet measured`. The CI enforcement harness described in
+section 5 is **PLANNED and not implemented**.
+
+Authoritative source: [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md),
+sections 6 (Performance Budgets) and 7 (Adaptive Hardware Profiles). Per spec
+section 1, performance is an acceptance criterion: RAM, CPU, disk I/O, boot
+time, and background activity are first-class engineering budgets, not
+nice-to-haves. If a budget and the spec ever disagree, the spec wins and this
+file must be corrected.
+
+Scope note on honesty (spec section 1.22): until Milestone 0's VM build exists
+and is measured, everything here is a commitment, not a result. Measurements
+taken inside VMs — especially emulated x86_64 VMs on the maintainer's arm64
+macOS host — must be labeled with their environment and are not comparable to
+bare-metal numbers.
+
+---
+
+## 1. Budgets
+
+All numbers below are copied from spec section 6 and must not drift from it.
+
+### 1.1 Idle RAM (whole system)
+
+Measured on a clean graphical desktop after boot and stabilization (see
+"stabilized idle", section 2.1).
+
+| Tier         | Budget       |
+|--------------|--------------|
+| Target       | < 1.0 GB RAM |
+| Stretch      | < 750 MB RAM |
+| Hard ceiling | 1.5 GB RAM   |
+
+Exceeding the hard ceiling is a **release blocker** unless explicitly waived.
+A waiver must be recorded (who, why, for which release) in this file.
+
+### 1.2 Punar / Smplify service RAM (combined)
+
+Combined idle memory for the local control-plane services — the `punard`
+daemon and its siblings from spec section 11 (`punar-agentd`, `punar-secrets`,
+`punar-workspace`, `punar-env`, `punar-netd`, and the resident parts of
+`punar-shell` attributable to control-plane work; `punarctl` is a short-lived
+CLI and is excluded while not running).
+
+| Tier        | Budget                                    |
+|-------------|-------------------------------------------|
+| Target      | < 100 MB total idle RSS/PSS where measurable |
+| MVP ceiling | < 150 MB                                  |
+
+### 1.3 Idle CPU
+
+| Tier   | Budget                          |
+|--------|---------------------------------|
+| Target | effectively 0% when idle        |
+
+Rules (spec 6.3):
+
+- Continuous high-frequency polling is prohibited.
+- Prefer event-driven observation (inotify/fanotify where scoped, netlink,
+  D-Bus/varlink signals, eBPF only where aggregation demands it) over timers.
+
+"Effectively 0%" is operationalized in section 2.3 as a concrete threshold so
+it can be enforced; the threshold is an engineering interpretation of the
+spec, not a spec number, and is marked as such.
+
+### 1.4 Disk I/O
+
+Spec 6.4 defines rules rather than a single number:
+
+- Avoid constant writes for telemetry, AI ledger, inventory, policy, and logs.
+- Batch and aggregate writes.
+- Do not log every filesystem read performed by AI agents.
+
+Operationalization (engineering interpretation, see section 2.4): at
+stabilized idle, Punar first-party services should produce approximately zero
+sustained write throughput — writes should arrive in infrequent batches, not a
+steady trickle. A concrete enforcement threshold will be set after the first
+baseline is measured.
+
+### 1.5 Boot
+
+Spec 6.5 mandates tracking, not a fixed number:
+
+- Track boot-to-usable-desktop time.
+- Every major release must measure boot performance and regress-test it.
+
+Until a first baseline exists there is no numeric boot budget; once Milestone
+0/1 produces a measured baseline, a regression threshold (e.g. "no release may
+regress boot-to-usable-desktop by more than X% against the recorded baseline")
+will be added here alongside the baseline value.
+
+### 1.6 Memory pressure behavior (companion requirement)
+
+Not a number, but budget-relevant (spec 6.6): use zram, memory-pressure-aware
+service behavior, cgroups, and per-project limits where useful. On 8 GB
+systems, developer applications take priority over decorative OS effects.
+
+---
+
+## 2. Measurement methodology
+
+Each budget has exactly one canonical measurement method. Any published number
+must state the method, the image version, and the environment (bare metal
+model, or hypervisor + host).
+
+### 2.1 Definition: "stabilized idle"
+
+All idle measurements (RAM, CPU, disk I/O) are taken at **stabilized idle**,
+defined as all of the following:
+
+1. Boot completed: `systemd-analyze time` returns (no jobs pending) and the
+   graphical session is fully started (`graphical.target` active, session
+   shell process running).
+2. Auto-login into the default graphical session; **no user input** after
+   login (no keystrokes, no pointer motion).
+3. **10 minutes elapsed** since `graphical.target` became active. This window
+   lets one-shot startup units exit, journal/coredump housekeeping finish,
+   page cache and service allocator behavior settle, and any first-boot or
+   first-login work complete.
+4. No foreground applications launched beyond what the default session starts
+   itself.
+5. Network connected (DHCP complete) but no user-initiated traffic — idle must
+   be measured with networking up, since that is the realistic state.
+6. Sampling itself must be lightweight: the measurement agent may not cause
+   the load it measures. Samplers read `/proc` and cgroup files directly and
+   sleep between samples; no `top`-style full-process-table scans at high
+   frequency.
+
+Idle metrics are then sampled over a **5-minute measurement window** starting
+at the 10-minute mark, and the reported value is the mean over the window
+(RAM: mean and max; CPU: mean; disk: total bytes written during the window).
+
+### 2.2 Idle RAM (whole system)
+
+- Canonical metric: `MemTotal - MemAvailable` from `/proc/meminfo`, sampled
+  every 10 s across the measurement window; report mean and max.
+- Rationale: `MemAvailable` accounts for reclaimable page cache; raw
+  `MemFree` would overstate usage and punish healthy caching.
+- zram: when zram swap is active (Constrained profile), additionally record
+  `swapused` and zram compressed size (`/sys/block/zram0/mm_stat`) so
+  compressed memory is visible and cannot silently hide budget breaches.
+  The headline budget number remains `MemTotal - MemAvailable`.
+- Environment: the budget is defined for the minimum target (8 GB machine,
+  spec 5.1) and for the CI VM sized to match (8 GB RAM). Numbers from VMs are
+  labeled `(VM)`; numbers from emulated VMs (qemu tcg on arm64 hosts) are
+  labeled `(VM, emulated)` and are indicative only.
+
+### 2.3 Punar / Smplify service RAM
+
+- Canonical metric: **PSS**, read from `/proc/<pid>/smaps_rollup` (`Pss:`
+  line) for every process belonging to a Punar first-party service, summed.
+  PSS is chosen because the services may share libraries; summing RSS would
+  double-count shared pages.
+- Process attribution: each Punar service runs in its own systemd unit
+  (`punard.service`, `punar-agentd.service`, ...). Membership is determined
+  from the unit's cgroup (`/sys/fs/cgroup/.../cgroup.procs`), never by
+  process-name matching.
+- Cross-check metric: systemd cgroup accounting —
+  `systemctl show -p MemoryCurrent <unit>` (i.e. cgroup v2
+  `memory.current`), summed across the same units. This includes kernel-side
+  memory (sockets, page tables) charged to the cgroup and will normally read
+  higher than summed PSS. **The budget (100 MB target / 150 MB MVP ceiling)
+  is judged against summed PSS**, per the spec's "RSS/PSS where measurable"
+  wording; the cgroup figure is recorded alongside it for drift detection.
+- Sampled at stabilized idle, same window and cadence as 2.2.
+
+### 2.4 Idle CPU
+
+- Canonical metric, per service: cgroup v2 `cpu.stat` (`usage_usec`) delta
+  across the 5-minute window for each Punar unit, expressed as % of one CPU.
+- Whole-system check: `/proc/stat` aggregate non-idle time delta across the
+  window (excluding the measurement agent's own usage, which is reported
+  separately and must itself be negligible).
+- Enforcement threshold (engineering interpretation of "effectively 0%", not
+  a spec number): each Punar service **< 0.5% of one core averaged over the
+  window**, and no periodic wakeup pattern faster than once per 10 s at idle
+  (verified ad hoc with `perf`/`timerlat` or wakeup counts when
+  investigating, not in the standard harness).
+
+### 2.5 Disk I/O
+
+- Canonical metric, per service: cgroup v2 `io.stat` (`wbytes`, `wios`)
+  delta across the measurement window for each Punar unit.
+- Whole-system check: `/proc/diskstats` sectors-written delta for the root
+  disk across the window.
+- Judged against the rules in 1.4: sustained writers at idle are failures
+  regardless of volume; batched, infrequent writes (e.g. a ledger flush once
+  per N minutes or on event-count threshold) are acceptable. A numeric
+  ceiling (bytes written per idle hour per service) will be set once a
+  baseline exists.
+
+### 2.6 Boot
+
+- Canonical tool: `systemd-analyze`.
+  - `systemd-analyze time` — firmware/loader/kernel/initrd/userspace split.
+  - `systemd-analyze critical-chain` and `systemd-analyze blame` — recorded
+    with every measurement for regression diagnosis.
+  - `systemd-analyze plot > boot-<image-version>.svg` — archived as a CI
+    artifact.
+- `systemd-analyze` stops at userspace completion, which is **not**
+  "usable desktop". Boot-to-usable-desktop is defined as: time from kernel
+  start (as reported by `systemd-analyze`'s zero point) until the session
+  shell reports ready — concretely, until a `punar-shell` readiness marker
+  (a `systemd-notify`-style READY signal or timestamped journal line emitted
+  when the shell has drawn its first frame and accepts keyboard input). Until
+  that marker exists in the shell, `graphical.target` activation time is the
+  interim proxy, and any number published with the proxy must say so.
+- Report the median of 3 consecutive cold boots of the same image.
+- VM boots exclude firmware time from cross-environment comparisons (VM
+  firmware time is not representative of UEFI on target laptops).
+
+---
+
+## 3. Hardware profiles (spec section 7)
+
+Budgets are defined at the **minimum target** (spec 5.1: 4-core x86_64, 8 GB
+RAM, SSD). The adaptive profiles change system behavior, and therefore what a
+measurement is expected to show — they do not relax the section 1 budgets.
+
+| Profile | Example hardware | Behavior changes |
+|---|---|---|
+| **Constrained** | 8 GB RAM, integrated GPU | Aggressive zram; minimal background services; reduced visual effects; conservative local-model defaults; container resource guidance; memory-aware browser behavior; no large local inference stack by default. |
+| **Standard** | 16 GB RAM | Full desktop experience; common developer containers; small/medium local AI utilities where appropriate; cloud AI remains primary. |
+| **AI workstation** | 32–64+ GB RAM, discrete GPU | Local inference optional; model cache; GPU development stack; larger project/container budgets. |
+
+Budget implications:
+
+- The section 1 idle budgets are enforced on the **Constrained** profile —
+  it is the worst case and the spec's minimum target.
+- Standard and AI-workstation profiles may legitimately idle higher (more
+  services enabled, optional local-AI machinery resident), but the base OS +
+  Punar services portion must still meet the section 1 numbers; anything
+  above it must be attributable to profile-enabled optional components.
+- CI enforcement (section 5) runs the Constrained profile. Per-profile
+  measurement is a later addition.
+
+---
+
+## 4. Baseline results
+
+Every value below is **not yet measured**. No VM image exists yet as of
+2026-08-24 (Milestone 0 in progress). This table is filled in only from runs
+of the canonical methodology in section 2, with environment labels.
+
+| Metric | Method | Budget | Measured value | Environment | Image / date |
+|---|---|---|---|---|---|
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | not yet measured | — | — |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | not yet measured | — | — |
+| Punar services PSS (sum) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
+| Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
+| Idle CPU, per Punar service | 2.4 | effectively 0% (< 0.5% of one core, interpretation) | not yet measured | — | — |
+| Idle disk writes, per Punar service | 2.5 | no sustained idle writers | not yet measured | — | — |
+| Boot to userspace complete | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
+
+Waivers granted: none.
+
+---
+
+## 5. CI enforcement plan — PLANNED, NOT IMPLEMENTED
+
+Nothing in this section exists yet. `tests/performance/` currently contains
+only a `.gitkeep`. This is the design the harness will be built to; it will
+be revised when Milestone 0's substrate ADR and VM build pipeline land.
+
+### 5.1 Harness shape
+
+A `tests/performance/` harness that:
+
+1. Takes a built Punar x86_64 VM image (the Milestone 0 image artifact) as
+   input.
+2. Boots it under QEMU/KVM in CI with the minimum-target shape: 4 vCPU, 8 GB
+   RAM, virtio disk, Constrained profile, auto-login.
+3. Waits for stabilized idle exactly as defined in 2.1 (boot complete,
+   10-minute settle).
+4. Runs an in-guest sampling script (shipped in the image or injected via
+   virtiofs/ssh) implementing sections 2.2–2.6: `/proc/meminfo`,
+   `smaps_rollup` sums, cgroup `memory.current` / `cpu.stat` / `io.stat`
+   deltas, `systemd-analyze` output.
+5. Emits a single JSON results file as a CI artifact, plus the
+   `systemd-analyze plot` SVG.
+6. Compares results against the budgets in section 1:
+   - **Hard failures (build fails):** idle RAM ≥ 1.5 GB hard ceiling;
+     Punar service PSS sum ≥ 150 MB MVP ceiling.
+   - **Warnings (annotated, non-fatal initially):** idle RAM above 1.0 GB
+     target; service PSS above 100 MB target; idle CPU above the 0.5%
+     interpretation threshold; sustained idle writers; boot-time regression
+     beyond the (future) recorded baseline threshold.
+7. Appends the run to a tracked history so trends are visible and the
+   baseline table in section 4 can be updated from real data.
+
+### 5.2 Environment caveats (must be encoded in the harness)
+
+- CI runners are x86_64 with KVM where available. If a runner offers no KVM,
+  the harness runs under TCG emulation: timings (boot, CPU) are then
+  **informational only and must not gate the build**; memory and disk-write
+  numbers remain valid gates since they are load-independent counters.
+- The maintainer's local host is macOS arm64 (Docker Desktop / Lima, no local
+  qemu-native x86_64 KVM). Local runs are for debugging the harness, always
+  labeled `(VM, emulated)`, and never a source of published baselines.
+- Budgets gate on VM measurements as a proxy. Bare-metal validation on a
+  representative device (spec 5.3) is a separate, later, manual step; VM
+  numbers must never be presented as bare-metal results.
+
+### 5.3 Sequencing
+
+- Milestone 0 delivers this file (done), the VM build, CI, and a
+  resource-budget baseline: the first harness iteration only **measures and
+  records** (steps 1–5, 7) without failing builds.
+- Gating (step 6 hard failures) is switched on once two consecutive
+  measurement runs produce stable numbers, so the first gate is not set
+  against noise.
+- Boot regression gating starts only after a baseline boot time is recorded
+  in section 4.
+
+---
+
+## 6. Change control
+
+- Budget numbers in section 1 change only via a spec change; edit
+  `docs/product/SPEC_v0.2.md` (or its successor) first, then mirror here.
+- Interpretation thresholds (CPU 0.5%, settle/measure windows, future disk
+  and boot thresholds) are owned by this file and may be tuned with an entry
+  in the log below.
+
+| Date | Change |
+|---|---|
+| 2026-08-24 | Initial version: budgets transcribed from SPEC_v0.2 sections 6–7; methodology defined; all baselines `not yet measured`; CI harness documented as planned. |

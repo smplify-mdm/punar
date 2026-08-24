@@ -1,0 +1,9 @@
+[package]
+name = "punar-agentd"
+description = "AI agent registry, identity, policy, attribution, and access-ledger service (SPEC section 11.3) — Milestone 0 placeholder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

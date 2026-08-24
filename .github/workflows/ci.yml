@@ -1,0 +1,124 @@
+# Punar CI — Milestone 0 (spec 76: "reproducible build and VM boot"; ADR-001).
+#
+# Jobs:
+#   rust       fmt + clippy(-D warnings) + tests for the Cargo workspace
+#   image      containerized mkosi build of the punar-dev qcow2 (tools/build-image.sh)
+#   boot-test  QEMU/OVMF boot smoke test of the built artifact (tools/boot-test.sh)
+#
+# Runner pin: ubuntu-24.04, NOT ubuntu-latest — GitHub is migrating -latest
+# labels toward 26.04 during 2026 (research/crosscutting.md §2.1); an OS
+# image build should not float. Standard public-repo runners are 4 vCPU /
+# 16 GB RAM / 14 GB SSD and expose /dev/kvm (permission granted via the udev
+# rule below, the pattern used by systemd's mkosi CI and the Android
+# emulator ecosystem). x86_64 CI is the canonical build environment; the
+# maintainer's arm64 Mac only runs the same containerized path under
+# emulation (docs/development/image-pipeline.md).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  image:
+    name: image (mkosi, containerized)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint pipeline shell scripts (shellcheck)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck tools/build-image.sh tools/boot-test.sh os/images/scripts/container-build.sh
+
+      - name: Build punar-dev image (containerized mkosi)
+        run: ./tools/build-image.sh
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-dev-image
+          path: |
+            os/images/out/punar-dev-x86_64.qcow2
+            os/images/out/SHA256SUMS
+            os/images/out/build-info.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  boot-test:
+    name: boot-test (QEMU smoke test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: image
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: punar-dev-image
+          path: os/images/out
+
+      - name: Install QEMU and OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      # Hosted Linux runners have /dev/kvm but the runner user lacks
+      # permission by default; this udev rule is the canonical fix
+      # (research/crosscutting.md §2.1). If KVM is still unavailable,
+      # tools/boot-test.sh degrades to TCG with a ::warning:: annotation
+      # rather than failing.
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot smoke test (serial console marker)
+        run: ./tools/boot-test.sh os/images/out/punar-dev-x86_64.qcow2
+
+      - name: Verify artifact checksum
+        run: |
+          cd os/images/out
+          sha256sum -c SHA256SUMS

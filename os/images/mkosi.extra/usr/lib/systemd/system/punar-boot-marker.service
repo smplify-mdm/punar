@@ -1,0 +1,18 @@
+# Emits a deterministic marker on the console once the system has reached
+# multi-user operation. tools/boot-test.sh greps the serial log for
+# PUNAR_BOOT_OK (spec 74.3 "boot" smoke test). The meminfo lines are a
+# coarse first-party RAM data point for the Milestone 0 budget baseline
+# (PERFORMANCE_BUDGETS.md) — indicative only, not a measurement harness.
+#
+# Enabled statically via the multi-user.target.wants symlink next to this
+# file (mkosi.extra/ is copied verbatim into the image).
+
+[Unit]
+Description=Punar CI boot marker
+After=getty.target
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh -c 'echo "PUNAR_BOOT_OK kernel=$(uname -r)"; grep -E "MemTotal|MemAvailable" /proc/meminfo'

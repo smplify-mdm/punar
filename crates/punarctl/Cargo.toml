@@ -1,0 +1,11 @@
+[package]
+name = "punarctl"
+description = "Punar control CLI (SPEC section 11.2) — real command surface, stubbed behavior until later milestones"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+punar-common = { workspace = true }

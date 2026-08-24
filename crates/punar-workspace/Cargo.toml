@@ -1,0 +1,9 @@
+[package]
+name = "punar-workspace"
+description = "Project workspace and window-context manager (SPEC section 11.5) — Milestone 0 placeholder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

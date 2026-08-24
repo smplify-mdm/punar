@@ -1,0 +1,437 @@
+<title>Punar Command Surfaces</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: a paper field-note document presenting two
+     overlay surfaces on a paper desktop. All colors explicit. */
+  * { box-sizing: border-box; }
+  body {
+    background: #FAF9F6; color: #333333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16px; line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta {
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: #666666;
+  }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 {
+    font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04;
+    letter-spacing: -0.028em; color: #000; margin: 56px 0 24px; text-wrap: balance;
+  }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px;
+  }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; }
+  .statebtn {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em; color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  /* ---- desktop frame ---- */
+  .frame {
+    position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6;
+    box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2);
+  }
+  .win {
+    position: absolute; border: 1px solid #E6E4DE; border-radius: 8px; background: #F4F2EC;
+  }
+  .win .bar {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666;
+    border-bottom: 1px solid #E6E4DE; padding: 6px 10px;
+  }
+  .scrim { position: absolute; inset: 0; background: rgb(28 24 16 / 0.22); }
+
+  /* ---- command center card ---- */
+  .cc {
+    position: absolute; left: 50%; top: 11%; transform: translateX(-50%);
+    width: min(560px, 78%); background: #FAF9F6; border: 1px solid #E6E4DE; border-radius: 10px;
+    box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.35), 0 2px 6px rgb(28 24 16 / 0.08);
+    overflow: hidden;
+  }
+  .cc .head { display: flex; justify-content: space-between; padding: 10px 16px 8px; border-bottom: 1px solid #E6E4DE; }
+  .cc .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; }
+  .cc .hm strong { color: #000; }
+  .cc .hm .okdot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #2E6B21; margin-right: 5px; vertical-align: 1px; }
+  .cc input {
+    width: 100%; border: 0; background: transparent; padding: 14px 16px 12px;
+    font-family: "Instrument Sans", sans-serif; font-size: 16.5px; font-weight: 500; color: #000;
+  }
+  .cc input::placeholder { color: #8C8880; font-weight: 400; }
+  .cc input:focus { outline: none; }
+  .cc .body { border-top: 1px solid #E6E4DE; max-height: 300px; overflow: hidden; }
+  .grp { padding: 8px 0 4px; }
+  .grp .gh { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; padding: 4px 16px; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 8px 16px 8px 14px; border-left: 2px solid transparent; cursor: pointer; }
+  .row.sel { background: #F4F2EC; border-left-color: #000; }
+  .glyph {
+    flex: none; width: 26px; height: 26px; border: 1px solid #E6E4DE; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.06em; color: #333;
+    background: #FAF9F6;
+  }
+  .row.sel .glyph { border-color: #000; color: #000; }
+  .rname { font-size: 14.5px; font-weight: 500; color: #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rmeta { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; text-align: right; flex: none; }
+  .rmeta .cap { color: #333; }
+  .explain { padding: 16px; }
+  .explain .st { font-size: 15.5px; font-weight: 500; color: #000; margin: 0 0 4px; line-height: 1.45; }
+  .explain .why { font-size: 13.5px; color: #333; margin: 0 0 12px; }
+  .explain .pol { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-bottom: 14px; }
+  .explain .acts { display: flex; gap: 8px; align-items: center; }
+  .xbtn {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    background: transparent; color: #000; border: 1px solid #000; border-radius: 6px; padding: 6px 11px; cursor: pointer;
+  }
+  .xtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #8A5A00; border: 1px solid #8A5A00; border-radius: 6px; padding: 5px 10px; }
+  .cc .foot { display: flex; justify-content: space-between; gap: 10px; border-top: 1px solid #E6E4DE; padding: 8px 16px; flex-wrap: wrap; }
+  .cc .fm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 6%;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #FAF9F6; background: #000; border-radius: 6px; padding: 8px 14px;
+    opacity: 0; transition: opacity 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .toast.on { opacity: 1; }
+
+  /* ---- approval card ---- */
+  .ap {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(520px, 80%); background: #FAF9F6; border: 1px solid #E6E4DE; border-radius: 10px;
+    box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.35), 0 2px 6px rgb(28 24 16 / 0.08);
+    padding: 18px 20px 16px;
+  }
+  .ap .head { display: flex; justify-content: space-between; align-items: center; }
+  .ap .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; }
+  .ap .hm strong { color: #000; }
+  .countdown { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; font-variant-numeric: tabular-nums; }
+  .countdown.low { color: #8A5A00; }
+  .ap .rl { border: 0; border-top: 2px solid #000; margin: 10px 0 12px; }
+  .ident { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; margin-bottom: 14px; }
+  .ap .req { font-size: 17px; font-weight: 500; color: #000; margin: 0 0 4px; line-height: 1.4; }
+  .ap .why { font-size: 14px; color: #333; margin: 0 0 14px; }
+  .contract { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; line-height: 2;
+    border-top: 1px solid #E6E4DE; border-bottom: 1px solid #E6E4DE; padding: 10px 0; margin-bottom: 14px; }
+  .contract .cap { color: #000; }
+  .risk { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.13em;
+    text-transform: uppercase; color: #8A5A00; border: 1px solid #8A5A00; border-radius: 6px; padding: 4px 9px; }
+  .ap .actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 4px; }
+  .btn {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    border-radius: 6px; padding: 8px 15px; cursor: pointer; transition: all 300ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .btn kbd { font-size: 9px; border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; margin-left: 6px; opacity: 0.7; }
+  .btn.deny { background: transparent; border: 1px solid #A31F2C; color: #A31F2C; }
+  .btn.deny:hover { background: #F4F2EC; }
+  .btn.approve { background: #2E6B21; border: 1px solid #2E6B21; color: #FAF9F6; }
+  .btn.approve:hover { opacity: 0.86; }
+  .btn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .verdict { display: none; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; padding: 10px 0 4px; }
+  .verdict.ok { color: #2E6B21; } .verdict.bad { color: #A31F2C; }
+  .ap.decided .actions { display: none; }
+  .ap.decided .verdict.show { display: block; }
+  .ap .foot { display: flex; justify-content: space-between; margin-top: 12px; border-top: 1px solid #E6E4DE; padding-top: 9px; }
+  .ap .fm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0; border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .toast, .statebtn, .btn { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Command Surfaces</strong></div>
+        <div class="meta">Command center and approval overlay</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-003</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>Intent goes in. A typed capability comes out.</h1>
+    <p class="deck">SUPER + Space is the front door of the whole capability layer — apps, settings, projects, and plain-language intent all resolve to the same typed calls. And when an agent needs permission, the OS asks in plain language, on paper, with a countdown.</p>
+  </header>
+
+  <section>
+    <h2>Sect I · Command Center</h2>
+    <div class="statebar" role="tablist" aria-label="Command center demo states">
+      <button class="statebtn" role="tab" data-cc="suggest" aria-selected="true">01 · Empty</button>
+      <button class="statebtn" role="tab" data-cc="install" aria-selected="false">02 · Install</button>
+      <button class="statebtn" role="tab" data-cc="intent" aria-selected="false">03 · Intent</button>
+      <button class="statebtn" role="tab" data-cc="explain" aria-selected="false">04 · Question</button>
+      <span class="demohint">Type in the field · ↑↓ select · ↵ run</span>
+    </div>
+
+    <div class="frame" id="ccframe">
+      <div class="win" style="left:4%; top:6%; width:55%; height:86%"><div class="bar">Terminal · Atlas</div></div>
+      <div class="win" style="left:61%; top:6%; width:35%; height:56%"><div class="bar">Editor · punard.rs</div></div>
+      <div class="win" style="left:61%; top:65%; width:35%; height:27%"><div class="bar">Browser · Acme Dev</div></div>
+      <div class="scrim"></div>
+      <div class="cc">
+        <div class="head">
+          <span class="hm"><strong>Punar</strong> · Command</span>
+          <span class="hm"><span class="okdot"></span>Atlas · Compliant</span>
+        </div>
+        <input id="ccinput" type="text" placeholder="Type — an app, a setting, a project, or plain intent" aria-label="Command input" autocomplete="off" spellcheck="false">
+        <div class="body" id="ccbody"></div>
+        <div class="foot">
+          <span class="fm">↑↓ Navigate · ↵ Run · Esc Close</span>
+          <span class="fm">Natural language resolves to typed capabilities</span>
+        </div>
+      </div>
+      <div class="toast" id="cctoast"></div>
+    </div>
+
+    <p class="assertion" style="margin-top:34px">The command center never generates a shell string — every row is a capability-registry entry, and the row says so.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Context head</span>
+      <p>Active project and compliance state ride along in the masthead — the overlay always says where you are and whether the device is in good standing. <span class="specref">spec §52 · §63</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Result rows</span>
+      <p>Glyph tags instead of app icons: two-letter mono codes in bordered squares keep the surface monochrome and instantly legible. Selection is a raise fill plus a 2px ink rule — no color spent.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Intent resolution</span>
+      <p>"Connect my headphones" resolves to <span class="specref">ConnectBluetooth(…)</span> and the row prints the typed capability it will call. The contract is visible before Enter. <span class="specref">spec §10 · §12.2</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Questions</span>
+      <p>"Why can't Claude access production?" answers inline with the effective policy, its source, and the next step — the §40 explain surface, reached from the same input as app launch. The exception path is an amber tag because it is an <span class="specref">approval_required</span> decision.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Approval Overlay</h2>
+    <div class="statebar">
+      <button class="statebtn" id="apreset">⟲ Reset</button>
+      <span class="demohint">A approve · D deny · countdown is live</span>
+    </div>
+
+    <div class="frame" id="apframe" tabindex="0" aria-label="Approval overlay demo">
+      <div class="win" style="left:4%; top:6%; width:55%; height:86%"><div class="bar">Terminal · Atlas · Claude Code</div></div>
+      <div class="win" style="left:61%; top:6%; width:35%; height:86%"><div class="bar">Editor · devenv.yaml</div></div>
+      <div class="scrim"></div>
+      <div class="ap" id="apcard">
+        <div class="head">
+          <span class="hm"><strong>Approval</strong> · apr_123</span>
+          <span style="display:flex; gap:10px; align-items:center">
+            <span class="risk">Medium</span>
+            <span class="countdown" id="apclock">Expires 04:59</span>
+          </span>
+        </div>
+        <hr class="rl">
+        <div class="ident">AI Agent · Claude Code · Atlas · agt_123 · alice@acme.com</div>
+        <p class="req">Claude Code wants to install the system package libvirt.</p>
+        <p class="why">Required by project Atlas.</p>
+        <div class="contract">
+          One-time execution · <span class="cap">InstallPackage(libvirt)</span><br>
+          Policy · Acme AI Engineering Baseline v3 · eng-ai-v3<br>
+          Recorded to local audit either way
+        </div>
+        <div class="actions">
+          <button class="btn deny" id="apdeny">Deny<kbd>D</kbd></button>
+          <button class="btn approve" id="apok">Approve<kbd>A</kbd></button>
+        </div>
+        <div class="verdict ok" id="v-ok">✓ Approved · InstallPackage(libvirt) executed · audit evt_501</div>
+        <div class="verdict bad" id="v-deny">Denied · nothing executed · audit evt_502</div>
+        <div class="verdict bad" id="v-exp">Expired · denied by timeout · audit evt_503</div>
+        <div class="foot">
+          <span class="fm">Esc · decide later (request stays pending)</span>
+          <span class="fm">Punar Agent Gateway</span>
+        </div>
+      </div>
+    </div>
+
+    <p class="assertion" style="margin-top:34px">An approval is a contract card: who is asking, for what, under which policy, for how long, and what exactly happens on yes.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Identity chain</span>
+      <p>The full attribution graph on one mono line — principal kind, agent, project, session, human. Every privileged event stays attributable. <span class="specref">spec §22 · §47</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Countdown</span>
+      <p>Live tabular-nums expiry in the masthead; it turns warn-amber under a minute and the request auto-denies at zero — expiration is a first-class outcome, audited like any decision. <span class="specref">spec §28</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Contract block</span>
+      <p>Between hairlines: the exact typed capability that will run, the policy that gates it, and the audit promise. Approving executes <span class="specref">InstallPackage(libvirt)</span> once — never a root shell. <span class="specref">spec §10 · §60</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Actions</span>
+      <p>The action-color pair: green filled Approve, red ghost Deny, keyboard-first with visible bindings. Esc defers without deciding — dismissal is not denial.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Implementation notes</h2>
+    <p class="assertion">Design mockups — Milestone 1–3 build these; the registers above are the acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Shell layer</span>
+      <p>Both are Quickshell layer-shell overlays over the compositor, consuming <span class="specref">shell/theme/punar-tokens.json</span>. The scrim is the warm ink wash at 22%, never a blur-only dim.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Data path</span>
+      <p>Command rows come from the capability registry (<span class="specref">§41</span>) and application index; explain answers from the policy engine (<span class="specref">§40</span>); approval cards from punar-agentd's typed approval API (<span class="specref">§28</span>) with <span class="specref">expires_at</span> driving the countdown.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">States not drawn</span>
+      <p>Multi-approval queue (badge in the masthead), unmanaged-agent warning variant, offline behavior, and the scratchpad/AI panel siblings. Dashed until drawn.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/command-approval.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  /* ---------- command center ---------- */
+  const STATES = {
+    suggest: { q: '', groups: [
+      { h: 'Recent', rows: [
+        { g: 'PR', n: 'Open Atlas', m: 'Project · Super 1' },
+        { g: 'SC', n: 'Terminal scratchpad', m: 'Scratchpad · Super T' },
+        { g: 'SY', n: 'Privacy · connections', m: 'System' },
+      ]},
+      { h: 'Suggested', rows: [
+        { g: 'AI', n: 'Show active AI agents', m: 'Super A' },
+        { g: 'SY', n: 'System Control', m: 'Super S' },
+      ]},
+    ]},
+    install: { q: 'install firefox', groups: [
+      { h: 'Actions', rows: [
+        { g: 'IN', n: 'Install Firefox', m: 'InstallApplication(firefox) · User package · Allowed', cap: true },
+        { g: 'IN', n: 'Install Firefox Developer Edition', m: 'InstallApplication(firefox-developer) · Allowed', cap: true },
+      ]},
+      { h: 'Policy', rows: [
+        { g: 'PO', n: 'User installs are permitted on this device', m: 'Acme Eng Baseline v12' },
+      ]},
+    ]},
+    intent: { q: 'connect my headphones', groups: [
+      { h: 'Actions', rows: [
+        { g: 'BT', n: 'Connect Sony WH-1000XM4', m: 'ConnectBluetooth(dev_04) · Paired', cap: true },
+        { g: 'BT', n: 'Connect Keychron K3', m: 'ConnectBluetooth(dev_07) · Paired', cap: true },
+        { g: 'SY', n: 'Open Bluetooth settings', m: 'System Control' },
+      ]},
+    ]},
+    explain: { q: "why can't claude access production?", explain: true },
+  };
+  const ccbody = document.getElementById('ccbody');
+  const ccinput = document.getElementById('ccinput');
+  const cctabs = [...document.querySelectorAll('[data-cc]')];
+  const toast = document.getElementById('cctoast');
+  let ccstate = 'suggest', sel = 0, rowsFlat = [];
+
+  function renderCC(name) {
+    ccstate = name; sel = 0;
+    const st = STATES[name];
+    cctabs.forEach(t => t.setAttribute('aria-selected', String(t.dataset.cc === name)));
+    if (st.explain) {
+      ccbody.innerHTML =
+        '<div class="explain">' +
+        '<p class="st">AWS Production access is blocked for Claude Code in the Atlas workspace.</p>' +
+        '<p class="why">The engineering AI baseline denies production credentials and network zones to agent sessions. Your own access is unaffected.</p>' +
+        '<div class="pol">Policy · Acme AI Engineering Baseline v3 · eng-ai-v3 · org mandatory</div>' +
+        '<div class="acts"><button class="xbtn">Open policy</button><span class="xtag">Request exception · Approval required</span></div>' +
+        '</div>';
+      rowsFlat = [];
+      return;
+    }
+    let html = ''; rowsFlat = [];
+    st.groups.forEach(g => {
+      html += '<div class="grp"><div class="gh">' + g.h + '</div>';
+      g.rows.forEach(r => {
+        const i = rowsFlat.length; rowsFlat.push(r);
+        html += '<div class="row' + (i === 0 ? ' sel' : '') + '" data-i="' + i + '">' +
+          '<span class="glyph">' + r.g + '</span><span class="rname">' + r.n + '</span>' +
+          '<span class="rmeta' + (r.cap ? ' cap' : '') + '">' + r.m + '</span></div>';
+      });
+      html += '</div>';
+    });
+    ccbody.innerHTML = html;
+    [...ccbody.querySelectorAll('.row')].forEach(el => el.addEventListener('click', () => { setSel(+el.dataset.i); runSel(); }));
+  }
+  function setSel(i) {
+    sel = Math.max(0, Math.min(rowsFlat.length - 1, i));
+    [...ccbody.querySelectorAll('.row')].forEach((el, j) => el.classList.toggle('sel', j === sel));
+  }
+  function runSel() {
+    if (!rowsFlat[sel]) return;
+    toast.textContent = 'Executing · ' + rowsFlat[sel].n;
+    toast.classList.add('on');
+    setTimeout(() => toast.classList.remove('on'), 1400);
+  }
+  function detect(q) {
+    q = q.toLowerCase();
+    if (!q.trim()) return 'suggest';
+    if (q.includes('why') || q.includes('prod')) return 'explain';
+    if (q.includes('connect') || q.includes('head') || q.includes('blue')) return 'intent';
+    if (q.includes('install') || q.includes('fire')) return 'install';
+    return ccstate === 'suggest' ? 'suggest' : ccstate;
+  }
+  cctabs.forEach(t => t.addEventListener('click', () => { renderCC(t.dataset.cc); ccinput.value = STATES[t.dataset.cc].q; ccinput.focus(); }));
+  ccinput.addEventListener('input', () => { const s = detect(ccinput.value); if (s !== ccstate) renderCC(s); });
+  ccinput.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { setSel(sel + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { setSel(sel - 1); e.preventDefault(); }
+    else if (e.key === 'Enter') { runSel(); e.preventDefault(); }
+  });
+  renderCC('suggest');
+
+  /* ---------- approval overlay ---------- */
+  const card = document.getElementById('apcard');
+  const clockEl = document.getElementById('apclock');
+  const frame = document.getElementById('apframe');
+  let remain = 299, apTimer = null, decided = false;
+
+  function fmt(s) { return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }
+  function tickAp() {
+    remain--;
+    if (remain <= 0) { decide('v-exp'); return; }
+    clockEl.textContent = 'Expires ' + fmt(remain);
+    clockEl.classList.toggle('low', remain < 60);
+  }
+  function decide(id) {
+    if (decided) return;
+    decided = true; clearInterval(apTimer);
+    card.classList.add('decided');
+    document.getElementById(id).classList.add('show');
+    if (id === 'v-exp') { clockEl.textContent = 'Expired 00:00'; clockEl.classList.add('low'); }
+  }
+  function resetAp() {
+    decided = false; remain = 299;
+    card.classList.remove('decided');
+    ['v-ok', 'v-deny', 'v-exp'].forEach(i => document.getElementById(i).classList.remove('show'));
+    clockEl.textContent = 'Expires ' + fmt(remain); clockEl.classList.remove('low');
+    clearInterval(apTimer); apTimer = setInterval(tickAp, 1000);
+  }
+  document.getElementById('apok').addEventListener('click', () => decide('v-ok'));
+  document.getElementById('apdeny').addEventListener('click', () => decide('v-deny'));
+  document.getElementById('apreset').addEventListener('click', resetAp);
+  frame.addEventListener('keydown', e => {
+    if (e.key === 'a' || e.key === 'A') decide('v-ok');
+    else if (e.key === 'd' || e.key === 'D') decide('v-deny');
+    else if (e.key === 'r' || e.key === 'R') resetAp();
+  });
+  resetAp();
+})();
+</script>

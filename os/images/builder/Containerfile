@@ -1,0 +1,48 @@
+# Punar image-builder container.
+#
+# Provides the toolchain (mkosi + filesystem/UKI tools) that turns
+# os/images/mkosi.conf into a bootable qcow2. The same container runs natively
+# on x86_64 CI runners and under `--platform linux/amd64` emulation on the
+# maintainer's arm64 Mac (slow; CI is canonical — see
+# docs/development/image-pipeline.md).
+#
+# Both build args are injected by tools/build-image.sh from
+# os/images/snapshot.env so the pins live in exactly one place.
+
+ARG BASE_IMAGE=docker.io/archlinux/archlinux:latest
+FROM ${BASE_IMAGE}
+
+ARG SNAPSHOT_DATE=2026/08/20
+
+# 1. Point pacman at the pinned Arch Linux Archive date snapshot so the
+#    builder toolchain itself is input-pinned.
+# 2. Disable pacman's alpm download sandbox (seccomp + landlock). Under
+#    Docker/Rosetta emulation on the arm64 Mac the seccomp filter fails to
+#    install (EINVAL) and every download aborts; verified locally 2026-08-24.
+#    Signature verification is unaffected. Build-environment-only tradeoff:
+#    this pacman.conf never ships in an image.
+# 3. Install the build toolchain. mkosi drives pacman for the target image
+#    itself; systemd-ukify + binutils build the UKI; dosfstools/e2fsprogs/
+#    btrfs-progs/erofs-utils cover mkfs for ESP and root; qemu-img converts
+#    raw -> qcow2.
+RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT_DATE}/\$repo/os/\$arch" \
+        > /etc/pacman.d/mirrorlist \
+    && sed -i \
+        -e 's/^#DisableSandboxFilesystem/DisableSandboxFilesystem/' \
+        -e 's/^#DisableSandboxSyscalls/DisableSandboxSyscalls/' \
+        /etc/pacman.conf \
+    && pacman -Syu --noconfirm \
+    && pacman -S --noconfirm --needed \
+        mkosi \
+        systemd-ukify \
+        binutils \
+        qemu-img \
+        dosfstools \
+        e2fsprogs \
+        btrfs-progs \
+        erofs-utils \
+        cpio \
+        zstd \
+    && rm -rf /var/cache/pacman/pkg/*
+
+WORKDIR /work

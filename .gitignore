@@ -1,0 +1,18 @@
+# Rust
+target/
+**/*.rs.bk
+
+# OS image build outputs
+os/images/out/
+
+# macOS
+.DS_Store
+.AppleDouble
+._*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

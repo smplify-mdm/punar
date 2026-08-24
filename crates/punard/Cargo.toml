@@ -1,0 +1,10 @@
+[package]
+name = "punard"
+description = "Punar privileged local control-plane daemon (SPEC section 11.1) — Milestone 0 CLI skeleton"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }

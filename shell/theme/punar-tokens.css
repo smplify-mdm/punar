@@ -1,0 +1,95 @@
+/* Punar design tokens — "Field Note" design language.
+ * Source of truth alongside punar-tokens.json (keep in sync).
+ * Derived from the Smplify field-note style. See docs/design/DESIGN_LANGUAGE.md.
+ * Rule: UI code consumes these tokens; never hardcode values. */
+
+:root {
+  /* Typography */
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  --tracking-display: -0.028em;
+  --tracking-label: 0.12em;
+  --label-size: 12px;
+  --meta-size: 10px;
+
+  /* Paper surface (light — default system surfaces) */
+  --paper: hsl(45 28.6% 97.3%);        /* #FAF9F6 */
+  --ink: hsl(0 0% 0%);                 /* #000000 */
+  --ink-2: hsl(0 0% 20%);              /* #333333 */
+  --ink-3: hsl(0 0% 40%);              /* #666666 */
+  --muted: hsl(45 26.7% 94.1%);        /* #F4F2EC */
+  --raise-2: hsl(43.6 23.4% 90.8%);    /* #EDEAE2 */
+  --border: hsl(45 13.8% 88.6%);       /* #E6E4DE */
+  --input-border: hsl(40 5% 52.5%);    /* #8C8880 */
+
+  /* Panel surface (dark — terminal, plates, technical surfaces) */
+  --panel: hsl(210 11.1% 3.5%);        /* #08090A */
+  --panel-fg: hsl(220 13% 95.5%);      /* #F2F3F5 */
+  --panel-ink-2: hsl(218.6 8.8% 68.6%);/* #A8ADB6 */
+  --panel-ink-3: hsl(220 8.6% 52.4%);  /* #7B8290 */
+  --panel-edge: hsl(225 9.5% 16.5%);   /* #26282E */
+
+  /* Status — the only colors with a voice.
+   * Map 1:1 to decisions (allow/approval_required/deny) and §52 compliance. */
+  --status-ok: hsl(109.5 52.9% 27.5%);   /* #2E6B21 */
+  --status-warn: hsl(39.1 100% 27.1%);   /* #8A5A00 */
+  --status-bad: hsl(354.1 68% 38%);      /* #A31F2C */
+  --panel-ok: hsl(83.9 71.2% 57.8%);     /* #A3E047 */
+  --panel-warn: hsl(31.4 80.7% 73.5%);   /* #F2BE85 */
+  --panel-bad: hsl(0 100% 73.9%);        /* #FF7A7A */
+
+  /* Shape & elevation */
+  --radius: 0.625rem;   /* 10px — cards, surfaces */
+  --radius-tag: 6px;    /* tags, pills */
+  --shadow-elegant: 0 18px 36px -18px rgb(28 24 16 / 0.16),
+                    0 2px 6px rgb(28 24 16 / 0.07);
+  --shadow-glow: 0 30px 70px -30px rgb(28 24 16 / 0.2);
+
+  /* Motion — fluid, not decorative (spec §13.4) */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-micro: 150ms;
+  --dur-standard: 300ms;
+  --dur-spatial: 450ms;
+}
+
+/* Panel surface context: flip the role tokens, keep the grammar. */
+[data-surface="panel"] {
+  --surface: var(--panel);
+  --fg: var(--panel-fg);
+  --fg-2: var(--panel-ink-2);
+  --fg-3: var(--panel-ink-3);
+  --edge: var(--panel-edge);
+  --ok: var(--panel-ok);
+  --warn: var(--panel-warn);
+  --bad: var(--panel-bad);
+}
+
+:root, [data-surface="paper"] {
+  --surface: var(--paper);
+  --fg: var(--ink);
+  --fg-2: var(--ink-2);
+  --fg-3: var(--ink-3);
+  --edge: var(--border);
+  --ok: var(--status-ok);
+  --warn: var(--status-warn);
+  --bad: var(--status-bad);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-micro: 0ms; --dur-standard: 0ms; --dur-spatial: 0ms; }
+}
+
+/* Action color (adopted 2026-08-24): consequential affirmative primaries
+ * (Approve, Unlock, Enroll, Commit) may fill with the ok family.
+ * Destructive = bad-family ghost; filled red only on final confirmation.
+ * At most one colored button per surface. */
+:root, [data-surface="paper"] {
+  --action: var(--status-ok);
+  --action-fg: var(--paper);
+  --action-destructive: var(--status-bad);
+}
+[data-surface="panel"] {
+  --action: var(--panel-ok);
+  --action-fg: var(--panel);
+  --action-destructive: var(--panel-bad);
+}
