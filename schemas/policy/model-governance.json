@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/policy/model-governance.json",
+  "title": "AI Model Governance (future)",
+  "$comment": "STATUS: future/vNext. Spec section 71 explicitly labels its document a 'Future example'; this schema ships in the v1alpha1 tree as a forward contract only — nothing enforces it yet. Expect additive growth when the feature lands; the section 71 sensitive-project overlay (project.classification with ai.cloudModels/localModels/externalMcp) is deliberately NOT modeled here.",
+  "description": "AI model governance document (spec section 71, 'AI Model Governance' — a future example, so treat this contract as vNext/forward-looking). Controls which AI model providers a device may use: cloud provider allowlist, local model toggle, and denial of unknown AI endpoints. YAML-authored configuration document: camelCase field names per the naming convention (unknownEndpoints), lowercase provider identifiers as values.",
+  "type": "object",
+  "required": ["ai"],
+  "additionalProperties": false,
+  "properties": {
+    "ai": {
+      "title": "AI governance root",
+      "description": "Root block of the model governance document (spec section 71 example: 'ai:').",
+      "type": "object",
+      "required": ["models"],
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "title": "Model governance",
+          "description": "Model provider governance (spec section 71). The spec example always includes the cloud, local, and unknownEndpoints blocks, so all three are required. Validated strictly so drift from the sketched contract is caught early; growth is expected to land as additive schema changes.",
+          "type": "object",
+          "required": ["cloud", "local", "unknownEndpoints"],
+          "additionalProperties": false,
+          "properties": {
+            "cloud": {
+              "title": "Cloud model governance",
+              "description": "Governance for cloud-hosted models (spec section 71).",
+              "type": "object",
+              "required": ["allowed"],
+              "additionalProperties": false,
+              "properties": {
+                "allowed": {
+                  "title": "Allowed cloud providers",
+                  "description": "Allowlist of cloud model provider identifiers (spec section 71 example values: openai, anthropic). An empty list allows no cloud providers.",
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "title": "Cloud provider identifier",
+                    "description": "Lowercase provider token: letters, digits, '_', '-' (spec section 71).",
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]*$",
+                    "examples": ["openai", "anthropic"]
+                  }
+                }
+              }
+            },
+            "local": {
+              "title": "Local model governance",
+              "description": "Governance for locally-run models (spec section 71; see also spec section 70, 'AI Model Strategy').",
+              "type": "object",
+              "required": ["allowed"],
+              "additionalProperties": false,
+              "properties": {
+                "allowed": {
+                  "title": "Local models allowed",
+                  "description": "Whether locally-run models are permitted (spec section 71 example: true).",
+                  "type": "boolean"
+                }
+              }
+            },
+            "unknownEndpoints": {
+              "title": "Unknown endpoint governance",
+              "description": "Governance for AI endpoints that are neither an allowed cloud provider nor a local model (spec section 71; unknown AI execution/endpoints also appear in spec sections 21 and 59.2).",
+              "type": "object",
+              "required": ["deny"],
+              "additionalProperties": false,
+              "properties": {
+                "deny": {
+                  "title": "Deny unknown endpoints",
+                  "description": "When true, traffic to unknown AI endpoints is denied (spec section 71 example: true).",
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "corp_dev",
+  "display_name": "Acme Dev",
+  "description": "Acme enterprise development network, e.g. dev.api.acme.internal.",
+  "kind": "corporate",
+  "relay_mode": "enterprise_route"
+}

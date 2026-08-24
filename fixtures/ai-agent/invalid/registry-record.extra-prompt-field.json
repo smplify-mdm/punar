@@ -1,0 +1,13 @@
+{
+  "session_id": "agt_123",
+  "agent": "claude-code",
+  "version": "x.y.z",
+  "process_id": 18422,
+  "user": "alice@acme.com",
+  "project": "atlas",
+  "environment": "atlas-dev-42",
+  "status": "active",
+  "classification": "managed",
+  "started_at": "2026-08-24T09:15:00Z",
+  "prompt": "please refactor the auth module"
+}

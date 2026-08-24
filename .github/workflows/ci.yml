@@ -40,13 +40,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Org Actions policy (and Punar's own supply-chain posture, spec 59.6)
+      # allows GitHub-owned actions only — no third-party toolchain/cache
+      # actions. rustup ships preinstalled on hosted runners.
       - name: Install Rust toolchain (stable, rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
@@ -56,6 +68,19 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+  contracts:
+    name: contracts (schemas + fixtures)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Validates all JSON Schemas (draft 2020-12) and every example/fixture
+      # against them, including the 45 negative fixtures, in a pinned python
+      # container. See tests/unit/schemas-validation.md.
+      - name: Validate schemas and fixtures
+        run: ./tools/validate-schemas.sh
 
   image:
     name: image (mkosi, containerized)

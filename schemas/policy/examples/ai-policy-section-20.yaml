@@ -1,0 +1,26 @@
+# Verbatim spec example: docs/product/SPEC_v0.2.md section 20 "AI Authority Model".
+# Validates against schemas/policy/ai-policy.json.
+ai:
+  agents:
+    default:
+      filesystem:
+        workspace: read_write
+        home: read
+        ssh: deny
+        aws: deny
+
+      host:
+        user_package: allow
+        system_package: approval_required
+        firewall: deny
+        user_management: deny
+
+      network:
+        internet: allow
+        corp_dev: allow
+        corp_prod: deny
+
+      credentials:
+        github: allow
+        aws_dev: request
+        aws_prod: deny

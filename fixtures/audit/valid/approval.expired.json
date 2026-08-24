@@ -1,0 +1,14 @@
+{
+  "approval_id": "apr_abc",
+  "requester": {
+    "type": "human",
+    "id": "bob@acme.com"
+  },
+  "user": "alice@acme.com",
+  "capability": "system.install_package",
+  "resource": "wireshark",
+  "reason": "packet capture for incident review",
+  "risk": "medium",
+  "status": "expired",
+  "expires_at": "2026-08-23T09:00:00Z"
+}

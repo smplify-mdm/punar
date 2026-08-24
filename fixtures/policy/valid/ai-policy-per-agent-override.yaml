@@ -1,0 +1,30 @@
+# Valid: named agent profile (patternProperties) may be partial, and the profile
+# object accepts additional permission blocks ('git') mapping targets to the
+# shared decision enum (spec section 20 category list is wider than its example).
+ai:
+  agents:
+    default:
+      filesystem:
+        workspace: read_write
+        home: read
+        ssh: deny
+        aws: deny
+      host:
+        user_package: allow
+        system_package: approval_required
+        firewall: deny
+        user_management: deny
+      network:
+        internet: allow
+        corp_dev: allow
+        corp_prod: deny
+      credentials:
+        github: allow
+        aws_dev: request
+        aws_prod: deny
+    claude-code:
+      network:
+        corp_prod: approval_required
+      git:
+        push: approval_required
+        force_push: deny

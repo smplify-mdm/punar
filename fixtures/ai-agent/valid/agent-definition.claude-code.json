@@ -1,0 +1,12 @@
+{
+  "name": "claude-code",
+  "adapter": "claude_code",
+  "launch": {
+    "method": "managed",
+    "command": "punar-env agent claude"
+  },
+  "adapter_config": {
+    "mcp_mediation": true,
+    "session_scope_prefix": "punar/agents"
+  }
+}

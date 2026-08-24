@@ -1,0 +1,11 @@
+# Invalid: cloud provider identifiers are lowercase tokens (spec section 71
+# example values: openai, anthropic); 'OpenAI' violates the pattern.
+ai:
+  models:
+    cloud:
+      allowed:
+        - OpenAI
+    local:
+      allowed: true
+    unknownEndpoints:
+      deny: true

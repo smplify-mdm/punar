@@ -1,0 +1,24 @@
+{
+  "session_id": "agt_123",
+  "agent": "claude-code",
+  "generated_at": "2026-08-24T12:00:00Z",
+  "resources": {
+    "repositories": ["github.com/acme/atlas"],
+    "directory_zones": ["workspace", "home"],
+    "network_destinations": ["api.anthropic.com", "corp_dev"],
+    "mcp_servers": ["github-mcp"],
+    "credential_classes": ["github", "aws_dev"],
+    "process_classes": ["bash", "git", "node", "cargo"]
+  },
+  "security_events": [
+    {
+      "event_id": "evt_456",
+      "event_type": "credential_request",
+      "timestamp": "2026-08-24T10:41:00Z"
+    },
+    {
+      "event_id": "evt_457",
+      "event_type": "production_access"
+    }
+  ]
+}

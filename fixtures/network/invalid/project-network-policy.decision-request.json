@@ -1,0 +1,6 @@
+{
+  "project_id": "atlas",
+  "rules": [
+    { "zone": "corp_dev", "decision": "request" }
+  ]
+}

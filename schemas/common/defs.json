@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/common/defs.json",
+  "title": "Punar shared definitions",
+  "description": "Shared $defs referenced by every Punar domain schema. Source of truth: docs/product/SPEC_v0.2.md sections 18, 19.1, 20, 28, 41, 52, 53. Reference from other schemas as {\"$ref\": \"https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/<name>\"}.",
+  "$defs": {
+    "principal_kind": {
+      "description": "Identity types recognized as first-class principals (spec section 18).",
+      "type": "string",
+      "enum": [
+        "device",
+        "human",
+        "organization",
+        "project",
+        "application",
+        "ai_agent",
+        "service"
+      ]
+    },
+    "decision": {
+      "description": "Policy decision values (spec section 20). Note: YAML manifest credential grants in spec examples also use the domain-specific value 'request' (equivalent intent to approval_required); that value belongs to manifest credential-mode enums, not to this runtime decision enum.",
+      "type": "string",
+      "enum": ["allow", "deny", "approval_required"]
+    },
+    "capability_id": {
+      "description": "Dotted-path capability identifier with snake_case segments, e.g. 'security.firewall', 'system.install_package' (spec sections 28, 41). Policy explain paths such as 'security.diskEncryption' are YAML config paths, not capability ids, and do not use this def.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "examples": ["security.firewall", "system.install_package"]
+    },
+    "device_id": {
+      "description": "Device identifier, 'dev_' prefix (spec sections 38, 53).",
+      "type": "string",
+      "pattern": "^dev_[A-Za-z0-9]+$",
+      "examples": ["dev_123"]
+    },
+    "agent_session_id": {
+      "description": "AI agent session identifier, 'agt_' prefix (spec sections 19.2, 28, 53).",
+      "type": "string",
+      "pattern": "^agt_[A-Za-z0-9]+$",
+      "examples": ["agt_123"]
+    },
+    "approval_id": {
+      "description": "Approval identifier, 'apr_' prefix (spec section 28).",
+      "type": "string",
+      "pattern": "^apr_[A-Za-z0-9]+$",
+      "examples": ["apr_123"]
+    },
+    "event_id": {
+      "description": "Audit event identifier, 'evt_' prefix (spec section 53).",
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9]+$",
+      "examples": ["evt_123"]
+    },
+    "timestamp": {
+      "description": "RFC 3339 timestamp. The pattern is asserted because 'format' is annotation-only in draft 2020-12 default vocabulary.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2026-08-24T12:00:00Z"]
+    },
+    "risk": {
+      "description": "Risk level (spec sections 28, 41).",
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "agent_classification": {
+      "description": "AI Agent Registry classification (spec section 19.1). 'unknown' covers the spec's UNKNOWN / SUSPECTED class.",
+      "type": "string",
+      "enum": ["managed", "observed", "unknown"]
+    },
+    "compliance_state": {
+      "description": "Compliance states (spec section 52).",
+      "type": "string",
+      "enum": [
+        "compliant",
+        "non_compliant",
+        "remediating",
+        "unknown",
+        "unsupported",
+        "exception"
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "approval_id": "apr_456",
+  "requester": {
+    "type": "ai_agent",
+    "id": "agt_123"
+  },
+  "user": "alice@acme.com",
+  "capability": "system.install_package",
+  "resource": "libvirt",
+  "reason": "required by project Atlas",
+  "risk": "medium",
+  "status": "approved",
+  "expires_at": "2026-08-24T12:30:00Z"
+}

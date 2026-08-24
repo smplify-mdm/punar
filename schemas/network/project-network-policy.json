@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/network/project-network-policy.json",
+  "title": "ProjectNetworkPolicy",
+  "description": "Project-aware network policy mapping network zones to policy decisions for one project or workspace (spec section 36; routing inputs in spec section 35). Models the section 36 tables: ATLAS (internet allow, corp dev allow, production deny) and PRODUCTION INCIDENT (internet allow, production temporary approval, privileged DB approval required). 'Temporary approval' is expressed as decision 'approval_required' plus an 'expires_at' expiry on the rule. AI network boundaries are enforced below the agent where possible (spec section 36). Runtime JSON record: snake_case fields, strict.",
+  "$comment": "Network observability records (spec section 37, 'punarctl privacy connections': who is communicating, destination, reason/category, relay route, project, AI session association) are runtime telemetry, deliberately OUT of the v1alpha1 contract layer. Milestone 3 note: crates/punar-common Rust types are not yet reconciled with this schema.",
+  "type": "object",
+  "properties": {
+    "project_id": {
+      "title": "Project identifier",
+      "description": "Identifier of the project or workspace this policy applies to, e.g. 'atlas', 'production_incident' (spec section 36; same field name as audit-event project attribution, spec section 53).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["atlas", "production_incident"]
+    },
+    "display_name": {
+      "title": "Display name",
+      "description": "Human-readable workspace label as shown in the spec section 36 tables, e.g. 'ATLAS', 'PRODUCTION INCIDENT'.",
+      "type": "string",
+      "minLength": 1
+    },
+    "rules": {
+      "title": "Zone rules",
+      "description": "Per-zone policy decisions for this project (spec section 36). Each rule maps one zone name to a decision, optionally with an expiry for temporary grants.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/zone_rule"
+      }
+    }
+  },
+  "required": ["project_id", "rules"],
+  "additionalProperties": false,
+  "$defs": {
+    "zone_rule": {
+      "title": "Zone rule",
+      "description": "Decision for one network zone within a project (spec section 36).",
+      "type": "object",
+      "properties": {
+        "zone": {
+          "title": "Zone name",
+          "description": "Name of the network zone the rule applies to (spec sections 17, 20, 36), e.g. 'internet', 'corp_dev', 'corp_prod', 'privileged_db'. Must match a NetworkZone 'name'.",
+          "$ref": "https://schemas.punar.dev/v1alpha1/network/network-zone.json#/$defs/zone_name"
+        },
+        "decision": {
+          "title": "Decision",
+          "description": "Policy decision for the zone: allow, deny, or approval_required (spec sections 20, 36). The section 36 'temporary approval' is 'approval_required' combined with 'expires_at'; the manifest-local credential value 'request' (spec sections 17, 20) is NOT valid here.",
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+        },
+        "expires_at": {
+          "title": "Expiry",
+          "description": "RFC 3339 instant after which the rule's grant lapses. Optional; with decision 'approval_required' this models the spec section 36 PRODUCTION INCIDENT 'temporary approval' semantics (see also the temporary-activity model, spec section 14.4).",
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        }
+      },
+      "required": ["zone", "decision"],
+      "additionalProperties": false
+    }
+  }
+}

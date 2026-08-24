@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/desired-state/desired-state.json",
+  "title": "DeviceDesiredState",
+  "description": "Declarative desired-state document that Smplify (the enterprise control plane) sends to a Punar device (spec sections 38, 50). Models the full section 38 example plus the firewall defaults of section 44.4 and the application policy of section 46. This is a YAML configuration manifest: field names are camelCase per the repo naming asymmetry (schemas/README.md); the apiVersion string is validated verbatim.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "title": "API version",
+      "description": "Manifest API version, verbatim from spec section 38. Independent of the schema-tree version (schemas/README.md, Versioning).",
+      "const": "smplify.io/v1alpha1"
+    },
+    "kind": {
+      "title": "Kind",
+      "description": "Document kind (spec section 38).",
+      "const": "DeviceDesiredState"
+    },
+    "metadata": {
+      "title": "Metadata",
+      "description": "Identifies the organization and the device this desired state targets (spec section 38).",
+      "type": "object",
+      "properties": {
+        "organization": {
+          "title": "Organization",
+          "description": "Organization identifier, e.g. 'acme' (spec sections 38, 47). Kept as a non-empty string: the spec shows a bare slug and defines no organization-id grammar.",
+          "type": "string",
+          "minLength": 1
+        },
+        "device": {
+          "title": "Device id",
+          "description": "Target device identifier, 'dev_' prefix (spec sections 38, 53).",
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/device_id"
+        }
+      },
+      "required": ["organization", "device"],
+      "additionalProperties": false
+    },
+    "spec": {
+      "title": "Desired state spec",
+      "description": "Desired configuration for the device (spec section 38). All five sections are present in the section 38 example — the only full DeviceDesiredState example — and are therefore required; relaxing a required field later is a compatible change (schemas/README.md, Versioning).",
+      "type": "object",
+      "properties": {
+        "security": {
+          "title": "Security baseline",
+          "description": "Enterprise security baseline settings (spec sections 38, 44). Extensible object: spec section 44.5 says enterprise policy should also govern service controls (SSH, Bluetooth, removable storage, local admin, screen lock, kernel/module restrictions, developer exceptions), so unknown keys are permitted here. Only 'firewall' is required: the section 44.4 declarative example shows a security block containing only 'firewall'.",
+          "type": "object",
+          "properties": {
+            "diskEncryption": {
+              "title": "Disk encryption",
+              "description": "Disk-encryption requirement for this device (spec sections 38, 44.2).",
+              "type": "object",
+              "properties": {
+                "required": {
+                  "title": "Disk encryption required",
+                  "description": "Whether disk encryption is required on this device (spec sections 38, 44.2).",
+                  "type": "boolean"
+                }
+              },
+              "required": ["required"],
+              "additionalProperties": false
+            },
+            "secureBoot": {
+              "title": "Secure Boot",
+              "description": "Secure Boot requirement for this device (spec sections 38, 44.1).",
+              "type": "object",
+              "properties": {
+                "required": {
+                  "title": "Secure Boot required",
+                  "description": "Whether Secure Boot is required on this device (spec sections 38, 44.1).",
+                  "type": "boolean"
+                }
+              },
+              "required": ["required"],
+              "additionalProperties": false
+            },
+            "firewall": {
+              "title": "Firewall",
+              "description": "Firewall desired state (spec sections 38, 44.4).",
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "title": "Firewall enabled",
+                  "description": "Whether the firewall is enabled (spec sections 38, 44.4).",
+                  "type": "boolean"
+                },
+                "inboundDefault": {
+                  "title": "Inbound default verdict",
+                  "description": "Default verdict for inbound traffic (spec section 44.4). Optional: present in the section 44.4 example, absent from the section 38 example.",
+                  "$ref": "#/$defs/firewall_default"
+                },
+                "outboundDefault": {
+                  "title": "Outbound default verdict",
+                  "description": "Default verdict for outbound traffic (spec section 44.4). Optional: present in the section 44.4 example, absent from the section 38 example.",
+                  "$ref": "#/$defs/firewall_default"
+                }
+              },
+              "required": ["enabled"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["firewall"],
+          "additionalProperties": true
+        },
+        "applications": {
+          "title": "Application policy",
+          "description": "Application policy (spec sections 38, 46). 'required' appears in both spec examples and is required here; 'denied' and 'allowUserInstall' appear only in the section 46 example and are optional. Strict object: spec section 46 says application semantics should remain stable even if the underlying package system changes.",
+          "type": "object",
+          "properties": {
+            "required": {
+              "title": "Required applications",
+              "description": "Applications that must be installed, by package name (spec sections 38, 46).",
+              "type": "array",
+              "items": {
+                "title": "Required application package name",
+                "description": "Package name of an application that must be installed (spec sections 38, 46).",
+                "$ref": "#/$defs/package_name"
+              }
+            },
+            "denied": {
+              "title": "Denied applications",
+              "description": "Applications that must not be installed (spec section 46).",
+              "type": "array",
+              "items": {
+                "title": "Denied application entry",
+                "description": "A denied-application entry; the spec section 46 example shows an object with a 'package' field.",
+                "type": "object",
+                "properties": {
+                  "package": {
+                    "title": "Denied package name",
+                    "description": "Package name of an application that must not be installed (spec section 46).",
+                    "$ref": "#/$defs/package_name"
+                  }
+                },
+                "required": ["package"],
+                "additionalProperties": false
+              }
+            },
+            "allowUserInstall": {
+              "title": "Allow user installs",
+              "description": "Whether users may install additional applications themselves (spec section 46).",
+              "type": "boolean"
+            }
+          },
+          "required": ["required"],
+          "additionalProperties": false
+        },
+        "ai": {
+          "title": "AI policy",
+          "description": "AI configuration for the device (spec section 38). Extensible object: spec section 71 sketches future keys under 'ai' (models, cloudModels, localModels, externalMcp), so unknown keys are permitted here.",
+          "type": "object",
+          "properties": {
+            "policy": {
+              "title": "AI policy name",
+              "description": "Name of the named AI policy applied to this device, e.g. 'engineering-standard' (spec sections 38, 20).",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": ["policy"],
+          "additionalProperties": true
+        },
+        "network": {
+          "title": "Network",
+          "description": "Network desired state (spec sections 38, 33).",
+          "type": "object",
+          "properties": {
+            "privateRelay": {
+              "title": "Private relay",
+              "description": "Native OS-level private relay configuration (spec sections 38, 33).",
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "title": "Private relay enabled",
+                  "description": "Whether the native private relay is enabled (spec sections 38, 33).",
+                  "type": "boolean"
+                }
+              },
+              "required": ["enabled"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["privateRelay"],
+          "additionalProperties": false
+        },
+        "update": {
+          "title": "Update",
+          "description": "Update configuration (spec sections 38, 57).",
+          "type": "object",
+          "properties": {
+            "channel": {
+              "title": "Update channel",
+              "description": "Update channel name, e.g. 'stable' (spec sections 38, 57). Kept as an open non-empty string: section 38 shows only 'stable', and section 57 defines rollout stages, not a channel enum — inventing one would be a speculative narrowing.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": ["channel"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["security", "applications", "ai", "network", "update"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "$defs": {
+    "firewall_default": {
+      "title": "Firewall default verdict",
+      "description": "Manifest-local default verdict for a firewall traffic direction: allow or deny (spec section 44.4). Deliberately narrower than the shared runtime 'decision' def — 'approval_required' is not meaningful as a packet default; do not widen.",
+      "type": "string",
+      "enum": ["allow", "deny"]
+    },
+    "package_name": {
+      "title": "Package name",
+      "description": "Application package name, e.g. 'git', 'podman', '1password', 'tailscale' (spec sections 38, 46). Kept as a non-empty string: the spec pins application semantics, not a package-name grammar (section 46), and tightening later would be a breaking change.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

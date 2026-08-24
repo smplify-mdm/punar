@@ -1,0 +1,5 @@
+{
+  "name": "internet",
+  "kind": "internet",
+  "relay_mode": "vpn"
+}

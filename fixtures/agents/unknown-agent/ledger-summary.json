@@ -1,0 +1,20 @@
+{
+  "session_id": "agt_999",
+  "agent": "foo-agent",
+  "generated_at": "2026-08-24T10:15:00Z",
+  "resources": {
+    "repositories": ["github.com/acme/atlas"],
+    "directory_zones": ["workspace"],
+    "network_destinations": ["api.foo.ai"],
+    "mcp_servers": [],
+    "credential_classes": [],
+    "process_classes": []
+  },
+  "security_events": [
+    {
+      "event_id": "evt_910",
+      "event_type": "unknown_ai_execution",
+      "timestamp": "2026-08-24T10:12:05Z"
+    }
+  ]
+}

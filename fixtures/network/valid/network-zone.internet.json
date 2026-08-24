@@ -1,0 +1,7 @@
+{
+  "name": "internet",
+  "display_name": "Internet",
+  "description": "Public internet egress.",
+  "kind": "internet",
+  "relay_mode": "private_relay"
+}

@@ -1,0 +1,14 @@
+{
+  "event_id": "evt_789",
+  "timestamp": "2026-08-24T13:00:00+02:00",
+  "device_id": "dev_123",
+  "user_id": "alice@acme.com",
+  "agent_session_id": "agt_456",
+  "project_id": "atlas",
+  "source": "ai_agent",
+  "action": "network.connect",
+  "resource": "unknown-endpoint.example.net",
+  "decision": "deny",
+  "policy_ids": ["eng-ai-v3", "net-default-v1"],
+  "result": "blocked"
+}

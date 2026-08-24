@@ -1,0 +1,13 @@
+# Invalid: filesystem zones use the graded enum read_write|read|deny
+# (spec section 20); 'allow' is not a filesystem value.
+ai:
+  agents:
+    default:
+      filesystem:
+        workspace: allow
+      host:
+        user_package: allow
+      network:
+        internet: allow
+      credentials:
+        github: allow

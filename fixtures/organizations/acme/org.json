@@ -1,0 +1,17 @@
+{
+  "id": "acme",
+  "name": "Acme",
+  "discovery": {
+    "domain": "acme.com",
+    "control_plane": "smplify-mock",
+    "endpoint": "mock://smplify/organizations/acme"
+  },
+  "enrollment": {
+    "display_name": "Acme Engineering",
+    "desired_state_file": "desired-state-eng-baseline-v12.json",
+    "baseline_policy_id": "eng-baseline-v12",
+    "ai_policy": "engineering-standard",
+    "ai_policy_id": "eng-ai-v3",
+    "ai_policy_file": "../../policies/ai-policy-engineering-standard.yaml"
+  }
+}

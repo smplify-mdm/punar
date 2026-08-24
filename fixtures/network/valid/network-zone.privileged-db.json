@@ -1,0 +1,6 @@
+{
+  "name": "privileged_db",
+  "display_name": "Privileged DB",
+  "description": "Privileged production database segment; every access requires approval.",
+  "kind": "privileged"
+}

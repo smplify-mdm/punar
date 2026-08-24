@@ -1,0 +1,11 @@
+# Invalid: ai.models.unknownEndpoints.deny must be a boolean (spec section 71),
+# not the string "true".
+ai:
+  models:
+    cloud:
+      allowed:
+        - openai
+    local:
+      allowed: true
+    unknownEndpoints:
+      deny: "true"

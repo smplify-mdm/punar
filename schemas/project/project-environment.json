@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/project/project-environment.json",
+  "title": "ProjectEnvironment",
+  "description": "Developer environment manifest for one project (spec section 17). Developer environments are both usability and security boundaries; this human-authored YAML manifest declares the project's environment type, toolchains, services, permitted AI agents and the environment's permission grants, and is consumed by punar-env (spec sections 11.6, 17, 27). Field set and required list mirror the sole full example in spec section 17 (the Atlas manifest). CamelCase YAML configuration document per the naming convention (schemas/README.md); leaf keys and values copy the spec's own snake_case spellings (read_write, corp_dev, aws_prod) exactly.",
+  "$comment": "Milestone 3 note: crates/punar-common Rust types are not yet reconciled with this schema. Managed AI session launch behavior (spec section 27) is runtime behavior, not configuration, and is not modeled here.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "title": "API version",
+      "description": "Manifest API version. Spec section 17 pins the exact string 'punar.dev/v1alpha1' for ProjectEnvironment documents; independent of the schema-tree version (schemas/README.md versioning rules).",
+      "const": "punar.dev/v1alpha1"
+    },
+    "kind": {
+      "title": "Kind",
+      "description": "Document kind discriminator, always 'ProjectEnvironment' (spec section 17).",
+      "const": "ProjectEnvironment"
+    },
+    "project": {
+      "title": "Project",
+      "description": "The project this environment belongs to (spec sections 14, 17). Projects drive workspace, policy, networking and AI-session association (spec sections 14, 27, 36).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "title": "Project name",
+          "description": "Name of the project, e.g. 'atlas' (spec section 17). Free-form non-empty string; no grammar is asserted, consistent with 'project' in the AI Agent Registry record (spec section 19.2) and 'project_id' in the network policy schema.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["atlas"]
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "environment": {
+      "title": "Environment",
+      "description": "How the development environment is realized (spec section 17).",
+      "type": "object",
+      "properties": {
+        "type": {
+          "title": "Environment type",
+          "description": "Environment technology. Spec section 17's example shows exactly one value, 'devcontainer' (see also spec section 16 devcontainers/Podman and Milestone 6 'Podman/devcontainer'); additional types would be added additively to this enum when the spec defines them — widening an enum is a compatible change under the versioning rules.",
+          "type": "string",
+          "enum": ["devcontainer"]
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "toolchains": {
+      "title": "Toolchains",
+      "description": "Project-local language toolchains to provision, as a map of toolchain name to version request (spec sections 16, 17), e.g. node: \"24\", rust: stable. Toolchains are project-isolated rather than preinstalled on the host (spec section 16). Open map: any snake_case toolchain name is allowed; version requests are free-form strings because each toolchain versions itself differently ('24', 'stable', '1.80.0').",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "title": "Toolchain version request",
+        "description": "Requested version of the toolchain, e.g. '24' or 'stable' (spec section 17). YAML authors should quote purely numeric versions so they parse as strings.",
+        "type": "string",
+        "minLength": 1,
+        "examples": ["24", "stable"]
+      }
+    },
+    "services": {
+      "title": "Services",
+      "description": "Backing services provisioned inside the environment, e.g. postgres (spec section 17).",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "title": "Service name",
+        "description": "Name of one backing service, e.g. 'postgres' (spec section 17). Lowercase kebab/dotted name.",
+        "type": "string",
+        "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+        "examples": ["postgres"]
+      }
+    },
+    "ai": {
+      "title": "AI",
+      "description": "AI agent configuration for this environment (spec section 17): which known agents may run in it. Agents are launched into the environment via the managed runtime (spec section 27, 'punar-env agent claude').",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "title": "Permitted agents",
+          "description": "Names of AI agents permitted in this environment, e.g. 'claude-code', 'codex' (spec section 17). Each name matches the 'name' of an agent-definition.json document and the 'agent' field of AI Agent Registry records (spec section 19.2).",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "title": "Agent name",
+            "description": "Lowercase kebab/dotted agent name (spec sections 17, 19.2).",
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+            "examples": ["claude-code", "codex"]
+          }
+        }
+      },
+      "required": ["agents"],
+      "additionalProperties": false
+    },
+    "permissions": {
+      "title": "Permissions",
+      "description": "Permission grants for the environment (spec section 17): filesystem zones, network zones and credential classes. The environment is a security boundary; these grants bound what runs inside it, including AI agents (spec sections 17, 20). The spec section 17 example shows exactly these three blocks, so all three are required; further permission categories from spec section 20 (host, mcp, ...) belong to the AI authority policy document, not this manifest, and would be added here additively only if the spec shows them in a ProjectEnvironment.",
+      "type": "object",
+      "properties": {
+        "filesystem": {
+          "title": "Filesystem grants",
+          "description": "Map of filesystem zone name to access grade (spec sections 17, 20), e.g. project: read_write. Keys are named zones (project, workspace, home, ssh, aws), never filesystem paths.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/filesystem_access"
+          }
+        },
+        "network": {
+          "title": "Network grants",
+          "description": "Map of network zone name to policy decision (spec sections 17, 20, 36), e.g. internet: allow, corp_dev: allow, corp_prod: deny. Keys are network zone names matching NetworkZone 'name' (schemas/network/network-zone.json, spec section 36); values use the shared runtime decision enum — the manifest-local credential value 'request' is NOT valid here.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+          }
+        },
+        "credentials": {
+          "title": "Credential grants",
+          "description": "Map of credential class to grant mode (spec sections 17, 20, 29), e.g. github: allow, aws_dev: request, aws_prod: deny. Credential classes are broker classes (spec section 29); secret values never appear in manifests.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/credential_grant"
+          }
+        }
+      },
+      "required": ["filesystem", "network", "credentials"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "project",
+    "environment",
+    "toolchains",
+    "services",
+    "ai",
+    "permissions"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "filesystem_access": {
+      "title": "Filesystem access grade",
+      "description": "Graded filesystem access for one zone: read_write, read, or deny (spec section 20 example values; section 17 shows read_write). Manifest-local enum matching the ai-policy filesystem grades; deliberately not the shared decision def.",
+      "type": "string",
+      "enum": ["read_write", "read", "deny"]
+    },
+    "credential_grant": {
+      "title": "Credential grant mode",
+      "description": "Manifest credential grant: allow, deny, or request (spec sections 17, 20). 'request' means the credential is obtainable on demand via approval (equivalent intent to the runtime 'approval_required'); per schemas/README.md it is modeled as this manifest-local enum rather than by widening the shared decision def.",
+      "type": "string",
+      "enum": ["allow", "deny", "request"]
+    }
+  }
+}

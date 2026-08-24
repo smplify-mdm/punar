@@ -1,0 +1,7 @@
+{
+  "project_id": "atlas",
+  "displayName": "ATLAS",
+  "rules": [
+    { "zone": "internet", "decision": "allow" }
+  ]
+}

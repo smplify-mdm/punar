@@ -1,0 +1,5 @@
+{
+  "policy_id": "os-default-firewall",
+  "source_kind": "os_secure_default",
+  "precedence_rank": 6
+}

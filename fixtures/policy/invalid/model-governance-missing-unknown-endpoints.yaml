@@ -1,0 +1,9 @@
+# Invalid: ai.models requires cloud, local, and unknownEndpoints
+# (all present in the spec section 71 example).
+ai:
+  models:
+    cloud:
+      allowed:
+        - anthropic
+    local:
+      allowed: true

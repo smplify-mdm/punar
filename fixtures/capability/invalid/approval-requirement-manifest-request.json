@@ -1,0 +1,12 @@
+{
+  "capability": "ai.cloud_models",
+  "supported": true,
+  "current_state": "deny",
+  "desired_state": "deny",
+  "mutable": true,
+  "requires_reboot": false,
+  "risk": "medium",
+  "managed_by": "smplify",
+  "verification": "punar-agentd",
+  "approval_requirement": "request"
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/network/network-zone.json",
+  "title": "NetworkZone",
+  "description": "Definition of a named network zone used by enterprise private networking and project-aware networking (spec sections 35-36). Zone names are the snake_case keys that manifests and policies reference ('internet', 'corp_dev', 'corp_prod', spec sections 17, 20, 36); the section 36 tables show their display names ('Internet', 'Acme Dev', 'Production', 'Privileged DB'). Runtime JSON record: snake_case fields, strict.",
+  "$comment": "Network observability records (spec section 37, 'punarctl privacy connections': process, destination, reason, relay route, project, AI session association) are runtime telemetry, deliberately OUT of the v1alpha1 contract layer. Milestone 3 note: crates/punar-common Rust types are not yet reconciled with this schema.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "title": "Zone name",
+      "description": "Stable snake_case identifier for the zone, e.g. 'internet', 'corp_dev', 'corp_prod', 'privileged_db'. These are the zone keys used in ProjectEnvironment and AI policy manifests (spec sections 17, 20) and referenced by project network policies (spec section 36).",
+      "$ref": "#/$defs/zone_name"
+    },
+    "display_name": {
+      "title": "Display name",
+      "description": "Human-readable label shown in UI tables, e.g. 'Acme Dev', 'Production', 'Privileged DB' (spec section 36).",
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "title": "Description",
+      "description": "Free-text description of what the zone covers, e.g. which destinations belong to it ('dev.api.acme.internal', spec section 35).",
+      "type": "string"
+    },
+    "kind": {
+      "title": "Zone kind",
+      "description": "Category of the zone (spec sections 35-36): 'internet' = public internet egress; 'corporate' = enterprise private development networks (Acme Dev / corp_dev); 'production' = production networks (corp_prod); 'privileged' = privileged resources such as the section 36 'Privileged DB'.",
+      "$ref": "#/$defs/zone_kind"
+    },
+    "relay_mode": {
+      "title": "Relay mode",
+      "description": "Default routing mode for traffic bound for this zone, per the spec section 33 diagram (Punar Network Policy -> Private Relay / Enterprise Route / Direct). Optional; when absent the routing decision is left to runtime network policy.",
+      "$ref": "#/$defs/relay_mode"
+    }
+  },
+  "required": ["name", "kind"],
+  "additionalProperties": false,
+  "$defs": {
+    "zone_name": {
+      "title": "Zone name",
+      "description": "Snake_case zone identifier (spec sections 17, 20, 36). Matches manifest zone keys such as 'internet', 'corp_dev', 'corp_prod'.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "examples": ["internet", "corp_dev", "corp_prod", "privileged_db"]
+    },
+    "zone_kind": {
+      "title": "Zone kind",
+      "description": "Zone categories derived from the spec section 36 tables and section 35 enterprise private networking: internet, corporate (enterprise dev), production, privileged.",
+      "type": "string",
+      "enum": ["internet", "corporate", "production", "privileged"]
+    },
+    "relay_mode": {
+      "title": "Relay mode",
+      "description": "How eligible traffic is routed (spec section 33): 'direct' = no relay; 'private_relay' = the native (long-term dual-hop, spec section 34) private relay; 'enterprise_route' = enterprise private networking route (spec section 35).",
+      "type": "string",
+      "enum": ["direct", "private_relay", "enterprise_route"]
+    }
+  }
+}

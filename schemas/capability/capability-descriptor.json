@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/capability/capability-descriptor.json",
+  "title": "Capability registry descriptor",
+  "description": "One entry in the Punar capability registry (spec section 41). Describes a typed capability: identity, support, current/desired state, mutability, reboot implications, risk, managing authority, and verification mechanism (the section 41 example), plus the section 41 prose requirements: state schema, allowed desired states, privilege required, approval requirements, and audit category. This is a JSON runtime record emitted by punard, so field names are snake_case. current_state and desired_state are capability-specific values; see $defs/state_value for the convention and state_schema for the per-capability authority.",
+  "type": "object",
+  "properties": {
+    "capability": {
+      "title": "Capability id",
+      "description": "Dotted snake_case capability identifier, e.g. 'security.firewall', 'system.install_package' (spec sections 28, 41).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/capability_id"
+    },
+    "supported": {
+      "title": "Supported",
+      "description": "Whether this capability is supported on this device/build (spec section 41 example). Unsupported capabilities are report-only entries and map to the 'unsupported' compliance state (spec section 52).",
+      "type": "boolean"
+    },
+    "current_state": {
+      "title": "Current state",
+      "description": "Observed, normalized actual state of the capability (spec section 41 example; spec section 42 'Normalize Actual State'). Capability-specific value — see $defs/state_value; the authoritative value space is this descriptor's state_schema when present.",
+      "$ref": "#/$defs/state_value"
+    },
+    "desired_state": {
+      "title": "Desired state",
+      "description": "Desired state of the capability as resolved from desired-state sources and policy (spec section 41 example; spec sections 38, 39, 42 'Load Desired State'). Capability-specific value — see $defs/state_value; must be one of allowed_desired_states when that list is present.",
+      "$ref": "#/$defs/state_value"
+    },
+    "mutable": {
+      "title": "Mutable",
+      "description": "Whether the capability's state can be changed on this device (spec section 41 example). An immutable capability is observe/report-only.",
+      "type": "boolean"
+    },
+    "requires_reboot": {
+      "title": "Requires reboot",
+      "description": "Reboot implications: whether applying a desired-state change requires a reboot to take effect (spec section 41 example and prose 'reboot implications').",
+      "type": "boolean"
+    },
+    "risk": {
+      "title": "Risk",
+      "description": "Risk level of mutating this capability: low | medium | high (spec sections 28, 41).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/risk"
+    },
+    "managed_by": {
+      "title": "Managed by",
+      "description": "Identifier of the management authority that owns reconciliation for this capability (spec section 41 example value 'smplify').",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["smplify"]
+    },
+    "verification": {
+      "title": "Verification mechanism",
+      "description": "Mechanism used to verify the actual state after apply (spec section 41 example value 'nftables'; spec section 42 'Verify' step).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["nftables"]
+    },
+    "state_schema": {
+      "title": "State schema",
+      "description": "JSON Schema (draft 2020-12) describing the value space of current_state / desired_state — the spec section 41 prose requirement that capabilities 'must describe schema'. May be any valid schema, including a boolean schema, so this property is deliberately open (no additionalProperties restriction). Optional: when absent, the state space is documented only by the $defs/state_value convention.",
+      "type": ["object", "boolean"]
+    },
+    "allowed_desired_states": {
+      "title": "Allowed desired states",
+      "description": "Enumeration of the desired-state values this capability accepts (spec section 41 prose 'allowed desired states'). Each item is a capability-specific state value. Optional: may be absent when the state space is continuous or is fully described by state_schema; may be empty for immutable capabilities.",
+      "type": "array",
+      "items": {
+        "title": "Allowed state value",
+        "description": "One acceptable desired-state value for this capability (spec section 41).",
+        "$ref": "#/$defs/state_value"
+      },
+      "uniqueItems": true
+    },
+    "privilege_required": {
+      "title": "Privilege required",
+      "description": "Privilege level required to mutate this capability (spec section 41 prose 'privilege required'). Lowercase snake_case identifier; not an enum because the spec does not enumerate privilege levels.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "examples": ["none", "user", "admin", "root"]
+    },
+    "approval_requirement": {
+      "title": "Approval requirement",
+      "description": "Approval requirement for mutating this capability (spec section 41 prose 'approval requirements'), expressed with the shared policy decision enum (spec section 20): 'allow' means no approval needed, 'deny' means mutation is refused, 'approval_required' means mutation is gated on an approval (spec section 28). The manifest-local credential value 'request' is not valid here.",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+    },
+    "audit_category": {
+      "title": "Audit category",
+      "description": "Category attached to audit events emitted when this capability is observed, mutated, or remediated (spec section 41 prose 'audit category'; audit events in spec section 53). Lowercase snake_case, optionally dotted.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+      "examples": ["security", "ai_policy"]
+    }
+  },
+  "required": [
+    "capability",
+    "supported",
+    "current_state",
+    "desired_state",
+    "mutable",
+    "requires_reboot",
+    "risk",
+    "managed_by",
+    "verification"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "state_value": {
+      "title": "Capability state value",
+      "description": "A capability-specific state value (spec section 41). Deliberately open — this schema accepts any JSON value — because the value space differs per capability and is authoritatively described by the descriptor's state_schema. Convention: simple toggle capabilities use lowercase snake_case strings (e.g. 'enabled', 'disabled'); richer capabilities may use numbers, objects, or arrays. Consumers must not assume string."
+    }
+  }
+}

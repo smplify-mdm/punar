@@ -1,0 +1,8 @@
+{
+  "name": "claude-code",
+  "adapter": "claude_code",
+  "launch": {
+    "method": "managed",
+    "command": "punar-env agent claude"
+  }
+}

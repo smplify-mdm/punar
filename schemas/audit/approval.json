@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/audit/approval.json",
+  "title": "Approval",
+  "description": "A first-class approval-gate record (spec section 28). Machine-emitted JSON runtime record, so field names are snake_case. MVP behavior (spec section 28): local graphical approval, keyboard approve/deny, expiration, audit, typed capability execution after approval. Status lifecycle: pending -> approved | denied | expired.",
+  "type": "object",
+  "properties": {
+    "approval_id": {
+      "title": "Approval id",
+      "description": "Unique approval identifier with 'apr_' prefix, e.g. 'apr_123' (spec section 28).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/approval_id"
+    },
+    "requester": {
+      "title": "Requester",
+      "description": "Principal requesting the capability (spec section 28).",
+      "type": "object",
+      "properties": {
+        "type": {
+          "title": "Requester type",
+          "description": "Kind of principal making the request, e.g. 'ai_agent' (spec sections 18, 28).",
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/principal_kind"
+        },
+        "id": {
+          "title": "Requester id",
+          "description": "Identifier of the requesting principal (spec section 28). For 'ai_agent' requesters this is an agent session id with 'agt_' prefix, e.g. 'agt_123' (spec section 19.2); other principal kinds use their own identifier forms.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["agt_123"]
+        }
+      },
+      "required": ["type", "id"],
+      "additionalProperties": false
+    },
+    "user": {
+      "title": "User",
+      "description": "Human user the approval is routed to for an approve/deny decision, e.g. 'alice@acme.com' (spec section 28).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["alice@acme.com"]
+    },
+    "capability": {
+      "title": "Capability",
+      "description": "Capability being requested, dotted snake_case capability id, e.g. 'system.install_package' (spec sections 28, 41).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/capability_id"
+    },
+    "resource": {
+      "title": "Resource",
+      "description": "Concrete resource the capability would act on, e.g. 'libvirt' (spec section 28).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["libvirt"]
+    },
+    "reason": {
+      "title": "Reason",
+      "description": "Human-readable justification supplied by the requester, e.g. 'required by project Atlas' (spec section 28).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["required by project Atlas"]
+    },
+    "risk": {
+      "title": "Risk",
+      "description": "Assessed risk level of granting the request: low, medium, or high (spec sections 28, 41).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/risk"
+    },
+    "status": {
+      "title": "Status",
+      "description": "Approval lifecycle status (spec section 28). 'pending' until the user approves or denies (keyboard approve/deny) or the request passes expires_at; typed capability execution proceeds only after 'approved'.",
+      "type": "string",
+      "enum": ["pending", "approved", "denied", "expired"]
+    },
+    "expires_at": {
+      "title": "Expires at",
+      "description": "RFC 3339 time after which a pending approval automatically expires (spec section 28; the spec example elides the value as \"...\").",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "approval_id",
+    "requester",
+    "user",
+    "capability",
+    "resource",
+    "reason",
+    "risk",
+    "status",
+    "expires_at"
+  ],
+  "additionalProperties": false
+}

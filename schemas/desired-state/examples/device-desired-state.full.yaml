@@ -1,0 +1,44 @@
+# Richer DeviceDesiredState variant composed only of shapes the spec shows:
+# section 38 (document layout), section 44.4 (firewall inboundDefault/outboundDefault),
+# section 46 (applications required/denied/allowUserInstall).
+apiVersion: smplify.io/v1alpha1
+kind: DeviceDesiredState
+
+metadata:
+  organization: acme
+  device: dev_456
+
+spec:
+  security:
+    diskEncryption:
+      required: true
+
+    secureBoot:
+      required: true
+
+    firewall:
+      enabled: true
+      inboundDefault: deny
+      outboundDefault: allow
+
+  applications:
+    required:
+      - git
+      - podman
+      - 1password
+      - tailscale
+
+    denied:
+      - package: unsafe-package
+
+    allowUserInstall: true
+
+  ai:
+    policy: engineering-standard
+
+  network:
+    privateRelay:
+      enabled: true
+
+  update:
+    channel: stable

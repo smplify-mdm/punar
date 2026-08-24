@@ -1,0 +1,6 @@
+# Invalid: ai.agents requires the 'default' profile (spec section 20).
+ai:
+  agents:
+    claude-code:
+      network:
+        corp_prod: deny

@@ -1,0 +1,31 @@
+# Acme "engineering-standard" AI authority policy. Policy id: eng-ai-v3
+# (the id the spec section 53 audit example cites in "policy_ids").
+# Referenced by fixtures/organizations/acme/desired-state-eng-baseline-v12.json
+# via spec.ai.policy: engineering-standard.
+# Body is the spec section 20 "AI Authority Model" example verbatim.
+# Validates against schemas/policy/ai-policy.json.
+# Provenance envelope: fixtures/policies/policy-source-eng-ai-v3.json.
+ai:
+  agents:
+    default:
+      filesystem:
+        workspace: read_write
+        home: read
+        ssh: deny
+        aws: deny
+
+      host:
+        user_package: allow
+        system_package: approval_required
+        firewall: deny
+        user_management: deny
+
+      network:
+        internet: allow
+        corp_dev: allow
+        corp_prod: deny
+
+      credentials:
+        github: allow
+        aws_dev: request
+        aws_prod: deny

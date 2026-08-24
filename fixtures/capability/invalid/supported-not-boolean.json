@@ -1,0 +1,11 @@
+{
+  "capability": "security.firewall",
+  "supported": "yes",
+  "current_state": "enabled",
+  "desired_state": "enabled",
+  "mutable": true,
+  "requires_reboot": false,
+  "risk": "high",
+  "managed_by": "smplify",
+  "verification": "nftables"
+}

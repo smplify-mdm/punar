@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/ai-agent/ledger-summary.json",
+  "title": "AI Access Ledger summary",
+  "description": "Privacy-preserving per-session summary from the local AI Access Ledger (spec section 21): the Level 3 resource summary (spec section 21.2 — which repositories, directory zones, network destinations, MCP servers, credential classes and process classes were used) plus references to Level 4 security events, whose full payloads live in the audit log (spec section 53; schema https://schemas.punar.dev/v1alpha1/audit/audit-event.json) and are referenced here by event_id only. Privacy rules from section 21.2 are encoded structurally: resource arrays hold distinct identifiers, not per-access entries (no per-read logging, no counts of source-code line reads); directories appear as named zones whose pattern rejects path separators (no raw filesystem paths); network destinations are domains or named zones whose pattern rejects URLs; credential entries are classes only (no secret values); there is no field anywhere for prompt text, file contents or source code. Snake_case JSON runtime record, strict additionalProperties.",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "title": "Agent session id",
+      "description": "The agent session this summary describes, 'agt_' prefix; joins to the AI Agent Registry record with the same session_id (spec sections 19.2, 21).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/agent_session_id"
+    },
+    "agent": {
+      "title": "Agent name",
+      "description": "Optional convenience copy of the agent name from the registry record (spec section 19.2), e.g. 'claude-code'; the registry record for session_id is authoritative.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+      "examples": ["claude-code"]
+    },
+    "generated_at": {
+      "title": "Summary generation time",
+      "description": "RFC 3339 timestamp when this summary was computed by the ledger.",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    },
+    "resources": {
+      "title": "Level 3 resource summary",
+      "description": "Distinct resources this session meaningfully accessed (spec sections 21.1, 21.2 Level 3). Each array is a de-duplicated set of identifiers — a summary of WHICH resources were used, never a log of individual accesses.",
+      "type": "object",
+      "properties": {
+        "repositories": {
+          "title": "Repositories",
+          "description": "Distinct source repositories accessed (spec sections 21.1, 21.2 Level 3), identified by repository identity (e.g. host/org/name), never by file paths or contents.",
+          "type": "array",
+          "items": {
+            "title": "Repository identifier",
+            "description": "Repository identity string, e.g. 'github.com/acme/atlas'.",
+            "type": "string",
+            "minLength": 1,
+            "examples": ["github.com/acme/atlas"]
+          },
+          "uniqueItems": true
+        },
+        "directory_zones": {
+          "title": "Directory zones touched",
+          "description": "Named filesystem zones touched — the zone names used by filesystem authority policy and sensitive-zone tracking (spec sections 20, 21.1), e.g. 'workspace', 'home', 'ssh', 'aws'. Zones, never raw paths: the pattern deliberately rejects '/' so a concrete filesystem path cannot appear in the ledger (spec section 21.2 privacy rules).",
+          "type": "array",
+          "items": {
+            "title": "Zone identifier",
+            "description": "Snake_case zone name; no path separators, no leading '/', never an actual directory path.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "examples": ["workspace", "home", "ssh", "aws"]
+          },
+          "uniqueItems": true
+        },
+        "network_destinations": {
+          "title": "Network destinations",
+          "description": "Distinct network destinations reached: DNS domains (spec section 21.2 Level 3 'domains') or named network zones such as enterprise private zones (spec sections 21.1, 36), e.g. 'corp_dev'. The pattern rejects ':' and '/' so full URLs — whose paths and query strings could leak prompts, code or secrets — cannot appear.",
+          "type": "array",
+          "items": {
+            "title": "Destination identifier",
+            "description": "Domain name or named network-zone identifier; never a URL, port or path.",
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+            "examples": ["api.anthropic.com", "corp_dev"]
+          },
+          "uniqueItems": true
+        },
+        "mcp_servers": {
+          "title": "MCP servers",
+          "description": "Distinct MCP servers used by the session (spec sections 21.1, 21.2 Level 3), identified by server name; tool arguments and results are never recorded here.",
+          "type": "array",
+          "items": {
+            "title": "MCP server name",
+            "description": "MCP server identifier, e.g. 'github-mcp'.",
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+            "examples": ["github-mcp"]
+          },
+          "uniqueItems": true
+        },
+        "credential_classes": {
+          "title": "Credential classes",
+          "description": "Distinct credential classes requested or used (spec sections 21.1, 21.2 Level 3), e.g. 'github', 'aws_dev' (policy-key style, spec section 20) or 'aws-dev' (secret-broker style, spec section 29). Classes only — secret values, tokens and key material are never logged (spec sections 21.2, 53).",
+          "type": "array",
+          "items": {
+            "title": "Credential class",
+            "description": "Credential class identifier; never a credential value.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "examples": ["github", "aws_dev", "aws-dev"]
+          },
+          "uniqueItems": true
+        },
+        "process_classes": {
+          "title": "Process classes",
+          "description": "Distinct classes of child processes spawned by the session (spec sections 21.1, 21.2 Level 3), by executable identity, e.g. 'bash', 'git', 'node', 'cargo' (spec section 22). Classes, not per-spawn entries; command-line arguments are never recorded here.",
+          "type": "array",
+          "items": {
+            "title": "Process class",
+            "description": "Executable class name, e.g. 'git'.",
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._+-]*$",
+            "examples": ["bash", "git", "node", "cargo"]
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "repositories",
+        "directory_zones",
+        "network_destinations",
+        "mcp_servers",
+        "credential_classes",
+        "process_classes"
+      ],
+      "additionalProperties": false
+    },
+    "security_events": {
+      "title": "Level 4 security events",
+      "description": "References to the precise security-relevant events recorded for this session (spec section 21.2 Level 4). The full event payload is an audit event (spec section 53, schema https://schemas.punar.dev/v1alpha1/audit/audit-event.json); the ledger summary stores only the event reference and its Level 4 category, never duplicating audit detail. May be empty.",
+      "type": "array",
+      "items": {
+        "title": "Security event reference",
+        "description": "Reference to one Level 4 security event in the audit log (spec sections 21.2, 53).",
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "title": "Audit event id",
+            "description": "Id of the audit event carrying the full record, 'evt_' prefix (spec section 53).",
+            "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/event_id"
+          },
+          "event_type": {
+            "title": "Level 4 event category",
+            "description": "Which of the seven Level 4 security-event categories this event falls under (spec section 21.2 Level 4): denied access; sensitive resource access; privilege request; production access; credential request; policy bypass attempt; unknown AI execution.",
+            "type": "string",
+            "enum": [
+              "denied_access",
+              "sensitive_resource_access",
+              "privilege_request",
+              "production_access",
+              "credential_request",
+              "policy_bypass_attempt",
+              "unknown_ai_execution"
+            ]
+          },
+          "timestamp": {
+            "title": "Event time",
+            "description": "Optional RFC 3339 timestamp of the event; the referenced audit event's timestamp is authoritative (spec section 53).",
+            "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+          }
+        },
+        "required": ["event_id", "event_type"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["session_id", "generated_at", "resources", "security_events"],
+  "additionalProperties": false
+}

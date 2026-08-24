@@ -1,0 +1,14 @@
+{
+  "approval_id": "apr_789",
+  "requester": {
+    "type": "ai_agent",
+    "id": "agt_456"
+  },
+  "user": "alice@acme.com",
+  "capability": "security.firewall",
+  "resource": "port_8080",
+  "reason": "expose dev server",
+  "risk": "high",
+  "status": "denied",
+  "expires_at": "2026-08-24T14:00:00Z"
+}

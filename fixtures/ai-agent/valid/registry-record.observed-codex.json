@@ -1,0 +1,12 @@
+{
+  "session_id": "agt_8927",
+  "agent": "codex",
+  "version": "0.31.0",
+  "process_id": 22014,
+  "user": "alice@acme.com",
+  "project": "atlas",
+  "environment": "atlas-dev-42",
+  "status": "active",
+  "classification": "observed",
+  "started_at": "2026-08-24T10:02:11+02:00"
+}

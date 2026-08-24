@@ -1,0 +1,13 @@
+{
+  "session_id": "agt_123",
+  "generated_at": "2026-08-24T12:00:00Z",
+  "resources": {
+    "repositories": [],
+    "directory_zones": [],
+    "network_destinations": ["https://api.anthropic.com/v1/messages?q=secret"],
+    "mcp_servers": [],
+    "credential_classes": [],
+    "process_classes": []
+  },
+  "security_events": []
+}

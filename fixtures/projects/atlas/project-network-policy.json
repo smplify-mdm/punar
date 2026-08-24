@@ -1,0 +1,9 @@
+{
+  "project_id": "atlas",
+  "display_name": "ATLAS",
+  "rules": [
+    { "zone": "internet", "decision": "allow" },
+    { "zone": "corp_dev", "decision": "allow" },
+    { "zone": "corp_prod", "decision": "deny" }
+  ]
+}

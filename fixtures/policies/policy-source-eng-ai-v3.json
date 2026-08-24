@@ -1,0 +1,6 @@
+{
+  "policy_id": "eng-ai-v3",
+  "source_kind": "organization_baseline",
+  "precedence_rank": 2,
+  "source_name": "Acme Engineering AI Policy"
+}

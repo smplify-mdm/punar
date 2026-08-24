@@ -1,0 +1,8 @@
+{
+  "policy_id": "fw-exception-2026-08",
+  "source_kind": "temporary_approved_exception",
+  "precedence_rank": 4,
+  "source_name": "Firewall exception for incident 4821",
+  "approval_id": "apr_9f3k2Qx",
+  "expires_at": "2026-08-25T12:00:00Z"
+}

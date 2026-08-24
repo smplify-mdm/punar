@@ -1,0 +1,15 @@
+# Verbatim spec example: docs/product/SPEC_v0.2.md section 71 "AI Model Governance"
+# ("Future example" — the schema is marked future/vNext accordingly).
+# Validates against schemas/policy/model-governance.json.
+ai:
+  models:
+    cloud:
+      allowed:
+        - openai
+        - anthropic
+
+    local:
+      allowed: true
+
+    unknownEndpoints:
+      deny: true

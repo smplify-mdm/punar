@@ -1,0 +1,6 @@
+{
+  "name": "corp_prod",
+  "display_name": "Production",
+  "kind": "production",
+  "relay_mode": "enterprise_route"
+}

@@ -1,0 +1,12 @@
+{
+  "session_id": "agt_999",
+  "agent": "foo-agent",
+  "version": "unknown",
+  "process_id": 27114,
+  "user": "alice@acme.com",
+  "project": "atlas",
+  "environment": "host",
+  "status": "active",
+  "classification": "unknown",
+  "started_at": "2026-08-24T10:12:00Z"
+}

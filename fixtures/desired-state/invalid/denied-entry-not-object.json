@@ -1,0 +1,22 @@
+{
+  "apiVersion": "smplify.io/v1alpha1",
+  "kind": "DeviceDesiredState",
+  "metadata": {
+    "organization": "acme",
+    "device": "dev_123"
+  },
+  "spec": {
+    "security": {
+      "diskEncryption": {"required": true},
+      "secureBoot": {"required": true},
+      "firewall": {"enabled": true}
+    },
+    "applications": {
+      "required": ["git", "podman"],
+      "denied": ["unsafe-package"]
+    },
+    "ai": {"policy": "engineering-standard"},
+    "network": {"privateRelay": {"enabled": true}},
+    "update": {"channel": "stable"}
+  }
+}

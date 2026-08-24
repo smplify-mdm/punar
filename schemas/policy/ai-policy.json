@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/policy/ai-policy.json",
+  "title": "AI Authority Policy",
+  "description": "AI authority policy document (spec section 20, 'AI Authority Model'). Declares what AI agents may do on a device via authority profiles keyed under ai.agents.<profile>: filesystem zone grants, host capability grants, network zone grants, and credential grants. YAML-authored configuration whose keys copy the spec section 20 example verbatim, including its deliberate snake_case leaf keys (read_write, corp_dev, aws_prod) — see schemas/README.md naming rules. How profiles for specific agents combine with 'default' at runtime is engine behavior, not part of this contract.",
+  "type": "object",
+  "required": ["ai"],
+  "additionalProperties": false,
+  "properties": {
+    "ai": {
+      "title": "AI policy root",
+      "description": "Root block of the AI authority policy document (spec section 20 example: 'ai:').",
+      "type": "object",
+      "required": ["agents"],
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "title": "Agent authority profiles",
+          "description": "Authority profiles keyed by profile name (spec section 20 example: 'ai.agents.default'). The 'default' profile is required and covers any agent without a dedicated profile. Additional keys are agent names as enumerated in ProjectEnvironment manifests (spec section 17, e.g. 'claude-code', 'codex') and carry override profiles, which may be partial.",
+          "type": "object",
+          "required": ["default"],
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/agent_authority_profile",
+              "title": "Default agent authority profile",
+              "description": "Baseline authority applying to every AI agent (spec section 20). The spec example always includes the filesystem, host, network, and credentials blocks, so all four are required on 'default'.",
+              "required": ["filesystem", "host", "network", "credentials"]
+            }
+          },
+          "patternProperties": {
+            "^[a-z][a-z0-9_-]*$": {
+              "$ref": "#/$defs/agent_authority_profile",
+              "title": "Named agent authority profile",
+              "description": "Per-agent override profile keyed by agent name (lowercase letters, digits, '_', '-'; spec section 17 agent names such as 'claude-code'). Unlike 'default', named profiles may be partial: no block is required."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "agent_authority_profile": {
+      "title": "Agent authority profile",
+      "description": "The permission blocks for one agent profile (spec section 20). The spec's category list is wider than its example (it also names system mutation, package installation, container access, MCP/tool access, browser automation, Git access, cloud environments, production resources), so this object is deliberately extensible: any additional block is validated as a map of snake_case target name to the shared decision enum. The four blocks shown in the spec example get dedicated definitions below.",
+      "type": "object",
+      "properties": {
+        "filesystem": {
+          "title": "Filesystem zone grants",
+          "description": "Map of filesystem zone name to access level (spec section 20 example zones: workspace, home, ssh, aws). Zone names are deployment-defined snake_case tokens; values use the graded filesystem access enum, not the shared decision enum.",
+          "type": "object",
+          "propertyNames": {
+            "title": "Filesystem zone name",
+            "description": "Snake_case filesystem zone token (spec section 20).",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/filesystem_zone_access"
+          }
+        },
+        "host": {
+          "title": "Host capability grants",
+          "description": "Map of host capability name to the shared decision enum allow | deny | approval_required (spec section 20 example: user_package, system_package, firewall, user_management). Keys here are short manifest tokens, not dotted capability ids (those are spec sections 28/41).",
+          "type": "object",
+          "propertyNames": {
+            "title": "Host capability name",
+            "description": "Snake_case host capability token (spec section 20).",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+          }
+        },
+        "network": {
+          "title": "Network zone grants",
+          "description": "Map of network zone name to the shared decision enum (spec sections 17 and 20 example zones: internet, corp_dev, corp_prod).",
+          "type": "object",
+          "propertyNames": {
+            "title": "Network zone name",
+            "description": "Snake_case network zone token (spec sections 17, 20).",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+          }
+        },
+        "credentials": {
+          "title": "Credential grants",
+          "description": "Map of credential name to the manifest-local credential decision enum allow | deny | request (spec sections 17 and 20 example credentials: github, aws_dev, aws_prod).",
+          "type": "object",
+          "propertyNames": {
+            "title": "Credential name",
+            "description": "Snake_case credential token (spec sections 17, 20).",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/credential_decision"
+          }
+        }
+      },
+      "additionalProperties": {
+        "title": "Additional permission block",
+        "description": "Growth point for the permission categories spec section 20 lists but does not exemplify (system mutation, package installation, container access, MCP/tool access, browser automation, Git access, cloud environments, production resources). Each such block is a map of snake_case target name to the shared decision enum allow | deny | approval_required.",
+        "type": "object",
+        "propertyNames": {
+          "title": "Permission target name",
+          "description": "Snake_case target token within a future permission block (spec section 20).",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "additionalProperties": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+        }
+      }
+    },
+    "filesystem_zone_access": {
+      "title": "Filesystem zone access level",
+      "description": "Graded access level for a filesystem zone: read_write | read | deny (exactly the values in the spec section 20 example). Deliberately distinct from the shared decision enum: filesystem authority distinguishes write from read, and 'allow' is not a valid filesystem value.",
+      "type": "string",
+      "enum": ["read_write", "read", "deny"]
+    },
+    "credential_decision": {
+      "title": "Credential decision",
+      "description": "Manifest-local decision enum for credential grants: allow | deny | request (spec sections 17 and 20 examples, e.g. 'aws_dev: request'). 'request' carries the same intent as 'approval_required' in the shared decision enum (spec section 20), but the spec's manifests consistently spell it 'request' for credentials, so it is modeled as its own enum rather than widening the shared runtime def (common/defs.json#/$defs/decision). Runtime records describing the outcome of a credential request still use the shared decision enum.",
+      "type": "string",
+      "enum": ["allow", "deny", "request"]
+    }
+  }
+}

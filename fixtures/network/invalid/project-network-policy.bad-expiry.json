@@ -1,0 +1,6 @@
+{
+  "project_id": "production_incident",
+  "rules": [
+    { "zone": "corp_prod", "decision": "approval_required", "expires_at": "tomorrow" }
+  ]
+}

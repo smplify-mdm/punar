@@ -1,0 +1,12 @@
+{
+  "name": "foo-agent",
+  "adapter": "generic",
+  "adapter_config": {
+    "simulated": true,
+    "note": "Shadow-AI detection fixture for the hero demo (spec sections 25, 75 step 10). Metadata describing a fake suspicious binary; contains no executable logic.",
+    "executable_path": "~/Downloads/foo-agent",
+    "network_destinations": ["api.foo.ai"],
+    "accesses_repository": "github.com/acme/atlas",
+    "expected_classification": "unknown"
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/audit/audit-event.json",
+  "title": "Audit event",
+  "description": "A single Punar audit-trail event as emitted by local services (spec section 53). Machine-emitted JSON runtime record, so field names are snake_case. Sensitive-content rule (spec section 53): audit events must never contain passwords, secret values, tokens, private keys, prompt contents by default, or source code — only identifiers, decisions, and outcomes are recorded.",
+  "type": "object",
+  "properties": {
+    "event_id": {
+      "title": "Event id",
+      "description": "Unique audit event identifier with 'evt_' prefix, e.g. 'evt_123' (spec section 53).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/event_id"
+    },
+    "timestamp": {
+      "title": "Timestamp",
+      "description": "RFC 3339 time at which the event occurred (spec section 53; the spec example elides the value as \"...\").",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    },
+    "device_id": {
+      "title": "Device id",
+      "description": "Device on which the event occurred, 'dev_' prefix, e.g. 'dev_123' (spec sections 38, 53).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/device_id"
+    },
+    "user_id": {
+      "title": "User id",
+      "description": "Human user in whose session the event occurred, e.g. 'alice@acme.com' (spec section 53). The spec shows an email address but does not mandate the form; any non-empty identifier is accepted.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["alice@acme.com"]
+    },
+    "agent_session_id": {
+      "title": "Agent session id",
+      "description": "AI agent session the event is attributed to, 'agt_' prefix, e.g. 'agt_123' (spec sections 19.2, 53).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/agent_session_id"
+    },
+    "project_id": {
+      "title": "Project id",
+      "description": "Project workspace the event occurred in, e.g. 'atlas' (spec sections 14, 53).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["atlas"]
+    },
+    "source": {
+      "title": "Source",
+      "description": "Kind of principal that originated the event, e.g. 'ai_agent' (spec sections 18, 53).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/principal_kind"
+    },
+    "action": {
+      "title": "Action",
+      "description": "Dotted snake_case name of the action that was attempted, e.g. 'credential.request' (spec section 53). Follows the same dotted-path style as capability ids (spec section 28) but is not restricted to registered capabilities and may be a single segment.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+      "examples": ["credential.request", "system.install_package"]
+    },
+    "resource": {
+      "title": "Resource",
+      "description": "Resource the action targeted, e.g. 'aws-dev' (spec section 53). Resource names only — never secret values, tokens, or file contents (spec section 53 never-log rule).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["aws-dev"]
+    },
+    "decision": {
+      "title": "Decision",
+      "description": "Policy decision applied to the action: allow, deny, or approval_required (spec sections 20, 53).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/decision"
+    },
+    "policy_ids": {
+      "title": "Policy ids",
+      "description": "Identifiers of the policies that produced the decision, e.g. [\"eng-ai-v3\"] (spec section 53).",
+      "type": "array",
+      "items": {
+        "title": "Policy id",
+        "description": "A single policy identifier (spec section 53).",
+        "type": "string",
+        "minLength": 1
+      },
+      "examples": [["eng-ai-v3"]]
+    },
+    "result": {
+      "title": "Result",
+      "description": "Outcome of the action after the decision was applied, e.g. 'success' (spec section 53). The spec does not enumerate result values; lowercase snake_case strings by convention.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["success"]
+    }
+  },
+  "required": [
+    "event_id",
+    "timestamp",
+    "device_id",
+    "user_id",
+    "agent_session_id",
+    "project_id",
+    "source",
+    "action",
+    "resource",
+    "decision",
+    "policy_ids",
+    "result"
+  ],
+  "additionalProperties": false
+}

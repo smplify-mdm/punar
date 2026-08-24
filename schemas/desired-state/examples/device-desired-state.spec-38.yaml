@@ -1,0 +1,33 @@
+# Verbatim DeviceDesiredState example from docs/product/SPEC_v0.2.md section 38 (1:1 copy of the YAML block).
+apiVersion: smplify.io/v1alpha1
+kind: DeviceDesiredState
+
+metadata:
+  organization: acme
+  device: dev_123
+
+spec:
+  security:
+    diskEncryption:
+      required: true
+
+    secureBoot:
+      required: true
+
+    firewall:
+      enabled: true
+
+  applications:
+    required:
+      - git
+      - podman
+
+  ai:
+    policy: engineering-standard
+
+  network:
+    privateRelay:
+      enabled: true
+
+  update:
+    channel: stable

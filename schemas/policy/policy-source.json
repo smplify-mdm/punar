@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/policy/policy-source.json",
+  "title": "Policy Source Envelope",
+  "description": "Provenance envelope attached to a stored policy: which spec section 39 state source produced it and where that source sits in the precedence ladder ('State Sources and Precedence'). Its fields feed the explainability output of 'punarctl policy explain' (spec section 40: the 'Source:' and 'Policy:' lines). JSON runtime record: snake_case field names, additionalProperties false.",
+  "type": "object",
+  "required": ["policy_id", "source_kind", "precedence_rank"],
+  "additionalProperties": false,
+  "properties": {
+    "policy_id": {
+      "title": "Policy identifier",
+      "description": "Stable identifier of the policy this envelope wraps, e.g. 'eng-baseline-v12' as shown on the 'Policy:' line of the spec section 40 explain output. Lowercase token of letters, digits, '.', '_', '-', starting and ending alphanumeric.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+      "examples": ["eng-baseline-v12"]
+    },
+    "source_kind": {
+      "$ref": "#/$defs/policy_source_kind",
+      "title": "Source kind",
+      "description": "Which of the spec section 39 state sources produced this policy."
+    },
+    "precedence_rank": {
+      "title": "Precedence rank",
+      "description": "Position of this source in the precedence ladder; a LOWER rank wins over a higher one. Spec section 39's suggested ladder maps as: 1 = os_hard_safety_constraint ('Hard OS Safety Constraint'), 2 = organization_baseline ('Organization Mandatory Policy'), 3 = organization_role_policy, 4 = temporary_approved_exception, 5 = local_user_preference ('User Preference'), 6 = os_secure_default ('OS Default'). device_specific_override appears in the section 39 source list but has no rung in the suggested ladder, so deployments assign its rank explicitly. Rank is stored data rather than schema-fixed per kind because the spec calls the ladder 'suggested' and instructs 'Encode and test'.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [2]
+    },
+    "source_name": {
+      "title": "Source display name",
+      "description": "Human-readable source name surfaced by explainability, e.g. 'Acme Engineering Baseline' on the 'Source:' line of the spec section 40 explain output. Optional: OS-shipped sources (os_hard_safety_constraint, os_secure_default) may omit it.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["Acme Engineering Baseline"]
+    },
+    "policy": {
+      "title": "Policy payload",
+      "description": "The stored policy document this envelope carries provenance for — for example an AI authority policy document (schemas/policy/ai-policy.json) or a desired-state fragment. Free-form object: the payload's own schema depends on the policy domain. Optional: an envelope may instead reference the payload by policy_id from a policy store.",
+      "type": "object"
+    },
+    "approval_id": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/approval_id",
+      "title": "Approval identifier",
+      "description": "Approval that authorized this policy; expected when source_kind is 'temporary_approved_exception' (spec sections 28, 39)."
+    },
+    "expires_at": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp",
+      "title": "Expiry timestamp",
+      "description": "RFC 3339 instant after which this source stops applying; expected for 'temporary_approved_exception' sources (spec sections 28, 39)."
+    }
+  },
+  "$defs": {
+    "policy_source_kind": {
+      "title": "Policy source kind",
+      "description": "The seven state sources of spec section 39. 'organization_baseline' is the source list's 'organization baseline' and corresponds to 'Organization Mandatory Policy' in the section's suggested precedence ladder; 'os_secure_default' corresponds to the ladder's 'OS Default'; 'local_user_preference' to 'User Preference'.",
+      "type": "string",
+      "enum": [
+        "os_hard_safety_constraint",
+        "os_secure_default",
+        "local_user_preference",
+        "organization_baseline",
+        "organization_role_policy",
+        "device_specific_override",
+        "temporary_approved_exception"
+      ]
+    }
+  }
+}

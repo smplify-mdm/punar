@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/ai-agent/agent-definition.json",
+  "title": "AI agent definition",
+  "description": "Definition of a known AI agent product: its name, the AI Agent Gateway adapter that mediates it (spec section 26), and — for agents launchable through the managed Punar runtime — the managed launch method (spec section 27, e.g. 'punar-env agent claude'). The spec gives no literal example document for this record, so the shape is synthesized from sections 19.1, 26 and 27; 'name' and 'adapter' are the fields every known agent always has, so only they are required. Snake_case JSON runtime record; strict except for the explicitly extensible adapter_config.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "title": "Agent name",
+      "description": "Canonical name of the agent product, e.g. 'claude-code' (spec section 19.2 'agent' field references this name). Lowercase kebab/dotted name.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+      "examples": ["claude-code", "codex", "generic-shell"]
+    },
+    "adapter": {
+      "title": "Gateway adapter id",
+      "description": "Identifier of the AI Agent Gateway adapter that provides session identity, project association, policy, credential mediation, privileged requests, MCP/tool mediation, audit and network context for this agent (spec section 26). Adapters are modular, so this is an open snake_case identifier rather than a closed enum; the spec's initial adapters are Claude Code ('claude_code'), OpenAI Codex CLI ('codex_cli') and a generic shell/agent adapter ('generic').",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "examples": ["claude_code", "codex_cli", "generic"]
+    },
+    "launch": {
+      "title": "Managed launch method",
+      "description": "How this agent is launched through the managed Punar runtime (spec section 27). Present only for agents that support managed launch; a known agent without this object can still be tracked when it runs outside the managed runtime, but only sessions started via this method qualify for the 'managed' classification (spec section 19.1). The launch flow itself (resolve project, create session identity, calculate effective policy, create cgroup/scope, configure workspace/network/secret broker/tool gateway, launch, display authority summary) is runtime behavior defined by spec section 27, not configuration.",
+      "type": "object",
+      "properties": {
+        "method": {
+          "title": "Launch method",
+          "description": "Launch mechanism. Spec section 27 defines exactly one: 'managed' — launch through the managed Punar runtime via punar-env. Additional methods would be added additively.",
+          "type": "string",
+          "enum": ["managed"]
+        },
+        "command": {
+          "title": "Launch command",
+          "description": "The punar-env invocation that starts a managed session for this agent, e.g. 'punar-env agent claude' (spec section 27).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["punar-env agent claude"]
+        }
+      },
+      "required": ["method", "command"],
+      "additionalProperties": false
+    },
+    "adapter_config": {
+      "title": "Adapter-specific configuration",
+      "description": "Free-form configuration consumed by the gateway adapter named in 'adapter'. Deliberately extensible (additionalProperties allowed) because adapters are modular and each defines its own settings (spec section 26); adapter authors should validate this object themselves.",
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "required": ["name", "adapter"],
+  "additionalProperties": false
+}

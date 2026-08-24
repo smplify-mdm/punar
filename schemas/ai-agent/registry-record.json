@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/ai-agent/registry-record.json",
+  "title": "AI Agent Registry record",
+  "description": "One live AI agent session as tracked by the native local AI Agent Registry (spec section 19). Field set is exactly the spec section 19.2 example record. This is a machine-emitted JSON runtime record: snake_case field names, strict additionalProperties. Spec placeholders: '...' in the 19.2 example stands for an RFC 3339 timestamp; 'x.y.z' stands for an agent version string.",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "title": "Agent session id",
+      "description": "Unique identifier of this agent session, 'agt_' prefix (spec sections 19.2, 22). Also used for process attribution, e.g. cgroup path punar/agents/atlas/claude/agt_8927 (spec section 22).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/agent_session_id"
+    },
+    "agent": {
+      "title": "Agent name",
+      "description": "Name of the AI agent product running in this session, e.g. 'claude-code' (spec section 19.2). Lowercase kebab/dotted name; matches the 'name' of an agent-definition.json document for managed and observed agents.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+      "examples": ["claude-code", "codex"]
+    },
+    "version": {
+      "title": "Agent version",
+      "description": "Version string of the agent binary for this session (spec section 19.2 shows the placeholder 'x.y.z'). Free-form: no semver pattern is asserted because agent products version themselves differently.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["x.y.z", "1.4.2"]
+    },
+    "process_id": {
+      "title": "Process id",
+      "description": "OS process id of the agent session's root process (spec section 19.2, example 18422). Child processes (bash, git, node, cargo) remain attributed to this session via cgroup/lineage where possible (spec section 22).",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [18422]
+    },
+    "user": {
+      "title": "Launching user",
+      "description": "Identity of the human who started the agent (spec sections 19, 19.2). Spec example is an email address ('alice@acme.com'); format is not asserted because local-account identities may not be emails.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["alice@acme.com"]
+    },
+    "project": {
+      "title": "Project",
+      "description": "Project the agent session belongs to (spec sections 14, 19.2), e.g. 'atlas'. Drives project-aware policy, networking and workspace access (spec sections 27, 36).",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["atlas"]
+    },
+    "environment": {
+      "title": "Environment",
+      "description": "Developer environment instance the session runs in (spec sections 17, 19.2), e.g. 'atlas-dev-42'.",
+      "type": "string",
+      "minLength": 1,
+      "examples": ["atlas-dev-42"]
+    },
+    "status": {
+      "title": "Session status",
+      "description": "Lifecycle status of the session. Spec section 19.2 shows only 'active'; additional lifecycle values (e.g. for ended sessions) will be added additively to this enum when the spec defines them — widening an enum is a compatible change under the versioning rules.",
+      "type": "string",
+      "enum": ["active"]
+    },
+    "classification": {
+      "title": "Registry classification",
+      "description": "How the registry classifies this agent (spec section 19.1): 'managed' (known, approved, launched through the managed Punar runtime), 'observed' (known AI agent running outside the managed runtime), 'unknown' (potential agentic/AI activity with uncertain identity — covers the spec's UNKNOWN / SUSPECTED class).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/agent_classification"
+    },
+    "started_at": {
+      "title": "Session start time",
+      "description": "RFC 3339 timestamp when the session started (spec section 19.2, shown there as the placeholder '...').",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "session_id",
+    "agent",
+    "version",
+    "process_id",
+    "user",
+    "project",
+    "environment",
+    "status",
+    "classification",
+    "started_at"
+  ],
+  "additionalProperties": false
+}

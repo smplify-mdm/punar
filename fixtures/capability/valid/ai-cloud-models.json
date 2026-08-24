@@ -1,0 +1,19 @@
+{
+  "capability": "ai.cloud_models",
+  "supported": true,
+  "current_state": "deny",
+  "desired_state": "deny",
+  "mutable": true,
+  "requires_reboot": false,
+  "risk": "medium",
+  "managed_by": "smplify",
+  "verification": "punar-agentd",
+  "state_schema": {
+    "type": "string",
+    "enum": ["allow", "deny"]
+  },
+  "allowed_desired_states": ["allow", "deny"],
+  "privilege_required": "admin",
+  "approval_requirement": "approval_required",
+  "audit_category": "ai_policy"
+}

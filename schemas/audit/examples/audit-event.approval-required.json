@@ -1,0 +1,14 @@
+{
+  "event_id": "evt_456",
+  "timestamp": "2026-08-24T12:05:00Z",
+  "device_id": "dev_123",
+  "user_id": "alice@acme.com",
+  "agent_session_id": "agt_123",
+  "project_id": "atlas",
+  "source": "ai_agent",
+  "action": "system.install_package",
+  "resource": "libvirt",
+  "decision": "approval_required",
+  "policy_ids": ["eng-ai-v3"],
+  "result": "pending_approval"
+}

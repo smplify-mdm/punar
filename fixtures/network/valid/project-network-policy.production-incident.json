@@ -1,0 +1,13 @@
+{
+  "project_id": "production_incident",
+  "display_name": "PRODUCTION INCIDENT",
+  "rules": [
+    { "zone": "internet", "decision": "allow" },
+    {
+      "zone": "corp_prod",
+      "decision": "approval_required",
+      "expires_at": "2026-08-25T02:00:00Z"
+    },
+    { "zone": "privileged_db", "decision": "approval_required" }
+  ]
+}
