@@ -196,7 +196,35 @@ page 148504578) defines conventions beyond the visuals. Punar adopts them:
   egg (Field Note 001's rim spells `KEEP NATIVE` in Morse, start at twelve,
   clockwise). Optional flourish — never at the cost of legibility.
 
-## 8. Non-negotiables
+## 8. Unmanaged-first (adopted 2026-08-24)
+
+Punar is an operating system first. Most devices will never enroll in an
+organization, and the design language treats the **personal, unmanaged
+device as the default state of every surface**:
+
+- Organization chrome — compliance pills, `MANAGED` tags, org names in
+  mastheads, policy citations — appears **only when enrolled**. Its absence
+  is calm paper, never an "unenrolled" warning or an upsell.
+- Personal mode still has policy: the user's own defaults (§20). The AI
+  panel cites `POLICY · PERSONAL DEFAULTS`, not nothing — authority always
+  has a named source, whoever set it.
+- Privacy statements strengthen, never weaken, in personal mode: the ledger
+  card reads *"no organization is enrolled · nothing leaves this machine ·
+  enrolling later never applies retroactively."*
+- Security features are user benefits before they are enterprise features:
+  shadow-AI detection, the access ledger, approval gates, and drift
+  visibility all render fully on personal devices — they protect the
+  user first, the organization second.
+- Enrollment is **additive chrome on the same surface** — it must never
+  restructure a screen, only annotate it. (Demonstrated live by the
+  Personal/Managed toggle in the AI panel mockup.)
+- The plates in this document mostly depict the managed hero-demo device
+  (Acme/Atlas); read them minus the org rows for the personal default.
+
+This is spec §3.2, §11, and Test A as a drawing rule: Punar must be worth
+choosing with Smplify nowhere in sight — and first-class when it is.
+
+## 9. Non-negotiables
 
 1. UI code consumes tokens (`punar-tokens.*`) — never hardcoded values.
 2. No color without meaning; no decoration that doesn't explain.
@@ -206,7 +234,7 @@ page 148504578) defines conventions beyond the visuals. Punar adopts them:
 5. Contrast: text meets WCAG AA on its surface (ink-3 on paper = 4.6:1 ✓;
    panel-ink-3 reserved for ≥14px labels).
 
-## 9. Reference mockups
+## 10. Reference mockups
 
 - [`mockups/boot-greeter.html`](mockups/boot-greeter.html) — boot splash
   (panel dial, arc from twelve), LUKS unlock, and greeter (first paper
@@ -216,3 +244,13 @@ page 148504578) defines conventions beyond the visuals. Punar adopts them:
   center (SUPER+Space; intent resolves to visible typed capabilities; inline
   policy explain) and the approval overlay (identity chain, live expiry
   countdown, contract block, action-color pair).
+- [`mockups/system-control.html`](mockups/system-control.html) — System
+  Control (SUPER+S; §63 taxonomy rail, managed controls that explain
+  themselves per §73/§40, simulated/undrawn states labeled honestly).
+- [`mockups/ai-panel.html`](mockups/ai-panel.html) — AI panel (SUPER+A; §19
+  registry, §20 authority vs §21 ledger on one screen, §25 unknown-AI view,
+  Personal/Managed toggle demonstrating enrollment-as-additive-chrome).
+- [`mockups/privacy-panel.html`](mockups/privacy-panel.html) — Privacy panel
+  (§64 who-talks list, §37 connection anatomy, dual-hop relay drawn dashed
+  while simulated, punard's own zero-connection row as the personal-mode
+  proof of silence).

@@ -1,0 +1,19 @@
+# Canonical idle-RAM measurement + CI artifact export (milestone-1.md §8–§9,
+# method fixed by PERFORMANCE_BUDGETS.md §2.1–2.2). Started by
+# punar-desktop-marker.service after PUNAR_DESKTOP_OK; emits
+# PUNAR_RAM_MEAN_MB / PUNAR_RAM_MAX_MB to the serial console and streams the
+# /run/punar artifacts out over the punar.export virtio-serial channel.
+#
+# Not enabled; started explicitly by the marker service.
+
+[Unit]
+Description=Punar idle-RAM measurement and artifact export
+
+[Service]
+Type=oneshot
+# 10 min stabilize + 5 min sampling + export, with generous headroom for
+# TCG-emulated CI runs.
+TimeoutStartSec=45min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/idle-ram.sh

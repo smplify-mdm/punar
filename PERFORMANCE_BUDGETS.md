@@ -1,8 +1,11 @@
 # Performance Budgets
 
 Status: **budgets defined, nothing measured yet.** Every number in the baseline
-table below is `not yet measured`. The CI enforcement harness described in
-section 5 is **PLANNED and not implemented**.
+table below is `not yet measured`. The idle-RAM slice of the section 5
+enforcement harness is now implemented (`tests/performance/` plus the CI
+`desktop-test` job); the rest of section 5 remains planned. The first green
+`desktop-test` run produces the first real numbers, published as the
+`punar-desktop-ram-report` CI artifact.
 
 Authoritative source: [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md),
 sections 6 (Performance Budgets) and 7 (Adaptive Hardware Profiles). Per spec
@@ -241,9 +244,19 @@ Budget implications:
 
 ## 4. Baseline results
 
-Every value below is **not yet measured**. No VM image exists yet as of
-2026-08-24 (Milestone 0 in progress). This table is filled in only from runs
-of the canonical methodology in section 2, with environment labels.
+Every value below is **not yet measured**. As of 2026-08-24 the minimal
+`punar-dev` image builds and boots in CI (Milestone 0 accepted), but no
+graphical `punar-desktop` image has ever run, so no idle measurement exists.
+The measurement mechanism is now in place: the CI `desktop-test` job boots
+`punar-desktop` on the minimum-target VM shape (8 GB / 4 vCPU), runs the
+in-guest sampler per section 2.2, and uploads the result as the
+`punar-desktop-ram-report` CI artifact (`ram-report.txt` with mean/max and
+environment label, plus raw samples; gated by
+`tests/performance/check-budgets.sh`). The idle-RAM rows below are filled
+from the first green `desktop-test` run's artifact — never by hand — with
+environment labels as defined in 2.2 (`(VM)` under KVM; `(VM, emulated)`
+under TCG, indicative only). This table is filled in only from runs of the
+canonical methodology in section 2, with environment labels.
 
 | Metric | Method | Budget | Measured value | Environment | Image / date |
 |---|---|---|---|---|---|
@@ -260,11 +273,15 @@ Waivers granted: none.
 
 ---
 
-## 5. CI enforcement plan — PLANNED, NOT IMPLEMENTED
+## 5. CI enforcement plan — idle-RAM slice implemented, rest PLANNED
 
-Nothing in this section exists yet. `tests/performance/` currently contains
-only a `.gitkeep`. This is the design the harness will be built to; it will
-be revised when Milestone 0's substrate ADR and VM build pipeline land.
+The whole-system idle-RAM gate from this design is implemented:
+`tests/performance/check-budgets.sh` (see `tests/performance/README.md`),
+fed by `tools/boot-test.sh --mode desktop` and wired as the CI
+`desktop-test` job — runtime-unverified until its first green run. The
+per-service RAM/CPU/disk checks, boot-regression gating, JSON results file,
+and tracked history below remain **planned, not implemented**. This is the
+design the remaining pieces will be built to.
 
 ### 5.1 Harness shape
 
@@ -329,3 +346,4 @@ A `tests/performance/` harness that:
 | Date | Change |
 |---|---|
 | 2026-08-24 | Initial version: budgets transcribed from SPEC_v0.2 sections 6–7; methodology defined; all baselines `not yet measured`; CI harness documented as planned. |
+| 2026-08-24 | Status wording only, no numbers: M0 CI green (punar-dev builds and boots); section 4 now names the `desktop-test` job's `punar-desktop-ram-report` artifact as the sole source that will fill the baseline table; section 5 marked partially implemented (idle-RAM slice in `tests/performance/`). Everything remains `not yet measured`. |

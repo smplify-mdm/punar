@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Build the punar-dev VM image (qcow2) via the containerized mkosi toolchain.
+# Build the Punar VM images (qcow2) via the containerized mkosi toolchain.
+#
+# Images (milestone-1.md §3):
+#   punar-dev      — minimal M0 image (PUNAR_BOOT_OK boot gate), unchanged.
+#   punar-desktop  — M1 graphical workstation (mkosi profile "desktop").
+#
+# Usage:
+#   tools/build-image.sh [dev|desktop|all]     (default: all)
+# or set PUNAR_IMAGES=dev|desktop|all. Set PUNAR_BUILD_MODE=summary for the
+# cheap config-validation path (staging + `mkosi summary`, no image build).
 #
 # Canonical execution environment: x86_64 CI runners (.github/workflows/ci.yml,
 # job "image"). On the maintainer's arm64 Mac this same path runs under Docker
@@ -9,13 +18,19 @@
 #
 # Requirements: docker with a running daemon. Network access to
 # archive.archlinux.org. The build container runs --privileged (mkosi
-# sandboxing + pacman inside a container need it).
+# sandboxing + pacman inside a container need it). The whole repo root is
+# mounted into the container: the desktop profile stages Hyprland/foot/font
+# configs from os/modules/desktop and the shell from shell/ at build time.
 #
-# Output: os/images/out/punar-dev-x86_64.qcow2 (+ SHA256SUMS, build-info.txt)
+# Output: os/images/out/punar-dev-x86_64.qcow2 and/or
+#         os/images/out/punar-desktop-x86_64.qcow2 (+ SHA256SUMS, build-info.txt)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGES_DIR="${REPO_ROOT}/os/images"
+
+PUNAR_IMAGES="${1:-${PUNAR_IMAGES:-all}}"
+PUNAR_BUILD_MODE="${PUNAR_BUILD_MODE:-build}"
 
 # shellcheck source=/dev/null
 . "${IMAGES_DIR}/snapshot.env"
@@ -46,14 +61,18 @@ docker build \
     --file "${IMAGES_DIR}/builder/Containerfile" \
     "${IMAGES_DIR}/builder"
 
-echo "==> Building punar-dev image (mkosi)"
+echo "==> Running containerized mkosi (images: ${PUNAR_IMAGES}, mode: ${PUNAR_BUILD_MODE})"
 docker run --rm --privileged \
     --platform linux/amd64 \
-    --volume "${IMAGES_DIR}:/work" \
-    --workdir /work \
+    --volume "${REPO_ROOT}:/work" \
+    --workdir /work/os/images \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
+    --env "PUNAR_IMAGES=${PUNAR_IMAGES}" \
+    --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
     "${BUILDER_TAG}" \
-    /work/scripts/container-build.sh
+    /work/os/images/scripts/container-build.sh
 
-echo "==> Done. Output in ${IMAGES_DIR}/out:"
-ls -lh "${IMAGES_DIR}/out"
+if [ "${PUNAR_BUILD_MODE}" = "build" ]; then
+    echo "==> Done. Output in ${IMAGES_DIR}/out:"
+    ls -lh "${IMAGES_DIR}/out"
+fi

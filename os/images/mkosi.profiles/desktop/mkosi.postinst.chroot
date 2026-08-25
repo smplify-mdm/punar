@@ -1,0 +1,27 @@
+#!/bin/sh
+# punar-desktop post-install (runs inside the image chroot; .chroot suffix).
+# Dev-image session plumbing per milestone-1.md §4 — everything here is a
+# development-image convenience, documented, never a production default.
+set -eu
+
+# Dev user for the greetd autologin session. Groups: wheel (admin), video +
+# input (direct DRM/input access safety net; the session normally gets these
+# via logind), uucp (serial ports, dev debugging). Password matches the M0
+# root convention (documented dev convenience, not a secret).
+useradd -m -G wheel,video,input,uucp -s /bin/bash punar
+echo 'punar:punar' | chpasswd
+
+# Rootless podman: subordinate uid/gid ranges (spec §76 M1 Podman
+# deliverable; newuidmap/newgidmap ship in base's shadow).
+echo 'punar:100000:65536' > /etc/subuid
+echo 'punar:100000:65536' > /etc/subgid
+
+# Session chain: greetd (autologin -> /usr/lib/punar/session.sh -> Hyprland).
+# greetd's packaged unit conflicts getty@tty1; the serial getty autologin
+# (ttyS0, from the base profile's Autologin=yes) remains as dev/CI fallback.
+systemctl enable greetd.service
+systemctl set-default graphical.target
+
+# Pre-warm the fontconfig cache for the vendored fonts (first session start
+# should not pay the scan). Non-fatal: fontconfig also scans at runtime.
+fc-cache --system-only -f || echo "warning: fc-cache failed; runtime scan will cover it" >&2

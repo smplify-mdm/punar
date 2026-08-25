@@ -1,0 +1,14 @@
+# Watches for the desktop-ready flag written by the user session
+# (desktop-ready.sh via Hyprland exec-once) and fires the root marker
+# service — the user session never writes to the serial console itself.
+# Mirrors the proven punar-boot-marker pattern (milestone-1.md §7).
+#
+# Enabled statically via the multi-user.target.wants symlink next to this
+# file (mkosi.extra/ is copied verbatim into the image).
+
+[Unit]
+Description=Punar desktop ready watch
+
+[Path]
+PathExists=/run/punar/desktop-ready
+Unit=punar-desktop-marker.service

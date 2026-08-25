@@ -1,0 +1,337 @@
+<title>Punar AI Panel</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one full-surface panel. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .scbody { flex: 1; display: flex; min-height: 0; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+  /* agent rail */
+  .rail { width: 216px; flex: none; border-right: 1px solid #E6E4DE; padding: 14px 14px 8px 0; overflow-y: auto; }
+  .rsec { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 4px 0 6px; }
+  .agent { padding: 8px 10px; border-left: 2px solid transparent; border-radius: 0 6px 6px 0; cursor: pointer; margin-bottom: 2px; }
+  .agent:hover { background: #F4F2EC; }
+  .agent.sel { background: #F4F2EC; border-left-color: #000; }
+  .agent .nm { font-size: 13.5px; font-weight: 500; color: #000; display: flex; align-items: center; gap: 8px; }
+  .agent .sub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #666; margin-top: 3px; }
+  .agent.bad .nm { color: #A31F2C; }
+  .agent.bad .sub { color: #A31F2C; }
+
+  /* detail pane */
+  .pane { flex: 1; min-width: 0; padding: 16px 4px 8px 22px; overflow-y: auto; }
+  .ptitle { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .ptitle .t { font-size: 19px; font-weight: 500; color: #000; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .pill.warnp { color: #8A5A00; border-color: #8A5A00; background: transparent; }
+  .pill.badp { color: #A31F2C; border-color: #A31F2C; background: transparent; }
+  .psub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; margin: 4px 0 6px; }
+  .sect { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 18px 0 2px; display: flex; justify-content: space-between; align-items: baseline; }
+  .sect::after { display: none; }
+  .sect .tagline { font-weight: 500; font-size: 8px; letter-spacing: 0.1em; color: #8C8880; text-transform: uppercase; }
+  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 16px; padding: 10px 0 4px; border-top: 1px solid #E6E4DE; }
+  .kv .k { font-size: 13px; font-weight: 500; color: #000; }
+  .kv .v { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.11em; text-transform: uppercase; text-align: right; }
+  .ok { color: #2E6B21; } .warn { color: #8A5A00; } .bad { color: #A31F2C; } .mut { color: #666; }
+  .evrow { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid #E6E4DE;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .privacy { border: 1px solid #E6E4DE; border-radius: 10px; background: #F4F2EC; padding: 12px 15px; margin-top: 18px;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2; }
+  .privacy b { color: #000; font-weight: 600; }
+  .acts { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 6px 12px; background: transparent; cursor: pointer; }
+  .ghost.red { color: #A31F2C; border-color: #A31F2C; }
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · AI on this device</strong></div>
+        <div class="meta">Agent registry, authority, and access ledger · Super + A</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-005</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>What it may touch. What it did touch. One screen.</h1>
+    <p class="deck">The AI panel is the registry (§19), the authority model (§20), and the access ledger (§21) in one keyboard-first surface — and it shows you everything your administrator could ever query, because you never see less than they do.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Device mode">
+      <button class="statebtn" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="demohint">Punar is unmanaged-first: enrollment only adds chrome, never redraws the surface · ↑↓ switch agents · credential expiry is live</div>
+    <div class="frame" id="frame" tabindex="0" aria-label="AI panel demo">
+      <div class="sc">
+        <div class="mast">
+          <div class="hm"><strong>Punar</strong> · AI on this device<br><span id="mastline">ThinkPad X1 · Personal</span></div>
+          <div class="hm" style="text-align:right"><strong id="mastcount">2 sessions · 1 unknown</strong><br>08 · 2026</div>
+        </div>
+        <hr class="scrule">
+        <div class="scbody">
+          <nav class="rail" id="rail" aria-label="Agents">
+            <div class="rsec">Sessions</div>
+          </nav>
+          <div class="pane" id="pane"></div>
+        </div>
+        <div class="scfoot">
+          <span>↑↓ Agent · ↵ Inspect · Esc Close</span>
+          <span>Ledger is local · admin queries are audited</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Registry register</h2>
+    <p class="assertion">Three classifications, three visual voices: managed is calm, observed is quiet, unknown is red.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Agent rail</span>
+      <p>Every session from the registry (§19): name, project, session id, classification. Managed agents get the green presence dot; unknown gets the bad-red row — the only red in the panel unless something is wrong.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Session line</span>
+      <p>The full attribution chain (§22/§47) as the detail masthead: <span class="specref">AGT_123 · ALICE@ACME.COM · ATLAS-DEV-42 · STARTED 13:44</span> — same grammar as the approval overlay's identity line.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Authority register — “may”</h2>
+    <p class="assertion">Authority is the promise: every row is a policy decision wearing its color.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Decision grid</span>
+      <p>The §25 layout verbatim — filesystem, network, credentials, tools — with §20 decision words as tracked mono: <span class="specref">ALLOWED</span> green, <span class="specref">DENIED</span> red, <span class="specref">REQUEST</span> amber. Reading down the right edge tells the whole story.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Live credential</span>
+      <p>Issued credentials show a live countdown (<span class="specref">EXPIRES 41:32</span>), amber in the final five minutes — short-lived by design (§29), and the panel makes the clock visible.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Policy line</span>
+      <p>Authority cites its source: <span class="specref">POLICY · ENG-AI-V3</span>. One keystroke from the §40 explain view in System Control.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Ledger register — “did”</h2>
+    <p class="assertion">The ledger answers a different question than authority — and the panel never lets you confuse them.</p>
+    <div class="reg"><span class="no">01</span><span class="what">May / did split</span>
+      <p>Authority and Ledger are stacked as separate ruled sections with their question in the section header — <span class="specref">AUTHORITY · WHAT IT MAY ACCESS</span> vs <span class="specref">LEDGER · WHAT IT ACCESSED</span>. This is §21's core distinction, made structural.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Resource summaries</span>
+      <p>Level-3 aggregation only (§21.2): repositories, domains, credential classes, process classes with counts. No file paths, no prompts, no source code — the privacy rules are visible in what the UI *cannot* show.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Security events</span>
+      <p>Level-4 events as red rows: <span class="specref">DENIED · AWS_PROD CREDENTIAL · 14:02 · EVT_502</span>. Denials are information, not noise.</p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Privacy card</span>
+      <p>The §24.2 principle stated on the surface itself: the ledger stays on this device; admin queries are scoped, audited, and visible here. <span class="specref">LAST ADMIN QUERY · NONE</span> is a feature, not an absence.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Unknown-AI register</h2>
+    <p class="assertion">Detection is honest: “suspected,” never “certain” — visibility first, then policy.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Unknown view</span>
+      <p>The §25 unknown-agent card: executable path, classification <span class="specref">UNMANAGED · SUSPECTED AI</span>, observed access (Atlas repository, api.foo.ai). Red voice throughout; no green anywhere on this screen.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Actions</span>
+      <p><span class="specref">INSPECT</span>, <span class="specref">BLOCK NETWORK</span> (a typed capability, approval-gated by policy), and <span class="specref">REGISTER AS MANAGED</span> — the constructive path out of the shadows (§23).</p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — punar-agentd builds this in Milestones 7–8; the schemas already exist.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Data</span>
+      <p>Rows come from the shipped contract layer: <span class="specref">schemas/ai-agent/registry-record.json</span>, <span class="specref">ledger-summary.json</span>, and the fixtures (<span class="specref">agt_123</span>, <span class="specref">foo-agent</span>) — this page renders those exact identifiers.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Shell</span>
+      <p>Quickshell full surface like System Control; the §63 AI section links here. CLI parity: <span class="specref">punarctl agents inspect agt_123</span> prints this screen's data in the terminal grammar.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/ai-panel.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const AGENTS = [
+    { id: 'claude', nm: 'Claude Code', dot: '#2E6B21', sub: 'Atlas · agt_123 · Managed · Active' },
+    { id: 'codex', nm: 'Codex', dot: '#E6E4DE', sub: 'Atlas · agt_124 · Managed · Idle' },
+    { id: 'foo', nm: 'foo-agent', dot: '#A31F2C', sub: 'Unknown · Suspected AI', bad: true },
+  ];
+
+  let MODE = 'personal';
+  const POLICY = () => MODE === 'managed' ? 'policy eng-ai-v3' : 'policy · personal defaults';
+  const PRIVACY = () => MODE === 'managed'
+    ? `<div class="privacy">This ledger stays on this device · <b>Admin queries are scoped, audited, and visible here</b><br>Last admin query · <b>None</b> · You never see less than your administrator</div>`
+    : `<div class="privacy">This ledger stays on this device · <b>No organization is enrolled</b><br>Nothing leaves this machine · <b>Enrolling later never applies retroactively</b></div>`;
+  const claudeView = (cred) => `
+    <div class="ptitle"><span class="t">Claude Code</span><span class="pill">Managed</span></div>
+    <div class="psub">agt_123 · alice@acme.com · atlas-dev-42 · started 13:44</div>
+
+    <div class="sect"><span>Authority</span><span class="tagline">what it may access · ${POLICY()}</span></div>
+    <div class="kv">
+      <span class="k">Workspace</span><span class="v ok">Read / Write</span>
+      <span class="k">Home</span><span class="v mut">Read</span>
+      <span class="k">SSH keys</span><span class="v bad">Denied</span>
+      <span class="k">AWS config</span><span class="v bad">Denied by default</span>
+    </div>
+    <div class="kv">
+      <span class="k">Internet</span><span class="v ok">Allowed</span>
+      <span class="k">Acme Dev</span><span class="v ok">Allowed</span>
+      <span class="k">Production</span><span class="v bad">Blocked</span>
+    </div>
+    <div class="kv">
+      <span class="k">GitHub</span><span class="v ok">Allowed</span>
+      <span class="k">AWS Dev</span><span class="v ${cred.low ? 'warn' : 'ok'}" id="credv">Expires ${cred.txt}</span>
+      <span class="k">AWS Production</span><span class="v bad">Denied</span>
+    </div>
+
+    <div class="sect"><span>Ledger</span><span class="tagline">what it accessed · local only · level 3</span></div>
+    <div class="kv">
+      <span class="k">Repositories</span><span class="v mut">atlas</span>
+      <span class="k">Domains</span><span class="v mut">api.anthropic.com · github.com</span>
+      <span class="k">Credential classes</span><span class="v mut">aws_dev × 1</span>
+      <span class="k">Processes</span><span class="v mut">git × 12 · cargo × 4 · bash × 9</span>
+    </div>
+    <div class="evrow"><span class="dot" style="background:#A31F2C"></span><span class="bad">Denied · aws_prod credential · 14:02 · evt_502</span></div>
+
+    ${PRIVACY()}
+    <div class="acts"><button class="ghost">Open project</button><button class="ghost red">End session</button></div>`;
+
+  const codexView = () => `
+    <div class="ptitle"><span class="t">Codex</span><span class="pill">Managed</span></div>
+    <div class="psub">agt_124 · alice@acme.com · atlas-dev-42 · idle 22m</div>
+    <div class="sect"><span>Authority</span><span class="tagline">what it may access · ${POLICY()}</span></div>
+    <div class="kv">
+      <span class="k">Workspace</span><span class="v ok">Read / Write</span>
+      <span class="k">Production</span><span class="v bad">Blocked</span>
+      <span class="k">Credentials</span><span class="v mut">None issued</span>
+    </div>
+    <div class="sect"><span>Ledger</span><span class="tagline">what it accessed · local only</span></div>
+    <div class="kv">
+      <span class="k">Repositories</span><span class="v mut">atlas</span>
+      <span class="k">Security events</span><span class="v mut">None</span>
+    </div>
+    <div class="acts"><button class="ghost red">End session</button></div>`;
+
+  const fooView = `
+    <div class="ptitle"><span class="t" style="color:#A31F2C">Unknown AI activity</span><span class="pill badp">Unmanaged · Suspected</span></div>
+    <div class="psub" style="color:#A31F2C">first observed 14:29 · not launched through the managed runtime</div>
+    <div class="sect"><span>Identity</span><span class="tagline">observed · best effort (§23)</span></div>
+    <div class="kv">
+      <span class="k">Executable</span><span class="v mut">~/Downloads/foo-agent</span>
+      <span class="k">Classification</span><span class="v bad">Unknown · Suspected AI</span>
+      <span class="k">Launched by</span><span class="v mut">alice · shell</span>
+    </div>
+    <div class="sect"><span>Observed access</span><span class="tagline">why this is flagged</span></div>
+    <div class="kv">
+      <span class="k">Atlas repository</span><span class="v bad">Read</span>
+      <span class="k">api.foo.ai</span><span class="v bad">43 connections</span>
+      <span class="k">Credentials</span><span class="v ok">None reached</span>
+    </div>
+    <div class="privacy">Detection is heuristic — <b>suspected, not certain</b> · Registering it makes it governable</div>
+    <div class="acts">
+      <button class="ghost red">Inspect</button>
+      <button class="ghost red">Block network</button>
+      <button class="ghost">Register as managed</button>
+    </div>`;
+
+  const rail = document.getElementById('rail');
+  const pane = document.getElementById('pane');
+  const frame = document.getElementById('frame');
+  const els = [];
+  let idx = 0, credSecs = 41 * 60 + 32;
+
+  AGENTS.forEach((a, i) => {
+    const el = document.createElement('div');
+    el.className = 'agent' + (a.bad ? ' bad' : '');
+    el.innerHTML = '<div class="nm"><span class="dot" style="background:' + a.dot + '"></span>' + a.nm + '</div><div class="sub">' + a.sub + '</div>';
+    el.addEventListener('click', () => select(i));
+    rail.appendChild(el); els.push(el);
+  });
+
+  function credState() {
+    const m = Math.floor(credSecs / 60), s = credSecs % 60;
+    return { txt: String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0'), low: credSecs < 300 };
+  }
+  function select(i) {
+    idx = i;
+    els.forEach((el, j) => el.classList.toggle('sel', j === i));
+    pane.innerHTML = i === 0 ? claudeView(credState()) : i === 1 ? codexView() : fooView;
+  }
+  select(0);
+
+  setInterval(() => {
+    credSecs = Math.max(0, credSecs - 1);
+    const v = document.getElementById('credv');
+    if (v) { const c = credState(); v.textContent = 'Expires ' + c.txt; v.className = 'v ' + (c.low ? 'warn' : 'ok'); }
+  }, 1000);
+
+  frame.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { select(Math.min(els.length - 1, idx + 1)); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { select(Math.max(0, idx - 1)); e.preventDefault(); }
+  });
+
+  [...document.querySelectorAll('.statebtn[data-mode]')].forEach(b => b.addEventListener('click', () => {
+    MODE = b.dataset.mode;
+    document.querySelectorAll('.statebtn[data-mode]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+    document.getElementById('mastline').textContent = MODE === 'managed'
+      ? 'ThinkPad X1 · dev_123 · Acme Engineering' : 'ThinkPad X1 · Personal';
+    document.getElementById('mastcount').textContent = MODE === 'managed'
+      ? '2 managed · 1 unknown' : '2 sessions · 1 unknown';
+    select(idx);
+  }));
+})();
+</script>

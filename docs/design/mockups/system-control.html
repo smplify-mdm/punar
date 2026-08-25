@@ -1,0 +1,327 @@
+<title>Punar System Control</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one full-surface panel. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 28px 0 14px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .schead .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .schead .hm strong { color: #000; font-weight: 600; }
+  .cpill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 4px 9px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #333; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .scbody { flex: 1; display: flex; min-height: 0; }
+
+  /* rail */
+  .rail { width: 208px; flex: none; border-right: 1px solid #E6E4DE; padding: 14px 14px 8px 0; overflow-y: auto; }
+  .search { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #8C8880; margin-bottom: 12px; padding-bottom: 5px; }
+  .search input { border: 0; background: transparent; width: 100%; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 10.5px; letter-spacing: 0.08em; color: #000; text-transform: uppercase; }
+  .search input::placeholder { color: #8C8880; }
+  .search input:focus { outline: none; }
+  .search .slash { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; border: 1px solid #E6E4DE;
+    border-radius: 4px; padding: 0 5px; color: #666; }
+  .rsec { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 12px 0 4px; }
+  .ritem { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px 5px 10px;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0; cursor: pointer;
+    font-size: 13.5px; font-weight: 500; color: #333; }
+  .ritem:hover { background: #F4F2EC; }
+  .ritem.sel { background: #F4F2EC; border-left-color: #000; color: #000; }
+  .ritem .rdot { width: 5px; height: 5px; border-radius: 50%; }
+  .ritem.hid { display: none; }
+
+  /* detail pane */
+  .pane { flex: 1; min-width: 0; padding: 16px 4px 8px 22px; overflow-y: auto; }
+  .ptitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+  .ptitle .t { font-size: 19px; font-weight: 500; color: #000; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .psub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; margin-bottom: 14px; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 7px 16px; padding: 12px 0; border-top: 1px solid #E6E4DE; }
+  .kv .k { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .kv .v { font-size: 13.5px; color: #000; font-weight: 500; }
+  .kv .v.mono { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .explain { border: 1px solid #E6E4DE; border-radius: 10px; background: #F4F2EC; padding: 13px 15px; margin: 14px 0;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2.05; }
+  .explain b { color: #000; font-weight: 600; }
+  .rowline { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid #E6E4DE; }
+  .rowline:last-child { border-bottom: 1px solid #E6E4DE; }
+  .rowline .nm { font-size: 13.5px; font-weight: 500; color: #000; }
+  .rowline .mt { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; text-align: right; }
+  .toggle { width: 34px; height: 18px; border: 1px solid #000; border-radius: 9px; position: relative; flex: none; }
+  .toggle .knob { position: absolute; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #000; transition: all 300ms cubic-bezier(0.2,0,0,1); }
+  .toggle.on .knob { right: 2px; } .toggle.off .knob { left: 2px; background: #8C8880; }
+  .toggle.off { border-color: #8C8880; }
+  .lockrow { display: flex; align-items: center; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
+  .xtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #8A5A00; border: 1px solid #8A5A00;
+    border-radius: 6px; padding: 4px 9px; cursor: pointer; background: transparent; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 5px 11px; background: transparent; cursor: pointer; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .undrawn { border: 1px dashed #8C8880; border-radius: 10px; padding: 40px 20px; text-align: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin-top: 20px; }
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .toggle .knob { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · System Control</strong></div>
+        <div class="meta">Full-surface settings panel · Super + S</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-004</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>A managed setting explains itself. It never grays out.</h1>
+    <p class="deck">System Control is one keyboard-first surface for the whole machine — system, security, AI, developer, privacy, organization. When policy owns a control, the panel says who, why, and what you can do about it.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="demohint">↑↓ navigate rail · / search · click or ↵ opens · four views drawn, the rest honestly dashed</div>
+    <div class="frame" id="frame" tabindex="0" aria-label="System Control demo">
+      <div class="sc">
+        <div class="mast schead">
+          <div class="hm"><strong>Punar</strong> · System Control<br>ThinkPad X1 · dev_123 · Acme Engineering</div>
+          <div class="hm" style="text-align:right"><span class="cpill"><span class="dot" style="background:#2E6B21"></span>Compliant</span><br>08 · 2026</div>
+        </div>
+        <hr class="scrule">
+        <div class="scbody">
+          <nav class="rail" id="rail" aria-label="Sections">
+            <div class="search"><input id="q" placeholder="Search" aria-label="Search settings"><span class="slash">/</span></div>
+          </nav>
+          <div class="pane" id="pane"></div>
+        </div>
+        <div class="scfoot">
+          <span>↑↓ Navigate · ↵ Open · Esc Back · / Search</span>
+          <span>Same capabilities as punarctl</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Structure register</h2>
+    <p class="assertion">Six sections, one rail, one grammar — and the CLI sees exactly the same capabilities.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Masthead</span>
+      <p>Device identity and org left, compliance and date right — the same masthead as the greeter and command center. Every first-party surface says where you are. <span class="specref">spec §63</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Rail</span>
+      <p>The §63 taxonomy verbatim: System, Security, AI, Developer, Privacy, Organization. Items are sans; section heads are tracked mono. Selection is the raise-fill + 2px ink rule, same as everywhere. Status dots appear only where there is status.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Search</span>
+      <p><span class="specref">/</span> filters the rail live — reach any setting in two keystrokes. The underline input is the greeter's passphrase field grammar reused.</p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Parity line</span>
+      <p>The footer states the architecture: this panel and <span class="specref">punarctl</span> call the same typed capability layer. Nothing here is a special path. <span class="specref">spec §10</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Managed-control register</h2>
+    <p class="assertion">The firewall view is the §73 anatomy: what, why, who, which policy, can you change it, what next.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Locked toggle</span>
+      <p>The switch renders on and live — with a <span class="specref">MANAGED</span> pill beside it, never disabled-gray. State stays legible; ownership is explicit.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Explain block</span>
+      <p>The <span class="specref">punarctl policy explain</span> output rendered as a card: effective value, source policy, override permission, compliance. Same data, same order, both surfaces. <span class="specref">spec §40</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Drift promise</span>
+      <p>The view states what happens if the setting is changed outside Punar: detection, remediation, audit. No surprises later. <span class="specref">spec §43</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Exception path</span>
+      <p>The amber <span class="specref">REQUEST EXCEPTION</span> tag is the approval_required decision wearing its color — it opens the approval flow from Plate D-003, not a settings hack.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Honesty register</h2>
+    <p class="assertion">Simulated is labeled. Undrawn is dashed. The panel cannot overclaim.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Simulated tag</span>
+      <p>Boot Integrity in the compliance view carries a dashed <span class="specref">SIMULATED</span> tag in VM builds — the §1.22 rule enforced at the pixel level, matching the plate stroke semantics.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Undrawn state</span>
+      <p>Items without a finished design open a dashed placeholder naming itself undrawn — the design system applies its own production-claim rule to itself.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Unknown AI row</span>
+      <p>The Agents view shows the shadow-AI fixture as a bad-red row with <span class="specref">INSPECT</span> — visibility before enforcement, matching the §25 panel it links to.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Implementation notes</h2>
+    <p class="assertion">Design mockup — System Control ships across Milestones 1–5; this page is the acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Shell</span>
+      <p>Quickshell full-surface window (not an overlay card), tokens from <span class="specref">shell/theme/punar-tokens.json</span>. M1 ships the frame + System section stubs; Security/Organization views go live with punard (M3–M5).</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Data</span>
+      <p>Every view reads the capability registry (<span class="specref">§41</span>) and policy engine (<span class="specref">§40</span>); the compliance table is the §52 states verbatim. Wi-Fi connect calls <span class="specref">ConnectWifi(network)</span> — the row prints it.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/system-control.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const SECTIONS = [
+    { h: 'System', items: [['Network', 'network'], ['Bluetooth'], ['Displays'], ['Audio'], ['Power']] },
+    { h: 'Security', items: [['Device'], ['Encryption'], ['Secure Boot'], ['Firewall', 'firewall', '#2E6B21']] },
+    { h: 'AI', items: [['Agents', 'agents', '#2E6B21'], ['Permissions'], ['Models'], ['MCP']] },
+    { h: 'Developer', items: [['Projects'], ['Containers'], ['Toolchains']] },
+    { h: 'Privacy', items: [['Connections'], ['Relay']] },
+    { h: 'Organization', items: [['Enrollment'], ['Compliance', 'compliance', '#2E6B21'], ['Policies'], ['Privilege']] },
+  ];
+
+  const VIEWS = {
+    firewall: `
+      <div class="ptitle"><span class="t">Firewall</span>
+        <span style="display:flex;gap:10px;align-items:center">
+          <span class="toggle on" aria-label="Firewall on, managed"><span class="knob"></span></span>
+          <span class="pill">Managed</span>
+        </span></div>
+      <div class="psub">Security · nftables · verified 08:24</div>
+      <div class="kv">
+        <span class="k">Inbound</span><span class="v mono">DENY BY DEFAULT</span>
+        <span class="k">Outbound</span><span class="v mono">ALLOW</span>
+        <span class="k">Verification</span><span class="v mono">NFTABLES RULESET · OK</span>
+      </div>
+      <div class="explain">
+        Effective value · <b>Enabled</b><br>
+        Source · <b>Acme Engineering Baseline</b> · eng-baseline-v12<br>
+        User override · <b>Not permitted</b><br>
+        Compliance · <b>Compliant</b>
+      </div>
+      <p style="font-size:13px;color:#666;margin:0 0 14px;max-width:52ch">If the firewall is disabled outside Punar, drift is detected, the policy remediates it automatically, and an audit event is recorded.</p>
+      <div class="lockrow">
+        <button class="ghost">View policy</button>
+        <button class="xtag">Request exception · Approval required</button>
+      </div>`,
+    network: `
+      <div class="ptitle"><span class="t">Network</span>
+        <span style="display:flex;gap:10px;align-items:center">
+          <span class="toggle on"><span class="knob"></span></span>
+          <span class="pill"><span class="dot" style="background:#2E6B21"></span>Connected</span>
+        </span></div>
+      <div class="psub">Wi-Fi · ACME-CORP · WPA3 · 5 GHz</div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">ACME-CORP</span><span class="mt">Connected · Auto</span></div>
+      <div class="rowline"><span class="dot" style="background:#E6E4DE"></span><span class="nm">ACME-GUEST</span><span class="mt">↵ ConnectWifi(acme-guest)</span></div>
+      <div class="rowline"><span class="dot" style="background:#E6E4DE"></span><span class="nm">Loft-5G</span><span class="mt">↵ ConnectWifi(loft-5g)</span></div>
+      <p style="font-size:13px;color:#666;margin:14px 0 0;max-width:52ch">Every connect action is the typed capability the row prints — the same call punarctl makes.</p>`,
+    agents: `
+      <div class="ptitle"><span class="t">AI Agents</span><span class="pill">Super + A · Full panel</span></div>
+      <div class="psub">Registry · 2 managed · 1 unknown</div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Claude Code</span><span class="mt">Atlas · agt_123 · Managed · Active</span></div>
+      <div class="rowline"><span class="dot" style="background:#E6E4DE"></span><span class="nm">Codex</span><span class="mt">Atlas · Managed · Idle</span></div>
+      <div class="rowline"><span class="dot" style="background:#A31F2C"></span><span class="nm" style="color:#A31F2C">foo-agent</span><span class="mt" style="color:#A31F2C">~/Downloads · Unknown · Suspected AI &nbsp;<button class="ghost" style="border-color:#A31F2C;color:#A31F2C">Inspect</button></span></div>
+      <p style="font-size:13px;color:#666;margin:14px 0 0;max-width:52ch">Authority, network zones, and the access ledger live in the full AI panel — this view is the registry at a glance.</p>`,
+    compliance: `
+      <div class="ptitle"><span class="t">Compliance</span><span class="pill"><span class="dot" style="background:#2E6B21"></span>Overall · Compliant</span></div>
+      <div class="psub">Acme Engineering · eng-baseline-v12 · reported 08:24</div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Boot Integrity</span><span class="mt"><span class="simtag">Simulated · VM</span>&nbsp; Compliant</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Disk Encryption</span><span class="mt">LUKS2 · Compliant</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Firewall</span><span class="mt">Compliant</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">AI Policy</span><span class="mt">eng-ai-v3 · Compliant</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Private Relay</span><span class="mt"><span class="simtag">Simulated · VM</span>&nbsp; Compliant</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">OS Update</span><span class="mt">Stable · Current</span></div>
+      <div class="rowline"><span class="dot" style="background:#2E6B21"></span><span class="nm">Enterprise Identity</span><span class="mt">Enrolled · Compliant</span></div>`,
+  };
+
+  const rail = document.getElementById('rail');
+  const pane = document.getElementById('pane');
+  const q = document.getElementById('q');
+  const frame = document.getElementById('frame');
+  const flat = [];
+
+  SECTIONS.forEach(sec => {
+    const h = document.createElement('div'); h.className = 'rsec'; h.textContent = sec.h; rail.appendChild(h);
+    sec.items.forEach(([name, view, dotColor]) => {
+      const el = document.createElement('div'); el.className = 'ritem'; el.dataset.view = view || '';
+      el.innerHTML = '<span>' + name + '</span>' + (dotColor ? '<span class="rdot" style="background:' + dotColor + '"></span>' : '');
+      el.addEventListener('click', () => select(flat.indexOf(el)));
+      rail.appendChild(el); flat.push(el);
+    });
+  });
+
+  let idx = -1;
+  function select(i) {
+    idx = Math.max(0, Math.min(flat.length - 1, i));
+    flat.forEach((el, j) => el.classList.toggle('sel', j === idx));
+    const el = flat[idx];
+    el.scrollIntoView({ block: 'nearest' });
+    const v = el.dataset.view;
+    pane.innerHTML = v && VIEWS[v] ? VIEWS[v] :
+      '<div class="undrawn">' + el.textContent.trim() + ' · Not yet drawn<br><span style="letter-spacing:0.1em;font-size:8.5px">dashed until designed — production-claim rule, applied to ourselves</span></div>';
+  }
+  select(flat.findIndex(el => el.dataset.view === 'firewall'));
+
+  function visible() { return flat.filter(el => !el.classList.contains('hid')); }
+  frame.addEventListener('keydown', e => {
+    if (e.key === '/') { q.focus(); e.preventDefault(); return; }
+    if (document.activeElement === q && e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Escape') return;
+    const vis = visible(); if (!vis.length) return;
+    let vi = vis.indexOf(flat[idx]); if (vi < 0) vi = 0;
+    if (e.key === 'ArrowDown') { select(flat.indexOf(vis[Math.min(vis.length - 1, vi + 1)])); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { select(flat.indexOf(vis[Math.max(0, vi - 1)])); e.preventDefault(); }
+    else if (e.key === 'Escape') { q.value = ''; filter(); frame.focus(); }
+  });
+  function filter() {
+    const t = q.value.trim().toLowerCase();
+    flat.forEach(el => el.classList.toggle('hid', !!t && !el.textContent.toLowerCase().includes(t)));
+    [...rail.querySelectorAll('.rsec')].forEach(h => {
+      let sib = h.nextElementSibling, any = false;
+      while (sib && sib.classList.contains('ritem')) { if (!sib.classList.contains('hid')) any = true; sib = sib.nextElementSibling; }
+      h.style.display = any ? '' : 'none';
+    });
+    const vis = visible();
+    if (t && vis.length && !vis.includes(flat[idx])) select(flat.indexOf(vis[0]));
+  }
+  q.addEventListener('input', filter);
+})();
+</script>

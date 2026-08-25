@@ -3,3 +3,12 @@ out/
 cache/
 mkosi.builddir/
 mkosi.output/
+
+# Desktop-profile content staged at build time by scripts/container-build.sh
+# from its source-of-truth trees (os/modules/desktop, shell/) — never commit;
+# the versioned parts of mkosi.extra (greetd, usr/lib/punar, systemd units,
+# tmpfiles) live outside these paths.
+mkosi.profiles/desktop/mkosi.extra/etc/xdg/
+mkosi.profiles/desktop/mkosi.extra/etc/fonts/
+mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/

@@ -1,0 +1,20 @@
+# greetd session chain for the punar-desktop DEV image (milestone-1.md §4).
+#
+# initial_session: autologin as the dev user `punar`, once per boot, straight
+# into the Punar session (Hyprland). Development-image convenience only —
+# the QML greeter implementing docs/design/mockups/boot-greeter.html is
+# deferred (milestone-1.md §1) and will replace this.
+#
+# default_session: after logout (SUPER+SHIFT+E) greetd falls back to agreety,
+# the packaged text greeter, which re-enters the same session script.
+
+[terminal]
+vt = 1
+
+[initial_session]
+command = "/usr/lib/punar/session.sh"
+user = "punar"
+
+[default_session]
+command = "agreety --cmd /usr/lib/punar/session.sh"
+user = "greeter"

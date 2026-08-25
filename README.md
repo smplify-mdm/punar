@@ -1,8 +1,13 @@
 # Punar
 
-> **Status: pre-alpha. Milestone 0 (Foundation evaluation) is in progress.**
-> Nothing here boots yet. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
-> for what exists versus what is planned.
+> **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done; Milestone 1
+> (Lightweight graphical workstation) is in progress.** The minimal `punar-dev`
+> image builds reproducibly and boots in CI
+> ([run 32788238871](https://github.com/smplify-mdm/punar/actions/runs/32788238871),
+> `PUNAR_BOOT_OK`). The `punar-desktop` image (Hyprland + punar-shell) is
+> authored and config-validated on disk but has not yet built or booted in CI.
+> See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists
+> versus what is planned.
 
 Punar, by Smplify, is a lightweight, privacy-first, AI-native Linux operating
 system for developer workstations. It targets existing 8–16 GB enterprise

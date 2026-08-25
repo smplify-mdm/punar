@@ -1,9 +1,22 @@
-# Punar CI — Milestone 0 (spec 76: "reproducible build and VM boot"; ADR-001).
+# Punar CI — Milestones 0+1 (spec 76: M0 "reproducible build and VM boot",
+# M1 "idle RAM measured" graphical acceptance; ADR-001, milestone-1.md §10).
 #
 # Jobs:
-#   rust       fmt + clippy(-D warnings) + tests for the Cargo workspace
-#   image      containerized mkosi build of the punar-dev qcow2 (tools/build-image.sh)
-#   boot-test  QEMU/OVMF boot smoke test of the built artifact (tools/boot-test.sh)
+#   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
+#   contracts     JSON Schemas + fixtures validation
+#   image         containerized mkosi build of BOTH qcow2s — punar-dev
+#                 (minimal M0) and punar-desktop (M1) — via
+#                 tools/build-image.sh. Both are built on every run
+#                 (milestone-1.md §3/§10): the minimal build is small and
+#                 shares the pacman package cache with the desktop build, and
+#                 the M0 boot gate must stay regression-isolated per PR.
+#   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
+#   desktop-test  M1 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#                 in-guest canonical idle-RAM measurement, screenshot/RAM
+#                 artifact export (tools/boot-test.sh --mode desktop), then
+#                 the PERFORMANCE_BUDGETS.md gate
+#                 (tests/performance/check-budgets.sh: fail mean > 1536 MB,
+#                 warn > 1024 MB; TCG runs warn-only, labeled emulated)
 #
 # Runner pin: ubuntu-24.04, NOT ubuntu-latest — GitHub is migrating -latest
 # labels toward 26.04 during 2026 (research/crosscutting.md §2.1); an OS
@@ -85,7 +98,11 @@ jobs:
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Raised from M0's 45: the desktop profile adds chromium/qt6/mesa
+    # (larger pacman download + a substantially larger qcow2 to compress and
+    # upload; size is an estimate until the first run — milestone-1.md §3).
+    # To be tightened once real run times exist.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -95,17 +112,32 @@ jobs:
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
-            tools/build-image.sh tools/boot-test.sh os/images/scripts/container-build.sh
+            tools/build-image.sh tools/boot-test.sh \
+            os/images/scripts/container-build.sh \
+            tests/performance/check-budgets.sh
 
-      - name: Build punar-dev image (containerized mkosi)
-        run: ./tools/build-image.sh
+      - name: Build punar-dev + punar-desktop images (containerized mkosi)
+        run: ./tools/build-image.sh all
 
-      - name: Upload image artifact
+      # SHA256SUMS covers both qcow2s; each artifact carries a copy and the
+      # consumers verify with --ignore-missing against the files they have.
+      - name: Upload minimal image artifact
         uses: actions/upload-artifact@v4
         with:
           name: punar-dev-image
           path: |
             os/images/out/punar-dev-x86_64.qcow2
+            os/images/out/SHA256SUMS
+            os/images/out/build-info.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload desktop image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-desktop-image
+          path: |
+            os/images/out/punar-desktop-x86_64.qcow2
             os/images/out/SHA256SUMS
             os/images/out/build-info.txt
           if-no-files-found: error
@@ -145,7 +177,87 @@ jobs:
       - name: Boot smoke test (serial console marker)
         run: ./tools/boot-test.sh os/images/out/punar-dev-x86_64.qcow2
 
+      # --ignore-missing: SHA256SUMS lists both images but this job only
+      # downloads punar-dev (GNU coreutils still fails if nothing verifies).
       - name: Verify artifact checksum
         run: |
           cd os/images/out
-          sha256sum -c SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+
+  # M1 graphical acceptance gate (milestone-1.md §7–§10). Boots the desktop
+  # image with -m 8192 -smp 4 -device virtio-vga + the punar.export
+  # virtio-serial channel, waits for PUNAR_DESKTOP_OK, then for the in-guest
+  # canonical idle-RAM measurement (10 min stabilize + 5 min window —
+  # PERFORMANCE_BUDGETS.md §2.1–2.2, ~16 min wall clock), collects the
+  # screenshot + RAM data exported by the guest, and gates the numbers
+  # against the budgets. ~45 min covers KVM boot + measurement + export;
+  # a TCG-degraded run (broken KVM) will exceed it — that failure mode is
+  # intentional surfacing, and the RAM gate itself is warn-only under TCG.
+  # "No mouse required" (the other M1 acceptance criterion) is not
+  # CI-provable: it is a human keyboard-only walkthrough, with the keybind
+  # config baked into the image as the CI-checkable proxy (milestone-1.md §10).
+  desktop-test:
+    name: desktop-test (graphical gate + RAM budget)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: image
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download desktop image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: punar-desktop-image
+          path: os/images/out
+
+      - name: Install QEMU and OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      # Same canonical udev fix as boot-test; tools/boot-test.sh degrades to
+      # TCG with a ::warning:: if KVM is still unavailable.
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Verify before the long boot so a corrupt download fails fast.
+      - name: Verify artifact checksum
+        run: |
+          cd os/images/out
+          sha256sum -c --ignore-missing SHA256SUMS
+
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + artifact export)
+        run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
+
+      - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
+        run: ./tests/performance/check-budgets.sh os/images/out/desktop-proof/ram-report.txt
+
+      # Uploads run even when a gate failed — the serial log and any partial
+      # proof files are the primary diagnostics. The screenshot is warn-only:
+      # the guest deliberately continues without one (grim failure is itself
+      # a signal), and boot-test already annotated its absence.
+      - name: Upload desktop screenshot
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-desktop-screenshot
+          path: os/images/out/desktop-proof/punar-desktop-screenshot.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload RAM report and measurement data
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-desktop-ram-report
+          path: |
+            os/images/out/desktop-proof/ram-report.txt
+            os/images/out/desktop-proof/ram-samples.txt
+            os/images/out/desktop-proof/meminfo
+            os/images/out/desktop-proof/serial.log
+          if-no-files-found: warn
+          retention-days: 7

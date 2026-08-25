@@ -1,0 +1,18 @@
+# Emits PUNAR_DESKTOP_OK on the console once the graphical session is up
+# (compositor running, punar-shell bar constructed, screenshot captured —
+# see desktop-ready.sh). tools/desktop-test.sh / CI grep the serial log for
+# this marker (M1 acceptance; milestone-1.md §7). The meminfo echo is a
+# coarse instant reading; the real measurement is punar-idle-ram.service,
+# kicked off below (§8).
+#
+# Triggered by punar-desktop-marker.path; not enabled directly.
+
+[Unit]
+Description=Punar CI desktop marker
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh -c 'echo "PUNAR_DESKTOP_OK"; grep -E "MemTotal|MemAvailable" /proc/meminfo'
+ExecStartPost=/usr/bin/systemctl start --no-block punar-idle-ram.service

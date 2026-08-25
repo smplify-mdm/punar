@@ -1,0 +1,285 @@
+<title>Punar Privacy Panel</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one full-surface panel. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+  .statusband { display: flex; gap: 10px; padding: 12px 0; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 6px 11px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #333; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 7.5px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 5px; padding: 1px 6px; }
+  .qtitle { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 8px 0 2px; }
+
+  .list { flex: 1; overflow-y: auto; min-height: 0; }
+  .prow { border-top: 1px solid #E6E4DE; }
+  .prow:last-child { border-bottom: 1px solid #E6E4DE; }
+  .phead { display: flex; align-items: center; gap: 10px; padding: 9px 6px 9px 4px; cursor: pointer;
+    border-left: 2px solid transparent; }
+  .prow.sel .phead { background: #F4F2EC; border-left-color: #000; }
+  .phead .nm { font-size: 14px; font-weight: 500; color: #000; }
+  .phead .ct { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px;
+    font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase; color: #666;
+    font-variant-numeric: tabular-nums; }
+  .dests { display: none; padding: 2px 4px 10px 20px; }
+  .prow.sel .dests { display: block; }
+  .drow { display: grid; grid-template-columns: minmax(150px, 1.3fr) 1fr 1fr 0.9fr; gap: 4px 14px;
+    padding: 5px 0; align-items: baseline; }
+  .drow .d { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; color: #000; letter-spacing: 0.04em; }
+  .drow .m { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #666; }
+  .drow .m.route { color: #333; font-weight: 600; }
+  .quiet { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; letter-spacing: 0.11em;
+    text-transform: uppercase; color: #8C8880; padding: 5px 0; }
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  /* dual-hop plate */
+  .plate { margin-top: 28px; border: 1px solid #E6E4DE; border-radius: 10px; padding: 24px 24px 18px; background: #F4F2EC; }
+  .plate svg { display: block; margin: 12px auto 0; max-width: 100%; height: auto; }
+  .register { display: flex; gap: 26px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; }
+    .drow { grid-template-columns: 1fr 1fr; } }
+  footer { margin-top: 96px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Privacy</strong></div>
+        <div class="meta">Network visibility without inspection</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-006</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>See who talks. Never what they say.</h1>
+    <p class="deck">The privacy panel answers one question completely — who on this machine is talking to the network, where, and by what route — and refuses to answer any deeper. No content inspection, by design, on principle.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Device mode">
+      <button class="statebtn" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="demohint">↑↓ select a process · ↵ expands its connections · personal mode is the default state</div>
+    <div class="frame" id="frame" tabindex="0" aria-label="Privacy panel demo">
+      <div class="sc">
+        <div class="mast">
+          <div class="hm"><strong>Punar</strong> · Privacy<br><span id="mastline">ThinkPad X1 · Personal</span></div>
+          <div class="hm" style="text-align:right"><strong id="totconn">20 connections</strong><br>08 · 2026</div>
+        </div>
+        <hr class="scrule">
+        <div class="statusband" id="statusband"></div>
+        <div class="qtitle">Who is talking to the network?</div>
+        <div class="list" id="list"></div>
+        <div class="scfoot">
+          <span>↑↓ Process · ↵ Expand · Esc Close</span>
+          <span>No content inspection · punarctl privacy connections</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="plate">
+      <div class="mast">
+        <span class="meta"><strong>Private relay · dual hop</strong> · drawn dashed — simulated in MVP</span>
+        <span class="meta">Sect III · 02</span>
+      </div>
+      <svg viewBox="0 0 640 120" role="img" aria-label="Dual-hop relay: device to ingress to egress to internet, drawn dashed because the relay is simulated in MVP">
+        <g fill="none" stroke="#666" stroke-width="1.5" stroke-dasharray="5 6" stroke-linecap="round">
+          <line x1="96" y1="52" x2="204" y2="52"/>
+          <line x1="300" y1="52" x2="368" y2="52"/>
+          <line x1="464" y1="52" x2="548" y2="52"/>
+          <path d="M 204 52 l -8 -4 m 8 4 l -8 4"/>
+          <path d="M 368 52 l -8 -4 m 8 4 l -8 4"/>
+          <path d="M 548 52 l -8 -4 m 8 4 l -8 4"/>
+        </g>
+        <g fill="none" stroke="#000" stroke-width="1.5">
+          <rect x="24" y="34" width="72" height="36" rx="8"/>
+          <rect x="206" y="34" width="94" height="36" rx="8"/>
+          <rect x="370" y="34" width="94" height="36" rx="8"/>
+        </g>
+        <g font-family="Geist Mono, ui-monospace, monospace" font-size="9" letter-spacing="1.2" fill="#000">
+          <text x="36" y="56">DEVICE</text>
+          <text x="219" y="56">INGRESS</text>
+          <text x="386" y="56">EGRESS</text>
+          <text x="552" y="56" fill="#666">INTERNET</text>
+        </g>
+        <g font-family="Geist Mono, ui-monospace, monospace" font-size="7.5" letter-spacing="1" fill="#666">
+          <text x="150" y="96">KNOWS YOU · NOT YOUR DESTINATION</text>
+          <text x="352" y="96">KNOWS YOUR DESTINATION · NOT YOU</text>
+        </g>
+      </svg>
+      <div class="register">
+        <span class="meta"><strong>01</strong> no single party sees both ends</span>
+        <span class="meta"><strong>02</strong> dashed · simulated until real (§34)</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Panel register</h2>
+    <p class="assertion">One question, answered completely: who, where, and by what route.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Status band</span>
+      <p>Relay and DNS protection as chips with green presence dots — and the <span class="specref">SIMULATED</span> dashed tag whenever the claim isn't production yet (§1.22). In personal mode the relay is the user's own toggle; managed adds the <span class="specref">MANAGED</span> annotation, nothing more.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Process list</span>
+      <p>The §64 view verbatim: every network-active process with its live connection count in tabular mono. AI sessions carry their attribution (<span class="specref">AGT_123 · ATLAS</span>) — the same identity chain as every other surface.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Connection anatomy</span>
+      <p>Expanding a row shows the §37 tuple per destination: domain, reason category, route, project. Four columns, no payloads — the schema of what Punar knows is the proof of what it doesn't.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Personal-first register</h2>
+    <p class="assertion">On a personal device, the most important row is the one that reads zero.</p>
+    <div class="reg"><span class="no">01</span><span class="what">punard's row</span>
+      <p>Personal mode: <span class="specref">PUNARD · 0 CONNECTIONS · NOTHING TO REPORT HOME</span> — the OS proves its own silence in the same list it uses to watch everything else. Managed mode: the row shows <span class="specref">control.smplify.com · COMPLIANCE SYNC</span>, because enrollment is visible, never ambient.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Additive chrome</span>
+      <p>Switching modes changes annotations only — the enterprise route appears as a route value (<span class="specref">ACME ROUTE</span>) on existing rows, never as a redesign. DESIGN_LANGUAGE.md §8.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Refusal as feature</span>
+      <p>The footer states the boundary: no content inspection. What the panel cannot show is a design commitment, not a missing feature (§37).</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Implementation notes</h2>
+    <p class="assertion">Design mockup — punar-netd builds this in Milestone 12; observability before relay.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Data</span>
+      <p>Connection tuples from punar-netd's observation layer (process, destination, category, route, project, agent session — the §37 fields; matches <span class="specref">schemas/network/</span>). CLI parity: <span class="specref">punarctl privacy connections</span>.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Relay honesty</span>
+      <p>The dual-hop plate ships dashed until the relay is real (Phase 2). A single-VPN implementation may never claim the dual-hop drawing — the §34 rule, enforced by stroke.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/privacy-panel.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  let MODE = 'personal';
+  const D = (dest, reason, route, proj) =>
+    `<div class="drow"><span class="d">${dest}</span><span class="m">${reason}</span><span class="m route">${route}</span><span class="m">${proj}</span></div>`;
+
+  const DATA = () => {
+    const relayRoute = 'Private relay';
+    const devRoute = MODE === 'managed' ? 'Acme route' : relayRoute;
+    return [
+      { nm: 'Browser', ct: 14, dests:
+        D('github.com', 'User navigation', relayRoute, '—') +
+        D('claude.ai', 'User navigation', relayRoute, '—') +
+        D('fonts.gstatic.com', 'Page resource', relayRoute, '—') +
+        '<div class="quiet">+ 11 more · all via relay</div>' },
+      { nm: 'Claude Code', ct: 2, agent: 'agt_123 · atlas', dests:
+        D('api.anthropic.com', 'AI inference', relayRoute, 'Atlas · agt_123') +
+        (MODE === 'managed' ? D('dev.api.acme.internal', 'Project service', devRoute, 'Atlas · agt_123') :
+          D('registry.npmjs.org', 'Toolchain fetch', relayRoute, 'Atlas · agt_123')) },
+      { nm: 'Containers', ct: 4, dests:
+        D('registry-1.docker.io', 'Image pull', relayRoute, 'Atlas') +
+        D('archive.punar.dev', 'Package mirror', 'Direct', 'System') +
+        '<div class="quiet">+ 2 more</div>' },
+      MODE === 'managed'
+        ? { nm: 'punard', ct: 1, dests: D('control.smplify.com', 'Compliance sync', 'Direct · mTLS', 'System') }
+        : { nm: 'punard', ct: 0, dests: '<div class="quiet">No connections · nothing to report home</div>' },
+    ];
+  };
+
+  const list = document.getElementById('list');
+  const statusband = document.getElementById('statusband');
+  const frame = document.getElementById('frame');
+  let idx = 1; // Claude Code preselected — the interesting row
+
+  function chips() {
+    const managed = MODE === 'managed';
+    statusband.innerHTML =
+      `<span class="chip"><span class="dot" style="background:#2E6B21"></span>Private relay · Active <span class="simtag">Simulated</span>${managed ? ' <span style="color:#666">· Managed</span>' : ''}</span>` +
+      `<span class="chip"><span class="dot" style="background:#2E6B21"></span>DNS protection · Active</span>` +
+      (managed ? `<span class="chip">Enterprise routes · Policy</span>` : `<span class="chip">Your device · Your rules</span>`);
+  }
+  function render() {
+    chips();
+    const data = DATA();
+    document.getElementById('mastline').textContent = MODE === 'managed'
+      ? 'ThinkPad X1 · dev_123 · Acme Engineering' : 'ThinkPad X1 · Personal';
+    document.getElementById('totconn').textContent =
+      data.reduce((n, p) => n + p.ct, 0) + ' connections';
+    list.innerHTML = '';
+    data.forEach((p, i) => {
+      const row = document.createElement('div');
+      row.className = 'prow' + (i === idx ? ' sel' : '');
+      row.innerHTML =
+        `<div class="phead"><span class="dot" style="background:${p.ct ? '#2E6B21' : '#E6E4DE'}"></span>` +
+        `<span class="nm">${p.nm}</span>` +
+        `<span class="ct">${p.agent ? p.agent + ' · ' : ''}${p.ct} connection${p.ct === 1 ? '' : 's'}</span></div>` +
+        `<div class="dests">${p.dests}</div>`;
+      row.querySelector('.phead').addEventListener('click', () => { idx = i; render(); });
+      list.appendChild(row);
+    });
+  }
+  render();
+
+  frame.addEventListener('keydown', e => {
+    const n = DATA().length;
+    if (e.key === 'ArrowDown') { idx = Math.min(n - 1, idx + 1); render(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { idx = Math.max(0, idx - 1); render(); e.preventDefault(); }
+  });
+
+  [...document.querySelectorAll('.statebtn[data-mode]')].forEach(b => b.addEventListener('click', () => {
+    MODE = b.dataset.mode;
+    document.querySelectorAll('.statebtn[data-mode]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+    render();
+  }));
+})();
+</script>
