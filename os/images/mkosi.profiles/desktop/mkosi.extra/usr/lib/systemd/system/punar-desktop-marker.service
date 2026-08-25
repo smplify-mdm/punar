@@ -12,6 +12,9 @@ Description=Punar CI desktop marker
 
 [Service]
 Type=oneshot
+# Stay 'active' after completion so the .path unit does not re-trigger
+# while /run/punar/desktop-ready persists (marker printed once, not looped).
+RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/bin/sh -c 'echo "PUNAR_DESKTOP_OK"; grep -E "MemTotal|MemAvailable" /proc/meminfo'

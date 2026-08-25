@@ -17,10 +17,13 @@ echo 'punar:100000:65536' > /etc/subuid
 echo 'punar:100000:65536' > /etc/subgid
 
 # Session chain: greetd (autologin -> /usr/lib/punar/session.sh -> Hyprland).
-# greetd's packaged unit conflicts getty@tty1; the serial getty autologin
-# (ttyS0, from the base profile's Autologin=yes) remains as dev/CI fallback.
-systemctl enable greetd.service
-systemctl set-default graphical.target
+# Enablement is DECLARATIVE: the extra tree ships
+# etc/systemd/system/display-manager.service and default.target symlinks
+# (graphical.target Wants=display-manager.service pulls greetd in). Runtime
+# `systemctl enable` here did not survive into the final image (verified on
+# the CI-built image 2026-08-25: is-enabled=disabled, no alias symlink,
+# while extra-tree .wants symlinks all persisted) — so we ship symlinks like
+# every other unit in this image and keep postinst free of systemctl.
 
 # Pre-warm the fontconfig cache for the vendored fonts (first session start
 # should not pay the scan). Non-fatal: fontconfig also scans at runtime.
