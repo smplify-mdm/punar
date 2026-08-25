@@ -54,7 +54,7 @@ impl TestBroker {
         let audit = dir.join("audit.jsonl");
 
         let mut cfg = SecretsConfig::new(socket.clone(), classes, ai_defaults, audit.clone());
-        cfg.ai_policy_dir = dir.join("policy.d-ai");
+        cfg.ai_policy_dir = dir.join("policy.d");
         cfg.state_dir = dir.join("state");
         std::fs::create_dir_all(&cfg.state_dir).unwrap();
         std::fs::write(cfg.state_dir.join("device-id"), "dev_test0001\n").unwrap();

@@ -1419,7 +1419,8 @@ Then `punarctl privilege request --capability time.timezone --reason
 "m9 exercise" --duration 1` → an `apr_`; resolve it; assert
 `privilege status` shows a `gnt_` with a countdown; assert the same
 non-root `capabilities set` **now succeeds** and the timezone actually
-changed (`timedatectl`); assert the audit event carries
+changed (`readlink /etc/localtime` — see §15.4 correction 8); assert the
+audit event carries
 `details.grant_id`. Sleep 65 s; assert the grant is gone, a
 `privilege.expire` event exists, and the non-root `capabilities set`
 **fails again with exit 3**. Assert `--reason ""` is a usage/params
@@ -1515,7 +1516,7 @@ gate that proved it, and anything that was **not** run says so.*
 | `usr/lib/systemd/system/punar-secrets.service` | `Type=simple`, `After=punard.service` (ordering only), `ProtectSystem=strict` with `ReadWritePaths=/run/punar-secrets /var/log/punar` and **no** `StateDirectory=`, `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute`, `LockPersonality`, `SystemCallFilter=@system-service`, `UMask=0077`. Deliberately **not** `ProtectProc=`/`ProcSubset=`: the broker reads `/proc/<peer_pid>/cgroup` to attribute a request, and hiding that would silently disable attribution — a security control must not fail towards "no agent" without saying so. |
 | `…/multi-user.target.wants/punar-secrets.service` | The vendor `.wants` symlink. `is-enabled` reports `disabled` for a `/usr/lib` wants unit, so `m9-check` asserts the **symlink** plus `Wants=` in `systemctl show multi-user.target` (the M4 lesson). |
 | `usr/lib/tmpfiles.d/punar-secrets.conf` | `d /run/punar-secrets 0750 root punar`. It carries **no** state-directory line, and that absence is the design. |
-| `usr/lib/tmpfiles.d/punard.conf` (extended) | `/var/lib/punar/approvals` and `/var/lib/punar/grants` at `0700 root:root`, plus the reserved `/var/lib/punar/policy.d/ai`. punard creates them itself; the lines exist so the modes are declared where an auditor can read them. |
+| `usr/lib/tmpfiles.d/punard.conf` (extended) | `/var/lib/punar/approvals` and `/var/lib/punar/grants` at `0700 root:root`. punard creates them itself; the lines exist so the modes are declared where an auditor can read them. **No AI-policy directory is reserved**: org AI documents are `<policy_id>.yaml` + `<policy_id>.json` pairs in `policy.d` itself (§5.2), which is the directory punard *and* `punar-secrets` read. An early draft of this milestone reserved `/var/lib/punar/policy.d/ai`; it was removed because a permanently present subdirectory breaks the unmanaged-first invariant `policy.d`-is-empty (milestone-5.md §10.2) and split the two daemons' view of the §39 ladder across two drop points. |
 | `scripts/container-build.sh` | Builds and stages `punar-secrets` beside the other binaries, and stages `fixtures/policies/ai-policy-personal-defaults.yaml` → `/usr/share/punar/policy/ai-defaults.yaml` and `crates/punar-secrets/share/classes.yaml` → `/usr/share/punar/secrets/classes.yaml`. Both are staged rather than committed twice for the M8 `process-classes.json` reason: each is *also* compiled into its daemon with `include_str!`, so a second hand-maintained copy is exactly the drift the compiled-in fallback exists to prevent. Both staged paths are in `os/images/.gitignore`. |
 | `usr/lib/punar/in-agent-scope.sh` | New. Runs one command from **inside** a managed session's real scope cgroup by migrating itself into it, so `punard` and `punar-secrets` read the same `/proc/<pid>/cgroup` they would read for a real agent child. Nothing is faked: no scope is invented and no session id is spelled by hand. It must be forked by the **user manager** (`systemd-run --user`), because cgroup v2 delegation containment permits the migration only from inside the destination's delegated subtree — the M7 hard lesson. Exits 97/98 on harness failure, deliberately outside `punarctl`'s documented 0–5 range so a harness fault can never be read as a daemon verdict. |
 | `usr/lib/punar/m9-check.sh` + `punar-m9-check.service` | The exercise. Root oneshot, **not enabled**, no `.wants`; started synchronously by `idle-ram.sh` after `punar-m8-check` and before the export. `TimeoutStartSec=20min`. Always exits 0; the verdict is `PUNAR_M9_OK`/`PUNAR_M9_FAIL` in `/run/punar/m9-report.txt`. |
@@ -1621,10 +1622,39 @@ milestone's check when a later milestone changes the behaviour it asserts.
    M9. The multi-approval queue UI is already deferred to M13 (§13 row 9)
    and this belongs with it. `punar-binds.conf` is unchanged and was
    verified against the pinned Hyprland config.
-7. **The redaction sweep adds a second, weaker probe** beyond the two
-   issued values: the identifiable `punar-mock-` prefix must appear nowhere
-   Punar writes. It catches a token this script never held — one a daemon
-   might have logged on a path the exercise does not exercise.
+7. **The redaction sweep adds a second, broader probe** beyond the two
+   issued values: nothing shaped like an issued credential may appear
+   anywhere Punar writes. It catches a token this script never held — one a
+   daemon might have logged on a path the exercise does not exercise.
+
+   The probe matches the token **grammar**
+   (`punar-mock-<class>-<43 base64url chars>`, i.e. `store.rs`'s
+   `TOKEN_PREFIX` + class id + 32 bytes of entropy), not the bare
+   `punar-mock-` prefix this line originally named. The bare prefix is not a
+   secret and is not credential-specific: it is the leading substring of two
+   long-shipped **component** names — `punar-mock-smplify` (M5's mock MDM
+   unit, socket directory and report lines) and `punar-mock-agent` (M7's
+   fixture binary, whose 15-character `/proc/<pid>/comm` is
+   `punar-mock-agen`). Grepping the prefix reports those five component
+   names as leaks; grepping the grammar reports only a value that could
+   actually authorize something. The probe now carries its own negative
+   control: the pattern must match a really-issued value (fed on stdin,
+   never argv) before its silence is accepted as evidence. The two
+   exact-value sweeps are unchanged and remain the primary assertion.
+8. **The "timezone actually changed" assertion reads `/etc/localtime`, not
+   `timedatectl`.** §12 group 11's parenthetical named `timedatectl`; that
+   is a D-Bus property of `systemd-timedated`, which reads `/etc/localtime`
+   once when it is activated and caches it for the life of the process.
+   punard owns `time.timezone` **as the symlink** (milestone-3.md §4.3:
+   observe = `readlink`, apply = symlink + `rename(2)`, descriptor
+   `verification: "symlink"`) and never speaks to timedated, so the
+   timedated property is a stale proxy — in the first M9 run it reported the
+   pre-change zone while punard's own post-apply re-observation, the audit
+   event and the rendered card all showed `Europe/Berlin`. `m9-check` now
+   reads the symlink. That is the ground truth the capability is defined on,
+   it is uncached, and it is still fully independent of punard — it asks the
+   filesystem, not a Punar process or a rendered descriptor, which is the
+   whole point of the assertion.
 
 ### 15.5 Verification (run, not asserted)
 

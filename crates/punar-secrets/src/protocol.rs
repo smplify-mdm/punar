@@ -45,8 +45,15 @@ pub const SECRETS_RUNTIME_DIR: &str = "/run/punar-secrets";
 pub const CLASSES_PATH: &str = "/usr/share/punar/secrets/classes.yaml";
 /// The AI authority document Milestone 9 ships (plan section 5.2).
 pub const AI_DEFAULTS_PATH: &str = "/usr/share/punar/policy/ai-defaults.yaml";
-/// Organization AI authority layers, when a device has any.
-pub const AI_POLICY_DIR: &str = "/var/lib/punar/policy.d/ai";
+/// Organization AI authority layers, when a device has any: the **same**
+/// `policy.d` punard reads (milestone-4.md section 3.1, milestone-9.md
+/// section 5.2), never a subdirectory of it. Two reasons, both load-bearing.
+/// The broker and punard must reach the same section 39 verdict about one
+/// org document, which they cannot do from two different directories; and
+/// `policy.d` being *empty* is the machine-checkable unmanaged-first
+/// invariant (milestone-5.md section 10.2), which a reserved subdirectory
+/// would destroy on every personal device.
+pub const AI_POLICY_DIR: &str = "/var/lib/punar/policy.d";
 /// `user_id` on broker-initiated audit events (the `USER_ID_DAEMON`
 /// convention, for the third daemon).
 pub const USER_ID_SECRETS: &str = "punar-secrets";

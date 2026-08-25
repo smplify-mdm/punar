@@ -82,8 +82,25 @@ pub const MUTATING_ACTION_PREFIXES: [&str; 1] = ["enroll."];
 /// 1. `decision == deny` on any other attributed action → `denied_access`
 ///    (**producer exists**: punard mutations, `agents.register` denials,
 ///    and since M9 `privilege.request` from inside an agent scope)
-/// 2. `decision == allow` on a mutating action → `privilege_request`
-///    (**producer exists**)
+/// 2. `decision == allow` **or** `decision == approval_required` on a
+///    mutating action → `privilege_request` (**producer exists**)
+///
+///    The `approval_required` half is an **M9 amendment**. M8 wrote the
+///    rule as "an agent reaching for a mutating action *is* a privilege
+///    request … whether or not the agent declared it"
+///    ([`MUTATING_ACTIONS`]), and in M8 every such reach ended in
+///    `allow` or `deny`, so matching `allow` covered it. M9 inserted a
+///    third outcome between them: `capabilities.set` from inside an
+///    agent scope now returns `approval_required` and executes only
+///    after a human resolves the gate. Matching `allow` alone would mean
+///    an agent that reached for the firewall and was *gated* leaves no
+///    trace in the ledger at all — the reach would be visible only if a
+///    human happened to say yes. That is the lie-by-omission spec 1.22
+///    forbids, and it is also the asymmetry rule 3 already avoids (a
+///    gated `credential.request` is referenced whatever the gate
+///    answers). The reference is to the **attempt**; whether it was
+///    granted lives in the audit event the reference points at, which is
+///    the whole division of labour this module is built on.
 /// 3. `action == credential.request` → `credential_request`
 ///    (**producer since M9**: `punar-secrets`)
 ///
@@ -101,7 +118,9 @@ pub fn classify(event: &AuditEvent) -> Option<SecurityEventType> {
     if event.decision == Decision::Deny {
         return Some(SecurityEventType::DeniedAccess);
     }
-    if event.decision == Decision::Allow && is_mutating(&event.action) {
+    if matches!(event.decision, Decision::Allow | Decision::ApprovalRequired)
+        && is_mutating(&event.action)
+    {
         return Some(SecurityEventType::PrivilegeRequest);
     }
     if event.action == CREDENTIAL_REQUEST_ACTION {
@@ -491,6 +510,29 @@ mod tests {
                 "{action}"
             );
         }
+        // 2b. M9's third outcome. A GATED mutation is still a reach for a
+        //     privilege; recording only the approved half would hide
+        //     every attempt a human said no to.
+        assert_eq!(
+            classify(&event(
+                "evt_3g",
+                "agt_a",
+                "capabilities.set",
+                Decision::ApprovalRequired
+            )),
+            Some(SecurityEventType::PrivilegeRequest)
+        );
+        // …and only for a MUTATING action: a gate on anything else is not
+        // a privilege request invented by this table.
+        assert_eq!(
+            classify(&event(
+                "evt_3h",
+                "agt_a",
+                "capabilities.get",
+                Decision::ApprovalRequired
+            )),
+            None
+        );
         // 3. Credential requests — a live producer since M9
         //    (punar-secrets).
         assert_eq!(

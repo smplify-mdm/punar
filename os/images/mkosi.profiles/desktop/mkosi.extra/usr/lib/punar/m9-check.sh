@@ -145,6 +145,30 @@ first_apr() {
     grep -o 'apr_[A-Za-z0-9][A-Za-z0-9]*' "$1" 2>/dev/null | head -n 1
 }
 
+# os_timezone — the timezone the OPERATING SYSTEM is actually in, read from
+# the one artifact the capability is defined on.
+#
+# NOT `timedatectl`: that is a D-Bus property of systemd-timedated, which
+# reads /etc/localtime once at activation and caches it for the lifetime of
+# the (idle-exiting) process. punard owns time.timezone as the
+# /etc/localtime symlink and never speaks to timedated (milestone-3.md
+# section 4.3: observe = readlink, apply = symlink + rename(2), descriptor
+# `verification: "symlink"`), so a timedated read is a STALE PROXY that can
+# report the pre-change zone long after the change landed — which is exactly
+# what it did in the M9 run. readlink is the ground truth, is uncached, and
+# is independent of punard: it goes to the filesystem, not to any Punar
+# process or rendered card. Accepts both absolute
+# ("/usr/share/zoneinfo/Europe/Berlin") and relative
+# ("../usr/share/zoneinfo/UTC") link forms; anything else is "unknown",
+# which fails loudly rather than silently.
+os_timezone() {
+    tz_link="$(readlink /etc/localtime 2>/dev/null)" || tz_link=""
+    case "${tz_link}" in
+        */zoneinfo/*) printf '%s\n' "${tz_link##*/zoneinfo/}" ;;
+        *) printf 'unknown\n' ;;
+    esac
+}
+
 PUNAR_UID="$(id -u punar 2>/dev/null || echo 1000)"
 PUNAR_RUN="/run/user/${PUNAR_UID}"
 
@@ -360,7 +384,7 @@ jq_check "the approval document matches the shipped patterns and enums" \
      and (.requester.id | test("^agt_[A-Za-z0-9]+$"))
      and (.capability == "security.firewall")
      and (.resource == "disabled")
-     and (["low","medium","high"] | index(.risk)) != null
+     and (.risk == "low" or .risk == "medium" or .risk == "high")
      and (.status == "pending")
      and (.user | length) > 0
      and (.reason | length) > 0
@@ -376,7 +400,7 @@ jq_check "consumed_at and execution are NOT inside .approval (the envelope law)"
      and (has("resolved_at") | not) and (has("kind") | not)'
 jq_check "the envelope carries the siblings, the contract line and the policy citation" \
     "${RUN_DIR}/m9-approvals-list.json" \
-    "[.approvals[] | select(.approval.approval_id == \"${APR1}\")] | length == 1
+    "([.approvals[] | select(.approval.approval_id == \"${APR1}\")] | length) == 1
      and ([.approvals[] | select(.approval.approval_id == \"${APR1}\")] | all(
         .kind == \"capability_set\"
         and (.contract | length) > 0
@@ -614,7 +638,7 @@ jq -c 'select(.action == "credential.request" or .action == "credential.expire"
 jq_slurp_check "every credential audit event names a CLASS and nothing else" \
     "${RUN_DIR}/m9-audit-credentials.json" \
     '(length >= 3) and all(.[];
-       (["github","aws-dev","aws-prod"] | index(.resource)) != null)'
+       .resource == "github" or .resource == "aws-dev" or .resource == "aws-prod")'
 
 # --- 8. (g) a short-lived credential really expires, and revoke is real ------
 elapsed=$(( $(date -u +%s) - GH_ISSUED_AT ))
@@ -743,21 +767,43 @@ sweep_token() {
 }
 sweep_token "github" "${TOK_GH}"
 sweep_token "aws-dev" "${TOK_AWS}"
-# The mock prefix is deliberately identifiable in a grep. Its ABSENCE
-# everywhere is a second, weaker sweep that also catches a token this script
-# never held (one a daemon might have logged on a path not exercised here).
-prefix_hits=0
+# A second, broader sweep: the SHAPE of an issued value, so it also catches a
+# token this script never held (one a daemon might have logged on a path not
+# exercised here, or from a class this run never asked for).
+#
+# It matches the token GRAMMAR, not the bare `punar-mock-` prefix:
+# store.rs mints `punar-mock-<class>-<43 base64url chars>` (TOKEN_PREFIX +
+# class id + 32 bytes of entropy). The bare prefix is NOT a secret and is not
+# even credential-specific — it is the leading substring of two long-shipped
+# COMPONENT names, `punar-mock-smplify` (the M5 mock MDM service, its socket
+# dir and its unit) and `punar-mock-agent` (the M7 fixture binary, whose
+# 15-char /proc comm is `punar-mock-agen`). Those names legitimately appear
+# in earlier milestones' reports, in cgroup comm dumps and in argv, so a
+# prefix grep reports leaks that are not leaks and would train the reader to
+# ignore this line. Requiring the class segment AND the 43-character random
+# tail makes a hit mean "a value that could actually authorize something".
+TOKEN_SHAPE='punar-mock-[a-z0-9-]+-[A-Za-z0-9_-]{43}'
+# Negative control for THIS sweep: the grammar must match a value that really
+# was issued, or its silence would prove nothing. The value goes in on stdin,
+# never in argv (the same discipline `secrets validate` enforces).
+if printf '%s' "${TOK_GH}" | grep -qE -- "${TOKEN_SHAPE}"; then
+    note "ok   negative control: the token-shape pattern does match a really-issued value, so its silence is evidence"
+else
+    note "FAIL negative control: the token-shape pattern does not match an issued value — the shape sweep below proves nothing"
+    FAILED=1
+fi
+shape_hits=0
 while IFS= read -r target; do
-    if grep -qF -- 'punar-mock-' "${target}" 2>/dev/null; then
-        prefix_hits=$((prefix_hits + 1))
-        echo "PREFIX-IN: ${target}" >> "${REDACTION}"
+    if grep -qE -- "${TOKEN_SHAPE}" "${target}" 2>/dev/null; then
+        shape_hits=$((shape_hits + 1))
+        echo "SHAPE-IN: ${target}" >> "${REDACTION}"
     fi
 done < "${CORPUS_LIST}"
-echo "mock-prefix: ${prefix_hits} occurrences" >> "${REDACTION}"
-if [ "${prefix_hits}" -eq 0 ]; then
-    note "ok   REDACTION: the identifiable mock token prefix appears nowhere Punar writes"
+echo "token-shape: ${shape_hits} occurrences" >> "${REDACTION}"
+if [ "${shape_hits}" -eq 0 ]; then
+    note "ok   REDACTION: nothing shaped like an issued credential appears anywhere Punar writes"
 else
-    note "FAIL REDACTION: the mock token prefix appears in ${prefix_hits} location(s)"
+    note "FAIL REDACTION: something shaped like an issued credential appears in ${shape_hits} location(s) — see ${REDACTION} for the file names (never the value)"
     FAILED=1
 fi
 
@@ -795,7 +841,7 @@ jq_check "no credential VALUE, token id or hash reached the ledger — only clas
     '(tostring | test("punar-mock-|sha256")) | not'
 
 # --- 11. (j) just-in-time privilege (spec 48, Plate D-012) ------------------
-TZ_BEFORE="$(timedatectl show -p Timezone --value 2>/dev/null)"
+TZ_BEFORE="$(os_timezone)"
 as_punar "${CTL}" capabilities set time.timezone Europe/Berlin \
     >/dev/null 2> "${RUN_DIR}/m9-nonroot-denied.txt"
 check_eq "a non-root human mutation is refused (exit 3)" 3 "$?"
@@ -829,7 +875,7 @@ as_punar "${CTL}" capabilities set time.timezone Europe/Berlin \
     > "${RUN_DIR}/m9-privilege.txt" 2>&1
 check_true "the SAME non-root call now succeeds, inside the window" "$?"
 check_eq "the timezone really changed (not just the descriptor)" "Europe/Berlin" \
-    "$(timedatectl show -p Timezone --value 2>/dev/null)"
+    "$(os_timezone)"
 # The grant IS a section 39 Temporary Approved Exception, so it is cited in
 # policy_ids. audit-event.json is closed at twelve fields and has no
 # `details` object; M9 does not extend the schema to carry a grant id
@@ -873,7 +919,7 @@ check_eq "the refusal is audited as agent_privilege_refused" 1 \
 # Restore the timezone as root.
 "${CTL}" capabilities set time.timezone "${TZ_BEFORE:-UTC}" >/dev/null 2>&1
 check_eq "the timezone was restored as root" "${TZ_BEFORE:-UTC}" \
-    "$(timedatectl show -p Timezone --value 2>/dev/null)"
+    "$(os_timezone)"
 
 # --- 12. negative probes (spec 74.4) ----------------------------------------
 for method in credential.show credential.export credential.list secrets.dump \

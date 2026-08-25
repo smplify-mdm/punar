@@ -48,7 +48,7 @@ pub mod classes;
 pub mod store;
 pub mod tail;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -56,7 +56,7 @@ use punar_common::agent::{AgentClassification, AgentStatus};
 use punar_common::ledger::{
     AgentsAccessResult, Evidence, LEDGER_RECORD_VERSION, LEDGER_RETENTION_DAYS, LedgerFingerprint,
     LedgerIndex, LedgerPurgeResult, LedgerRecord, LedgerRuntimeFile, PROCESS_CLASSES_PATH,
-    ResourceCategory, ResourceClass, TailPosition, ZONE_WORKSPACE,
+    ResourceCategory, ResourceClass, SecurityEventRef, TailPosition, ZONE_WORKSPACE,
 };
 
 use crate::ledger::classes::{CgroupRoot, ClassTable, sample_scope};
@@ -143,10 +143,79 @@ struct ActiveLedger {
     dirty: bool,
 }
 
+/// One attributed audit contribution that arrived before the ledger it
+/// belongs to existed. See [`State::pending`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingAttribution {
+    /// A Level-4 `security_events[]` reference.
+    Event(SecurityEventRef),
+    /// A Level-3 `resources.credential_classes[]` contribution.
+    Class(ResourceClass),
+}
+
+/// How many out-of-order attributions are held at once, across all
+/// sessions. The window they cover is one launcher round trip, so a
+/// handful is realistic; the cap exists so a stream of events naming
+/// session ids that never register cannot grow memory without bound.
+/// Overflow drops the **oldest**, which is the one least likely still to
+/// be inside its race window.
+const MAX_PENDING_ATTRIBUTIONS: usize = 256;
+
 #[derive(Debug, Default)]
 struct State {
     index: LedgerIndex,
     active: BTreeMap<String, ActiveLedger>,
+    /// Attributions the audit tail produced for a session id the ledger
+    /// does not know **yet**, in arrival order.
+    ///
+    /// # Why this exists (the M8 evidence-chain race)
+    ///
+    /// punard attributes an agent's call by the peer's **cgroup**, which
+    /// exists the instant `systemd-run --scope` places the process. The
+    /// ledger only learns the session at `agents.register`, which the
+    /// launcher can only send *after* it has seen that same placement
+    /// (`punar-env`'s `register_when_attributed`). Between those two
+    /// moments an agent can already call punard, and punard already
+    /// stamps `agent_session_id` on the audit event.
+    ///
+    /// The drain used to discard such a reference and advance the tail
+    /// offset past it, so the session's very first calls — exactly the
+    /// ones a fast agent makes — were lost from `security_events[]`
+    /// permanently. Holding them until [`LedgerEngine::begin_session`]
+    /// closes that hole without re-reading the trail and without
+    /// weakening the tombstone floor: a purged session is filtered
+    /// before anything is queued, and again before anything is applied.
+    ///
+    /// Memory only, and no more privacy-bearing than the reference
+    /// itself: an id, a category, a timestamp, a class name.
+    pending: VecDeque<(String, PendingAttribution)>,
+}
+
+impl State {
+    /// Queue one attribution for a session the ledger has not opened
+    /// yet, evicting the oldest when the cap is reached.
+    fn hold(&mut self, session_id: &str, item: PendingAttribution) {
+        while self.pending.len() >= MAX_PENDING_ATTRIBUTIONS {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((session_id.to_string(), item));
+    }
+
+    /// Remove and return everything held for `session_id`, in arrival
+    /// order.
+    fn take_pending(&mut self, session_id: &str) -> Vec<PendingAttribution> {
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.pending.len());
+        for (id, item) in std::mem::take(&mut self.pending) {
+            if id == session_id {
+                taken.push(item);
+            } else {
+                kept.push_back((id, item));
+            }
+        }
+        self.pending = kept;
+        taken
+    }
 }
 
 /// The engine. One `Mutex` around all mutable ledger state; it is never
@@ -190,6 +259,7 @@ impl LedgerEngine {
             state: Mutex::new(State {
                 index,
                 active: BTreeMap::new(),
+                pending: VecDeque::new(),
             }),
             table,
             runtime_gid,
@@ -293,6 +363,34 @@ impl LedgerEngine {
 
         {
             let mut state = self.state.lock().unwrap();
+            // B, replayed — anything punard attributed to this session in
+            // the window between the kernel placing the process in its
+            // scope and the launcher registering it. The tombstone floor
+            // is re-checked here, not only at queue time: a purge that
+            // landed while the attribution waited must still win.
+            let held = state.take_pending(&facts.session_id);
+            let tombstoned = state
+                .index
+                .row(&facts.session_id)
+                .is_some_and(|row| row.is_tombstone());
+            if !tombstoned {
+                for item in held {
+                    match item {
+                        PendingAttribution::Event(reference) => {
+                            active.record.observe_security_event(reference);
+                        }
+                        PendingAttribution::Class(class) => {
+                            active.record.observe(
+                                ResourceCategory::CredentialClasses,
+                                class,
+                                1,
+                                Evidence::AuditEvent,
+                                now,
+                            );
+                        }
+                    }
+                }
+            }
             state.active.insert(facts.session_id.clone(), active);
         }
         self.sample_active(std::slice::from_ref(facts), now);
@@ -354,6 +452,13 @@ impl LedgerEngine {
                         // An ended session can still be named by an event
                         // that landed after it ended; load, apply, write.
                         let Some(mut record) = self.store.load_record(&session_id) else {
+                            // Neither active nor on disk: punard attributed
+                            // this call by cgroup before the launcher got
+                            // to `agents.register`. Hold it for
+                            // `begin_session` rather than dropping it —
+                            // the tail offset has already moved past the
+                            // line, so a drop would be permanent.
+                            state.hold(&session_id, PendingAttribution::Event(reference));
                             continue;
                         };
                         if record.observe_security_event(reference) {
@@ -405,6 +510,10 @@ impl LedgerEngine {
                     }
                     None => {
                         let Some(mut record) = self.store.load_record(&session_id) else {
+                            // Same race as the reference loop above: a
+                            // credential issued to an agent whose session
+                            // has not registered yet.
+                            state.hold(&session_id, PendingAttribution::Class(class));
                             continue;
                         };
                         if record.observe(
@@ -957,6 +1066,155 @@ mod tests {
             policy_ids: vec!["personal-defaults".to_string()],
             result: "denied".to_string(),
         }
+    }
+
+    /// The M8 evidence-chain race, in the order the VM actually produces
+    /// it: punard attributes an agent's call by the peer **cgroup**, which
+    /// exists as soon as `systemd-run --scope` places the process, but the
+    /// ledger only learns the session at `agents.register`, which
+    /// `punar-env` can only send after it has observed that same
+    /// placement. Every drain in between must hold what it read — the
+    /// tail offset has already moved past those lines, so dropping them
+    /// loses a session's first calls for good.
+    #[test]
+    fn an_attribution_that_arrives_before_the_session_is_not_lost() {
+        let h = harness("ledger-preregister-race");
+        spawn(&h.proc_root, 2143, "punar-mock-agent");
+        let scope = fixture_cgroup_scope(&h.dir.join("cgroup"), SESSION, &[2143], Some(1));
+        let facts = facts(Some(scope));
+
+        // 1. The agent is already in its scope and calls punard twice:
+        //    a refused privilege window and an allowed credential.
+        let mut writer = AuditWriter::open(&h.audit).unwrap();
+        writer
+            .append(&audit_event(
+                "evt_601",
+                SESSION,
+                "privilege.request",
+                Decision::Deny,
+            ))
+            .unwrap();
+        let mut issued = audit_event("evt_602", SESSION, "credential.request", Decision::Allow);
+        issued.resource = Some("github".to_string());
+        writer.append(&issued).unwrap();
+
+        // 2. Something drains the trail before the launcher registers —
+        //    in production the inotify watcher, here explicitly.
+        assert!(
+            !h.engine.drain_audit("2026-08-27T09:58:39Z"),
+            "nothing is ingested yet: there is no ledger to ingest into"
+        );
+        let past = h.engine.tail_position();
+        assert!(
+            past.offset > 0,
+            "the offset moved past both lines, which is why they must be held"
+        );
+
+        // 3. The launcher registers. The held attributions land, and the
+        //    trail is never re-read.
+        h.engine.begin_session(&facts, "2026-08-27T09:58:40Z");
+        assert_eq!(h.engine.tail_position(), past);
+
+        let record = h.engine.record_of(SESSION).unwrap();
+        assert_eq!(
+            record
+                .security_events
+                .iter()
+                .map(|e| (e.event_id.as_str(), e.event_type))
+                .collect::<Vec<_>>(),
+            vec![
+                ("evt_601", SecurityEventType::DeniedAccess),
+                ("evt_602", SecurityEventType::CredentialRequest),
+            ]
+        );
+        assert_eq!(
+            record
+                .summary("2026-08-27T09:58:41Z")
+                .resources
+                .credential_classes
+                .iter()
+                .map(ResourceClass::as_str)
+                .collect::<Vec<_>>(),
+            vec!["github"],
+            "the Level-3 half of the same event is held too"
+        );
+
+        // 4. Nothing is held for a session that never registers, beyond
+        //    the cap — and a second drain does not resurrect anything.
+        assert!(!h.engine.drain_audit("2026-08-27T09:58:42Z"));
+        assert!(h.engine.state.lock().unwrap().pending.is_empty());
+        let _ = std::fs::remove_dir_all(&h.dir);
+    }
+
+    /// The hold is bounded and cannot be used to grow memory: a stream of
+    /// events naming session ids that never register evicts oldest-first
+    /// and stops at the cap.
+    #[test]
+    fn the_pending_hold_is_bounded_and_drops_the_oldest() {
+        let h = harness("ledger-pending-bound");
+        let mut writer = AuditWriter::open(&h.audit).unwrap();
+        for n in 0..(MAX_PENDING_ATTRIBUTIONS + 40) {
+            writer
+                .append(&audit_event(
+                    &format!("evt_{n}"),
+                    "agt_ffffffffffff",
+                    "privilege.request",
+                    Decision::Deny,
+                ))
+                .unwrap();
+        }
+        h.engine.drain_audit("2026-08-27T09:58:39Z");
+        let held = h.engine.state.lock().unwrap().pending.len();
+        assert_eq!(held, MAX_PENDING_ATTRIBUTIONS);
+        let _ = std::fs::remove_dir_all(&h.dir);
+    }
+
+    /// The purge floor survives the hold: an attribution queued for a
+    /// session the user has since purged must not reappear when a session
+    /// with that id is opened again.
+    #[test]
+    fn a_held_attribution_never_defeats_a_tombstone() {
+        let h = harness("ledger-pending-tombstone");
+        spawn(&h.proc_root, 2143, "punar-mock-agent");
+        let facts = facts(None);
+
+        let mut writer = AuditWriter::open(&h.audit).unwrap();
+        writer
+            .append(&audit_event(
+                "evt_701",
+                SESSION,
+                "privilege.request",
+                Decision::Deny,
+            ))
+            .unwrap();
+        h.engine.drain_audit("2026-08-27T09:58:39Z");
+        assert_eq!(h.engine.state.lock().unwrap().pending.len(), 1);
+
+        // The user purges that session id before it ever opened a ledger.
+        {
+            let purged = LedgerRecord::new(
+                SESSION,
+                "claude-code",
+                "punar",
+                None,
+                AgentClassification::Managed,
+                "2026-08-27T09:58:30Z",
+            );
+            let mut state = h.engine.state.lock().unwrap();
+            state
+                .index
+                .upsert(tombstone_row(&index_row(&purged), "2026-08-27T09:58:39Z"));
+        }
+        h.engine.begin_session(&facts, "2026-08-27T09:58:40Z");
+        assert!(
+            h.engine
+                .record_of(SESSION)
+                .unwrap()
+                .security_events
+                .is_empty(),
+            "a tombstoned id ingests nothing, held or not"
+        );
+        let _ = std::fs::remove_dir_all(&h.dir);
     }
 
     #[test]

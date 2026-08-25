@@ -180,12 +180,28 @@ impl AiPolicySet {
     /// fail-closed default, which is safe but silently wrong, so the daemon
     /// refuses to start instead.
     ///
-    /// `org_dir` holds `<policy_id>.yaml` AI authority documents delivered
-    /// by enrollment. Milestone 9 ships **no producer** for that directory
-    /// — the enrolled ladder demo runs through punard's capability path —
-    /// so in practice it is absent, and an absent directory is simply no
-    /// org opinion. It is read rather than ignored because a broker that
-    /// could not see an org layer that *is* there would be citing personal
+    /// `org_dir` is `/var/lib/punar/policy.d` — **the same directory
+    /// punard's AI loader reads**, not a broker-private one. That is the
+    /// whole point: the two daemons must reach the same section 39 verdict
+    /// about one org document, and they cannot do that from two drop
+    /// points. It also keeps `policy.d`-is-empty as the single
+    /// machine-checkable unmanaged-first invariant (milestone-5.md section
+    /// 10.2) instead of splitting it across a reserved subdirectory.
+    ///
+    /// Each layer is a `<policy_id>.yaml` document **beside its
+    /// `<policy_id>.json` policy-source envelope**, exactly as
+    /// `punard::aipolicy` requires. A YAML with no envelope is ignored,
+    /// loudly: provenance is not guessable, and a document that cannot say
+    /// who wrote it and at what rank must not outrank the OS default by
+    /// having its rank invented from its filename. The desired-state
+    /// envelopes enrollment writes here (`eng-baseline-v12.json`) carry no
+    /// AI document and are simply not `.yaml`, so they are skipped.
+    ///
+    /// Milestone 9 ships **no producer** for an org AI document — the
+    /// enrolled ladder demo runs through punard's capability path — so in
+    /// practice there is none, and no org document is simply no org
+    /// opinion. It is read rather than ignored because a broker that could
+    /// not see an org layer that *is* there would be citing personal
     /// defaults over a managed decision.
     pub fn load(defaults_path: &Path, org_dir: &Path) -> Result<AiPolicySet, PolicyLoadError> {
         let text = std::fs::read_to_string(defaults_path).map_err(|e| PolicyLoadError {
@@ -226,29 +242,50 @@ impl AiPolicySet {
             Ok(entries) => entries
                 .filter_map(Result::ok)
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|ext| ext == "yaml" || ext == "yml")
+                })
                 .collect(),
             Err(_) => return, // absent or unreadable: no org opinion
         };
         files.sort();
         for path in files {
-            let policy_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
+            let envelope_path = path.with_extension("json");
+            let provenance = match read_envelope(&envelope_path) {
+                Ok(provenance) => provenance,
+                Err(detail) => {
+                    // Ignored, not `broken`: a document with no readable
+                    // provenance has no authority to be broken *at*. Denying
+                    // every credential because an unattributed file exists
+                    // would hand a drop-anything-in-policy.d writer a global
+                    // outage; punard::aipolicy skips these for the same
+                    // reason, and both daemons must skip the same files.
+                    self.warnings.push(format!(
+                        "{}: {detail}; ignored — an AI authority document may not \
+                         outrank the OS default without declaring who wrote it and \
+                         at what rank",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            let policy_id = provenance.policy_id.clone();
             match std::fs::read_to_string(&path).map_err(|e| e.to_string()) {
                 Ok(text) => match parse_document(&text) {
-                    Ok(credentials) => self.layers.push(Layer {
-                        credentials,
-                        provenance: Provenance {
-                            kind: SourceKind::OrganizationBaseline,
-                            rank: SourceKind::OrganizationBaseline.fixed_rank().unwrap_or(2),
-                            policy_id: policy_id.clone(),
-                            source_name: policy_id.clone(),
-                        },
-                        from_org: true,
-                    }),
+                    Ok(credentials) => {
+                        let from_org = matches!(
+                            provenance.kind,
+                            SourceKind::OrganizationBaseline
+                                | SourceKind::OrganizationRolePolicy
+                                | SourceKind::TemporaryApprovedException
+                        );
+                        self.layers.push(Layer {
+                            credentials,
+                            provenance,
+                            from_org,
+                        });
+                    }
                     Err(detail) => {
                         self.broken.push(policy_id);
                         self.warnings.push(format!(
@@ -311,6 +348,66 @@ fn parse_document(text: &str) -> Result<BTreeMap<String, CredentialGrant>, Strin
     let document: AiDocument = serde_norway::from_str(text)
         .map_err(|e| format!("not a valid AI authority document: {e}"))?;
     Ok(document.ai.agents.default.credentials)
+}
+
+/// The provenance half of an org AI drop: the `schemas/policy/policy-source.json`
+/// envelope, minus the desired-state payload this crate does not read.
+///
+/// Deliberately a small local mirror of `punard::aipolicy::AiSourceEnvelope`
+/// rather than a shared type: `punar-secrets` must not depend on punard (it
+/// is a separate daemon with a separate blast radius), and the shared piece
+/// that actually matters — the ladder itself — already lives in
+/// `punar-policy`, which both use. The **rules** are what must not diverge,
+/// and they are pinned by test in both crates.
+#[derive(Debug, Deserialize)]
+struct AiSourceEnvelope {
+    policy_id: String,
+    source_kind: SourceKind,
+    precedence_rank: u32,
+    #[serde(default)]
+    source_name: Option<String>,
+}
+
+/// Read `<policy_id>.json` beside an AI document and turn it into the
+/// provenance that document is allowed to claim.
+///
+/// A stored rank that contradicts the schema's fixed ladder is a corrupt
+/// envelope, not a novel rung — the same judgment punard's `policy.d`
+/// loaders make. `device_specific_override` has no fixed rung, so its
+/// stored rank is taken as data.
+fn read_envelope(path: &Path) -> Result<Provenance, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "no readable provenance envelope at {} ({e})",
+            path.display()
+        )
+    })?;
+    let envelope: AiSourceEnvelope = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "{} is not a valid policy-source envelope ({e})",
+            path.display()
+        )
+    })?;
+    if envelope
+        .source_kind
+        .fixed_rank()
+        .is_some_and(|fixed| fixed != envelope.precedence_rank)
+    {
+        return Err(format!(
+            "{} stores precedence_rank {} for source_kind {}",
+            path.display(),
+            envelope.precedence_rank,
+            envelope.source_kind.as_str()
+        ));
+    }
+    Ok(Provenance {
+        kind: envelope.source_kind,
+        rank: envelope.precedence_rank,
+        source_name: envelope
+            .source_name
+            .unwrap_or_else(|| envelope.policy_id.clone()),
+        policy_id: envelope.policy_id,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -385,12 +482,25 @@ aws_prod: deny\n";
         dir
     }
 
+    /// The shipped defaults plus the org drop directory — named `policy.d`
+    /// because that is what it is: the one directory punard reads too.
     fn personal(tag: &str, body: &str) -> (PathBuf, PathBuf) {
         let dir = dir(tag);
         let defaults = dir.join("ai-defaults.yaml");
         std::fs::write(&defaults, body).unwrap();
-        (defaults, dir.join("policy.d-ai"))
+        (defaults, dir.join("policy.d"))
     }
+
+    /// Drop one org AI document the way a real one arrives: the YAML plus
+    /// its policy-source envelope.
+    fn drop_org(org: &Path, policy_id: &str, body: &str, envelope: &str) {
+        std::fs::create_dir_all(org).unwrap();
+        std::fs::write(org.join(format!("{policy_id}.yaml")), body).unwrap();
+        std::fs::write(org.join(format!("{policy_id}.json")), envelope).unwrap();
+    }
+
+    const ENG_AI_V3_ENVELOPE: &str =
+        include_str!("../../../fixtures/policies/policy-source-eng-ai-v3.json");
 
     #[test]
     fn the_section_20_block_resolves_to_its_three_decisions() {
@@ -427,19 +537,29 @@ aws_prod: deny\n";
     #[test]
     fn an_org_layer_outranks_personal_defaults() {
         let (defaults, org) = personal("ladder", SECTION_20);
-        std::fs::create_dir_all(&org).unwrap();
-        std::fs::write(
-            org.join("eng-ai-v3.yaml"),
+        drop_org(
+            &org,
+            "eng-ai-v3",
             "ai:\n  agents:\n    default:\n      credentials:\n        github: deny\n        \
              aws_prod: allow\n",
+            ENG_AI_V3_ENVELOPE,
+        );
+        // The desired-state envelope enrollment writes into the same
+        // directory carries no AI document and must not become a layer.
+        std::fs::write(
+            org.join("eng-baseline-v12.json"),
+            r#"{"policy_id":"eng-baseline-v12","source_kind":"organization_baseline",
+                "precedence_rank":2,"policy":{}}"#,
         )
         .unwrap();
         let set = AiPolicySet::load(&defaults, &org).unwrap();
         assert!(set.enrolled());
+        assert_eq!(set.layers.len(), 2, "defaults + one org AI layer");
 
         let github = set.credential_decision("github");
         assert_eq!(github.grant, CredentialGrant::Deny);
         assert_eq!(github.policy_id, "eng-ai-v3");
+        assert_eq!(github.policy_name, "Acme Engineering AI Policy");
         assert!(github.from_org);
 
         // The org layer can also loosen; the ladder is precedence, not
@@ -457,8 +577,12 @@ aws_prod: deny\n";
     #[test]
     fn a_broken_org_layer_denies_everything_instead_of_failing_open() {
         let (defaults, org) = personal("broken", SECTION_20);
-        std::fs::create_dir_all(&org).unwrap();
-        std::fs::write(org.join("acme.yaml"), "ai: [this is not a policy]\n").unwrap();
+        drop_org(
+            &org,
+            "acme",
+            "ai: [this is not a policy]\n",
+            r#"{"policy_id":"acme","source_kind":"organization_baseline","precedence_rank":2}"#,
+        );
         let set = AiPolicySet::load(&defaults, &org).unwrap();
         let github = set.credential_decision("github");
         assert_eq!(github.grant, CredentialGrant::Deny);
@@ -466,11 +590,49 @@ aws_prod: deny\n";
         assert!(!set.warnings.is_empty());
     }
 
+    /// Provenance is not guessable — the rule punard's loader states, held
+    /// here too, because the two daemons must skip exactly the same files.
+    /// A YAML with no envelope, or one whose envelope lies about its rung,
+    /// is ignored: it never becomes a rank-2 organization layer just by
+    /// being named after one.
+    #[test]
+    fn a_yaml_without_a_truthful_envelope_is_ignored_not_obeyed() {
+        let (defaults, org) = personal("noprov", SECTION_20);
+        std::fs::create_dir_all(&org).unwrap();
+        std::fs::write(
+            org.join("mystery.yaml"),
+            "ai:\n  agents:\n    default:\n      credentials:\n        github: deny\n",
+        )
+        .unwrap();
+        drop_org(
+            &org,
+            "liar",
+            "ai:\n  agents:\n    default:\n      credentials:\n        aws_dev: allow\n",
+            r#"{"policy_id":"liar","source_kind":"organization_baseline","precedence_rank":1}"#,
+        );
+
+        let set = AiPolicySet::load(&defaults, &org).unwrap();
+        assert!(!set.enrolled(), "neither drop earned an org rung");
+        assert_eq!(
+            set.credential_decision("github").grant,
+            CredentialGrant::Allow,
+            "the personal default still answers"
+        );
+        assert_eq!(
+            set.credential_decision("aws_dev").grant,
+            CredentialGrant::Request
+        );
+        assert_eq!(set.warnings.len(), 2, "both were ignored loudly");
+        // Ignored, not `broken`: an unattributed file must not take every
+        // credential on the device down with it.
+        assert!(set.broken.is_empty());
+    }
+
     #[test]
     fn a_missing_or_malformed_defaults_document_refuses_to_start() {
         let missing = AiPolicySet::load(
             Path::new("/nonexistent/ai-defaults.yaml"),
-            Path::new("/nonexistent/ai"),
+            Path::new("/nonexistent/policy.d"),
         );
         assert!(missing.is_err());
 

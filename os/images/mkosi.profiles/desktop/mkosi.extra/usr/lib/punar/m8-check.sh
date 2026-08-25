@@ -643,10 +643,20 @@ else
     FAILED=1
 fi
 as_punar "${CTL}" --json agents access "${SID}" > "${RUN_DIR}/m8-access-ended.json" 2>/dev/null
+# The wire contract (docs/api/ipc.md section 12.2) is a two-shape field:
+# {"days":14,"active":true} while the session runs, {"days":14,"expires_at":"…"}
+# once it has ended. `active` is ABSENT on an ended session, not `false` —
+# omitting it is how the document says "the retention clock has started".
+# This row used to assert `.retention.active == false`, which the contract
+# never promised and which `null == false` fails. What it MEANT to test is
+# asserted instead, and more strictly than before: the window, a concrete
+# date, that date being the same deadline the stored record carries, and no
+# claim that an ended session is still running.
 jq_check "an ended session reports the concrete date it will be deleted, not a policy sentence" \
     "${RUN_DIR}/m8-access-ended.json" \
-    '.retention.days == 14 and .retention.active == false
-     and (.retention.expires_at | length) > 0'
+    ".retention.days == 14 and (.retention.active // false) == false
+     and (.retention.expires_at | length) > 0
+     and .retention.expires_at == \"${EXPIRES_AT}\""
 
 # --- 13. purge as the owner (spec 24.2: unconditional, for your own data) ----
 as_punar "${CTL}" privacy purge --session "${SID}" --yes \
