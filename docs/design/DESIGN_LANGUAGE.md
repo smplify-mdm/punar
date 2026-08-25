@@ -169,6 +169,11 @@ white `#F2F3F5`, bright-black `#7B8290`. Blue/magenta/cyan slots are
 desaturated blue-grays pending M1 tuning — the scheme stays near-monochrome
 with lime as the single accent, matching the plates.
 
+The full derivation of all sixteen ANSI slots from the panel block — so the
+terminal follows the palette without anyone transcribing a colour by hand — is
+specified in [`theme-system.md`](theme-system.md) §7.1, which supersedes this
+draft on adoption.
+
 ## 7. Plate semantics and voice (from the field-note editorial record)
 
 The internal editorial record for Field Note 001 (Confluence: SMPLIFY space,
@@ -232,7 +237,11 @@ choosing with Smplify nowhere in sight — and first-class when it is.
 4. Every first-party surface keyboard-operable (spec §12) — focus states use
    a 2px ink (or panel-fg) ring, offset 2px, no color dependence.
 5. Contrast: text meets WCAG AA on its surface (ink-3 on paper = 4.6:1 ✓;
-   panel-ink-3 reserved for ≥14px labels).
+   panel-ink-3 on panel measures **5.16:1** and needs no size caveat — the
+   earlier "reserved for ≥14px labels" restriction was written before the
+   ratio was computed, and is replaced by the measured floors in
+   [`theme-system.md`](theme-system.md) §4.2–§4.4, which bind every palette
+   rather than only this one).
 
 ## 10. Reference mockups
 
@@ -301,3 +310,37 @@ choosing with Smplify nowhere in sight — and first-class when it is.
   highest-severity slot; §8 personal calm as the default and org chrome as one
   appended slot, every element traced to its file and milestone with
   approvals, credentials and environments dashed).
+
+## 11. Companion designs
+
+Proposed, not yet adopted by a milestone. Each extends this document without
+amending its grammar; each carries its own claim register in the §7 stroke
+vocabulary.
+
+- [`theme-system.md`](theme-system.md) — **Themes.** A theme is a palette of
+  nineteen named colour roles plus a mood, never the grammar; every other
+  colour on the machine (ANSI slots, window borders, wallpaper marks, portal
+  preference) is derived, never authored. A machine-checkable contrast
+  contract refuses an illegible palette before a human sees it. Amends §6's
+  terminal-palette draft and §9.5's `panel-ink-3` caveat.
+- [`app-catalog.md`](app-catalog.md) — **Applications.** What ships
+  preinstalled and why the list is short; Flatpak as the single supported
+  runtime install path, forced by ADR-003's A/B slots; the catalog id as spec
+  §46's stable application name; install as a typed capability whose request
+  carries an id and never a package string. Owns the `trustTier` /
+  `containment` vocabulary jointly with the next entry.
+- [`execution-trust.md`](execution-trust.md) — **Execution trust.** Punar's
+  answer to Gatekeeper: one deliberate human decision per set of bytes of
+  *foreign origin*, gated by `fanotify` `FAN_OPEN_EXEC_PERM` inside `punard`,
+  consented through the M9 approval engine. Its limits section is written with
+  more care than its feature sections, per §7.
+
+**Recommended order, and the reason:** themes first (M13 — smallest surface,
+no daemon, no IPC method, no kernel primitive, and the one item on this list
+that improves the demo); the catalog second (its own workstream, because
+Flatpak is a substrate decision, not polish, and it defines the shared
+`trustTier` / `containment` vocabulary the third entry consumes); execution
+trust last, and only after a standalone `fanotify` spike in the CI VM has
+answered `execution-trust.md` §3.5 V2 and V3. None of the three adds a
+resident process, an enabled unit, or a timer; the combined budget arithmetic
+is in [`execution-trust.md`](execution-trust.md) §13.3.
