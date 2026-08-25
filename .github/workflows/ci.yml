@@ -11,10 +11,14 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   desktop-test  M1 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
-#                 in-guest canonical idle-RAM measurement, screenshot/RAM
-#                 artifact export (tools/boot-test.sh --mode desktop), then
-#                 the PERFORMANCE_BUDGETS.md gate
+#   desktop-test  M1+M2 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#                 in-guest canonical idle-RAM measurement, then the in-guest
+#                 M2 multitasking exercise (milestone-2.md §7: presets,
+#                 groups, floating, named workspaces, overview IPC, state
+#                 file, shell-restart restore — punar-m2-check.service,
+#                 verdict in m2-report.txt, hard gate in boot-test.sh),
+#                 screenshot/RAM/M2 artifact export (tools/boot-test.sh
+#                 --mode desktop), then the PERFORMANCE_BUDGETS.md gate
 #                 (tests/performance/check-budgets.sh: fail mean > 1536 MB,
 #                 warn > 1024 MB; TCG runs warn-only, labeled emulated)
 #
@@ -123,7 +127,11 @@ jobs:
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh \
             os/images/scripts/container-build.sh \
-            tests/performance/check-budgets.sh
+            tests/performance/check-budgets.sh \
+            os/modules/desktop/hypr/punar-layout.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-layout.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -193,22 +201,28 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-  # M1 graphical acceptance gate (milestone-1.md §7–§10). Boots the desktop
-  # image with -m 8192 -smp 4 -device virtio-vga + the punar.export
-  # virtio-serial channel, waits for PUNAR_DESKTOP_OK, then for the in-guest
-  # canonical idle-RAM measurement (10 min stabilize + 5 min window —
-  # PERFORMANCE_BUDGETS.md §2.1–2.2, ~16 min wall clock), collects the
-  # screenshot + RAM data exported by the guest, and gates the numbers
-  # against the budgets. ~45 min covers KVM boot + measurement + export;
-  # a TCG-degraded run (broken KVM) will exceed it — that failure mode is
-  # intentional surfacing, and the RAM gate itself is warn-only under TCG.
-  # "No mouse required" (the other M1 acceptance criterion) is not
+  # M1+M2 graphical acceptance gate (milestone-1.md §7–§10, milestone-2.md
+  # §7). Boots the desktop image with -m 8192 -smp 4 -device virtio-vga +
+  # the punar.export virtio-serial channel, waits for PUNAR_DESKTOP_OK,
+  # then for the in-guest canonical idle-RAM measurement (10 min stabilize
+  # + 5 min window — PERFORMANCE_BUDGETS.md §2.1–2.2, ~16 min wall clock),
+  # then the guest runs the M2 multitasking exercise (punar-m2-check.service
+  # strictly AFTER sampling, so the idle numbers stay clean) and exports
+  # screenshots + RAM data + the M2 report; boot-test.sh hard-fails on a
+  # PUNAR_M2_FAIL verdict, and the RAM numbers gate against the budgets.
+  # ~55 min covers KVM boot + measurement + M2 exercise + export; a
+  # TCG-degraded run (broken KVM) will exceed it — that failure mode is
+  # intentional surfacing; the RAM gate is warn-only under TCG, and a
+  # MISSING M2 report is warn (KVM) / info (TCG) — though a delivered
+  # PUNAR_M2_FAIL always fails.
+  # "No mouse required" (the other M1/M2 acceptance criterion) is not
   # CI-provable: it is a human keyboard-only walkthrough, with the keybind
-  # config baked into the image as the CI-checkable proxy (milestone-1.md §10).
+  # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
+  # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + RAM budget)
+    name: desktop-test (graphical gate + M2 exercise + RAM budget)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 55
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -239,7 +253,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + artifact export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2 exercise + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
@@ -249,16 +263,18 @@ jobs:
       # proof files are the primary diagnostics. The screenshot is warn-only:
       # the guest deliberately continues without one (grim failure is itself
       # a signal), and boot-test already annotated its absence.
-      - name: Upload desktop screenshot
+      - name: Upload desktop screenshots (M1 idle + M2 overview)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: punar-desktop-screenshot
-          path: os/images/out/desktop-proof/punar-desktop-screenshot.png
+          path: |
+            os/images/out/desktop-proof/punar-desktop-screenshot.png
+            os/images/out/desktop-proof/punar-m2.png
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload RAM report and measurement data
+      - name: Upload RAM report, M2 report and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -267,6 +283,8 @@ jobs:
             os/images/out/desktop-proof/ram-report.txt
             os/images/out/desktop-proof/ram-samples.txt
             os/images/out/desktop-proof/meminfo
+            os/images/out/desktop-proof/m2-report.txt
+            os/images/out/desktop-proof/m2-*.json
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

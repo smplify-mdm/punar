@@ -85,6 +85,14 @@ Known deviation from budgets §2.1 item 5: the VM runs with `-nic none`
 networking up. Recorded here until guest networking lands; the deviation
 makes the measured number, if anything, slightly optimistic.
 
+M2 interplay (milestone-2.md §7): the in-guest M2 multitasking exercise
+(`punar-m2-check.service`, started by `idle-ram.sh`) runs **strictly after**
+the 5-minute sampling window closes and before the artifact export — it
+opens windows and the overview, so ordering it after sampling is what keeps
+the canonical idle measurement unpolluted. The RAM numbers and this gate
+are therefore unchanged by M2; the M2 verdict is a separate gate applied by
+`tools/boot-test.sh` (phase 4) on the exported `m2-report.txt`.
+
 ## Budgets applied (`check-budgets.sh`)
 
 Values mirror `PERFORMANCE_BUDGETS.md` §1.1 (which mirrors spec §6) and must

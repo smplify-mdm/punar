@@ -1,13 +1,18 @@
 # Punar
 
 > **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done; Milestone 1
-> (Lightweight graphical workstation) is in progress.** The minimal `punar-dev`
-> image builds reproducibly and boots in CI
-> ([run 32788238871](https://github.com/smplify-mdm/punar/actions/runs/32788238871),
-> `PUNAR_BOOT_OK`). The `punar-desktop` image (Hyprland + punar-shell) is
-> authored and config-validated on disk but has not yet built or booted in CI.
-> See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists
-> versus what is planned.
+> (Lightweight graphical workstation) has a green CI gate with one acceptance
+> item left; Milestone 2 (Native multitasking) is in progress.** The
+> `punar-desktop` image (Hyprland + punar-shell) builds, boots, and passes the
+> graphical gate in CI
+> ([run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681),
+> `PUNAR_DESKTOP_OK`; idle RAM measured at 1162 MB mean — under the 1.5 GB hard
+> ceiling, over the 1.0 GB target). M1's keyboard-only human walkthrough is
+> still pending. M2 multitasking (window groups, floating polish, layout
+> presets, the SUPER+TAB overview, scratchpads, named project workspaces) is
+> authored and config/lint-validated on disk; its in-VM CI exercise has not
+> yet run. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what
+> exists versus what is proven.
 
 Punar, by Smplify, is a lightweight, privacy-first, AI-native Linux operating
 system for developer workstations. It targets existing 8–16 GB enterprise

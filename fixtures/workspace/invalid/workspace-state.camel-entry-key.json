@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "updated": "2026-08-25T09:30:00Z",
+  "layoutPreset": "balanced",
+  "workspaces": [
+    { "id": 1, "name": "atlas", "layoutPreset": "focus" }
+  ]
+}

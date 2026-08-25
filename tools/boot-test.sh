@@ -31,19 +31,30 @@
 #                                the canonical stabilization.
 #     3. "PUNAR_EXPORT_END" on the export channel — the guest streams
 #        `tar -C /run/punar | base64` (screenshot.png, meminfo,
-#        ram-samples.txt) between PUNAR_EXPORT_BEGIN/END sentinels.
+#        ram-samples.txt, and since M2 the m2-report.txt / punar-m2.png /
+#        m2-*.json exercise artifacts) between PUNAR_EXPORT_BEGIN/END
+#        sentinels. The M2 exercise (punar-m2-check.service, started by
+#        idle-ram.sh strictly between the sampling window and the export)
+#        runs inside this phase's wait — EXPORT_TIMEOUT covers it.
+#     4. M2 verdict (milestone-2.md §7): parse the exported m2-report.txt.
+#        PUNAR_M2_FAIL (or a truncated report) hard-fails the gate; a
+#        MISSING report is a ::warning:: under KVM and info-only under TCG
+#        (an emulated run that could not even export is already flagged).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
+#     punar-m2.png                  grim capture with the overview open (M2)
 #     ram-report.txt                key=value idle-RAM numbers + environment
 #     ram-samples.txt, meminfo      raw guest measurement data
+#     m2-report.txt, m2-*.json      M2 exercise verdict + hyprctl snapshots
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
 #   PERFORMANCE_BUDGETS.md (fail > 1536 MB mean, warn > 1024 MB).
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
-#   and the RAM gate rests on the serial numbers.
+#   and the RAM gate rests on the serial numbers. The M2 verdict is the
+#   one exception: an exported report that says PUNAR_M2_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -62,7 +73,9 @@
 #                          fixed 10 min + 5 min measurement
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
-#                          (default: 180 KVM, 600 TCG)
+#                          — must also cover the in-guest M2 exercise,
+#                          which runs between the RAM result and the export
+#                          (default: 900 KVM, 2400 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
 #                          (default: os/images/out/desktop-proof)
 #
@@ -175,7 +188,9 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     DEFAULT_BOOT_TIMEOUT=300
     DEFAULT_DESKTOP_TIMEOUT=900
     DEFAULT_RAM_TIMEOUT=1200
-    DEFAULT_EXPORT_TIMEOUT=180
+    # Covers the in-guest M2 exercise (a few minutes under KVM) that runs
+    # before the guest starts streaming the export.
+    DEFAULT_EXPORT_TIMEOUT=900
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -183,7 +198,9 @@ else
     DEFAULT_BOOT_TIMEOUT=1200
     DEFAULT_DESKTOP_TIMEOUT=3600
     DEFAULT_RAM_TIMEOUT=2400
-    DEFAULT_EXPORT_TIMEOUT=600
+    # TCG: the in-guest M2 exercise before the export is the slow part
+    # (window spawns, quickshell relaunch — bounded at 25 min in-guest).
+    DEFAULT_EXPORT_TIMEOUT=2400
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -321,9 +338,12 @@ run_desktop() {
 
     mkdir -p "${PROOF_DIR}"
     rm -f "${PROOF_DIR}/punar-desktop-screenshot.png" \
+          "${PROOF_DIR}/punar-m2.png" \
           "${PROOF_DIR}/ram-report.txt" \
           "${PROOF_DIR}/ram-samples.txt" \
           "${PROOF_DIR}/meminfo" \
+          "${PROOF_DIR}/m2-report.txt" \
+          "${PROOF_DIR}"/m2-*.json \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -408,9 +428,16 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt meminfo; do
+            for f in ram-samples.txt meminfo m2-report.txt punar-m2.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
+                fi
+            done
+            # M2 hyprctl -j snapshots (m2-layout-*.json, m2-clients*.json,
+            # m2-workspaces*.json) — diagnostics for the phase-4 verdict.
+            for f in "${guest_dir}"/m2-*.json; do
+                if [ -f "${f}" ]; then
+                    cp "${f}" "${PROOF_DIR}/"
                 fi
             done
         else
@@ -441,6 +468,39 @@ run_desktop() {
     } > "${PROOF_DIR}/ram-report.txt"
 
     preserve_serial_log
+
+    # Phase 4: M2 exercise verdict (milestone-2.md §7). The guest wrote
+    # /run/punar/m2-report.txt (per-assertion ok/FAIL lines + a final
+    # PUNAR_M2_OK / PUNAR_M2_FAIL line) via punar-m2-check.service; it
+    # arrived in the phase-3 export. Hard gate: a delivered FAIL — or a
+    # truncated report, meaning the guest crashed mid-exercise — fails
+    # this script. A MISSING report degrades: the report is also echoed to
+    # the serial console, so serial is checked as the fallback verdict;
+    # with no verdict anywhere it is a ::warning:: under KVM and info-only
+    # under TCG (an emulated run is already flagged and not M2-gated).
+    local m2_report="${PROOF_DIR}/m2-report.txt"
+    if [ -f "${m2_report}" ]; then
+        if grep -q 'PUNAR_M2_FAIL' "${m2_report}"; then
+            echo "error: M2 exercise reported PUNAR_M2_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m2_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M2_OK' "${m2_report}"; then
+            echo "==> M2 exercise: PUNAR_M2_OK ($(grep -c '^ok' "${m2_report}" || true) assertions passed)"
+        else
+            echo "error: m2-report.txt carries no PUNAR_M2_OK/PUNAR_M2_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m2_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M2_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M2 exercise reported PUNAR_M2_FAIL on the serial console (export did not deliver m2-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M2_OK' "${SERIAL_LOG}"; then
+        echo "==> M2 exercise: PUNAR_M2_OK (verdict from serial console; export did not deliver m2-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m2-report.txt in the export and no M2 verdict on serial — the M2 exercise did not run"
+    else
+        echo "==> M2 exercise: no report under TCG (informational only; emulated runs are not M2-gated)"
+    fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"
     echo "==> Idle RAM (${env_label}): mean=${ram_mean} MB max=${ram_max} MB — verdict is check-budgets.sh's"

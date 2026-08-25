@@ -1,0 +1,25 @@
+# M2 in-VM multitasking exercise (milestone-2.md §7). Runs m2-check.sh as
+# the session user; the script discovers the Hyprland/Wayland session env
+# from /run/user/<uid> itself.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) AFTER the
+# canonical RAM sampling window completes and BEFORE the /run/punar
+# artifact export, so the idle measurement is never polluted and the
+# m2-report.txt / punar-m2.png / m2-*.json files ship in the existing
+# export tar. Same not-enabled pattern as punar-idle-ram.service — no
+# .wants symlink needed, so the mkosi preset-wipe lesson
+# (milestone-1.md; vendor-level wants only) does not even come into play.
+
+[Unit]
+Description=Punar M2 multitasking exercise (CI)
+
+[Service]
+Type=oneshot
+User=punar
+# Generous for TCG-emulated CI runs (window spawns and the quickshell
+# relaunch are the slow steps); the KVM path completes in a few minutes.
+TimeoutStartSec=25min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m2-check.sh

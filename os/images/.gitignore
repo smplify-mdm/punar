@@ -9,6 +9,7 @@ mkosi.output/
 # the versioned parts of mkosi.extra (greetd, usr/lib/punar, systemd units,
 # tmpfiles) live outside these paths.
 mkosi.profiles/desktop/mkosi.extra/etc/xdg/
+mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-layout.sh
 mkosi.profiles/desktop/mkosi.extra/etc/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/

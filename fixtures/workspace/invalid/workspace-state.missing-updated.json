@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "layoutPreset": "balanced",
+  "workspaces": [
+    { "id": 1, "name": "atlas" }
+  ]
+}

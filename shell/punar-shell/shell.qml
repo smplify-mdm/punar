@@ -1,23 +1,37 @@
-// punar-shell — Quickshell entrypoint (Milestone 1).
+// punar-shell — Quickshell entrypoint (Milestones 1–2).
 //
-// Top bar + command center overlay, implementing the field-note designs:
+// Top bar + command center overlay + SUPER+TAB overview, implementing the
+// field-note designs:
 //   docs/design/DESIGN_LANGUAGE.md (binding)
-//   docs/design/mockups/command-approval.html (Sect I — acceptance reference)
+//   docs/design/mockups/command-approval.html (Sect I — command center)
+//   docs/design/mockups/desktop-multitasking.html (Plate D-007 — overview)
 // All design values flow through the Theme singleton (punar-tokens.json).
 
+import QtQuick
 import Quickshell
 import Quickshell.Io
 import "Bar"
 import "CommandCenter"
+import "Overview"
+import "Services"
 
 ShellRoot {
     id: shellRoot
+
+    // Instantiate WorkspaceState at startup (singletons are lazy): it
+    // restores stored workspace names via `renameworkspace` dispatches and
+    // persists renames/preset changes to ~/.local/state/punar/workspaces.json
+    // (milestone-2.md §6).
+    Component.onCompleted: WorkspaceState.init()
 
     Bar {
         onBarCreated: readyMarker.running = true
     }
 
     CommandCenter {
+    }
+
+    Overview {
     }
 
     // Ready marker (milestone-1.md §7 / survey decision 6): once the bar is

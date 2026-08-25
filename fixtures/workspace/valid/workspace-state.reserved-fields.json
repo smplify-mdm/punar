@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "updated": "2026-08-25T10:15:30.500Z",
+  "layoutPreset": "stack",
+  "workspaces": [
+    { "id": 1, "name": "atlas", "layout_preset": "custom", "monitor": "DP-1" },
+    { "id": 4, "name": "Research 2" }
+  ]
+}

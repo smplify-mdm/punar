@@ -11,9 +11,11 @@ Description=Punar idle-RAM measurement and artifact export
 
 [Service]
 Type=oneshot
-# 10 min stabilize + 5 min sampling + export, with generous headroom for
-# TCG-emulated CI runs.
-TimeoutStartSec=45min
+# 10 min stabilize + 5 min sampling + the synchronous M2 exercise
+# (punar-m2-check.service, itself bounded at 25 min — started by
+# idle-ram.sh between sampling and export, milestone-2.md §7) + export,
+# with generous headroom for TCG-emulated CI runs.
+TimeoutStartSec=75min
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/lib/punar/idle-ram.sh

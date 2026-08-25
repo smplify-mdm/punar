@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/workspace/workspace-state.json",
+  "title": "Workspace state file",
+  "description": "Persisted project-workspace state, ~/.local/state/punar/workspaces.json (spec sections 13.5, 14.1, 14.3; exact shape decided in docs/development/milestone-2.md section 6). Machine-emitted JSON runtime record. Writer in Milestone 2 is punar-shell (QML FileView, atomic tmp+rename), debounced on renameworkspace events and layout-preset changes; the punar-workspace daemon (spec section 11.5) takes over as writer in Milestone 3+. The typed Rust twin is crates/punar-workspace (WorkspacesFile / WorkspaceState). One deliberate camelCase exception: the top-level key is 'layoutPreset', fixed verbatim by the milestone-2 decision record and asserted by the M2 CI exercise; all other keys are snake_case per the runtime-record convention. Two ordering rules are enforced by the writer, not expressible here: 'workspaces' is sorted by strictly ascending 'id' (which also forbids duplicate ids).",
+  "type": "object",
+  "properties": {
+    "version": {
+      "title": "State schema version",
+      "description": "Version of this file's shape. Const 1 for this schema; readers reject files declaring a newer version and a breaking change bumps the version.",
+      "const": 1
+    },
+    "updated": {
+      "title": "Last write time",
+      "description": "RFC 3339 timestamp of the last write, e.g. 2026-08-25T09:30:00Z (milestone-2 section 6: UTC ISO-8601).",
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    },
+    "layoutPreset": {
+      "title": "Global active layout preset",
+      "description": "The active layout preset (spec section 13.5); presets are global in Milestone 2. The M2 writer emits only 'balanced', 'columns', 'rows', 'focus', or 'stack': 'grid' is a spec 13.5 name with no shipped mapping in M2 (Hyprland 0.56.2 has no native grid algorithm) and 'custom' is reserved for a layout diverged from any preset — both are admitted for forward compatibility with the Milestone 3+ daemon.",
+      "$ref": "#/$defs/layout_preset"
+    },
+    "workspaces": {
+      "title": "Named workspaces",
+      "description": "Entries only for workspaces with non-empty names, sorted by strictly ascending id (writer-enforced ordering).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/workspace_state"
+      }
+    }
+  },
+  "required": ["version", "updated", "layoutPreset", "workspaces"],
+  "additionalProperties": false,
+  "$defs": {
+    "layout_preset": {
+      "title": "Layout preset name",
+      "description": "The six spec section 13.5 preset names plus 'custom'. Lowercase snake_case values per the enum convention.",
+      "type": "string",
+      "enum": ["balanced", "columns", "rows", "focus", "stack", "grid", "custom"]
+    },
+    "workspace_state": {
+      "title": "Workspace entry",
+      "description": "One named project workspace (spec section 14). Milestone 2 writes only 'id' and 'name'; 'layout_preset' and 'monitor' are optional fields reserved for the Milestone 3+ daemon and never emitted by the M2 shell.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "title": "Workspace number",
+          "description": "Hyprland workspace id, >= 1. Special workspaces (negative ids, special: names) are never persisted.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [1, 2]
+        },
+        "name": {
+          "title": "Project workspace name",
+          "description": "Milestone-2 section 6 name rule: 1-32 characters, ASCII alphanumeric first character, then ASCII alphanumerics, spaces, underscores, or hyphens. No commas (Hyprland's socket2 renameworkspace event frames as ID,NAME) and no leading 'special' (Hyprland's reserved special-workspace prefix, excluded via the 'not' subschema).",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$",
+          "not": {
+            "pattern": "^special"
+          },
+          "examples": ["atlas", "punar", "Research"]
+        },
+        "layout_preset": {
+          "title": "Per-workspace preset override (reserved)",
+          "description": "Reserved for Milestone 3+: layout presets are global in Milestone 2 (milestone-2 section 2), so the M2 writer never emits this field.",
+          "$ref": "#/$defs/layout_preset"
+        },
+        "monitor": {
+          "title": "Last monitor (reserved)",
+          "description": "Reserved for Milestone 3+: monitor memory (spec section 15) is out of Milestone 2 scope, so the M2 writer never emits this field.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["DP-1"]
+        }
+      },
+      "required": ["id", "name"],
+      "additionalProperties": false
+    }
+  }
+}

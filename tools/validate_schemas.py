@@ -58,6 +58,7 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("schemas/policy/examples/model-governance-*", "schemas/policy/model-governance.json"),
     ("schemas/policy/examples/policy-source-*", "schemas/policy/policy-source.json"),
     ("schemas/project/examples/*", "schemas/project/project-environment.json"),
+    ("schemas/workspace/examples/*", "schemas/workspace/workspace-state.json"),
     # --- fixtures/<domain>/{valid,invalid}/ ---------------------------------
     ("fixtures/ai-agent/*/agent-definition.*", "schemas/ai-agent/agent-definition.json"),
     ("fixtures/ai-agent/*/ledger-summary.*", "schemas/ai-agent/ledger-summary.json"),
@@ -72,6 +73,7 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/policy/*/model-governance-*", "schemas/policy/model-governance.json"),
     ("fixtures/policy/*/policy-source-*", "schemas/policy/policy-source.json"),
     ("fixtures/project/*/project-environment.*", "schemas/project/project-environment.json"),
+    ("fixtures/workspace/*/workspace-state.*", "schemas/workspace/workspace-state.json"),
     # --- seed data: fixtures/agents/ (fixtures/agents/README.md table) ------
     ("fixtures/agents/claude-code.registry-record.json", "schemas/ai-agent/registry-record.json"),
     ("fixtures/agents/claude-code.json", "schemas/ai-agent/agent-definition.json"),

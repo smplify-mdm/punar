@@ -44,6 +44,16 @@ mean=$((sum / SAMPLE_COUNT))
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
 echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 
+# M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
+# SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the
+# sampling window above — so the idle measurement is never polluted — and
+# strictly BEFORE the export below, so the m2-report.txt / punar-m2.png /
+# m2-*.json files it writes into /run/punar ship in the same tar. Never
+# fatal here: the verdict lives in m2-report.txt and the host gate
+# (tools/boot-test.sh) parses it; a missing report is its own signal.
+systemctl start punar-m2-check.service \
+    || echo "punar: idle-ram: punar-m2-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

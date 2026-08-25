@@ -36,6 +36,9 @@ sleep 2
 # Proof of real rendering (llvmpipe): grim uses wlr-screencopy against the
 # live compositor. Non-fatal — the marker chain must not die on a
 # screenshot failure; CI treats a missing screenshot as its own signal.
+# Dismiss transient compositor notices (e.g. the 0.56 .conf-format
+# deprecation banner) so the proof screenshot shows the desktop, not chrome.
+hyprctl dismissnotify -1 >/dev/null 2>&1 || true
 grim "${RUN_DIR}/screenshot.png" || echo "punar: desktop-ready: grim screenshot failed" >&2
 
 cat /proc/meminfo > "${RUN_DIR}/meminfo" 2>/dev/null || true

@@ -31,13 +31,17 @@ PanelWindow {
 
     Component.onCompleted: root.barCreated()
 
-    // Active Hyprland workspace: named workspaces show their name, numeric
-    // ones their number (Quickshell.Hyprland keeps this live via IPC).
+    // Active Hyprland workspace in the masthead grammar (M2 named project
+    // workspaces): a named workspace shows its NAME, an unnamed one falls
+    // back to the number — Hyprland reports unnamed workspaces with the
+    // numeric id as the name, which WorkspaceState.isNamed filters out.
+    // Quickshell.Hyprland keeps this live via socket2 events (no polling);
+    // renames land here the moment `renameworkspace` fires.
     readonly property string workspaceLabel: {
         var ws = Hyprland.focusedWorkspace;
         if (ws === null)
             return "1";
-        return String(ws.name !== "" ? ws.name : ws.id);
+        return WorkspaceState.isNamed(ws) ? ws.name : String(ws.id);
     }
 
     // Meta-row label grammar: Geist Mono, tracked, uppercase (§1 type roles).
@@ -80,15 +84,19 @@ PanelWindow {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 6
 
+            // Unmanaged-first (§8): compliance chrome renders only when
+            // enrolled — a personal device's bar is just name + clock.
             Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 5
                 height: 5
                 radius: 2.5
+                visible: Status.enrolled
                 color: Status.color // stub singleton — M5 wires real compliance
             }
             MetaLabel {
                 anchors.verticalCenter: parent.verticalCenter
+                visible: Status.enrolled
                 text: Status.label + " · "
             }
             MetaLabel {
