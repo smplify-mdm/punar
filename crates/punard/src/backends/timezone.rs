@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use punar_common::CapabilityId;
+use punar_common::{CapabilityId, Risk};
 use serde_json::{Value, json};
 
 use crate::capability::{BackendError, Capability, DescriptorMeta};
@@ -78,7 +78,7 @@ impl Capability for TimezoneBackend {
     fn descriptor(&self) -> DescriptorMeta {
         DescriptorMeta {
             capability: CapabilityId::new(CAPABILITY_ID).expect("static id is valid"),
-            risk: "low",
+            risk: Risk::Low,
             verification: "symlink",
             audit_category: "system",
             state_schema: Some(json!({

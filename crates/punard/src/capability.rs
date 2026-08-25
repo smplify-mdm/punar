@@ -1,19 +1,13 @@
 //! The typed capability contract (SPEC sections 10, 41) and the registry.
 //!
 //! Every privileged change flows through a [`Capability`] implementation —
-//! observe / apply / verify with a schema-conformant descriptor. There is no
-//! other mutation path in the daemon.
-//!
-//! INTERFACE NOTE (for the M3 integrate agent): [`Descriptor`] serializes to
-//! the `schemas/capability/capability-descriptor.json` shape verbatim. If
-//! the concurrent `punar-common` work lands a shared descriptor struct (for
-//! `punarctl`'s typed rendering), replace this one with it — the field set
-//! and names here are the schema's, so the swap should be mechanical.
+//! observe / apply / verify with a schema-conformant descriptor
+//! ([`punar_common::CapabilityDescriptor`]). There is no other mutation path
+//! in the daemon.
 
 use std::fmt;
 
-use punar_common::CapabilityId;
-use serde::Serialize;
+use punar_common::{CapabilityDescriptor, CapabilityId, Decision, Risk};
 use serde_json::Value;
 
 /// Backend failure (observe/apply/verify). Message text is operator-facing
@@ -29,61 +23,40 @@ impl BackendError {
     }
 }
 
-/// Static (state-independent) part of a capability's descriptor.
+/// Static (state-independent) part of a capability's descriptor. The
+/// registry combines this with live state into a full
+/// [`CapabilityDescriptor`] via [`DescriptorMeta::describe`].
 #[derive(Debug, Clone)]
 pub struct DescriptorMeta {
     pub capability: CapabilityId,
-    pub risk: &'static str,
+    pub risk: Risk,
     pub verification: &'static str,
     pub audit_category: &'static str,
     pub state_schema: Option<Value>,
     pub allowed_desired_states: Option<Vec<Value>>,
 }
 
-/// A full capability-registry descriptor, serializing exactly per
-/// `schemas/capability/capability-descriptor.json`.
-///
-/// M3 constants (docs/development/milestone-3.md section 4): every shipped
-/// capability is supported, mutable, reboot-free, locally managed
-/// (personal mode), root-gated, and approval-free.
-#[derive(Debug, Clone, Serialize)]
-pub struct Descriptor {
-    pub capability: String,
-    pub supported: bool,
-    pub current_state: Value,
-    pub desired_state: Value,
-    pub mutable: bool,
-    pub requires_reboot: bool,
-    pub risk: String,
-    pub managed_by: String,
-    pub verification: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state_schema: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_desired_states: Option<Vec<Value>>,
-    pub privilege_required: String,
-    pub approval_requirement: String,
-    pub audit_category: String,
-}
-
-impl Descriptor {
-    /// Build the full descriptor from static meta plus live state.
-    pub fn from_meta(meta: &DescriptorMeta, current_state: Value, desired_state: Value) -> Self {
-        Descriptor {
-            capability: meta.capability.to_string(),
+impl DescriptorMeta {
+    /// Build the full schema-shaped descriptor from static meta plus live
+    /// state. M3 constants (docs/development/milestone-3.md section 4):
+    /// every shipped capability is supported, mutable, reboot-free, locally
+    /// managed (personal mode), root-gated, and approval-free.
+    pub fn describe(&self, current_state: Value, desired_state: Value) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            capability: self.capability.clone(),
             supported: true,
             current_state,
             desired_state,
             mutable: true,
             requires_reboot: false,
-            risk: meta.risk.to_string(),
+            risk: self.risk,
             managed_by: "local".to_string(),
-            verification: meta.verification.to_string(),
-            state_schema: meta.state_schema.clone(),
-            allowed_desired_states: meta.allowed_desired_states.clone(),
-            privilege_required: "root".to_string(),
-            approval_requirement: "allow".to_string(),
-            audit_category: meta.audit_category.to_string(),
+            verification: self.verification.to_string(),
+            state_schema: self.state_schema.clone(),
+            allowed_desired_states: self.allowed_desired_states.clone(),
+            privilege_required: Some("root".to_string()),
+            approval_requirement: Some(Decision::Allow),
+            audit_category: Some(self.audit_category.to_string()),
         }
     }
 }
@@ -159,9 +132,8 @@ pub mod mock {
     //! integration tests; kept in the library so external test binaries can
     //! build registries around it. Not part of the shipped daemon wiring.
 
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -218,7 +190,7 @@ pub mod mock {
         fn descriptor(&self) -> DescriptorMeta {
             DescriptorMeta {
                 capability: self.inner.id.clone(),
-                risk: "low",
+                risk: Risk::Low,
                 verification: "mock",
                 audit_category: "system",
                 state_schema: Some(serde_json::json!({ "type": "string" })),
@@ -268,11 +240,9 @@ mod tests {
     #[test]
     fn descriptor_serializes_to_the_schema_field_set() {
         let mock = MockCapability::new("mock.widget", Value::String("on".into()));
-        let d = Descriptor::from_meta(
-            &mock.descriptor(),
-            Value::String("on".into()),
-            Value::String("on".into()),
-        );
+        let d = mock
+            .descriptor()
+            .describe(Value::String("on".into()), Value::String("on".into()));
         let v = serde_json::to_value(&d).unwrap();
         let obj = v.as_object().unwrap();
         for key in [
@@ -298,6 +268,7 @@ mod tests {
         assert_eq!(obj["managed_by"], "local");
         assert_eq!(obj["privilege_required"], "root");
         assert_eq!(obj["approval_requirement"], "allow");
+        assert_eq!(obj["risk"], "low");
     }
 
     #[test]

@@ -1,5 +1,7 @@
-# Punar CI — Milestones 0+1 (spec 76: M0 "reproducible build and VM boot",
-# M1 "idle RAM measured" graphical acceptance; ADR-001, milestone-1.md §10).
+# Punar CI — Milestones 0–3 (spec 76: M0 "reproducible build and VM boot",
+# M1 "idle RAM measured" graphical acceptance, M2 multitasking exercise,
+# M3 daemon/typed-IPC/capability/audit exercise; ADR-001, milestone-1.md §10,
+# milestone-2.md §7, milestone-3.md §8–§9).
 #
 # Jobs:
 #   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
@@ -11,16 +13,21 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   desktop-test  M1+M2 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
-#                 in-guest canonical idle-RAM measurement, then the in-guest
-#                 M2 multitasking exercise (milestone-2.md §7: presets,
-#                 groups, floating, named workspaces, overview IPC, state
-#                 file, shell-restart restore — punar-m2-check.service,
-#                 verdict in m2-report.txt, hard gate in boot-test.sh),
-#                 screenshot/RAM/M2 artifact export (tools/boot-test.sh
-#                 --mode desktop), then the PERFORMANCE_BUDGETS.md gate
-#                 (tests/performance/check-budgets.sh: fail mean > 1536 MB,
-#                 warn > 1024 MB; TCG runs warn-only, labeled emulated)
+#   desktop-test  M1+M2+M3 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#                 in-guest canonical idle-RAM measurement + services-RSS
+#                 sample (punard.service cgroup, summed PSS), then the
+#                 in-guest M2 multitasking exercise (milestone-2.md §7 —
+#                 punar-m2-check.service, verdict in m2-report.txt) and the
+#                 in-guest M3 daemon/CLI exercise (milestone-3.md §8 —
+#                 punar-m3-check.service: socket perms, typed IPC, authz
+#                 denial voice, audit schema, firewall drift/apply, no-exec
+#                 probe; verdict in m3-report.txt; both hard-gated in
+#                 boot-test.sh), artifact export (tools/boot-test.sh --mode
+#                 desktop), then the PERFORMANCE_BUDGETS.md gates
+#                 (tests/performance/check-budgets.sh: whole-system fail
+#                 mean > 1536 MB / warn > 1024 MB; services fail > 150 MB /
+#                 warn > 100 MB, absent fails even under TCG; other TCG
+#                 breaches warn-only, labeled emulated)
 #
 # Runner pin: ubuntu-24.04, NOT ubuntu-latest — GitHub is migrating -latest
 # labels toward 26.04 during 2026 (research/crosscutting.md §2.1); an OS
@@ -105,7 +112,10 @@ jobs:
     # Raised from M0's 45: the desktop profile adds chromium/qt6/mesa
     # (larger pacman download + a substantially larger qcow2 to compress and
     # upload; size is an estimate until the first run — milestone-1.md §3).
-    # To be tightened once real run times exist.
+    # Since M3 the desktop build also compiles punard/punarctl in-container
+    # (native x86_64 release build, a few minutes cold, ~nothing warm —
+    # the cargo cache rides os/images/cache). To be tightened once real run
+    # times exist.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -115,12 +125,17 @@ jobs:
       # trap-invoked cleanup). Local/CI parity over distro convenience.
       # Package cache for the pinned snapshot — one good run fills it, after
       # which builds pull ~nothing from archive.archlinux.org (which throttles
-      # large pulls). Keyed on the snapshot pin: new pin = new cache.
-      - name: Cache mkosi package downloads
+      # large pulls). Since M3 the same directory also carries CARGO_HOME +
+      # the cargo target dir for the in-container punard/punarctl build
+      # (milestone-3.md §7), so the key includes Cargo.lock; the restore-key
+      # prefix keeps the snapshot pin as the cache boundary (new pin = new
+      # cache, a lock change reuses the same snapshot's packages).
+      - name: Cache mkosi package downloads and cargo build
         uses: actions/cache@v4
         with:
           path: os/images/cache
-          key: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}
+          key: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}-
 
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
@@ -129,9 +144,9 @@ jobs:
             os/images/scripts/container-build.sh \
             tests/performance/check-budgets.sh \
             os/modules/desktop/hypr/punar-layout.sh \
-            os/modules/desktop/hypr/punar-layout.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -220,9 +235,12 @@ jobs:
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2 exercise + RAM budget)
+    name: desktop-test (graphical gate + M2/M3 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    # Raised from M2's 55: the in-guest M3 exercise (punar-m3-check.service,
+    # bounded at 10 min in-guest, seconds under KVM) runs between the M2
+    # exercise and the export.
+    timeout-minutes: 65
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -274,7 +292,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload RAM report, M2 report and measurement data
+      - name: Upload RAM report, M2/M3 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -285,6 +303,9 @@ jobs:
             os/images/out/desktop-proof/meminfo
             os/images/out/desktop-proof/m2-report.txt
             os/images/out/desktop-proof/m2-*.json
+            os/images/out/desktop-proof/m3-report.txt
+            os/images/out/desktop-proof/m3-*.json
+            os/images/out/desktop-proof/m3-deny-stderr.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

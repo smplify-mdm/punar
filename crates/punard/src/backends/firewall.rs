@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use punar_common::CapabilityId;
+use punar_common::{CapabilityId, Risk};
 use serde_json::{Value, json};
 
 use crate::capability::{BackendError, Capability, DescriptorMeta};
@@ -118,7 +118,7 @@ impl Capability for FirewallBackend {
     fn descriptor(&self) -> DescriptorMeta {
         DescriptorMeta {
             capability: CapabilityId::new(CAPABILITY_ID).expect("static id is valid"),
-            risk: "high",
+            risk: Risk::High,
             verification: "nftables",
             audit_category: "security",
             state_schema: Some(json!({ "enum": ["enabled", "disabled"] })),

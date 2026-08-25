@@ -1,0 +1,23 @@
+# punar-base: Punar firewall baseline (SPEC section 44.4 default-deny inbound;
+# docs/development/milestone-3.md §4.1). Applied and verified EXCLUSIVELY by
+# punard's security.firewall capability (nft -f, fixed argv) — never enable
+# nftables.service, which would make a second owner of the ruleset.
+#
+# The leading `destroy table` (delete-if-exists; nftables >= 1.0.8, the
+# snapshot ships 1.1.6) makes re-apply idempotent — verified on 1.1.6 during
+# fixture capture (crates/punard/tests/fixtures/README.md). icmpv6 accept is
+# required or IPv6 neighbor discovery dies on real hardware; the CI VM is
+# -nic none, so nothing at runtime depends on the network.
+destroy table inet punar-base
+table inet punar-base {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iif "lo" accept
+    ip protocol icmp accept
+    meta l4proto ipv6-icmp accept
+  }
+  chain forward { type filter hook forward priority filter; policy drop; }
+  chain output  { type filter hook output  priority filter; policy accept; }
+}

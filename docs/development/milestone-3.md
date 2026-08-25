@@ -56,7 +56,8 @@ when touched).
   [os default]) → **boot reconcile** (observe+verify, apply only
   `security.firewall` if the table is absent — the one boot-time apply,
   because the firewall's desired default is a fixed os default, audited
-  `source:"os"`) → bind socket, perms, listen.
+  `source:"service"` — errata: originally planned `"os"`, which is not a
+  `principal_kind` enum value; see §12) → bind socket, perms, listen.
 - **State:** registry is static (3 capability implementations behind one
   trait: `observe() / apply(desired) / verify(desired) / descriptor()`);
   desired.json is the only mutable store (root 0600); every
@@ -394,6 +395,99 @@ Asserted, not yet verified (lands with implementation): `nft -j` output
 shape against 1.1.6 (observe parser must be written against the real JSON),
 `destroy table` in `-f` files on 1.1.6 (documented ≥1.0.8; confirm in-image),
 cargo build time under emulation (estimate), rustix transitive set at lock
-time, and every m3-check assertion (that is what CI is for). No M3 code,
-units, or image changes exist yet — this document and `docs/api/ipc.md` are
-the plan of record.
+time, and every m3-check assertion (that is what CI is for).
+
+## 12. Implementation status (2026-08-25)
+
+M3 is **implemented and image-wired**. What exists:
+
+- **Code:** `punar-common` (`ipc`/`audit`/`time`/`descriptor` modules),
+  `punard` (std thread-per-connection daemon, three real backends,
+  AuditWriter, boot reconcile), `punarctl` (real `status`/`capabilities`/
+  `audit tail`/`reconcile`, D-014 formatter, hidden `debug rpc`). Whole
+  workspace green in the `docker rust:1` container 2026-08-25: `cargo fmt
+  --check`, `cargo clippy --workspace --all-targets --locked -D warnings`,
+  `cargo test --workspace --locked` (199 tests, 0 failed). New workspace
+  deps landed: `rustix` (net) per §3, plus `signal-hook` (safe
+  SIGTERM/SIGINT; sigaction is unreachable from safe std/rustix — justified
+  in the workspace `Cargo.toml`).
+- **nft fixtures are real:** captured from the pinned builder container
+  (`nftables 1:1.1.6-3`) with `--cap-add NET_ADMIN`; `destroy table`
+  verified working in `-f` files and on argv on 1.1.6
+  (`crates/punard/tests/fixtures/README.md`) — closing two of the
+  "asserted" items in §11.
+- **Errata (decide-once, flagged by implementation):** audit `source` for
+  daemon-initiated events is **`"service"`**, not the planned `"os"` —
+  `"os"` is not a `principal_kind` enum value and the shipped schema is the
+  contract (ipc.md §6 errata'd; `AuditActor::daemon()` keeps `user_id:
+  "punard"`). Also: `punar_common::AuditWriter` fdatasyncs per event —
+  stricter than §5's "no per-line fsync" note; accepted (free at M3 event
+  rates), revisit only if the RSS/latency budget complains.
+- **Image integration (this section supersedes "new image content summary"
+  in §7 as the as-built list):** `rust` in the builder Containerfile;
+  `stage_punar_binaries()` in `container-build.sh` (gated on `MODE=build` +
+  desktop; summary mode never compiles); staged `usr/bin/{punard,punarctl}`
+  gitignored; `nftables` in the desktop package list; versioned extra-tree
+  files `punard.service` + vendor `multi-user.target.wants` symlink,
+  `tmpfiles.d/punard.conf`, `usr/share/punar/nftables/punar-base.nft`
+  (staging in `container-build.sh` now wipes only `usr/share/punar/shell` +
+  `theme`, so the vendored ruleset survives), `m3-check.sh` +
+  `punar-m3-check.service`; `idle-ram.sh` emits `PUNAR_SERVICES_RSS_MB`
+  (summed PSS, punard cgroup) after the sampling window and starts
+  `punar-m3-check` after `punar-m2-check`, before the export
+  (`punar-idle-ram.service` timeout raised to 85 min); `boot-test.sh`
+  phase-5 M3 verdict (delivered `PUNAR_M3_FAIL`/truncated report fails;
+  missing report warns under KVM, info under TCG — a silently-dead punard
+  is still caught by the RSS gate) + services-RSS capture into
+  `ram-report.txt`; `check-budgets.sh` services gate (`>150` fail KVM,
+  `>100` warn, `absent`/`missing` fails even under TCG); ci.yml shellcheck
+  + artifact lists extended, image cache key now includes `Cargo.lock`.
+- **Verified locally 2026-08-25** (arm64 Mac, emulated builder — spec 1.22
+  labels): shellcheck v0.11.0 clean on every touched script; `mkosi
+  summary` for BOTH images via `PUNAR_BUILD_MODE=summary` (staging runs, no
+  compile); workspace green in `docker rust:1` (above); actionlint on
+  ci.yml; the rebuilt builder container installs `rust 1:1.97.1-1` from
+  the pinned snapshot (`pacman -Q` checked); the EXACT
+  `stage_punar_binaries` cargo command (`--release --locked`, snapshot
+  toolchain, cache paths) compiled both binaries in the builder container
+  under emulation in **~50 s** (the §7 +10–30 min estimate was far too
+  pessimistic — the dependency tree is deliberately small); m3-check's jq
+  filters exercised against representative result JSON (positive and
+  negative cases); check-budgets exercised across the full gate matrix
+  (ok/warn/fail/absent/missing × kvm/tcg).
+- **CI is the arbiter for** (not locally verifiable): the full hermetic
+  image build (mkosi build with the staged binaries), every in-VM m3-check
+  assertion, the real socket/audit file modes, boot reconcile applying
+  punar-base in the image, and the first real `PUNAR_SERVICES_RSS_MB`
+  number against the 100/150 MB budget.
+
+### Status audit addendum (2026-08-25, later the same day)
+
+Independent re-verification by the status audit, against the working tree
+as it stood:
+
+- `cargo test --workspace --locked` in the `docker rust:1` container:
+  green — **200 tests, 0 failed** (the tree gained one test after the
+  199-count run above). fmt/clippy not re-run; the §12 run stands.
+- shellcheck v0.11.0 (pinned container): clean on `m3-check.sh`,
+  `idle-ram.sh`, `boot-test.sh`, `check-budgets.sh`,
+  `container-build.sh`. actionlint: clean on `ci.yml`.
+  `tools/validate-schemas.sh`: 15 schemas metaschema-checked, 123
+  documents validated, ALL PASS.
+- **Live CI state:** the latest run,
+  [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
+  (2026-08-25), is fully green — all five jobs, including the first
+  execution of the M2 exercise (`PUNAR_M2_OK`; idle RAM 1157 MB mean /
+  1162 MB max, over-target warning). That run **predates every M3
+  change**: no CI run has compiled the staged binaries, built the image
+  with the M3 extra-tree content, or executed `punar-m3-check`. The first
+  M3-inclusive run is the arbiter, exactly per the list above.
+- The §7 build-strategy decision is now also recorded as
+  [ADR-002 — Distribution of First-Party Binaries](../architecture/adr/ADR-002-first-party-binaries.md)
+  (Accepted, 2026-08-25).
+- Reproducibility note for the container test runs: `CARGO_BIN_EXE_*`
+  paths are baked into test binaries at compile time, so a `target/`
+  populated with the repo mounted at `/work` makes the punarctl CLI tests
+  fail with `NotFound` when re-run with a different mount point (e.g. the
+  `/w` in getting-started.md) until the stale test binary is rebuilt.
+  Mount-path artifact, not a code defect — verified both ways today.

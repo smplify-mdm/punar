@@ -40,13 +40,23 @@
 #        PUNAR_M2_FAIL (or a truncated report) hard-fails the gate; a
 #        MISSING report is a ::warning:: under KVM and info-only under TCG
 #        (an emulated run that could not even export is already flagged).
+#     5. M3 verdict (milestone-3.md §8): same pattern for m3-report.txt
+#        (punar-m3-check.service — daemon/CLI/authz/audit/firewall
+#        exercise, run after the M2 exercise, before the export). Phase 2
+#        additionally captures PUNAR_SERVICES_RSS_MB=<n|absent> — the
+#        guest's summed-PSS reading of the punard.service cgroup at idle
+#        (PERFORMANCE_BUDGETS.md §2.3) — into ram-report.txt for
+#        check-budgets.sh (fail > 150 MB, warn > 100 MB; absent/missing
+#        fails even under TCG).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
 #     punar-m2.png                  grim capture with the overview open (M2)
-#     ram-report.txt                key=value idle-RAM numbers + environment
+#     ram-report.txt                key=value idle-RAM + services-RSS numbers
 #     ram-samples.txt, meminfo      raw guest measurement data
 #     m2-report.txt, m2-*.json      M2 exercise verdict + hyprctl snapshots
+#     m3-report.txt, m3-*.json      M3 exercise verdict + punarctl/nft
+#                                   snapshots (+ m3-deny-stderr.txt)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -344,6 +354,9 @@ run_desktop() {
           "${PROOF_DIR}/meminfo" \
           "${PROOF_DIR}/m2-report.txt" \
           "${PROOF_DIR}"/m2-*.json \
+          "${PROOF_DIR}/m3-report.txt" \
+          "${PROOF_DIR}"/m3-*.json \
+          "${PROOF_DIR}/m3-deny-stderr.txt" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -406,6 +419,23 @@ run_desktop() {
     ram_max="${ram_line##*PUNAR_RAM_MAX_MB=}"
     echo "==> Idle RAM from guest: mean=${ram_mean} MB max=${ram_max} MB"
 
+    # M3 services-RSS line (milestone-3.md §9): the guest emits
+    # PUNAR_SERVICES_RSS_MB=<n|absent> immediately after the RAM result
+    # (summed PSS over the punard.service cgroup — PERFORMANCE_BUDGETS.md
+    # §2.3; the var name keeps RSS as the fixed consumer contract). Short
+    # wait only; if it never appears (pre-M3 guest image) record `missing`
+    # — check-budgets.sh fails both `absent` and `missing`, even under TCG
+    # (a dead daemon is not an emulation artifact).
+    local services_rss_regex='PUNAR_SERVICES_RSS_MB=([0-9]+|absent)'
+    local services_rss="missing"
+    if wait_for_pattern "${SERIAL_LOG}" "${services_rss_regex}" 120 "services-RSS line (PUNAR_SERVICES_RSS_MB)"; then
+        services_rss="$(grep -aoE "${services_rss_regex}" "${SERIAL_LOG}" | tail -n 1)"
+        services_rss="${services_rss#PUNAR_SERVICES_RSS_MB=}"
+        echo "==> Services RSS from guest (summed PSS, punard.service cgroup): ${services_rss} MB"
+    else
+        warn "desktop-test: no PUNAR_SERVICES_RSS_MB line after the RAM result (pre-M3 guest image?); recording 'missing'"
+    fi
+
     # Phase 3: artifact export on the virtio-serial channel (milestone-1.md
     # §9). Non-fatal: the RAM gate rests on the serial numbers above, and the
     # guest deliberately continues without a screenshot too.
@@ -428,14 +458,17 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt meminfo m2-report.txt punar-m2.png; do
+            for f in ram-samples.txt meminfo m2-report.txt punar-m2.png \
+                     m3-report.txt m3-deny-stderr.txt; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
             done
             # M2 hyprctl -j snapshots (m2-layout-*.json, m2-clients*.json,
-            # m2-workspaces*.json) — diagnostics for the phase-4 verdict.
-            for f in "${guest_dir}"/m2-*.json; do
+            # m2-workspaces*.json) — diagnostics for the phase-4 verdict —
+            # and the M3 punarctl --json / nft -j snapshots (m3-*.json) —
+            # diagnostics for the phase-5 verdict.
+            for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -458,8 +491,12 @@ run_desktop() {
         echo "# (MemTotal - MemAvailable; 10 min stabilize, 5 min window, 10 s cadence; mean+max)."
         echo "# PUNAR_DESKTOP_OK_HOST_SECS is host wall clock from qemu start to the marker —"
         echo "# an informational boot-to-desktop proxy (budgets §2.6), not a measured boot metric."
+        echo "# PUNAR_SERVICES_RSS_MB is the summed PSS (smaps_rollup) of the punard.service"
+        echo "# cgroup's pids at stabilized idle (PERFORMANCE_BUDGETS.md §2.3; the variable"
+        echo "# name keeps RSS as the fixed consumer contract, the value is summed PSS)."
         echo "PUNAR_RAM_MEAN_MB=${ram_mean}"
         echo "PUNAR_RAM_MAX_MB=${ram_max}"
+        echo "PUNAR_SERVICES_RSS_MB=${services_rss}"
         echo "PUNAR_RAM_ACCEL=${ACCEL}"
         echo "PUNAR_RAM_ENV_LABEL=${env_label}"
         echo "PUNAR_RAM_IMAGE=$(basename "${IMAGE}")"
@@ -500,6 +537,40 @@ run_desktop() {
         warn "desktop-test: no m2-report.txt in the export and no M2 verdict on serial — the M2 exercise did not run"
     else
         echo "==> M2 exercise: no report under TCG (informational only; emulated runs are not M2-gated)"
+    fi
+
+    # Phase 5: M3 exercise verdict (milestone-3.md §8) — same pattern as the
+    # M2 gate. The guest wrote /run/punar/m3-report.txt (per-assertion
+    # ok/FAIL lines + a final PUNAR_M3_OK / PUNAR_M3_FAIL line) via
+    # punar-m3-check.service; it arrived in the phase-3 export. Hard gate: a
+    # delivered FAIL — or a truncated report — fails this script. A MISSING
+    # report degrades: serial carries the echoed report as the fallback
+    # verdict; with no verdict anywhere it is a ::warning:: under KVM and
+    # info-only under TCG. Note a silently-dead punard cannot slip through
+    # the missing-report path: check-budgets.sh hard-fails on
+    # PUNAR_SERVICES_RSS_MB=absent even under TCG.
+    local m3_report="${PROOF_DIR}/m3-report.txt"
+    if [ -f "${m3_report}" ]; then
+        if grep -q 'PUNAR_M3_FAIL' "${m3_report}"; then
+            echo "error: M3 exercise reported PUNAR_M3_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m3_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M3_OK' "${m3_report}"; then
+            echo "==> M3 exercise: PUNAR_M3_OK ($(grep -c '^ok' "${m3_report}" || true) assertions passed)"
+        else
+            echo "error: m3-report.txt carries no PUNAR_M3_OK/PUNAR_M3_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m3_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M3_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M3 exercise reported PUNAR_M3_FAIL on the serial console (export did not deliver m3-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M3_OK' "${SERIAL_LOG}"; then
+        echo "==> M3 exercise: PUNAR_M3_OK (verdict from serial console; export did not deliver m3-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m3-report.txt in the export and no M3 verdict on serial — the M3 exercise did not run"
+    else
+        echo "==> M3 exercise: no report under TCG (informational only; emulated runs are not M3-gated)"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

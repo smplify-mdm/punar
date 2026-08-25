@@ -44,6 +44,34 @@ mean=$((sum / SAMPLE_COUNT))
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
 echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 
+# M3 services-RSS sample (milestone-3.md §9): taken right here — still at
+# stabilized idle, strictly BEFORE the M2/M3 exercises start below. Canonical
+# metric per PERFORMANCE_BUDGETS.md §2.3: summed PSS (/proc/<pid>/smaps_rollup
+# `Pss:` lines) over the pids of the punard.service cgroup — cgroup
+# attribution, never process-name matching. The env var name says RSS (fixed
+# consumer contract); the VALUE is summed PSS, stated wherever it is reported.
+# `absent` (cgroup missing or empty — punard dead) is a gated failure in
+# tests/performance/check-budgets.sh, even under TCG. The unit list grows as
+# sibling services ship (agentd M7, netd M12, ...).
+CGROUP_PROCS=/sys/fs/cgroup/system.slice/punard.service/cgroup.procs
+services_rss=absent
+if [ -r "${CGROUP_PROCS}" ]; then
+    pss_kb=0
+    got=0
+    while IFS= read -r svc_pid; do
+        pid_pss="$(awk '/^Pss:/ {print $2}' "/proc/${svc_pid}/smaps_rollup" 2>/dev/null)"
+        if [ -n "${pid_pss}" ]; then
+            pss_kb=$((pss_kb + pid_pss))
+            got=1
+        fi
+    done < "${CGROUP_PROCS}"
+    if [ "${got}" -eq 1 ]; then
+        # Integer MB, rounded up.
+        services_rss=$(((pss_kb + 1023) / 1024))
+    fi
+fi
+echo "PUNAR_SERVICES_RSS_MB=${services_rss}"
+
 # M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
 # SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the
 # sampling window above — so the idle measurement is never polluted — and
@@ -53,6 +81,15 @@ echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 # (tools/boot-test.sh) parses it; a missing report is its own signal.
 systemctl start punar-m2-check.service \
     || echo "punar: idle-ram: punar-m2-check.service failed to start" >&2
+
+# M3 exercise ordering hook (milestone-3.md §8): same pattern — start
+# punar-m3-check SYNCHRONOUSLY strictly AFTER the M2 exercise and strictly
+# BEFORE the export below, so the m3-report.txt / m3-*.json files it writes
+# into /run/punar ship in the same tar and its hostname mutation never
+# pollutes the idle window (sampled far above). Never fatal here: the verdict
+# lives in m3-report.txt and the host gate (tools/boot-test.sh) parses it.
+systemctl start punar-m3-check.service \
+    || echo "punar: idle-ram: punar-m3-check.service failed to start" >&2
 
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the

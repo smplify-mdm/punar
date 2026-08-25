@@ -20,3 +20,4 @@ gets one row in the index below.
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
 | [ADR-001](docs/architecture/adr/ADR-001-distribution-substrate.md) | Distribution Substrate | Accepted | 2026-08-24 |
+| [ADR-002](docs/architecture/adr/ADR-002-first-party-binaries.md) | Distribution of First-Party Binaries | Accepted | 2026-08-25 |

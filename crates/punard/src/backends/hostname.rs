@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use punar_common::CapabilityId;
+use punar_common::{CapabilityId, Risk};
 use serde_json::{Value, json};
 
 use crate::capability::{BackendError, Capability, DescriptorMeta};
@@ -62,7 +62,7 @@ impl Capability for HostnameBackend {
     fn descriptor(&self) -> DescriptorMeta {
         DescriptorMeta {
             capability: CapabilityId::new(CAPABILITY_ID).expect("static id is valid"),
-            risk: "low",
+            risk: Risk::Low,
             verification: "kernel+file",
             audit_category: "system",
             state_schema: Some(json!({
@@ -92,6 +92,11 @@ impl Capability for HostnameBackend {
         let name = desired
             .as_str()
             .ok_or_else(|| BackendError::new("desired hostname is not a string"))?;
+        // Defense in depth (SPEC section 60): re-run the syntactic guard even
+        // though the server validates before authorizing — a hostname that
+        // slipped past validation could otherwise inject newlines into
+        // /etc/hostname. Mirrors the same guard in the timezone backend.
+        validate_hostname(name).map_err(BackendError::new)?;
         write_atomic(&self.etc_hostname, format!("{name}\n").as_bytes(), 0o644).map_err(|e| {
             BackendError::new(format!(
                 "writing {} failed: {e}",
@@ -145,6 +150,28 @@ mod tests {
         ] {
             assert!(validate_hostname(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn apply_rejects_invalid_names_before_touching_files() {
+        // Section-60 defense in depth: even if server-side validation were
+        // bypassed, apply must never write a newline-injecting or otherwise
+        // invalid name to /etc/hostname.
+        let dir = std::env::temp_dir().join(format!("punard-hostname-dd-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let etc = dir.join("hostname");
+        let proc = dir.join("proc-hostname");
+        fs::write(&etc, "old\n").unwrap();
+        fs::write(&proc, "old\n").unwrap();
+        let b = HostnameBackend::new(etc.clone(), proc.clone());
+        for bad in ["evil\nroot::0:0::/:/bin/sh", "UPPER", "", "trail-"] {
+            assert!(b.apply(&json!(bad)).is_err(), "{bad:?}");
+        }
+        assert!(b.apply(&json!(42)).is_err());
+        // Files untouched by the rejected applies.
+        assert_eq!(fs::read_to_string(&etc).unwrap(), "old\n");
+        assert_eq!(fs::read_to_string(&proc).unwrap(), "old\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

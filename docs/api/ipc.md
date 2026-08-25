@@ -274,8 +274,13 @@ Audited as `action: "reconcile"`, `resource: "capability_registry"`,
     the documented, greppable truth.)
   - `project_id`: `"system"` (no project workspaces in the control plane
     until M6).
-  - `source`: `"human"` for CLI-originated requests, `"os"` for
-    daemon-initiated events (both are `PrincipalKind` values).
+  - `source`: `"human"` for CLI-originated requests, `"service"` for
+    daemon-initiated events. (Errata 2026-08-25: this line originally said
+    `"os"`, which is **not** a value of the shipped
+    `schemas/common/defs.json#/$defs/principal_kind` enum that
+    `audit-event.json` binds `source` to; the schema is the contract, so
+    the implementation uses `"service"` — `punar_common::AuditActor::daemon()`
+    pins this, and a test pins that `"os"` is absent from the schema enum.)
   - `action`: the method name verbatim (`"capabilities.set"`,
     `"reconcile"`).
   - `resource`: the capability id, or `"capability_registry"` for

@@ -24,7 +24,11 @@ ARG SNAPSHOT_DATE=2026/08/20
 # 3. Install the build toolchain. mkosi drives pacman for the target image
 #    itself; systemd-ukify + binutils build the UKI; dosfstools+mtools/e2fsprogs/
 #    btrfs-progs/erofs-utils cover mkfs for ESP and root; qemu-img converts
-#    raw -> qcow2.
+#    raw -> qcow2. rust (1:1.97.1-1 in ALA 2026/08/20 extra, verified
+#    2026-08-25; includes cargo, satisfies workspace rust-version 1.85)
+#    compiles punard/punarctl for the desktop image from the SAME pinned
+#    snapshot — hermetic in-container build, no rustup, no second toolchain
+#    provenance (milestone-3.md §7, decision (a)).
 RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT_DATE}/\$repo/os/\$arch" \
         > /etc/pacman.d/mirrorlist \
     && sed -i \
@@ -44,6 +48,7 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT_DATE}/\$repo/o
         erofs-utils \
         cpio \
         zstd \
+        rust \
     && rm -rf /var/cache/pacman/pkg/*
 
 WORKDIR /work

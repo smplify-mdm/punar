@@ -52,8 +52,11 @@ stage_desktop_extra() {
     (cd "${mod}/fonts" && sha256sum --quiet -c MANIFEST.sha256)
 
     echo "==> Staging desktop configs/assets into ${extra}"
+    # Only the STAGED subtrees are wiped: usr/share/punar/nftables (the
+    # vendored punar-base.nft, M3) is versioned and must survive staging.
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
-           "${extra}/usr/share/fonts" "${extra}/usr/share/punar"
+           "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
+           "${extra}/usr/share/punar/theme"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme"
@@ -80,6 +83,40 @@ stage_desktop_extra() {
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
+}
+
+# Compile punard + punarctl from the workspace with the snapshot's own Rust
+# toolchain and stage them into the desktop profile's extra tree
+# (milestone-3.md §7, hermetic in-container build — decision (a)). Called
+# only when MODE=build and the desktop image is selected: `mkosi summary`
+# needs no extra-tree contents, so the cheap validation path never compiles.
+#
+# Honest hermeticity limit: crates.io is fetched HERE at image-build time —
+# the one build input not served from the Arch snapshot. It is pinned by the
+# committed Cargo.lock (--locked refuses drift) and checksummed by cargo;
+# CARGO_HOME + the target dir live under os/images/cache (gitignored), riding
+# the same CI cache as the pacman packages, so warm builds fetch ~nothing.
+# The RUNTIME image needs no network: the binaries are dynamically linked
+# against the snapshot glibc installed by mkosi (hard CI constraint:
+# the test VM runs -nic none).
+stage_punar_binaries() {
+    local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
+    local cargo_target="${IMAGES_DIR}/cache/cargo-target"
+
+    echo "==> Building punard + punarctl (release, --locked; $(rustc --version))"
+    (
+        cd "${REPO_ROOT}" &&
+            CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
+                CARGO_TARGET_DIR="${cargo_target}" \
+                cargo build --release --locked -p punard -p punarctl
+    )
+
+    echo "==> Staging punard + punarctl into ${extra}/usr/bin (gitignored)"
+    install -d "${extra}/usr/bin"
+    install -m 0755 \
+        "${cargo_target}/release/punard" \
+        "${cargo_target}/release/punarctl" \
+        "${extra}/usr/bin/"
 }
 
 # run_mkosi <image-id> [extra mkosi args...]
@@ -140,6 +177,9 @@ fi
 
 if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
     stage_desktop_extra
+    if [ "${MODE}" = "build" ]; then
+        stage_punar_binaries
+    fi
     run_mkosi punar-desktop \
         --profile desktop \
         --image-id punar-desktop \
@@ -164,7 +204,7 @@ echo "==> Writing build metadata"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "note: unsigned development images; VM-only (no linux-firmware)"
-    echo "note: punar-desktop is the Milestone 1 graphical workstation (Hyprland + punar-shell)"
+    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build)"
 } > out/build-info.txt
 
 # Bare filenames (no ./ prefix) — CI re-verifies with `sha256sum -c` against

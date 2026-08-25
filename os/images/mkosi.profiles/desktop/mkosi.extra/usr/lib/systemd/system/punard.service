@@ -1,0 +1,31 @@
+# Punar privileged local control-plane daemon (SPEC section 11.1; M3 —
+# docs/development/milestone-3.md §3). Serves the typed capability API on
+# /run/punard/punard.sock (docs/api/ipc.md); applies the firewall baseline at
+# boot reconcile, so nftables.service stays disabled — punard is the single
+# owner of the punar-base ruleset (milestone-3.md §4.1).
+#
+# Enablement is DECLARATIVE at the VENDOR level: the extra tree ships
+# usr/lib/systemd/system/multi-user.target.wants/punard.service. mkosi applies
+# Arch's presets (disable *) to /etc AFTER extra trees, so postinst systemctl
+# and /etc symlinks are preset-wiped — /usr/lib .wants only (the twice-verified
+# M1 lesson, see mkosi.postinst.chroot).
+
+[Unit]
+Description=Punar control-plane daemon (typed capability API)
+# /run/punard, /var/lib/punar, /var/log/punar come from
+# tmpfiles.d/punard.conf; systemd-tmpfiles-setup orders before basic.target,
+# which every default-dependency service (this one) starts after.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punard run
+Restart=on-failure
+# Minimal hardening per milestone-3.md §3. Deliberately NOT ProtectSystem:
+# the system.hostname and time.timezone capabilities write /etc/hostname and
+# /etc/localtime (the full sandbox profile is later-milestone work).
+# NoNewPrivileges is compatible with nft (root's own privileges, no setuid).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal

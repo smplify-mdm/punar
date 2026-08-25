@@ -31,9 +31,11 @@ Deliverables (spec section 76, Milestone 0):
   (jobs green in that run: rust, contracts, image, boot-test). The M1
   `desktop-test` job has since had its first green run too:
   [32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681)
-  (2026-08-25, all five jobs green — see M1 below). The workflow on disk
-  has since grown the M2 exercise phase inside `desktop-test`, which has
-  **no** recorded run yet (see M2 below).
+  (2026-08-25, all five jobs green — see M1 below). The M2 exercise phase
+  inside `desktop-test` has since gone green as well: run
+  [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
+  (2026-08-25, see M2 below). The workflow on disk has since grown the M3
+  exercise phase, which has **no** recorded run yet (see M3 below).
 - [x] Repository — skeleton per spec section 67 (all section 67 directories
   and top-level documents exist; Cargo workspace members match the crates on
   disk).
@@ -99,7 +101,9 @@ Deliverables (spec section 76, Milestone 1):
   [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md);
   config verified against the pinned hyprland; the config demonstrably
   loads in-VM (the session came up). Behavior is exercised by the M2 CI
-  exercise (pending) and the human walkthrough.
+  exercise (green — run
+  [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021))
+  and the human walkthrough.
 
 Acceptance (spec section 76, Milestone 1):
 
@@ -116,85 +120,161 @@ Acceptance (spec section 76, Milestone 1):
   it must be executed by a human against a booted desktop image. **Still
   pending** — this is the only open M1 item.
 
-## Current milestone: M2 — Native multitasking (in progress)
+## M2 — Native multitasking: done (CI exercise green)
 
 Detailed plan, capability verification, and the in-VM exercise contract:
-[`docs/development/milestone-2.md`](docs/development/milestone-2.md).
-Everything checked below exists **on disk and is statically validated**
-(per milestone-2.md §1 and §8: a `Hyprland --verify-config` probe of every
-new dispatcher/keyword on the pinned 0.56.2-1 binary with a negative
-control; qmllint-clean QML; `punar-workspace` cargo tests; schema +
-fixture validation — re-run 2026-08-25, 15 schemas / 123 documents ALL
-PASS including the new `schemas/workspace/` domain; shellcheck v0.11.0 and
-actionlint clean; `mkosi summary` pass with the M2 staging). **None of it
-has executed in a VM**: the green `desktop-test` run above predates the M2
-exercise wiring, so no CI run has yet executed `punar-m2-check`. That
-first run is the arbiter for every item marked "runtime CI-pending"
-(spec 1.22).
+[`docs/development/milestone-2.md`](docs/development/milestone-2.md) (its
+status line "runtime acceptance pending the first desktop CI run that
+includes the M2 exercise" is dated 2026-08-25 and predates the green run
+recorded here).
 
-Deliverables (spec section 76, Milestone 2) — on disk vs proven:
+The arbiter run has happened: CI run
+[32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
+(2026-08-25, KVM runner, all five jobs green) ran the M2 exercise —
+`punar-m2-check` executed inside the booted `punar-desktop` VM and
+delivered **`PUNAR_M2_OK`**: the milestone-2.md §7 assertion list passed at
+runtime (rename lands in `hyprctl` and survives a shell restart via the
+schema-valid state file; group create/cycle/leave; float + pin + center;
+each preset flips `general:layout` and the workspace `tiledLayout`; preset
+cycling + cache; assistant and notes scratchpads; `workspace name:`
+navigation; the overview toggles over IPC and rendered — `punar-m2.png` in
+the `punar-desktop-screenshot` artifact). Budgets stayed green with no new
+always-on processes: idle RAM **mean 1157 MB / max 1162 MB** (under the
+1536 MB ceiling, over the 1024 MB target — recorded warning;
+`m2-report.txt` ships in the `punar-desktop-ram-report` artifact).
 
-- [x] Tiling — layout machinery over the M1 dwindle base: four tiled
-  algorithms (dwindle/scrolling/master/monocle) driven per preset (see
-  Layouts). Keywords/dispatchers config-verified on the pinned binary.
-  Runtime CI-pending (exercise rows 5–6).
-- [x] Stacking — tab/stack group grammar (SUPER+G toggle, SUPER+SHIFT+G
-  out, SUPER+[ / ] cycle, SUPER+CTRL+HJKL move-into) in
-  `os/modules/desktop/hypr/punar-binds.conf`; design-language groupbar
-  styling in `punar-look.conf`; `stack` preset (monocle) for
-  one-window-at-a-time. Config-verified. Runtime CI-pending (rows 2–3).
+Deliverables (spec section 76, Milestone 2) — all on disk, statically
+validated (milestone-2.md §1/§8: `Hyprland --verify-config` probes on the
+pinned 0.56.2-1 binary, qmllint-clean QML, `punar-workspace` cargo tests,
+schema + fixture validation, shellcheck v0.11.0, actionlint, `mkosi
+summary`), and **runtime-proven** by run 32825539021:
+
+- [x] Tiling — four tiled algorithms (dwindle/scrolling/master/monocle)
+  driven per preset.
+- [x] Stacking — tab/stack group grammar (SUPER+G / SUPER+SHIFT+G /
+  SUPER+[ ] / SUPER+CTRL+HJKL) in
+  `os/modules/desktop/hypr/punar-binds.conf`; `stack` (monocle) preset.
 - [x] Floating — pin (SUPER+SHIFT+V), center (SUPER+C), float-aware
-  move/resize on top of M1's togglefloating. Config-verified. Runtime
-  CI-pending (row 4).
+  move/resize.
 - [x] Overview — SUPER+TAB project-workspace overview
-  (`shell/punar-shell/Overview/Overview.qml`) implementing Plate D-007
-  (`docs/design/mockups/desktop-multitasking.html`): project card grid,
-  wireframe minis scaled from real client geometry, meta rows,
-  type-to-search, arrow navigation, selection as raise fill + 2 px ink
-  rule, 300 ms `cubic-bezier(0.2,0,0,1)` motion only where it explains
-  state. Event-driven (Quickshell Hyprland models + one refresh on open;
-  no polling), toggled via Quickshell IPC. qmllint-clean. Runtime behavior
-  CI-pending (row 9); design fidelity human-reviewed against the plate.
+  (`shell/punar-shell/Overview/Overview.qml`, Plate D-007), event-driven,
+  toggled via Quickshell IPC; rendered in-VM (`punar-m2.png`). Design
+  fidelity remains human-reviewed against the plate — CI proves behavior,
+  not aesthetics.
 - [x] Layouts — five presets (`balanced`, `columns`, `rows`, `focus`,
-  `stack`) applied by `/usr/lib/punar/punar-layout.sh` (source
-  `os/modules/desktop/hypr/punar-layout.sh`; one `hyprctl --batch` per
-  invocation, one-shot, shellcheck-clean), cycled on SUPER+comma/period,
-  restored on session start. A `grid` preset is **deliberately not
-  shipped** — hyprland 0.56.2 has no native grid algorithm
-  (milestone-2.md §1.3/§2). Runtime CI-pending (rows 5–6).
-- [x] Scratchpads — assistant (SUPER+A) and notes (SUPER+N) special
-  workspaces join M1's terminal (SUPER+T), with silent window rules.
-  Config-verified. Runtime CI-pending (row 7).
-- [x] Named project workspaces — rename (overview inline + command
-  center), `name:` navigation, names in bar and overview; persistence to
-  `~/.local/state/punar/workspaces.json` written only by
-  `Services/WorkspaceState.qml` (atomic writes, event-driven, 1 s
-  debounce, restore on shell start); typed contract in the
-  `punar-workspace` crate (serde round-trip + name-regex tests) with JSON
-  Schema `schemas/workspace/workspace-state.json` and fixtures. Schema and
-  crate validated; in-VM write/restore CI-pending (rows 1, 8, 10–11).
-- [x] M2 CI exercise wiring — in-guest `/usr/lib/punar/m2-check.sh` +
-  `punar-m2-check.service` (started synchronously after the idle-RAM
-  sampling window, before the export), verdict in `m2-report.txt`, hard
-  gate in `tools/boot-test.sh` phase 4, `desktop-test` job + artifact
-  uploads extended in `ci.yml`. Statically validated (shellcheck,
-  actionlint, `mkosi summary`); **no recorded run**.
-
-What only a green `desktop-test` run including the M2 exercise will prove
-(all currently unverified; milestone-2.md §7 is the assertion list):
-rename lands in `hyprctl -j workspaces` and survives a shell restart via
-the state file; group create/cycle/leave behave; float + pin + center
-behave; each preset actually flips `general:layout` and the workspace
-`tiledLayout`; preset cycling and the preset cache file; the assistant and
-notes specials toggle cleanly; `workspace name:` navigation; the overview
-opens/closes over IPC and renders (screenshot `punar-m2.png`); the state
-file on disk matches the schema; and budgets stay green with no new
-always-on processes.
+  `stack`) via `/usr/lib/punar/punar-layout.sh`, cycled on
+  SUPER+comma/period, restored on session start; `grid` deliberately not
+  shipped (no native hyprland algorithm — milestone-2.md §1.3/§2).
+- [x] Scratchpads — assistant (SUPER+A) and notes (SUPER+N) specials
+  alongside M1's terminal (SUPER+T).
+- [x] Named project workspaces — rename, `name:` navigation, names in bar
+  and overview; persistence to `~/.local/state/punar/workspaces.json`
+  (atomic, event-driven, restored on shell start); typed contract in the
+  `punar-workspace` crate + `schemas/workspace/workspace-state.json`; the
+  in-VM state file validated against the schema by the exercise.
+- [x] M2 CI exercise wiring — `/usr/lib/punar/m2-check.sh` +
+  `punar-m2-check.service`, verdict in `m2-report.txt`, hard gate in
+  `tools/boot-test.sh` phase 4 — exercised end-to-end in run 32825539021.
 
 Out of scope for M2 (decided in milestone-2.md §2, not regressions):
 `grid` preset, per-workspace presets, full §14.3 restoration (app
 reopening), §14.4 activities, §15 monitor-layout memory, mouse
 drag-to-tile.
+
+## Current milestone: M3 — `punard` + `punarctl` (in progress)
+
+Architecture plan, decisions, and as-built list:
+[`docs/development/milestone-3.md`](docs/development/milestone-3.md)
+(§12 is the implementation status). Binding wire contract:
+[`docs/api/ipc.md`](docs/api/ipc.md). The build-strategy decision is
+recorded as
+[ADR-002 Distribution of First-Party Binaries](docs/architecture/adr/ADR-002-first-party-binaries.md).
+Everything M3 ships runs in personal mode (design language section 8): no
+org anything; policy citations are `personal-defaults` / "os default".
+
+Everything checked below exists **on disk and is statically validated** —
+re-verified 2026-08-25 by this status audit unless noted: whole workspace
+green in the `docker rust:1` container (`cargo test --workspace --locked`:
+**200 tests, 0 failed**; fmt/clippy green per milestone-3.md §12);
+shellcheck v0.11.0 clean on all five touched scripts (`m3-check.sh`,
+`idle-ram.sh`, `boot-test.sh`, `check-budgets.sh`, `container-build.sh`);
+actionlint clean on `ci.yml`; contract validation 15 schemas / 123
+documents ALL PASS. The `mkosi summary` pass for both images with the M3
+staging and the ~50 s in-builder compile probe are recorded in
+milestone-3.md §12 (emulated local runs — non-authoritative per spec 1.22).
+**None of it has executed in CI**: the green run 32825539021 predates the
+M3 image wiring, so no CI run has built the image with the staged binaries
+or executed `punar-m3-check`. The first M3-inclusive run is the arbiter
+for every item marked "runtime CI-pending".
+
+Deliverables (spec section 76, Milestone 3) — on disk vs proven:
+
+- [x] Daemon — `punard` (`crates/punard/`): std thread-per-connection UDS
+  server at `/run/punard/punard.sock` (**no async runtime** — budgets
+  §6.2 frugality; milestone-3.md §3), `SO_PEERCRED` admission via
+  `rustix`, root-only mutations (`personal-defaults`), desired-state store
+  `/var/lib/punar/desired.json`, boot reconcile (one boot-time apply:
+  the firewall os-default). `punard.service` + vendor-level
+  `multi-user.target.wants/` symlink + `tmpfiles.d/punard.conf` in the
+  desktop extra tree (the M1 preset lesson applied). Unit/integration
+  tests green, incl. a socketpair authz matrix. Runtime CI-pending
+  (m3-check rows 1–2, 9; boot reconcile in-image).
+- [x] Typed IPC — versioned `{v:1, id, method, params}` NDJSON envelope,
+  closed six-method set, **no exec/shell method** (spec sections 10, 60;
+  m3-check row 10 probes for it); wire contract in `docs/api/ipc.md`;
+  envelope serde round-trip and contract-example tests in `punar-common`.
+  Runtime CI-pending (every in-VM RPC).
+- [x] Capability registry — three real capabilities behind one
+  observe/apply/verify/descriptor trait: `security.firewall` (nftables
+  table `inet punar-base`, inbound-drop; ruleset vendored at
+  `/usr/share/punar/nftables/punar-base.nft`; `nftables` added to the
+  desktop package list), `system.hostname` (`/etc/hostname` +
+  `/proc/sys/kernel/hostname`, no D-Bus), `time.timezone`
+  (`/etc/localtime` symlink, traversal-guarded). Descriptors conform to
+  `schemas/capability/capability-descriptor.json`; `nft` parser tested
+  against fixtures captured from the pinned `nftables 1:1.1.6-3`. Real
+  apply/verify in-image runtime CI-pending (rows 4–7).
+- [x] CLI — `punarctl` real `status`, `capabilities [get|set]`,
+  `audit tail`, `reconcile`, global `--json`, hidden `debug rpc`; human
+  output per Plate D-014 through one formatter module (personal mode — no
+  org rows); section-73 denial voice; exit-code contract (0/1/2/3/5, 4
+  reserved). 42 punarctl tests green incl. D-014 snapshot tests against a
+  mock daemon. Other subcommands keep their milestone stubs. Runtime
+  CI-pending (rows 3–6, 9).
+- [x] Audit — every mutation and every denial appended to
+  `/var/log/punar/audit.jsonl` (0640 root:punar, punard-only writes),
+  events conform to `schemas/audit/audit-event.json` with documented
+  sentinels (`agt_none`, `project_id:"system"`; daemon-initiated events
+  use `source:"service"` — milestone-3.md §12 errata). Schema-conformance
+  tested host-side; in-VM file modes + emitted-line shape check
+  CI-pending (rows 5–6, 8).
+- [x] Hermetic in-image binary build — ADR-002: snapshot `rust 1:1.97.1-1`
+  in the builder container; `stage_punar_binaries()` compiles `--release
+  --locked` and stages `usr/bin/{punard,punarctl}` (gitignored) before
+  mkosi; summary mode never compiles. Full image build with staged
+  binaries CI-pending.
+- [x] M3 CI exercise + budget wiring — `/usr/lib/punar/m3-check.sh` +
+  `punar-m3-check.service` (ten assertions: socket perms, typed status,
+  group-read authz, allowed mutation + audit, **non-root denial in the
+  section-73 voice + deny audit event**, firewall drift/apply/reconcile,
+  audit schema shape, unauthorized-socket negative, no-exec probe),
+  started after `punar-m2-check` and before export; `boot-test.sh`
+  phase-5 M3 verdict gate; `PUNAR_SERVICES_RSS_MB` (summed PSS of the
+  `punard.service` cgroup) exported and gated by `check-budgets.sh`
+  (fail > 150 MB, warn > 100 MB, dead-daemon `absent` fails even under
+  TCG). Statically validated; **no recorded run**.
+
+What only the first M3-inclusive CI run will prove (milestone-3.md §12
+"CI is the arbiter" list): the hermetic image build with the staged
+binaries, all ten m3-check assertions, the real socket/audit file modes,
+boot reconcile applying `punar-base` in the image, and the first real
+`PUNAR_SERVICES_RSS_MB` number against the 100/150 MB services budget.
+
+Out of scope for M3 (decided in milestone-3.md §1, each with its landing
+milestone): desired-state schemas/policy merge/drift remediation (M4),
+enrollment/compliance (M5), audit rotation (M5 follow-up), agent methods
+(M7+), approvals/JIT elevation (M9), `punarctl update status` (stays
+stubbed).
 
 ## Milestone table
 
@@ -207,8 +287,8 @@ exist and function, until sharper criteria are defined.
 | --- | --- | --- | --- |
 | M0 — Foundation evaluation | Substrate ADR; resource-budget baseline; VM build; CI; repository | Reproducible build and VM boot | **Done** — acceptance met, [CI run 32788238871](https://github.com/smplify-mdm/punar/actions/runs/32788238871); budget baseline recorded in [run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) |
 | M1 — Lightweight graphical workstation | Wayland, compositor, shell, command center, terminal, browser, Git, editor, Podman, keyboard navigation | Idle RAM measured; no mouse required for core desktop use | **CI gate green** — [run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) (2026-08-25): build, boot, `PUNAR_DESKTOP_OK`, idle RAM 1162 MB mean (pass w/ over-target warning); human keyboard-only walkthrough pending |
-| M2 — Native multitasking | Tiling, stacking, floating, overview, layouts, scratchpads, named project workspaces | Not specified in spec §76 | **In progress** — all deliverables on disk + statically validated (see checklist above); first `desktop-test` run with the M2 exercise pending |
-| M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | Not started (M2 ships its typed workspace-state contract in `punar-workspace` for M3 to consume) |
+| M2 — Native multitasking | Tiling, stacking, floating, overview, layouts, scratchpads, named project workspaces | Not specified in spec §76 | **Done** — [run 32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021) (2026-08-25) fully green incl. the in-VM M2 exercise (`PUNAR_M2_OK`); idle RAM 1157 MB mean (pass w/ over-target warning) |
+| M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | **In progress** — implemented on disk + statically validated (checklist above; ADR-002; milestone-3.md §12); no CI run includes the M3 wiring yet — the first such run is the arbiter |
 | M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | Not started |
 | M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | Not started |
 | M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | Not started |

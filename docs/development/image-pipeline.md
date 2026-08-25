@@ -1,4 +1,4 @@
-# Image pipeline (Milestones 0–1)
+# Image pipeline (Milestones 0–3)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now produces two images from one config tree
@@ -11,6 +11,11 @@ pipeline now produces two images from one config tree
   adding Hyprland, punar-shell (Quickshell), greetd autologin session, foot,
   chromium, git/neovim/podman, pipewire, vendored fonts, and the
   `PUNAR_DESKTOP_OK` ready-marker / idle-RAM / artifact-export chain.
+  Since Milestone 3 it also carries the Punar control plane —
+  `punard`/`punarctl` compiled hermetically inside the builder container
+  from the pinned snapshot's own Rust toolchain, plus nftables, the
+  punar-base firewall ruleset, and the `punar-m3-check` in-VM exercise
+  ([milestone-3.md](milestone-3.md) §7–§9).
 
 Substrate per [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md):
 minimal Arch package payload, vendor-pinned snapshot channels, mkosi-built
@@ -55,12 +60,12 @@ CI run is the arbiter.
 | Path | Role |
 | --- | --- |
 | `os/images/snapshot.env` | The input pins: ALA snapshot date + builder base image digest. Single source of truth. |
-| `os/images/builder/Containerfile` | Builder container: pinned Arch + mkosi 26 + UKI/filesystem tools. |
+| `os/images/builder/Containerfile` | Builder container: pinned Arch + mkosi 26 + UKI/filesystem tools + `rust` (1:1.97.1-1 from the same snapshot — compiles `punard`/`punarctl` for the desktop image; no rustup, single toolchain provenance, milestone-3.md §7). |
 | `os/images/mkosi.conf` | Base image definition: minimal Arch payload (`base`, `linux`), UEFI/systemd-boot, UKI, serial console, root autologin. Shared by both images. |
 | `os/images/mkosi.extra/` | Files copied verbatim into every image; currently `punar-boot-marker.service` + its enablement symlink. |
 | `os/images/mkosi.profiles/desktop/` | The M1 `punar-desktop` profile: `mkosi.conf` (the verified §2.1 package additions), `mkosi.postinst.chroot` (dev user `punar` + subuid/subgid for rootless podman, `systemctl enable greetd`, `graphical.target`, fc-cache), and `mkosi.extra/` — the versioned parts (greetd `config.toml`, `/usr/lib/punar/{session.sh,desktop-ready.sh,idle-ram.sh}`, `punar-desktop-marker.path/.service`, `punar-idle-ram.service`, tmpfiles `/run/punar`) plus build-time-staged parts (gitignored; see next row). |
 | `os/modules/desktop/`, `shell/punar-shell/`, `shell/theme/` | Source of truth for Hyprland config (`/etc/xdg/hypr/`), foot config (`/etc/xdg/foot/foot.ini`), fontconfig defaults + vendored fonts (`/usr/share/fonts/punar/`), the punar-shell QML (`/usr/share/punar/shell/`) and design tokens (`/usr/share/punar/theme/punar-tokens.json`). `container-build.sh` re-verifies the font sha256 manifest and stages these into the desktop profile's `mkosi.extra/` on every build — nothing is committed twice. |
-| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. |
+| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
 | `tools/build-image.sh` | Host-side wrapper: builds the builder container, runs the containerized build with the **repo root** mounted (the desktop staging needs `os/modules` + `shell/`). `tools/build-image.sh [dev|desktop|all]` (default `all`). Identical path in CI and locally. |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
 | `.github/workflows/ci.yml` | Jobs `rust`, `image`, `boot-test` on pinned `ubuntu-24.04` runners. |
@@ -81,11 +86,16 @@ CI run is the arbiter.
    (`os/images/out/punar-dev-x86_64.qcow2`), plus `SHA256SUMS` and
    `build-info.txt` (snapshot date, mkosi/qemu-img versions, git SHA).
 4. With `PUNAR_IMAGES=all` (the default) or `desktop`, the desktop content is
-   staged (font manifest verified first) and mkosi runs a second time with
+   staged (font manifest verified first), `punard` + `punarctl` are compiled
+   `--release --locked` with the builder's snapshot-pinned Rust and staged
+   into the profile's `usr/bin/` (build mode only — summary mode never
+   compiles), and mkosi runs a second time with
    `--profile desktop --image-id punar-desktop --hostname punar-desktop` —
    scalar overrides on the CLI, so no profile scalar-merge ambiguity — and the
    result is converted to `os/images/out/punar-desktop-x86_64.qcow2`. Both
-   builds share `CacheDirectory=cache`, so packages download once.
+   builds share `CacheDirectory=cache`, so packages download once; the cargo
+   home/target live under the same `os/images/cache` and ride the same CI
+   cache entry.
 
 Determinism posture (per ADR-001: input-pinned, not bit-for-bit): base image
 by digest, packages from a date snapshot, `SourceDateEpoch` clamped to the
@@ -146,6 +156,45 @@ built or booted yet; the first CI desktop-test run is the arbiter, and the
 virtio-vga + llvmpipe rendering path carries the documented fallback chain
 (milestone-1.md §6).
 
+## The M3 control plane in the image (Milestone 3)
+
+Full decisions in [milestone-3.md](milestone-3.md) §7–§9 and
+`docs/api/ipc.md`; the wiring as built:
+
+- **Binaries:** `/usr/bin/punard` + `/usr/bin/punarctl`, compiled inside the
+  builder container by `stage_punar_binaries()` (hermetic in-container
+  build — same pinned snapshot toolchain, `rust 1:1.97.1-1`; crates.io
+  pinned by `Cargo.lock`, `--locked`), staged gitignored into the desktop
+  extra tree.
+- **Service:** `punard.service` (`Type=simple`, `ExecStart=/usr/bin/punard
+  run`, `NoNewPrivileges`/`PrivateTmp`/`ProtectHome`; deliberately NOT
+  `ProtectSystem` — it writes `/etc/hostname` and `/etc/localtime`),
+  enabled by the vendor-level `multi-user.target.wants` symlink in the extra
+  tree (the M1 preset lesson — never postinst `systemctl`).
+- **Directories:** `tmpfiles.d/punard.conf` — `/run/punard` 0750 root:punar
+  (socket dir; deliberately not the punar-writable `/run/punar`),
+  `/var/lib/punar` 0700 (desired.json, device-id), `/var/log/punar` 0750
+  root:punar (audit.jsonl, written 0640 by punard).
+- **Firewall:** package `nftables` (verified absent from base's dependency
+  chain), vendored ruleset `/usr/share/punar/nftables/punar-base.nft`
+  (inbound drop / outbound accept, idempotent via leading `destroy table`);
+  `punard` applies it at boot reconcile — `nftables.service` stays disabled
+  so the ruleset has exactly one owner. Netless CI VM unaffected
+  (`-nic none`; loopback + established/related accepted).
+- **In-VM exercise:** `punar-m3-check.service` (root oneshot, not enabled)
+  runs `/usr/lib/punar/m3-check.sh`, started synchronously by `idle-ram.sh`
+  after the M2 exercise and before the export: socket perms, typed-IPC
+  status/list, root mutation + audit event, non-root denial (exit 3,
+  section-73 voice), firewall drift report + real re-apply, audit schema
+  shape, `nobody` connect rejection, `system.exec`/`shell.run` →
+  `unknown_method`. Verdict `PUNAR_M3_OK`/`PUNAR_M3_FAIL` in
+  `/run/punar/m3-report.txt`, gated host-side by `boot-test.sh`.
+- **Services-RSS budget:** `idle-ram.sh` emits `PUNAR_SERVICES_RSS_MB`
+  (summed PSS of the `punard.service` cgroup, PERFORMANCE_BUDGETS.md §2.3)
+  right after the idle sampling window; `boot-test.sh` records it in
+  `ram-report.txt`; `check-budgets.sh` gates it (fail > 150 MB, warn >
+  100 MB; `absent` fails even under TCG).
+
 ## The boot smoke test
 
 `tools/boot-test.sh [image.qcow2]` (spec 74.3 "boot"):
@@ -200,6 +249,13 @@ What to expect, honestly:
   Rosetta has documented failure modes (crosscutting.md §2.3). Local results
   are for iteration only; **CI is canonical** and local emulated results are
   labeled non-authoritative per spec 1.22.
+- Since M3 a local `desktop` build also compiles the two release binaries
+  under emulation. Measured 2026-08-25 (arm64 Mac, Rosetta, exact pipeline
+  commands in the builder container): **~50 s** compile after the crates.io
+  fetch — the plan's +10–30 min estimate was far too pessimistic; the
+  workspace dependency tree is deliberately small (budgets §6.2). The dev
+  loop is unchanged: host-side `docker run rust:1 … cargo test` for code,
+  `PUNAR_BUILD_MODE=summary` for image config (it never compiles).
 - One Rosetta failure is already known and worked around: pacman 7's alpm
   download sandbox fails to install its seccomp filter under emulation
   (`error restricting syscalls via seccomp: 22`). The builder container

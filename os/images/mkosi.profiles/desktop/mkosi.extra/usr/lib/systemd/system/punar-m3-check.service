@@ -1,0 +1,24 @@
+# M3 in-VM daemon/CLI exercise (milestone-3.md §8). Runs m3-check.sh as
+# ROOT — deliberately no User=: the service manager IS the decided root path
+# for the allowed-mutation assertions (no sudo, no helper binaries);
+# unprivileged paths inside the script use runuser -u punar / -u nobody.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m2-check.service and BEFORE the /run/punar artifact export, so the
+# hostname mutation never pollutes the idle window and m3-report.txt /
+# m3-*.json ship in the existing export tar. Same not-enabled pattern as
+# punar-m2-check.service — no .wants symlink, so the mkosi preset-wipe
+# lesson does not even come into play.
+
+[Unit]
+Description=Punar M3 daemon/CLI exercise (CI)
+
+[Service]
+Type=oneshot
+# Generous for TCG-emulated CI runs; the KVM path completes in well under a
+# minute (every assertion is a local RPC, an nft call, or a file read).
+TimeoutStartSec=10min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m3-check.sh

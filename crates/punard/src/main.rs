@@ -39,7 +39,7 @@ enum Command {
 #[derive(clap::Args)]
 struct RunArgs {
     /// Unix socket path (docs/api/ipc.md section 1).
-    #[arg(long, default_value = "/run/punard/punard.sock")]
+    #[arg(long, default_value = punar_common::ipc::SOCKET_PATH)]
     socket: PathBuf,
 
     /// State directory holding desired.json and device-id.
@@ -47,7 +47,7 @@ struct RunArgs {
     state_dir: PathBuf,
 
     /// Audit log file (append-only JSONL).
-    #[arg(long, default_value = "/var/log/punar/audit.jsonl")]
+    #[arg(long, default_value = punar_common::audit::AUDIT_LOG_PATH)]
     audit_file: PathBuf,
 
     /// Group granted read access to the socket.

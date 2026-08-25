@@ -2,17 +2,20 @@
 
 > **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done; Milestone 1
 > (Lightweight graphical workstation) has a green CI gate with one acceptance
-> item left; Milestone 2 (Native multitasking) is in progress.** The
-> `punar-desktop` image (Hyprland + punar-shell) builds, boots, and passes the
-> graphical gate in CI
-> ([run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681),
-> `PUNAR_DESKTOP_OK`; idle RAM measured at 1162 MB mean — under the 1.5 GB hard
-> ceiling, over the 1.0 GB target). M1's keyboard-only human walkthrough is
-> still pending. M2 multitasking (window groups, floating polish, layout
-> presets, the SUPER+TAB overview, scratchpads, named project workspaces) is
-> authored and config/lint-validated on disk; its in-VM CI exercise has not
-> yet run. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what
-> exists versus what is proven.
+> item left; Milestone 2 (Native multitasking) is done — CI-proven; Milestone 3
+> (`punard` + `punarctl`) is in progress.** The `punar-desktop` image (Hyprland
+> + punar-shell) builds, boots, and passes the graphical gate plus the in-VM M2
+> multitasking exercise in CI
+> ([run 32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021),
+> `PUNAR_DESKTOP_OK` + `PUNAR_M2_OK`; idle RAM measured at 1157 MB mean — under
+> the 1.5 GB hard ceiling, over the 1.0 GB target). M1's keyboard-only human
+> walkthrough is still pending. M3 — the `punard` daemon, typed IPC over a
+> Unix socket, the first three real capabilities (firewall, hostname,
+> timezone), the real `punarctl` CLI, and the audit trail — is implemented and
+> statically validated on disk (the hermetic in-image build strategy is
+> ADR-002); no CI run includes it yet. See
+> [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists versus
+> what is proven.
 
 Punar, by Smplify, is a lightweight, privacy-first, AI-native Linux operating
 system for developer workstations. It targets existing 8–16 GB enterprise
