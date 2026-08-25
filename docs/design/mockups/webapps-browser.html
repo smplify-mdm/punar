@@ -1,0 +1,414 @@
+<title>Punar Web Apps</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one full-surface panel. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .modesep { width: 1px; height: 18px; background: #E6E4DE; margin: 0 4px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .cpill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 4px 9px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #333; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .scbody { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+  .stage { position: absolute; inset: 0; opacity: 0; pointer-events: none;
+    transition: opacity 300ms cubic-bezier(0.2, 0, 0, 1); display: flex; flex-direction: column; }
+  .stage.active { opacity: 1; pointer-events: auto; }
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  /* managed-mode chrome is additive annotation only */
+  .m-only, .ctxrow.m-only, .cpill.m-only, .secnote.m-only { display: none; }
+  .frame.managed .m-only { display: inline-flex; }
+  .frame.managed span.m-only.txt { display: inline; }
+  .frame.managed .ctxrow.m-only { display: flex; }
+
+  /* ---- 01 · install card ---- */
+  .installwash { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+    background: #F4F2EC; border-radius: 10px; margin: 14px 0 10px; padding: 10px 0; }
+  .card { width: min(430px, 84%); max-height: 100%; overflow-y: auto; background: #FAF9F6;
+    border: 1px solid #E6E4DE; border-radius: 10px; padding: 16px 20px 14px;
+    box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07); }
+  .card .cm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; display: flex; justify-content: space-between; gap: 10px; }
+  .card .crule { border: 0; border-top: 2px solid #000; margin: 8px 0 12px; }
+  .card .ct { font-size: 17px; font-weight: 600; color: #000; letter-spacing: -0.01em; margin-bottom: 10px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  .chip { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #333; border: 1px solid #E6E4DE;
+    border-radius: 6px; padding: 3px 8px; background: #F4F2EC; }
+  .storelab { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  .storerow { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; border: 1px solid #E6E4DE;
+    border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
+  .storerow:hover { background: #F4F2EC; }
+  .storerow.sel { border-color: #000; background: #F4F2EC; }
+  .storerow .rk { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600; color: #8C8880; }
+  .storerow.sel .rk { color: #000; }
+  .storerow .rn { font-size: 13px; font-weight: 500; color: #000; }
+  .storerow .rm { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: #666; text-align: right; }
+  .secnote { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: #666; line-height: 1.9; margin: 10px 0 12px; }
+  .secnote b { color: #000; font-weight: 600; }
+  .cardacts { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 6px 12px; background: transparent; cursor: pointer; }
+  .ghost:focus-visible, .affirm:focus-visible, .storerow:focus-visible, .ctxrow:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .affirm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; background: #2E6B21; color: #FAF9F6;
+    border: 1px solid #2E6B21; border-radius: 6px; padding: 7px 14px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .affirm:hover { opacity: 0.86; }
+  .affirm kbd { font-size: 8.5px; border: 1px solid rgb(250 249 246 / 0.5); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+
+  /* ---- 02 · app window ---- */
+  .deskwash { flex: 1; display: flex; align-items: center; justify-content: center; background: #F4F2EC;
+    border-radius: 10px; margin: 14px 0 10px; position: relative; }
+  .appwin { width: min(560px, 88%); height: 78%; background: #FAF9F6; border: 1px solid #8C8880; border-radius: 10px;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07); }
+  .titlebar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #E6E4DE; }
+  .titlebar .wt { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #000; }
+  .titlebar .worigin { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px;
+    letter-spacing: 0.08em; color: #666; margin-left: auto; }
+  .ctxtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #333; border: 1px solid #E6E4DE;
+    border-radius: 6px; padding: 2px 7px; background: #F4F2EC; }
+  .winbody { flex: 1; display: flex; align-items: center; justify-content: center; padding: 14px; }
+  .undrawn { border: 1px dashed #8C8880; border-radius: 10px; padding: 26px 20px; text-align: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+  .toast { position: absolute; top: 10px; right: 10px; background: #FAF9F6; border: 1px solid #E6E4DE;
+    border-radius: 10px; padding: 9px 12px; box-shadow: 0 2px 6px rgb(28 24 16 / .07);
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 1.9; }
+  .toast b { color: #000; font-weight: 600; }
+
+  /* ---- 03 · context picker ---- */
+  .ctxhead { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 16px 0 8px; }
+  .ctxrow { display: flex; align-items: baseline; gap: 12px; padding: 11px 12px; border: 1px solid #E6E4DE;
+    border-left: 2px solid transparent; border-radius: 6px; margin-bottom: 7px; cursor: pointer; }
+  .ctxrow:hover { background: #F4F2EC; }
+  .ctxrow.sel { border-color: #000; border-left-color: #000; background: #F4F2EC; }
+  .ctxrow .cn { font-size: 14px; font-weight: 500; color: #000; min-width: 110px; }
+  .ctxrow .iso { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; }
+  .ctxrow .cstat { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px;
+    font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #666; text-align: right; }
+  .ctxrow .cstat .okc { color: #2E6B21; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .ctxnote { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2; margin-top: 10px; }
+  .ctxnote b { color: #000; font-weight: 600; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .stage, .statebtn, .affirm { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Web Apps</strong></div>
+        <div class="meta">Installed web apps and browser contexts</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-013</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>A web app installed here is a citizen, not a tab wearing a costume.</h1>
+    <p class="deck">Punar ships upstream-current Chromium with a small integration layer — never a fork. Install a web app and it gets a launcher entry, its own window identity, notifications, and a stated storage context. Browser state follows the project: switch to Atlas and Atlas's context comes forward.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Web app states">
+      <button class="statebtn" id="sb-install" role="tab" data-state="0" aria-selected="true">01 · Install</button>
+      <button class="statebtn" id="sb-window" role="tab" data-state="1" aria-selected="false">02 · App window</button>
+      <button class="statebtn" id="sb-contexts" role="tab" data-state="2" aria-selected="false">03 · Contexts</button>
+      <span class="modesep" aria-hidden="true"></span>
+      <button class="statebtn" id="mode-personal" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" id="mode-managed" data-mode="managed" aria-selected="false">Managed · Acme</button>
+      <span class="demohint">← → states · ↑↓ select · ↵ confirm</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Web apps demo">
+      <div class="sc">
+        <div class="mast">
+          <div class="hm"><strong>Punar</strong> · Web Apps · ThinkPad X1 · dev_123<span class="m-only txt"><br>Acme Engineering · Managed</span></div>
+          <div class="hm" style="text-align:right"><span class="cpill m-only"><span class="dot" style="background:#2E6B21"></span>Compliant</span><br>08 · 2026</div>
+        </div>
+        <hr class="scrule">
+        <div class="scbody">
+
+          <!-- 01 · INSTALL -->
+          <div class="stage active" id="st-install">
+            <div class="installwash">
+              <div class="card" role="dialog" aria-label="Install Linear as an app">
+                <div class="cm"><span>Install · Web App</span><span>linear.app</span></div>
+                <hr class="crule">
+                <div class="ct">Install Linear as an app</div>
+                <div class="chips">
+                  <span class="chip">Launcher entry</span>
+                  <span class="chip">Own window identity</span>
+                  <span class="chip">Notifications</span>
+                  <span class="chip">Workspace assignment</span>
+                </div>
+                <div class="storelab">Storage context</div>
+                <div class="storerow sel" id="store-shared" role="radio" aria-checked="true" tabindex="-1">
+                  <span class="rk">[1]</span><span class="rn">Shared browser profile</span>
+                  <span class="rm">Cookies and sign-ins shared with the browser</span>
+                </div>
+                <div class="storerow" id="store-separate" role="radio" aria-checked="false" tabindex="-1">
+                  <span class="rk">[2]</span><span class="rn">Separate context</span>
+                  <span class="rm">Own cookies · storage · sign-ins</span>
+                </div>
+                <div class="secnote">Either choice runs the <b>same upstream Chromium sandbox and site isolation</b>. A separate context isolates state, not security — no claim beyond that.</div>
+                <div class="secnote m-only" id="install-policy" style="margin-top:0">Policy · <b>Web app allowed</b> · eng-baseline-v12 · unrestricted for linear.app</div>
+                <div class="cardacts">
+                  <button class="ghost" id="btn-cancel">Esc · Cancel</button>
+                  <button class="affirm" id="btn-install">Install<kbd>↵</kbd></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 02 · APP WINDOW -->
+          <div class="stage" id="st-window">
+            <div class="deskwash">
+              <div class="appwin" id="appwin" aria-label="Linear app window">
+                <div class="titlebar">
+                  <span class="wt" id="wintitle">Linear · Atlas</span>
+                  <span class="ctxtag" id="ctxtag">Ctx · Atlas</span>
+                  <span class="worigin">linear.app · no URL bar · identity pinned to origin</span>
+                </div>
+                <div class="winbody">
+                  <div class="undrawn">Web content · linear.app<br>
+                    <span style="letter-spacing:0.1em;font-size:8.5px">the app draws itself — not ours to draw, so dashed</span></div>
+                </div>
+              </div>
+              <div class="toast" id="toast"><b>Linear · Atlas</b> · now<br>ENG-142 assigned to you</div>
+            </div>
+          </div>
+
+          <!-- 03 · CONTEXTS -->
+          <div class="stage" id="st-contexts">
+            <div class="ctxhead">Browser contexts · active project brings its context forward</div>
+            <div class="ctxrow" id="ctx-personal" role="option" aria-selected="false" tabindex="-1">
+              <span class="cn">Personal</span>
+              <span class="iso">Cookies · tabs · storage · identity</span>
+              <span class="cstat">Default off-project</span>
+            </div>
+            <div class="ctxrow sel" id="ctx-atlas" role="option" aria-selected="true" tabindex="-1">
+              <span class="cn">Atlas</span>
+              <span class="iso">Cookies · tabs · storage · identity</span>
+              <span class="cstat"><span class="okc">Active</span> · brought forward by workspace Atlas</span>
+            </div>
+            <div class="ctxrow m-only" id="ctx-acme" role="option" aria-selected="false" tabindex="-1">
+              <span class="cn">Acme Work</span>
+              <span class="iso">Cookies · tabs · storage · identity · certificates · network policy</span>
+              <span class="cstat"><span class="pill" style="padding:2px 7px;font-size:8px">Managed</span> <span class="simtag">Cert roots · Simulated</span></span>
+            </div>
+            <div class="ctxnote" id="ctx-status">Active · <b>Atlas</b> — switched by workspace, or here by hand.</div>
+          </div>
+
+        </div>
+        <div class="scfoot">
+          <span>← → States · ↑↓ Select · ↵ Confirm · Esc Cancel</span>
+          <span>Same registry as punarctl app list</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Engine register</h2>
+    <p class="assertion">Upstream-current Chromium plus a small, auditable integration layer — the fork we refuse to build is the claim.</p>
+    <div class="reg"><span class="no">01</span><span class="what">No fork</span>
+      <p>Punar does not build a browser engine and does not deep-fork Chromium. The integration layer is small enough to audit and rebase; the engine stays current. <span class="specref">spec §30.1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Security cadence</span>
+      <p>Browser security updates ship as critical OS security updates, independently of slower Punar feature releases. The engine never waits on us. <span class="specref">spec §30.2</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Untouched model</span>
+      <p>Sandbox, site isolation, process boundaries, certificate validation, and extension security are upstream's — the integration layer may not weaken any of them, and no surface may claim otherwise. The install card's storage note is this rule as copy. <span class="specref">spec §62</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Platform floor</span>
+      <p>PWA support, WebGPU, WebRTC, passkeys, extensions — inherited from upstream by staying upstream, never reimplemented. <span class="specref">spec §30.1</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Citizen register</h2>
+    <p class="assertion">Installation is a contract the card states in full: what the app gets, and where its state lives.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Install card</span>
+      <p>Raised from the command center, wearing the approval-card grammar: mono masthead, rule, one plain sentence, grants as chips. Install is a consequential affirmative — the one ok-green fill on the surface; Cancel stays ghost. <span class="specref">spec §31 · §12.2</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Storage choice</span>
+      <p>Shared profile or separate context, chosen at install as two honest rows. The card says what separation is — cookies, storage, sign-ins — and refuses to call it a security boundary. <span class="specref">spec §31 · §62</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Window identity</span>
+      <p>The titlebar is the masthead grammar — <span class="specref">LINEAR · ATLAS</span> with a context tag. No URL bar; identity is pinned to the installed origin and printed in the corner instead. It tiles, tabs, and answers Super-keys like any native window. <span class="specref">spec §13 · §31</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Notifications</span>
+      <p>The toast carries the app's masthead name and its context, through the same notification surface native apps use — a citizen's channel, not a browser popup. <span class="specref">spec §31</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Context register</h2>
+    <p class="assertion">Browser state follows the project — and enrollment adds a row, never a different screen.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Isolation meta</span>
+      <p>Every context row states what it isolates: cookies · tabs · storage · identity. Silence is not isolation — the row is the coverage statement. <span class="specref">spec §32</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Project forward</span>
+      <p>Switching to workspace Atlas brings the Atlas context forward automatically; the picker names the cause. Manual switching stays one keystroke away. <span class="specref">spec §32 · §14</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Personal default</span>
+      <p>Unenrolled, the picker holds PERSONAL and the user's own project contexts — calm paper, no upsell, no empty org slot. <span class="specref">spec §3.2 · design language §8</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Enterprise additive</span>
+      <p>Enrollment annotates: the ACME WORK row appears with certificate roots and network policy in its meta, a <span class="specref">MANAGED</span> pill, and a dashed <span class="specref">SIMULATED</span> tag while cert deployment is mocked. Existing rows do not move. <span class="specref">spec §32 · §62 · §1.22</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Implementation notes</h2>
+    <p class="assertion">Design mockup — the browser lands in Milestone 1; contexts and enterprise annotation follow the daemons.</p>
+    <div class="reg"><span class="no">01</span><span class="what">M1 · Browser</span>
+      <p>Package upstream Chromium with the Punar integration layer; install flow writes the launcher entry and window identity so <span class="specref">punar-shell</span> treats the app as native. Demo Step 13 is the acceptance test. <span class="specref">spec §30 · §76</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">M2 · Windows</span>
+      <p>App windows join tiling, tabbing, workspace assignment, and layout presets — no special cases in the window grammar. <span class="specref">spec §13 · §31</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">M3–M4 · Contexts</span>
+      <p>Context switching rides workspace state via <span class="specref">punar-workspace</span>; context definitions become declarative desired state with the rest of the machine. <span class="specref">spec §14 · §38</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">M5 · Enterprise</span>
+      <p>Mock Smplify enrollment adds the managed context row, extension and allowed-app policy, and certificate roots — dashed <span class="specref">SIMULATED</span> until the control plane is real. <span class="specref">spec §62 · §77</span></p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/webapps-browser.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const frame = document.getElementById('frame');
+  const stages = ['st-install', 'st-window', 'st-contexts'].map(id => document.getElementById(id));
+  const tabs = [...document.querySelectorAll('.statebtn[data-state]')];
+  const modeBtns = [...document.querySelectorAll('.statebtn[data-mode]')];
+  let current = 0;
+
+  function setState(i) {
+    current = Math.max(0, Math.min(stages.length - 1, i));
+    stages.forEach((s, j) => s.classList.toggle('active', j === current));
+    tabs.forEach((t, j) => t.setAttribute('aria-selected', String(j === current)));
+  }
+  tabs.forEach(t => t.addEventListener('click', () => setState(+t.dataset.state)));
+
+  function setMode(mode) {
+    frame.classList.toggle('managed', mode === 'managed');
+    modeBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+    // Unmanaged-first: leaving managed mode removes the org context entirely —
+    // if it was active, activation falls back to the workspace context.
+    const acme = document.getElementById('ctx-acme');
+    if (mode !== 'managed' && acme && acme.classList.contains('sel')) {
+      activateCtx(document.getElementById('ctx-atlas'));
+    }
+  }
+  modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+  // 01 · storage-context choice
+  const storeRows = [document.getElementById('store-shared'), document.getElementById('store-separate')];
+  function chooseStore(i) {
+    storeRows.forEach((r, j) => {
+      r.classList.toggle('sel', j === i);
+      r.setAttribute('aria-checked', String(j === i));
+    });
+  }
+  storeRows.forEach((r, i) => r.addEventListener('click', () => chooseStore(i)));
+  document.getElementById('btn-install').addEventListener('click', () => setState(1));
+  document.getElementById('btn-cancel').addEventListener('click', () => setState(0));
+
+  // 03 · context picker
+  const ctxRows = [document.getElementById('ctx-personal'), document.getElementById('ctx-atlas'), document.getElementById('ctx-acme')];
+  const ctxStatus = document.getElementById('ctx-status');
+  function visibleCtx() { return ctxRows.filter(r => getComputedStyle(r).display !== 'none'); }
+  function activateCtx(row) {
+    if (!row) return;
+    ctxRows.forEach(r => {
+      r.classList.toggle('sel', r === row);
+      r.setAttribute('aria-selected', String(r === row));
+    });
+    const name = row.querySelector('.cn').textContent;
+    ctxStatus.innerHTML = 'Active · <b>' + name + '</b> — ' +
+      (row.id === 'ctx-atlas' ? 'switched by workspace, or here by hand.' : 'switched by hand.');
+  }
+  ctxRows.forEach(r => r.addEventListener('click', () => activateCtx(r)));
+
+  // keyboard: whole frame
+  frame.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight') { setState(current + 1); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft') { setState(current - 1); e.preventDefault(); return; }
+    if (e.key === '1' || e.key === '2' || e.key === '3') { setState(+e.key - 1); return; }
+    if (current === 0) {
+      if (e.key === 'ArrowDown') { chooseStore(1); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { chooseStore(0); e.preventDefault(); }
+      else if (e.key === 'Enter') { setState(1); e.preventDefault(); }
+      else if (e.key === 'Escape') { chooseStore(0); }
+    } else if (current === 2) {
+      const vis = visibleCtx();
+      let vi = vis.findIndex(r => r.classList.contains('sel'));
+      if (vi < 0) vi = 0;
+      if (e.key === 'ArrowDown') { activateCtx(vis[Math.min(vis.length - 1, vi + 1)]); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { activateCtx(vis[Math.max(0, vi - 1)]); e.preventDefault(); }
+      else if (e.key === 'Enter') { activateCtx(vis[vi]); e.preventDefault(); }
+    }
+  });
+})();
+</script>

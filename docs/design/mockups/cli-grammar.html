@@ -1,0 +1,357 @@
+<title>Punar CLI</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one panel-surface terminal frame. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* demo chrome */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+
+  /* terminal frame — panel surface, ANSI palette v0 from the design language §6 */
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #08090A; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .term { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.6% 3.2%;
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11.5px; line-height: 1.85;
+    color: #F2F3F5; font-variant-numeric: tabular-nums; }
+  .tbody { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; }
+  .tfoot { border-top: 1px solid #26282E; padding-top: 8px; display: flex; justify-content: space-between;
+    gap: 8px; flex-wrap: wrap; font-size: 8.5px; font-weight: 500; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #7B8290; }
+  .pline { margin: 0 0 4px; } .pline .prompt { color: #7B8290; } .pline .cmd { color: #F2F3F5; font-weight: 500; }
+  .tmast { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #F2F3F5; }
+  .tmast .r { color: #7B8290; font-weight: 500; }
+  .trule { border-top: 2px solid #F2F3F5; margin: 3px 0 7px; }
+  .trule.thin { border-top: 1px solid #26282E; }
+  .trow { display: flex; gap: 14px; align-items: baseline; }
+  .tk { width: 128px; flex: none; color: #7B8290; text-transform: uppercase; letter-spacing: 0.12em;
+    font-size: 9.5px; font-weight: 500; }
+  .tv { width: 112px; flex: none; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; font-size: 10px; }
+  .td { flex: 1; min-width: 0; color: #A8ADB6; }
+  .tvr { margin-left: auto; flex: none; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    font-size: 10px; text-align: right; }
+  .ok { color: #A3E047; } .warn { color: #F2BE85; } .bad { color: #FF7A7A; }
+  .fg { color: #F2F3F5; } .dim { color: #A8ADB6; } .mut { color: #7B8290; }
+  .tsec { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 8px;
+    border-top: 1px solid #26282E; font-size: 9.5px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #F2F3F5; }
+  .tsec .r { color: #7B8290; font-weight: 500; }
+  .tgap { height: 10px; }
+  .tnote { color: #7B8290; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 8px; }
+  .contract { border-left: 2px solid #26282E; padding-left: 12px; margin: 8px 0 10px;
+    color: #7B8290; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .contract .cap { color: #F2F3F5; text-transform: none; letter-spacing: 0; }
+  .tacts { display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+  .tbtn { font-family: inherit; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    background: transparent; border: 0; padding: 3px 10px; border-radius: 3px; cursor: pointer;
+    transition: opacity 150ms cubic-bezier(0.2,0,0,1); }
+  .tbtn:focus-visible { outline: 2px solid #F2F3F5; outline-offset: 2px; }
+  .tbtn.approve { background: #A3E047; color: #08090A; }         /* the one filled colored control */
+  .tbtn.deny { color: #FF7A7A; border: 1px solid #FF7A7A; }      /* destructive stays a ghost */
+  .tbtn[aria-disabled="true"] { opacity: 0.35; cursor: default; }
+  .verdict { margin-top: 10px; font-weight: 600; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* paper idioms reused from the family */
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 5px 11px; background: transparent; cursor: pointer; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .statebtn, .tbtn { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · CLI</strong></div>
+        <div class="meta">Terminal output grammar · punarctl · punar-env</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-014</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>Terminal output is designed, not dumped.</h1>
+    <p class="deck">The shell is keyboard-first, but the terminal remains exceptional — so the CLI is part of the design language, not an escape from it. Every punarctl verb calls the same typed capability the graphical shell calls, and its output arrives in the same grammar: tracked mastheads, middle-dot separators, tabular columns, and color only where there is status.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Command">
+      <button class="statebtn" id="cmd-1" data-cmd="1" aria-selected="true">01 · status</button>
+      <button class="statebtn" id="cmd-2" data-cmd="2" aria-selected="false">02 · policy explain</button>
+      <button class="statebtn" id="cmd-3" data-cmd="3" aria-selected="false">03 · agents inspect</button>
+      <button class="statebtn" id="cmd-4" data-cmd="4" aria-selected="false">04 · env up</button>
+      <button class="statebtn" id="cmd-5" data-cmd="5" aria-selected="false">05 · approval</button>
+    </div>
+    <div class="statebar" role="tablist" aria-label="Device mode">
+      <button class="statebtn" id="mode-personal" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" id="mode-managed" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="demohint">Unmanaged-first: enrollment adds rows, never redraws the output · 1–5 switch command · ← → cycle · P/M mode · A/D answer 05</div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Punar CLI demo terminal">
+      <div class="term">
+        <div class="tbody" id="term-output" data-cmd="1" data-mode="personal"></div>
+        <div class="tfoot">
+          <span>1–5 command · ←→ cycle · A/D respond in 05</span>
+          <span>Same capability layer as the shell · §10</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · One-layer register</h2>
+    <p class="assertion">punarctl is not a wrapper around shell scripts — it is the same typed capability call the shell makes, printed in the house grammar.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Capability parity</span>
+      <p>Every verb resolves to a typed capability — <span class="specref">SetFirewall(enabled)</span>, <span class="specref">InstallApplication(package)</span> — through the same policy layer as the GUI. <span class="specref">RunRootShell(command)</span> is prohibited by architecture, not by convention. <span class="specref">spec §10</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Verb set</span>
+      <p>The five outputs drawn here cover the §11.2 surface: <span class="specref">status</span>, <span class="specref">policy explain</span>, <span class="specref">agents inspect</span>, plus <span class="specref">punar-env up</span> (§17) and the in-terminal approval prompt (§28). The remaining verbs reuse the same four grammar rules — nothing needs a new idiom.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Same data, same order</span>
+      <p><span class="specref">policy explain</span> prints the exact anatomy of System Control's explain card (Plate D-004); <span class="specref">agents inspect</span> prints the AI panel's authority-then-ledger stack (Plate D-005), MAY and DID kept structurally apart. One dataset, two typefaces. <span class="specref">spec §40 · §21 · §25</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Exceptional terminal</span>
+      <p>"The graphical shell is keyboard-first, but the terminal remains exceptional" — a rule this plate takes literally: the CLI gets designed output because for many users it is the primary surface, not the fallback. <span class="specref">spec §82 · §3.2</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Grammar register</h2>
+    <p class="assertion">Four rules make a screen of text read as Punar: tracked mastheads, middle dots, tabular columns, and color spent only on status words.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Masthead + rule</span>
+      <p>Output opens the way every surface opens: <span class="specref">PUNAR · STATUS</span> left, context right, closed by a heavy rule. In a real terminal the rule is a run of box-drawing <span class="specref">U+2500</span>; this mockup draws it as a border for crispness.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Middle dots</span>
+      <p>Fields join with <span class="specref">·</span>, never pipes or slashes — <span class="specref">AGT_123 · ALICE@ACME.COM · ATLAS-DEV-42</span> is the same attribution line the approval overlay prints. One separator everywhere means output is scannable before it is read.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Columns</span>
+      <p>Labels are tracked uppercase in bright-black; values sit in aligned tabular-nums columns; decisions hold the right edge so reading straight down tells the whole story — the D-005 rule, kept in monospace.</p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Status color</span>
+      <p>The ANSI slots map 1:1 to decisions and states (§52): lime for allowed/compliant/ready, peach for approval-pending, red for denied/unknown. <span class="specref">DEVICE · PERSONAL</span> stays uncolored — the absence of an organization is calm, never a warning. <span class="specref">design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Scriptability register</h2>
+    <p class="assertion">The pretty output is for humans. Every command keeps a machine spelling, and the two never disagree.</p>
+    <div class="reg"><span class="no">01</span><span class="what">--json flag &nbsp;<span class="simtag">Planned · M3</span></span>
+      <p>Every verb takes <span class="specref">--json</span> and emits the capability-registry field names verbatim (<span class="specref">current_state</span>, <span class="specref">managed_by</span>, <span class="specref">verification</span>) — the human table and the JSON are two renderers over one struct. Dashed until punarctl ships. <span class="specref">spec §41 · §11.2</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Pipes strip color</span>
+      <p>When stdout is not a TTY, or <span class="specref">NO_COLOR</span> is set, ANSI codes drop and columns stay — grep and awk see clean fields, and no script ever parses an escape sequence.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Exit codes &nbsp;<span class="simtag">Planned · M3</span></span>
+      <p>0 for success, distinct nonzero codes for <span class="specref">deny</span>, <span class="specref">approval_required</span>, and drift — so the policy decision values (§20) are testable from a shell script without reading prose.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Implementation notes</h2>
+    <p class="assertion">Design mockup — the CLI lands with punarctl in Milestone 3 and grows verbs as its services ship; this page is the output acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Milestone map</span>
+      <p><span class="specref">status</span> and <span class="specref">policy explain</span> ship with punard + punarctl (M3–M4); <span class="specref">punar-env up</span> with the environment manager (M6); <span class="specref">agents inspect</span> with registry and ledger (M7–M8); the in-terminal approval prompt with approval gates (M9).</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">One formatter</span>
+      <p>A single output library in punarctl renders masthead, rule, row, and decision — no command formats itself. The terminal palette is design-language §6 v0 (<span class="specref">#08090A / #F2F3F5</span>, lime cursor); tuning the blue/magenta/cyan slots is an M1 task.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Approval TUI</span>
+      <p>The 05 prompt is the agent gateway (§26) speaking through the terminal: the same <span class="specref">apr_123</span> contract block as Plate D-003, same expiry, same audit line either way. Approve is the surface's one filled control — inverse-video lime; deny stays a red ghost. <span class="specref">spec §28</span></p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/cli-grammar.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const out = document.getElementById('term-output');
+  const frame = document.getElementById('frame');
+  const cmdBtns = [...document.querySelectorAll('.statebtn[data-cmd]')];
+  const modeBtns = [...document.querySelectorAll('.statebtn[data-mode]')];
+  let cmd = 1, mode = 'personal', apState = null;
+
+  const prompt = (c) => '<div class="pline"><span class="prompt">alice@thinkpad ~/atlas $</span> <span class="cmd">' + c + '</span></div>';
+  const mast = (l, r) => '<div class="tmast"><span>' + l + '</span><span class="r">' + r + '</span></div><div class="trule"></div>';
+  const row = (id, k, v, vc, d) =>
+    '<div class="trow" id="' + id + '"><span class="tk">' + k + '</span><span class="tv ' + vc + '">' + v + '</span><span class="td">' + d + '</span></div>';
+
+  function statusView() {
+    const managed = mode === 'managed';
+    let h = prompt('punarctl status');
+    h += mast('Punar · Status', managed ? 'dev_123 · Acme Engineering' : 'thinkpad-x1 · Personal');
+    h += managed
+      ? row('st-device', 'Device', 'Managed', 'fg', 'thinkpad-x1 · dev_123 · enrolled 2026-06-12')
+      : row('st-device', 'Device', 'Personal', 'fg', 'thinkpad-x1 · not enrolled · nothing leaves this machine');
+    h += row('st-firewall', 'Firewall', 'Enabled', 'ok', 'inbound deny by default · nftables verified 08:24');
+    h += row('st-ai', 'AI sessions', '2 active', 'fg', 'agt_123 · agt_124 · <span class="bad">1 unknown</span> — punarctl agents list');
+    h += row('st-updates', 'Updates', 'Current', 'ok', 'stable channel · checked 07:58');
+    if (managed) {
+      h += row('st-compliance', 'Compliance', 'Compliant', 'ok', 'eng-baseline-v12 · reported 08:24');
+      h += row('st-org', 'Org', 'Acme', 'fg', 'policy set engineering-standard · queries audited &amp; visible');
+    }
+    h += '<div class="tnote">' + (managed
+      ? 'You never see less than your administrator · punarctl audit tail'
+      : 'No organization is enrolled · enrolling later never applies retroactively') + '</div>';
+    return h;
+  }
+
+  function explainView() {
+    const managed = mode === 'managed';
+    let h = prompt('punarctl policy explain security.firewall');
+    h += mast('Punar · Policy Explain', 'security.firewall');
+    h += row('ex-effective', 'Effective value', 'Enabled', 'fg', '');
+    h += managed
+      ? row('ex-source', 'Source', '', 'fg', '<span class="fg">Acme Engineering Baseline</span>')
+      : row('ex-source', 'Source', '', 'fg', '<span class="fg">You · this device</span>');
+    h += managed
+      ? row('ex-policy', 'Policy', '', 'fg', '<span class="fg">eng-baseline-v12</span>')
+      : row('ex-policy', 'Policy', '', 'fg', '<span class="fg">personal defaults</span>');
+    h += managed
+      ? row('ex-override', 'User override', '', 'fg', '<span class="fg">Not permitted</span>')
+      : row('ex-override', 'User override', '', 'fg', '<span class="fg">Permitted</span> · it is your device');
+    h += managed
+      ? row('ex-compliance', 'Compliance', 'Compliant', 'ok', '')
+      : row('ex-compliance', 'Compliance', '', 'fg', '<span class="mut">not enrolled · local state only</span>');
+    h += '<div class="tnote">Same data, same order as System Control → Firewall · §40</div>';
+    return h;
+  }
+
+  function inspectView() {
+    const managed = mode === 'managed';
+    const pol = managed ? 'policy · eng-ai-v3' : 'policy · personal defaults';
+    const arow = (k, d, v, vc) =>
+      '<div class="trow"><span class="tk">' + k + '</span><span class="td">' + d + '</span><span class="tvr ' + vc + '">' + v + '</span></div>';
+    let h = prompt('punarctl agents inspect agt_123');
+    h += mast('Claude Code · agt_123', 'Managed · Active');
+    h += '<div class="tnote" style="margin-top:0">alice@acme.com · atlas · atlas-dev-42 · started 13:44</div>';
+    h += '<div class="tsec" id="in-authority"><span>Authority · what it may access</span><span class="r">' + pol + '</span></div>';
+    h += arow('Workspace', 'read / write', 'Allowed', 'ok');
+    h += arow('Home', 'read only', 'Allowed', 'ok');
+    h += arow('SSH keys', '~/.ssh', 'Denied', 'bad');
+    h += arow('Internet', 'egress', 'Allowed', 'ok');
+    h += arow('Corp dev', 'zone', 'Allowed', 'ok');
+    h += arow('Corp prod', 'zone', 'Denied', 'bad');
+    h += arow('GitHub', 'credential', 'Allowed', 'ok');
+    h += arow('AWS dev', 'short-lived · expires 41:32', 'Issued', 'ok');
+    h += arow('AWS prod', 'credential', 'Denied', 'bad');
+    h += '<div class="tsec" id="in-ledger"><span>Ledger · what it accessed</span><span class="r">local only · level 3</span></div>';
+    h += arow('Repositories', 'atlas', '', 'fg');
+    h += arow('Domains', 'api.anthropic.com · github.com', '', 'fg');
+    h += arow('Credentials', 'aws_dev × 1', '', 'fg');
+    h += arow('Processes', 'git × 12 · cargo × 4 · bash × 9', '', 'fg');
+    h += '<div class="trow" id="in-event"><span class="tk">Event</span><span class="td bad">denied · aws_prod credential · 14:02 · evt_502</span></div>';
+    h += '<div class="tnote">' + (managed
+      ? 'Ledger stays on this device · admin queries are scoped, audited, visible here'
+      : 'Ledger stays on this device · no organization is enrolled') + '</div>';
+    return h;
+  }
+
+  function envView() {
+    const step = (k, d) =>
+      '<div class="trow"><span class="tv ok" style="width:24px">✓</span><span class="tk" style="width:104px">' + k + '</span><span class="td">' + d + '</span></div>';
+    let h = prompt('punar-env up');
+    h += mast('Punar-Env · Atlas', 'devcontainer · punar.dev/v1alpha1');
+    h += step('Manifest', 'punar-env.yaml · valid');
+    h += step('Toolchains', 'node 24 · rust stable');
+    h += step('Services', 'postgres · ready');
+    h += step('Network', '<span class="ok">internet allow</span> · <span class="ok">corp_dev allow</span> · <span class="bad">corp_prod deny</span>');
+    h += step('Credentials', '<span class="ok">github allow</span> · <span class="warn">aws_dev on request</span> · <span class="bad">aws_prod deny</span>');
+    h += step('Agents', 'claude-code · codex · registered');
+    h += '<div class="trule thin" style="margin-top:8px"></div>';
+    h += '<div class="verdict ok" id="env-ready">Workspace ready · atlas · 12.4s — punar-env shell to enter</div>';
+    h += '<div class="tnote">Boundaries are provisioned before the first tool runs · §17</div>';
+    return h;
+  }
+
+  function approvalView() {
+    const managed = mode === 'managed';
+    let h = prompt('punar-env agent claude');
+    h += '<div class="tnote" style="margin-top:0">session agt_123 · claude code · attached</div>';
+    h += '<div class="tgap"></div>';
+    h += mast('Approval · apr_123 · expires 04:59', '<span class="warn">Medium</span>');
+    h += '<div class="fg" style="font-weight:500">Claude Code requests system.install_package · libvirt</div>';
+    h += '<div class="dim">Required by project Atlas.</div>';
+    h += '<div class="contract">One-time execution · <span class="cap">InstallPackage(libvirt)</span><br>' +
+      (managed ? 'Policy · Acme AI Engineering Baseline v3 · eng-ai-v3' : 'Policy · personal defaults · system_package = approval_required') +
+      '<br>Recorded to local audit either way</div>';
+    const dis = apState ? ' aria-disabled="true"' : '';
+    h += '<div class="tacts"><button class="tbtn deny" id="apD"' + dis + '>[D] Deny</button><button class="tbtn approve" id="apA"' + dis + '>[A] Approve</button></div>';
+    if (apState === 'ok') h += '<div class="verdict ok" id="ap-verdict">✓ Approved · InstallPackage(libvirt) executed · audit evt_501</div>';
+    if (apState === 'deny') h += '<div class="verdict bad" id="ap-verdict">Denied · nothing executed · audit evt_502</div>';
+    return h;
+  }
+
+  function render() {
+    const views = { 1: statusView, 2: explainView, 3: inspectView, 4: envView, 5: approvalView };
+    out.innerHTML = (views[cmd] || statusView)();
+    out.dataset.cmd = String(cmd);
+    out.dataset.mode = mode;
+    cmdBtns.forEach(b => b.setAttribute('aria-selected', String(+b.dataset.cmd === cmd)));
+    modeBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+  }
+
+  function setCmd(c) { c = Math.max(1, Math.min(5, c)); if (c !== cmd) apState = null; cmd = c; render(); }
+  function setMode(m) { mode = m; render(); }
+  function decide(v) { if (cmd !== 5 || apState) return; apState = v; render(); }
+
+  cmdBtns.forEach(b => b.addEventListener('click', () => setCmd(+b.dataset.cmd)));
+  modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+  out.addEventListener('click', e => {
+    if (e.target.closest && e.target.closest('#apA')) decide('ok');
+    else if (e.target.closest && e.target.closest('#apD')) decide('deny');
+  });
+
+  frame.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (e.key >= '1' && e.key <= '5') { setCmd(+e.key); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { setCmd(cmd === 5 ? 1 : cmd + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { setCmd(cmd === 1 ? 5 : cmd - 1); e.preventDefault(); }
+    else if (k === 'p') { setMode('personal'); e.preventDefault(); }
+    else if (k === 'm') { setMode('managed'); e.preventDefault(); }
+    else if (k === 'a' && cmd === 5) { decide('ok'); e.preventDefault(); }
+    else if (k === 'd' && cmd === 5) { decide('deny'); e.preventDefault(); }
+  });
+
+  render();
+})();
+</script>

@@ -1,0 +1,560 @@
+<title>Punar First Boot</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, all-paper first-boot sequence. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .statebtn.gated { border-style: dashed; border-color: #8C8880; color: #8C8880; cursor: default; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .fb { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .fbhead .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .fbhead .hm strong { color: #000; font-weight: 600; }
+  .cpill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 4px 9px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #333; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .fbrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .fbbody { flex: 1; position: relative; min-height: 0; }
+  .stage { position: absolute; inset: 0; opacity: 0; pointer-events: none; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    padding: 2% 6%; transition: opacity 450ms cubic-bezier(0.2, 0, 0, 1); }
+  .stage.active { opacity: 1; pointer-events: auto; }
+  .fbfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  /* stage idioms */
+  .wordmark { font-family: "Instrument Sans", sans-serif; font-weight: 700; letter-spacing: -0.028em;
+    color: #000; font-size: clamp(30px, 5.5vw, 46px); line-height: 1; }
+  .stlabel { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.2em; text-transform: uppercase; color: #666; }
+  .stq { font-weight: 600; font-size: clamp(17px, 2.6vw, 22px); letter-spacing: -0.01em; color: #000; margin: 0; }
+  .col { width: min(440px, 92%); display: flex; flex-direction: column; }
+  .rowline { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid #E6E4DE;
+    cursor: pointer; width: 100%; background: transparent; border-left: 0; border-right: 0; border-bottom: 0;
+    font-family: inherit; text-align: left; }
+  .rowline:last-child { border-bottom: 1px solid #E6E4DE; }
+  .rowline:focus-visible { outline: 2px solid #000; outline-offset: -2px; border-radius: 4px; }
+  .rowline .nm { font-size: 13.5px; font-weight: 500; color: #000; }
+  .rowline .mt { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; text-align: right; }
+  .rowline.sel { background: #F4F2EC; }
+  .uinput { font-family: "Geist Mono", ui-monospace, monospace; font-size: 13px; color: #000; letter-spacing: 0.06em;
+    border: 0; border-bottom: 1px solid #8C8880; background: transparent; padding: 6px 2px; width: 100%; }
+  .uinput:focus { outline: 2px solid #000; outline-offset: 3px; border-radius: 2px; }
+  .uinput::placeholder { font-size: 9.5px; letter-spacing: 0.18em; color: #8C8880; text-transform: uppercase; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 5px 11px; background: transparent; cursor: pointer; }
+  .ghost:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .explain { border: 1px solid #E6E4DE; border-radius: 10px; background: #F4F2EC; padding: 13px 15px;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2.05; width: 100%; }
+  .explain b { color: #000; font-weight: 600; }
+  .subnote { font-size: 12.5px; color: #666; margin: 0; max-width: 52ch; text-align: center; }
+  .toggle { width: 34px; height: 18px; border: 1px solid #000; border-radius: 9px; position: relative; flex: none;
+    background: transparent; cursor: pointer; padding: 0; }
+  .toggle .knob { position: absolute; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #000;
+    transition: all 300ms cubic-bezier(0.2,0,0,1); }
+  .toggle.on .knob { right: 2px; } .toggle.off .knob { left: 2px; background: #8C8880; }
+  .toggle.off { border-color: #8C8880; }
+  .toggle:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+
+  /* fork cards */
+  .forkrow { display: flex; gap: 14px; width: min(560px, 96%); }
+  .fcard { flex: 1; border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; padding: 14px 15px;
+    cursor: pointer; text-align: left; font-family: inherit; display: flex; flex-direction: column; gap: 8px;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .fcard:hover { background: #F4F2EC; }
+  .fcard.sel { border-color: #000; background: #F4F2EC; box-shadow: inset 2px 0 0 #000; }
+  .fcard:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .fcard .ft { font-size: 15px; font-weight: 600; color: #000; display: flex; align-items: center; gap: 8px;
+    justify-content: space-between; }
+  .fcard .fc { font-size: 12.5px; color: #333; line-height: 1.5; margin: 0; }
+  .fcard .fm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-top: auto; }
+
+  /* enrollment chain */
+  .estep { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid #E6E4DE; width: 100%; }
+  .estep:last-of-type { border-bottom: 1px solid #E6E4DE; }
+  .estep .edot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid #8C8880; background: transparent; flex: none; }
+  .estep.done .edot { background: #2E6B21; border-color: #2E6B21; }
+  .estep .en { font-size: 13px; font-weight: 500; color: #666; }
+  .estep.done .en { color: #000; }
+  .estep .em { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #8C8880; text-align: right; }
+  .estep.done .em { color: #666; }
+
+  /* done + handoff */
+  .fill { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; background: #2E6B21; color: #FAF9F6;
+    border: 1px solid #2E6B21; border-radius: 6px; padding: 8px 16px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .fill:hover { opacity: 0.86; }
+  .fill:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .fill kbd { font-size: 9px; border: 1px solid rgb(250 249 246 / 0.5); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+  .handoff { position: absolute; inset: 0; background: #FAF9F6; display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 450ms cubic-bezier(0.2, 0, 0, 1); }
+  .handoff.on { opacity: 1; }
+  .handoff span { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.2em; text-transform: uppercase; color: #666; }
+
+  /* registers */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } .forkrow { flex-direction: column; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .stage, .handoff, .statebtn, .fcard, .fill, .toggle .knob { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · First Boot</strong></div>
+        <div class="meta">Out-of-box sequence · seven stages, one fork</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-008</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>A fresh machine is personal until its owner says otherwise.</h1>
+    <p class="deck">First boot is calm paper end to end: language, network, a local account with no email, and then the one question that matters — how will you use this device? Personal is the default and the finish line; the organization path is a marked branch, drawn honestly, with its simulated steps labeled. No terminal appears anywhere.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="First-boot stages">
+      <button class="statebtn" role="tab" data-stage="0" aria-selected="true">01 · Welcome</button>
+      <button class="statebtn" role="tab" data-stage="1" aria-selected="false">02 · Network</button>
+      <button class="statebtn" role="tab" data-stage="2" aria-selected="false">03 · Account</button>
+      <button class="statebtn" role="tab" data-stage="3" aria-selected="false">04 · The fork</button>
+      <button class="statebtn" role="tab" data-stage="4" aria-selected="false">05 · Privacy</button>
+      <button class="statebtn" role="tab" data-stage="5" aria-selected="false">06 · Organization</button>
+      <button class="statebtn" role="tab" data-stage="6" aria-selected="false">07 · Done</button>
+      <span class="demohint">← → stages · branch follows the fork</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Interactive first-boot demo">
+      <div class="fb">
+        <div class="mast fbhead">
+          <div class="hm"><strong>Punar</strong> · First boot<br><span id="mastline">Local setup · No account required</span></div>
+          <div class="hm" style="text-align:right"><span id="mastpill"></span>Setup · 08 · 2026</div>
+        </div>
+        <hr class="fbrule">
+        <div class="fbbody">
+
+          <!-- 01 · WELCOME -->
+          <div class="stage active" id="st0">
+            <div class="wordmark">punar</div>
+            <div class="stlabel">Welcome · Set up this machine</div>
+            <div class="col">
+              <button class="rowline" id="optLang"><span class="nm">Language</span><span class="mt" id="valLang">English (US) · ↵ change</span></button>
+              <button class="rowline" id="optKb"><span class="nm">Keyboard</span><span class="mt" id="valKb">US QWERTY · ↵ change</span></button>
+              <button class="rowline" id="optTz"><span class="nm">Timezone</span><span class="mt" id="valTz">Europe/Berlin · ↵ change</span></button>
+            </div>
+            <button class="ghost" id="welcomeContinue">Continue →</button>
+          </div>
+
+          <!-- 02 · NETWORK -->
+          <div class="stage" id="st1">
+            <div class="stlabel">Connect to a network</div>
+            <div class="col" id="wifiList">
+              <button class="rowline wnet" id="wifi-0" data-net="Loft-5G"><span class="dot" style="background:#E6E4DE"></span><span class="nm">Loft-5G</span><span class="mt">WPA3 · Strong</span></button>
+              <button class="rowline wnet" id="wifi-1" data-net="ACME-CORP"><span class="dot" style="background:#E6E4DE"></span><span class="nm">ACME-CORP</span><span class="mt">WPA3-Enterprise</span></button>
+              <button class="rowline wnet" id="wifi-2" data-net="cafe-guest"><span class="dot" style="background:#E6E4DE"></span><span class="nm">cafe-guest</span><span class="mt">Open</span></button>
+            </div>
+            <div class="col" id="wifiAuth" style="display:none; gap:10px; flex-direction:row; align-items:flex-end">
+              <input class="uinput" id="wifiPass" type="password" placeholder="Network passphrase" aria-label="Network passphrase">
+              <button class="ghost" id="wifiConnect">Connect ↵</button>
+            </div>
+            <div class="stlabel" id="netState">Not connected</div>
+            <p class="subnote">Setup continues offline too — the organization path simply stays closed until a network exists.</p>
+          </div>
+
+          <!-- 03 · YOUR ACCOUNT -->
+          <div class="stage" id="st2">
+            <div class="stlabel">Your account</div>
+            <div class="col" style="gap:14px">
+              <input class="uinput" id="accName" type="text" placeholder="Your name" aria-label="Your name">
+              <div class="rowline" style="cursor:default"><span class="nm" style="font-family:'Geist Mono',monospace;font-size:11px" id="accUser">username · —</span><span class="mt">Local user</span></div>
+              <input class="uinput" id="accPass" type="password" placeholder="Passphrase" aria-label="Passphrase">
+            </div>
+            <p class="subnote">No email. No cloud sign-up. This user exists only on this machine.</p>
+            <button class="ghost" id="accContinue">Continue →</button>
+          </div>
+
+          <!-- 04 · THE FORK -->
+          <div class="stage" id="st3">
+            <p class="stq">How will you use this device?</p>
+            <div class="forkrow">
+              <button class="fcard sel" id="forkPersonal" aria-pressed="true">
+                <span class="ft">Personal <span class="pill">Default</span></span>
+                <p class="fc">Your device. Your rules. Nothing leaves this machine.</p>
+                <span class="fm">Policy source · your own defaults</span>
+              </button>
+              <button class="fcard" id="forkOrg" aria-pressed="false">
+                <span class="ft">With my organization</span>
+                <p class="fc">Adds your organization's baseline and visibility — always shown to you.</p>
+                <span class="fm">You can also enroll later · never retroactively</span>
+              </button>
+            </div>
+            <button class="ghost" id="forkContinue">Continue ↵</button>
+          </div>
+
+          <!-- 05 · PRIVACY DEFAULTS (personal path) -->
+          <div class="stage" id="st4">
+            <div class="stlabel">Privacy defaults</div>
+            <div class="col">
+              <div class="rowline" style="cursor:default">
+                <span class="nm">Private relay</span>
+                <span class="simtag">Simulated · M12</span>
+                <span class="mt" style="display:flex;align-items:center;gap:10px">
+                  <span id="relayState">Off · R toggles</span>
+                  <button class="toggle off" id="relayToggle" role="switch" aria-checked="false" aria-label="Private relay"><span class="knob"></span></button>
+                </span>
+              </div>
+            </div>
+            <p class="subnote">Hides your IP address from destinations. Your choice, stated here — not buried in a settings tree.</p>
+            <div class="col"><div class="explain" id="telemetryFact">
+              Telemetry · <b>Community edition has no telemetry. There is nothing to opt out of.</b><br>
+              Enrolling later · <b>Never applies retroactively</b>
+            </div></div>
+            <button class="ghost" id="privContinue">Continue →</button>
+          </div>
+
+          <!-- 06 · ORG PATH (only if fork = organization) -->
+          <div class="stage" id="st5">
+            <div class="stlabel">Joining your organization</div>
+            <div class="col">
+              <div class="estep" id="enroll-0"><span class="edot"></span><span class="en">Discovery</span><span class="em">alice@acme.com → smplify.acme.com</span></div>
+              <div class="estep" id="enroll-1"><span class="edot"></span><span class="en">Authentication</span><span class="em">alice@acme.com · SSO</span></div>
+              <div class="estep" id="enroll-2"><span class="edot"></span><span class="en">Registration</span><span class="em">Device dev_123</span></div>
+              <div class="estep" id="enroll-3"><span class="edot"></span><span class="en">Attestation</span><span class="em"><span class="simtag">Simulated · VM</span></span></div>
+              <div class="estep" id="enroll-4"><span class="edot"></span><span class="en">Desired state</span><span class="em">eng-baseline-v12 · engineering-standard</span></div>
+              <div class="estep" id="enroll-5"><span class="edot"></span><span class="en">Provision</span><span class="em">eng-ai-v3 · applied</span></div>
+            </div>
+            <div class="stlabel" id="enrollDone" style="visibility:hidden">Enrolled · Acme Engineering · you see everything they see</div>
+            <button class="ghost" id="enrollFinish">Complete now ↵</button>
+          </div>
+
+          <!-- 07 · DONE -->
+          <div class="stage" id="st6">
+            <div class="wordmark" style="font-size:clamp(24px,4vw,36px)">Ready.</div>
+            <div class="stlabel" id="doneMeta">Personal · Nothing left this machine · No shell commands used</div>
+            <button class="fill" id="beginBtn">Enter desktop<kbd>↵</kbd></button>
+          </div>
+
+          <div class="handoff" id="handoff"><span>First light · Handoff · Punar Shell</span></div>
+        </div>
+        <div class="fbfoot">
+          <span>← → Stage · ↵ Continue · P O Fork · R Relay</span>
+          <span>No terminal during first boot · spec §65</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · The fork register</h2>
+    <p class="assertion">The fork is unmanaged-first as law: personal is the pre-selected default, and the organization is a card, not a gate.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Default card</span>
+      <p>Personal arrives selected, carrying the only <span class="specref">DEFAULT</span> tag in the flow. Its copy is the whole promise in nine words: your device, your rules, nothing leaves this machine. <span class="specref">spec §65 · §3.6</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Org card copy</span>
+      <p>The organization card states exactly what changes — a baseline and visibility — and adds the standing rule that everything the organization can see is always shown to the user too. <span class="specref">spec §24.2</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Enroll later</span>
+      <p>The card's own footer says enrollment can happen any time and never applies retroactively — so choosing personal today costs nothing tomorrow. <span class="specref">spec §49 · design language §8</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Additive chrome</span>
+      <p>After the org path completes, the only visual change is the masthead gaining a line and a compliance pill. Enrollment annotates the surface; it never restructures it — the same demonstration the AI panel's mode toggle makes. <span class="specref">design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Telemetry honesty register</h2>
+    <p class="assertion">The privacy stage states facts; it does not stage a negotiation.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The sentence</span>
+      <p>Community edition has no telemetry, so the stage renders that as a fact block — <span class="specref">THERE IS NOTHING TO OPT OUT OF</span> — instead of drawing a toggle for data that is never collected. <span class="specref">spec §54</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Relay is a choice</span>
+      <p>Private relay is the one real decision on the stage: off until chosen, one line of consequence, and a dashed <span class="specref">SIMULATED · M12</span> tag because the relay path is not yet a production claim. <span class="specref">spec §33 · §1.22</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">No opt-out theater</span>
+      <p>Nothing on this stage is pre-checked consent, dark-pattern copy, or a "share diagnostics" plea. A screen with no status to report contains no color — and no bargaining. <span class="specref">design language §2</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Enrollment chain register</h2>
+    <p class="assertion">The organization path is the §49 chain drawn as a progress register — six steps, every claim marked.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Chain order</span>
+      <p>Discovery, authentication, registration, attestation, desired state, provision — the spec's sequence verbatim, each step a register row with a status dot that fills ok-green only when that step has actually completed. <span class="specref">spec §49</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Attestation honesty</span>
+      <p>Attestation carries a dashed <span class="specref">SIMULATED · VM</span> tag: in MVP builds there is no real TPM measurement, and the drawing refuses to pretend otherwise. <span class="specref">spec §1.22 · §44.1</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Mocked control plane</span>
+      <p>The whole path talks to a mocked Smplify control plane until Milestone 5 — so the plate names the fixtures (<span class="specref">alice@acme.com · dev_123 · eng-baseline-v12 · eng-ai-v3</span>) rather than inventing a live service. <span class="specref">spec §49 · §76 M5</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Visibility line</span>
+      <p>The chain ends with the employee-facing promise, not a corporate one: enrolled means you see everything they see. It is the §24.2 rule stated at the moment it starts to matter.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Keyboard register</h2>
+    <p class="assertion">First boot is completable start to finish without a pointer — and without a terminal.</p>
+    <div class="reg"><span class="no">01</span><span class="what">No shell</span>
+      <p>No stage shows, requires, or suggests a shell command. The spec's first-boot rule is absolute, and the demo honors it down to the footer. <span class="specref">spec §65</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Arrow grammar</span>
+      <p>← → move between stages along whichever branch the fork selected; ↵ acts on the current stage; single letters (<span class="specref">P · O · R</span>) make the fork and relay decisions. Bindings are printed in the frame footer, not hidden. <span class="specref">spec §12</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Underline inputs</span>
+      <p>Name, passphrase, and Wi-Fi credential fields reuse the greeter's underline-input grammar — the same hairline, the same focus ring, learned once at first boot and kept forever.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the personal path ships with Milestone 1; the organization branch goes live with the mocked control plane in Milestone 5.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Personal path</span>
+      <p>Stages 01–05 and 07 are a Quickshell OOBE surface consuming <span class="specref">shell/theme/punar-tokens.json</span>, shipped on the M1 ISO/VM image. No custom installer beyond this flow before the core OS works. <span class="specref">spec §66 · §76 M1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Org branch</span>
+      <p>Stage 06 calls the enrollment chain against mocked Smplify (M5); attestation stays dashed until real Secure Boot/TPM measurement exists. The relay toggle wires to the network privacy prototype in M12 and stays labeled simulated until then. <span class="specref">spec §76 M5 · M12</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Handoff</span>
+      <p>ENTER DESKTOP performs the same 450ms first-light handoff the greeter uses — one spatial transition, once, into Punar Shell with terminal, browser, and workspace creation one keystroke away. <span class="specref">spec §65 steps 7–11</span></p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/first-boot.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const stages = [0, 1, 2, 3, 4, 5, 6].map(i => document.getElementById('st' + i));
+  const tabs = [...document.querySelectorAll('.statebtn[data-stage]')];
+  const frame = document.getElementById('frame');
+  let current = 0;
+  let fork = 'personal'; // unmanaged-first: personal is the default state
+  let enrolled = false;
+  let enrollTimer = null;
+
+  const path = () => fork === 'org' ? [0, 1, 2, 3, 5, 6] : [0, 1, 2, 3, 4, 6];
+
+  function updateTabs() {
+    const p = path();
+    tabs.forEach(t => {
+      const i = +t.dataset.stage;
+      t.setAttribute('aria-selected', String(i === current));
+      const gated = !p.includes(i);
+      t.classList.toggle('gated', gated);
+      t.setAttribute('aria-disabled', String(gated));
+    });
+  }
+
+  function setStage(i) {
+    if (!path().includes(i)) return;
+    current = i;
+    stages.forEach((s, j) => s.classList.toggle('active', j === i));
+    updateTabs();
+    if (i === 5) runEnroll();
+  }
+
+  function advance(dir) {
+    const p = path();
+    let pi = p.indexOf(current);
+    if (pi < 0) pi = 0;
+    setStage(p[Math.max(0, Math.min(p.length - 1, pi + dir))]);
+  }
+
+  tabs.forEach(t => t.addEventListener('click', () => setStage(+t.dataset.stage)));
+
+  // --- 01 welcome: cycling option rows ---
+  const cycle = (btnId, valId, label, values) => {
+    let vi = 0;
+    const val = document.getElementById(valId);
+    document.getElementById(btnId).addEventListener('click', () => {
+      vi = (vi + 1) % values.length;
+      val.textContent = values[vi] + ' · ↵ change';
+    });
+  };
+  cycle('optLang', 'valLang', 'Language', ['English (US)', 'Deutsch', 'हिन्दी', 'Español']);
+  cycle('optKb', 'valKb', 'Keyboard', ['US QWERTY', 'DE QWERTZ', 'Colemak']);
+  cycle('optTz', 'valTz', 'Timezone', ['Europe/Berlin', 'Asia/Kolkata', 'America/New_York']);
+  document.getElementById('welcomeContinue').addEventListener('click', () => advance(1));
+
+  // --- 02 network ---
+  const nets = [...document.querySelectorAll('.wnet')];
+  const wifiAuth = document.getElementById('wifiAuth');
+  const wifiPass = document.getElementById('wifiPass');
+  const netState = document.getElementById('netState');
+  let netSel = -1;
+  function selectNet(i) {
+    netSel = Math.max(0, Math.min(nets.length - 1, i));
+    nets.forEach((n, j) => n.classList.toggle('sel', j === netSel));
+    const open = nets[netSel].dataset.net === 'cafe-guest';
+    wifiAuth.style.display = open ? 'none' : 'flex';
+    if (open) connectNet(); else wifiPass.focus({ preventScroll: true });
+  }
+  function connectNet() {
+    if (netSel < 0) return;
+    nets.forEach(n => { n.querySelector('.dot').style.background = '#E6E4DE'; });
+    nets[netSel].querySelector('.dot').style.background = '#2E6B21';
+    netState.textContent = 'Connected · ' + nets[netSel].dataset.net;
+    wifiAuth.style.display = 'none';
+    wifiPass.value = '';
+  }
+  nets.forEach((n, i) => n.addEventListener('click', () => selectNet(i)));
+  document.getElementById('wifiConnect').addEventListener('click', connectNet);
+  wifiPass.addEventListener('keydown', e => { if (e.key === 'Enter') { connectNet(); e.stopPropagation(); } });
+
+  // --- 03 account ---
+  const accName = document.getElementById('accName');
+  const accUser = document.getElementById('accUser');
+  accName.addEventListener('input', () => {
+    const u = accName.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '') || '—';
+    accUser.textContent = 'username · ' + u;
+  });
+  document.getElementById('accPass').addEventListener('keydown', e => { if (e.key === 'Enter') { advance(1); e.stopPropagation(); } });
+  document.getElementById('accContinue').addEventListener('click', () => advance(1));
+
+  // --- 04 the fork ---
+  const cardP = document.getElementById('forkPersonal');
+  const cardO = document.getElementById('forkOrg');
+  function setFork(f) {
+    fork = f;
+    cardP.classList.toggle('sel', f === 'personal');
+    cardO.classList.toggle('sel', f === 'org');
+    cardP.setAttribute('aria-pressed', String(f === 'personal'));
+    cardO.setAttribute('aria-pressed', String(f === 'org'));
+    document.getElementById('doneMeta').textContent = f === 'org'
+      ? 'Managed · Acme Engineering · Baseline visible in System Control'
+      : 'Personal · Nothing left this machine · No shell commands used';
+    if (f === 'personal') {
+      // Unmanaged-first: choosing personal removes any org annotation entirely.
+      clearTimeout(enrollTimer);
+      enrolled = false;
+      document.querySelectorAll('#st5 .done').forEach(s => s.classList.remove('done'));
+      document.getElementById('enrollDone').style.visibility = 'hidden';
+      document.getElementById('mastline').textContent = 'Local setup · No account required';
+      document.getElementById('mastpill').innerHTML = '';
+    }
+    updateTabs();
+  }
+  cardP.addEventListener('click', () => setFork('personal'));
+  cardO.addEventListener('click', () => setFork('org'));
+  document.getElementById('forkContinue').addEventListener('click', () => advance(1));
+
+  // --- 05 privacy defaults ---
+  const relayBtn = document.getElementById('relayToggle');
+  const relayState = document.getElementById('relayState');
+  function toggleRelay() {
+    const on = relayBtn.getAttribute('aria-checked') !== 'true';
+    relayBtn.setAttribute('aria-checked', String(on));
+    relayBtn.classList.toggle('on', on);
+    relayBtn.classList.toggle('off', !on);
+    relayState.textContent = on ? 'On · R toggles' : 'Off · R toggles';
+  }
+  relayBtn.addEventListener('click', toggleRelay);
+  document.getElementById('privContinue').addEventListener('click', () => advance(1));
+
+  // --- 06 org path: §49 chain as progress register ---
+  const esteps = [0, 1, 2, 3, 4, 5].map(i => document.getElementById('enroll-' + i));
+  const enrollDone = document.getElementById('enrollDone');
+  function finishEnroll() {
+    clearTimeout(enrollTimer);
+    esteps.forEach(s => s.classList.add('done'));
+    enrollDone.style.visibility = 'visible';
+    enrolled = true;
+    document.getElementById('mastline').textContent = 'dev_123 · Acme Engineering · Managed';
+    document.getElementById('mastpill').innerHTML =
+      '<span class="cpill" style="margin-right:8px"><span class="dot" style="background:#2E6B21"></span>Compliant</span>';
+  }
+  function runEnroll() {
+    if (enrolled) return;
+    clearTimeout(enrollTimer);
+    esteps.forEach(s => s.classList.remove('done'));
+    enrollDone.style.visibility = 'hidden';
+    if (reduced) { finishEnroll(); return; }
+    let i = 0;
+    const step = () => {
+      if (current !== 5) return;
+      if (i < esteps.length) { esteps[i].classList.add('done'); i++; enrollTimer = setTimeout(step, 450); }
+      else finishEnroll();
+    };
+    enrollTimer = setTimeout(step, 450);
+  }
+  document.getElementById('enrollFinish').addEventListener('click', finishEnroll);
+
+  // --- 07 done ---
+  const handoff = document.getElementById('handoff');
+  document.getElementById('beginBtn').addEventListener('click', () => {
+    handoff.classList.add('on');
+    setTimeout(() => handoff.classList.remove('on'), 1400);
+  });
+
+  // --- keyboard ---
+  frame.addEventListener('keydown', e => {
+    const inInput = e.target && e.target.tagName === 'INPUT';
+    if (e.key === 'ArrowRight' && !inInput) { advance(1); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft' && !inInput) { advance(-1); e.preventDefault(); return; }
+    if (inInput) return;
+    if (current === 1) {
+      if (e.key === 'ArrowDown') { selectNet(netSel + 1); e.preventDefault(); return; }
+      if (e.key === 'ArrowUp') { selectNet(Math.max(0, netSel - 1)); e.preventDefault(); return; }
+    }
+    if (current === 3) {
+      if (e.key === 'p' || e.key === 'P') { setFork('personal'); e.preventDefault(); return; }
+      if (e.key === 'o' || e.key === 'O') { setFork('org'); e.preventDefault(); return; }
+    }
+    if (current === 4 && (e.key === 'r' || e.key === 'R')) { toggleRelay(); e.preventDefault(); return; }
+    if (e.key === 'Enter' && !(e.target && (e.target.tagName === 'BUTTON'))) {
+      if (current === 5) finishEnroll();
+      else if (current === 6) { handoff.classList.add('on'); setTimeout(() => handoff.classList.remove('on'), 1400); }
+      else advance(1);
+      e.preventDefault();
+    }
+  });
+
+  updateTabs();
+})();
+</script>

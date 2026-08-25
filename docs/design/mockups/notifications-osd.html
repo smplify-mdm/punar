@@ -1,0 +1,553 @@
+<title>Punar Notifications</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document; toast and center on paper, OSD on panel. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .modegap { width: 14px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .stage { position: absolute; inset: 0; opacity: 0; pointer-events: none;
+    transition: opacity 300ms cubic-bezier(0.2, 0, 0, 1); display: flex; flex-direction: column; }
+  .stage.active { opacity: 1; pointer-events: auto; }
+
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .ffoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .pill.warnp { color: #8A5A00; border-color: #8A5A00; background: transparent; }
+  .pill.badp { color: #A31F2C; border-color: #A31F2C; background: transparent; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 5px 11px; background: transparent; cursor: pointer; }
+  .ghost.red { color: #A31F2C; border-color: #A31F2C; }
+  .ghost:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .orgonly { display: none; }
+  .frame.managed .orgonly { display: inline-flex; }
+
+  /* ---- desktop hint (paper stages) ---- */
+  .desk { position: absolute; inset: 0; padding: 2.8% 3.4%; display: flex; flex-direction: column; }
+  .deskbody { flex: 1; display: flex; gap: 12px; padding: 14px 0 10px; opacity: 0.45; }
+  .win { flex: 1; border: 1px dashed #8C8880; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #8C8880; }
+
+  /* ---- 01 toast cards ---- */
+  .toaststack { position: absolute; top: 13%; right: 3.4%; width: min(46%, 340px); display: flex; flex-direction: column; gap: 10px; }
+  .toast { border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; padding: 12px 14px;
+    box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07);
+    transition: opacity 300ms cubic-bezier(0.2,0,0,1), transform 300ms cubic-bezier(0.2,0,0,1); }
+  .toast.dismissed { opacity: 0; transform: translateX(24px); pointer-events: none; }
+  .tmeta { display: flex; justify-content: space-between; gap: 10px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 8.5px; font-weight: 600; letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .tmeta b { color: #000; font-weight: 600; }
+  .tmeta .exp { color: #8A5A00; font-variant-numeric: tabular-nums; }
+  .trule { border: 0; border-top: 1px solid #000; margin: 8px 0 9px; }
+  .toast.calm .trule { border-top-color: #E6E4DE; }
+  .tsent { font-size: 13px; font-weight: 500; color: #000; line-height: 1.45; margin: 0; }
+  .tpolicy { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #666; margin-top: 8px; }
+  .tacts { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  .approve { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; background: #2E6B21; color: #FAF9F6;
+    border: 1px solid #2E6B21; border-radius: 6px; padding: 6px 11px; cursor: pointer; }
+  .approve:hover { opacity: 0.86; }
+  .approve:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .approve kbd, .ghost kbd { font-size: 8px; border: 1px solid rgb(140 136 128 / 0.6); border-radius: 3px; padding: 0 4px; margin-left: 5px; }
+  .approve kbd { border-color: rgb(250 249 246 / 0.5); }
+  .toast.approved { border-color: #2E6B21; }
+  .toast.approved .tmeta b, .toast.approved .tmeta { color: #2E6B21; }
+  .waitchip { position: absolute; top: 4%; right: 3.4%; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 8.5px; font-weight: 600; letter-spacing: 0.13em; text-transform: uppercase; color: #666;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; background: #F4F2EC; display: none; }
+  .waitchip.on { display: inline-flex; }
+
+  /* ---- 02 center ---- */
+  .centerwrap { position: absolute; inset: 0; padding: 2.8% 3.4%; display: flex; flex-direction: column; }
+  .cbody { flex: 1; display: flex; justify-content: flex-end; min-height: 0; padding: 12px 0 10px; }
+  .cpanel { width: min(52%, 380px); border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6;
+    box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07);
+    display: flex; flex-direction: column; min-height: 0; }
+  .chead { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 11px 13px 9px;
+    border-bottom: 1px solid #000; }
+  .chead .t { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #000; font-variant-numeric: tabular-nums; }
+  .clist { flex: 1; overflow-y: auto; padding: 4px 13px 8px; }
+  .gsrc { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 10px 0 2px;
+    display: flex; align-items: center; gap: 8px; }
+  .nitem { padding: 8px 9px; border-left: 2px solid transparent; border-radius: 0 6px 6px 0; cursor: pointer; margin: 2px 0; }
+  .nitem:hover { background: #F4F2EC; }
+  .nitem.sel { background: #F4F2EC; border-left-color: #000; }
+  .nitem .ns { font-size: 12.5px; font-weight: 500; color: #000; line-height: 1.4; display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+  .nitem .nsub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.11em; text-transform: uppercase; color: #666; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .nitem.bad .ns, .nitem.bad .nsub { color: #A31F2C; }
+  .nitem.bad.sel { border-left-color: #A31F2C; }
+  .dndrow { border-top: 1px solid #E6E4DE; padding: 10px 13px 12px; display: flex; gap: 12px; align-items: flex-start; }
+  .toggle { width: 34px; height: 18px; border: 1px solid #000; border-radius: 9px; position: relative; flex: none; cursor: pointer; margin-top: 2px; background: transparent; }
+  .toggle .knob { position: absolute; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #000; transition: all 300ms cubic-bezier(0.2,0,0,1); }
+  .toggle.on .knob { right: 2px; } .toggle.off .knob { left: 2px; background: #8C8880; }
+  .toggle.off { border-color: #8C8880; }
+  .toggle:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .dndrow .dl { font-size: 12.5px; font-weight: 500; color: #000; }
+  .dndrow .dsub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; margin-top: 3px; line-height: 1.9; }
+  .dndrow .dsub b { color: #8A5A00; font-weight: 600; }
+
+  /* ---- 03 osd ---- */
+  .osdstage { background: #08090A; }
+  .osdesk { flex: 1; display: flex; align-items: center; justify-content: center; padding: 6%; opacity: 0.55; }
+  .osdesk .win { border-color: #26282E; color: #7B8290; width: 60%; height: 70%; flex: none; }
+  .osdstack { position: absolute; left: 50%; bottom: 9%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 10px; width: min(56%, 400px); }
+  .osd { border: 1px solid #26282E; border-radius: 10px; background: #08090A; padding: 11px 15px;
+    display: flex; align-items: center; gap: 14px; }
+  .osd .ol { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #7B8290; width: 86px; flex: none; }
+  .ticks { flex: 1; display: flex; gap: 3px; align-items: center; }
+  .tick { flex: 1; height: 14px; background: #26282E; border-radius: 1px; cursor: pointer; }
+  .tick.lit { background: #F2F3F5; }
+  .osd .pct { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 600;
+    color: #F2F3F5; font-variant-numeric: tabular-nums; width: 44px; text-align: right; flex: none; }
+  .osd .pct.mut { color: #7B8290; }
+  .obtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600; color: #A8ADB6;
+    border: 1px solid #26282E; border-radius: 6px; background: transparent; width: 22px; height: 22px; cursor: pointer; flex: none; }
+  .obtn:focus-visible { outline: 2px solid #F2F3F5; outline-offset: 2px; }
+  .ffoot.panelfoot { border-top-color: #26282E; color: #7B8290; padding: 0 3.4% 2.4%; }
+  .ffoot.panelfoot { padding-top: 9px; }
+  .osdhead { padding: 2.8% 3.4% 0; }
+  .osdhead .hm { color: #7B8290; }
+  .osdhead .hm strong { color: #F2F3F5; }
+  .osdhead .scrule { border-top-color: #F2F3F5; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .stage, .toast, .toggle .knob { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Notifications</strong></div>
+        <div class="meta">Toast, notification center, and on-screen display</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-009</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>An interruption is a field note: source, claim, next step.</h1>
+    <p class="deck">Toasts are one-sentence cards with a named source and a keyboard action. The center groups, never nags — and do-not-disturb yields only to deadlines. Volume and brightness get an instrument, not a gradient.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Notification states">
+      <button class="statebtn" data-state="0" role="tab" aria-selected="true">01 · Toast</button>
+      <button class="statebtn" data-state="1" role="tab" aria-selected="false">02 · Center</button>
+      <button class="statebtn" data-state="2" role="tab" aria-selected="false">03 · OSD</button>
+      <span class="modegap"></span>
+      <button class="statebtn" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="demohint">1 2 3 states · toast: A approve · D to center · center: j/k x, C clear, D dnd · osd: ↑↓ volume ←→ brightness · enrollment only annotates</div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Notifications and OSD demo">
+
+      <!-- 01 · TOAST -->
+      <div class="stage active" id="st-toast">
+        <div class="desk">
+          <div class="mast">
+            <div class="hm"><strong>Punar</strong> · <span id="mast-toast">ThinkPad X1 · Personal</span></div>
+            <div class="hm" style="text-align:right"><strong>14:31</strong> · 08 · 2026</div>
+          </div>
+          <hr class="scrule">
+          <div class="deskbody">
+            <div class="win">Editor · Atlas</div>
+            <div class="win" style="flex:0.7">Terminal</div>
+          </div>
+          <div class="ffoot"><span>[A] Approve · [D] Dismiss to center · Esc ignores nothing silently</span><span>Super + N opens center</span></div>
+        </div>
+        <span class="waitchip" id="waitchip">1 waiting in center</span>
+        <div class="toaststack">
+          <div class="toast" id="toast-approval" role="alert">
+            <div class="tmeta"><span><b>Approval</b> · Claude Code · Atlas</span><span class="exp" id="exp-toast">04:00</span></div>
+            <hr class="trule">
+            <p class="tsent">Claude Code requests system.install_package · libvirt.</p>
+            <div class="tpolicy" id="policy-toast">apr_123 · agt_123 · Policy · Personal defaults</div>
+            <div class="tacts">
+              <button class="approve" id="btn-approve">Approve<kbd>A</kbd></button>
+              <button class="ghost" id="btn-dismiss">To center<kbd>D</kbd></button>
+              <span class="orgonly pill" style="margin-left:auto">Managed</span>
+            </div>
+          </div>
+          <div class="toast calm" id="toast-calm">
+            <div class="tmeta"><span><b>Screenshot</b> · Saved</span><span>14:31</span></div>
+            <hr class="trule">
+            <p class="tsent">Region saved to ~/Pictures and copied to the clipboard.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 02 · CENTER -->
+      <div class="stage" id="st-center">
+        <div class="centerwrap">
+          <div class="mast">
+            <div class="hm"><strong>Punar</strong> · Notification center · <span id="mast-center">ThinkPad X1 · Personal</span></div>
+            <div class="hm" style="text-align:right"><strong>Super + N</strong><br>08 · 2026</div>
+          </div>
+          <hr class="scrule">
+          <div class="cbody">
+            <div class="cpanel">
+              <div class="chead">
+                <span class="t">Notifications · <span id="ncount">4</span></span>
+                <button class="ghost" id="btn-clearall">Clear all<kbd>C</kbd></button>
+              </div>
+              <div class="clist" id="nlist">
+                <div class="gsrc" data-group="claude">Claude Code · Atlas <span class="orgonly pill" style="padding:2px 7px">Managed</span></div>
+                <div class="nitem sel" data-group="claude" data-sticky="1" id="n-approval">
+                  <div class="ns"><span>Approval waiting · system.install_package · libvirt</span><span class="pill warnp" style="padding:2px 7px">Expires <span id="exp-center">04:00</span></span></div>
+                  <div class="nsub">apr_123 · agt_123 · ↵ opens the approval card</div>
+                </div>
+                <div class="gsrc" data-group="system">System</div>
+                <div class="nitem" data-group="system" id="n-shot">
+                  <div class="ns"><span>Screenshot saved</span></div>
+                  <div class="nsub">~/Pictures · copied to clipboard · 14:31</div>
+                </div>
+                <div class="nitem" data-group="system" id="n-update">
+                  <div class="ns"><span>OS update ready · stable channel</span></div>
+                  <div class="nsub">applies on next reboot · nothing forced</div>
+                </div>
+                <div class="gsrc" data-group="agentd">punar-agentd <span class="simtag">Detection · Simulated</span></div>
+                <div class="nitem bad" data-group="agentd" id="n-foo">
+                  <div class="ns"><span>Unknown AI activity suspected · foo-agent</span><button class="ghost red" style="padding:3px 8px">Inspect</button></div>
+                  <div class="nsub">~/Downloads/foo-agent → api.foo.ai · suspected, not certain</div>
+                </div>
+              </div>
+              <div class="dndrow">
+                <button class="toggle off" id="dndtoggle" role="switch" aria-checked="false" aria-label="Do not disturb"><span class="knob"></span></button>
+                <div>
+                  <div class="dl">Do not disturb <span class="meta" id="dndstate" style="font-size:8.5px">· Off</span></div>
+                  <div class="dsub">Silences toasts, never the record · <b>Approval-expiry warnings always break through</b> — deadlines outrank quiet</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="ffoot"><span>j/k Navigate · x Dismiss · ↵ Open · C Clear all · D Do not disturb</span><span id="stickyhint">Approvals resolve · they don't dismiss</span></div>
+        </div>
+      </div>
+
+      <!-- 03 · OSD -->
+      <div class="stage osdstage" id="st-osd">
+        <div class="osdhead">
+          <div class="mast">
+            <div class="hm"><strong>Punar</strong> · On-screen display</div>
+            <div class="hm" style="text-align:right">Panel surface · overlay</div>
+          </div>
+          <hr class="scrule">
+        </div>
+        <div class="osdesk"><div class="win">Terminal · Atlas</div></div>
+        <div class="osdstack">
+          <div class="osd" id="osd-vol">
+            <span class="ol" id="vollabel">Volume</span>
+            <button class="obtn" id="vol-down" aria-label="Volume down">−</button>
+            <div class="ticks" id="volticks" aria-hidden="true"></div>
+            <button class="obtn" id="vol-up" aria-label="Volume up">+</button>
+            <span class="pct" id="volpct">65%</span>
+          </div>
+          <div class="osd" id="osd-bri">
+            <span class="ol">Brightness <span class="simtag" style="color:#7B8290;border-color:#7B8290;display:block;margin-top:4px;width:max-content">Sim · VM</span></span>
+            <button class="obtn" id="bri-down" aria-label="Brightness down">−</button>
+            <div class="ticks" id="briticks" aria-hidden="true"></div>
+            <button class="obtn" id="bri-up" aria-label="Brightness up">+</button>
+            <span class="pct" id="bripct">80%</span>
+          </div>
+        </div>
+        <div class="ffoot panelfoot"><span>↑↓ Volume · ←→ Brightness · M Mute</span><span>20 ticks · 5% each · never a gradient</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Card anatomy register</h2>
+    <p class="assertion">Every toast is the same drawing: meta row, rule, one sentence, actions. Nothing gets a second sentence.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Meta row</span>
+      <p>Tracked mono, middle-dot separators: kind, source, project — <span class="specref">APPROVAL · CLAUDE CODE · ATLAS</span> — with the live datum right-aligned (an expiry, a timestamp). The masthead grammar, shrunk to a card.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">One sentence</span>
+      <p>The claim is a single plain sentence in Instrument Sans 500. If it needs two, it isn't a toast — it opens a surface. The §73 anatomy (what, who, which policy, next step) fits in the card or the card links out. <span class="specref">spec §73</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Actions</span>
+      <p>Approve is the surface's one filled ok-green button — the action-color rule from the greeter. Dismiss is ghost and never destroys: it files the card to the center. Kbd hints are printed on the buttons, not hidden in docs. <span class="specref">spec §12.1 · §28</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Calm variant</span>
+      <p><span class="specref">SCREENSHOT · SAVED</span> carries no color and a hairline rule instead of ink — a screen with no status to report contains no color. Same anatomy, quieter voice.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Center and DND register</h2>
+    <p class="assertion">The center is a ledger of interruptions, grouped by who spoke — and quiet has one exception, stated on the surface.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Grouped by source</span>
+      <p>Sources are tracked-mono group heads: <span class="specref">CLAUDE CODE · ATLAS</span>, <span class="specref">SYSTEM</span>, <span class="specref">PUNAR-AGENTD</span>. A notification always names its speaker; anonymous interruptions do not exist.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Unknown-AI alert</span>
+      <p>The <span class="specref">foo-agent</span> row is the only red in the panel: <span class="specref">SUSPECTED, NOT CERTAIN</span>, with <span class="specref">INSPECT</span> linking to the §25 view in Plate D-005. Detection wears a dashed <span class="specref">SIMULATED</span> tag until M10 ships it. <span class="specref">spec §25 · §1.22</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">DND policy</span>
+      <p>Do-not-disturb silences toasts, never the record — and it <em>never</em> silences approval-expiry warnings. A pending approval is a deadline someone is waiting on; deadlines outrank quiet. The rule is printed beside the toggle, in amber, because it is a promise about the warn state. <span class="specref">spec §28 · §73</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Approvals resolve</span>
+      <p><span class="specref">X</span> and <span class="specref">CLEAR ALL</span> skip the approval row. Approvals are decisions, not noise — they leave the center by being approved, denied, or expiring, and every exit lands in the audit trail as <span class="specref">evt_50x</span>.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · OSD-as-instrument register</h2>
+    <p class="assertion">Volume is a reading on a dial, not a fluid in a tube — twenty discrete ticks, five percent each.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Segmented bar</span>
+      <p>The tick bar quantizes to real steps, like the boot dial's rim: lit ticks are panel-fg, unlit are panel-edge, no gradient and no partial tick. What you see is exactly the value the capability layer holds.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Mono percentage</span>
+      <p>The number is Geist Mono, tabular-nums, right-aligned so it never jitters while held keys repeat. At zero the label reads <span class="specref">MUTED</span> in panel-ink-3 — a state word, not a color, because silence is not an error.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Panel surface</span>
+      <p>OSD overlays live on the panel system per the surface assignment — they float over anything, including full-screen video, and the near-black card holds contrast everywhere. No status color appears: level is a reading, not a judgment.</p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Honest backlight</span>
+      <p>In VM builds there is no physical backlight; the brightness row carries a dashed <span class="specref">SIM · VM</span> tag rather than pretending. Solid claims require an operating path. <span class="specref">spec §1.22</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Keyboard register</h2>
+    <p class="assertion">Notifications, screenshots, and clipboard are on the §12.1 list: every action here has a key, and every key is printed.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Toast keys</span>
+      <p><span class="specref">A</span> approves, <span class="specref">D</span> files to center — no pointer travel to the corner of the screen while an agent waits. The bindings render on the buttons themselves. <span class="specref">spec §12.1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Center keys</span>
+      <p><span class="specref">J/K</span> walk the list, <span class="specref">X</span> dismisses, <span class="specref">↵</span> opens the source surface, <span class="specref">C</span> clears, <span class="specref">D</span> toggles quiet. The footer names all of them — discoverability is a printed fact, not a memory test. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Unmanaged-first</span>
+      <p>The demo defaults to a personal device: the approval cites <span class="specref">POLICY · PERSONAL DEFAULTS</span> — the user's own gates, protecting the user first. Enrolling only annotates: the org name joins the masthead and a <span class="specref">MANAGED</span> pill joins the card; nothing moves. <span class="specref">spec §3.2 · §20</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the daemon and shell pieces land across Milestones 1–10; this page is the acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Shell</span>
+      <p>Quickshell layer-shell surfaces consuming <span class="specref">shell/theme/punar-tokens.json</span>: toast stack and OSD in M1 (audio/brightness via the typed capability layer), notification center with M1's shell frame. Toasts speak the freedesktop notification protocol so third-party apps inherit the anatomy.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Approval path</span>
+      <p>The approval toast is Plate D-003's overlay in miniature: same <span class="specref">apr_123</span> object from punard (M9), same expiry clock, same audit event on resolution. One approval, three renderings — toast, overlay, CLI — one source of truth. <span class="specref">spec §28 · §10</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Detection alert</span>
+      <p>The unknown-AI row arrives with M10 shadow-AI detection; until then the fixture (<span class="specref">foo-agent</span>, <span class="specref">api.foo.ai</span>) renders behind the dashed simulated tag. DND state and the expiry-breakthrough rule live in punard so <span class="specref">punarctl</span> reports them identically.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/notifications-osd.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const frame = document.getElementById('frame');
+  const stages = ['st-toast', 'st-center', 'st-osd'].map(id => document.getElementById(id));
+  const stateBtns = [...document.querySelectorAll('.statebtn[data-state]')];
+  const modeBtns = [...document.querySelectorAll('.statebtn[data-mode]')];
+  let current = 0;
+
+  function setStage(i) {
+    current = i;
+    stages.forEach((s, j) => s.classList.toggle('active', j === i));
+    stateBtns.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
+  }
+  stateBtns.forEach(b => b.addEventListener('click', () => setStage(+b.dataset.state)));
+
+  // ---- personal / managed: enrollment annotates, never restructures ----
+  function setMode(mode) {
+    frame.classList.toggle('managed', mode === 'managed');
+    modeBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+    const line = mode === 'managed' ? 'ThinkPad X1 · dev_123 · Acme Engineering' : 'ThinkPad X1 · Personal';
+    const mt = document.getElementById('mast-toast'); if (mt) mt.textContent = line;
+    const mc = document.getElementById('mast-center'); if (mc) mc.textContent = line;
+    const pol = document.getElementById('policy-toast');
+    if (pol) pol.textContent = mode === 'managed'
+      ? 'apr_123 · agt_123 · Policy · Acme eng-ai-v3'
+      : 'apr_123 · agt_123 · Policy · Personal defaults';
+  }
+  modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+  // ---- expiry clock (shared: toast + center) ----
+  let expSecs = 4 * 60;
+  setInterval(() => {
+    expSecs = Math.max(0, expSecs - 1);
+    const txt = String(Math.floor(expSecs / 60)).padStart(2, '0') + ':' + String(expSecs % 60).padStart(2, '0');
+    const a = document.getElementById('exp-toast'); if (a) a.textContent = txt;
+    const c = document.getElementById('exp-center'); if (c) c.textContent = txt;
+  }, 1000);
+
+  // ---- toast actions ----
+  const toastApproval = document.getElementById('toast-approval');
+  const waitchip = document.getElementById('waitchip');
+  let toastDone = false;
+  function approveToast() {
+    if (toastDone || !toastApproval) return;
+    toastDone = true;
+    toastApproval.classList.add('approved');
+    toastApproval.innerHTML =
+      '<div class="tmeta"><span><b>Approved</b> · apr_123 · evt_503 logged</span><span>now</span></div>' +
+      '<hr class="trule" style="border-top-color:#2E6B21">' +
+      '<p class="tsent">libvirt is installing. This decision is in the ledger.</p>';
+  }
+  function dismissToast() {
+    if (toastDone || !toastApproval) return;
+    toastDone = true;
+    toastApproval.classList.add('dismissed');
+    if (waitchip) waitchip.classList.add('on');
+  }
+  const ba = document.getElementById('btn-approve'); if (ba) ba.addEventListener('click', approveToast);
+  const bd = document.getElementById('btn-dismiss'); if (bd) bd.addEventListener('click', dismissToast);
+
+  // ---- notification center ----
+  const nlist = document.getElementById('nlist');
+  const ncount = document.getElementById('ncount');
+  const stickyhint = document.getElementById('stickyhint');
+  function items() { return [...nlist.querySelectorAll('.nitem')]; }
+  function refreshCenter() {
+    const its = items();
+    if (ncount) ncount.textContent = String(its.length);
+    [...nlist.querySelectorAll('.gsrc')].forEach(g => {
+      const any = its.some(it => it.dataset.group === g.dataset.group);
+      g.style.display = any ? '' : 'none';
+    });
+  }
+  function selIndex() { return items().findIndex(it => it.classList.contains('sel')); }
+  function selectItem(i) {
+    const its = items(); if (!its.length) return;
+    const k = Math.max(0, Math.min(its.length - 1, i));
+    its.forEach((it, j) => it.classList.toggle('sel', j === k));
+  }
+  function dismissSel() {
+    const its = items(); const i = selIndex(); if (i < 0) return;
+    const it = its[i];
+    if (it.dataset.sticky) {
+      if (stickyhint) stickyhint.textContent = "Approvals resolve · they don't dismiss";
+      return;
+    }
+    it.remove();
+    refreshCenter();
+    selectItem(Math.min(i, items().length - 1));
+  }
+  function clearAll() {
+    items().forEach(it => { if (!it.dataset.sticky) it.remove(); });
+    refreshCenter();
+    selectItem(0);
+  }
+  items().forEach((it, i) => it.addEventListener('click', () => selectItem(i)));
+  const bc = document.getElementById('btn-clearall'); if (bc) bc.addEventListener('click', clearAll);
+
+  const dnd = document.getElementById('dndtoggle');
+  const dndstate = document.getElementById('dndstate');
+  function toggleDnd() {
+    if (!dnd) return;
+    const on = !dnd.classList.contains('on');
+    dnd.classList.toggle('on', on); dnd.classList.toggle('off', !on);
+    dnd.setAttribute('aria-checked', String(on));
+    if (dndstate) dndstate.textContent = on ? '· On · expiry breaks through' : '· Off';
+  }
+  if (dnd) dnd.addEventListener('click', toggleDnd);
+
+  // ---- osd: 20 ticks, 5% each ----
+  const osd = { vol: 65, bri: 80 };
+  function buildTicks(holder, key) {
+    if (!holder) return;
+    for (let i = 0; i < 20; i++) {
+      const t = document.createElement('span');
+      t.className = 'tick';
+      t.addEventListener('click', () => { osd[key] = (i + 1) * 5; renderOsd(); });
+      holder.appendChild(t);
+    }
+  }
+  buildTicks(document.getElementById('volticks'), 'vol');
+  buildTicks(document.getElementById('briticks'), 'bri');
+  function renderOne(key, ticksId, pctId) {
+    const v = osd[key];
+    const holder = document.getElementById(ticksId);
+    if (holder) [...holder.children].forEach((t, i) => t.classList.toggle('lit', i < Math.round(v / 5)));
+    const p = document.getElementById(pctId);
+    if (p) { p.textContent = v + '%'; p.classList.toggle('mut', v === 0); }
+  }
+  function renderOsd() {
+    renderOne('vol', 'volticks', 'volpct');
+    renderOne('bri', 'briticks', 'bripct');
+    const vl = document.getElementById('vollabel');
+    if (vl) vl.textContent = osd.vol === 0 ? 'Muted' : 'Volume';
+  }
+  function nudge(key, d) { osd[key] = Math.max(0, Math.min(100, osd[key] + d)); renderOsd(); }
+  const wire = (id, key, d) => { const b = document.getElementById(id); if (b) b.addEventListener('click', () => nudge(key, d)); };
+  wire('vol-up', 'vol', 5); wire('vol-down', 'vol', -5);
+  wire('bri-up', 'bri', 5); wire('bri-down', 'bri', -5);
+  renderOsd();
+
+  // ---- keyboard: everything ----
+  frame.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (e.key === '1' || e.key === '2' || e.key === '3') { setStage(+e.key - 1); e.preventDefault(); return; }
+    if (current === 0) {
+      if (k === 'a') { approveToast(); e.preventDefault(); }
+      else if (k === 'd') { dismissToast(); e.preventDefault(); }
+    } else if (current === 1) {
+      if (k === 'j') { selectItem(selIndex() + 1); e.preventDefault(); }
+      else if (k === 'k') { selectItem(selIndex() - 1); e.preventDefault(); }
+      else if (k === 'x') { dismissSel(); e.preventDefault(); }
+      else if (k === 'c') { clearAll(); e.preventDefault(); }
+      else if (k === 'd') { toggleDnd(); e.preventDefault(); }
+    } else if (current === 2) {
+      if (e.key === 'ArrowUp') { nudge('vol', 5); e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { nudge('vol', -5); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { nudge('bri', 5); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft') { nudge('bri', -5); e.preventDefault(); }
+      else if (k === 'm') { osd.vol = 0; renderOsd(); e.preventDefault(); }
+    }
+  });
+
+  setMode('personal');
+  refreshCenter();
+})();
+</script>

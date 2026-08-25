@@ -1,0 +1,427 @@
+<title>Punar Updates</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one full-surface panel. */
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .sbsep { width: 1px; height: 18px; background: #E6E4DE; margin: 0 4px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .cpill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 4px 9px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #333; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .pane { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 4px 8px 2px; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .ptitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+  .ptitle .t { font-size: 19px; font-weight: 500; color: #000; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .psub { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; margin-bottom: 12px; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 6px 16px; padding: 10px 0; border-top: 1px solid #E6E4DE; }
+  .kv .k { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .kv .v { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; color: #000; font-weight: 500;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.06em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .rowline { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid #E6E4DE; }
+  .rowline .nm { font-size: 13.5px; font-weight: 500; color: #000; }
+  .rowline .mt { margin-left: auto; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; text-align: right;
+    display: flex; align-items: center; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+  /* update card */
+  .upcard { border: 1px solid #E6E4DE; border-radius: 10px; background: #F4F2EC; padding: 13px 15px; margin: 12px 0; }
+  .meter { display: flex; gap: 4px; margin: 10px 0 8px; }
+  .meter .seg { flex: 1; border: 1px solid #E6E4DE; border-radius: 6px; padding: 5px 0; text-align: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: #FAF9F6; }
+  .meter .seg.done { background: #000; border-color: #000; color: #FAF9F6; }
+  .meter .seg.cur { border-color: #000; color: #000; }
+  .meter .seg.you { border-style: dashed; border-color: #8C8880; color: #333; }
+  .mline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2; }
+  .mline b { color: #000; font-weight: 600; }
+  .stately { font-size: 13px; color: #666; margin: 0 0 10px; max-width: 56ch; }
+  .apply { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; background: #2E6B21; color: #FAF9F6;
+    border: 1px solid #2E6B21; border-radius: 6px; padding: 8px 16px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .apply:hover { opacity: 0.86; }
+  .apply:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .apply kbd { font-size: 9px; border: 1px solid rgb(250 249 246 / 0.5); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+  .stateline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #2E6B21; margin-top: 10px; }
+  .stateline:empty { display: none; }
+
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 5px 11px; background: transparent; cursor: pointer; }
+  .ghost:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .xtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #8A5A00; border: 1px solid #8A5A00;
+    border-radius: 6px; padding: 4px 9px; cursor: pointer; background: transparent; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .dashnote { border: 1px dashed #8C8880; border-radius: 10px; padding: 10px 14px; margin: 10px 0 0;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 2; }
+  .lockrow { display: flex; align-items: center; gap: 10px; margin: 10px 0 0; flex-wrap: wrap; }
+  .shead { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 16px 0 2px; }
+
+  /* deny card (§73 voice) */
+  .denycard { border: 1px solid #E6E4DE; border-left: 2px solid #A31F2C; border-radius: 10px;
+    background: #F4F2EC; padding: 13px 15px; margin: 12px 0 0; }
+  .denycard .dh { font-size: 14px; font-weight: 500; color: #000; margin: 0 0 4px; }
+  .denycard p { font-size: 13px; color: #333; margin: 0 0 8px; max-width: 56ch; }
+  .denycard .pol { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 10px; }
+  .denycard .pol b { color: #000; font-weight: 600; }
+
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .statebtn, .apply { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Updates &amp; Applications</strong></div>
+        <div class="meta">System Control deep view · Super + S</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-010</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>An update names its snapshot, keeps the way back, and never makes the browser wait.</h1>
+    <p class="deck">Every version on this machine is a pinned date on a vendor snapshot channel. Rollout rings, health gates, and required apps are managed-mode annotations on the same surface — a personal device simply gets updates when they are stable, installs what it wants, and can always boot yesterday.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Device mode and view">
+      <button class="statebtn" id="mode-personal" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" id="mode-managed" data-mode="managed" aria-selected="false">Managed · Acme</button>
+      <span class="sbsep" aria-hidden="true"></span>
+      <button class="statebtn" id="tab-updates" data-view="updates" aria-selected="true">01 · Updates</button>
+      <button class="statebtn" id="tab-apps" data-view="apps" aria-selected="false">02 · Applications</button>
+    </div>
+    <div class="demohint">Unmanaged-first: enrollment only annotates, never redraws · 1 / 2 switch views · M toggles mode · ↵ apply · R roll back</div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Updates and applications demo">
+      <div class="sc" id="sc">
+        <div class="mast">
+          <div class="hm"><strong>Punar</strong> · System Control · Updates<br><span id="mastline">ThinkPad X1 · Personal</span></div>
+          <div class="hm" style="text-align:right"><span class="cpill mgonly" id="comp-pill" hidden><span class="dot" style="background:#2E6B21"></span>Compliant</span><span class="cpill" id="ver-pill">Punar 0.4.2 · Stable</span><br>08 · 2026</div>
+        </div>
+        <hr class="scrule">
+        <div class="pane">
+
+          <!-- ============ 01 · UPDATES ============ -->
+          <div class="view active" id="view-updates">
+            <div class="ptitle"><span class="t">Updates</span><span class="pill" id="snapshotpin">Channel · Stable · Snapshot 2026/08/20</span></div>
+            <div class="psub">Signed image · verified at boot · previous snapshot bootable</div>
+
+            <div class="kv">
+              <span class="k">Installed</span><span class="v">Punar 0.4.2 · 2026/08/20</span>
+              <span class="k">Desired</span><span class="v">Punar 0.4.3 · 2026/08/22</span>
+              <span class="k">Signature</span><span class="v">Signed UKI · OK <span class="simtag">Secure Boot · Simulated · VM</span></span>
+              <span class="k">Health</span><span class="v"><span class="dot" style="background:#2E6B21"></span>OK · Last boot clean</span>
+              <span class="k">Rollback state</span><span class="v">Snapshot 2026/08/13 · Bootable</span>
+            </div>
+
+            <div class="upcard" id="updcard">
+              <div class="ptitle" style="margin-bottom:2px"><span class="t" style="font-size:15px">Punar 0.4.3 available</span><span class="pill">Snapshot 2026/08/22</span></div>
+              <div class="psub" style="margin-bottom:8px">Stable channel · promoted 2026/08/22 · signed</div>
+
+              <!-- managed only: staged rollout position -->
+              <div class="mgonly" id="rollout" hidden>
+                <div class="meter" aria-label="Staged rollout position">
+                  <span class="seg done">Canary</span>
+                  <span class="seg cur">10</span>
+                  <span class="seg you">50 · You</span>
+                  <span class="seg">100</span>
+                </div>
+                <div class="mline">Rollout at <b>10%</b> · health gate <b>OK</b> · your ring <b>50%</b> opens when the 10% ring holds<br>Assignment · <b>Acme Engineering Baseline</b> · eng-baseline-v12</div>
+              </div>
+
+              <!-- personal only: the stable promise -->
+              <p class="stately psonly" id="stablenote">Updates arrive when stable. No rings, no fleet gate — stable snapshot promotion is the only wait. Apply when you choose; the snapshot you are on stays bootable.</p>
+
+              <div class="lockrow">
+                <button class="apply psonly" id="apply">Apply update<kbd>↵</kbd></button>
+                <span class="mline mgonly" id="ringnote" hidden>Arrives with your ring · no action needed</span>
+              </div>
+              <div class="stateline" id="updstate"></div>
+            </div>
+
+            <!-- §58: browser rides its own channel -->
+            <div class="shead">Browser · Separate channel</div>
+            <div class="rowline" id="browser-row">
+              <span class="dot" style="background:#2E6B21"></span>
+              <span class="nm">Browser security updates ride a faster channel</span>
+              <span class="mt"><span class="mgonly" id="browser-org" hidden>Org-staged ·</span> Chromium 142.0.7401 · Updated 2026/08/23</span>
+            </div>
+
+            <!-- rollback -->
+            <div class="shead">Rollback</div>
+            <div class="lockrow" style="margin-top:6px">
+              <button class="ghost" id="rollback">Roll back · Snapshot 2026/08/13</button>
+              <span class="simtag" id="ab-note">A/B image slots · Simulated · Trajectory</span>
+            </div>
+            <div class="dashnote" id="rbnote" hidden>Would boot the previous snapshot — known good, kept until the next update holds. Recorded as an update event.</div>
+            <p class="stately" style="margin-top:8px">Snapshot rollback is the shipped mechanism. A/B image slots are the declared production path (ADR-001) — drawn dashed until they operate.</p>
+
+            <!-- history -->
+            <div class="shead">Update history · Local · Audited</div>
+            <div class="rowline evt" id="evt_503">
+              <span class="nm" style="font-family:'Geist Mono',monospace;font-size:11px">evt_503</span>
+              <span class="mt">2026/08/23 · Browser 142.0.7401 · Security · Applied</span>
+            </div>
+            <div class="rowline evt" id="evt_502">
+              <span class="nm" style="font-family:'Geist Mono',monospace;font-size:11px">evt_502</span>
+              <span class="mt">2026/08/20 · Punar 0.4.1 → 0.4.2 · Snapshot 2026/08/20 · Applied</span>
+            </div>
+            <div class="rowline evt" id="evt_501" style="border-bottom:1px solid #E6E4DE">
+              <span class="nm" style="font-family:'Geist Mono',monospace;font-size:11px">evt_501</span>
+              <span class="mt">2026/08/06 · Punar 0.4.0 → 0.4.1 · Rolled back · Snapshot restore</span>
+            </div>
+          </div>
+
+          <!-- ============ 02 · APPLICATIONS ============ -->
+          <div class="view" id="view-apps">
+            <div class="ptitle"><span class="t">Applications</span><span class="pill" id="apps-pill">User installs · Allowed</span></div>
+            <div class="psub" id="apps-sub">5 installed · You install what you want</div>
+
+            <div class="rowline" id="app-chromium">
+              <span class="nm">Chromium</span>
+              <span class="mt">System · Browser channel · 142.0.7401</span>
+            </div>
+            <div class="rowline" id="app-git">
+              <span class="nm">git</span>
+              <span class="mt"><span class="pill mgonly" id="git-managed" hidden>Managed · Required</span> 2.51 · <span class="psonly" id="git-src">User install</span><span class="mgonly" id="git-pol" hidden>eng-baseline-v12</span></span>
+            </div>
+            <div class="rowline" id="app-podman">
+              <span class="nm">podman</span>
+              <span class="mt"><span class="pill mgonly" id="podman-managed" hidden>Managed · Required</span> 5.4 · <span class="psonly" id="podman-src">User install</span><span class="mgonly" id="podman-pol" hidden>eng-baseline-v12</span></span>
+            </div>
+            <div class="rowline" id="app-zed">
+              <span class="nm">Zed</span>
+              <span class="mt">0.198 · User install</span>
+            </div>
+            <div class="rowline" id="app-tailscale" style="border-bottom:1px solid #E6E4DE">
+              <span class="nm">Tailscale</span>
+              <span class="mt">1.88 · User install</span>
+            </div>
+
+            <p class="stately psonly" id="apps-personal-note" style="margin-top:12px">No required list, no denied list — <span class="specref" style="font-family:'Geist Mono',monospace;font-size:11px">allowUserInstall</span> is your own default. Enrolling later never uninstalls what you chose.</p>
+
+            <!-- managed only: denied package, §73 voice -->
+            <div class="denycard mgonly" id="denied-card" hidden>
+              <div class="dh" id="denied-name">unsafe-package cannot be installed on this device.</div>
+              <p>Acme's application policy denies it after an upstream supply-chain advisory. Your own installs stay allowed — this is the only package on the denied list.</p>
+              <div class="pol">Policy · <b>Acme Engineering Baseline</b> · eng-baseline-v12 · applications.denied</div>
+              <div class="lockrow" style="margin-top:0">
+                <button class="ghost" id="denied-viewpolicy">View policy</button>
+                <button class="xtag" id="denied-exception">Request exception · Approval required</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+        <div class="scfoot">
+          <span>1 Updates · 2 Applications · M Mode · ↵ Apply · R Roll back</span>
+          <span>Same capabilities as punarctl update · punarctl app</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Channel register</h2>
+    <p class="assertion">A version is a date you can point to — a vendor-pinned snapshot, promoted per channel, never a moving target.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Snapshot pin</span>
+      <p>The masthead pill reads <span class="specref">CHANNEL · STABLE · SNAPSHOT 2026/08/20</span> — the whole package set is one pinned date on the vendor mirror. Reproducible by construction, citable in an audit. <span class="specref">spec §8.1 · ADR-001</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Endpoint fields</span>
+      <p>The key–value block is the §57 endpoint verbatim: current version, desired version, channel, health, rollback state. The panel renders what <span class="specref">punarctl update status</span> prints — same data, same order. <span class="specref">spec §57 · §10</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Ring meter</span>
+      <p>Managed mode draws the staged rollout as a segmented tick meter — <span class="specref">CANARY / 10 / 50 / 100</span> with the health gate named between stages and the device's own ring marked <span class="specref">YOU</span> in a dashed segment (not reached yet: not a claim). <span class="specref">spec §57</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Personal promise</span>
+      <p>Unenrolled, the meter does not exist — the card says <em>updates arrive when stable</em> and offers the one colored button: Apply, ok-green, the commit action. No rings is not a downgrade; it is the default state. <span class="specref">design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Browser split register</h2>
+    <p class="assertion">Browser security updates ride a faster channel — the row says so, with its own date.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Own row, own date</span>
+      <p>Chromium's last-updated date (<span class="specref">2026/08/23</span>) sits beside the OS snapshot date (<span class="specref">2026/08/20</span>) — visibly newer, because emergency browser patches never wait for an OS release. <span class="specref">spec §58 · §30.2</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Org staging</span>
+      <p>Managed mode prefixes the row with <span class="specref">ORG-STAGED</span> — staged enterprise browser rollout is an annotation on the same row, not a second screen. <span class="specref">spec §58</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">History parity</span>
+      <p>Browser updates land in the same local history with the same <span class="specref">evt_</span> ids as OS updates — one audited timeline, two cadences. <span class="specref">spec §53</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Rollback honesty register</h2>
+    <p class="assertion">Solid strokes for the rollback that ships; a dashed tag for the one that is a trajectory.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Ghost action</span>
+      <p>Roll back is an ink ghost button naming its target snapshot (<span class="specref">2026/08/13</span>) — consequential but not destructive, so it takes no color. Bootable-snapshot restore is the shipped MVP mechanism. <span class="specref">ADR-001 · spec §57</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">A/B tag</span>
+      <p>The <span class="specref">A/B IMAGE SLOTS · SIMULATED · TRAJECTORY</span> tag is dashed because A/B updates are the declared production path, not an operating one — implementation alone would not earn a solid line, and a plan certainly does not. <span class="specref">design language §7 · spec §1.22</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">History tells rollbacks</span>
+      <p><span class="specref">evt_501</span> records a real rollback in the visible history — the surface does not pretend updates never fail; it shows that failing was recoverable. <span class="specref">spec §42 · §43</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Application policy register</h2>
+    <p class="assertion">Required, denied, and yours — three words, and every denial explains itself in sentences.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Personal list</span>
+      <p>Unenrolled, the applications view is a plain list. <span class="specref">allowUserInstall</span> is the user's own default; there is no empty "policy" chrome waiting to be filled. <span class="specref">spec §46 · §20</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Required pins</span>
+      <p>Managed mode pins <span class="specref">git</span> and <span class="specref">podman</span> with a <span class="specref">MANAGED · REQUIRED</span> pill citing <span class="specref">eng-baseline-v12</span> — annotation on the existing rows, never a reordering of the list. <span class="specref">spec §46 · §49</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Denial voice</span>
+      <p>The denied card answers the §73 questions in order: what happened, why, which policy, whether an exception is possible, and the next step — with the amber approval tag, never a bare <span class="specref">EPERM</span>. <span class="specref">spec §73 · §46 · §28</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Stable semantics</span>
+      <p>Required / denied / allowUserInstall are the surface's whole vocabulary — they must survive any change to the underlying package system, so the panel never names one. <span class="specref">spec §46</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the channel exists from Milestone 0; this page is the acceptance reference for the surface that reports it.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Substrate</span>
+      <p>Vendor-pinned snapshot channels and mkosi-signed images land with the substrate (M0–M1, per <span class="specref">ADR-001</span>); snapper bootable-snapshot rollback is the M1 mechanism the Roll back button calls. A/B slots stay dashed until the production update path operates.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Control plane</span>
+      <p>The §57 endpoint fields are served by <span class="specref">punard</span> (M3–M4); ring assignment and the rollout meter go live with mock Smplify enrollment (M5). Until then the managed state on this page runs on fixture data — which is why the whole demo is a mockup, labeled as one.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Applications</span>
+      <p>The applications view reads the §46 policy document through the capability registry (<span class="specref">§41</span>); required-app reconciliation and the denial explain reuse the §40/§73 machinery already drawn in Plate D-004. Browser channel wiring is the §58 pipeline, staged per §30.2 cadence.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/updates-apps.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const frame = document.getElementById('frame');
+  if (!frame) return;
+  let MODE = 'personal';
+  let VIEW = 'updates';
+
+  const modeBtns = [...document.querySelectorAll('.statebtn[data-mode]')];
+  const viewBtns = [...document.querySelectorAll('.statebtn[data-view]')];
+  const views = { updates: document.getElementById('view-updates'), apps: document.getElementById('view-apps') };
+  const mastline = document.getElementById('mastline');
+
+  function render() {
+    modeBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === MODE)));
+    viewBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === VIEW)));
+    Object.keys(views).forEach(k => { if (views[k]) views[k].classList.toggle('active', k === VIEW); });
+    const managed = MODE === 'managed';
+    document.querySelectorAll('.mgonly').forEach(el => { el.hidden = !managed; });
+    document.querySelectorAll('.psonly').forEach(el => { el.hidden = managed; });
+    if (mastline) mastline.textContent = managed
+      ? 'ThinkPad X1 · dev_123 · Acme Engineering' : 'ThinkPad X1 · Personal';
+    const appsPill = document.getElementById('apps-pill');
+    if (appsPill) appsPill.textContent = managed
+      ? 'Policy · eng-baseline-v12' : 'User installs · Allowed';
+    const appsSub = document.getElementById('apps-sub');
+    if (appsSub) appsSub.textContent = managed
+      ? '5 installed · 2 required · 1 denied · user installs allowed'
+      : '5 installed · You install what you want';
+  }
+
+  function setMode(m) { MODE = m; render(); }
+  function setView(v) { VIEW = v; render(); }
+
+  modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  viewBtns.forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+
+  const updstate = document.getElementById('updstate');
+  const applyBtn = document.getElementById('apply');
+  function doApply() {
+    if (MODE !== 'personal' || VIEW !== 'updates') return;
+    if (updstate) updstate.textContent = 'Staged for next boot · snapshot 2026/08/20 kept bootable';
+    const card = document.getElementById('updcard');
+    if (card) card.classList.add('staged');
+  }
+  if (applyBtn) applyBtn.addEventListener('click', doApply);
+
+  const rbnote = document.getElementById('rbnote');
+  const rbBtn = document.getElementById('rollback');
+  function doRollback() {
+    if (VIEW !== 'updates') return;
+    if (rbnote) rbnote.hidden = !rbnote.hidden;
+  }
+  if (rbBtn) rbBtn.addEventListener('click', e => { e.stopPropagation(); if (rbnote) rbnote.hidden = !rbnote.hidden; });
+
+  frame.addEventListener('keydown', e => {
+    if (e.key === '1') { setView('updates'); e.preventDefault(); }
+    else if (e.key === '2') { setView('apps'); e.preventDefault(); }
+    else if (e.key === 'm' || e.key === 'M') { setMode(MODE === 'personal' ? 'managed' : 'personal'); e.preventDefault(); }
+    else if (e.key === 'Enter') { doApply(); e.preventDefault(); }
+    else if (e.key === 'r' || e.key === 'R') { doRollback(); e.preventDefault(); }
+  });
+
+  render();
+})();
+</script>

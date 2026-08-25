@@ -1,0 +1,578 @@
+<title>Punar Elevation</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, three fixed-world screens. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .modelabel { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #8C8880; margin-left: auto; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .stage { position: absolute; inset: 0; opacity: 0; pointer-events: none;
+    transition: opacity 450ms cubic-bezier(0.2, 0, 0, 1); display: flex; flex-direction: column; }
+  .stage.active { opacity: 1; pointer-events: auto; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .pill.badp { color: #A31F2C; border-color: #A31F2C; background: transparent; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .ghost { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #000; border: 1px solid #000; border-radius: 6px;
+    padding: 6px 12px; background: transparent; cursor: pointer; }
+  .ghost.red { color: #A31F2C; border-color: #A31F2C; }
+  .ghost:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .xtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #8A5A00; border: 1px solid #8A5A00;
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; background: transparent; }
+  .okfill { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; background: #2E6B21; color: #FAF9F6;
+    border: 1px solid #2E6B21; border-radius: 6px; padding: 8px 16px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .okfill:hover { opacity: 0.86; }
+  .okfill:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .okfill:disabled { background: transparent; color: #8C8880; border-color: #8C8880; cursor: not-allowed; }
+  .okfill kbd { font-size: 9px; border: 1px solid rgb(250 249 246 / 0.5); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+  .okfill:disabled kbd { border-color: #8C8880; }
+  .stfoot { border-top: 1px solid #E6E4DE; margin: 0 3.4%; padding: 9px 0; display: flex; justify-content: space-between;
+    gap: 8px; flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px;
+    font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  /* ---- stage 01: privilege ---- */
+  .win { position: absolute; border: 1px solid #E6E4DE; border-radius: 8px; background: #FAF9F6; }
+  .win .bar { border-bottom: 1px solid #E6E4DE; padding: 5px 10px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 8px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: #8C8880; }
+  .scrim { position: absolute; inset: 0; background: rgb(28 24 16 / 0.14); }
+  .shellbar { position: absolute; top: 0; left: 0; right: 0; height: 26px; background: #FAF9F6;
+    border-bottom: 1px solid #E6E4DE; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .elevchip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #2E6B21; border-radius: 6px;
+    padding: 3px 8px; color: #2E6B21; font-variant-numeric: tabular-nums; }
+  .elevchip .dot { background: #2E6B21; }
+  .elevchip.low { border-color: #8A5A00; color: #8A5A00; }
+  .elevchip.low .dot { background: #8A5A00; }
+  .elev { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(480px, 78%);
+    background: #FAF9F6; border: 1px solid #E6E4DE; border-radius: 10px; padding: 18px 20px 16px;
+    box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07); }
+  .elev .ehead { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .elev .erule { border: 0; border-top: 2px solid #000; margin: 8px 0 12px; }
+  .elev .ask { font-size: 16px; font-weight: 500; color: #000; line-height: 1.45; margin: 0 0 8px; }
+  .elev .ask b { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12.5px; font-weight: 600; }
+  .chain { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-bottom: 12px; }
+  .rlabel { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; margin: 12px 0 2px; }
+  .uline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 13px; color: #000; letter-spacing: 0.04em;
+    border: 0; border-bottom: 1px solid #8C8880; background: transparent; width: 100%; padding: 6px 2px; }
+  .uline:focus { outline: 2px solid #000; outline-offset: 3px; border-radius: 2px; }
+  .uline::placeholder { font-size: 9px; letter-spacing: 0.14em; color: #8C8880; text-transform: uppercase; }
+  .eacts { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .privnote { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-top: 12px; min-height: 14px; }
+  .gv { display: none; }
+  #st-priv[data-state="granted"] .rv { display: none; }
+  #st-priv[data-state="granted"] .gv { display: block; }
+  #st-priv[data-state="granted"] .shellbar .elevchip { display: inline-flex; }
+  #st-priv:not([data-state="granted"]) .shellbar .elevchip { display: none; }
+  .gkv { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; padding: 10px 0 4px; border-top: 1px solid #E6E4DE; }
+  .gkv .k { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; }
+  .gkv .v { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; color: #000; font-variant-numeric: tabular-nums; }
+  .gkv .v.ok { color: #2E6B21; }
+
+  /* ---- stage 02: credential ---- */
+  .credwrap { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 14px; padding: 3% 8%; min-height: 0; }
+  .card { border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; padding: 14px 18px;
+    box-shadow: 0 2px 6px rgb(28 24 16 / .05); }
+  .card .chead { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .card .crule { border: 0; border-top: 2px solid #000; margin: 8px 0 10px; }
+  .card .body73 { font-size: 14px; font-weight: 500; color: #000; line-height: 1.45; margin: 0 0 8px; max-width: 56ch; }
+  .privline { border: 1px solid #E6E4DE; border-radius: 10px; background: #F4F2EC; padding: 9px 13px; margin: 10px 0 0;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; line-height: 1.9; }
+  .privline b { color: #000; font-weight: 600; }
+  #credcard[data-state="revoked"] .crule { border-top-color: #8C8880; }
+  #credcard[data-state="revoked"] { border-style: dashed; }
+  .denycard .crule { border-top-color: #A31F2C; }
+
+  /* ---- stage 03: lock ---- */
+  .lock { background: #FAF9F6; padding: 3.6% 4.5%; }
+  .gm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .gm strong { color: #000; font-weight: 600; }
+  .grule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .cpill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.13em;
+    text-transform: uppercase; color: #333; }
+  .cpill .d { width: 6px; height: 6px; border-radius: 50%; background: #2E6B21; }
+  .gcenter { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+  .clock { font-weight: 700; font-size: clamp(44px, 9vw, 76px); letter-spacing: -0.028em; color: #000;
+    line-height: 1; font-variant-numeric: tabular-nums; }
+  .dateline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: #666; margin-top: 10px; }
+  .user { display: flex; align-items: center; gap: 12px; margin-top: 4.5%; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; border: 1px solid #000; display: flex; align-items: center;
+    justify-content: center; font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 600; color: #000; }
+  .uname { font-weight: 500; font-size: 16px; color: #000; }
+  .umail { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .pwrow { display: flex; align-items: center; gap: 12px; margin-top: 3%; }
+  .pw { font-family: "Geist Mono", ui-monospace, monospace; font-size: 15px; color: #000; letter-spacing: 0.25em;
+    border: 0; border-bottom: 1px solid #8C8880; background: transparent; width: 220px; text-align: center; padding: 6px 4px; }
+  .pw:focus { outline: 2px solid #000; outline-offset: 3px; border-radius: 2px; }
+  .pw::placeholder { font-size: 9.5px; letter-spacing: 0.18em; color: #8C8880; text-transform: uppercase; }
+  .handoff { position: absolute; inset: 0; background: #FAF9F6; display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 450ms cubic-bezier(0.2, 0, 0, 1); }
+  .handoff.on { opacity: 1; }
+  .handoff span { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.2em; text-transform: uppercase; color: #666; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .stage, .handoff, .statebtn, .okfill { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Elevation</strong></div>
+        <div class="meta">Privilege, credentials, and the lock</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-012</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>Root is a fifteen-minute loan with your name on it.</h1>
+    <p class="deck">Punar has no permanent administrator. When you need privilege, you ask — with a reason — and the grant counts itself down in the bar. Credentials are issued the same way: short-lived, attributed, never written to disk. And the lock screen is the greeter's sibling, because leaving the machine is the same surface as arriving at it.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Elevation demo states">
+      <button class="statebtn" role="tab" id="tab-priv" data-stage="priv" aria-selected="true">01 · Privilege</button>
+      <button class="statebtn" role="tab" id="tab-cred" data-stage="cred" aria-selected="false">02 · Credential</button>
+      <button class="statebtn" role="tab" id="tab-lock" data-stage="lock" aria-selected="false">03 · Lock</button>
+      <span class="modelabel">Device ·</span>
+      <button class="statebtn" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="demohint">← → switch states · countdowns are live · unmanaged-first: managed mode only annotates, never redraws</div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Interactive elevation demo">
+
+      <!-- 01 · PRIVILEGE -->
+      <div class="stage active" id="st-priv" data-state="request">
+        <div class="win" style="left:4%; top:10%; width:55%; height:82%"><div class="bar">Terminal · Atlas</div></div>
+        <div class="win" style="left:61%; top:10%; width:35%; height:60%"><div class="bar">Editor · punard.rs</div></div>
+        <div class="scrim"></div>
+        <div class="shellbar">
+          <span>Punar · Atlas</span>
+          <span class="elevchip" id="elevchip"><span class="dot"></span><span id="elevtime">Elevated · 15:00 remaining</span></span>
+        </div>
+
+        <div class="elev" role="dialog" aria-label="Privilege request">
+          <!-- request view -->
+          <div class="rv">
+            <div class="ehead">
+              <span class="hm"><strong>Elevation</strong> · You</span>
+              <span class="pill">Grant · 15 minutes</span>
+            </div>
+            <hr class="erule">
+            <p class="ask">You are requesting <b>system.install_package</b> · libfoo</p>
+            <div class="chain">alice · dev_123 · atlas · requested 14:02</div>
+            <div class="chain" id="privpolicy">Policy · Personal defaults · elevation always requires a reason</div>
+            <div class="rlabel">Reason · required — it goes in the audit event, verbatim</div>
+            <input class="uline" id="reason" type="text" placeholder="Why do you need this?" aria-label="Reason for privilege request" autocomplete="off" spellcheck="false">
+            <div class="eacts">
+              <button class="okfill" id="authorize" disabled>Authorize<kbd>↵</kbd></button>
+              <button class="ghost" id="cancel">Cancel · Esc</button>
+            </div>
+            <div class="privnote" id="privnote"></div>
+          </div>
+          <!-- granted view -->
+          <div class="gv">
+            <div class="ehead">
+              <span class="hm"><strong>Elevation</strong> · Granted</span>
+              <span class="pill"><span class="dot" style="background:#2E6B21"></span>Active</span>
+            </div>
+            <hr class="erule">
+            <div class="gkv">
+              <span class="k">Capability</span><span class="v">system.install_package</span>
+              <span class="k">Reason</span><span class="v" id="grantreason" style="text-transform:none; letter-spacing:0.02em"></span>
+              <span class="k">Remaining</span><span class="v ok" id="grantremain">15:00</span>
+              <span class="k">Audit</span><span class="v" style="color:#666">evt_50x · alice · dev_123 · atlas</span>
+            </div>
+            <div class="eacts">
+              <button class="ghost red" id="revoke">Revoke now · R</button>
+            </div>
+            <div class="privnote">The chip lives in the shell bar — privilege is visible for exactly as long as it exists.</div>
+          </div>
+        </div>
+        <div class="stfoot" style="position:absolute; left:0; right:0; bottom:0; background:#FAF9F6">
+          <span>Type reason · ↵ Authorize · Esc Cancel · R Revoke</span>
+          <span>punarctl privilege request --capability system.install-package</span>
+        </div>
+      </div>
+
+      <!-- 02 · CREDENTIAL -->
+      <div class="stage" id="st-cred" style="background:#FAF9F6">
+        <div class="mast" style="padding:2.8% 3.4% 0">
+          <div class="hm"><strong>Punar</strong> · Secret broker<br>punar-secrets · issued credentials are events, not files</div>
+          <div class="hm" style="text-align:right"><strong>1 issued · 1 denied</strong><br>08 · 2026</div>
+        </div>
+        <hr class="grule" style="margin:10px 3.4% 0">
+        <div class="credwrap">
+
+          <div class="card" id="credcard" data-state="issued">
+            <div class="chead">
+              <span class="hm"><strong>aws-dev</strong> · issued to Claude Code · agt_123 · atlas</span>
+              <span style="display:flex; gap:8px; align-items:center">
+                <span class="simtag">Simulated · Mock provider</span>
+                <span class="pill" id="credpill"><span class="dot" style="background:#2E6B21"></span><span id="ttl">Expires 59:41</span></span>
+              </span>
+            </div>
+            <hr class="crule">
+            <div class="chain" id="credchain">alice@acme.com · dev_123 · atlas · claude-code · requested ttl 3600</div>
+            <div class="chain" id="credpolicy">Policy · Personal defaults</div>
+            <div class="privline">Never written to disk · never logged · <b>the value does not appear in this UI either</b> — expiry is the only thing worth showing</div>
+            <div class="eacts">
+              <button class="ghost red" id="credrevoke">Revoke now · R</button>
+            </div>
+          </div>
+
+          <div class="card denycard" id="denycard">
+            <div class="chead">
+              <span class="hm"><strong>aws_prod</strong> · requested by Claude Code · agt_123</span>
+              <span class="pill badp">Denied</span>
+            </div>
+            <hr class="crule">
+            <p class="body73">Production AWS credentials are not issued to Claude Code in the Atlas development workspace.</p>
+            <div class="chain" id="denypolicy">Policy · Personal defaults — you made this rule</div>
+            <div class="chain">Denial recorded · evt_502 · the agent was told the same sentence you are reading</div>
+            <div class="eacts" id="denyacts">
+              <button class="ghost" id="denyghost">Change it · System Control → AI</button>
+              <button class="xtag" id="denyexception" style="display:none">Request exception · Approval required</button>
+            </div>
+          </div>
+
+        </div>
+        <div class="stfoot">
+          <span>R Revoke · ← → State</span>
+          <span>Broker evaluates user · device · compliance · agent · project · policy</span>
+        </div>
+      </div>
+
+      <!-- 03 · LOCK -->
+      <div class="stage lock" id="st-lock">
+        <div class="mast">
+          <div class="gm"><strong>Punar</strong> · ThinkPad X1<span id="lockorg" style="display:none"> · dev_123<br>Acme Engineering · Managed</span></div>
+          <div class="gm" style="text-align:right"><span class="cpill" id="lockpill" style="display:none"><span class="d"></span>Compliant</span><span id="locktag">Locked</span><br>08 · 2026</div>
+        </div>
+        <hr class="grule">
+        <div class="gcenter">
+          <div class="clock" id="lockclock">08:26</div>
+          <div class="dateline" id="lockdate">Sunday · 24 August 2026</div>
+          <div class="user">
+            <span class="avatar">AL</span>
+            <span>
+              <span class="uname">Alice</span><br>
+              <span class="umail" id="lockmail">alice</span>
+            </span>
+          </div>
+          <div class="pwrow">
+            <input class="pw" id="lockpw" type="password" placeholder="Passphrase" aria-label="Passphrase">
+            <button class="okfill" id="unlockbtn">Unlock<kbd>↵</kbd></button>
+          </div>
+        </div>
+        <div class="stfoot" style="margin:0; border-top:1px solid #E6E4DE; padding-top:10px">
+          <span>Session locked · your windows are exactly where you left them</span>
+          <span>↵ Unlock · Tab user · F4 power</span>
+        </div>
+        <div class="handoff" id="lockhand"><span>Unlocked · your session, as you left it</span></div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Privilege register</h2>
+    <p class="assertion">There is no permanent root — there is a reason, a grant, and a clock.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The dialog</span>
+      <p>The sibling of the D-003 approval card, with one inversion: the requester is you. Same contract grammar — who, what, how long, under which policy — because a human asking for privilege deserves the same clarity an agent gets. CLI parity is literal: <span class="specref">punarctl privilege request --capability system.install-package --reason "…"</span>. <span class="specref">spec §48</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Reason field</span>
+      <p>The underline input from the greeter's grammar, and it is required — Authorize stays unfilled until a reason exists, because the reason travels verbatim into the audit event. <span class="specref">spec §53</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Countdown chip</span>
+      <p><span class="specref">ELEVATED · 14:32 REMAINING</span> lives in the shell bar for the life of the grant — green while active, amber in the final minute, gone when it expires. Privilege is never invisible, and revoke is one keystroke. There is no generic unrestricted root-shell API to fall back to. <span class="specref">spec §48</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Auto-expiry</span>
+      <p>At 00:00 the grant drops itself and the dialog returns to its unprivileged state. Extending means asking again, with a reason, again. Fifteen minutes is a policy value, not a constant.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Broker register</h2>
+    <p class="assertion">A credential is an event with an expiry, not a file with a location.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Issuance card</span>
+      <p>The §29 request rendered as a card: user, agent, project, credential, TTL — <span class="specref">alice@acme.com · claude-code · atlas · aws-dev · 3600</span>. The broker evaluated device, compliance, and policy before this card existed; the card is the receipt.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Privacy line</span>
+      <p><span class="specref">NEVER WRITTEN TO DISK · NEVER LOGGED</span> — the §53 redaction rule stated on the surface, and enforced on the surface too: the UI has no affordance that could show the value. Expiry is the only property worth drawing. <span class="specref">spec §29 · §53</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Deny voice</span>
+      <p>The <span class="specref">aws_prod</span> card is §73 verbatim: what happened, why, which policy, and the next step — an amber approval path when managed, a System Control pointer when personal. The agent received the same sentence. <span class="specref">spec §73 · evt_502</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Mock honesty</span>
+      <p>The dashed <span class="specref">SIMULATED · MOCK PROVIDER</span> tag stays on the card until a real provider ships — §29's MVP is a mock with expiration, deny path, and redaction tests, and the drawing claims exactly that much.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Identity register</h2>
+    <p class="assertion">Seven nouns, one chain — every surface on this plate prints the same graph.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The graph</span>
+      <p>Organization → Device → User → Project → Application → AI Agent → Service. Every privileged event on this plate is attributable through it: the elevation grant, the issued credential, the denial. <span class="specref">spec §47</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">One grammar</span>
+      <p>The attribution line — <span class="specref">ALICE · DEV_123 · ATLAS</span> — is the same tracked-mono row as the approval overlay's identity chain and the AI panel's session line. Learn it once; it never changes shape.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Personal chain</span>
+      <p>An unmanaged device keeps the whole chain minus the organization. Attribution is a user benefit first: your own audit trail of what held privilege, when, and why — with no one to report it to.</p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Lock register</h2>
+    <p class="assertion">Leaving the machine is the same surface as arriving at it.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Greeter sibling</span>
+      <p>Same masthead, same tabular clock, same underline passphrase field as Plate D-002 — the only difference is what is behind it: a running session instead of a fresh one, and the footer says so.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Unlock button</span>
+      <p>Unlock is a named consequential affirmative in the action-color rule, so it carries the ok-green fill — the one colored button on the surface, exactly as Sign in does on the greeter.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Managed chrome</span>
+      <p>Enrollment adds the org line and the compliance pill to the masthead — and nothing else. The personal lock is calm paper with no absence to apologize for. <span class="specref">design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — privilege and the broker land with punard; the lock ships with the greeter.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Privilege</span>
+      <p>A typed capability in <span class="specref">punard</span> backed by polkit and transient group membership — Milestones 3–4. The bar chip is <span class="specref">punar-shell</span>; the dialog and <span class="specref">punarctl privilege request</span> call the identical capability. <span class="specref">spec §10 · §48</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Broker</span>
+      <p><span class="specref">punar-secrets</span> (§11.4) with the §29 mock provider; issuance surfaces arrive with the agent milestones (M7–M8). Redaction tests are the acceptance gate — this card may never be able to render a secret value.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Lock</span>
+      <p>A Quickshell lock module sharing the greeter's QML components and <span class="specref">shell/theme/punar-tokens.json</span> — Milestone 1. Failed-attempt states (shake, <span class="specref">TRY AGAIN</span>, bad-red on third failure) are specified in D-002's words and stay dashed until drawn.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/identity-elevation.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const STAGES = ['priv', 'cred', 'lock'];
+  const stageEls = {};
+  STAGES.forEach(s => { stageEls[s] = document.getElementById('st-' + s); });
+  const tabs = [...document.querySelectorAll('.statebtn[data-stage]')];
+  const modeBtns = [...document.querySelectorAll('.statebtn[data-mode]')];
+  const frame = document.getElementById('frame');
+  let current = 'priv';
+  let MODE = 'personal';
+
+  /* ---------- stage switching ---------- */
+  function setStage(name) {
+    if (!stageEls[name]) return;
+    current = name;
+    STAGES.forEach(s => stageEls[s].classList.toggle('active', s === name));
+    tabs.forEach(t => t.setAttribute('aria-selected', String(t.dataset.stage === name)));
+    if (name === 'priv' && stageEls.priv.dataset.state === 'request') {
+      setTimeout(() => { const r = document.getElementById('reason'); if (r) r.focus({ preventScroll: true }); }, 460);
+    }
+    if (name === 'lock') {
+      setTimeout(() => { const p = document.getElementById('lockpw'); if (p) p.focus({ preventScroll: true }); }, 460);
+    }
+  }
+  tabs.forEach(t => t.addEventListener('click', () => setStage(t.dataset.stage)));
+
+  /* ---------- mode (personal / managed) ---------- */
+  function applyMode() {
+    const managed = MODE === 'managed';
+    document.getElementById('privpolicy').textContent = managed
+      ? 'Policy · Acme Engineering Baseline · eng-baseline-v12'
+      : 'Policy · Personal defaults · elevation always requires a reason';
+    document.getElementById('credpolicy').textContent = managed
+      ? 'Policy · eng-ai-v3 · Acme AI Engineering Baseline'
+      : 'Policy · Personal defaults';
+    document.getElementById('credchain').textContent = managed
+      ? 'alice@acme.com · dev_123 · atlas · claude-code · requested ttl 3600'
+      : 'alice · dev_123 · atlas · claude-code · requested ttl 3600';
+    document.getElementById('denypolicy').textContent = managed
+      ? 'Policy · Acme AI Engineering Baseline v3 · eng-ai-v3'
+      : 'Policy · Personal defaults — you made this rule';
+    document.getElementById('denyghost').style.display = managed ? 'none' : '';
+    document.getElementById('denyexception').style.display = managed ? '' : 'none';
+    document.getElementById('lockorg').style.display = managed ? '' : 'none';
+    document.getElementById('lockpill').style.display = managed ? '' : 'none';
+    document.getElementById('locktag').style.display = managed ? 'none' : '';
+    document.getElementById('lockmail').textContent = managed ? 'alice@acme.com' : 'alice';
+  }
+  modeBtns.forEach(b => b.addEventListener('click', () => {
+    MODE = b.dataset.mode;
+    modeBtns.forEach(x => x.setAttribute('aria-selected', String(x === b)));
+    applyMode();
+  }));
+  applyMode();
+
+  /* ---------- 01 · privilege ---------- */
+  const reason = document.getElementById('reason');
+  const authorize = document.getElementById('authorize');
+  const privnote = document.getElementById('privnote');
+  const elevchip = document.getElementById('elevchip');
+  const elevtime = document.getElementById('elevtime');
+  const grantremain = document.getElementById('grantremain');
+  let elevSecs = 0, elevTimer = null;
+
+  function fmt(s) { return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }
+
+  reason.addEventListener('input', () => { authorize.disabled = reason.value.trim() === ''; });
+
+  function grant() {
+    if (reason.value.trim() === '') return;
+    document.getElementById('grantreason').textContent = '"' + reason.value.trim() + '"';
+    stageEls.priv.dataset.state = 'granted';
+    elevSecs = 15 * 60;
+    renderElev();
+    clearInterval(elevTimer);
+    elevTimer = setInterval(() => {
+      elevSecs--;
+      if (elevSecs <= 0) { endGrant('Expired · privilege dropped automatically · evt_50x'); return; }
+      renderElev();
+    }, 1000);
+    frame.focus({ preventScroll: true });
+  }
+  function renderElev() {
+    const low = elevSecs < 60;
+    elevtime.textContent = 'Elevated · ' + fmt(elevSecs) + ' remaining';
+    elevchip.classList.toggle('low', low);
+    grantremain.textContent = fmt(elevSecs);
+    grantremain.classList.toggle('ok', !low);
+    grantremain.style.color = low ? '#8A5A00' : '';
+  }
+  function endGrant(note) {
+    clearInterval(elevTimer);
+    stageEls.priv.dataset.state = 'request';
+    reason.value = '';
+    authorize.disabled = true;
+    privnote.textContent = note;
+  }
+  authorize.addEventListener('click', grant);
+  document.getElementById('cancel').addEventListener('click', () => endGrant('Cancelled · nothing granted, nothing elevated'));
+  document.getElementById('revoke').addEventListener('click', () => endGrant('Revoked early · audit event evt_50x recorded'));
+  reason.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { grant(); e.preventDefault(); }
+    else if (e.key === 'Escape') { endGrant('Cancelled · nothing granted, nothing elevated'); frame.focus(); }
+  });
+
+  /* ---------- 02 · credential ---------- */
+  const credcard = document.getElementById('credcard');
+  const credpill = document.getElementById('credpill');
+  const ttl = document.getElementById('ttl');
+  let ttlSecs = 59 * 60 + 41;
+  const ttlTimer = setInterval(() => {
+    if (credcard.dataset.state !== 'issued') return;
+    ttlSecs = Math.max(0, ttlSecs - 1);
+    ttl.textContent = 'Expires ' + fmt(ttlSecs);
+    const low = ttlSecs < 300;
+    credpill.style.color = low ? '#8A5A00' : '';
+    credpill.style.borderColor = low ? '#8A5A00' : '';
+    const d = credpill.querySelector('.dot');
+    if (d) d.style.background = low ? '#8A5A00' : '#2E6B21';
+    if (ttlSecs === 0) revokeCred('Expired 00:00');
+  }, 1000);
+  function revokeCred(label) {
+    credcard.dataset.state = 'revoked';
+    ttl.textContent = label || 'Revoked · evt_50x';
+    const d = credpill.querySelector('.dot');
+    if (d) d.style.background = '#8C8880';
+    credpill.style.color = '#666';
+    credpill.style.borderColor = '#E6E4DE';
+    document.getElementById('credrevoke').disabled = true;
+    document.getElementById('credrevoke').style.opacity = '0.4';
+  }
+  document.getElementById('credrevoke').addEventListener('click', () => revokeCred('Revoked · evt_50x'));
+
+  /* ---------- 03 · lock ---------- */
+  const lockclock = document.getElementById('lockclock');
+  const lockdate = document.getElementById('lockdate');
+  function tick() {
+    const now = new Date();
+    lockclock.textContent = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    lockdate.textContent = days[now.getDay()] + ' · ' + now.getDate() + ' ' + months[now.getMonth()] + ' ' + now.getFullYear();
+  }
+  tick(); setInterval(tick, 15000);
+
+  const lockhand = document.getElementById('lockhand');
+  const lockpw = document.getElementById('lockpw');
+  function unlock() {
+    lockhand.classList.add('on');
+    setTimeout(() => { lockhand.classList.remove('on'); lockpw.value = ''; }, 1400);
+  }
+  document.getElementById('unlockbtn').addEventListener('click', unlock);
+  lockpw.addEventListener('keydown', e => { if (e.key === 'Enter') { unlock(); e.preventDefault(); } });
+
+  /* ---------- frame keyboard ---------- */
+  frame.addEventListener('keydown', e => {
+    if (e.target && e.target.tagName === 'INPUT') return; /* inputs own their keys */
+    const i = STAGES.indexOf(current);
+    if (e.key === 'ArrowRight') { setStage(STAGES[Math.min(STAGES.length - 1, i + 1)]); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { setStage(STAGES[Math.max(0, i - 1)]); e.preventDefault(); }
+    else if (e.key === 'r' || e.key === 'R') {
+      if (current === 'priv' && stageEls.priv.dataset.state === 'granted') endGrant('Revoked early · audit event evt_50x recorded');
+      else if (current === 'cred' && credcard.dataset.state === 'issued') revokeCred('Revoked · evt_50x');
+    }
+    else if (e.key === 'Escape' && current === 'priv' && stageEls.priv.dataset.state === 'request') {
+      endGrant('Cancelled · nothing granted, nothing elevated');
+    }
+  });
+})();
+</script>

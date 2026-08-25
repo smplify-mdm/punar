@@ -1,0 +1,421 @@
+<title>Punar Projects</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, two paper frames. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin: 0 0 14px; }
+  .statebar { display: flex; gap: 8px; margin: 28px 0 10px; flex-wrap: wrap; align-items: center; }
+  .statebar + .statebar { margin-top: 0; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; background: transparent;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .statelabel { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #8C8880; margin-right: 4px; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .sc { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.8% 3.4%; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8; }
+  .hm strong { color: #000; font-weight: 600; }
+  .scrule { border: 0; border-top: 2px solid #000; margin: 10px 0 0; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 4px 9px; color: #333; background: #F4F2EC; }
+  .pill[hidden] { display: none; }
+  .pane { flex: 1; min-width: 0; padding: 14px 4px 8px 2px; overflow-y: auto; }
+  .sect { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: #666; margin: 16px 0 2px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .sect:first-child { margin-top: 2px; }
+  .sect .tagline { font-weight: 500; font-size: 8px; letter-spacing: 0.1em; color: #8C8880; text-transform: uppercase; text-align: right; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 6px 16px; padding: 10px 0 4px; border-top: 1px solid #E6E4DE; }
+  .kv .k { font-size: 13px; font-weight: 500; color: #000; }
+  .kv .v { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.11em; text-transform: uppercase; text-align: right; }
+  .ok { color: #2E6B21; } .warn { color: #8A5A00; } .bad { color: #A31F2C; } .mut { color: #666; }
+  .note { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #8C8880; margin: 4px 0 0; }
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+  .undrawn { border: 1px dashed #8C8880; border-radius: 10px; padding: 14px 16px; margin-top: 14px;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; line-height: 2; }
+  .undrawn b { color: #333; font-weight: 600; }
+  .scfoot { border-top: 1px solid #E6E4DE; padding-top: 9px; display: flex; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  /* ---- frame 2: switcher over dimmed workspace ---- */
+  .ghostwin { position: absolute; border: 1px solid #E6E4DE; border-radius: 8px; background: #F4F2EC; }
+  .gw-a { left: 4%; top: 8%; width: 58%; height: 84%; }
+  .gw-b { left: 64.5%; top: 8%; width: 31.5%; height: 40%; }
+  .gw-c { left: 64.5%; top: 51%; width: 31.5%; height: 41%; }
+  .dim { position: absolute; inset: 0; background: rgb(250 249 246 / 0.72); }
+  .switch { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+  .swlabel { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+    letter-spacing: 0.2em; text-transform: uppercase; color: #666; }
+  .wsstrip { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 0 6%; }
+  .wschip { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #333; background: #FAF9F6;
+    border: 1px solid #E6E4DE; border-radius: 6px; padding: 8px 13px; cursor: pointer;
+    font-variant-numeric: tabular-nums; transition: all 150ms cubic-bezier(0.2, 0, 0, 1); }
+  .wschip.sel { color: #FAF9F6; background: #000; border-color: #000; }
+  .wschip.empty { border-style: dashed; color: #8C8880; background: transparent; }
+  .wschip.empty.sel { color: #FAF9F6; background: #000; border-color: #000; border-style: solid; }
+  .wschip:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .wssummary { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-weight: 500;
+    letter-spacing: 0.13em; text-transform: uppercase; color: #666; min-height: 18px; text-align: center; padding: 0 8%; }
+  .wssummary b { color: #000; font-weight: 600; }
+  .swfoot { position: absolute; bottom: 4.5%; left: 4%; right: 4%; display: flex; justify-content: space-between;
+    flex-wrap: wrap; gap: 8px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .wschip { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Projects</strong></div>
+        <div class="meta">Project workspaces and dev environments · Super + 1–9</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-011</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>A project is not a folder. It is operating-system state.</h1>
+    <p class="deck">Open Atlas and the OS opens Atlas: the window layout, the dev environment, the AI sessions, the network rules, and the short-lived keys — one named context, one keystroke away. This surface is that context, shown whole.</p>
+  </header>
+
+  <section>
+    <h2>Sequence · Atlas detail</h2>
+    <div class="statebar" role="tablist" aria-label="Device mode">
+      <span class="statelabel">Device</span>
+      <button class="statebtn" data-mode="personal" aria-selected="true">Personal</button>
+      <button class="statebtn" data-mode="managed" aria-selected="false">Managed · Acme</button>
+    </div>
+    <div class="statebar" role="tablist" aria-label="Environment lifecycle">
+      <span class="statelabel">Lifecycle</span>
+      <button class="statebtn" data-env="init" aria-selected="false">punar-env init</button>
+      <button class="statebtn" data-env="up" aria-selected="true">punar-env up</button>
+      <button class="statebtn" data-env="shell" aria-selected="false">punar-env shell</button>
+    </div>
+    <div class="demohint">Unmanaged-first: enrollment only annotates, never redraws · I / U / S drive the lifecycle · credential expiry is live</div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Atlas project workspace demo">
+      <div class="sc">
+        <div class="mast">
+          <div class="hm"><strong>Atlas</strong> · Workspace 1 · ~/src/atlas<br><span id="mastline">ThinkPad X1 · Personal</span></div>
+          <div class="hm" style="text-align:right">
+            <span class="pill" id="orgpill" hidden>Managed</span>
+            <span class="pill" id="envchip"><span class="dot" style="background:#2E6B21"></span>Env · Up</span><br>08 · 2026
+          </div>
+        </div>
+        <hr class="scrule">
+        <div class="pane" id="pane">
+
+          <div class="sect"><span>Windows</span><span class="tagline">layout remembered · Super+Tab overview</span></div>
+          <div class="kv">
+            <span class="k">Zed</span><span class="v mut">Editor · Left 2/3</span>
+            <span class="k">Terminal</span><span class="v mut">punar-env shell · Right upper 1/3</span>
+            <span class="k">Chromium</span><span class="v mut">Atlas browser context · Right lower 1/3</span>
+          </div>
+
+          <div class="sect"><span>Environment</span><span class="tagline">punar-env status · manifest punar-env.yaml</span></div>
+          <div class="kv">
+            <span class="k">Type</span><span class="v mut">Devcontainer · Podman</span>
+            <span class="k">Node</span><span class="v mut" id="tc-node">24 · Ready</span>
+            <span class="k">Rust</span><span class="v mut" id="tc-rust">Stable · Ready</span>
+            <span class="k">Postgres</span><span class="v ok" id="pgstate">Running</span>
+          </div>
+          <div class="note" id="envnote">punar-env up · container running · boundary enforced</div>
+
+          <div class="sect"><span>AI sessions</span><span class="tagline">managed runtime · Super+A inspects · Plate D-005</span></div>
+          <div class="kv">
+            <span class="k">Claude Code</span><span class="v ok" id="ai-claude">agt_123 · Active</span>
+            <span class="k">Codex</span><span class="v mut">agt_124 · Idle</span>
+          </div>
+          <div class="note">launched via punar-env agent claude · identity chained to alice</div>
+
+          <div class="sect"><span>Network</span><span class="tagline" id="netsource">Source · your rules · project manifest</span></div>
+          <div class="kv">
+            <span class="k">Internet</span><span class="v ok" id="net-internet">Allow</span>
+            <span class="k">Acme Dev</span><span class="v ok" id="net-dev">Allow</span>
+            <span class="k">Production</span><span class="v bad" id="net-prod">Deny</span>
+          </div>
+          <div class="note">enforced below the agent · applies to every process in this workspace</div>
+
+          <div class="sect"><span>Credentials</span><span class="tagline" id="credsource">Broker · your rules · short-lived</span></div>
+          <div class="kv">
+            <span class="k">GitHub</span><span class="v ok">Allowed</span>
+            <span class="k">AWS Dev</span><span class="v warn" id="credv">Issued · Expires 04:41</span>
+            <span class="k">AWS Production</span><span class="v bad">Denied</span>
+          </div>
+
+          <div class="undrawn" id="activity">
+            Activity · <b>Investigate Production Incident</b> · <span class="simtag">Future · §14.4</span><br>
+            temporary authority · windows + terminal + browser + AI + network · revoked at end · not yet drawn
+          </div>
+
+        </div>
+        <div class="scfoot">
+          <span>I / U / S Lifecycle · Super+A Agents · Super+Tab Overview</span>
+          <span>Same capabilities as punarctl</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sequence · Workspace switcher</h2>
+    <div class="demohint">Super held · 1–9 or ← → select · click a chip · empty slots are dashed until named</div>
+    <div class="frame" id="frame2" tabindex="0" aria-label="Workspace switcher demo">
+      <div class="ghostwin gw-a"></div>
+      <div class="ghostwin gw-b"></div>
+      <div class="ghostwin gw-c"></div>
+      <div class="dim"></div>
+      <div class="switch">
+        <div class="swlabel">Workspaces · Super held</div>
+        <div class="wsstrip" id="wsstrip" role="tablist" aria-label="Workspaces"></div>
+        <div class="wssummary" id="wssummary"></div>
+      </div>
+      <div class="swfoot">
+        <span>1–9 Select · ←→ Move · Release Super commits</span>
+        <span>Projects are named contexts, not numbers</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Workspace register</h2>
+    <p class="assertion">Project context is a native operating-system concept — this surface is where that sentence becomes furniture.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Masthead</span>
+      <p><span class="specref">ATLAS · WORKSPACE 1</span> — the project is named before anything else is shown, the same identity-first masthead as every plate. The number is an address; the name is the concept. <span class="specref">spec §14 · §82</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">State list</span>
+      <p>The five sections are §14.1 verbatim: windows, environment, AI sessions, network policy, temporary credentials. A workspace is the sum of these — the panel proves the claim by listing nothing else. <span class="specref">spec §14.1</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Switcher</span>
+      <p><span class="specref">SUPER+1–9</span> chips carry project names, not just digits; empty slots stay dashed until a project claims them. The graphical overview is <span class="specref">SUPER+TAB</span> with arrows, Enter, and type-to-search. <span class="specref">spec §14.2</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Personal default</span>
+      <p>The demo opens unmanaged: the same Atlas, the same boundaries, sourced from <span class="specref">YOUR RULES</span>. Enrolling adds the <span class="specref">MANAGED</span> pill, the org line, and a policy citation — annotation, never restructure. <span class="specref">spec §3.2 · design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Environment register</h2>
+    <p class="assertion">The dev environment is a security boundary that happens to be convenient.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Manifest</span>
+      <p>The rows render the §17 Atlas fixture exactly: devcontainer, node 24, rust stable, postgres — plus the permissions block that becomes the Network and Credentials sections below it. One file declares the whole workspace. <span class="specref">spec §17</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Lifecycle</span>
+      <p>The statebar buttons are the actual commands — <span class="specref">punar-env init / up / shell</span> — and the env chip states the claim: declared, running, attached. The chip never says more than <span class="specref">punar-env status</span> would print. <span class="specref">spec §11.6</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Agent launch</span>
+      <p><span class="specref">punar-env agent claude</span> starts Claude Code inside the boundary as <span class="specref">agt_123</span> — registered, attributed, and subject to the same network table as everything else in the workspace. Inspection is one keystroke away in the AI panel. <span class="specref">spec §17 · §27</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Network register</h2>
+    <p class="assertion">Three rows tell the whole story, and the colors are the policy decisions themselves.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Atlas table</span>
+      <p>The §36 example verbatim: Internet <span class="specref">ALLOW</span> green, Acme Dev <span class="specref">ALLOW</span> green, Production <span class="specref">DENY</span> red. Green and red are the §20 decision words wearing their one meaning — no decoration anywhere else on the surface. <span class="specref">spec §36 · §52</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Named source</span>
+      <p>Personal mode cites <span class="specref">YOUR RULES · PROJECT MANIFEST</span>; managed mode cites <span class="specref">ENG-BASELINE-V12 + PROJECT MANIFEST</span>. Authority always has a named source, whoever set it — the table itself never changes shape. <span class="specref">spec §39 · §40</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Enforcement depth</span>
+      <p>The note under the table states where the boundary lives: below the agent, applied to every process in the workspace. An AI session cannot route around a rule its shell is inside of. <span class="specref">spec §36 · §45</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Short-lived keys</span>
+      <p><span class="specref">AWS DEV</span> shows a live countdown, amber in its final five minutes — credentials are brokered, scoped to the workspace, and expire by design. Production credentials render red and stay red. <span class="specref">spec §29</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Restoration register</h2>
+    <p class="assertion">Punar remembers the layout today; the rest of the promise is drawn dashed until it operates.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Layout memory</span>
+      <p>Window positions and workspace assignment are remembered and restored — a solid-stroke claim, shipped with native multitasking. <span class="specref">spec §14.3 · M2</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Future restoration</span>
+      <p>Application reopening, terminal state, browser context, container reconnection, and AI session state where safe are §14.3's future goals — described here in words, dashed in drawings, never rendered as if they worked. <span class="specref">spec §14.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Activity model</span>
+      <p>The dashed card in the frame is §14.4 honestly held: a temporary activity like <span class="specref">INVESTIGATE PRODUCTION INCIDENT</span> bundles windows, credentials, and network access, and ending it revokes the temporary authority. Not yet drawn, so it says so. <span class="specref">spec §14.4 · §36</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the workspace surface assembles across Milestones 2–12; this page is the acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Workspaces</span>
+      <p><span class="specref">punar-workspace</span> (§11.5) owns named contexts and layout memory; M2 delivers tiling, overview, and named project workspaces. The switcher strip is shell chrome over the same service.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Environment</span>
+      <p><span class="specref">punar-env</span> (§11.6) with Podman/devcontainer lands in M6, Atlas fixture included — the Environment section reads its status call directly. Agent launch wires to the registry in M7.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Network + keys</span>
+      <p>Project-route policy and observability come with <span class="specref">punar-netd</span> in M12; the credential rows read the M9 secret broker. Until those land, this panel renders fixtures — and would carry <span class="specref">SIMULATED</span> tags if shipped early.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/projects-dev.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  // ---- frame 1: mode + env lifecycle + live credential ----
+  let MODE = 'personal', ENV = 'up';
+
+  const mastline = document.getElementById('mastline');
+  const orgpill = document.getElementById('orgpill');
+  const netsource = document.getElementById('netsource');
+  const credsource = document.getElementById('credsource');
+  const envchip = document.getElementById('envchip');
+  const tcNode = document.getElementById('tc-node');
+  const tcRust = document.getElementById('tc-rust');
+  const pgstate = document.getElementById('pgstate');
+  const envnote = document.getElementById('envnote');
+  const aiClaude = document.getElementById('ai-claude');
+  const frame = document.getElementById('frame');
+
+  function renderMode() {
+    const managed = MODE === 'managed';
+    mastline.textContent = managed ? 'ThinkPad X1 · dev_123 · Acme Engineering' : 'ThinkPad X1 · Personal';
+    orgpill.hidden = !managed;
+    netsource.textContent = managed
+      ? 'Source · eng-baseline-v12 + project manifest'
+      : 'Source · your rules · project manifest';
+    credsource.textContent = managed
+      ? 'Broker · eng-ai-v3 · short-lived'
+      : 'Broker · your rules · short-lived';
+    document.querySelectorAll('.statebtn[data-mode]').forEach(b =>
+      b.setAttribute('aria-selected', String(b.dataset.mode === MODE)));
+  }
+
+  function renderEnv() {
+    const dotOk = '<span class="dot" style="background:#2E6B21"></span>';
+    if (ENV === 'init') {
+      envchip.innerHTML = 'Env · Initialized';
+      tcNode.textContent = '24 · Declared'; tcRust.textContent = 'Stable · Declared';
+      pgstate.textContent = 'Declared'; pgstate.className = 'v mut';
+      envnote.textContent = 'punar-env init · manifest read · nothing running yet';
+      aiClaude.textContent = 'agt_123 · Waiting for env'; aiClaude.className = 'v mut';
+    } else if (ENV === 'up') {
+      envchip.innerHTML = dotOk + 'Env · Up';
+      tcNode.textContent = '24 · Ready'; tcRust.textContent = 'Stable · Ready';
+      pgstate.textContent = 'Running'; pgstate.className = 'v ok';
+      envnote.textContent = 'punar-env up · container running · boundary enforced';
+      aiClaude.textContent = 'agt_123 · Active'; aiClaude.className = 'v ok';
+    } else {
+      envchip.innerHTML = dotOk + 'Env · Up · Shell';
+      tcNode.textContent = '24 · Ready'; tcRust.textContent = 'Stable · Ready';
+      pgstate.textContent = 'Running'; pgstate.className = 'v ok';
+      envnote.textContent = 'punar-env shell · attached · atlas-dev-42';
+      aiClaude.textContent = 'agt_123 · Active'; aiClaude.className = 'v ok';
+    }
+    document.querySelectorAll('.statebtn[data-env]').forEach(b =>
+      b.setAttribute('aria-selected', String(b.dataset.env === ENV)));
+  }
+
+  document.querySelectorAll('.statebtn[data-mode]').forEach(b =>
+    b.addEventListener('click', () => { MODE = b.dataset.mode; renderMode(); }));
+  document.querySelectorAll('.statebtn[data-env]').forEach(b =>
+    b.addEventListener('click', () => { ENV = b.dataset.env; renderEnv(); }));
+
+  frame.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'i') { ENV = 'init'; renderEnv(); e.preventDefault(); }
+    else if (k === 'u') { ENV = 'up'; renderEnv(); e.preventDefault(); }
+    else if (k === 's') { ENV = 'shell'; renderEnv(); e.preventDefault(); }
+    else if (k === 'p') { MODE = 'personal'; renderMode(); e.preventDefault(); }
+    else if (k === 'm') { MODE = 'managed'; renderMode(); e.preventDefault(); }
+  });
+
+  renderMode(); renderEnv();
+
+  // live short-lived credential (aws_dev, already in its final five minutes)
+  let credSecs = 4 * 60 + 41;
+  setInterval(() => {
+    const v = document.getElementById('credv');
+    if (!v) return;
+    credSecs = Math.max(0, credSecs - 1);
+    if (credSecs === 0) { v.textContent = 'Expired · Re-request'; v.className = 'v bad'; return; }
+    const m = String(Math.floor(credSecs / 60)).padStart(2, '0');
+    const s = String(credSecs % 60).padStart(2, '0');
+    v.textContent = 'Issued · Expires ' + m + ':' + s;
+    v.className = 'v warn';
+  }, 1000);
+
+  // ---- frame 2: workspace switcher ----
+  const NAMES = ['Atlas', 'Punar', 'Website', 'Research', 'Personal'];
+  const SUMMARIES = {
+    1: '<b>Atlas</b> · env up · 1 agent active · 3 windows · deny production',
+    2: '<b>Punar</b> · 2 windows · no environment declared',
+    3: '<b>Website</b> · browser context · 1 window',
+    4: '<b>Research</b> · 1 window · quiet',
+    5: '<b>Personal</b> · your rules · nothing managed here',
+  };
+  const strip = document.getElementById('wsstrip');
+  const summary = document.getElementById('wssummary');
+  const frame2 = document.getElementById('frame2');
+  const chips = [];
+  let wsIdx = 0;
+
+  for (let n = 1; n <= 9; n++) {
+    const named = n <= NAMES.length;
+    const c = document.createElement('button');
+    c.className = 'wschip' + (named ? '' : ' empty');
+    c.id = 'ws-' + n;
+    c.setAttribute('role', 'tab');
+    c.textContent = named ? n + ' · ' + NAMES[n - 1] : String(n);
+    c.addEventListener('click', () => selectWs(n - 1));
+    strip.appendChild(c); chips.push(c);
+  }
+
+  function selectWs(i) {
+    wsIdx = Math.max(0, Math.min(8, i));
+    chips.forEach((c, j) => {
+      c.classList.toggle('sel', j === wsIdx);
+      c.setAttribute('aria-selected', String(j === wsIdx));
+    });
+    summary.innerHTML = SUMMARIES[wsIdx + 1] ||
+      'Empty slot · a workspace begins when a project claims it';
+  }
+  selectWs(0);
+
+  frame2.addEventListener('keydown', e => {
+    if (e.key >= '1' && e.key <= '9') { selectWs(+e.key - 1); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { selectWs(wsIdx + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { selectWs(wsIdx - 1); e.preventDefault(); }
+  });
+})();
+</script>

@@ -254,3 +254,37 @@ choosing with Smplify nowhere in sight — and first-class when it is.
   (§64 who-talks list, §37 connection anatomy, dual-hop relay drawn dashed
   while simulated, punard's own zero-connection row as the personal-mode
   proof of silence).
+- [`mockups/desktop-multitasking.html`](mockups/desktop-multitasking.html) —
+  Desktop and multitasking (§13 window grammar with HJKL focus/resize modes,
+  §14 workspace overview with type-to-search, §13.6 scratchpad, restoration
+  and multi-monitor drawn dashed as futures).
+- [`mockups/first-boot.html`](mockups/first-boot.html) — First boot (§65
+  seven-stage OOBE; the personal/organization fork with personal as the
+  DEFAULT card, §54 nothing-to-opt-out-of telemetry fact, §49 enrollment
+  chain as additive masthead annotation, relay and attestation dashed).
+- [`mockups/notifications-osd.html`](mockups/notifications-osd.html) —
+  Notifications and OSD (§28 approval toast with live expiry and action-color
+  pair, source-grouped center with sticky approvals and DND that never mutes
+  expiry warnings, §25 unknown-AI alert dashed, tick-meter volume/brightness
+  OSD on panel).
+- [`mockups/updates-apps.html`](mockups/updates-apps.html) — Updates and
+  applications (§57 snapshot-pinned channel, §58 faster browser lane, staged
+  rollout rings and required-app pills as managed annotation, §73-voice
+  denial explain, A/B slots dashed as trajectory).
+- [`mockups/projects-dev.html`](mockups/projects-dev.html) — Projects and
+  development (§14 workspace detail: windows, §17 environment lifecycle, AI
+  sessions, §36 network table with named policy source, short-lived
+  credential countdown; SUPER+1..9 switcher strip; §14.4 activity dashed).
+- [`mockups/identity-elevation.html`](mockups/identity-elevation.html) —
+  Identity and elevation (§48 reason-required JIT privilege with countdown
+  chip and early revoke, §29 broker issuance/deny cards with never-logged
+  privacy line, lock screen as the greeter's sibling; managed chrome as
+  annotation).
+- [`mockups/webapps-browser.html`](mockups/webapps-browser.html) — Web apps
+  and browser (§31 install contract with storage-context choice, web app as
+  a native window carrying masthead identity and printed origin, §32 context
+  picker where the org context exists only in managed mode).
+- [`mockups/cli-grammar.html`](mockups/cli-grammar.html) — CLI grammar
+  (punarctl status/explain/inspect, punar-env up, and an in-terminal §28
+  approval in the §6 terminal palette — mastheads, middle dots, tabular
+  columns, status-only color; --json and exit codes dashed as planned).

@@ -1,0 +1,458 @@
+<title>Punar Desktop</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one tiled desktop frame. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .frame:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .dk { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 2.4% 3%; }
+
+  /* top bar — field-note masthead grammar */
+  .dbar { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; line-height: 1.8;
+    font-variant-numeric: tabular-nums; }
+  .hm strong { color: #000; font-weight: 600; }
+  #modechip { display: none; align-items: center; margin-left: 10px; padding: 2px 8px; border-radius: 6px;
+    background: #000; color: #FAF9F6; font-size: 8.5px; font-weight: 600; letter-spacing: 0.13em; }
+  .dk[data-state="resize"] #modechip { display: inline-flex; }
+  .drule { border: 0; border-top: 2px solid #000; margin: 8px 0 0; }
+
+  .dbody { flex: 1; position: relative; min-height: 0; margin-top: 8px; }
+
+  /* ---- tiled windows ---- */
+  .tilearea { position: absolute; inset: 0; display: flex; gap: 8px; background: #EDEAE2;
+    border-radius: 10px; padding: 8px; }
+  .col { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+  #colL { flex: 0 0 56%; }
+  #colR { flex: 1; }
+  .win { border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; overflow: hidden;
+    display: flex; flex-direction: column; min-height: 0; cursor: pointer;
+    transition: flex-basis 300ms cubic-bezier(0.2, 0, 0, 1), box-shadow 150ms cubic-bezier(0.2, 0, 0, 1); }
+  .win.active { border-color: #000; box-shadow: 0 0 0 1px #000; }
+  .win.wpanel { background: #08090A; border-color: #26282E; }
+  #win-term { flex: 1; }
+  #win-editor { flex: 0 0 52%; }
+  #win-browser { flex: 1; }
+  .dk[data-ws="punar"] #win-browser { display: none; }
+  .dk[data-ws="punar"] #win-editor { flex: 1; }
+  .dk[data-ws="personal"] #colL, .dk[data-ws="personal"] #win-editor { display: none; }
+  .wbar { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; padding: 6px 10px;
+    border-bottom: 1px solid #E6E4DE; flex: none; }
+  .wpanel .wbar { color: #7B8290; border-bottom-color: #26282E; }
+  .wbody { flex: 1; min-height: 0; padding: 10px 12px; overflow: hidden; }
+
+  .tline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #F2F3F5;
+    line-height: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tline .tp { color: #7B8290; }
+  .tline .tout { color: #A8ADB6; }
+  .tline .caret { color: #A3E047; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .sk { height: 7px; border-radius: 2px; background: #EDEAE2; margin: 9px 0; }
+  .sk.d { background: #E6E4DE; }
+  .urlline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #666; border-bottom: 1px solid #E6E4DE; padding-bottom: 7px; margin-bottom: 10px; }
+  .pageph { border: 1px dashed #8C8880; border-radius: 6px; height: calc(100% - 34px);
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; line-height: 2; }
+
+  /* ---- overview ---- */
+  .overview { display: none; position: absolute; inset: 0; background: #FAF9F6; border-radius: 10px;
+    flex-direction: column; padding: 4px 2px; }
+  .dk[data-state="overview"] .overview { display: flex; }
+  .ovhead { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+  .search { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #8C8880;
+    padding-bottom: 5px; width: 240px; }
+  .search input { border: 0; background: transparent; width: 100%; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 10.5px; letter-spacing: 0.08em; color: #000; text-transform: uppercase; }
+  .search input::placeholder { color: #8C8880; }
+  .search input:focus { outline: none; }
+  .ovgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-content: start; }
+  .wscard { border-radius: 10px; cursor: pointer; padding: 0; background: transparent; border: 0;
+    text-align: left; font: inherit; }
+  .wscard.sel { outline: 2px solid #000; outline-offset: 3px; }
+  .wscard.hid { display: none; }
+  .wscard:focus-visible { outline: 2px solid #000; outline-offset: 3px; }
+  .mini { aspect-ratio: 16 / 10; background: #F4F2EC; border: 1px solid #E6E4DE; border-radius: 6px;
+    padding: 5px; display: flex; gap: 4px; }
+  .mini .mcol { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .mw { flex: 1; border: 1px solid #E6E4DE; background: #FAF9F6; border-radius: 3px; }
+  .mw.mpanel { background: #08090A; border-color: #26282E; }
+  .wmeta { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-top: 8px; line-height: 1.7; }
+  .wmeta strong { color: #000; font-weight: 600; }
+  .wscard.future { cursor: default; }
+  .wscard.future .mini { border-style: dashed; border-color: #8C8880; background: transparent;
+    align-items: center; justify-content: center; }
+  .wscard.future .mini span { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px;
+    font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: #666; text-align: center; line-height: 2; }
+
+  /* ---- scratchpad ---- */
+  .scratch { display: none; position: absolute; top: 6%; left: 18%; right: 18%; height: 44%;
+    background: #08090A; border: 1px solid #26282E; border-radius: 10px; flex-direction: column;
+    overflow: hidden; box-shadow: 0 30px 60px -24px rgb(28 24 16 / 0.45), 0 0 0 1px #000; }
+  .dk[data-state="scratchpad"] .scratch { display: flex; }
+
+  .dfoot { border-top: 1px solid #E6E4DE; margin-top: 8px; padding-top: 8px; display: flex;
+    justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; }
+    .ovgrid { grid-template-columns: repeat(2, 1fr); } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) {
+    .win, .statebtn { transition: none; }
+    .tline .caret { animation: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Desktop</strong></div>
+        <div class="meta">Tiling, overview, scratchpads</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-007</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>Ten windows should cost the same thought as one.</h1>
+    <p class="deck">The desktop is the instrument you live in: windows land where the grammar says, the bar names the workspace instead of decorating it, and SUPER&nbsp;+&nbsp;TAB reads projects, not numbered desktops. This is a personal machine — the managed desktop is pixel-identical.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Desktop states">
+      <button class="statebtn" id="sb-tiled" data-state="tiled" role="tab" aria-selected="true">01 · Tiled</button>
+      <button class="statebtn" id="sb-resize" data-state="resize" role="tab" aria-selected="false">02 · Resize</button>
+      <button class="statebtn" id="sb-overview" data-state="overview" role="tab" aria-selected="false">03 · Overview</button>
+      <button class="statebtn" id="sb-scratchpad" data-state="scratchpad" role="tab" aria-selected="false">04 · Scratchpad</button>
+      <span class="demohint">Click frame · R / Tab / T stand in for Super-chords</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Interactive tiling desktop demo">
+      <div class="dk" id="desk" data-state="tiled" data-ws="atlas" data-splitx="56" data-splity="52">
+        <div class="dbar">
+          <div class="hm"><strong>Punar</strong> · <span id="wsnum">1</span> · <span id="wsname">Atlas</span><span id="modechip">Resize · HJKL · Esc</span></div>
+          <div class="hm"><span id="deskclock">08:26</span> · Bat 82 · Wi-Fi</div>
+        </div>
+        <hr class="drule">
+        <div class="dbody">
+          <div class="tilearea" id="tilearea">
+            <div class="col" id="colL">
+              <div class="win wpanel active" id="win-term" data-win="term">
+                <div class="wbar">Terminal · ~/atlas</div>
+                <div class="wbody">
+                  <div class="tline"><span class="tp">alice@punar ~/atlas %</span> punarctl agents list</div>
+                  <div class="tline"><span class="tout">agt_123 · claude-code · active · project atlas</span></div>
+                  <div class="tline"><span class="tp">alice@punar ~/atlas %</span> <span class="caret">▏</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="col" id="colR">
+              <div class="win" id="win-editor" data-win="editor">
+                <div class="wbar">Editor · atlas/src/main.rs</div>
+                <div class="wbody">
+                  <div class="sk d" style="width:34%"></div>
+                  <div class="sk" style="width:78%"></div>
+                  <div class="sk" style="width:64%"></div>
+                  <div class="sk" style="width:82%"></div>
+                  <div class="sk d" style="width:28%"></div>
+                  <div class="sk" style="width:70%"></div>
+                  <div class="sk" style="width:52%"></div>
+                </div>
+              </div>
+              <div class="win" id="win-browser" data-win="browser">
+                <div class="wbar">Browser</div>
+                <div class="wbody">
+                  <div class="urlline">localhost:3000 · atlas dev</div>
+                  <div class="pageph">Page content · not part of this plate</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="overview" id="overview" aria-label="Workspace overview">
+            <div class="ovhead">
+              <div class="hm"><strong>Workspaces</strong> · 3 projects</div>
+              <div class="search"><input id="wsq" placeholder="Type to search" aria-label="Search workspaces"><span class="hm">↵</span></div>
+            </div>
+            <div class="ovgrid" id="ovgrid">
+              <button class="wscard sel" data-ws="atlas" data-num="1" data-name="Atlas">
+                <div class="mini">
+                  <div class="mcol" style="flex:0 0 56%"><span class="mw mpanel"></span></div>
+                  <div class="mcol"><span class="mw"></span><span class="mw"></span></div>
+                </div>
+                <div class="wmeta"><strong>1 · Atlas</strong><br>3 windows · agt_123 active</div>
+              </button>
+              <button class="wscard" data-ws="punar" data-num="2" data-name="Punar">
+                <div class="mini">
+                  <div class="mcol" style="flex:0 0 56%"><span class="mw mpanel"></span></div>
+                  <div class="mcol"><span class="mw"></span></div>
+                </div>
+                <div class="wmeta"><strong>2 · Punar</strong><br>2 windows · idle</div>
+              </button>
+              <button class="wscard" data-ws="personal" data-num="3" data-name="Personal">
+                <div class="mini">
+                  <div class="mcol"><span class="mw"></span></div>
+                </div>
+                <div class="wmeta"><strong>3 · Personal</strong><br>1 window</div>
+              </button>
+              <div class="wscard future" aria-hidden="true">
+                <div class="mini"><span>Temporary activity<br>not yet drawn</span></div>
+                <div class="wmeta">§14.4 · <span class="simtag">Future</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="scratch" id="scratch" aria-label="Scratchpad terminal">
+            <div class="wbar">Scratchpad · Terminal · Super + T</div>
+            <div class="wbody">
+              <div class="tline"><span class="tp">alice@punar ~ %</span> punarctl ledger tail</div>
+              <div class="tline"><span class="tout">evt_50x · agt_123 · secrets.read · allowed</span></div>
+              <div class="tline"><span class="tp">alice@punar ~ %</span> <span class="caret">▏</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="dfoot">
+          <span>H/J/K/L Focus · R Resize · Tab Overview · T Scratchpad · Esc Back</span>
+          <span>Stand-ins for the §13.3 Super-chords</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Window-grammar register</h2>
+    <p class="assertion">Four window modes, one chord family — the grammar is the interface, not the chrome.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The table</span>
+      <p>The §13.3 table verbatim: <span class="specref">SUPER+H/J/K/L</span> focus, <span class="specref">+SHIFT</span> moves, <span class="specref">R</span> resize, <span class="specref">F</span> fullscreen, <span class="specref">TAB</span> overview, <span class="specref">1..9</span> workspaces, <span class="specref">SPACE</span> command center. Bindings may evolve; the family does not. <span class="specref">spec §13.3</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Modes</span>
+      <p>Tile, stack/tab group, float, fullscreen. This plate draws tile and one justified float — the scratchpad. Stacks and the layout chooser (<span class="specref">SUPER+L</span>, §13.5 presets) are specified in words and dashed until drawn. <span class="specref">spec §13.2</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Active border</span>
+      <p>Windows carry no buttons and no title furniture — a hairline, a tracked mono label, and the ink border on exactly one window: the focused one. Gaps 8, radius 10, the tokens everywhere else uses. <span class="specref">spec §12</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Motion</span>
+      <p>Fluid, not decorative: a retile eases 300ms on the standard curve, the overview gets the 450ms spatial ease, and nothing moves that isn't explaining a state change. Reduced-motion collapses all of it to opacity. <span class="specref">spec §13.4</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Overview register</h2>
+    <p class="assertion">SUPER + TAB reads projects, not numbered desktops.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Project cards</span>
+      <p>Atlas, Punar, Personal — named contexts carrying windows, agents, containers, and environment. The card wireframes the real layout; the meta row states window count and agent presence in registry vocabulary (<span class="specref">agt_123 · active</span>). <span class="specref">spec §14 · §14.1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Keyboard nav</span>
+      <p>Arrows move the selection ring, <span class="specref">↵</span> commits, and typing searches — three keystrokes from any window to any project. The underline field is the greeter's passphrase grammar reused. <span class="specref">spec §14.2</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Mode chip</span>
+      <p>Submaps announce themselves: entering resize prints an instrument chip in the bar — <span class="specref">RESIZE · HJKL · ESC</span> — state, verbs, exit. Modality is never silent. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Restoration</span>
+      <p>Layout memory ships first; app reopening, terminal and browser restoration, and temporary activities are future goals — drawn dashed in the grid, never claimed solid. <span class="specref">spec §14.3 · §14.4</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Edges register</h2>
+    <p class="assertion">The edges of the desktop keep the same promises as its center.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Scratchpads</span>
+      <p>Terminal, AI assistant, and notes drop over the tiling on a chord and leave on the same chord — the one float the grammar owes you. It lands on the panel surface with the panel shadow rule bent once: a floating window may cast, a tiled one may not. <span class="specref">spec §13.6</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Multi-monitor</span>
+      <p>Remembered layouts, no off-screen lost windows, <span class="specref">SUPER+SHIFT+RIGHT</span> across displays, collapse and restore on dock events — required, unbuilt, and therefore a dashed row here, not a second frame. <span class="specref">spec §15</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Personal = managed</span>
+      <p>This plate has no Personal/Managed toggle because the desktop is identical in both: enrollment annotates panels and mastheads elsewhere, and buys no different tiling, overview, or grammar. Nothing at this altitude is org chrome. <span class="specref">spec §3.2 · design language §8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Implementation notes</h2>
+    <p class="assertion">Design mockup — the tiled desktop is Milestones 1–2; this page is the acceptance reference.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Compositor</span>
+      <p>Wayland with Hyprland + Quickshell as the initial evaluation; the bar, overview, and scratchpads are <span class="specref">punar-shell</span> surfaces consuming <span class="specref">shell/theme/punar-tokens.json</span>. The grammar must survive the legacy-GPU fallback compositor unchanged. <span class="specref">spec §69 · §11.8</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Milestones</span>
+      <p>M1 ships the bar, tiling, and full keyboard navigation (acceptance: no mouse required). M2 ships stacking, floating, overview, layout presets, scratchpads, and named project workspaces. <span class="specref">spec §76</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">States not drawn</span>
+      <p>Stack/tab groups, the layout chooser, drag-to-tile with the mouse, monitor-disconnect collapse, and the workspace-switch spatial slide are specified in words and will be drawn when M2 builds them. Dashed until then.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/desktop-multitasking.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const desk = document.getElementById('desk');
+  const frame = document.getElementById('frame');
+  const colL = document.getElementById('colL');
+  const winEditor = document.getElementById('win-editor');
+  const wsq = document.getElementById('wsq');
+  const stateBtns = [...document.querySelectorAll('.statebtn[data-state]')];
+  const wins = [...document.querySelectorAll('.win[data-win]')];
+  const cards = [...document.querySelectorAll('.wscard[data-ws]')];
+  if (!desk || !frame || !wsq) return;
+
+  // ---- state machine ----
+  function setState(s) {
+    desk.dataset.state = s;
+    stateBtns.forEach(b => b.setAttribute('aria-selected', String(b.dataset.state === s)));
+    if (s === 'overview') {
+      wsq.value = '';
+      filterCards();
+      selectCard(cards.findIndex(c => c.dataset.ws === desk.dataset.ws));
+    }
+  }
+  stateBtns.forEach(b => b.addEventListener('click', () => { setState(b.dataset.state); frame.focus(); }));
+
+  // ---- focused window (tiled) ----
+  let act = 'term';
+  const MOVES = {
+    term: { l: 'editor' },
+    editor: { h: 'term', j: 'browser' },
+    browser: { h: 'term', k: 'editor' },
+  };
+  function visibleWin(name) {
+    const el = wins.find(w => w.dataset.win === name);
+    return el && el.offsetParent !== null ? el : null;
+  }
+  function setActive(name) {
+    if (!visibleWin(name)) return;
+    act = name;
+    wins.forEach(w => w.classList.toggle('active', w.dataset.win === name));
+  }
+  wins.forEach(w => w.addEventListener('click', () => setActive(w.dataset.win)));
+
+  // ---- resize submap ----
+  function applySplit() {
+    colL.style.flexBasis = desk.dataset.splitx + '%';
+    winEditor.style.flexBasis = desk.dataset.splity + '%';
+  }
+  function resizeStep(key) {
+    let x = +desk.dataset.splitx, y = +desk.dataset.splity;
+    if (key === 'h') x = Math.max(30, x - 4);
+    if (key === 'l') x = Math.min(72, x + 4);
+    if (key === 'k') y = Math.max(30, y - 6);
+    if (key === 'j') y = Math.min(70, y + 6);
+    desk.dataset.splitx = x; desk.dataset.splity = y;
+    applySplit();
+  }
+  applySplit();
+
+  // ---- overview ----
+  let sel = 0;
+  function visibleCards() { return cards.filter(c => !c.classList.contains('hid')); }
+  function selectCard(i) {
+    const vis = visibleCards(); if (!vis.length) return;
+    let target = cards[i] && !cards[i].classList.contains('hid') ? cards[i] : vis[0];
+    sel = cards.indexOf(target);
+    cards.forEach((c, j) => c.classList.toggle('sel', j === sel));
+  }
+  function moveSel(delta) {
+    const vis = visibleCards(); if (!vis.length) return;
+    let vi = vis.indexOf(cards[sel]); if (vi < 0) vi = 0;
+    vi = Math.max(0, Math.min(vis.length - 1, vi + delta));
+    selectCard(cards.indexOf(vis[vi]));
+  }
+  function filterCards() {
+    const t = wsq.value.trim().toLowerCase();
+    cards.forEach(c => c.classList.toggle('hid', !!t && !c.dataset.name.toLowerCase().includes(t)));
+    if (cards[sel] && cards[sel].classList.contains('hid')) selectCard(-1);
+  }
+  function commitCard(card) {
+    if (!card) return;
+    desk.dataset.ws = card.dataset.ws;
+    document.getElementById('wsnum').textContent = card.dataset.num;
+    document.getElementById('wsname').textContent = card.dataset.name;
+    setState('tiled');
+    if (!visibleWin(act)) {
+      const first = wins.find(w => w.offsetParent !== null);
+      if (first) setActive(first.dataset.win);
+    } else setActive(act);
+    frame.focus();
+  }
+  cards.forEach(c => c.addEventListener('click', () => commitCard(c)));
+  wsq.addEventListener('input', filterCards);
+
+  // ---- keyboard ----
+  frame.addEventListener('keydown', e => {
+    const s = desk.dataset.state;
+    if (s === 'overview') {
+      if (e.key === 'Escape') { setState('tiled'); frame.focus(); e.preventDefault(); }
+      else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { moveSel(1); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { moveSel(-1); e.preventDefault(); }
+      else if (e.key === 'Enter') { commitCard(cards[sel]); e.preventDefault(); }
+      else if (e.key === 'Backspace' && e.target !== wsq) { wsq.value = wsq.value.slice(0, -1); filterCards(); e.preventDefault(); }
+      else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && e.target !== wsq) {
+        wsq.value += e.key; filterCards(); e.preventDefault();
+      }
+      return;
+    }
+    if (e.key === 'Escape') { setState('tiled'); e.preventDefault(); return; }
+    if (e.key === 'Tab') { setState('overview'); e.preventDefault(); return; }
+    if (e.key === 'r' || e.key === 'R') { setState(s === 'resize' ? 'tiled' : 'resize'); e.preventDefault(); return; }
+    if (e.key === 't' || e.key === 'T') { setState(s === 'scratchpad' ? 'tiled' : 'scratchpad'); e.preventDefault(); return; }
+    if ('hjkl'.includes(e.key)) {
+      if (s === 'resize') resizeStep(e.key);
+      else { const next = (MOVES[act] || {})[e.key]; if (next) setActive(next); }
+      e.preventDefault();
+    }
+  });
+
+  // ---- bar clock ----
+  const clock = document.getElementById('deskclock');
+  function tick() {
+    const now = new Date();
+    clock.textContent = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  }
+  tick(); setInterval(tick, 15000);
+})();
+</script>
