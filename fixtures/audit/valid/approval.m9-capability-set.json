@@ -1,0 +1,14 @@
+{
+  "approval_id": "apr_7c1d9a4e",
+  "requester": {
+    "type": "ai_agent",
+    "id": "agt_4f21c09ab3e1"
+  },
+  "user": "punar",
+  "capability": "security.firewall",
+  "resource": "disabled",
+  "reason": "agt_4f21c09ab3e1 requested security.firewall = disabled through the typed capability API",
+  "risk": "high",
+  "status": "pending",
+  "expires_at": "2026-08-25T10:05:00Z"
+}

@@ -317,7 +317,7 @@ impl LedgerEngine {
     pub fn drain_audit(&self, now: &str) -> bool {
         let position = self.state.lock().unwrap().index.tail;
         let drained = self.tail.drain(position);
-        if drained.references.is_empty() {
+        if drained.references.is_empty() && drained.classes.is_empty() {
             // Still remember where we got to, so the next drain does not
             // re-read what it already skipped.
             let mut state = self.state.lock().unwrap();
@@ -357,6 +357,63 @@ impl LedgerEngine {
                             continue;
                         };
                         if record.observe_security_event(reference) {
+                            record.updated_at = now.to_string();
+                            if let Err(e) = self.store.write_record(&record) {
+                                eprintln!(
+                                    "punar-agentd: could not update the ledger for \
+                                     {session_id}: {e}"
+                                );
+                                continue;
+                            }
+                            state.index.upsert(index_row(&record));
+                            touched_on_disk.insert(session_id);
+                            ingested = true;
+                        }
+                    }
+                }
+            }
+
+            // The Level-3 half (milestone-9.md section 9.2). M8 wired this
+            // drain for Level-4 references only and left the
+            // `Evidence::AuditEvent` variant declared-but-unused; an
+            // allowed `credential.request` is the first — and in M9 the
+            // only — audit event that names a *resource class* rather
+            // than a security event. Same tombstone floor, same
+            // active/ended split, same "write only if something changed"
+            // rule as the loop above.
+            for (session_id, class) in drained.classes {
+                if state
+                    .index
+                    .row(&session_id)
+                    .is_some_and(|row| row.is_tombstone())
+                {
+                    continue;
+                }
+                match state.active.get_mut(&session_id) {
+                    Some(active) => {
+                        if active.record.observe(
+                            ResourceCategory::CredentialClasses,
+                            class,
+                            1,
+                            Evidence::AuditEvent,
+                            now,
+                        ) {
+                            active.record.updated_at = now.to_string();
+                            active.dirty = true;
+                            ingested = true;
+                        }
+                    }
+                    None => {
+                        let Some(mut record) = self.store.load_record(&session_id) else {
+                            continue;
+                        };
+                        if record.observe(
+                            ResourceCategory::CredentialClasses,
+                            class,
+                            1,
+                            Evidence::AuditEvent,
+                            now,
+                        ) {
                             record.updated_at = now.to_string();
                             if let Err(e) = self.store.write_record(&record) {
                                 eprintln!(

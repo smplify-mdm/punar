@@ -52,8 +52,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::approval::{
+    ApprovalEnvelope, ApprovalKind, ApprovalRequest, ApprovalStatus, Grant, PolicyCitation,
+    Requester, RequesterPeer,
+};
 use crate::audit::POLICY_PERSONAL_DEFAULTS;
-use crate::{AuditEvent, CapabilityDescriptor, CapabilityId};
+use crate::{AuditEvent, CapabilityDescriptor, CapabilityId, Risk};
 
 // ---------------------------------------------------------------------------
 // Contract constants (docs/api/ipc.md sections 1–2)
@@ -113,7 +117,8 @@ pub const EXIT_ERROR: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 /// Authorization denied (`denied` wire error).
 pub const EXIT_DENIED: i32 = 3;
-/// Approval required — reserved until Milestone 9.
+/// The call was gated: an approval was created and **nothing executed**
+/// (`approval_required` wire error). Reserved since M3, real since M9.
 pub const EXIT_APPROVAL_REQUIRED: i32 = 4;
 /// The daemon could not be reached (connect/timeout — a transport failure,
 /// so it never appears as a wire error code).
@@ -167,11 +172,24 @@ pub enum ErrorCode {
     /// `enroll.start` never surface as request errors; they queue per SPEC
     /// section 55. `details.stage` names the failing pipeline stage.
     UpstreamUnreachable,
+    /// M9 (contract section 14.1): the call is **gated**. An approval was
+    /// created and **nothing was executed** — this is a refusal to act, not
+    /// a queued action. `details` carries `approval_id`, `expires_at`,
+    /// `capability`, `resource`, `decision` (always `"approval_required"`)
+    /// and `policy_ids`. Maps to [`EXIT_APPROVAL_REQUIRED`], reserved for
+    /// exactly this since M3.
+    ApprovalRequired,
+    /// M9 (contract section 14.1): the approval passed `expires_at`, or a
+    /// presented credential's TTL lapsed. Deliberately distinct from
+    /// [`Conflict`](ErrorCode::Conflict), which means *already resolved*:
+    /// "you were too late" and "someone already answered" are different
+    /// facts and a human deserves to be told which one happened.
+    Expired,
 }
 
 impl ErrorCode {
     /// All wire codes, in contract-table order.
-    pub const ALL: [ErrorCode; 11] = [
+    pub const ALL: [ErrorCode; 13] = [
         ErrorCode::MalformedRequest,
         ErrorCode::UnsupportedVersion,
         ErrorCode::UnknownMethod,
@@ -183,6 +201,8 @@ impl ErrorCode {
         ErrorCode::Internal,
         ErrorCode::Conflict,
         ErrorCode::UpstreamUnreachable,
+        ErrorCode::ApprovalRequired,
+        ErrorCode::Expired,
     ];
 
     /// The wire spelling (snake_case).
@@ -199,6 +219,8 @@ impl ErrorCode {
             ErrorCode::Internal => "internal",
             ErrorCode::Conflict => "conflict",
             ErrorCode::UpstreamUnreachable => "upstream_unreachable",
+            ErrorCode::ApprovalRequired => "approval_required",
+            ErrorCode::Expired => "expired",
         }
     }
 
@@ -209,13 +231,15 @@ impl ErrorCode {
     }
 
     /// The `punarctl` exit code this error maps to (Plate D-014 section
-    /// III): [`EXIT_DENIED`] for `denied`, [`EXIT_ERROR`] otherwise.
+    /// III): [`EXIT_DENIED`] for `denied`, [`EXIT_APPROVAL_REQUIRED`] for
+    /// `approval_required` — **real as of Milestone 9**, after being
+    /// reserved for it since M3 — and [`EXIT_ERROR`] otherwise.
     /// [`EXIT_USAGE`] and [`EXIT_DAEMON_UNREACHABLE`] arise client-side and
-    /// never from a wire error; [`EXIT_APPROVAL_REQUIRED`] is reserved
-    /// until Milestone 9 introduces an approval flow.
+    /// never from a wire error.
     pub fn suggested_exit_code(self) -> i32 {
         match self {
             ErrorCode::Denied => EXIT_DENIED,
+            ErrorCode::ApprovalRequired => EXIT_APPROVAL_REQUIRED,
             _ => EXIT_ERROR,
         }
     }
@@ -264,14 +288,22 @@ impl IpcError {
         }
     }
 
-    /// The canonical Milestone 3 root-only denial (contract section 3.2
-    /// example; SPEC section 73 voice). `target` names what was refused
-    /// (usually a capability id), `retry_command` is the full command to
-    /// re-run as root. When `capability` is given it is included in
+    /// The canonical root-only denial (contract section 3.2 example; SPEC
+    /// section 73 voice). `target` names what was refused (usually a
+    /// capability id), `retry_command` is the full command to re-run as
+    /// root. When `capability` is given it is included in
     /// `details.capability`.
     ///
     /// The message deliberately contains both "administrator" and "personal
     /// defaults" — the section 74.4 in-VM check greps for exactly those.
+    ///
+    /// **M9 amendment.** Since M3 this message has promised that
+    /// "just-in-time elevation arrives in Milestone 9". It has arrived, so
+    /// the message now names the command that exists — but only when the
+    /// refusal is about a **capability**, because a grant is per-capability
+    /// (SPEC section 48: no wildcard elevation). `reconcile` and the
+    /// enrollment mutations have no grant to ask for and keep pointing at
+    /// root, which is the honest answer for them.
     pub fn denied_needs_root(target: &str, capability: Option<&str>, retry_command: &str) -> Self {
         let mut details = json!({
             "decision": "deny",
@@ -280,14 +312,77 @@ impl IpcError {
         if let (Some(map), Some(capability)) = (details.as_object_mut(), capability) {
             map.insert("capability".to_string(), Value::String(capability.into()));
         }
+        let next = match capability {
+            Some(capability) => format!(
+                "Next step: re-run as root: {retry_command}\n\
+                 Or ask for time-boxed privilege: \
+                 punarctl privilege request --capability {capability} --reason \"<why>\""
+            ),
+            None => format!("Next step: re-run as root: {retry_command}"),
+        };
         IpcError::with_details(
             ErrorCode::Denied,
             format!(
                 "Changing {target} needs administrator privileges.\n\
-                 Policy: personal defaults — just-in-time elevation arrives in Milestone 9.\n\
-                 Next step: re-run as root: {retry_command}"
+                 Policy: personal defaults — an ordinary user may hold privilege for a \
+                 bounded window, never permanently (SPEC section 48).\n\
+                 {next}"
             ),
             details,
+        )
+    }
+
+    /// The M9 gate (contract section 14.1). The call did **not** execute;
+    /// an approval was created and a human has to answer it.
+    ///
+    /// The message is deliberately four beats in the SPEC section 73 voice —
+    /// what happened, who asked, which policy said so, what to do next — and
+    /// it names a next step that exists (`punarctl approvals wait`), because
+    /// a gate that leaves the caller with nowhere to go is just a denial
+    /// with extra words.
+    pub fn approval_required(
+        approval_id: &str,
+        capability: &str,
+        resource: &str,
+        expires_at: &str,
+        policy_name: &str,
+        policy_id: &str,
+    ) -> Self {
+        IpcError::with_details(
+            ErrorCode::ApprovalRequired,
+            format!(
+                "Changing {capability} to {resource} needs a person to approve it.\n\
+                 Nothing has been changed: the request is waiting as {approval_id} \
+                 and expires at {expires_at}.\n\
+                 Policy: {policy_name} ({policy_id}) — AI agents may request this \
+                 capability, and a human answers.\n\
+                 Next step: answer it in the approval overlay, or run \
+                 `punarctl approvals wait {approval_id}`."
+            ),
+            json!({
+                "approval_id": approval_id,
+                "expires_at": expires_at,
+                "capability": capability,
+                "resource": resource,
+                "decision": "approval_required",
+                "policy_ids": [policy_id],
+            }),
+        )
+    }
+
+    /// The M9 `expired` error (contract section 14.1): the approval lapsed
+    /// before anyone answered, or an approved credential approval was
+    /// presented after its expiry. **A yes is not a standing grant.**
+    pub fn expired(approval_id: &str, expires_at: &str) -> Self {
+        IpcError::with_details(
+            ErrorCode::Expired,
+            format!(
+                "{approval_id} expired at {expires_at} and can no longer be used.\n\
+                 Policy: personal defaults — an approval is answerable for a bounded \
+                 window, so an unattended device cannot accumulate live authorizations.\n\
+                 Next step: make the request again to raise a fresh approval."
+            ),
+            json!({ "approval_id": approval_id, "expires_at": expires_at }),
         )
     }
 
@@ -302,7 +397,9 @@ impl IpcError {
             format!(
                 "{capability} is managed by {source_name} ({policy_id}).\n\
                  User override: not permitted.\n\
-                 Next step: exceptions require approval (Milestone 9)."
+                 Next step: ask {source_name} for an exception — a local approval \
+                 cannot outrank an organization policy, and Punar will not pretend \
+                 otherwise."
             ),
             json!({
                 "decision": "deny",
@@ -412,6 +509,144 @@ pub struct EnrollStartParams {
     pub org_domain: String,
 }
 
+// -- M9 approval + privilege params (contract section 14) -------------------
+
+/// Params for `approvals.get`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalIdParams {
+    pub approval_id: String,
+}
+
+/// Params for `approvals.create` (M9, contract section 14.2) — **root
+/// only**. In practice there are exactly two callers: punard itself, when
+/// AI authority policy gates a `capabilities.set`, and `punar-secrets`,
+/// which runs as root and raises a `credential_request` on behalf of the
+/// agent that asked for a class.
+///
+/// An unprivileged peer cannot reach this method, and that is the point: a
+/// process that could mint approvals could spam the human until they stop
+/// reading them. Approval fatigue is the classic attack on an approval
+/// gate, so the first bound on it is the authorization rule and the second
+/// is [`crate::approval::MAX_PENDING_APPROVALS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalsCreateParams {
+    pub kind: ApprovalKind,
+    /// Registry capability id, or a typed method name (`credential.request`).
+    pub capability: String,
+    /// The concrete argument: desired state · credential class · grant window.
+    pub resource: String,
+    /// Requester-authored justification. Validated by the daemon
+    /// ([`crate::approval::validate_reason`]) — one printable line.
+    pub reason: String,
+    pub risk: Risk,
+    /// The human the approval is routed to.
+    pub user: String,
+    pub requester: Requester,
+    /// Optional shorter TTL in seconds, clamped to `[15, 300]`. A requester
+    /// may ask for less and never for more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u64>,
+    /// Optional Plate D-003 contract line; derived from
+    /// `capability`/`resource` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    /// The requesting peer's kernel-attested credentials, when the caller
+    /// terminated the connection that made the request. `punar-secrets`
+    /// fills this in: it read `SO_PEERCRED` and the peer's cgroup itself
+    /// (the shared rule in [`crate::principal`]), and punard cannot
+    /// re-derive them for a call that arrived at a different socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_peer: Option<RequesterPeer>,
+    /// The policy that made this an approval rather than an allow or a
+    /// deny. Supplied by the caller because the caller is the one that
+    /// evaluated it — the broker knows whether `aws_dev: request` came from
+    /// the personal defaults or from an org baseline, and punard would have
+    /// to guess. Defaults to the personal-defaults citation.
+    ///
+    /// This is caller-supplied data on a **root-only** method, which is the
+    /// whole reason it is acceptable: the only callers are punard itself
+    /// and a root daemon Punar ships. An unprivileged peer cannot reach
+    /// this method at all (section 14.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyCitation>,
+    /// The originating typed call, recorded verbatim so a resolver sees the
+    /// real request and punard re-derives execution from its own record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<ApprovalRequest>,
+}
+
+/// The two answers a human may give (contract section 14.5). Deliberately
+/// **not** [`crate::Decision`]: a person answers `approved`/`denied`, which
+/// are the shipped `approval.json` status values, while `Decision` is the
+/// section 20 policy vocabulary and includes `approval_required` — a value
+/// that would be meaningless here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveDecision {
+    Approved,
+    Denied,
+}
+
+impl ResolveDecision {
+    /// The resulting terminal status.
+    pub fn status(self) -> ApprovalStatus {
+        match self {
+            ResolveDecision::Approved => ApprovalStatus::Approved,
+            ResolveDecision::Denied => ApprovalStatus::Denied,
+        }
+    }
+}
+
+/// Params for `approvals.resolve` (contract section 14.5). **Human only** —
+/// enforced in the daemon at the kernel-attested cgroup, never here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalsResolveParams {
+    pub approval_id: String,
+    pub decision: ResolveDecision,
+}
+
+/// Params for `privilege.request` (contract section 14.8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivilegeRequestParams {
+    /// The single capability to elevate. No wildcard exists.
+    pub capability: CapabilityId,
+    /// **Required.** Plate D-012: the reason travels verbatim into the
+    /// audit event, so an empty one is `invalid_params`, not a default.
+    pub reason: String,
+    /// Grant window in minutes; defaults to
+    /// [`crate::approval::GRANT_DEFAULT_MINUTES`], clamped to `[1, 60]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<u64>,
+}
+
+/// Params for `privilege.revoke` (contract section 14.8): exactly one of
+/// `grant_id` or `all` — neither or both is `invalid_params`, because
+/// "revoke something" must never be guessed at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivilegeRevokeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+}
+
+impl PrivilegeRevokeParams {
+    /// `Ok(Some(id))` for one grant, `Ok(None)` for all of the caller's.
+    pub fn target(&self) -> Result<Option<&str>, &'static str> {
+        match (self.grant_id.as_deref(), self.all) {
+            (Some(id), None | Some(false)) => Ok(Some(id)),
+            (None, Some(true)) => Ok(None),
+            (Some(_), Some(true)) => Err("pass either grant_id or all, not both"),
+            (None, None | Some(false)) => Err("pass grant_id, or all: true"),
+        }
+    }
+}
+
 impl Default for AuditTailParams {
     fn default() -> Self {
         AuditTailParams {
@@ -472,11 +707,37 @@ pub enum Method {
     /// `enroll.stop` (M5, contract section 5.11) — local unenroll: remove
     /// the org layers, restore personal state. Root-only; always audited.
     EnrollStop,
+    /// `approvals.list` (M9, contract section 14.2) — pending first, then
+    /// recently resolved. Read; any connected peer; sweeps expiry lazily.
+    ApprovalsList,
+    /// `approvals.get` (M9) — one approval envelope. Read.
+    ApprovalsGet(ApprovalIdParams),
+    /// `approvals.create` (M9) — raise an approval. **Root only**; always
+    /// audited. Boxed: this is by far the widest params object in the
+    /// table, and every other method would otherwise carry its size.
+    ApprovalsCreate(Box<ApprovalsCreateParams>),
+    /// `approvals.resolve` (M9, contract section 14.5) — a **human** answers.
+    /// May execute the recorded request. Always audited, including the
+    /// refusal when the peer turns out to be an AI agent.
+    ApprovalsResolve(ApprovalsResolveParams),
+    /// `approvals.consume` (M9, contract section 14.7) — spend an approved
+    /// `credential_request` exactly once. **Root only** (in practice
+    /// `punar-secrets`); always audited.
+    ApprovalsConsume(ApprovalIdParams),
+    /// `privilege.request` (M9, contract section 14.8) — ask for a
+    /// time-boxed grant. Refused outright for agent-attributed peers.
+    PrivilegeRequest(PrivilegeRequestParams),
+    /// `privilege.status` (M9) — the caller's live grants (every grant for
+    /// root). Read; sweeps expiry lazily.
+    PrivilegeStatus,
+    /// `privilege.revoke` (M9) — hand privilege back before it lapses.
+    /// Owner or root; always audited.
+    PrivilegeRevoke(PrivilegeRevokeParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 19] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -488,6 +749,14 @@ impl Method {
         "enroll.start",
         "enroll.status",
         "enroll.stop",
+        "approvals.list",
+        "approvals.get",
+        "approvals.create",
+        "approvals.resolve",
+        "approvals.consume",
+        "privilege.request",
+        "privilege.status",
+        "privilege.revoke",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -505,6 +774,14 @@ impl Method {
             Method::EnrollStart(_) => "enroll.start",
             Method::EnrollStatus => "enroll.status",
             Method::EnrollStop => "enroll.stop",
+            Method::ApprovalsList => "approvals.list",
+            Method::ApprovalsGet(_) => "approvals.get",
+            Method::ApprovalsCreate(_) => "approvals.create",
+            Method::ApprovalsResolve(_) => "approvals.resolve",
+            Method::ApprovalsConsume(_) => "approvals.consume",
+            Method::PrivilegeRequest(_) => "privilege.request",
+            Method::PrivilegeStatus => "privilege.status",
+            Method::PrivilegeRevoke(_) => "privilege.revoke",
         }
     }
 
@@ -525,6 +802,28 @@ impl Method {
             // M5 (contract section 5): enrollment mutations are root-only,
             // exactly like `capabilities.set`.
             Method::EnrollStart(_) | Method::EnrollStop => true,
+            // M9 (contract section 14.2). Reads stay open. `create` and
+            // `consume` are root-only: minting approvals and spending them
+            // are privileged operations whose only callers are punard
+            // itself and the root-run broker.
+            Method::ApprovalsList | Method::ApprovalsGet(_) => false,
+            Method::ApprovalsCreate(_) | Method::ApprovalsConsume(_) => true,
+            // `approvals.resolve` is the one method whose rule this flag
+            // cannot express, and saying `false` here would be a lie in the
+            // safe direction only. It is **human only** (section 14.5):
+            // root is permitted, an ordinary user is permitted for their
+            // own routed approvals, and a peer inside a managed agent scope
+            // is refused *whatever its uid* — because spec 60 forbids
+            // bypassing AI policy enforcement, and root-ness inside an
+            // agent scope buys no bypass. The daemon enforces all three
+            // conditions; this flag only says "not root-only".
+            Method::ApprovalsResolve(_) => false,
+            // Privilege: asking and reading are open (the answer may still
+            // be a refusal); revoking is checked against grant ownership in
+            // the daemon, so it is not root-only either.
+            Method::PrivilegeRequest(_) | Method::PrivilegeStatus | Method::PrivilegeRevoke(_) => {
+                false
+            }
         }
     }
 
@@ -536,12 +835,19 @@ impl Method {
             | Method::Reconcile
             | Method::PolicyEffective
             | Method::EnrollStatus
-            | Method::EnrollStop => return None,
+            | Method::EnrollStop
+            | Method::ApprovalsList
+            | Method::PrivilegeStatus => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
             Method::PolicyExplain(p) => serde_json::to_value(p),
             Method::EnrollStart(p) => serde_json::to_value(p),
+            Method::ApprovalsGet(p) | Method::ApprovalsConsume(p) => serde_json::to_value(p),
+            Method::ApprovalsCreate(p) => serde_json::to_value(p),
+            Method::ApprovalsResolve(p) => serde_json::to_value(p),
+            Method::PrivilegeRequest(p) => serde_json::to_value(p),
+            Method::PrivilegeRevoke(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -580,6 +886,29 @@ impl Method {
                 Self::expect_no_params(method, params).map(|()| Method::EnrollStatus)
             }
             "enroll.stop" => Self::expect_no_params(method, params).map(|()| Method::EnrollStop),
+            "approvals.list" => {
+                Self::expect_no_params(method, params).map(|()| Method::ApprovalsList)
+            }
+            "approvals.get" => {
+                Self::parse_required_params(method, params).map(Method::ApprovalsGet)
+            }
+            "approvals.create" => Self::parse_required_params(method, params)
+                .map(|p| Method::ApprovalsCreate(Box::new(p))),
+            "approvals.resolve" => {
+                Self::parse_required_params(method, params).map(Method::ApprovalsResolve)
+            }
+            "approvals.consume" => {
+                Self::parse_required_params(method, params).map(Method::ApprovalsConsume)
+            }
+            "privilege.request" => {
+                Self::parse_required_params(method, params).map(Method::PrivilegeRequest)
+            }
+            "privilege.status" => {
+                Self::expect_no_params(method, params).map(|()| Method::PrivilegeStatus)
+            }
+            "privilege.revoke" => {
+                Self::parse_required_params(method, params).map(Method::PrivilegeRevoke)
+            }
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -1358,9 +1687,47 @@ pub struct ReconcileEntry {
     pub remediation: Option<RemediationOutcome>,
 }
 
+// -- M9 results (contract sections 14.2-14.8) -------------------------------
+
+/// Result of `approvals.list`: pending first (soonest expiry first), then
+/// recently resolved, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalsListResult {
+    pub approvals: Vec<ApprovalEnvelope>,
+    /// When the lazy expiry sweep ran — the same read that produced this
+    /// list (contract section 14.4). Present so a reader can tell "nothing
+    /// pending" from "nobody has looked recently".
+    pub checked_at: String,
+}
+
+/// Result of `approvals.consume` (contract section 14.7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalsConsumeResult {
+    pub approval: ApprovalEnvelope,
+    pub consumed_at: String,
+}
+
+/// Result of `privilege.status` (contract section 14.8): the caller's own
+/// live grants, or every live grant for root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrivilegeStatusResult {
+    pub grants: Vec<Grant>,
+    pub checked_at: String,
+}
+
+/// Result of `privilege.revoke`: the grant ids that were live and are not
+/// any more. Revoking nothing is a success with an empty list — idempotent,
+/// because handing back privilege must never fail for lack of privilege.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrivilegeRevokeResult {
+    pub revoked: Vec<String>,
+    pub revoked_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PrincipalKind;
 
     // -- error codes --------------------------------------------------------
 
@@ -1378,6 +1745,8 @@ mod tests {
             "internal",
             "conflict",
             "upstream_unreachable",
+            "approval_required",
+            "expired",
         ];
         assert_eq!(ErrorCode::ALL.len(), expected.len());
         for (code, name) in ErrorCode::ALL.into_iter().zip(expected) {
@@ -1392,8 +1761,13 @@ mod tests {
     #[test]
     fn exit_codes_follow_plate_d014() {
         assert_eq!(ErrorCode::Denied.suggested_exit_code(), EXIT_DENIED);
+        // M9: exit 4 stops being reserved and starts being reachable.
+        assert_eq!(
+            ErrorCode::ApprovalRequired.suggested_exit_code(),
+            EXIT_APPROVAL_REQUIRED
+        );
         for code in ErrorCode::ALL {
-            if code != ErrorCode::Denied {
+            if !matches!(code, ErrorCode::Denied | ErrorCode::ApprovalRequired) {
                 assert_eq!(code.suggested_exit_code(), EXIT_ERROR, "{code}");
             }
         }
@@ -1413,6 +1787,21 @@ mod tests {
         assert!(err.message.contains("administrator"));
         assert!(err.message.contains("personal defaults"));
         assert!(err.message.contains("Next step"));
+        // M9: the pointer that has said "Milestone 9" since M3 now names a
+        // command that exists.
+        assert!(
+            err.message
+                .contains("punarctl privilege request --capability")
+        );
+        assert!(!err.message.contains("Milestone 9"));
+        // A refusal with no capability has no grant to offer, and says so
+        // by not offering one.
+        let no_cap = IpcError::denied_needs_root(
+            "the capability registry (reconcile)",
+            None,
+            "sudo punarctl reconcile",
+        );
+        assert!(!no_cap.message.contains("privilege request"));
         let details = err.details.unwrap();
         assert_eq!(details["capability"], "system.hostname");
         assert_eq!(details["decision"], "deny");
@@ -1444,6 +1833,44 @@ mod tests {
             }),
             Method::EnrollStatus,
             Method::EnrollStop,
+            Method::ApprovalsList,
+            Method::ApprovalsGet(ApprovalIdParams {
+                approval_id: "apr_7c1d9a4e".to_string(),
+            }),
+            Method::ApprovalsCreate(Box::new(ApprovalsCreateParams {
+                kind: ApprovalKind::CapabilitySet,
+                capability: "security.firewall".to_string(),
+                resource: "disabled".to_string(),
+                reason: "Atlas integration test".to_string(),
+                risk: Risk::High,
+                user: "punar".to_string(),
+                requester: Requester {
+                    kind: PrincipalKind::AiAgent,
+                    id: "agt_4f21c09ab3e1".to_string(),
+                },
+                ttl: Some(60),
+                contract: None,
+                requester_peer: None,
+                policy: None,
+                request: None,
+            })),
+            Method::ApprovalsResolve(ApprovalsResolveParams {
+                approval_id: "apr_7c1d9a4e".to_string(),
+                decision: ResolveDecision::Approved,
+            }),
+            Method::ApprovalsConsume(ApprovalIdParams {
+                approval_id: "apr_7c1d9a4e".to_string(),
+            }),
+            Method::PrivilegeRequest(PrivilegeRequestParams {
+                capability: CapabilityId::new("time.timezone").unwrap(),
+                reason: "Reproducing the Atlas net bug".to_string(),
+                duration_minutes: Some(15),
+            }),
+            Method::PrivilegeStatus,
+            Method::PrivilegeRevoke(PrivilegeRevokeParams {
+                grant_id: Some("gnt_2b8e11c4".to_string()),
+                all: None,
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -1476,11 +1903,21 @@ mod tests {
     #[test]
     fn only_mutating_methods_require_root() {
         // M3: set + reconcile. M5 adds the enrollment mutations; the read
-        // (`enroll.status`) stays open to any connected peer.
+        // (`enroll.status`) stays open to any connected peer. M9 adds
+        // `approvals.create`/`approvals.consume`.
         for method in every_method() {
             let expected = matches!(
                 method.name(),
-                "capabilities.set" | "reconcile" | "enroll.start" | "enroll.stop"
+                "capabilities.set"
+                    | "reconcile"
+                    | "enroll.start"
+                    | "enroll.stop"
+                    // M9: minting and spending approvals are privileged.
+                    // `approvals.resolve` is human-only, which is a
+                    // stronger rule this flag cannot express (see
+                    // `Method::requires_root`).
+                    | "approvals.create"
+                    | "approvals.consume"
             );
             assert_eq!(method.requires_root(), expected, "{}", method.name());
         }

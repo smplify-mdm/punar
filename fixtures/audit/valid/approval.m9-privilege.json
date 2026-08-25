@@ -1,0 +1,14 @@
+{
+  "approval_id": "apr_5b31d0a2",
+  "requester": {
+    "type": "human",
+    "id": "punar"
+  },
+  "user": "punar",
+  "capability": "time.timezone",
+  "resource": "15m",
+  "reason": "Reproducing the Atlas net bug",
+  "risk": "low",
+  "status": "approved",
+  "expires_at": "2026-08-25T10:05:00Z"
+}

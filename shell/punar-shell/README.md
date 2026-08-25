@@ -27,10 +27,13 @@ language.
 | `Services/Status.qml` | Singleton: enrollment/compliance context — watches `/run/punar/status.json` (M5, ipc.md §9) |
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
+| `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
+| `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `CommandCenter/CommandCenter.qml` | SUPER+Space overlay + `commandcenter` IPC handler |
 | `Overview/Overview.qml` | SUPER+TAB project-workspace overview + `overview` IPC handler (Plate D-007) |
 | `AiPanel/AiPanel.qml` | SUPER+A AI panel + `aipanel` IPC handler (Plate D-005) |
+| `Approval/ApprovalOverlay.qml` | The M9 approval gate + `approval` IPC handler (Plate D-003 Sect II) |
 
 ## Running on a dev machine
 
@@ -70,6 +73,12 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 - In the overlay: typing filters, `↑`/`↓` select (animated highlight),
   `Enter` launches, `Esc` closes. A scrim click also dismisses, but nothing
   requires the mouse.
+
+- The **approval overlay has no opening keybinding, on purpose**: it opens
+  itself whenever punard records something pending, because a gate the
+  human has to go looking for is not a gate. In it: `A` approves, `D`
+  denies, `↑`/`↓` cycle when more than one is pending, and `Esc` **defers**
+  — dismissal is not denial, and the request stays pending in the daemon.
 
 ## Overview — SUPER+TAB (M2, Plate D-007)
 
@@ -270,6 +279,80 @@ fed by `punar-agentd`'s summary file — the AI-panel sibling of
   agentd socket. It carries no pids, no cmdlines, no secrets and no
   ledger data.
 
+## Approval gate + elevation chip (M9, Plates D-003 / D-012)
+
+`Approval/ApprovalOverlay.qml` is the local graphical approval of spec §28,
+and it is a **gate, not a notification**: the capability behind it has
+already been refused and does not execute until a human answers. The
+overlay therefore appears **unbidden** whenever `pending > 0`.
+
+The card is Plate D-003 Sect II register by register — masthead
+`APPROVAL · apr_…` with a count badge when more than one is waiting, the
+risk pill, a live countdown in tabular mono that turns **warn-amber under
+a minute**, the identity chain on one line, the request sentence in the
+system voice, the requester's own reason **quoted and attributed**, the
+contract block between hairlines naming the exact typed call plus the
+policy citation and `RECORDED TO LOCAL AUDIT EITHER WAY`, and the action
+pair (green filled `APPROVE · A`, red ghost `DENY · D`). Once resolved the
+actions give way to the verdict, carrying the audit pointer
+(`✓ APPROVED · SETFIREWALL(DISABLED) EXECUTED · AUDIT EVT_501`).
+
+**The reason is shown, and quarantined.** §73 requires *why* and *who
+requested it*, and a gate whose justification is hidden is a rubber stamp
+— but for an agent-originated approval the reason is text an AI wrote. So
+punard validates it at creation (one line, ≤512 bytes, no control
+characters) and this surface renders it in a *quoted requester voice*:
+plain non-interactive `Text` with `textFormat: Text.PlainText`, italic
+sans behind a hairline, never the tracked mono the system speaks in.
+System prose and requester prose never share a typeface here, so agent
+text can never be read as an OS statement.
+
+**Nothing here decides anything.** `A` and `D` run
+`punarctl approvals resolve <id> --decision …` **detached, with fixed
+argv**, sending only the `approval_id`; punard re-derives the contract from
+its own record and re-checks every authorization rule — including that an
+AI agent may resolve nothing, ever (ipc.md §14.5). The overlay never reads
+the process result: the next `FileView` change is the truth.
+
+**One timer, with a visible consumer.** A 1 Hz countdown runs only while
+the overlay is open with something actionable, and stops otherwise. Past
+zero the card reads `EXPIRED · DENIED BY TIMEOUT` immediately whether or
+not punard has swept yet (ipc.md §14.4) — the daemon's `expired` answer
+then makes it official.
+
+`Bar/Bar.qml` carries Plate D-012 Sect I.03's elevation chip:
+`● ELEVATED · 14:32 REMAINING`, green while a just-in-time grant is alive,
+amber in its final minute, **gone** the moment it lapses. Its second hand
+is a `SystemClock` whose `enabled` is bound to the existence of a grant,
+so an unelevated device pays nothing for it and an unelevated bar is
+byte-identical to the pre-M9 bar. Privilege is never invisible on this
+device, and there is no generic unrestricted root-shell API behind it.
+
+### Data — `/run/punard/approvals.json` (M9, ipc.md §15)
+
+Deliberately **not** in `/run/punar` alongside `status.json` and
+`agents.json`. That directory is `0755 punar:punar`, so a local process
+could unlink a file there and bind its own. For a counts fingerprint that
+is a nuisance; for the file that tells a human *what they are about to
+authorize* it is a spoofing primitive — show a benign contract block over
+a dangerous `apr_` id and the human presses `A`. So the summary lives at
+`0640 root:punar` inside the root-owned `/run/punard`, exactly the
+reasoning that put `ledger.json` in `/run/punar-agentd`.
+
+It is still **non-authoritative**: display data, watched with an inotify
+`FileView`, with no socket client in the shell. Missing or unparsable
+reads as *nothing is pending* — fail closed, never an error surface and
+never a spurious gate.
+
+IPC probes (the `aipanel` / `overview` precedent):
+
+```sh
+qs -p /usr/share/punar/shell ipc call approval open      # also: close, toggle
+qs -p /usr/share/punar/shell ipc call approval state     # open | closed
+qs -p /usr/share/punar/shell ipc call approval pending   # count
+qs -p /usr/share/punar/shell ipc call approval selected  # the apr_ on screen
+```
+
 ## Command center data sources (M1 scope)
 
 1. Installed applications via Quickshell `DesktopEntries` — launched with
@@ -296,7 +379,7 @@ touch fails harmlessly.
 
 ## Linting
 
-All nine `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
+All twelve `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
 quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in a container
 built on the pinned builder base with `qt6-declarative` + `quickshell`
 installed from the same snapshot; default import path — Quickshell ships
@@ -304,9 +387,10 @@ qmldir + qmltypes under `/usr/lib/qt6/qml/Quickshell`, so no extra `-I` is
 needed; the binary lives at `/usr/lib/qt6/bin/qmllint`):
 
 ```sh
-qmllint shell.qml AiPanel/AiPanel.qml Bar/Bar.qml \
-        CommandCenter/CommandCenter.qml Overview/Overview.qml \
-        Theme/Theme.qml Services/Agents.qml Services/Status.qml \
+qmllint shell.qml AiPanel/AiPanel.qml Approval/ApprovalOverlay.qml \
+        Bar/Bar.qml CommandCenter/CommandCenter.qml Overview/Overview.qml \
+        Theme/Theme.qml Services/Agents.qml Services/Approvals.qml \
+        Services/Ledger.qml Services/Status.qml \
         Services/WorkspaceState.qml                       # from this directory
 ```
 
@@ -361,3 +445,20 @@ and that deleting `agents.json` fails closed to the empty panel.
   device line (`ThinkPad X1 · dev_123 · Acme Engineering`) shows only the
   mode/org part: the shell has no trustworthy device identity to print
   yet, and inventing one would be the wrong kind of fidelity.
+- Approval overlay (M9): the same drop-shadow omission. D-003's identity
+  chain ends at a human's email address (`alice@acme.com`); the card
+  prints whatever the record actually carries, which on a personal device
+  is the local user name — an email the shell has not been given is not
+  invented. Plate D-003 Sect III lists the multi-approval queue under
+  "states not drawn": M9 ships the count badge and `↑`/`↓` cycling, and
+  the fuller queue UI stays future scope.
+- Elevation chip (M9): D-012 binds `R` to revoke. The bar is a
+  non-focusable layer surface, and making it grab the keyboard to own one
+  letter would break every other keystroke on the desktop — so the chip
+  revokes on a **two-step click** (the first arms and the chip asks, the
+  second acts, the AI panel's `SHIFT+DEL` precedent) and the keystroke
+  ships with the graphical elevation dialog (M13). The verb itself is
+  already real: `punarctl privilege revoke <gnt_id>`, which is exactly
+  what the chip runs. D-012's elevation *dialog* and the graphical broker
+  issuance card are not drawn in M9 either; the CLI renders the issuance
+  card on stderr, and the dialog is M13.

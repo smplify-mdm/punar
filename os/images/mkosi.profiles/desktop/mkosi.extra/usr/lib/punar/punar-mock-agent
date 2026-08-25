@@ -76,14 +76,33 @@ if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
     else
         echo "Children: could not create ./$FIFO — no process-class evidence generated" >&2
     fi
-    # A real, short-lived child that punard DENIES (mutations are root-only
-    # until M9 JIT elevation). It is gone long before any sampling pass, so
-    # it can only ever be proven by the audit stream — which is exactly the
-    # point: the ledger's two evidence paths are independent.
+    # Two real, short-lived children that punard REFUSES. Both are gone long
+    # before any sampling pass, so they can only ever be proven by the audit
+    # stream — which is exactly the point: the ledger's two evidence paths
+    # are independent.
+    #
+    # M9 changed what the FIRST one proves, and the label says so rather than
+    # keeping the old sentence. Before M9 an agent's capability mutation was
+    # denied outright; now the personal AI authority document says
+    # `firewall: approval_required`, so punard raises an approval and answers
+    # `approval_required` (exit 4). Nothing is applied either way — that is
+    # the invariant this line demonstrates — but "denied" would now be the
+    # wrong word for it.
     if punarctl capabilities set security.firewall enabled >/dev/null 2>&1; then
-        echo "Children: capabilities.set was ALLOWED — expected a denial from a non-root peer" >&2
+        echo "Children: capabilities.set was ALLOWED — expected an approval gate from an agent peer" >&2
     else
-        echo "Children: capabilities.set denied by punard (the Level-4 evidence)"
+        echo "Children: capabilities.set gated by punard (approval required, nothing applied)"
+    fi
+    # The Level-4 denied_access evidence, post-M9: an AI agent asking for a
+    # PRIVILEGE WINDOW is refused outright and always will be. Agents get one
+    # approved call at a time; a time window is a human affordance (SPEC
+    # sections 48, 60). A refusal that policy can never turn into a yes is
+    # the right shape for a fixture that must stay a denial.
+    if punarctl privilege request --capability security.firewall \
+            --reason "mock agent asks for a privilege window" >/dev/null 2>&1; then
+        echo "Children: privilege.request was ALLOWED for an agent — a grant must never be issued to an AI" >&2
+    else
+        echo "Children: privilege.request refused for an AI agent (the Level-4 evidence)"
     fi
 fi
 

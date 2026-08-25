@@ -161,14 +161,21 @@ at the 10-minute mark, and the reported value is the mean over the window
   (`punard.service`, `punar-agentd.service`, ...). Membership is determined
   from the unit's cgroup (`/sys/fs/cgroup/.../cgroup.procs`), never by
   process-name matching.
-- Units summed **as of M7**: `punard.service` (M3) and `punar-agentd.service`
-  (M7). The in-guest sampler (`/usr/lib/punar/idle-ram.sh`) walks that list
+- Units summed **as of M9**: `punard.service` (M3), `punar-agentd.service`
+  (M7) and `punar-secrets.service` (M9 — the credential broker, a separate
+  daemon by decision: `docs/development/milestone-9.md` §3.1). The in-guest
+  sampler (`/usr/lib/punar/idle-ram.sh`) walks that list
   and emits one combined `PUNAR_SERVICES_RSS_MB`; a unit whose cgroup is
   missing or empty makes the whole value `absent`, which
   `tests/performance/check-budgets.sh` fails even on emulated runs — one live
   daemon must never be able to mask a dead sibling. The budget below is the
   **combined** number and does not move as siblings ship: spec section 6.2
-  budgets the services total, not each daemon.
+  budgets the services total, not each daemon. Adding a daemon and leaving
+  it out of the sum, or raising the threshold to make room for one, would
+  each make this budget say something untrue; if the total ever crowds the
+  target, the honest responses in order are to report the number, trim the
+  new daemon, and only then reconsider the topology
+  (`docs/development/milestone-9.md` §11).
 - Cross-check metric: systemd cgroup accounting —
   `systemctl show -p MemoryCurrent <unit>` (i.e. cgroup v2
   `memory.current`), summed across the same units. This includes kernel-side
@@ -270,7 +277,7 @@ canonical methodology in section 2, with environment labels.
 |---|---|---|---|---|---|
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | not yet measured | — | — |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | not yet measured | — | — |
-| Punar services PSS (sum: punard + punar-agentd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
 | Idle CPU, per Punar service | 2.4 | effectively 0% (< 0.5% of one core, interpretation) | not yet measured | — | — |
 | Idle disk writes, per Punar service | 2.5 | no sustained idle writers | not yet measured | — | — |
@@ -355,3 +362,4 @@ A `tests/performance/` harness that:
 |---|---|
 | 2026-08-24 | Initial version: budgets transcribed from SPEC_v0.2 sections 6–7; methodology defined; all baselines `not yet measured`; CI harness documented as planned. |
 | 2026-08-24 | Status wording only, no numbers: M0 CI green (punar-dev builds and boots); section 4 now names the `desktop-test` job's `punar-desktop-ram-report` artifact as the sole source that will fill the baseline table; section 5 marked partially implemented (idle-RAM slice in `tests/performance/`). Everything remains `not yet measured`. |
+| 2026-08-25 | Milestone 9: `punar-secrets.service` joins the services-PSS sum (section 2.3) — the third resident daemon, added to the number honestly rather than left out of it. Thresholds unchanged (target < 100 MB, MVP ceiling < 150 MB): spec section 6.2 budgets the services *total*. Still `not yet measured` — the first real value comes from the `punar-desktop-ram-report` artifact of a CI run, and `docs/development/milestone-9.md` records the before/after from that run rather than asserting one here. |

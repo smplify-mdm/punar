@@ -13,6 +13,12 @@ punar-common = { workspace = true }
 punar-policy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# M9: the section 20 AI authority document is YAML (schemas/policy/
+# ai-policy.json describes a YAML-authored file, and the shipped
+# ai-defaults.yaml is that file). Already in the workspace tree for
+# punar-env's ProjectEnvironment manifest — no new crate, no new
+# transitives; justification lives at [workspace.dependencies].
+serde_norway = { workspace = true }
 thiserror = { workspace = true }
 # Justifications for both live at the workspace [workspace.dependencies] table:
 # rustix = SO_PEERCRED + pre-listen socket setup without unsafe;

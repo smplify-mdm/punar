@@ -121,6 +121,33 @@ stage_desktop_extra() {
     rm -f "${extra}/usr/share/punar/agents/process-classes.json"
     install -m 0644 "${REPO_ROOT}/crates/punar-agentd/data/process-classes.json" \
         "${extra}/usr/share/punar/agents/process-classes.json"
+
+    # M9: the two data files the approval gate and the credential broker
+    # read at runtime (milestone-9.md §5.2, §6.1). Staged for exactly the
+    # M8 process-classes.json reason — both are ALSO compiled in with
+    # include_str! as the daemons' fallbacks, so a second hand-maintained
+    # copy under mkosi.extra would create the drift the compiled-in
+    # fallback exists to prevent.
+    #
+    #   ai-defaults.yaml  the SHIPPED section 20 AI authority document
+    #                     (fixtures/policies/ai-policy-personal-defaults.yaml
+    #                     is the single source of truth; it is already
+    #                     schema-validated by the fixtures/policies/
+    #                     ai-policy-*.yaml glob in tools/validate_schemas.py,
+    #                     which is why staging it needs no manifest entry).
+    #                     punar-secrets REFUSES TO START without this file —
+    #                     starting would mean silently answering every
+    #                     credential from a fail-closed default.
+    #   classes.yaml      the credential class catalog. The classes are DATA:
+    #                     a class not listed here does not exist, and the
+    #                     broker refuses to start on a malformed catalog.
+    rm -rf "${extra}/usr/share/punar/policy" "${extra}/usr/share/punar/secrets"
+    install -d "${extra}/usr/share/punar/policy" "${extra}/usr/share/punar/secrets"
+    install -m 0644 \
+        "${REPO_ROOT}/fixtures/policies/ai-policy-personal-defaults.yaml" \
+        "${extra}/usr/share/punar/policy/ai-defaults.yaml"
+    install -m 0644 "${REPO_ROOT}/crates/punar-secrets/share/classes.yaml" \
+        "${extra}/usr/share/punar/secrets/classes.yaml"
 }
 
 # Compile punard + punarctl from the workspace with the snapshot's own Rust
@@ -153,23 +180,31 @@ stage_punar_binaries() {
     # SPEC section 11.3) — a real always-on daemon like punard, enabled by
     # the vendor-level wants symlink shipped in the extra tree; its socket
     # and state directories come from tmpfiles.d/punar-agentd.conf.
-    echo "==> Building punard + punarctl + punar-env + punar-agentd + punar-mock-smplify (release, --locked; $(rustc --version))"
+    # punar-secrets is the M9 credential broker (milestone-9.md §3.1, SPEC
+    # section 11.4) — the THIRD always-on daemon, same vendor-wants pattern,
+    # socket directory from tmpfiles.d/punar-secrets.conf and NO state
+    # directory at all (that absence is the milestone's central promise).
+    # It is counted honestly in the services-RSS gate: idle-ram.sh sums all
+    # three service cgroups into the one PUNAR_SERVICES_RSS_MB the budget is
+    # judged against (PERFORMANCE_BUDGETS.md §2.3).
+    echo "==> Building punard + punarctl + punar-env + punar-agentd + punar-secrets + punar-mock-smplify (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
             CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
                 CARGO_TARGET_DIR="${cargo_target}" \
                 cargo build --release --locked \
                     -p punard -p punarctl -p punar-env -p punar-agentd \
-                    -p punar-mock-smplify
+                    -p punar-secrets -p punar-mock-smplify
     )
 
-    echo "==> Staging punard + punarctl + punar-env + punar-agentd + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
+    echo "==> Staging punard + punarctl + punar-env + punar-agentd + punar-secrets + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
         "${cargo_target}/release/punarctl" \
         "${cargo_target}/release/punar-env" \
         "${cargo_target}/release/punar-agentd" \
+        "${cargo_target}/release/punar-secrets" \
         "${cargo_target}/release/punar-mock-smplify" \
         "${extra}/usr/bin/"
 }
@@ -437,7 +472,7 @@ echo "==> Writing build metadata"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "note: unsigned development images; VM-only (no linux-firmware)"
-    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only) + M6 developer environments (punar-env + preloaded punar-env-base OCI archive + staged Atlas project fixture) + M7 AI agent registry (punar-agentd daemon + vendored adapter/signature data + the punar-mock-agent and foo-agent dev/CI fixtures — the mock stands in for a real agent binary, which the offline VM cannot have)"
+    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only) + M6 developer environments (punar-env + preloaded punar-env-base OCI archive + staged Atlas project fixture) + M7 AI agent registry (punar-agentd daemon + vendored adapter/signature data + the punar-mock-agent and foo-agent dev/CI fixtures — the mock stands in for a real agent binary, which the offline VM cannot have) + M9 approval gates and the short-lived credential broker (punar-secrets daemon + the staged AI authority document and credential-class catalog — the provider is a MOCK and every surface says so; the CI VM has no network and no real credential authority exists)"
 } > out/build-info.txt
 
 # Bare filenames (no ./ prefix) — CI re-verifies with `sha256sum -c` against

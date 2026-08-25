@@ -1711,6 +1711,995 @@ fn policy_words(citation: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------
+// Milestone 9 — approvals, just-in-time privilege, the secret broker
+// (contract sections 14, 16; Plates D-003, D-012, D-014 register 05).
+// ---------------------------------------------------------------------
+
+/// SPEC section 28 statuses on the terminal semantic slots. `pending` is
+/// the peach/amber "waiting on a human" register; `expired` is red
+/// because expiry **is** a denial, not a neutral lapse (Plate D-003:
+/// "Expired · denied by timeout").
+fn approval_slot(status: &str) -> Slot {
+    match status {
+        "approved" => Slot::Ok,
+        "pending" => Slot::Warn,
+        "denied" | "expired" => Slot::Bad,
+        _ => Slot::Neutral,
+    }
+}
+
+/// Risk pill colors (Plate D-003 draws `Medium` in warn-amber). An
+/// unrecognized word stays calm rather than guessing a severity.
+fn risk_slot(risk: &str) -> Slot {
+    match risk {
+        "high" | "critical" => Slot::Bad,
+        "medium" => Slot::Warn,
+        _ => Slot::Neutral,
+    }
+}
+
+/// Seconds from now until `expires_at`, negative once it has lapsed.
+/// `None` when the timestamp is missing or unparsable — the view then
+/// prints the raw stamp and no countdown, because a formatter that
+/// invents a clock is worse than one that omits it.
+fn seconds_until(expires_at: &str) -> Option<i64> {
+    let deadline = punar_common::time::unix_seconds_from_rfc3339(expires_at)? as i64;
+    let now = (punar_common::time::unix_now_millis() / 1000) as i64;
+    Some(deadline - now)
+}
+
+/// `M:SS` in the tabular register Plate D-003 draws in the masthead. Past
+/// zero it reads `0:00` — the card then says `EXPIRED` in words, never a
+/// negative clock.
+pub fn countdown(seconds: i64) -> String {
+    let s = seconds.max(0);
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Prose spelling of a remaining window: `4m 59s`, `45s`, `expired`.
+fn remaining_words(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "expired".to_string();
+    }
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    format!("{}m {}s", seconds / 60, seconds % 60)
+}
+
+/// The `capability(resource)` spelling of Plate D-003's contract block —
+/// `security.firewall(disabled)`, `credential.request(aws-dev)`,
+/// `time.timezone(15m)`. `resource` semantics are defined once for all
+/// three kinds (contract section 14.3), which is exactly why one
+/// formatter can serve them all.
+fn typed_call(capability: &str, resource: &str) -> String {
+    if resource.is_empty() {
+        capability.to_string()
+    } else {
+        format!("{capability}({resource})")
+    }
+}
+
+/// The contract line an approval carries, falling back to the typed call
+/// when the daemon sent none. Never invented: the fallback is derived
+/// from fields the record already holds.
+fn contract_line(env: &model::ApprovalEnvelope) -> String {
+    if env.contract.is_empty() {
+        typed_call(&env.approval.capability, &env.approval.resource)
+    } else {
+        env.contract.clone()
+    }
+}
+
+/// The Plate D-003 identity chain, on one line: principal kind, agent
+/// name, session id, routed user. Only the parts the record actually
+/// carries are printed — an absent project is absent, not a placeholder.
+/// `agent_name` is normally ABSENT here: `schemas/audit/approval.json`'s
+/// requester carries `{type, id}` only, and punard deliberately keeps the
+/// friendly name out of the root-owned surfaces (it lives in the
+/// world-writable `agents.json`, so putting it on an authorization
+/// surface would be a spoofing primitive). The chain therefore keys on
+/// the kernel-attested `agt_` id, and prints a display name only if one
+/// was actually supplied.
+fn identity_chain(doc: &model::ApprovalDoc) -> String {
+    let mut parts = Vec::new();
+    parts.push(match doc.requester.kind.as_str() {
+        "ai_agent" => "AI agent".to_string(),
+        "user" => "User".to_string(),
+        "" => "Requester".to_string(),
+        other => other.replace('_', " "),
+    });
+    if !doc.requester.agent_name.is_empty() {
+        parts.push(doc.requester.agent_name.clone());
+    }
+    if !doc.requester.id.is_empty() {
+        parts.push(doc.requester.id.clone());
+    }
+    if !doc.user.is_empty() {
+        parts.push(doc.user.clone());
+    }
+    parts.join(" · ")
+}
+
+/// The policy citation, in the section 8 unmanaged-first voice: personal
+/// mode reads `personal defaults`, an enrolled device reads the org's own
+/// name. Whatever the daemon cites is printed — the CLI never upgrades a
+/// personal citation into an organizational one.
+fn policy_citation(env: &model::ApprovalEnvelope) -> String {
+    match &env.policy {
+        Some(p) if !p.name.is_empty() && !p.policy_id.is_empty() => {
+            let id = policy_words(&p.policy_id);
+            // `Personal defaults · personal defaults` says one thing
+            // twice. When the machine id humanizes to the display name,
+            // the citation prints once.
+            if id.eq_ignore_ascii_case(&p.name) {
+                p.name.clone()
+            } else {
+                format!("{} · {id}", p.name)
+            }
+        }
+        Some(p) if !p.name.is_empty() => p.name.clone(),
+        Some(p) if !p.policy_id.is_empty() => policy_words(&p.policy_id),
+        _ => "personal defaults".to_string(),
+    }
+}
+
+/// The quoted requester voice (milestone-9.md section 8.3). The reason is
+/// requester-authored text and it **is** shown — SPEC section 73 requires
+/// *why* and *who requested it*, and a gate whose justification is hidden
+/// is a rubber stamp. It is quoted and attributed so that requester prose
+/// can never be mistaken for system prose, and the daemon has already
+/// refused control characters and newlines at creation time.
+fn quoted_reason(doc: &model::ApprovalDoc) -> Option<String> {
+    if doc.reason.is_empty() {
+        return None;
+    }
+    let who = if !doc.requester.agent_name.is_empty() {
+        doc.requester.agent_name.clone()
+    } else if doc.requester.kind == "ai_agent" {
+        // The attested id, not a friendly name — see `identity_chain`.
+        if doc.requester.id.is_empty() {
+            "The AI agent".to_string()
+        } else {
+            doc.requester.id.clone()
+        }
+    } else if !doc.user.is_empty() {
+        doc.user.clone()
+    } else {
+        "The requester".to_string()
+    };
+    Some(format!("{who} says: \"{}\"", doc.reason))
+}
+
+/// The one-sentence request line — Plate D-003's `.req`, derived from the
+/// record rather than stored, so it can never disagree with the contract
+/// block beneath it.
+fn request_sentence(env: &model::ApprovalEnvelope) -> String {
+    let doc = &env.approval;
+    let who = if !doc.requester.agent_name.is_empty() {
+        doc.requester.agent_name.clone()
+    } else if doc.requester.kind == "ai_agent" {
+        // The requester row above carries the attested id, so the
+        // sentence says what KIND of principal is asking rather than
+        // repeating it: the card names the requester once, precisely.
+        "This AI agent".to_string()
+    } else if !doc.user.is_empty() {
+        doc.user.clone()
+    } else {
+        "A requester".to_string()
+    };
+    match env.kind.as_str() {
+        "credential_request" => format!("{who} wants a short-lived {} credential.", doc.resource),
+        "privilege_request" => format!(
+            "{who} is requesting {} for {}.",
+            doc.capability, doc.resource
+        ),
+        _ => format!("{who} wants to set {} to {}.", doc.capability, doc.resource),
+    }
+}
+
+/// The verdict line of a resolved approval, in Plate D-003's exact
+/// wording — including the audit pointer, which is what makes the card
+/// and the trail one story.
+fn approval_verdict(style: &Style, env: &model::ApprovalEnvelope) -> String {
+    let doc = &env.approval;
+    let call = contract_line(env);
+    let audit = env
+        .execution
+        .as_ref()
+        .and_then(|e| e.audit_event_id.clone())
+        .map(|id| format!(" · audit {id}"))
+        .unwrap_or_default();
+    match doc.status.as_str() {
+        "approved" => {
+            let outcome = match env.execution.as_ref() {
+                // A credential approval is flipped by punard and spent
+                // later by the broker (contract section 14.6): there is
+                // no execution to claim, and the card must not invent one.
+                None if env.kind == "credential_request" => {
+                    if env.consumed_at.is_some() {
+                        "credential issued".to_string()
+                    } else {
+                        "awaiting issuance".to_string()
+                    }
+                }
+                None => "approved".to_string(),
+                Some(e) if e.result == "success" => {
+                    // `changed: false` is a real, honest outcome: the
+                    // capability was already in the requested state, so
+                    // the card says so rather than claiming a mutation.
+                    if e.changed == Some(false) {
+                        format!("{call} · already in that state")
+                    } else {
+                        format!("{call} executed")
+                    }
+                }
+                Some(e) => {
+                    let why = e.error.clone().unwrap_or_else(|| e.result.clone());
+                    return fmt::verdict(
+                        style,
+                        Slot::Bad,
+                        &format!("Approved, but not applied · {why}{audit}"),
+                    );
+                }
+            };
+            let grant = env
+                .execution
+                .as_ref()
+                .and_then(|e| e.grant_id.clone())
+                .map(|id| format!(" · grant {id}"))
+                .unwrap_or_default();
+            fmt::verdict(
+                style,
+                Slot::Ok,
+                &format!("✓ Approved · {outcome}{grant}{audit}"),
+            )
+        }
+        "denied" => fmt::verdict(
+            style,
+            Slot::Bad,
+            &format!("Denied · nothing executed{audit}"),
+        ),
+        "expired" => fmt::verdict(
+            style,
+            Slot::Bad,
+            &format!("Expired · denied by timeout · nothing executed{audit}"),
+        ),
+        _ => String::new(),
+    }
+}
+
+/// The contract card body shared by `approvals get` and `approvals wait`
+/// — Plate D-003 Sect II in terminal grammar, and Plate D-014 register 05
+/// verbatim: who is asking, for what, under which policy, for how long,
+/// and what exactly happens on yes.
+///
+/// `eligible` decides whether the `[A]` / `[D]` affordance is drawn.
+/// Resolution is human-only (contract section 14.5), so an agent running
+/// this command sees the card and the countdown and **no buttons**. The
+/// affordance is display only: the daemon is the authorization point and
+/// re-checks every rule regardless of what was printed here.
+fn approval_card(style: &Style, env: &model::ApprovalEnvelope, eligible: bool) -> String {
+    let doc = &env.approval;
+    let mut out = String::new();
+
+    let remaining = seconds_until(&doc.expires_at);
+    let expiry_cell = match remaining {
+        Some(s) if doc.status == "pending" && s > 0 => {
+            format!(
+                "expires {} · {} left",
+                fmt::timestamp(&doc.expires_at),
+                countdown(s)
+            )
+        }
+        Some(_) if doc.status == "pending" => {
+            format!("expired {}", fmt::timestamp(&doc.expires_at))
+        }
+        _ => fmt::timestamp(&doc.expires_at),
+    };
+
+    let mut rows = vec![
+        Row::new(
+            "Approval",
+            &doc.approval_id,
+            approval_slot(&doc.status),
+            &format!(
+                "{}{}",
+                if doc.status.is_empty() {
+                    "pending"
+                } else {
+                    &doc.status
+                },
+                if env.kind.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", env.kind.replace('_', " "))
+                }
+            ),
+        ),
+        Row::new(
+            "Requester",
+            &doc.requester.kind.replace('_', " "),
+            Slot::Neutral,
+            &if env.created_at.is_empty() {
+                identity_chain(doc)
+            } else {
+                format!(
+                    "{} · requested {}",
+                    identity_chain(doc),
+                    fmt::timestamp(&env.created_at)
+                )
+            },
+        ),
+        // The value column uppercases by grammar, so the exact typed
+        // call — the thing that will actually run — sits in the
+        // description column where its spelling survives verbatim.
+        Row::new(
+            "Capability",
+            &doc.capability,
+            Slot::Neutral,
+            &contract_line(env),
+        ),
+        Row::new("Policy", "", Slot::Neutral, &policy_citation(env)),
+        Row::new("Expiry", "", Slot::Neutral, &expiry_cell),
+    ];
+    if !doc.risk.is_empty() {
+        rows.insert(1, Row::new("Risk", &doc.risk, risk_slot(&doc.risk), ""));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+
+    // Plate D-003's `.req` — one plain sentence in the SYSTEM voice,
+    // derived from the record so it can never disagree with the contract
+    // block beneath it.
+    out.push('\n');
+    out.push_str(&format!("  {}\n", request_sentence(env)));
+
+    // The requester's own words, quoted and attributed — never in the
+    // system voice, never formatted as a system statement. Requester
+    // prose and system prose never share a line on this surface.
+    if let Some(reason) = quoted_reason(doc) {
+        out.push_str(&format!("  {reason}\n"));
+    }
+
+    // The contract block: what runs on yes, under which policy, and the
+    // audit promise that holds either way.
+    out.push('\n');
+    out.push_str(&fmt::section(
+        style,
+        "Contract · what happens on yes",
+        "spec 28",
+    ));
+    out.push_str(&fmt::note(
+        style,
+        &format!("One-time execution · {}", contract_line(env)),
+    ));
+    out.push_str(&fmt::note(
+        style,
+        &format!("Policy · {}", policy_citation(env)),
+    ));
+    out.push_str(&fmt::note(style, "Recorded to local audit either way"));
+
+    if doc.status == "pending" {
+        out.push('\n');
+        if eligible {
+            out.push_str(&fmt::note(
+                style,
+                &format!(
+                    "[A] punarctl approvals resolve {} --decision approved",
+                    doc.approval_id
+                ),
+            ));
+            out.push_str(&fmt::note(
+                style,
+                &format!(
+                    "[D] punarctl approvals resolve {} --decision denied",
+                    doc.approval_id
+                ),
+            ));
+        } else {
+            // Not a refusal to render — a statement of who may act. The
+            // agent that raised this request is told, in the section 73
+            // voice, that it is not the one who answers.
+            out.push_str(&fmt::note(
+                style,
+                "Only a human at this device may resolve this — an AI agent may resolve nothing",
+            ));
+            out.push_str(&fmt::note(
+                style,
+                &format!("Routed to {} · answer it in the approval overlay", doc.user),
+            ));
+        }
+    } else {
+        out.push_str(&approval_verdict(style, env));
+    }
+    out
+}
+
+/// `punarctl approvals list` — pending first, then recently resolved.
+pub fn approvals_list(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let list: model::ApprovalsList = parse(result)?;
+    let mut out = fmt::masthead(style, "Approvals", &personal_context(hostname));
+
+    let pending = list
+        .approvals
+        .iter()
+        .filter(|e| e.approval.status == "pending")
+        .count();
+    out.push_str(&fmt::section(
+        style,
+        "Approvals · what is waiting on you",
+        &format!("{pending} pending"),
+    ));
+
+    if list.approvals.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No approvals pending — nothing is gated right now",
+        ));
+        return Ok(out);
+    }
+
+    let rows: Vec<Row> = list
+        .approvals
+        .iter()
+        .map(|env| {
+            let doc = &env.approval;
+            let tail = match seconds_until(&doc.expires_at) {
+                Some(s) if doc.status == "pending" => {
+                    format!("{} · {} left", contract_line(env), remaining_words(s))
+                }
+                _ => contract_line(env),
+            };
+            Row::new(
+                &doc.approval_id,
+                &doc.status,
+                approval_slot(&doc.status),
+                &format!("{tail} · {}", identity_chain(doc)),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let checked = if list.checked_at.is_empty() {
+        String::new()
+    } else {
+        format!(" · read {}", fmt::timestamp(&list.checked_at))
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "{} recorded · a pending approval executes nothing until a human answers{checked}",
+            list.approvals.len()
+        ),
+    ));
+    Ok(out)
+}
+
+/// `punarctl approvals get <apr_id>` — the full contract card.
+pub fn approval_get(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    eligible: bool,
+) -> Result<String, String> {
+    let env: model::ApprovalEnvelope = parse(result)?;
+    let mut out = fmt::masthead(style, "Approval", &personal_context(hostname));
+    out.push_str(&approval_card(style, &env, eligible));
+    Ok(out)
+}
+
+/// `punarctl approvals wait <apr_id>` — Plate D-014 register 05. Same
+/// card, redrawn on each wake, with the countdown live.
+pub fn approval_wait(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    eligible: bool,
+) -> Result<String, String> {
+    approval_get(style, result, hostname, eligible)
+}
+
+/// `punarctl approvals resolve <apr_id> --decision …` — the verdict, and
+/// the audit pointer that ties it to the trail.
+pub fn approval_resolved(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let env: model::ApprovalEnvelope = parse(result)?;
+    let mut out = fmt::masthead(style, "Approval", &personal_context(hostname));
+    let doc = &env.approval;
+    let mut rows = vec![
+        Row::new(
+            "Approval",
+            &doc.approval_id,
+            approval_slot(&doc.status),
+            &contract_line(&env),
+        ),
+        Row::new("Requester", "", Slot::Neutral, &identity_chain(doc)),
+    ];
+    if let Some(by) = &env.resolved_by {
+        let mut who = Vec::new();
+        if !by.user.is_empty() {
+            who.push(by.user.clone());
+        }
+        if let Some(uid) = by.uid {
+            who.push(format!("uid {uid}"));
+        }
+        if let Some(pid) = by.pid {
+            who.push(format!("pid {pid}"));
+        }
+        rows.push(Row::new("Resolved by", "", Slot::Neutral, &who.join(" · ")));
+    }
+    if let Some(at) = &env.resolved_at {
+        rows.push(Row::new(
+            "Resolved at",
+            "",
+            Slot::Neutral,
+            &fmt::timestamp(at),
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&approval_verdict(style, &env));
+    out.push_str(&fmt::note(
+        style,
+        "The agent did it · the human allowed it · the trail says both",
+    ));
+    Ok(out)
+}
+
+/// The **exit 4** surface: a gated call created an approval and executed
+/// nothing (contract section 14.1). This is not a failure report — it is
+/// the section 73 four beats for a request that is alive and waiting:
+/// what is pending, who must decide, how long it lasts, what to do next.
+///
+/// `message` is the daemon's own prose and is printed verbatim; the rows
+/// beneath it are the machine facts from `error.details`.
+pub fn approval_required(
+    style: &Style,
+    message: &str,
+    details: Option<&Value>,
+    hostname: &str,
+) -> String {
+    let mut out = fmt::masthead(style, "Approval required", &personal_context(hostname));
+    if !message.is_empty() {
+        out.push_str(message);
+        if !message.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    let get = |key: &str| -> String {
+        details
+            .and_then(|d| d.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let approval_id = get("approval_id");
+    let expires_at = get("expires_at");
+    let capability = get("capability");
+    let resource = get("resource");
+    let decision = get("decision");
+    let policy_ids: Vec<String> = details
+        .and_then(|d| d.get("policy_ids"))
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(policy_words)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut rows = Vec::new();
+    if !approval_id.is_empty() {
+        rows.push(Row::new(
+            "Approval",
+            &approval_id,
+            Slot::Warn,
+            "pending · nothing has been executed",
+        ));
+    }
+    if !capability.is_empty() {
+        rows.push(Row::new(
+            "Capability",
+            &typed_call(&capability, &resource),
+            Slot::Neutral,
+            "",
+        ));
+    }
+    if !decision.is_empty() {
+        rows.push(Row::new(
+            "Decision",
+            &decision,
+            decision_slot(&decision),
+            "the effective AI authority for this capability",
+        ));
+    }
+    if !policy_ids.is_empty() {
+        rows.push(Row::new(
+            "Policy",
+            "",
+            Slot::Neutral,
+            &policy_ids.join(" · "),
+        ));
+    }
+    if !expires_at.is_empty() {
+        let cell = match seconds_until(&expires_at) {
+            Some(s) if s > 0 => format!(
+                "{} · {} left to answer",
+                fmt::timestamp(&expires_at),
+                remaining_words(s)
+            ),
+            _ => format!("{} · elapsed", fmt::timestamp(&expires_at)),
+        };
+        rows.push(Row::new("Expires", "", Slot::Neutral, &cell));
+    }
+    if !rows.is_empty() {
+        out.push_str(&fmt::rows(style, &rows));
+    }
+
+    // The loudest sentence on this surface, in the loud register: the
+    // call did not happen. Exit 4 is not "it failed" and not "it worked".
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Warn,
+        "Pending · nothing has been executed",
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "A human at this device decides · an AI agent may resolve nothing",
+    ));
+    if approval_id.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "Next step: punarctl approvals list — or answer it in the approval overlay",
+        ));
+    } else {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "Next step: punarctl approvals wait {approval_id} — or answer it in the approval overlay"
+            ),
+        ));
+    }
+    out
+}
+
+/// `punarctl privilege status` — the live grants, with what is left of
+/// each. Privilege is visible for exactly as long as it exists.
+pub fn privilege_status(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let status: model::PrivilegeStatus = parse(result)?;
+    let mut out = fmt::masthead(style, "Privilege", &personal_context(hostname));
+    out.push_str(&fmt::section(
+        style,
+        "Elevation · privilege you hold right now",
+        "spec 48",
+    ));
+    if status.grants.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No active grants — this device has no permanent administrator",
+        ));
+        out.push_str(&fmt::note(
+            style,
+            "Next step: punarctl privilege request --capability <id> --reason \"<why>\"",
+        ));
+        return Ok(out);
+    }
+    let rows: Vec<Row> = status
+        .grants
+        .iter()
+        .map(|g| {
+            let left = seconds_until(&g.expires_at);
+            let slot = match left {
+                Some(s) if s <= 0 => Slot::Bad,
+                Some(s) if s < 60 => Slot::Warn,
+                _ => Slot::Ok,
+            };
+            let word = left
+                .map(remaining_words)
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut desc = format!(
+                "{} · expires {}",
+                g.capability,
+                fmt::timestamp(&g.expires_at)
+            );
+            if !g.granted_at.is_empty() {
+                desc = format!("{} · granted {}", desc, fmt::timestamp(&g.granted_at));
+            }
+            if !g.reason.is_empty() {
+                desc.push_str(&format!(" · \"{}\"", g.reason));
+            }
+            Row::new(&g.grant_id, &word, slot, &desc)
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let checked = if status.checked_at.is_empty() {
+        String::new()
+    } else {
+        format!(" · read {}", fmt::timestamp(&status.checked_at))
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!("One capability per grant · no wildcard · no root shell to fall back to{checked}"),
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Next step: punarctl privilege revoke <gnt_id> — extending means asking again, with a reason",
+    ));
+    Ok(out)
+}
+
+/// `punarctl privilege revoke` — a grant dropped early, on purpose.
+pub fn privilege_revoked(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    scope: &str,
+) -> Result<String, String> {
+    let revoke: model::PrivilegeRevoke = parse(result)?;
+    let mut out = fmt::masthead(style, "Privilege", &personal_context(hostname));
+    let count = revoke.revoked_count.unwrap_or(revoke.revoked.len() as u64);
+    let mut rows = vec![Row::new(
+        "Revoked",
+        &count.to_string(),
+        Slot::Ok,
+        &format!("{scope} · privilege dropped immediately"),
+    )];
+    if !revoke.revoked.is_empty() {
+        rows.push(Row::new(
+            "Grants",
+            "",
+            Slot::Neutral,
+            &revoke.revoked.join(" · "),
+        ));
+    }
+    if !revoke.revoked_at.is_empty() {
+        rows.push(Row::new(
+            "At",
+            "",
+            Slot::Neutral,
+            &fmt::timestamp(&revoke.revoked_at),
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Ok,
+        &format!(
+            "Revoked · {count} grant{} dropped",
+            if count == 1 { "" } else { "s" }
+        ),
+    ));
+    out.push_str(&fmt::note(style, "Recorded to the local audit log"));
+    Ok(out)
+}
+
+/// `punarctl secrets list` — the credential classes and their effective
+/// decision. **Never values**: after issuance the broker holds only
+/// `sha256(token)`, so no method here could return one.
+pub fn secrets_list(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let classes: model::CredentialClasses = parse(result)?;
+    let mut out = fmt::masthead(style, "Secrets", &personal_context(hostname));
+    out.push_str(&fmt::section(
+        style,
+        "Credential classes · what may be issued",
+        "spec 29",
+    ));
+    if classes.classes.is_empty() {
+        out.push_str(&fmt::note(style, "No credential classes are configured"));
+        return Ok(out);
+    }
+    let rows: Vec<Row> = classes
+        .classes
+        .iter()
+        .map(|c| {
+            let mut desc = Vec::new();
+            if let Some(ttl) = c.default_ttl {
+                desc.push(format!("default ttl {ttl}s"));
+            }
+            if let Some(max) = c.max_ttl {
+                desc.push(format!("max {max}s"));
+            }
+            if !c.policy_key.is_empty() {
+                desc.push(format!("policy credentials.{}", c.policy_key));
+            }
+            if !c.provider.is_empty() {
+                desc.push(format!("provider {}", c.provider));
+            }
+            Row::new(
+                &c.credential,
+                &c.decision,
+                decision_slot(&c.decision),
+                &desc.join(" · "),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let provider = if classes.provider.is_empty() {
+        "mock".to_string()
+    } else {
+        classes.provider.clone()
+    };
+    let checked = if classes.checked_at.is_empty() {
+        String::new()
+    } else {
+        format!(" · read {}", fmt::timestamp(&classes.checked_at))
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "Provider {provider} · simulated · no real credential exists on this device{checked}"
+        ),
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Issued values are never listed · the broker keeps only a hash",
+    ));
+    Ok(out)
+}
+
+/// The Plate D-012 issuance card — rendered to **stderr** so that the
+/// value on stdout is the whole of stdout (milestone-9.md section 6.4):
+/// `TOKEN=$(punarctl secrets get aws-dev)` works, and prose can never
+/// contaminate the value.
+///
+/// The card carries what D-012 draws — class, requester, expiry, the
+/// redaction promise, the simulation label — and, exactly as the plate
+/// says, it has **no affordance that could show the value**.
+pub fn secrets_card(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let issued: model::CredentialIssued = parse(result)?;
+    let mut out = fmt::masthead(style, "Credential", &personal_context(hostname));
+    let mut rows = vec![Row::new(
+        "Credential",
+        &issued.credential,
+        Slot::Ok,
+        "issued once · this value is not retrievable again",
+    )];
+    if !issued.agent_session_id.is_empty() {
+        rows.push(Row::new(
+            "Issued to",
+            "",
+            Slot::Neutral,
+            &issued.agent_session_id,
+        ));
+    }
+    if !issued.expires_at.is_empty() {
+        let cell = match seconds_until(&issued.expires_at) {
+            Some(s) if s > 0 => format!(
+                "{} · {} left",
+                fmt::timestamp(&issued.expires_at),
+                remaining_words(s)
+            ),
+            _ => fmt::timestamp(&issued.expires_at),
+        };
+        rows.push(Row::new("Expires", "", Slot::Neutral, &cell));
+    }
+    let provider = if issued.provider.is_empty() {
+        "mock".to_string()
+    } else {
+        issued.provider.clone()
+    };
+    rows.push(Row::new(
+        "Provider",
+        &provider,
+        Slot::Warn,
+        "not a real credential — nothing on the other end of it",
+    ));
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(style, "Simulated · mock provider"));
+    out.push_str(&fmt::note(
+        style,
+        "Never written to disk · never logged · the value is on stdout and nowhere else",
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Punar never writes it — a shell that redirects stdout to a file does",
+    ));
+    Ok(out)
+}
+
+/// `punarctl secrets validate` — the token arrives on **stdin** and is
+/// never echoed back. Only the class, the verdict and the expiry are
+/// printed, because they are the only properties worth drawing (D-012).
+pub fn secrets_validate(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let v: model::CredentialValidate = parse(result)?;
+    let mut out = fmt::masthead(style, "Credential", &personal_context(hostname));
+    let mut rows = vec![
+        Row::new(
+            "Valid",
+            if v.valid { "yes" } else { "no" },
+            if v.valid { Slot::Ok } else { Slot::Bad },
+            "checked against the clock · no timer, no sweep",
+        ),
+        Row::new("Credential", &v.credential, Slot::Neutral, ""),
+    ];
+    if !v.expires_at.is_empty() {
+        let cell = match seconds_until(&v.expires_at) {
+            Some(s) if s > 0 => format!(
+                "{} · {} left",
+                fmt::timestamp(&v.expires_at),
+                remaining_words(s)
+            ),
+            _ => format!("{} · elapsed", fmt::timestamp(&v.expires_at)),
+        };
+        rows.push(Row::new("Expires", "", Slot::Neutral, &cell));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "The value was read from stdin and is not echoed · never on argv",
+    ));
+    Ok(out)
+}
+
+/// A credential the broker refused to vouch for: `expired` (the TTL
+/// lapsed) or `not_found` (it never issued this value, or already dropped
+/// it). Both are legitimate verdicts rather than malfunctions, so the
+/// word **INVALID** is rendered by this CLI from the wire `code` and does
+/// not depend on the daemon's prose — while the daemon's own section 73
+/// sentence is still printed verbatim beneath it.
+pub fn secrets_invalid(style: &Style, code: &str, message: &str, hostname: &str) -> String {
+    let mut out = fmt::masthead(style, "Credential", &personal_context(hostname));
+    let why = match code {
+        "expired" => "expired · the lifetime lapsed",
+        "not_found" => "not found · the broker holds no such credential",
+        other => other,
+    };
+    out.push_str(&fmt::rows(
+        style,
+        &[Row::new("Valid", "no", Slot::Bad, why)],
+    ));
+    if !message.is_empty() {
+        out.push_str(message);
+        if !message.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str(&fmt::note(
+        style,
+        "The value was read from stdin and is not echoed · never on argv",
+    ));
+    out
+}
+
+/// `punarctl secrets revoke` — the token arrives on stdin, the entry is
+/// dropped immediately, and the audit event names the class only.
+pub fn secrets_revoked(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let r: model::CredentialRevoke = parse(result)?;
+    let mut out = fmt::masthead(style, "Credential", &personal_context(hostname));
+    let mut rows = vec![Row::new(
+        "Revoked",
+        if r.revoked == Some(false) {
+            "no"
+        } else {
+            "yes"
+        },
+        if r.revoked == Some(false) {
+            Slot::Bad
+        } else {
+            Slot::Ok
+        },
+        "dropped from the broker immediately",
+    )];
+    if !r.credential.is_empty() {
+        rows.push(Row::new("Credential", &r.credential, Slot::Neutral, ""));
+    }
+    if !r.revoked_at.is_empty() {
+        rows.push(Row::new(
+            "At",
+            "",
+            Slot::Neutral,
+            &fmt::timestamp(&r.revoked_at),
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "Recorded to the local audit log · the class only, never the value",
+    ));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2183,5 +3172,449 @@ mod tests {
         assert!(text.contains("DRIFT DETECTED · 1 OF 2 CAPABILITIES · REPORTED ONLY"));
         assert!(text.contains("desired enabled · observed disabled"));
         assert!(text.contains("MILESTONE 3 REPORTS DRIFT WITHOUT REMEDIATING"));
+    }
+
+    // ---- Milestone 9 -------------------------------------------------
+
+    /// A pending capability-set approval, five minutes out. The
+    /// envelope's `approval` member is exactly the spec section 28
+    /// document; everything else is a sibling (contract section 14.3).
+    fn pending_firewall_approval() -> serde_json::Value {
+        json!({
+            "v": 1,
+            "approval": {
+                "approval_id": "apr_7c1d9a4e",
+                "requester": {"type": "ai_agent", "id": "agt_4f21c09ab3e1",
+                              "agent_name": "claude-code"},
+                "user": "punar",
+                "capability": "security.firewall",
+                "resource": "disabled",
+                "reason": "Atlas integration test needs the host firewall down",
+                "risk": "high",
+                "status": "pending",
+                "expires_at": "2126-08-25T10:05:00Z"
+            },
+            "kind": "capability_set",
+            "created_at": "2126-08-25T10:00:00Z",
+            "contract": "SetFirewall(disabled)",
+            "policy": {"name": "Personal preference", "policy_id": "personal-defaults"},
+            "resolved_at": null, "resolved_by": null,
+            "consumed_at": null, "execution": null
+        })
+    }
+
+    /// Plate D-003, register by register: the identity chain, the live
+    /// countdown, the contract block with the exact typed call, the
+    /// policy citation and the audit promise that holds either way.
+    #[test]
+    fn a_pending_approval_renders_the_d003_contract_card() {
+        let style = Style::plain();
+        let text = approval_get(&style, &pending_firewall_approval(), "punar-m9", true).unwrap();
+
+        // Masthead + the approval id and its status.
+        assert!(text.contains("A P P R O V A L"), "{text}");
+        assert!(text.contains("APR_7C1D9A4E"), "{text}");
+        assert!(text.contains("pending · capability set"), "{text}");
+        // Identity chain, one line, in the plate's order.
+        assert!(
+            text.contains("AI agent · claude-code · agt_4f21c09ab3e1 · punar"),
+            "{text}"
+        );
+        // The exact typed capability that will run — never a root shell.
+        assert!(
+            text.contains("ONE-TIME EXECUTION · SETFIREWALL(DISABLED)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("POLICY · PERSONAL PREFERENCE · PERSONAL DEFAULTS"),
+            "{text}"
+        );
+        // The exact typed call keeps its spelling in the row register.
+        assert!(text.contains("SetFirewall(disabled)"), "{text}");
+        assert!(
+            text.contains("RECORDED TO LOCAL AUDIT EITHER WAY"),
+            "{text}"
+        );
+        // Risk pill, and a live countdown (the fixture expires far out).
+        assert!(text.contains("HIGH"), "{text}");
+        assert!(text.contains("left"), "{text}");
+    }
+
+    /// The reason is SHOWN — section 73 requires *why* and *who requested
+    /// it*, and a gate whose justification is hidden is a rubber stamp —
+    /// but it is quoted and attributed to the requester, never rendered
+    /// as a system statement (milestone-9.md section 8.3).
+    #[test]
+    fn the_requester_reason_is_shown_in_a_quoted_requester_voice() {
+        let style = Style::plain();
+        let text = approval_get(&style, &pending_firewall_approval(), "punar-m9", true).unwrap();
+        assert!(
+            text.contains(
+                "claude-code says: \"Atlas integration test needs the host firewall down\""
+            ),
+            "{text}"
+        );
+        // The system's own sentence about the request is separate prose,
+        // and the two never share a line.
+        assert!(
+            text.contains("claude-code wants to set security.firewall to disabled."),
+            "{text}"
+        );
+    }
+
+    /// Resolution is human-only (contract section 14.5), so the `[A]` /
+    /// `[D]` affordance of Plate D-014 register 05 appears only for a
+    /// peer eligible to use it. An agent sees the card, the countdown,
+    /// and no buttons — and is told, in the section 73 voice, who does
+    /// decide.
+    #[test]
+    fn the_resolve_affordance_is_drawn_only_for_an_eligible_peer() {
+        let style = Style::plain();
+        let approval = pending_firewall_approval();
+
+        let human = approval_get(&style, &approval, "punar-m9", true).unwrap();
+        assert!(
+            human.contains("[A] PUNARCTL APPROVALS RESOLVE APR_7C1D9A4E --DECISION APPROVED"),
+            "{human}"
+        );
+        assert!(human.contains("[D] "), "{human}");
+
+        let agent = approval_get(&style, &approval, "punar-m9", false).unwrap();
+        assert!(!agent.contains("[A]"), "{agent}");
+        assert!(!agent.contains("[D]"), "{agent}");
+        assert!(agent.contains("AN AI AGENT MAY RESOLVE NOTHING"), "{agent}");
+        assert!(agent.contains("ROUTED TO PUNAR"), "{agent}");
+    }
+
+    /// Plate D-003's three verdicts, verbatim — including the audit
+    /// pointer, which is what ties the card to the trail without
+    /// extending `audit-event.json` (contract section 14.3).
+    #[test]
+    fn the_three_verdicts_carry_the_audit_pointer() {
+        let style = Style::plain();
+
+        let mut approved = pending_firewall_approval();
+        approved["approval"]["status"] = json!("approved");
+        approved["resolved_at"] = json!("2126-08-25T10:01:00Z");
+        approved["resolved_by"] = json!({"uid": 1000, "user": "punar", "pid": 812});
+        approved["execution"] =
+            json!({"result": "success", "changed": true, "audit_event_id": "evt_501"});
+        let text = approval_resolved(&style, &approved, "punar-m9").unwrap();
+        assert!(
+            text.contains("✓ APPROVED · SETFIREWALL(DISABLED) EXECUTED · AUDIT EVT_501"),
+            "{text}"
+        );
+        assert!(text.contains("punar · uid 1000 · pid 812"), "{text}");
+        assert!(
+            text.contains("THE AGENT DID IT · THE HUMAN ALLOWED IT · THE TRAIL SAYS BOTH"),
+            "{text}"
+        );
+
+        let mut denied = pending_firewall_approval();
+        denied["approval"]["status"] = json!("denied");
+        denied["execution"] = json!({"result": "not_executed", "audit_event_id": "evt_502"});
+        let text = approval_resolved(&style, &denied, "punar-m9").unwrap();
+        assert!(
+            text.contains("DENIED · NOTHING EXECUTED · AUDIT EVT_502"),
+            "{text}"
+        );
+
+        let mut expired = pending_firewall_approval();
+        expired["approval"]["status"] = json!("expired");
+        expired["execution"] = json!({"result": "not_executed", "audit_event_id": "evt_503"});
+        let text = approval_resolved(&style, &expired, "punar-m9").unwrap();
+        assert!(
+            text.contains("EXPIRED · DENIED BY TIMEOUT · NOTHING EXECUTED · AUDIT EVT_503"),
+            "{text}"
+        );
+    }
+
+    /// A credential approval is flipped by punard and spent later by the
+    /// broker (contract section 14.6). The card must not claim an
+    /// execution punard never performed.
+    #[test]
+    fn an_approved_credential_claims_no_execution_it_did_not_perform() {
+        let style = Style::plain();
+        let approval = json!({
+            "approval": {
+                "approval_id": "apr_11ba32cd",
+                "requester": {"type": "ai_agent", "id": "agt_4f21", "agent_name": "claude-code"},
+                "user": "punar", "capability": "credential.request", "resource": "aws-dev",
+                "reason": "Atlas needs the dev account", "risk": "medium",
+                "status": "approved", "expires_at": "2126-08-25T10:05:00Z"
+            },
+            "kind": "credential_request",
+            "contract": "IssueCredential(aws-dev)",
+            "consumed_at": null, "execution": null
+        });
+        let text = approval_resolved(&style, &approval, "punar-m9").unwrap();
+        assert!(text.contains("✓ APPROVED · AWAITING ISSUANCE"), "{text}");
+        assert!(!text.contains("EXECUTED"), "{text}");
+
+        let mut consumed = approval;
+        consumed["consumed_at"] = json!("2126-08-25T10:02:00Z");
+        let text = approval_resolved(&style, &consumed, "punar-m9").unwrap();
+        assert!(text.contains("✓ APPROVED · CREDENTIAL ISSUED"), "{text}");
+    }
+
+    /// Exit 4 is not a failure report. The section 73 four beats: what is
+    /// pending, who must decide, how long it lasts, what to do next —
+    /// and, loudest of all, that **nothing was executed**.
+    #[test]
+    fn the_approval_required_surface_says_nothing_ran() {
+        let style = Style::plain();
+        let details = json!({
+            "approval_id": "apr_7c1d9a4e",
+            "expires_at": "2126-08-25T10:05:00Z",
+            "capability": "security.firewall",
+            "resource": "disabled",
+            "decision": "approval_required",
+            "policy_ids": ["personal-defaults"]
+        });
+        let text = approval_required(
+            &style,
+            "Claude Code may not disable the host firewall without your approval.",
+            Some(&details),
+            "punar-m9",
+        );
+        // The daemon's own prose passes through verbatim.
+        assert!(
+            text.contains("Claude Code may not disable the host firewall without your approval."),
+            "{text}"
+        );
+        assert!(text.contains("APR_7C1D9A4E"), "{text}");
+        assert!(
+            text.contains("PENDING · NOTHING HAS BEEN EXECUTED"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pending · nothing has been executed"),
+            "{text}"
+        );
+        assert!(text.contains("SECURITY.FIREWALL(DISABLED)"), "{text}");
+        assert!(text.contains("APPROVAL_REQUIRED"), "{text}");
+        assert!(text.contains("personal defaults"), "{text}");
+        assert!(text.contains("left to answer"), "{text}");
+        assert!(
+            text.contains("A HUMAN AT THIS DEVICE DECIDES · AN AI AGENT MAY RESOLVE NOTHING"),
+            "{text}"
+        );
+        assert!(
+            text.contains("NEXT STEP: PUNARCTL APPROVALS WAIT APR_7C1D9A4E"),
+            "{text}"
+        );
+    }
+
+    /// punard deliberately keeps the spoofable display name off the
+    /// authorization surfaces, so the usual card keys on the attested
+    /// `agt_` id. It must still read as a sentence.
+    #[test]
+    fn a_requester_with_no_display_name_keys_on_the_attested_id() {
+        let style = Style::plain();
+        let mut approval = pending_firewall_approval();
+        approval["approval"]["requester"] = json!({"type": "ai_agent", "id": "agt_4f21c09ab3e1"});
+        let text = approval_get(&style, &approval, "punar-m9", true).unwrap();
+        assert!(
+            text.contains("This AI agent wants to set security.firewall"),
+            "{text}"
+        );
+        assert!(
+            text.contains("agt_4f21c09ab3e1 says: \"Atlas integration"),
+            "{text}"
+        );
+        // The chain keys on the id, with no invented display name.
+        assert!(
+            text.contains("AI agent · agt_4f21c09ab3e1 · punar"),
+            "{text}"
+        );
+    }
+
+    /// A daemon that sends no `details` still gets a usable surface: the
+    /// message and a next step, and never an invented approval id.
+    #[test]
+    fn the_approval_required_surface_survives_a_bare_error() {
+        let style = Style::plain();
+        let text = approval_required(&style, "Approval is required.", None, "punar-m9");
+        assert!(text.contains("Approval is required."), "{text}");
+        assert!(
+            text.contains("NEXT STEP: PUNARCTL APPROVALS LIST"),
+            "{text}"
+        );
+        assert!(!text.contains("APR_"), "{text}");
+    }
+
+    /// The list is the "what is waiting on you" register: pending count
+    /// in the section header, the typed call, and the time left.
+    #[test]
+    fn approvals_list_leads_with_what_is_pending() {
+        let style = Style::plain();
+        let result = json!({
+            "approvals": [pending_firewall_approval()],
+            "checked_at": "2126-08-25T10:00:30Z"
+        });
+        let text = approvals_list(&style, &result, "punar-m9").unwrap();
+        assert!(text.contains("1 PENDING"), "{text}");
+        assert!(text.contains("APR_7C1D9A4E"), "{text}");
+        assert!(text.contains("SetFirewall(disabled)"), "{text}");
+        assert!(
+            text.contains("A PENDING APPROVAL EXECUTES NOTHING UNTIL A HUMAN ANSWERS"),
+            "{text}"
+        );
+
+        let empty = json!({"approvals": [], "checked_at": "2126-08-25T10:00:30Z"});
+        let text = approvals_list(&style, &empty, "punar-m9").unwrap();
+        assert!(text.contains("NOTHING IS GATED RIGHT NOW"), "{text}");
+    }
+
+    /// Plate D-012 Sect I.03: privilege is visible for exactly as long as
+    /// it exists, and the absence of a grant is the loud default — this
+    /// device has no permanent administrator.
+    #[test]
+    fn privilege_status_renders_grants_and_their_absence() {
+        let style = Style::plain();
+        let none = json!({"grants": [], "checked_at": "2126-08-25T10:00:00Z"});
+        let text = privilege_status(&style, &none, "punar-m9").unwrap();
+        assert!(
+            text.contains("NO ACTIVE GRANTS — THIS DEVICE HAS NO PERMANENT ADMINISTRATOR"),
+            "{text}"
+        );
+        assert!(text.contains("PUNARCTL PRIVILEGE REQUEST"), "{text}");
+
+        let live = json!({
+            "grants": [{"grant_id": "gnt_2b8e11c4", "capability": "time.timezone",
+                        "reason": "Reproducing the Atlas net bug",
+                        "granted_at": "2126-08-25T10:00:00Z",
+                        "expires_at": "2126-08-25T10:15:00Z"}],
+            "checked_at": "2126-08-25T10:00:30Z"
+        });
+        let text = privilege_status(&style, &live, "punar-m9").unwrap();
+        assert!(text.contains("GNT_2B8E11C4"), "{text}");
+        assert!(text.contains("time.timezone"), "{text}");
+        assert!(text.contains("\"Reproducing the Atlas net bug\""), "{text}");
+        assert!(
+            text.contains("ONE CAPABILITY PER GRANT · NO WILDCARD · NO ROOT SHELL"),
+            "{text}"
+        );
+    }
+
+    /// `secrets list` shows classes and decisions and **never** a value —
+    /// after issuance the broker holds only a hash, so there is no method
+    /// that could produce one. The mock provider is labelled loudly.
+    #[test]
+    fn secrets_list_shows_decisions_and_never_a_value() {
+        let style = Style::plain();
+        let result = json!({
+            "classes": [
+                {"credential": "github", "decision": "allow", "policy_key": "github",
+                 "default_ttl": 3600, "max_ttl": 3600, "provider": "mock"},
+                {"credential": "aws-dev", "decision": "request", "policy_key": "aws_dev",
+                 "default_ttl": 3600, "max_ttl": 3600, "provider": "mock"},
+                {"credential": "aws-prod", "decision": "deny", "policy_key": "aws_prod",
+                 "default_ttl": 0, "max_ttl": 0, "provider": "mock"}
+            ],
+            "provider": "mock",
+            "checked_at": "2126-08-25T10:00:00Z"
+        });
+        let text = secrets_list(&style, &result, "punar-m9").unwrap();
+        // Kebab-case on the wire and on every surface (section 16.3).
+        assert!(text.contains("AWS-DEV"), "{text}");
+        assert!(text.contains("AWS-PROD"), "{text}");
+        assert!(!text.contains("aws_dev  "), "{text}");
+        // The snake_case policy key is named as the declared mapping.
+        assert!(text.contains("policy credentials.aws_dev"), "{text}");
+        assert!(text.contains("ALLOW"), "{text}");
+        assert!(text.contains("REQUEST"), "{text}");
+        assert!(text.contains("DENY"), "{text}");
+        assert!(
+            text.contains("SIMULATED · NO REAL CREDENTIAL EXISTS ON THIS DEVICE"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ISSUED VALUES ARE NEVER LISTED · THE BROKER KEEPS ONLY A HASH"),
+            "{text}"
+        );
+    }
+
+    /// Plate D-012 Sect II: the issuance card says what it may say and
+    /// has **no affordance that could show the value** — the redaction
+    /// rule stated on the surface and enforced on the surface.
+    #[test]
+    fn the_issuance_card_never_carries_the_value() {
+        let style = Style::plain();
+        const TOKEN: &str = "punar-mock-aws-dev-9Qw3ZzmXk1";
+        let result = json!({
+            "credential": "aws-dev",
+            "value": TOKEN,
+            "expires_at": "2126-08-25T11:00:00Z",
+            "provider": "mock",
+            "agent_session_id": "agt_4f21c09ab3e1"
+        });
+        let card = secrets_card(&style, &result, "punar-m9").unwrap();
+        // The headline assertion of this milestone, at the CLI boundary.
+        assert!(!card.contains(TOKEN), "{card}");
+        assert!(!card.contains("punar-mock"), "{card}");
+        assert!(card.contains("AWS-DEV"), "{card}");
+        assert!(
+            card.contains("NEVER WRITTEN TO DISK · NEVER LOGGED · THE VALUE IS ON STDOUT"),
+            "{card}"
+        );
+        assert!(card.contains("SIMULATED · MOCK PROVIDER"), "{card}");
+        assert!(card.contains("not a real credential"), "{card}");
+        assert!(card.contains("PUNAR NEVER WRITES IT"), "{card}");
+        assert!(card.contains("agt_4f21c09ab3e1"), "{card}");
+    }
+
+    /// `validate` prints a verdict and an expiry and never the value it
+    /// was handed; `expired` and `not_found` are verdicts rather than
+    /// malfunctions, and the word INVALID comes from the wire code.
+    #[test]
+    fn validate_renders_a_verdict_without_echoing_the_value() {
+        let style = Style::plain();
+        let ok = json!({"valid": true, "credential": "github",
+                        "expires_at": "2126-08-25T11:00:00Z"});
+        let text = secrets_validate(&style, &ok, "punar-m9").unwrap();
+        assert!(text.contains("YES"), "{text}");
+        assert!(text.contains("GITHUB"), "{text}");
+        assert!(
+            text.contains("THE VALUE WAS READ FROM STDIN AND IS NOT ECHOED · NEVER ON ARGV"),
+            "{text}"
+        );
+
+        let text = secrets_invalid(
+            &style,
+            "expired",
+            "That credential's lifetime has ended.",
+            "punar-m9",
+        );
+        assert!(text.contains("VALID"), "{text}");
+        assert!(text.contains("NO"), "{text}");
+        assert!(text.contains("expired · the lifetime lapsed"), "{text}");
+        assert!(
+            text.contains("That credential's lifetime has ended."),
+            "{text}"
+        );
+    }
+
+    /// The countdown is tabular and never negative: past zero the card
+    /// says EXPIRED in words rather than drawing a negative clock.
+    #[test]
+    fn the_countdown_never_runs_backwards() {
+        assert_eq!(countdown(299), "4:59");
+        assert_eq!(countdown(60), "1:00");
+        assert_eq!(countdown(9), "0:09");
+        assert_eq!(countdown(0), "0:00");
+        assert_eq!(countdown(-42), "0:00");
+    }
+
+    /// An approval whose `expires_at` has passed reads as expired
+    /// everywhere, whether or not the daemon has swept it yet (contract
+    /// section 14.4).
+    #[test]
+    fn a_lapsed_pending_approval_reads_as_expired_before_the_sweep() {
+        let style = Style::plain();
+        let mut approval = pending_firewall_approval();
+        approval["approval"]["expires_at"] = json!("2020-01-01T00:00:00Z");
+        let text = approval_get(&style, &approval, "punar-m9", true).unwrap();
+        assert!(text.contains("expired 2020-01-01 00:00:00"), "{text}");
     }
 }

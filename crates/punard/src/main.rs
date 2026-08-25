@@ -28,6 +28,12 @@ struct Cli {
     command: Option<Command>,
 }
 
+// `RunArgs` is large by design — every production path punard touches is an
+// injectable flag, which is what lets the in-VM checks and the host tests
+// point the daemon at a tempdir. clap's derive needs the args inline in the
+// variant (a `Box<RunArgs>` does not implement `Args`), and this enum is
+// constructed exactly once per process.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Run the daemon (started by punard.service as root).
@@ -73,6 +79,25 @@ struct RunArgs {
     /// M5 shell summary file (docs/api/ipc.md section 9).
     #[arg(long, default_value = punard::enroll::DEFAULT_STATUS_FILE)]
     status_file: PathBuf,
+
+    /// M9 approval summary the shell watches (docs/api/ipc.md section 15).
+    /// Inside the **root-owned** `/run/punard`, deliberately not beside
+    /// `status.json` in the user-writable `/run/punar`: this is the file
+    /// that tells a human what they are about to authorize, and a file a
+    /// local process can substitute is a spoofing primitive.
+    #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_FILE)]
+    approvals_file: PathBuf,
+
+    /// M9 AI authority document (SPEC section 20). A missing or unreadable
+    /// file falls back to the compiled-in personal defaults — the same
+    /// bytes the image installs here.
+    #[arg(long, default_value = punar_common::aipolicy::AI_DEFAULTS_FILE)]
+    ai_defaults_file: PathBuf,
+
+    /// M9: the uid an agent-raised approval is routed to (the session
+    /// user). Not a presence check — see `Inner::console_user`.
+    #[arg(long, default_value_t = punard::server::DEFAULT_CONSOLE_UID)]
+    console_uid: u32,
 }
 
 fn build_registry(args: &RunArgs) -> Registry {
@@ -110,6 +135,9 @@ fn run(args: RunArgs) -> ExitCode {
         group: args.group,
         control_plane_socket,
         status_file: args.status_file,
+        approvals_file: args.approvals_file,
+        ai_defaults_file: args.ai_defaults_file,
+        console_uid: args.console_uid,
         ..cfg
     };
 

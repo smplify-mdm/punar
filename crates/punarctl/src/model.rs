@@ -587,6 +587,232 @@ pub struct LedgerFingerprint {
     pub updated_at: String,
 }
 
+// ---------------------------------------------------------------------
+// Milestone 9 — approvals, privilege grants, credential classes
+// (contract sections 14, 16).
+// ---------------------------------------------------------------------
+
+/// The spec section 28 approval **document** — the member of the envelope
+/// that validates against `schemas/audit/approval.json` as-is (contract
+/// section 14.3). Nothing M9 added lives in here: `kind`, `execution`,
+/// `consumed_at` and the rest are siblings, and `status` never leaves the
+/// shipped `pending | approved | denied | expired` enum.
+#[derive(Deserialize)]
+pub struct ApprovalDoc {
+    pub approval_id: String,
+    #[serde(default)]
+    pub requester: Requester,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub capability: String,
+    #[serde(default)]
+    pub resource: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+/// `approval.requester` — who asked. `type` is `ai_agent` or `user`; the
+/// field is spelled `type` on the wire, which is a Rust keyword.
+#[derive(Deserialize, Default)]
+pub struct Requester {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    /// Display-grade, from the registry — present on the summary file's
+    /// rows, absent from the schema document.
+    #[serde(default)]
+    pub agent_name: String,
+}
+
+/// The `approvals.get` / `approvals.resolve` / `approvals.consume`
+/// envelope (contract section 14.3). Every sibling defaults, so a daemon
+/// that answers with the bare document still renders and the view simply
+/// prints nothing it cannot prove.
+#[derive(Deserialize)]
+pub struct ApprovalEnvelope {
+    pub approval: ApprovalDoc,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub contract: String,
+    #[serde(default)]
+    pub policy: Option<ApprovalPolicy>,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub resolved_by: Option<ResolvedBy>,
+    #[serde(default)]
+    pub consumed_at: Option<String>,
+    #[serde(default)]
+    pub execution: Option<ApprovalExecution>,
+}
+
+/// The policy citation an approval carries (`{name, policy_id}`).
+/// Personal mode cites the personal defaults; an org name appears only
+/// while enrolled (DESIGN_LANGUAGE section 8).
+#[derive(Deserialize)]
+pub struct ApprovalPolicy {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub policy_id: String,
+}
+
+/// Who answered, recorded in full so that an attribution escape is
+/// visible after the fact even where it is not preventable (contract
+/// section 14.5).
+#[derive(Deserialize)]
+pub struct ResolvedBy {
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
+/// What ran on `resolve(approved)`, and the **pointer into the audit
+/// trail** (contract section 14.3). The direction is deliberate:
+/// approval → event, exactly as Plate D-003 prints it ("audit evt_501").
+#[derive(Deserialize)]
+pub struct ApprovalExecution {
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub changed: Option<bool>,
+    #[serde(default)]
+    pub audit_event_id: Option<String>,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `approvals.list` result.
+#[derive(Deserialize)]
+pub struct ApprovalsList {
+    #[serde(default)]
+    pub approvals: Vec<ApprovalEnvelope>,
+    #[serde(default)]
+    pub checked_at: String,
+}
+
+/// One live just-in-time privilege grant (contract section 14.8).
+#[derive(Deserialize)]
+pub struct Grant {
+    pub grant_id: String,
+    #[serde(default)]
+    pub capability: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub granted_at: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+/// `privilege.status` result.
+#[derive(Deserialize)]
+pub struct PrivilegeStatus {
+    #[serde(default)]
+    pub grants: Vec<Grant>,
+    #[serde(default)]
+    pub checked_at: String,
+}
+
+/// `privilege.revoke` result. The shape is deliberately tolerant: the
+/// view reports whichever count the daemon spells.
+#[derive(Deserialize)]
+pub struct PrivilegeRevoke {
+    #[serde(default)]
+    pub revoked: Vec<String>,
+    #[serde(default)]
+    pub revoked_count: Option<u64>,
+    #[serde(default)]
+    pub revoked_at: String,
+}
+
+/// One credential class (contract section 16.3). Class ids are
+/// **kebab-case** on the wire, in audit `resource` and in the M8 ledger
+/// (`github`, `aws-dev`, `aws-prod`); the snake_case `policy_key` is the
+/// declared mapping into the section 20 policy document, never a guess.
+#[derive(Deserialize)]
+pub struct CredentialClass {
+    pub credential: String,
+    #[serde(default)]
+    pub decision: String,
+    #[serde(default)]
+    pub policy_key: String,
+    #[serde(default)]
+    pub default_ttl: Option<u64>,
+    #[serde(default)]
+    pub max_ttl: Option<u64>,
+    #[serde(default)]
+    pub provider: String,
+}
+
+/// `credential.classes` result — classes and their effective decision.
+/// **Never values**: after issuance the broker holds only
+/// `sha256(token)`, so there is no method that could list one.
+#[derive(Deserialize)]
+pub struct CredentialClasses {
+    #[serde(default, alias = "credentials")]
+    pub classes: Vec<CredentialClass>,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub checked_at: String,
+}
+
+/// The issuance receipt for the human card (contract section 16.3). The
+/// **value is not in this struct on purpose**: it is lifted out of the
+/// raw result into a [`punar_common::Redacted`] and written once to fd 1
+/// (see `main::secrets_get`), so no derived `Debug` here can ever print
+/// it.
+#[derive(Deserialize)]
+pub struct CredentialIssued {
+    #[serde(default)]
+    pub credential: String,
+    #[serde(default)]
+    pub expires_at: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub agent_session_id: String,
+}
+
+/// `credential.validate` result.
+#[derive(Deserialize)]
+pub struct CredentialValidate {
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(default)]
+    pub credential: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+/// `credential.revoke` result.
+#[derive(Deserialize)]
+pub struct CredentialRevoke {
+    #[serde(default)]
+    pub credential: String,
+    #[serde(default)]
+    pub revoked: Option<bool>,
+    #[serde(default)]
+    pub revoked_at: String,
+}
+
 /// Display spelling of a capability state value: strings render bare
 /// (`enabled`), anything else as compact JSON.
 pub fn state_str(value: &Value) -> String {

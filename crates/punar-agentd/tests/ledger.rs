@@ -186,6 +186,19 @@ impl TestDaemon {
     /// Append one audit event as punard would, once the M8 attribution
     /// rule tags it with the agent session that made the call.
     fn append_audit(&self, event_id: &str, session_id: &str, action: &str, decision: &str) {
+        self.append_audit_on(event_id, session_id, action, decision, "security.firewall");
+    }
+
+    /// The same, with the `resource` spelled out — the M9 credential
+    /// drain reads it (milestone-9.md section 9.2).
+    fn append_audit_on(
+        &self,
+        event_id: &str,
+        session_id: &str,
+        action: &str,
+        decision: &str,
+        resource: &str,
+    ) {
         let event = json!({
             "event_id": event_id,
             "timestamp": "2026-08-27T09:59:12Z",
@@ -195,7 +208,7 @@ impl TestDaemon {
             "project_id": "atlas",
             "source": "ai_agent",
             "action": action,
-            "resource": "security.firewall",
+            "resource": resource,
             "decision": decision,
             "policy_ids": ["personal-defaults"],
             "result": if decision == "deny" { "denied" } else { "success" }
@@ -379,6 +392,9 @@ fn access_returns_the_schema_exact_summary_and_its_siblings() {
     assert!(classes.contains(&"agent"), "{classes:?}");
 
     // Level 3 — what it cannot, said out loud rather than left blank.
+    // `credential_classes` is empty here too, but it is NOT in the honesty
+    // rows any more: M9 shipped punar-secrets, so an empty array now means
+    // "this session asked for no credential", which is a fact, not a gap.
     for empty in ["network_destinations", "mcp_servers", "credential_classes"] {
         assert_eq!(resources[empty], json!([]), "{empty}");
     }
@@ -393,12 +409,22 @@ fn access_returns_the_schema_exact_summary_and_its_siblings() {
             )
         })
         .collect();
-    assert_eq!(honest.len(), 8);
+    assert_eq!(honest.len(), 5);
     assert!(honest.contains(&("network_destinations", "M12")));
-    assert!(honest.contains(&("mcp_servers", "M9+")));
-    assert!(honest.contains(&("credential_classes", "M9")));
-    // All seven Level-4 categories are accounted for: `denied_access`
-    // and `privilege_request` have producers, the other five are named.
+    // M9 re-milestoned this rather than leaving it promising M9+: the
+    // milestone shipped a credential broker, not a tool gateway.
+    assert!(honest.contains(&("mcp_servers", "M11+")));
+    // Left the list in M9 — punar-secrets is the producer, and a category
+    // with a producer is not "not yet observed".
+    assert!(!honest.iter().any(|(cat, _)| *cat == "credential_classes"));
+    assert!(!honest.iter().any(|(cat, _)| *cat == "credential_request"));
+    assert!(
+        !honest
+            .iter()
+            .any(|(cat, _)| *cat == "policy_bypass_attempt")
+    );
+    // All seven Level-4 categories are accounted for: four have producers
+    // as of M9, the other three are named here.
     assert!(honest.contains(&("unknown_ai_execution", "M10")));
 
     // Level 4 — a reference, joined to the audit trail by event id.
@@ -853,6 +879,85 @@ fn the_negative_paths_are_honest() {
     }
 }
 
+/// M9's Level-3 door (milestone-9.md section 9.2). M8 wired `drain_audit`
+/// for Level-4 references only; this asserts the missing half end to end,
+/// through the socket, without any of the four M8 evidence sources being
+/// involved: an issued credential fills `credential_classes` **and** its
+/// Level-4 reference, a refused one fills only the denial, and an agent
+/// refused at the approval gate lands as `policy_bypass_attempt` rather
+/// than as a generic `denied_access`.
+#[test]
+fn an_issued_credential_fills_the_level_3_row_and_a_refused_gate_is_a_bypass_attempt() {
+    let daemon = TestDaemon::start("credentials", Peer::user(PUNAR_UID), scope_processes);
+    managed_session(&daemon);
+    daemon.append_audit_on("evt_610", SESSION, "credential.request", "allow", "github");
+    daemon.append_audit_on("evt_611", SESSION, "credential.request", "allow", "aws-dev");
+    // Same class twice: a count, never a second row.
+    daemon.append_audit_on("evt_612", SESSION, "credential.request", "allow", "github");
+    // Refused: a denial, not a class the agent used.
+    daemon.append_audit_on("evt_613", SESSION, "credential.request", "deny", "aws-prod");
+    // The self-approval refusal — the one action whose denial is a bypass.
+    daemon.append_audit_on(
+        "evt_614",
+        SESSION,
+        "approval.resolve",
+        "deny",
+        "apr_1a2b3c4d",
+    );
+    daemon.result("agents.scan", None);
+
+    let result = daemon.result("agents.access", Some(json!({"session_id": SESSION})));
+    let classes = result["summary"]["resources"]["credential_classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        classes,
+        vec!["aws-dev", "github"],
+        "kebab-case, deduplicated"
+    );
+    // aws-prod was refused, so it is NOT a class this session used.
+    assert!(!classes.contains(&"aws-prod"));
+
+    let entry = result["detail"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["category"] == "credential_classes" && e["resource_class"] == "github")
+        .cloned()
+        .expect("a credential_classes entry for github");
+    assert_eq!(entry["count"], 2, "the same class twice is a count");
+    assert_eq!(
+        entry["evidence"], "audit_event",
+        "the evidence variant M8 declared and never produced"
+    );
+
+    let events: Vec<(&str, &str)> = result["summary"]["security_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["event_id"].as_str().unwrap(),
+                e["event_type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(events.contains(&("evt_610", "credential_request")));
+    assert!(events.contains(&("evt_613", "denied_access")));
+    assert!(events.contains(&("evt_614", "policy_bypass_attempt")));
+
+    // Still no token, no hash, no approval payload anywhere on disk: the
+    // broker's events carry the class name and nothing else, which is the
+    // property that makes this door safe (spec 53).
+    let written = daemon.ledger_written_bytes();
+    assert!(written.contains("github"), "the class name IS recorded");
+    assert!(!written.contains("punar-mock-"), "no token prefix");
+    assert!(!written.contains("apr_1a2b3c4d"), "no approval payload");
+}
+
 /// The panel's side file is root-owned, `0640`, and carries the same rows
 /// the socket returns (ipc.md 13.2).
 #[test]
@@ -869,7 +974,7 @@ fn the_runtime_view_matches_the_socket_and_is_not_world_readable() {
     assert_eq!(file["v"], 1);
     let view = &file["sessions"][0];
     assert_eq!(view["summary"]["session_id"], SESSION);
-    assert_eq!(view["not_yet_observed"].as_array().unwrap().len(), 8);
+    assert_eq!(view["not_yet_observed"].as_array().unwrap().len(), 5);
     assert_eq!(view["retention"]["days"], 14);
 
     // Same rows as the socket, so the pane and the CLI cannot disagree.

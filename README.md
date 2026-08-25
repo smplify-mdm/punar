@@ -5,36 +5,46 @@
 > one acceptance item left; Milestones 2–7 (Native multitasking; `punard` +
 > `punarctl`; Declarative desired state; Mock Smplify enrollment; Developer
 > environment manager; AI Agent Registry) are done — CI-proven; Milestone 8
-> (AI Access Ledger) is implemented on disk, uncommitted, awaiting its
+> (AI Access Ledger) is committed and pushed with its host-side CI jobs
+> green, but its in-VM exercise has still never run; Milestone 9 (Approval
+> gates + secret broker) is implemented on disk, uncommitted, awaiting its
 > first CI run.** The last fully green CI run is
-> [32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695)
+> [32877949285](https://github.com/smplify-mdm/punar/actions/runs/32877949285)
 > (2026-08-25): the `punar-desktop` image (Hyprland + punar-shell) builds,
 > boots, and passes the graphical gate plus the in-VM M2 multitasking, M3
 > control-plane, M4 policy-merge/drift-remediation, M5 mock-enrollment, M6
 > developer-environment and M7 AI-agent-registry exercises
 > (`PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` + `PUNAR_M3_OK` + `PUNAR_M4_OK` +
 > `PUNAR_M5_OK` + `PUNAR_M6_OK` + `PUNAR_M7_OK`; 282 in-VM assertions;
-> idle RAM 1175 MB mean — under the 1.5 GB hard ceiling, over the 1.0 GB
+> idle RAM 1163 MB mean — under the 1.5 GB hard ceiling, over the 1.0 GB
 > target; `punard` + `punar-agentd` services RSS 4 MB combined against a
 > 100 MB target). M1's keyboard-only human walkthrough is still pending.
-> M8 — the AI Access Ledger, where spec section 21 becomes a surface you
-> can read and delete: `agents.access` and `ledger.purge` on the agentd
-> socket, `punarctl agents access` / `privacy ledger` / `privacy purge`,
-> and the real ledger register replacing the dashed placeholder in the
-> `SUPER + A` panel — is implemented: the full tree, including the in-VM
-> m8-check exercise and its CI wiring, is on disk and statically validated
-> locally, but it is uncommitted and nothing M8 has ever run in CI.
-> The ledger is **derived** from mediation points Punar already owns —
-> the agent's scope cgroup, the audit stream, the `punar-env` workspace
-> grant, the registry record — with no eBPF, fanotify, ptrace or
-> `LD_PRELOAD` anywhere (spec 1.14), and its privacy rules are enforced
-> in types, not prose: no file paths inside the workspace, no prompts, no
-> source code, no secrets, no per-read events (spec 21.2). What has no
-> mediation point yet is labeled, not invented: network destinations read
-> `NOT YET OBSERVED · MILESTONE 12`, MCP servers M9+, credential classes
-> M9. Nothing leaves the device — the authorized remote query is M10. See
-> [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists
-> versus what is proven.
+>
+> That green run also carries an honest correction: **it did not execute
+> the M8 exercise.** `m8-check.sh` shipped non-executable, its oneshot
+> failed to start, and the boot harness downgraded the missing verdict to
+> a warning — so a green run claimed a milestone that had not run. The
+> harness now treats a missing M2..M8 verdict as a hard failure, and that
+> fix is committed locally but not yet pushed. No `PUNAR_M8_OK` exists
+> anywhere; M8's ledger code is CI-built and CI-tested, not CI-exercised.
+>
+> M9 — approval gates and the secret broker, where spec section 28 stops
+> being a schema — is implemented on disk and statically validated
+> locally: a typed capability call an AI agent may not make on its own
+> **stops**, returning `approval_required` with nothing applied and CLI
+> exit 4; a card appears on the user's own screen naming the exact
+> capability, the policy that gated it and the audit promise, with a live
+> expiry countdown and keyboard approve/deny; and the call executes only
+> if a human answers yes. An AI agent may approve **nothing** — not its
+> own request, not anyone's — and may never hold a standing privilege
+> window. `punar-secrets`, a third daemon, issues short-lived **mock**
+> credentials from a data catalog; a token leaves it exactly once, on a
+> file descriptor, and the broker keeps only its SHA-256, so no method
+> anywhere in Punar can return a token twice. `schemas/audit/approval.json`
+> is not modified by one byte. The in-VM exercise, including the redaction
+> sweep that greps every file Punar writes for the tokens it issued, has
+> never run. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for
+> what exists versus what is proven.
 
 Punar, by Smplify, is a lightweight, privacy-first, AI-native Linux operating
 system for developer workstations. It targets existing 8–16 GB enterprise

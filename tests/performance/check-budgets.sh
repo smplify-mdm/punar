@@ -15,8 +15,10 @@
 # §1.2/§2.3; milestone-3.md §9) from the same report. The number is the
 # COMBINED services total, never per-daemon: spec 6.2 budgets the services
 # together, so as sibling daemons ship they are summed into the same value
-# and the thresholds do NOT move (punard since M3, punar-agentd since M7 —
-# milestone-7.md §11):
+# and the thresholds do NOT move (punard since M3, punar-agentd since M7,
+# punar-secrets since M9 — milestone-7.md §11, milestone-9.md §11). Adding a
+# daemon and leaving it out of the sum, or raising a threshold to make room
+# for one, would both make this gate say something untrue:
 #
 #   PUNAR_SERVICES_RSS_MB > 150 (MVP ceiling)  ::error::   -> exit 1
 #   PUNAR_SERVICES_RSS_MB > 100 (target)       ::warning:: -> exit 0
@@ -119,7 +121,7 @@ echo "    image:   ${IMAGE:-unknown}"
 echo "    mean:    ${MEAN_MB} MB"
 echo "    max:     ${MAX_MB} MB"
 echo "    target:  ${TARGET_MB} MB   hard ceiling: ${HARD_MB} MB (PERFORMANCE_BUDGETS.md §1.1)"
-echo "    services: ${SERVICES_MB:-missing} MB (summed PSS, punard + punar-agentd cgroups — §1.2/§2.3:"
+echo "    services: ${SERVICES_MB:-missing} MB (summed PSS, punard + punar-agentd + punar-secrets cgroups — §1.2/§2.3:"
 echo "              target ${SERVICES_TARGET_MB} MB, MVP ceiling ${SERVICES_HARD_MB} MB)"
 
 if [ "${MEAN_MB}" -gt "${HARD_MB}" ]; then
@@ -141,12 +143,13 @@ fi
 
 # --- Punar services RAM gate (M3; PERFORMANCE_BUDGETS.md §1.2/§2.3,
 # milestone-3.md §9). absent/missing/non-numeric fails EVEN under TCG: it
-# means punard was not alive at stabilized idle (or the report predates M3),
+# means a Punar daemon was not alive at stabilized idle (or the report
+# predates M3),
 # which no emulation slowness explains. Numeric breaches follow the same
 # TCG-downgrade rule as the whole-system gate above.
 case "${SERVICES_MB:-missing}" in
     ''|missing|absent)
-        annotate error "Punar services RSS is '${SERVICES_MB:-missing}' — a Punar service (punard.service or punar-agentd.service) was not running at stabilized idle, or the guest never emitted PUNAR_SERVICES_RSS_MB; a dead daemon is a gate failure even on emulated runs (milestone-3.md §9, milestone-7.md §11)"
+        annotate error "Punar services RSS is '${SERVICES_MB:-missing}' — a Punar service (punard.service, punar-agentd.service or punar-secrets.service) was not running at stabilized idle, or the guest never emitted PUNAR_SERVICES_RSS_MB; a dead daemon is a gate failure even on emulated runs (milestone-3.md §9, milestone-7.md §11, milestone-9.md §11)"
         fail=1
         ;;
     *[!0-9]*)

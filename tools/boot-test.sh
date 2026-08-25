@@ -97,6 +97,29 @@
 #        no-resurrection drain, a retention prune against an injected
 #        backdated ledger, and negative probes proving no export path
 #        exists — run after the M7 exercise, before the export).
+#    11. M9 verdict (milestone-9.md §12): same pattern for m9-report.txt
+#        (punar-m9-check.service — the approval gate, the credential broker
+#        and just-in-time privilege: the punar-secrets preflight (socket
+#        modes, the root-owned approval/grant stores, the vendor .wants
+#        symlink AND multi-user.target Wants=), an agent-originated
+#        capabilities.set answered `approval_required` with exit 4 and
+#        NOTHING applied (checked against a live nft read, never a cached
+#        descriptor), the pending approval object validated TWICE — by jq
+#        in the guest and, on this host, against schemas/audit/approval.json
+#        — the agent's own attempt to resolve it refused and audited as
+#        self_approval_refused, the Plate D-003 overlay screenshot with the
+#        card on screen asserted through the shell's own IPC, the human
+#        resolve that finally executes the mutation with BOTH pointer
+#        directions and BOTH identities in the trail, an unanswered approval
+#        expiring without executing anything, allow/request/deny credential
+#        classes against the MOCK provider, a 5-second credential really
+#        expiring and a revoke really revoking, THE REDACTION SWEEP (every
+#        issued value grepped for across every file Punar writes, the whole
+#        export tar, the journal and every punar process's environ and
+#        cmdline, with a negative control), the M8 ledger's credential rows
+#        filling in for real, a one-minute privilege grant that works and
+#        then does not, and the negative probes — run after the M8 exercise,
+#        before the export).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
@@ -129,6 +152,18 @@
 #                                   view, the attributed audit denial
 #     punar-m8.png                  grim capture, AI panel with the D-005
 #                                   ledger register (M8)
+#     m9-report.txt, m9-*.txt       M9 exercise verdict + the launch block,
+#                                   the approval_required / denial / secrets
+#                                   card renders and the redaction sweep
+#                                   (counts only — never a value)
+#     m9-*.json                     approvals list/get snapshots, the
+#                                   exported approval document this script
+#                                   re-validates against the shipped schema,
+#                                   the agents.access result and the audit
+#                                   slices both pointer directions are
+#                                   proven against
+#     punar-m9.png                  grim capture, the Plate D-003 approval
+#                                   overlay with a live contract card (M9)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -136,7 +171,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6/M7/M8_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2..M9_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -283,10 +318,14 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     # in the worst case — a 180 s launch+children wait, a screenshot
     # settle, a 60 s teardown wait and a 30 s socket wait around the one
     # deliberate punar-agentd restart — a minute or two under KVM) — all
-    # of which run before the guest starts streaming the export. Raised
-    # from M7's 2400 to keep the same headroom now that a ninth bounded
-    # in-guest exercise sits between the RAM result and the export.
-    DEFAULT_EXPORT_TIMEOUT=3000
+    # of which run before the guest starts streaming the export — and the
+    # M9 approval/credential/privilege exercise (bounded 20 min in-guest;
+    # its longest single wait is the SHIPPED 300 s approval TTL, started
+    # early so the credential and privilege groups run inside the window,
+    # plus a 65 s grant-expiry wait and a 180 s launch wait). Raised from
+    # M8's 3000 to keep the same headroom now that a tenth bounded in-guest
+    # exercise sits between the RAM result and the export.
+    DEFAULT_EXPORT_TIMEOUT=3600
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -304,8 +343,12 @@ else
     # quickshell IPC round trips and grim are the slow parts under TCG)
     # and the M8 ledger exercise (bounded 15 min in-guest; under TCG the
     # slow parts are the same quickshell/grim round trips plus the one
-    # punar-agentd restart the retention-prune assertion needs).
-    DEFAULT_EXPORT_TIMEOUT=5400
+    # punar-agentd restart the retention-prune assertion needs) and the M9
+    # approval/credential/privilege exercise (bounded 20 min in-guest; its
+    # waits are wall-clock TTLs — a 300 s approval expiry and a 65 s grant
+    # expiry — so they cost the same under TCG as under KVM, while the
+    # quickshell/grim round trips are the slow parts).
+    DEFAULT_EXPORT_TIMEOUT=7200
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -473,6 +516,10 @@ run_desktop() {
           "${PROOF_DIR}"/m8-*.json \
           "${PROOF_DIR}"/m8-*.txt \
           "${PROOF_DIR}/punar-m8.png" \
+          "${PROOF_DIR}/m9-report.txt" \
+          "${PROOF_DIR}"/m9-*.json \
+          "${PROOF_DIR}"/m9-*.txt \
+          "${PROOF_DIR}/punar-m9.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -581,7 +628,8 @@ run_desktop() {
                      m4-explain-unknown.txt \
                      m5-report.txt punar-m5.png punar-m5-personal.png \
                      m7-report.txt punar-m7.png \
-                     m8-report.txt punar-m8.png; do
+                     m8-report.txt punar-m8.png \
+                     m9-report.txt punar-m9.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -607,14 +655,26 @@ run_desktop() {
             # agents.access result, the stored ledger record and index.json,
             # the panel's runtime view, the attributed audit denial that the
             # Level-4 join is proven against, and the privacy/purge renders)
-            # for the phase-10 verdict.
+            # for the phase-10 verdict — and the M9 approval/credential
+            # snapshots (m9-*.txt/.json: m9-report.txt, the launch block,
+            # the approval_required and denial renders, the credential
+            # cards (stderr only — the VALUE never touches a file), the
+            # redaction sweep's COUNTS, the approvals list/get objects, the
+            # exported approval document phase 11 re-validates against
+            # schemas/audit/approval.json, the agents.access result showing
+            # the ledger's credential rows filled in, and the audit slices
+            # both pointer directions are proven against) for the phase-11
+            # verdict. No M9 artifact carries a credential value — that is
+            # asserted in-guest by m9-check group 9 against this very tar,
+            # which is why the exercise runs before the export.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
                      "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
                      "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt \
                      "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt \
                      "${guest_dir}"/m7-*.json "${guest_dir}"/m7-*.jsonl \
                      "${guest_dir}"/m7-*.txt \
-                     "${guest_dir}"/m8-*.json "${guest_dir}"/m8-*.txt; do
+                     "${guest_dir}"/m8-*.json "${guest_dir}"/m8-*.txt \
+                     "${guest_dir}"/m9-*.json "${guest_dir}"/m9-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -915,6 +975,79 @@ run_desktop() {
         exit 1
     else
         echo "==> M8 exercise: no report under TCG (informational only; emulated runs are not M8-gated)"
+    fi
+
+    # Phase 11: M9 exercise verdict (milestone-9.md §12) — same pattern as
+    # the M2–M8 gates. The guest wrote /run/punar/m9-report.txt (per-assertion
+    # ok/FAIL lines + a final PUNAR_M9_OK / PUNAR_M9_FAIL line) via
+    # punar-m9-check.service: the approval gate, the mock credential broker
+    # and just-in-time privilege — an agent-originated mutation answered
+    # `approval_required` with nothing applied, the agent's own attempt to
+    # approve it refused and audited, the Plate D-003 overlay screenshot, the
+    # human resolve that finally executes it with both pointer directions in
+    # the audit trail, an unanswered approval expiring, allow/request/deny
+    # credential classes, a credential that really expires, THE REDACTION
+    # SWEEP, the M8 ledger's credential rows filling in, and a one-minute
+    # privilege grant. Hard gate: a delivered FAIL — or a truncated report —
+    # fails this script. A MISSING report degrades exactly as M2–M8 do.
+    local m9_report="${PROOF_DIR}/m9-report.txt"
+    if [ -f "${m9_report}" ]; then
+        if grep -q 'PUNAR_M9_FAIL' "${m9_report}"; then
+            echo "error: M9 exercise reported PUNAR_M9_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m9_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M9_OK' "${m9_report}"; then
+            echo "==> M9 exercise: PUNAR_M9_OK ($(grep -c '^ok' "${m9_report}" || true) assertions passed)"
+        else
+            echo "error: m9-report.txt carries no PUNAR_M9_OK/PUNAR_M9_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m9_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M9_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M9 exercise reported PUNAR_M9_FAIL on the serial console (export did not deliver m9-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M9_OK' "${SERIAL_LOG}"; then
+        echo "==> M9 exercise: PUNAR_M9_OK (verdict from serial console; export did not deliver m9-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        echo "error: no m9-report.txt in the export and no M9 verdict on serial — the M9 exercise did not run" >&2
+        exit 1
+    else
+        echo "==> M9 exercise: no report under TCG (informational only; emulated runs are not M9-gated)"
+    fi
+
+    # Phase 11b: the OTHER half of the M9 approval-document assertion.
+    #
+    # The desktop image ships no JSON-Schema validator — no python, no
+    # jsonschema — so m9-check asserts the approval object's shape with jq
+    # in the guest and exports the document. Here it is replayed against the
+    # SHIPPED schemas/audit/approval.json, so a drift between what punard
+    # actually emitted and what schemas/ promises fails CI instead of
+    # passing an in-guest spot-check (milestone-9.md §12 group 3).
+    #
+    # Run through the same containerized validator tools/validate-schemas.sh
+    # uses, because this host is not assumed to have jsonschema either. A
+    # validation FAILURE is fatal; a missing docker is a warning, since the
+    # jq half already ran in the guest and the contracts job validates the
+    # committed fixtures on every push regardless.
+    local m9_doc="${PROOF_DIR}/m9-approval-doc.json"
+    if [ -s "${m9_doc}" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            if docker run --rm -v "${REPO_ROOT}:/w" -v "${PROOF_DIR}:/proof:ro" \
+                    -w /w python:3.12-slim sh -c \
+                    "pip install -q jsonschema pyyaml referencing && \
+                     python tools/validate_schemas.py \
+                       --document /proof/m9-approval-doc.json \
+                       --schema schemas/audit/approval.json"; then
+                echo "==> M9 approval document validates against schemas/audit/approval.json"
+            else
+                echo "error: the approval object punard emitted does NOT validate against schemas/audit/approval.json" >&2
+                exit 1
+            fi
+        else
+            warn "desktop-test: docker is unavailable, so the exported M9 approval document was not re-validated against schemas/audit/approval.json (the in-guest jq shape assertions still ran)"
+        fi
+    else
+        warn "desktop-test: no m9-approval-doc.json in the export; the host-side schema replay was skipped"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

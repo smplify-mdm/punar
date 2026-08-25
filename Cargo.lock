@@ -250,6 +250,16 @@ dependencies = [
 [[package]]
 name = "punar-secrets"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "punar-common",
+ "punar-policy",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "signal-hook",
+]
 
 [[package]]
 name = "punar-workspace"
@@ -266,6 +276,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "punar-common",
+ "rustix",
  "serde",
  "serde_json",
 ]
@@ -280,6 +291,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "serde_norway",
  "signal-hook",
  "thiserror",
 ]

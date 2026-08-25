@@ -18,24 +18,35 @@ use std::time::Duration;
 
 use std::collections::BTreeMap;
 
+use punar_common::aipolicy::{AiAuthority, AiRuling};
+use punar_common::approval::{
+    Approval, ApprovalEnvelope, ApprovalKind, ApprovalRequest, ApprovalStatus, Execution, Grant,
+    MAX_PENDING_APPROVALS, MAX_PENDING_PER_REQUESTER, PolicyCitation, RESULT_AGENT_CREATE_REFUSED,
+    RESULT_AGENT_PRIVILEGE_REFUSED, RESULT_APPROVAL_FLOOD, RESULT_SELF_APPROVAL_REFUSED, Requester,
+    RequesterPeer, ResolvedBy,
+};
 use punar_common::audit::{
     AGENT_SESSION_NONE, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
     RESOURCE_CAPABILITY_REGISTRY, count_events, next_event_id, tail,
 };
 use punar_common::ipc::{
-    AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
-    CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
-    FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
-    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
-    PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome, Request, Response,
-    SERVER_READ_TIMEOUT, StatusResult,
+    ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
+    ApprovalsResolveParams, AuditStatus, AuditTailParams, CapabilitiesGetParams,
+    CapabilitiesSetParams, CapabilityCompliance, Classification as WireClassification,
+    ComplianceBlock, ComplianceState, EnrollStartParams, EnrollStartResult, EnrollStatusResult,
+    EnrollStopResult, ErrorCode, FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method,
+    Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
+    PolicyExplainParams, PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams,
+    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
+    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
+    StatusResult,
 };
 use punar_common::time::utc_now_rfc3339;
-use punar_common::{AuditEvent, Decision, Redacted};
+use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 
+use crate::approvals::{self, ApprovalStore};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
 use crate::enroll::{
@@ -51,6 +62,10 @@ use crate::state::{
     migrate_m3_store,
 };
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
+
+mod m9;
+
+use m9::MutationAuthority;
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
@@ -125,11 +140,25 @@ pub struct DaemonConfig {
     pub os_release_path: PathBuf,
     /// M5 inventory source (injectable for tests).
     pub kernel_release_path: PathBuf,
+    /// M9: the approval summary the shell watches (docs/api/ipc.md section
+    /// 15). `/run/punard/approvals.json` in production — deliberately
+    /// inside the **root-owned** runtime directory, not beside
+    /// `status.json` in the user-writable `/run/punar`. Defaults to a
+    /// state-dir file so embedded/test daemons never write outside their
+    /// tempdir.
+    pub approvals_file: PathBuf,
+    /// M9: the shipped AI authority document (SPEC section 20).
+    pub ai_defaults_file: PathBuf,
+    /// M9: the uid an agent-raised approval is routed to — the console
+    /// user. 1000 in the image (`punar`); injectable for tests. Not a
+    /// presence check: see `Inner::console_user`.
+    pub console_uid: u32,
 }
 
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
         let status_file = state_dir.join("status.json");
+        let approvals_file = state_dir.join("approvals.json");
         DaemonConfig {
             socket_path,
             state_dir,
@@ -145,9 +174,16 @@ impl DaemonConfig {
             status_file,
             os_release_path: PathBuf::from("/etc/os-release"),
             kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
+            approvals_file,
+            ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
+            console_uid: DEFAULT_CONSOLE_UID,
         }
     }
 }
+
+/// The image's session user (`punar`, uid 1000) — who an agent-raised
+/// approval is routed to on an unenrolled personal device.
+pub const DEFAULT_CONSOLE_UID: u32 = 1000;
 
 /// Per-capability compliance bookkeeping (SPEC section 52, personal scope)
 /// plus the remediation loop-protection counters. In-memory only —
@@ -237,6 +273,12 @@ struct Inner {
     /// The last tuple written to the ipc.md section 9 status file, so the
     /// file is rewritten only when the summary actually changes.
     status_written: Mutex<Option<StatusSummary>>,
+    /// M9: approvals and privilege grants — one store, one lock, one
+    /// expiry sweep (crate::approvals).
+    approvals: Mutex<ApprovalStore>,
+    /// M9: the effective AI authority (SPEC section 20). Reloaded on every
+    /// enrollment transition, because an org layer may carry one.
+    ai: Mutex<AiAuthority>,
     /// Serializes `enroll.start`/`enroll.stop` without holding the state
     /// lock across the network + reconcile pipeline.
     enroll_in_progress: AtomicBool,
@@ -342,6 +384,17 @@ impl Daemon {
             );
         }
 
+        // M9: the approval store and the AI authority document. A store
+        // that will not open is fatal — a daemon that cannot record an
+        // approval must not serve a gate it cannot honour.
+        let approvals = ApprovalStore::load(
+            &cfg.state_dir,
+            cfg.approvals_file.clone(),
+            lookup_gid(&cfg.group_file, &cfg.group),
+        )?;
+        let ai =
+            crate::aipolicy::load_authority(&cfg.ai_defaults_file, &cfg.state_dir.join("policy.d"));
+
         let daemon = Daemon {
             inner: Arc::new(Inner {
                 cfg,
@@ -362,6 +415,8 @@ impl Daemon {
                 pending_inventory: AtomicBool::new(false),
                 last_sync_outcome: Mutex::new(None),
                 status_written: Mutex::new(None),
+                approvals: Mutex::new(approvals),
+                ai: Mutex::new(ai),
                 enroll_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
@@ -369,8 +424,15 @@ impl Daemon {
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
-        // the boot reconcile moments later with computed compliance).
+        // the boot reconcile moments later with computed compliance), and
+        // of the section 15 approval summary — which must exist and read
+        // "nothing pending" before the socket opens, so the overlay never
+        // has to distinguish "no approvals" from "punard has not started".
         daemon.inner.publish_status_summary();
+        {
+            let store = daemon.inner.approvals.lock().unwrap();
+            daemon.inner.publish_approvals_summary(&store);
+        }
         Ok(daemon)
     }
 
@@ -767,6 +829,18 @@ impl Inner {
         *self.effective.lock().unwrap() = doc;
     }
 
+    /// M9: re-read the AI authority documents (SPEC section 20) after an
+    /// enrollment transition, so an organization that publishes one takes
+    /// effect the moment its layer lands — the same live-reload the
+    /// enrollment chain already does for desired-state layers.
+    fn reload_ai_authority(&self) {
+        let authority = crate::aipolicy::load_authority(
+            &self.cfg.ai_defaults_file,
+            &self.cfg.state_dir.join("policy.d"),
+        );
+        *self.ai.lock().unwrap() = authority;
+    }
+
     /// Dispatch a typed request. The method table is closed at the type
     /// level ([`Method`]): unknown names never reach this point — they were
     /// already answered with `unknown_method` by the parse pipeline (SPEC
@@ -788,6 +862,15 @@ impl Inner {
             Method::EnrollStart(params) => self.handle_enroll_start(peer, params),
             Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
             Method::EnrollStop => self.handle_enroll_stop(peer),
+            // M9 (contract section 14.2).
+            Method::ApprovalsList => self.handle_approvals_list(),
+            Method::ApprovalsGet(params) => self.handle_approvals_get(params),
+            Method::ApprovalsCreate(params) => self.handle_approvals_create(peer, params),
+            Method::ApprovalsResolve(params) => self.handle_approvals_resolve(peer, params),
+            Method::ApprovalsConsume(params) => self.handle_approvals_consume(peer, params),
+            Method::PrivilegeRequest(params) => self.handle_privilege_request(peer, params),
+            Method::PrivilegeStatus => self.handle_privilege_status(peer),
+            Method::PrivilegeRevoke(params) => self.handle_privilege_revoke(peer, params),
         }
     }
 
@@ -871,6 +954,10 @@ impl Inner {
     /// preference, so effective == requested and the result is
     /// byte-identical to M3. Allow and deny, success and failure are all
     /// audited; `policy_ids` cites the winning source.
+    ///
+    /// **M9 (contract section 14.8): the request shape, validation, errors,
+    /// result object and audit action are unchanged.** Only the
+    /// authorization step grew — see [`Inner::authorize_capability_set`].
     fn handle_capabilities_set(
         &self,
         peer: &Peer,
@@ -882,58 +969,55 @@ impl Inner {
             .map_err(|reason| invalid_state(&reason))?;
 
         let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            // The root-only rule denies *before* policy is consulted
-            // (unchanged since M3). M5 amendment (contract section 5.4):
-            // when the target path is org-pinned, the citation names the
-            // pinning source — "personal defaults" would be a false
-            // citation on a managed path. Unpinned paths keep the M3/M4
-            // message byte-identical.
-            let pinning = {
-                let doc = self.effective.lock().unwrap();
-                doc.get(id).and_then(|entry| {
-                    (!entry.user_override_permitted).then(|| {
-                        (
-                            entry.provenance.source_name.clone(),
-                            entry.provenance.policy_id.clone(),
-                        )
-                    })
-                })
-            };
-            let mut denial_event =
-                AuditEvent::denial(&self.device_id, &actor, "capabilities.set", id);
-            if let Some((_, policy_id)) = &pinning {
-                denial_event.policy_ids = vec![policy_id.clone()];
-            }
-            self.log_audit(denial_event);
-            if let Some((source_name, policy_id)) = pinning {
-                return Err(IpcError::denied_org_pinned(id, &source_name, &policy_id));
-            }
-            let state_hint = match &params.desired_state {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            return Err(IpcError::denied_needs_root(
-                id,
-                Some(id),
-                &format!("sudo punarctl capabilities set {id} {state_hint}"),
-            ));
-        }
+        let authorized = self.authorize_capability_set(peer, &actor, id, params)?;
+        let extra_policy_ids = match &authorized {
+            // A grant is a section 39 Temporary Approved Exception, so the
+            // grant id belongs in `policy_ids` — it *is* the authority that
+            // permitted this call. (`audit-event.json` is closed and has no
+            // `details` field; M9 does not extend it, and inventing one to
+            // carry a grant id would be the tail wagging the schema.)
+            MutationAuthority::Grant { grant_id } => vec![grant_id.clone()],
+            MutationAuthority::Root | MutationAuthority::AiAllowed { .. } => Vec::new(),
+        };
+        self.execute_capability_set(&actor, cap, params, &extra_policy_ids)
+            .0
+    }
 
+    /// Run the authorized mutation: record the preference, recompute the
+    /// merge, apply the **effective** value, verify, audit.
+    ///
+    /// Returns the wire result **and** the [`Execution`] record, because
+    /// `approvals.resolve` runs exactly this pipeline and has to write down
+    /// what happened — including the `evt_` id, which is the link from an
+    /// approval into the audit trail (contract section 14.3).
+    fn execute_capability_set(
+        &self,
+        actor: &AuditActor,
+        cap: &dyn Capability,
+        params: &CapabilitiesSetParams,
+        extra_policy_ids: &[String],
+    ) -> (Result<Value, IpcError>, Execution) {
+        let id = params.capability.as_str();
         // Record the request as a User Preference layer entry (rank 5) and
         // recompute the merge. The preference is recorded even when a
         // higher layer overrides it — it becomes effective the moment the
         // override goes away (SPEC section 39).
-        self.preferences
-            .set(
-                id,
-                PreferenceEntry {
-                    value: params.desired_state.clone(),
-                    set_at: utc_now_rfc3339(),
-                    set_by: actor.user_id.clone(),
-                },
-            )
-            .map_err(|e| self.internal(&format!("persisting the preference failed: {e}")))?;
+        if let Err(e) = self.preferences.set(
+            id,
+            PreferenceEntry {
+                value: params.desired_state.clone(),
+                set_at: utc_now_rfc3339(),
+                set_by: actor.user_id.clone(),
+            },
+        ) {
+            let err = self.internal(&format!("persisting the preference failed: {e}"));
+            let execution = Execution {
+                result: "internal".to_string(),
+                error: Some(err.message.clone()),
+                ..Execution::default()
+            };
+            return (Err(err), execution);
+        }
         self.recompute_effective();
 
         let (effective_value, winning_policy_id) = {
@@ -944,15 +1028,17 @@ impl Inner {
             (entry.value.clone(), entry.provenance.policy_id.clone())
         };
         let overridden = effective_value != params.desired_state;
+        let mut policy_ids = vec![winning_policy_id];
+        policy_ids.extend(extra_policy_ids.iter().cloned());
         let audited = |outcome: AuditOutcome| {
             let mut event = AuditEvent::capabilities_set(
                 &self.device_id,
-                &actor,
+                actor,
                 &params.capability,
                 Decision::Allow,
                 outcome,
             );
-            event.policy_ids = vec![winning_policy_id.clone()];
+            event.policy_ids = policy_ids.clone();
             event
         };
         // Optional M4 result fields — emitted only when a higher layer
@@ -971,16 +1057,24 @@ impl Inner {
         // Idempotence: already in the effective state → audit noop.
         let already = cap.observe().ok().is_some_and(|cur| cur == effective_value);
         if already {
-            self.log_audit(audited(AuditOutcome::Noop));
+            let event_id = self.log_audit_id(audited(AuditOutcome::Noop));
             self.mark_settled(id);
-            return Ok(extend(
-                json!({ "descriptor": self.describe(cap), "changed": false }),
-            ));
+            return (
+                Ok(extend(
+                    json!({ "descriptor": self.describe(cap), "changed": false }),
+                )),
+                Execution {
+                    result: AuditOutcome::Noop.as_str().to_string(),
+                    changed: Some(false),
+                    audit_event_id: event_id,
+                    ..Execution::default()
+                },
+            );
         }
 
         if let Err(apply_err) = cap.apply(&effective_value) {
-            self.log_audit(audited(AuditOutcome::Failure));
-            return Err(IpcError::with_details(
+            let event_id = self.log_audit_id(audited(AuditOutcome::Failure));
+            let err = IpcError::with_details(
                 ErrorCode::ApplyFailed,
                 format!(
                     "Applying the new state for {id} failed: {apply_err}.\n\
@@ -988,27 +1082,43 @@ impl Inner {
                      Next step: check `journalctl -u punard` and retry."
                 ),
                 json!({ "capability": id, "stage": "apply" }),
-            ));
+            );
+            let execution = Execution {
+                result: AuditOutcome::Failure.as_str().to_string(),
+                changed: Some(false),
+                audit_event_id: event_id,
+                error: Some(err.message.clone()),
+                ..Execution::default()
+            };
+            return (Err(err), execution);
         }
 
         match cap.verify(&effective_value) {
             Ok(true) => {
-                self.log_audit(audited(AuditOutcome::Success));
+                let event_id = self.log_audit_id(audited(AuditOutcome::Success));
                 self.mark_settled(id);
-                Ok(extend(
-                    json!({ "descriptor": self.describe(cap), "changed": true }),
-                ))
+                (
+                    Ok(extend(
+                        json!({ "descriptor": self.describe(cap), "changed": true }),
+                    )),
+                    Execution {
+                        result: AuditOutcome::Success.as_str().to_string(),
+                        changed: Some(true),
+                        audit_event_id: event_id,
+                        ..Execution::default()
+                    },
+                )
             }
             verify_outcome => {
                 let observed = cap
                     .observe()
                     .unwrap_or(Value::String("unknown".to_string()));
-                self.log_audit(audited(AuditOutcome::VerifyFailed));
+                let event_id = self.log_audit_id(audited(AuditOutcome::VerifyFailed));
                 let why = match verify_outcome {
                     Err(e) => format!("verification errored: {e}"),
                     _ => "the system did not reach the requested state".to_string(),
                 };
-                Err(IpcError::with_details(
+                let err = IpcError::with_details(
                     ErrorCode::VerifyFailed,
                     format!(
                         "The change to {id} was applied but could not be verified: {why}.\n\
@@ -1020,7 +1130,15 @@ impl Inner {
                         "expected": effective_value,
                         "observed": observed,
                     }),
-                ))
+                );
+                let execution = Execution {
+                    result: AuditOutcome::VerifyFailed.as_str().to_string(),
+                    changed: Some(true),
+                    audit_event_id: event_id,
+                    error: Some(err.message.clone()),
+                    ..Execution::default()
+                };
+                (Err(err), execution)
             }
         }
     }
@@ -1087,6 +1205,13 @@ impl Inner {
     /// M3 result fields keep their M3 meaning: `drift` / `drift_count`
     /// describe the **pre-remediation** observation.
     fn reconcile_and_remediate(&self, actor: &AuditActor) -> ReconcileResult {
+        // M9: the lazy expiry sweep rides the existing reconcile timer, so
+        // an unattended device still retires lapsed approvals and grants
+        // without punard growing a timer of its own (SPEC section 6.3).
+        {
+            let mut store = self.approvals.lock().unwrap();
+            self.sweep_approvals(&mut store);
+        }
         let effective: BTreeMap<String, EffectiveEntry<Value>> =
             self.effective.lock().unwrap().entries.clone();
         let mut entries: Vec<ReconcileEntry> = Vec::new();
@@ -1691,6 +1816,7 @@ impl Inner {
         *self.device_token.lock().unwrap() = Some(token);
         *self.enrollment.lock().unwrap() = Some(enrollment);
         *self.org_layers.lock().unwrap() = loaded.layers;
+        self.reload_ai_authority();
         self.recompute_effective();
 
         // One full section 42 pass. Its sync hook (now enrolled) performs
@@ -1826,6 +1952,7 @@ impl Inner {
         }
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
+        self.reload_ai_authority();
         self.pending_compliance.store(false, Ordering::SeqCst);
         self.pending_inventory.store(false, Ordering::SeqCst);
         *self.last_sync_outcome.lock().unwrap() = None;

@@ -26,10 +26,18 @@ fixtures/agents/README.md and fixtures/projects/atlas/README.md tables.
 
 Run via tools/validate-schemas.sh (Docker; the host has no local jsonschema).
 Exit status: 0 iff every check passes.
+
+One-off mode (M9): `--document <path> --schema <path>` validates a single
+document that is NOT in the repo -- the approval object `m9-check` exported
+from the VM -- against a shipped schema, using the same local $ref registry.
+The desktop image has no JSON-Schema validator, so this is how a
+daemon-vs-schema drift fails CI instead of passing an in-guest jq spot-check
+(docs/development/milestone-9.md section 12).
 """
 
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import json
 import sys
@@ -134,7 +142,95 @@ def map_schema(relpath: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def build_registry() -> tuple[Registry, dict[str, dict], list[str]]:
+    """Load every schema, metaschema-check it, and build the $ref registry.
+
+    Returns (registry, {repo-relative path: schema doc}, [error strings]).
+    Shared by the full harness and the one-off --document mode below, so
+    both resolve $refs from the same local schemas/ tree and never over the
+    network.
+    """
+    registry = Registry()
+    schemas: dict[str, dict] = {}
+    errors: list[str] = []
+    for sp in sorted(
+        p for p in SCHEMAS.rglob("*.json") if "examples" not in p.relative_to(SCHEMAS).parts
+    ):
+        try:
+            doc = json.loads(sp.read_text(encoding="utf-8"))
+            Draft202012Validator.check_schema(doc)
+        except Exception as exc:  # noqa: BLE001 - report and continue
+            errors.append(f"schema  {rel(sp)}: {type(exc).__name__}: {exc}")
+            continue
+        sid = doc.get("$id")
+        if not sid:
+            errors.append(f"schema  {rel(sp)}: schema has no $id")
+            continue
+        registry = registry.with_resource(sid, Resource.from_contents(doc))
+        schemas[rel(sp)] = doc
+    return registry, schemas, errors
+
+
+def validate_one(document: Path, schema: Path) -> int:
+    """Validate ONE document against ONE schema, both named by path.
+
+    The escape hatch the in-VM exercises need (docs/development/
+    milestone-9.md section 12): the desktop image ships no JSON-Schema
+    validator -- no python, no jsonschema -- so `m9-check` asserts the shape
+    of the approval document with jq inside the guest, exports the document,
+    and tools/boot-test.sh replays it HERE against the real shipped schema.
+    Drift between what the daemon actually emitted and what schemas/
+    promises therefore fails CI, instead of passing a jq spot-check.
+
+    Deliberately outside the MANIFEST: the argument is not a fixture and
+    does not live in the repo -- it is one run's evidence, named on the
+    command line.
+    """
+    registry, _schemas, errors = build_registry()
+    for err in errors:
+        print(f"[FAIL] {err}")
+    if errors:
+        return 1
+    try:
+        schema_doc = json.loads(schema.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] schema {schema}: unreadable: {type(exc).__name__}: {exc}")
+        return 1
+    try:
+        instance = load_doc(document)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] document {document}: unparseable: {type(exc).__name__}: {exc}")
+        return 1
+    doc_errors = sorted(
+        Draft202012Validator(schema_doc, registry=registry).iter_errors(instance),
+        key=lambda e: e.json_path,
+    )
+    if doc_errors:
+        for e in doc_errors:
+            print(f"[FAIL] {document} vs {schema}: {e.json_path}: {e.message[:300]}")
+        return 1
+    print(f"[PASS] {document} validates against {schema}")
+    return 0
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Punar contract-layer validation harness")
+    parser.add_argument(
+        "--document",
+        type=Path,
+        help="validate ONE document (by path) instead of running the full harness",
+    )
+    parser.add_argument(
+        "--schema",
+        type=Path,
+        help="the schema to validate --document against (used together with it)",
+    )
+    args = parser.parse_args()
+    if args.document or args.schema:
+        if not (args.document and args.schema):
+            parser.error("--document and --schema are used together")
+        return validate_one(args.document, args.schema)
+
     failures = 0
     schema_count = 0
     doc_count = 0
@@ -147,27 +243,12 @@ def main() -> int:
             failures += 1
 
     # -- 1. Load every schema, check it against the metaschema, build registry
-    schema_paths = sorted(
-        p for p in SCHEMAS.rglob("*.json") if "examples" not in p.relative_to(SCHEMAS).parts
-    )
-    registry = Registry()
-    schemas: dict[str, dict] = {}  # repo-relative path -> schema doc
-    for sp in schema_paths:
-        label = f"schema  {rel(sp)}"
-        try:
-            doc = json.loads(sp.read_text(encoding="utf-8"))
-            Draft202012Validator.check_schema(doc)
-        except Exception as exc:  # noqa: BLE001 - report and continue
-            report(False, label, f"{type(exc).__name__}: {exc}")
-            continue
+    registry, schemas, schema_errors = build_registry()
+    for err in schema_errors:
+        report(False, err)
+    for schema_rel in schemas:
         schema_count += 1
-        sid = doc.get("$id")
-        if not sid:
-            report(False, label, "schema has no $id")
-            continue
-        registry = registry.with_resource(sid, Resource.from_contents(doc))
-        schemas[rel(sp)] = doc
-        report(True, label)
+        report(True, f"schema  {schema_rel}")
 
     validators: dict[str, Draft202012Validator] = {}
 

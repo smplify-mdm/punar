@@ -1,0 +1,61 @@
+# Punar personal defaults — AI authority (spec section 20). Policy id:
+# personal-defaults, rank 6 (os_secure_default) in the section 39 ladder.
+#
+# THIS FILE IS THE SHIPPED DOCUMENT, not a sample of one. It is compiled into
+# punard as the fallback (include_str!) and installed into the image at
+# /usr/share/punar/policy/ai-defaults.yaml, so there is exactly one copy to
+# keep honest — the M8 process-classes.json pattern. It validates against
+# schemas/policy/ai-policy.json through the existing
+# fixtures/policies/ai-policy-*.yaml glob in tools/validate_schemas.py.
+#
+# An organization layer in /var/lib/punar/policy.d outranks every line below
+# while the device is enrolled (section 39). Nothing here is a hard OS safety
+# constraint; those live in code, not in a file a policy can outrank.
+ai:
+  agents:
+    default:
+      # Zone grants are declared here because the section 20 example declares
+      # them and the schema requires the block on `default`. Milestone 9
+      # enforces NONE of them: filesystem zone mediation has no capability in
+      # this milestone. Declared, not enforced — and no surface may claim
+      # otherwise (SPEC 1.22).
+      filesystem:
+        workspace: read_write
+        home: read
+        ssh: deny
+        aws: deny
+
+      host:
+        # The three tokens that map to a real Milestone 9 capability
+        # (security.firewall, system.hostname, time.timezone). An AI agent
+        # may ASK for these and a human answers — in personal mode the user
+        # is the approver, so denying outright would violate section 73's
+        # "whether approval is possible" for a device whose owner is standing
+        # in front of it. Enrolled, an org baseline may say deny instead, and
+        # the agent is refused citing that organization.
+        firewall: approval_required
+        hostname: approval_required
+        timezone: approval_required
+        # Vocabulary from the section 20 example that maps to no capability
+        # in Milestone 9. These rules enforce nothing today and are printed
+        # with an explicit marker wherever they are shown; they are here so
+        # the day package installation becomes a capability, the gate is one
+        # line of policy away rather than a new design.
+        user_package: approval_required
+        system_package: approval_required
+        # Not approval_required: creating or elevating local accounts is not
+        # something an agent should be able to put in front of a tired human
+        # at all (SPEC section 60 — no path to persistent unrestricted root).
+        user_management: deny
+
+      network:
+        internet: allow
+        corp_dev: allow
+        corp_prod: deny
+
+      credentials:
+        # Read by punar-secrets through the class's declared policy_key.
+        # These are the section 20 example's own values.
+        github: allow
+        aws_dev: request
+        aws_prod: deny

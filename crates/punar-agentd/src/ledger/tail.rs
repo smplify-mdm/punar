@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 
 use punar_common::audit::AGENT_SESSION_NONE;
 use punar_common::ledger::{
-    MAX_AUDIT_DRAIN_BYTES, SecurityEventRef, SecurityEventType, TailPosition,
+    MAX_AUDIT_DRAIN_BYTES, ResourceCategory, ResourceClass, SecurityEventRef, SecurityEventType,
+    TailPosition,
 };
 use punar_common::{AuditEvent, Decision};
 
@@ -61,34 +62,86 @@ pub const MUTATING_ACTION_PREFIXES: [&str; 1] = ["enroll."];
 /// Map one attributed audit event to a Level-4 category, or `None` when
 /// it is not security-relevant.
 ///
-/// Ordered exactly as milestone-8.md section 4.2 states it — a denial is
-/// a denial first, whatever the action was:
+/// The caller ([`AuditTail::ingest_line`]) has already established that
+/// the event names a real agent session, so every rule below reads
+/// "…**by an agent**".
 ///
-/// 1. `decision == deny` on any attributed action → `denied_access`
-///    (**producer exists**: punard mutations, `agents.register` denials)
+/// Ordered as milestone-8.md section 4.2 states it — a denial is a denial
+/// first, whatever the action was — with the one M9 rule that has to sit
+/// **ahead** of the generic deny to exist at all:
+///
+/// 0. `action == approval.resolve` **and** `decision == deny` →
+///    `policy_bypass_attempt` (**producer since M9**: an AI agent that
+///    tries to answer an approval gate is refused by punard and audited
+///    with `result: "self_approval_refused"` — docs/api/ipc.md section
+///    14.5). Narrow by construction: only this one action, only when
+///    refused, only when the peer was attributed to an agent session.
+///    Without this rule the refusal would land as a generic
+///    `denied_access` and M8's written promise ("approval gates arrive
+///    with M9") would stay aspirational.
+/// 1. `decision == deny` on any other attributed action → `denied_access`
+///    (**producer exists**: punard mutations, `agents.register` denials,
+///    and since M9 `privilege.request` from inside an agent scope)
 /// 2. `decision == allow` on a mutating action → `privilege_request`
 ///    (**producer exists**)
-/// 3. `action == credential.request` → `credential_request` (**M9**)
+/// 3. `action == credential.request` → `credential_request`
+///    (**producer since M9**: `punar-secrets`)
 ///
-/// The four remaining enum values — `policy_bypass_attempt` (M9),
-/// `production_access` (M12), `sensitive_resource_access` (M9/M12) and
-/// `unknown_ai_execution` (the audit event exists today, but a detection
-/// has no persisted session, so in M8 it attaches to no ledger; M10 owns
-/// the unknown-agent ledger) — have no producer here and are reported in
-/// `not_yet_observed[]` instead of being quietly absent. Rule 3's
-/// `credential_request` has no producer either (punar-secrets is M9), so
-/// it is named there too: five of the seven are pending, two are live.
+/// The three remaining enum values — `production_access` (M12),
+/// `sensitive_resource_access` (M12) and `unknown_ai_execution` (the
+/// audit event exists today, but a detected process has no persisted
+/// session, so it attaches to no ledger until M10) — have no producer
+/// here and are reported in
+/// [`punar_common::ledger::not_yet_observed`] instead of being quietly
+/// absent: four of the seven are live, three are pending.
 pub fn classify(event: &AuditEvent) -> Option<SecurityEventType> {
+    if event.action == APPROVAL_RESOLVE_ACTION && event.decision == Decision::Deny {
+        return Some(SecurityEventType::PolicyBypassAttempt);
+    }
     if event.decision == Decision::Deny {
         return Some(SecurityEventType::DeniedAccess);
     }
     if event.decision == Decision::Allow && is_mutating(&event.action) {
         return Some(SecurityEventType::PrivilegeRequest);
     }
-    if event.action == "credential.request" {
+    if event.action == CREDENTIAL_REQUEST_ACTION {
         return Some(SecurityEventType::CredentialRequest);
     }
     None
+}
+
+/// The one action whose refusal is a bypass attempt rather than an
+/// ordinary denial (docs/api/ipc.md section 14.5).
+pub const APPROVAL_RESOLVE_ACTION: &str = "approval.resolve";
+
+/// The `punar-secrets` audit action that carries a credential class in
+/// `resource` (docs/api/ipc.md section 16.3).
+pub const CREDENTIAL_REQUEST_ACTION: &str = "credential.request";
+
+/// The Level-3 `credential_classes` contribution of one audit event, if
+/// it has one (milestone-9.md section 9.2).
+///
+/// M8 wired `drain_audit` for Level-4 references only, and documented an
+/// `Evidence::AuditEvent` variant it never produced. This is the missing
+/// door, and it is deliberately the narrowest one that can exist: an
+/// **allowed** `credential.request` contributes the class it names, and
+/// nothing else does. A *refused* credential contributes only the
+/// Level-4 `denied_access` reference rule 1 already makes — a credential
+/// that was not issued is not access, and recording it as a class the
+/// agent "used" would be a lie in the user's own privacy surface.
+///
+/// The value is the class **name** (`github`, `aws-dev`) and never a
+/// token, a token id or a hash: the broker's audit events carry the class
+/// only, which is the property that makes this safe (SPEC section 53).
+pub fn credential_class_of(event: &AuditEvent) -> Option<ResourceClass> {
+    if event.action != CREDENTIAL_REQUEST_ACTION || event.decision != Decision::Allow {
+        return None;
+    }
+    ResourceClass::new(
+        ResourceCategory::CredentialClasses,
+        event.resource.as_deref()?,
+    )
+    .ok()
 }
 
 fn is_mutating(action: &str) -> bool {
@@ -113,6 +166,13 @@ pub fn attributed_session(event: &AuditEvent) -> Option<&str> {
 pub struct DrainResult {
     /// `(session_id, reference)` in file order.
     pub references: Vec<(String, SecurityEventRef)>,
+    /// `(session_id, credential class)` in file order — the Level-3
+    /// contribution of an allowed `credential.request`
+    /// (milestone-9.md section 9.2). Kept beside the references rather
+    /// than folded into them because the two land in different halves of
+    /// the record: `resources.credential_classes[]` versus
+    /// `security_events[]`.
+    pub classes: Vec<(String, ResourceClass)>,
     pub position: TailPosition,
     /// The [`MAX_AUDIT_DRAIN_BYTES`] bound was hit; the next drain picks
     /// up where this one stopped rather than reading the rest now.
@@ -232,6 +292,12 @@ impl AuditTail {
         let Some(session_id) = attributed_session(&event) else {
             return;
         };
+        // Level 3 first: the class contribution is independent of whether
+        // the same event also produces a Level-4 reference, and an
+        // allowed `credential.request` produces both.
+        if let Some(class) = credential_class_of(&event) {
+            result.classes.push((session_id.to_string(), class));
+        }
         let Some(event_type) = classify(&event) else {
             return;
         };
@@ -425,8 +491,8 @@ mod tests {
                 "{action}"
             );
         }
-        // 3. Credential requests — no producer until M9, but the arm is
-        //    already here, which is why M9 needs no ledger code change.
+        // 3. Credential requests — a live producer since M9
+        //    (punar-secrets).
         assert_eq!(
             classify(&event(
                 "evt_4",
@@ -436,6 +502,35 @@ mod tests {
             )),
             Some(SecurityEventType::CredentialRequest)
         );
+        // 0. The M9 rule sits AHEAD of the generic deny, or it could
+        //    never fire: an agent refused at the approval gate would land
+        //    as an ordinary denied_access.
+        assert_eq!(
+            classify(&event("evt_7", "agt_a", "approval.resolve", Decision::Deny)),
+            Some(SecurityEventType::PolicyBypassAttempt)
+        );
+        // Narrow by construction: the same action ALLOWED is a human
+        // answering a gate, which is not a bypass attempt and (being a
+        // non-mutating action) is not a ledger event at all.
+        assert_eq!(
+            classify(&event(
+                "evt_8",
+                "agt_a",
+                "approval.resolve",
+                Decision::Allow
+            )),
+            None
+        );
+        // A refused credential is still a denial, never a bypass.
+        assert_eq!(
+            classify(&event(
+                "evt_9",
+                "agt_a",
+                "credential.request",
+                Decision::Deny
+            )),
+            Some(SecurityEventType::DeniedAccess)
+        );
         // Reads are not security events.
         for action in ["capabilities.get", "status", "agents.list", "audit.tail"] {
             assert_eq!(
@@ -444,6 +539,72 @@ mod tests {
                 "{action}"
             );
         }
+    }
+
+    #[test]
+    fn only_an_issued_credential_contributes_a_level_3_class() {
+        let mut allowed = event("evt_10", "agt_a", "credential.request", Decision::Allow);
+        allowed.resource = Some("aws-dev".to_string());
+        assert_eq!(
+            credential_class_of(&allowed).map(|c| c.as_str().to_string()),
+            Some("aws-dev".to_string()),
+            "the kebab-case class id travels verbatim into the ledger"
+        );
+
+        // A REFUSED credential is not access. It keeps its Level-4
+        // denied_access reference and contributes no class.
+        let mut refused = allowed.clone();
+        refused.decision = Decision::Deny;
+        assert_eq!(credential_class_of(&refused), None);
+        assert_eq!(
+            classify(&refused),
+            Some(SecurityEventType::DeniedAccess),
+            "the denial is still recorded, just not as a class the agent used"
+        );
+
+        // Nothing else in the trail contributes a class, whatever its
+        // resource looks like.
+        let mut other = event("evt_11", "agt_a", "capabilities.set", Decision::Allow);
+        other.resource = Some("security.firewall".to_string());
+        assert_eq!(credential_class_of(&other), None);
+
+        // A resource that is not a legal resource class is dropped rather
+        // than poisoning the record: the newtype's rules are the floor.
+        let mut bad = allowed.clone();
+        bad.resource = Some("/home/punar/.aws/credentials".to_string());
+        assert_eq!(credential_class_of(&bad), None);
+        bad.resource = None;
+        assert_eq!(credential_class_of(&bad), None);
+    }
+
+    #[test]
+    fn a_drain_carries_the_class_and_the_reference_of_one_issuance() {
+        let dir = temp_dir("audit-tail-classes");
+        let path = dir.join("audit.jsonl");
+        let mut writer = AuditWriter::open(&path).unwrap();
+        let mut issued = event(
+            "evt_20",
+            "agt_4f21c09ab3e1",
+            "credential.request",
+            Decision::Allow,
+        );
+        issued.resource = Some("github".to_string());
+        writer.append(&issued).unwrap();
+
+        let drained = AuditTail::new(&path).drain(TailPosition::default());
+        assert_eq!(
+            drained
+                .classes
+                .iter()
+                .map(|(sid, class)| (sid.as_str(), class.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("agt_4f21c09ab3e1", "github")]
+        );
+        assert_eq!(drained.references.len(), 1);
+        assert_eq!(
+            drained.references[0].1.event_type,
+            SecurityEventType::CredentialRequest
+        );
     }
 
     #[test]

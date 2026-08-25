@@ -24,9 +24,22 @@ pub const DEFAULT_SOCKET: &str = "/run/punard/punard.sock";
 /// daemons, one envelope.
 pub const AGENTD_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
 
+/// The third socket (M9, contract section 16.1): the secret broker
+/// `punar-secrets`. A separate daemon per SPEC section 11.4 — a broker
+/// with no state directory at all is the strongest available form of the
+/// "never written to disk" promise (milestone-9.md section 3.1).
+pub const SECRETS_SOCKET: &str = "/run/punar-secrets/secrets.sock";
+
 /// Method-name prefix that routes to [`AGENTD_SOCKET`] (contract section
 /// 10.5: `agents.*` names auto-route, even under `debug rpc`).
 pub const AGENTD_METHOD_PREFIX: &str = "agents.";
+
+/// Method-name prefix that routes to [`SECRETS_SOCKET`] (contract section
+/// 16.2). `approvals.*` and `privilege.*` deliberately do **not** appear
+/// here: the approval engine is punard (one store, one audit path, one
+/// expiry sweep — milestone-9.md section 3.2), and the broker is a client
+/// of it, not a second copy of it.
+pub const CREDENTIAL_METHOD_PREFIX: &str = "credential.";
 
 /// The one protocol version this client speaks (contract section 3.3).
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -45,8 +58,16 @@ pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
 /// 0 = success and 2 = usage (owned by clap) complete the set.
 pub const EXIT_ERROR: u8 = 1;
 pub const EXIT_DENIED: u8 = 3;
-pub const EXIT_APPROVAL_REQUIRED: u8 = 4; // reserved until Milestone 9
+/// Reserved since M3, **real as of M9**: a gated call created an approval
+/// and executed nothing (contract section 14.1).
+pub const EXIT_APPROVAL_REQUIRED: u8 = 4;
 pub const EXIT_UNREACHABLE: u8 = 5;
+
+/// The wire code that carries exit 4 (contract section 14.1).
+pub const CODE_APPROVAL_REQUIRED: &str = "approval_required";
+/// The M9 code for a lapsed approval or a lapsed credential TTL — distinct
+/// from `conflict`, which means *already resolved* (contract section 14.1).
+pub const CODE_EXPIRED: &str = "expired";
 
 /// Request envelope (contract section 3.1). `params` is omitted — not
 /// `{}` — for methods that take none.
@@ -72,12 +93,20 @@ struct Response {
     error: Option<WireError>,
 }
 
-/// The structured error object (contract section 4). `details` is machine
-/// data this CLI does not render; serde ignores it.
+/// The structured error object (contract section 4).
+///
+/// `details` was ignored until M9. It is kept now for exactly one reason:
+/// `approval_required` (contract section 14.1) carries the `approval_id`,
+/// `expires_at`, `capability`, `resource` and `policy_ids` of a request
+/// that was **not executed**, and SPEC section 73 requires the surface to
+/// say what is pending, who decides and how long it lasts. Everything
+/// else still renders from `message` alone.
 #[derive(Debug, Deserialize)]
 pub struct WireError {
     pub code: String,
     pub message: String,
+    #[serde(default)]
+    pub details: Option<Value>,
 }
 
 /// Everything that can go wrong with one call, already sorted by exit code.
@@ -104,11 +133,27 @@ impl CallError {
             CallError::Unreachable { .. } => EXIT_UNREACHABLE,
             CallError::Server(err) => match err.code.as_str() {
                 "denied" => EXIT_DENIED,
-                "approval_required" => EXIT_APPROVAL_REQUIRED,
+                CODE_APPROVAL_REQUIRED => EXIT_APPROVAL_REQUIRED,
                 _ => EXIT_ERROR,
             },
             CallError::Protocol { .. } => EXIT_ERROR,
         }
+    }
+
+    /// The server error object, when the failure came from a daemon.
+    pub fn server(&self) -> Option<&WireError> {
+        match self {
+            CallError::Server(err) => Some(err),
+            _ => None,
+        }
+    }
+
+    /// True for the M9 gate error (contract section 14.1) — the one error
+    /// that is not a failure: the request was recorded and is waiting on a
+    /// human, and nothing was executed.
+    pub fn is_approval_required(&self) -> bool {
+        self.server()
+            .is_some_and(|e| e.code == CODE_APPROVAL_REQUIRED)
     }
 
     /// The stderr text. Server messages pass through verbatim; local
@@ -255,13 +300,22 @@ impl Client {
 pub enum Target {
     Punard,
     Agentd,
+    /// M9 (contract section 16): the secret broker.
+    Secrets,
 }
 
 impl Target {
-    /// The daemon that owns `method` (contract section 10.5).
+    /// The daemon that owns `method` (contract sections 10.5, 16.2).
+    ///
+    /// `approvals.*` and `privilege.*` route to punard — they are not
+    /// listed here because punard is the fallback, and that is the point:
+    /// the approval store lives with the executor of the capabilities it
+    /// gates (milestone-9.md section 3.2).
     pub fn of_method(method: &str) -> Target {
         if method.starts_with(AGENTD_METHOD_PREFIX) {
             Target::Agentd
+        } else if method.starts_with(CREDENTIAL_METHOD_PREFIX) {
+            Target::Secrets
         } else {
             Target::Punard
         }
@@ -271,6 +325,7 @@ impl Target {
         match self {
             Target::Punard => PathBuf::from(DEFAULT_SOCKET),
             Target::Agentd => PathBuf::from(AGENTD_SOCKET),
+            Target::Secrets => PathBuf::from(SECRETS_SOCKET),
         }
     }
 
@@ -278,6 +333,7 @@ impl Target {
         match self {
             Target::Punard => "PUNARD_SOCKET",
             Target::Agentd => "PUNAR_AGENTD_SOCKET",
+            Target::Secrets => "PUNAR_SECRETS_SOCKET",
         }
     }
 
@@ -286,6 +342,7 @@ impl Target {
         match self {
             Target::Punard => "punard",
             Target::Agentd => "punar-agentd",
+            Target::Secrets => "punar-secrets",
         }
     }
 
@@ -300,16 +357,17 @@ impl Target {
 /// Resolve the socket for `target`: an explicit `--socket` wins, then the
 /// per-daemon environment override, then the contract default.
 ///
-/// `--socket` also accepts the two daemon **names** rather than a path
-/// (`--socket agentd`), which is how the section 74.4 negative probes
-/// target the sibling socket without a second flag: a path with no
-/// separator that names a daemon is a name, not a path — no file can be
-/// addressed as a bare `agentd` anyway (a relative socket path needs at
-/// least `./`).
+/// `--socket` also accepts the three daemon **names** rather than a path
+/// (`--socket agentd`, `--socket secrets`), which is how the section 74.4
+/// negative probes target a sibling socket without a second flag: a path
+/// with no separator that names a daemon is a name, not a path — no file
+/// can be addressed as a bare `agentd` anyway (a relative socket path
+/// needs at least `./`).
 pub fn resolve_socket(target: Target, flag: Option<&Path>) -> PathBuf {
     match flag.and_then(|p| p.to_str()) {
         Some("agentd") => Target::Agentd.socket_from_env_or_default(),
         Some("punard") => Target::Punard.socket_from_env_or_default(),
+        Some("secrets") => Target::Secrets.socket_from_env_or_default(),
         _ => match flag {
             Some(path) => path.to_path_buf(),
             None => target.socket_from_env_or_default(),
@@ -483,6 +541,63 @@ mod tests {
         assert!(!message.contains("status punard\n"), "{message}");
     }
 
+    /// M9 routing (contract section 16.2): `credential.*` belongs to the
+    /// broker; `approvals.*` and `privilege.*` stay on punard, because the
+    /// approval store lives with the executor of the gated capability.
+    #[test]
+    fn credential_methods_route_to_the_broker_and_approvals_do_not() {
+        assert_eq!(Target::of_method("credential.request"), Target::Secrets);
+        assert_eq!(Target::of_method("credential.classes"), Target::Secrets);
+        assert_eq!(Target::of_method("credential.show"), Target::Secrets);
+        assert_eq!(Target::of_method("approvals.resolve"), Target::Punard);
+        assert_eq!(Target::of_method("privilege.request"), Target::Punard);
+        assert_eq!(Target::of_method("secrets.dump"), Target::Punard);
+
+        let secrets = Client::for_target(Target::Secrets, None);
+        assert_eq!(secrets.socket, PathBuf::from(SECRETS_SOCKET));
+        let message = secrets
+            .connect_error(&io::Error::from(io::ErrorKind::NotFound))
+            .message();
+        assert!(
+            message.contains("systemctl status punar-secrets"),
+            "{message}"
+        );
+    }
+
+    /// The M9 gate error is not a failure: it carries the machine data the
+    /// section 73 surface needs, and it exits 4.
+    #[test]
+    fn approval_required_carries_its_details_and_exits_four() {
+        let err = interpret(
+            r#"{"v":1,"id":"ctl-9","error":{"code":"approval_required","message":"pending",
+                "details":{"approval_id":"apr_7c1d9a4e","expires_at":"2026-08-25T10:05:00Z",
+                "capability":"security.firewall","resource":"disabled",
+                "decision":"approval_required","policy_ids":["personal-defaults"]}}}"#,
+            "ctl-9",
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_APPROVAL_REQUIRED);
+        assert!(err.is_approval_required());
+        let details = err.server().unwrap().details.as_ref().unwrap();
+        assert_eq!(details["approval_id"], json!("apr_7c1d9a4e"));
+        assert_eq!(details["decision"], json!("approval_required"));
+    }
+
+    /// An error without `details` still parses — every pre-M9 error shape
+    /// is unchanged (contract section 3.3 tolerance).
+    #[test]
+    fn errors_without_details_still_parse() {
+        let err = interpret(
+            r#"{"v":1,"id":"ctl-9","error":{"code":"expired","message":"gone"}}"#,
+            "ctl-9",
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_ERROR);
+        assert!(!err.is_approval_required());
+        assert_eq!(err.server().unwrap().code, CODE_EXPIRED);
+        assert!(err.server().unwrap().details.is_none());
+    }
+
     /// `--socket agentd` is a daemon **name**, not a path: it is how the
     /// section 74.4 negative probes reach the sibling socket.
     #[test]
@@ -494,6 +609,10 @@ mod tests {
         assert_eq!(
             resolve_socket(Target::Agentd, Some(Path::new("punard"))),
             PathBuf::from(DEFAULT_SOCKET)
+        );
+        assert_eq!(
+            resolve_socket(Target::Punard, Some(Path::new("secrets"))),
+            PathBuf::from(SECRETS_SOCKET)
         );
         assert_eq!(
             resolve_socket(Target::Agentd, Some(Path::new("/tmp/x.sock"))),

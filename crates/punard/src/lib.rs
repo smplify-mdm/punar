@@ -15,11 +15,22 @@
 //! explainability set; `status` carries personal-scope section 52
 //! compliance. Design: docs/development/milestone-4.md.
 //!
+//! Milestone 9 (SPEC sections 20, 28, 48, 60): approvals became a real
+//! gate. `capabilities.set` from inside a managed agent session is
+//! evaluated against the section 20 AI authority document *before* the uid
+//! test — root-ness inside an agent scope buys no bypass — and an
+//! `approval_required` verdict raises a section 28 approval that only a
+//! human can answer ([`approvals`], [`aipolicy`], `server::m9`). A resolved
+//! privilege request mints a time-boxed, single-capability grant; there is
+//! still no path to persistent unrestricted root, and never a generic
+//! shell. Design: docs/development/milestone-9.md.
+//!
 //! Architectural law (SPEC sections 10, 60): privileged changes go through
 //! typed capability APIs only — there is **no** generic root-command RPC, no
 //! exec/shell method, ever. Authorization: socket filesystem admission +
-//! `SO_PEERCRED` per connection; mutations are root-only in M3
-//! (`personal-defaults` rule; JIT elevation is Milestone 9).
+//! `SO_PEERCRED` per connection; mutations are root-only for humans without
+//! a live section 48 grant, and agent-originated mutations answer to the
+//! section 20 AI authority document.
 //!
 //! Budget note (PERFORMANCE_BUDGETS.md sections 1.2/2.3): no async runtime —
 //! std threads, one per connection, capped; per-connection buffers are bounded
@@ -27,6 +38,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aipolicy;
+pub mod approvals;
 pub mod authz;
 pub mod backends;
 pub mod capability;

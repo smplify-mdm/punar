@@ -1,9 +1,25 @@
 [package]
 name = "punar-secrets"
-description = "Short-lived credential broker (SPEC section 11.4) — Milestone 0 placeholder"
+description = "Punar short-lived credential broker (SPEC sections 11.4, 29) — Milestone 9: mock provider, approval-gated classes, redaction by construction"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap = { workspace = true }
+punar-common = { workspace = true }
+punar-policy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Credential classes and AI authority documents are YAML data files, read
+# with the workspace's existing YAML dependency (M6 justification at the
+# [workspace.dependencies] table). No new crate enters the tree for M9.
+serde_norway = { workspace = true }
+# rustix: SO_PEERCRED + bind-before-listen without `unsafe` (the punard/
+# punar-agentd pattern, docs/api/ipc.md sections 1.2, 10.1, 16.1), plus the
+# `rand` feature for getrandom(2) — the token source ipc.md section 16.4
+# names. Features are additive; the workspace table already pins net + fs.
+rustix = { workspace = true, features = ["rand"] }
+# signal-hook: safe SIGTERM/SIGINT handling for graceful shutdown.
+signal-hook = { workspace = true }

@@ -1,0 +1,51 @@
+# M9 in-VM approval-gate / credential-broker / JIT-privilege exercise
+# (milestone-9.md §12). Runs m9-check.sh as ROOT — the same decided pattern
+# as punar-m3..m8-check.service (no User=, no sudo); every punarctl, qs and
+# grim invocation inside the script runs as punar via runuser with the live
+# session env, and every AGENT-originated call runs inside the managed
+# session's own scope cgroup through /usr/lib/punar/in-agent-scope.sh, which
+# needs greetd's autologin user manager to be up.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m8-check.service and BEFORE the /run/punar artifact export, so
+# m9-report.txt / m9-*.json / m9-*.txt / punar-m9.png ship in the existing
+# export tar. Same not-enabled pattern as punar-m2..m8-check — no .wants
+# symlink, so the mkosi preset-wipe lesson does not even come into play.
+#
+# The ordering matters more here than in any earlier milestone: this
+# exercise issues MOCK CREDENTIAL TOKENS and then greps the entire export
+# tar for them. The sweep is only honest if it runs before the tar is built.
+#
+# The agent session and its approvals live only inside this window, which
+# opens strictly after the idle-RAM sampling and the combined services-PSS
+# sample closed. punar-secrets.service, however, is resident for that sample
+# by design — M9's third daemon is inside the budget number, not hidden
+# behind this window (idle-ram.sh PUNAR_SERVICE_UNITS).
+
+[Unit]
+Description=Punar M9 approval gate, credential broker and JIT privilege exercise (CI)
+
+[Service]
+Type=oneshot
+# Timeout math, stated rather than copied. Bounded waits inside the script:
+#   180 s  managed session launch + registration
+#   300 s  approval-expiry wait — the SHIPPED 300 s TTL, because
+#          `capabilities.set` carries no ttl parameter by decision
+#          (milestone-9.md §5.1: its request shape is unchanged) and the
+#          image has no tool to hand-craft a socket frame. The clock is
+#          started early and the other groups run inside it, so the
+#          incremental cost is the remainder, not the whole 300 s.
+#    65 s  grant-expiry wait (a 1-minute grant + margin)
+#    12 s  overlay open settle + grim
+#     6 s  credential TTL-expiry wait (a 5 s token)
+#    60 s  scope teardown
+#   ~60 s  ~70 RPCs, jq passes, greps and the redaction sweep
+# ~11 min of bounded waiting in the worst case, most of it overlapped.
+# 20 min is generous TCG headroom, not an expectation: a run that actually
+# needs it has already gone wrong, and the report will name the assertion it
+# stopped at.
+TimeoutStartSec=20min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m9-check.sh

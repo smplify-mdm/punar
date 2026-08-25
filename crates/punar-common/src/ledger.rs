@@ -945,13 +945,28 @@ pub struct NotYetObserved {
     pub reason: String,
 }
 
-/// The canonical, complete not-yet-observed set for Milestone 8.
+/// The canonical, complete not-yet-observed set as of Milestone 9.
 ///
-/// Three Level-3 categories and four Level-4 categories have no
-/// mediation point in M8; naming them — with the milestone and the reason
-/// — is the difference between an honest empty array and a lie by
-/// omission (SPEC 1.22). When a producer ships, its row leaves this list
-/// and **no other ledger code changes**.
+/// Naming a producerless category — with the milestone and the reason —
+/// is the difference between an honest empty array and a lie by omission
+/// (SPEC 1.22). When a producer ships, its row leaves this list.
+///
+/// **Milestone 9 changed this list in both directions** (milestone-9.md
+/// section 9.3), which is the point of the idiom:
+///
+/// - *Left, because the producer shipped*: `credential_classes` (L3) and
+///   `credential_request` (L4) — `punar-secrets` now emits
+///   `credential.request` audit events carrying an `agent_session_id`;
+///   and `policy_bypass_attempt` (L4) — an AI agent that tries to resolve
+///   an approval is refused, audited, and classified
+///   ([`crate::ledger`] consumers see it through
+///   `punar_agentd::ledger::tail::classify`).
+/// - *Re-milestoned, because the honest date moved*: `mcp_servers`
+///   M9+ → M11+ (M9 ships no MCP or tool gateway; SPEC section 26 has no
+///   section 76 milestone of its own) and `sensitive_resource_access`
+///   M9/M12 → M12 (no mediation point observes sensitive zones in M9).
+///   Re-milestoning is the honest move; leaving a row that quietly
+///   promises the wrong milestone is not.
 pub fn not_yet_observed() -> Vec<NotYetObserved> {
     let row = |level: u8, category: &str, milestone: &str, reason: &str| NotYetObserved {
         level,
@@ -970,26 +985,9 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
         row(
             3,
             ResourceCategory::McpServers.as_str(),
-            "M9+",
-            "no tool or MCP gateway mediates MCP traffic yet (spec section 26)",
-        ),
-        row(
-            3,
-            ResourceCategory::CredentialClasses.as_str(),
-            "M9",
-            "punar-secrets is the producer of credential.request events (spec section 29)",
-        ),
-        row(
-            4,
-            SecurityEventType::CredentialRequest.as_str(),
-            "M9",
-            "no credential producer exists yet",
-        ),
-        row(
-            4,
-            SecurityEventType::PolicyBypassAttempt.as_str(),
-            "M9",
-            "approval gates arrive with M9",
+            "M11+",
+            "no tool or MCP gateway mediates MCP traffic yet (spec section 26); Milestone 9 \
+             shipped the credential broker, not a tool gateway",
         ),
         row(
             4,
@@ -1000,7 +998,7 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
         row(
             4,
             SecurityEventType::SensitiveResourceAccess.as_str(),
-            "M9/M12",
+            "M12",
             "no mediation point observes sensitive zones yet",
         ),
         row(
@@ -1609,9 +1607,16 @@ mod tests {
             .filter(|r| r.level == 3)
             .map(|r| r.category.as_str())
             .collect();
+        // M9 shipped punar-secrets, so `credential_classes` left this
+        // list. `mcp_servers` was re-milestoned M9+ -> M11+ rather than
+        // left promising a milestone that does not own it.
+        assert_eq!(level3, vec!["network_destinations", "mcp_servers"]);
         assert_eq!(
-            level3,
-            vec!["network_destinations", "mcp_servers", "credential_classes"]
+            rows.iter()
+                .find(|r| r.category == "mcp_servers")
+                .unwrap()
+                .milestone,
+            "M11+"
         );
         let level4: Vec<&str> = rows
             .iter()
@@ -1621,21 +1626,23 @@ mod tests {
         assert_eq!(
             level4,
             vec![
-                "credential_request",
-                "policy_bypass_attempt",
                 "production_access",
                 "sensitive_resource_access",
                 "unknown_ai_execution"
             ]
         );
-        // All seven Level-4 categories are accounted for: two have
-        // producers in M8 (`denied_access`, `privilege_request`) and the
-        // other five are named here. None is quietly absent (spec 1.22).
+        // All seven Level-4 categories are accounted for: four have
+        // producers as of M9 (`denied_access`, `privilege_request`,
+        // `credential_request`, `policy_bypass_attempt`) and the other
+        // three are named here. None is quietly absent (spec 1.22).
         let named: Vec<&str> = level4.clone();
         for event_type in SecurityEventType::ALL {
             let has_producer = matches!(
                 event_type,
-                SecurityEventType::DeniedAccess | SecurityEventType::PrivilegeRequest
+                SecurityEventType::DeniedAccess
+                    | SecurityEventType::PrivilegeRequest
+                    | SecurityEventType::CredentialRequest
+                    | SecurityEventType::PolicyBypassAttempt
             );
             assert!(
                 has_producer || named.contains(&event_type.as_str()),
@@ -1652,7 +1659,7 @@ mod tests {
     #[test]
     fn the_result_always_carries_the_privacy_notice_and_the_honesty_rows() {
         let result = AgentsAccessResult::from_record(&populated_record(), "2026-08-27T10:00:02Z");
-        assert_eq!(result.not_yet_observed.len(), 8);
+        assert_eq!(result.not_yet_observed.len(), 5);
         assert!(result.privacy.local_only);
         assert!(result.privacy.audit_trail_separate);
         assert_eq!(

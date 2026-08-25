@@ -60,6 +60,83 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     }
 }
 
+/// [`write_atomic`], plus `fsync` of the file **and** of the parent
+/// directory before the rename is considered done.
+///
+/// Milestone 9 uses this for approvals and privilege grants, where the M3
+/// tradeoff does not hold. The M3 stores are desired state: losing the last
+/// write means re-observing and re-applying. A grant is different — it is a
+/// *live authorization*, and the dangerous direction is asymmetric. Losing
+/// the creation of an approval is harmless (nothing executes); losing the
+/// **revocation** of a grant would resurrect privilege the user handed back,
+/// which is a fail-open. Two `fsync`s per human-paced action is a price
+/// worth paying for that, and the write volume is unchanged
+/// (PERFORMANCE_BUDGETS.md section 6.4: these writes are user-paced, not
+/// periodic).
+pub fn write_atomic_synced(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = parent.join(format!(".{file_name}.punard-tmp.{}", std::process::id()));
+    let open_excl = || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)
+    };
+    {
+        let mut f = match open_excl() {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&tmp)?;
+                open_excl()?
+            }
+            Err(e) => return Err(e),
+        };
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => {
+            // Directory fsync: without it the rename itself can be lost.
+            // Best-effort — a filesystem that refuses to open a directory
+            // read-only must not fail an otherwise-completed write.
+            if let Ok(dir) = File::open(&parent) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Remove `path` and `fsync` the parent directory, so an unlink that means
+/// "this authorization is over" survives a crash (see
+/// [`write_atomic_synced`]). A missing file is success.
+pub fn remove_synced(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// Outcome of a bounded subprocess run.
 #[derive(Debug)]
 pub struct CommandResult {

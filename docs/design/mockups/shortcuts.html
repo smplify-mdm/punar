@@ -1,0 +1,915 @@
+<meta charset="utf-8">
+<title>Punar Shortcuts</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one live desktop frame.
+     The two shortcut surfaces inside it are generated from a JSON copy of
+     `hyprctl binds -j` — the same transform the shell runs. No hand list. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  /* The frame is a display: every dimension inside it is a share of the frame's
+     own width (1cqw = 1% of it), so both surfaces read at true proportion. */
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    container-type: inline-size;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .frame:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .scr { position: absolute; inset: 0; display: flex; flex-direction: column; background: #EDEAE2; }
+
+  /* ---- bar (D-016 grammar, quoted not rebuilt) ---- */
+  .bar { flex: none; height: 30px; height: 3.42cqw; background: #FAF9F6; border-bottom: 1px solid #E6E4DE;
+    display: flex; align-items: center; justify-content: space-between; padding: 0 1.37cqw; position: relative; z-index: 3; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-size: 1.025cqw;
+    font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: #666; line-height: 1;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hm strong { color: #000; font-weight: 600; }
+  #modechip { display: none; align-items: center; margin-left: 0.9cqw; padding: 0.23cqw 0.91cqw; border-radius: 6px;
+    background: #000; color: #FAF9F6; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 8.5px; font-size: 0.97cqw; font-weight: 600; letter-spacing: 0.13em; text-transform: uppercase; }
+  .scr[data-state="submap"] #modechip { display: inline-flex; }
+
+  /* ---- desktop behind the surfaces ---- */
+  .desk { flex: 1; position: relative; min-height: 0; padding: 1cqw; display: flex; gap: 0.9cqw; }
+  .win { flex: 1; border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; overflow: hidden;
+    display: flex; flex-direction: column; min-width: 0; }
+  .win.active { border-color: #000; box-shadow: 0 0 0 1px #000; }
+  .win.wpanel { background: #08090A; border-color: #26282E; flex: 0 0 46%; }
+  .win.wpanel.active { border-color: #000; box-shadow: 0 0 0 1px #000; }
+  .wbar { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; padding: 0.7cqw 1cqw;
+    border-bottom: 1px solid #E6E4DE; flex: none; }
+  .wpanel .wbar { color: #7B8290; border-bottom-color: #26282E; }
+  .wbody { flex: 1; min-height: 0; padding: 1cqw 1.2cqw; overflow: hidden; }
+  .tline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 1.14cqw; color: #F2F3F5;
+    line-height: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tline .tp { color: #7B8290; } .tline .tout { color: #A8ADB6; }
+  .sk { height: 0.8cqw; border-radius: 2px; background: #EDEAE2; margin: 1cqw 0; }
+  .sk.d { background: #E6E4DE; }
+
+  /* ---- the transient hold overlay · panel surface (design language §6: OSD) ---- */
+  #hold { position: absolute; left: 50%; transform: translateX(-50%); bottom: 3.2cqw; width: 82cqw;
+    background: #08090A; border: 1px dashed #7B8290; border-radius: 10px;
+    padding: 1.6cqw 1.9cqw 1.3cqw; z-index: 6; pointer-events: none;
+    opacity: 0; visibility: hidden; transition: opacity 150ms cubic-bezier(0.2, 0, 0, 1); }
+  #hold.on { opacity: 1; visibility: visible; }
+  #hold .holdmast { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2cqw;
+    border-bottom: 1px solid #26282E; padding-bottom: 0.8cqw; margin-bottom: 1cqw; }
+  #hold .hmk { font-family: "Geist Mono", ui-monospace, monospace; font-size: 1.025cqw; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #F2F3F5; }
+  #hold .hms { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.91cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #7B8290; font-variant-numeric: tabular-nums; }
+  #hold-cols { column-count: 3; column-gap: 2.2cqw; }
+  #hold .hsec { break-inside: avoid; margin: 0 0 1.1cqw; }
+  #hold .hsech { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #7B8290; padding-bottom: 0.35cqw;
+    border-bottom: 1px solid #26282E; margin-bottom: 0.55cqw; }
+  #hold .krow { display: flex; align-items: center; gap: 0.7cqw; padding: 0.16cqw 0; }
+  #hold .cap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.97cqw; font-weight: 500;
+    letter-spacing: 0.10em; text-transform: uppercase; color: #F2F3F5; border: 1px solid #26282E;
+    border-radius: 6px; padding: 0.15cqw 0.42cqw; min-width: 2.4cqw; text-align: center; flex: none;
+    font-variant-numeric: tabular-nums; }
+  #hold .klab { font-size: 1.08cqw; color: #A8ADB6; line-height: 1.5; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #hold .modetag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.72cqw; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #7B8290; border: 1px solid #26282E;
+    border-radius: 6px; padding: 0 0.34cqw; flex: none; }
+  #hold .holdfoot { display: flex; justify-content: space-between; gap: 1.2cqw; margin-top: 0.5cqw;
+    border-top: 1px solid #26282E; padding-top: 0.7cqw;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #7B8290; font-variant-numeric: tabular-nums; }
+  #hold .holdfoot b { color: #F2F3F5; font-weight: 600; }
+
+  /* ---- the persistent help surface · paper ---- */
+  #help { position: absolute; inset: 1cqw; background: #FAF9F6; border: 1px solid #E6E4DE; border-radius: 10px;
+    z-index: 7; display: none; flex-direction: column; padding: 1.2cqw 1.5cqw 0.9cqw;
+    box-shadow: 0 30px 60px -24px rgb(28 24 16 / 0.28); }
+  .scr[data-state="help"] #help, .scr[data-state="search"] #help { display: flex; }
+  #help .helpmast { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2cqw; }
+  #help .hrule { border: 0; border-top: 2px solid #000; margin: 0.6cqw 0 0; }
+  .qrow { display: flex; align-items: center; gap: 0.8cqw; border-bottom: 1px solid #8C8880;
+    padding: 0.6cqw 0 0.4cqw; margin-bottom: 0.7cqw; }
+  .qrow .qp { font-family: "Geist Mono", ui-monospace, monospace; font-size: 1.14cqw; font-weight: 600;
+    color: #000; flex: none; }
+  #help-q { flex: 1; min-width: 0; border: 0; background: transparent; color: #000;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 1.14cqw; letter-spacing: 0.08em;
+    text-transform: uppercase; padding: 0; }
+  #help-q::placeholder { color: #8C8880; }
+  #help-q:focus { outline: none; }
+  .qrow.kfocus { border-bottom-color: #000; }
+  .qrow .qhint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; flex: none; }
+  /* Three real columns, not CSS multi-column: a multi-column body with a
+     vertical scroll silently pushes late sections out of view, and a
+     shortcut reference may not lose rows. Sections stay whole; the body is
+     the single vertical scroll when the tallest column overflows. */
+  #help-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; gap: 2cqw; align-items: flex-start; }
+  .hcol { flex: 1 1 0; min-width: 0; }
+  #help-body .hsec { margin: 0 0 0.9cqw; }
+  #help-body .hsech { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.82cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; padding-bottom: 0.3cqw;
+    border-bottom: 1px solid #E6E4DE; margin-bottom: 0.4cqw; }
+  .hrow { display: flex; align-items: center; gap: 0.55cqw; padding: 0.1cqw 0.3cqw; border-radius: 6px; }
+  .hrow.sel { outline: 2px solid #000; outline-offset: -1px; }
+  .hrow .chord { display: flex; align-items: center; gap: 0.18cqw; flex: none; }
+  .hrow .lab { font-size: 0.95cqw; color: #333; line-height: 1.36; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .hrow mark { background: #EDEAE2; color: #000; }
+  .hrow .rep { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.72cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; border: 1px solid #E6E4DE;
+    border-radius: 6px; padding: 0 0.34cqw; flex: none; }
+  .norow { padding: 0.2cqw 0.3cqw; }
+  .norow .lab { font-size: 1.05cqw; color: #666; }
+  .cap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.88cqw; font-weight: 500;
+    letter-spacing: 0.10em; text-transform: uppercase; border-radius: 6px; padding: 0.08cqw 0.36cqw;
+    flex: none; font-variant-numeric: tabular-nums; }
+  .cap.mod { color: #666; border: 1px solid #E6E4DE; background: transparent; }
+  .cap.term { color: #000; border: 1px solid #8C8880; background: #F4F2EC; min-width: 2.2cqw; text-align: center; }
+  .plus { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.8cqw; color: #666; flex: none; }
+  .modeblk { border: 1px solid #8C8880; border-radius: 10px; padding: 0.6cqw 0.7cqw 0.5cqw;
+    margin: 0 0 0.9cqw; }
+  .modeblk .mh { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #000; margin-bottom: 0.15cqw; }
+  .modeblk .ms { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.78cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-bottom: 0.4cqw; }
+  .modeblk .rep { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.72cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; flex: none; }
+  #help-foot { flex: none; border-top: 1px solid #E6E4DE; margin-top: 0.6cqw; padding-top: 0.6cqw;
+    display: flex; justify-content: space-between; gap: 1cqw;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; font-variant-numeric: tabular-nums; }
+  #help-foot b { color: #000; font-weight: 600; }
+
+  /* ---- submap mode surface (state 05) ---- */
+  #submap { position: absolute; left: 50%; transform: translateX(-50%); bottom: 3.2cqw; width: 46cqw;
+    background: #08090A; border: 1px solid #26282E; border-radius: 10px; padding: 1.3cqw 1.6cqw 1.1cqw;
+    z-index: 6; display: none; }
+  .scr[data-state="submap"] #submap { display: block; }
+  #submap .smh { font-family: "Geist Mono", ui-monospace, monospace; font-size: 1.025cqw; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #F2F3F5; }
+  #submap .sms { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.86cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #7B8290; margin: 0.2cqw 0 0.9cqw;
+    border-bottom: 1px solid #26282E; padding-bottom: 0.7cqw; }
+  #submap .krow { display: flex; align-items: center; gap: 0.7cqw; padding: 0.16cqw 0; }
+  #submap .cap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.97cqw; font-weight: 500;
+    letter-spacing: 0.10em; text-transform: uppercase; color: #F2F3F5; border: 1px solid #26282E;
+    border-radius: 6px; padding: 0.15cqw 0.42cqw; min-width: 2.4cqw; text-align: center; flex: none;
+    background: #26282E; }
+  #submap .klab { font-size: 1.08cqw; color: #A8ADB6; }
+  #submap .rep { font-family: "Geist Mono", ui-monospace, monospace; font-size: 0.72cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #7B8290; margin-left: auto; }
+
+  .dfoot { flex: none; border-top: 1px solid #E6E4DE; background: #FAF9F6; padding: 0.7cqw 1.2cqw 0.8cqw;
+    display: flex; justify-content: space-between; gap: 1cqw; flex-wrap: wrap; z-index: 2;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+
+  /* document-scale key caps, for the typography register */
+  .dcap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.10em; text-transform: uppercase; border-radius: 6px; padding: 3px 7px;
+    display: inline-block; font-variant-numeric: tabular-nums; }
+  .dcap.mod { color: #666; border: 1px solid #E6E4DE; }
+  .dcap.term { color: #000; border: 1px solid #8C8880; background: #F4F2EC; }
+  .dcap.bare { color: #000; border: 1px solid #8C8880; background: #EDEAE2; }
+  .dplus { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; color: #666; margin: 0 3px; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  .reg p .gap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #A31F2C; }
+  .reg p .tv { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #8A5A00; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) {
+    .statebtn, #hold { transition: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Shortcuts</strong></div>
+        <div class="meta">Hold overlay · shortcut help</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-017</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>A shortcut you cannot find is a shortcut you do not have.</h1>
+    <p class="deck">Spec §12.3 asks for two things — hold SUPER and see the chords, press <span class="dcap term">?</span> and read them all — and then states the requirement plainly: do not make people memorise dozens of undocumented shortcuts. Punar ships sixty-four described binds today and no surface that names a single one of them; a user sitting in front of a window they wanted closed had to ask another human what <span style="white-space:nowrap"><span class="dcap mod">SUPER</span><span class="dplus">+</span><span class="dcap term">Q</span></span> was. That is exactly the failure §12.3 names. The fix is not a documentation page. It is two surfaces generated from the compositor's own binding table, so the reference cannot drift from the machine it describes.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Shortcut surface states">
+      <button class="statebtn" id="sb-desktop" data-state="desktop" role="tab" aria-selected="true">01 · Desktop</button>
+      <button class="statebtn" id="sb-hold" data-state="hold" role="tab" aria-selected="false">02 · Hold</button>
+      <button class="statebtn" id="sb-help" data-state="help" role="tab" aria-selected="false">03 · Help</button>
+      <button class="statebtn" id="sb-search" data-state="search" role="tab" aria-selected="false">04 · Search</button>
+      <button class="statebtn" id="sb-submap" data-state="submap" role="tab" aria-selected="false">05 · Submap</button>
+      <span class="demohint">Hold S for Super · Shift/Ctrl layer · ? help · ↑↓ · Esc · R resize</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Interactive shortcut discoverability demo">
+      <div class="scr" id="scr" data-state="desktop">
+
+        <div class="bar" id="bar">
+          <div class="hm"><strong>Punar</strong> · 1 · Atlas<span id="modechip">Resize · HJKL · Esc</span></div>
+          <div class="hm" id="deskclock">08:26</div>
+        </div>
+
+        <div class="desk">
+          <div class="win wpanel active" id="win-term">
+            <div class="wbar">Terminal · ~/atlas</div>
+            <div class="wbody">
+              <div class="tline"><span class="tp">alice@punar ~/atlas %</span> hyprctl binds -j | jq length</div>
+              <div class="tline"><span class="tout">64</span></div>
+              <div class="tline"><span class="tp">alice@punar ~/atlas %</span></div>
+            </div>
+          </div>
+          <div class="win" id="win-editor">
+            <div class="wbar">Editor · atlas/src/main.rs</div>
+            <div class="wbody">
+              <div class="sk d" style="width:34%"></div>
+              <div class="sk" style="width:78%"></div>
+              <div class="sk" style="width:62%"></div>
+              <div class="sk" style="width:81%"></div>
+              <div class="sk d" style="width:27%"></div>
+              <div class="sk" style="width:69%"></div>
+            </div>
+          </div>
+
+          <!-- 02 · transient hold overlay: panel surface, click-through, dashed
+               because the hold mechanism itself is not yet verified (§7). -->
+          <div id="hold" aria-hidden="true">
+            <div class="holdmast">
+              <span class="hmk" id="hold-title">Holding Super</span>
+              <span class="hms" id="hold-sub">22 chords</span>
+            </div>
+            <div id="hold-cols"></div>
+            <div class="holdfoot">
+              <span id="hold-more"></span>
+              <span id="hold-help">? · all rows</span>
+            </div>
+          </div>
+
+          <!-- 05 · the resize submap drawn as a mode, not a list -->
+          <div id="submap" aria-hidden="true">
+            <div class="smh">Mode · Resize</div>
+            <div class="sms">Entered with Super + R · every key below is bare</div>
+            <div id="submap-rows"></div>
+          </div>
+
+          <!-- 03/04 · persistent help surface: paper, focusable, searchable -->
+          <div id="help" role="dialog" aria-label="Shortcut help">
+            <div class="helpmast">
+              <span class="hm"><strong>Punar</strong> · Shortcuts</span>
+              <span class="hm" id="help-chord">Super + / · Esc closes</span>
+            </div>
+            <hr class="hrule">
+            <div class="qrow" id="qrow">
+              <span class="qp">/</span>
+              <input id="help-q" autocomplete="off" spellcheck="false" placeholder="Type to filter" aria-label="Filter shortcuts">
+              <span class="qhint">↑↓ select · Esc close</span>
+            </div>
+            <div id="help-body"></div>
+            <div id="help-foot">
+              <span id="help-count"></span>
+              <span id="help-source">Source · hyprctl binds -j · cached at session start</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="dfoot">
+          <span id="dfoot-left">Every row generated from a JSON copy of hyprctl binds -j</span>
+          <span>Dashed overlay = hold mechanism not yet verified · <span class="simtag">Mockup</span></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Anti-drift register</h2>
+    <p class="assertion">The overlay is generated from the compositor's binding table on every session, and there is no second list anywhere — because a second list is a surface that lies the moment a chord changes.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The rule</span>
+      <p>The shell renders <span class="specref">hyprctl binds -j</span> and nothing else. Not a QML array, not a Markdown table, not a generated header — the live table the compositor is currently dispatching from. A hardcoded list is a second source of truth, and a second source of truth is a promise to be wrong later: the day someone moves the assistant scratchpad to <span class="specref">SUPER+SHIFT+A</span> (M7 did exactly that), a hand list keeps confidently printing the old chord to a user who then presses it and gets nothing. Punar's whole posture is that a surface does not claim what is not true. <span class="specref">spec §1.22 · §12.3 · design language §7</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">The transform</span>
+      <p>Four fields per bind, four rules. <strong>modmask + key → the chord</strong>: the mask is decoded against the standard modifier bits (SHIFT 1, CTRL 4, SUPER 64 — so <span class="specref">SUPER</span> is 64, <span class="specref">SUPER+SHIFT</span> 65, <span class="specref">SUPER+CTRL</span> 68) and rendered in one canonical order — SUPER, CTRL, SHIFT, ALT — never in bitmask order, so two chords with the same modifiers always read identically. <strong>description → the label</strong>, verbatim, never rewritten or title-cased by the shell. <strong>dispatcher → the section</strong> (Sect III). <strong>submap → the mode block</strong>: a non-empty submap field means the row belongs to a mode, not to the global grammar. The keysym gets a twelve-entry display table (<span class="specref">bracketleft → [</span>, <span class="specref">Return → ↵</span>, <span class="specref">escape → ESC</span>, arrows to glyphs); an unrecognised keysym renders uppercased verbatim and is never dropped. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">No description · no row</span>
+      <p>A bind whose description is empty is <strong>excluded</strong>. Not shown with its dispatcher as a fallback label, not shown as "unnamed" — excluded. That absence is the enforcement: an undescribed binding is invisible to every user of the machine, so the pressure to write a label lands on the person adding the binding, at the moment they add it, instead of on some later documentation pass that never happens. <span class="specref">punar-binds.conf</span> already uses <span class="specref">bindd</span> for all sixty-four binds precisely so this rule costs nothing today; the counter in the help footer prints <span class="specref">0 undescribed</span>, and the number rising is the alarm. <span class="specref">spec §1.22 · §11.8</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Order · config order</span>
+      <p>Rows inside a section appear in the order the compositor returns them, which is the order they are written in <span class="specref">punar-binds.conf</span> — focus, move, groups, resize, modes, layouts, workspaces, overview, apps, scratchpads, displays, screenshots, session. Not alphabetical: alphabetical order puts "Close window" above "Focus left" and destroys the grammar the config already teaches. There is no sort function in the shell to get wrong, and the maintainer reorders the reference by reordering the config — one place. The cost is real and stated: file order becomes a design surface. <span class="tv">To verify</span> — that <span class="specref">hyprctl binds -j</span> preserves registration order on 0.56.2. If it does not, the shell sorts by a stable dispatcher-order list instead, and the register is amended, not the claim. <span class="specref">design language §7</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">The range fold</span>
+      <p>Nine workspace binds are one idea. Rows fold when — and only when — the dispatcher is identical, the modmask is identical, the keys form a contiguous digit run, and the descriptions differ solely by that trailing integer: <span class="specref">Workspace 1…9</span>, <span class="specref">Move window to workspace 1…9</span>. Mechanical, reversible, and it hides nothing: sixty-four binds become forty-eight rows, and both numbers are printed in the help footer so the fold is auditable at a glance. Directional families (<span class="specref">Focus left/down/up/right</span>) do <em>not</em> fold — their labels differ by a word, not an index, and four verbs are four things to learn. <span class="specref">design language §7</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · Two-surface register</h2>
+    <p class="assertion">One source, two commitments: the held overlay is a glance you cannot touch, the help surface is a document you can work in.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Hold · what it shows</span>
+      <p>It shows exactly the bindings the modifier you are holding can reach <em>right now</em> — every bind whose modmask is SUPER alone, twenty-two rows in three columns. That is a mechanical filter, not a curated summary: nobody chooses which chords are "the ones people forget", the held modifier does. Adding SHIFT while still holding swaps the overlay to the fifteen <span class="specref">SUPER+SHIFT</span> rows; adding CTRL swaps to the four <span class="specref">SUPER+CTRL</span> rows. The footer counts the layers you are not looking at, so the overlay never implies it is the whole grammar. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">400 ms</span>
+      <p>The hold delay is <strong>400 ms</strong>. At 0 ms the overlay flashes on every chord you already know — <span class="specref">SUPER+Q</span> would strobe a panel across the screen — which prices fluency in visual noise and teaches people to dread their own leader key. At 1000 ms the question has already been abandoned; a second of nothing reads as "this does not do anything" and the user goes to a browser. A confident chord completes well under 250 ms, and hesitation is legible above roughly 350; 400 ms sits in the gap, above the fast typist and inside the pause that means "I have forgotten this". The timer exists only between press and either the chord or the deadline — nothing runs at rest. <span class="specref">spec §12.3 · §6.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Hold · commitment</span>
+      <p>Transient, non-interactive, and unfocusable: a layer-shell surface with <span class="specref">keyboardFocus: none</span> and an empty input region, so it is literally click-through and cannot steal a keystroke from the window under it. Bottom-centred, 82% of the display width, 24 px above the bottom edge — below the bar (which owns modality and must stay readable) and clear of the top two thirds where the focused window's own header and first lines live. It appears with a 150 ms opacity fade and <strong>disappears on the release frame with no fade-out</strong>: modifier state is binary, and a ghost that outlives the key is a surface lying about the keyboard. <span class="specref">design language §4 · §6 · spec §13.4</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Help · commitment</span>
+      <p>Persistent, focusable, complete: all forty-eight rows, every layer, every mode, on paper. Opened with <span class="specref">SUPER + /</span> (and with <span class="specref">?</span> from inside any shell surface that already owns the keyboard — a bare question mark cannot be a global bind without eating the character out of every text field). <span class="specref">/</span> focuses the filter, <span class="specref">↑↓</span> walk the visible rows, <span class="specref">ESC</span> closes and returns focus to the window that had it. Panel for the glance, paper for the document — the transient surface is an OSD and the persistent one is a shell surface, which is the surface assignment the design language already makes. <span class="specref">design language §6 · spec §12.1</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Help does not execute</span>
+      <p><span class="specref">↵</span> on a selected row does nothing. The help surface teaches a chord; it never runs one. Running it would mean the shell dispatching the row's dispatcher itself — a second execution path alongside the compositor's own, testable only by having both — and it would teach the wrong lesson, because the key the user pressed was not the chord they came to learn. The surface that <em>runs</em> things by name already exists and is one chord away: the command center, <span class="specref">SUPER+Space</span> (§12.2). Reference and execution are deliberately different rooms. <span class="specref">spec §12.2 · §12.3</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Overflow · 1366 × 768</span>
+      <p>Different answers, because the surfaces have different escape routes. <strong>Help</strong>: three columns above 1200 logical px, two above 900, one below; sections stay whole and a section longer than a column continues under a repeated header; the body is one vertical scroll (never a nested one), keyboard selection scrolls itself into view, and filtering is the real overflow answer — two letters usually beat any amount of scrolling. <strong>Hold</strong>: it may not scroll, because you cannot scroll a surface that vanishes when you let go. It drops to two columns, then shrinks the label to 12 px, and if a layer still does not fit, the final row is replaced by an honest count — <span class="specref">+6 more · ? for all</span> — because a reference that silently truncates is worse than one that admits it. Today's twenty-two-row SUPER layer fits three columns at 1366 with room. <span class="specref">spec §5.1 · §12.3</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Grouping and mode register</h2>
+    <p class="assertion">Sections come from the dispatcher, never from the label — and when the section table misses, the row still appears with its true chord under OTHER, because grouping may degrade but a row may not.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Five sections</span>
+      <p>In the order a person reaches for them: <strong>WINDOWS</strong> (focus, move, close, resize) · <strong>WORKSPACES AND PROJECTS</strong> (1…9, move-to, overview) · <strong>LAYOUTS</strong> (groups, fullscreen, float, pin, centre, presets) · <strong>SURFACES</strong> (command center, AI panel, terminal, browser, scratchpads — and System Control and approvals when they take chords) · <strong>SESSION</strong> (screenshots, end session). Frequency, roughly, and consequence: the section that ends things is last. Section order is fixed in the shell; row order inside a section is the config's (Sect I·04). <span class="specref">spec §12.3 · §13 · §14</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Dispatcher → section</span>
+      <p>A closed table keyed on the dispatcher — a vocabulary of about fifteen Hyprland verbs, not forty bindings: <span class="specref">movefocus · movewindow · killactive · submap · resizeactive</span> → WINDOWS; <span class="specref">workspace · movetoworkspace</span> → WORKSPACES; <span class="specref">togglegroup · moveintogroup · moveoutofgroup · changegroupactive · fullscreen · togglefloating · pin · centerwindow</span> → LAYOUTS; <span class="specref">togglespecialworkspace</span> → SURFACES; <span class="specref">exit</span> → SESSION. A new binding on a verb the table already knows files itself with no code change at all — which is the point: the table is small, closed, and changes an order of magnitude less often than the binds do. <span class="specref">spec §13.2 · §13.6</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">exec · and OTHER</span>
+      <p><span class="specref">exec</span> is not a verb, so it is disambiguated by the command, which Punar owns: a command containing <span class="specref">ipc call &lt;target&gt;</span> takes the section of that shell target (<span class="specref">overview</span> → workspaces, <span class="specref">commandcenter</span> and <span class="specref">aipanel</span> → surfaces) — a contract the shell itself defines and therefore cannot drift from — and a five-entry command table covers the rest (<span class="specref">punar-layout.sh</span> → layouts, terminal and browser → surfaces, <span class="specref">grim</span> → session). Rename one of those and its row does not vanish and is not mislabelled: it falls to <strong>OTHER</strong>, visible, with the real chord and the real description. OTHER renders only when it is non-empty, and it is empty today — <span class="specref">0 unmapped</span> in the footer. Same enforcement shape as the missing description: the mistake is loud, not silent. <span class="specref">spec §1.22</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">A submap is a mode</span>
+      <p>The resize submap is a state machine, and it is the one place the overlay teaches one. Three obligations. <strong>The door</strong>: <span class="specref">SUPER+R · Enter resize mode</span> carries a <span class="specref">MODE</span> tag in both surfaces — derived from the dispatcher being <span class="specref">submap</span>, not from a hand annotation — so it never reads as one more toggle. <strong>The room</strong>: the submap's own binds render in a bounded block with the mode named at its head and no modifier cap on any key, because those keys mean nothing outside it; the block's border is what says "only in here". The block prints the repeat flag the JSON already carries (<span class="specref">HJKL · repeats while held</span>) rather than a comment claiming it. <strong>The exit</strong>: both exits, always shown, never abbreviated to one. <span class="specref">spec §13.3 · design language §7</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">The mode chip</span>
+      <p>While a submap is active the bar prints the instrument chip D-007 already specified — <span class="specref">RESIZE · HJKL · ESC</span>: state, verbs, exit — in the centre zone D-016 reserved for modality and nothing else. The overlay and the chip are the same fact at two commitments: the chip is a persistent statement that you are in a mode, the block is the full key list you get by asking. A mode is never silent and never announced twice in the same place. <span class="specref">D-007 Sect II·03 · D-016 Sect I·02 · spec §12.3</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Nothing org-specific</span>
+      <p>No section, no row and no footer in either surface knows whether the machine is enrolled. There is no "organization shortcuts" group, no policy-restricted chord greyed out with a citation, no managed annotation of any kind: the keyboard grammar is the operating system's, identical on a personal laptop and a fleet device, exactly as D-007's desktop is. If enrolment ever removes a binding it will remove it from the compositor's table, and the reference will stop printing it — annotation, never restructuring. <span class="specref">design language §8 · spec §3.2 · §11</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Chord typography register</h2>
+    <p class="assertion">A chord is typeset, not spelled — the modifier is the constant and the key is the variable, and the type must say which is which before the words are read.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The cap</span>
+      <p>Geist Mono 500, 10 px, uppercase, +0.10em tracking, <span class="specref">tabular-nums</span>, 1 px border, 6 px radius, 3 px / 7 px padding — the tag idiom from the design language, at tag size. Tracking is 0.10em rather than the 0.12–0.14em of meta rows because a cap is a unit, not a label: it must hold together as one object. Caps sit on a 3 px gutter inside a chord and a 10 px gutter from the label. Terminal key caps carry a <span class="specref">min-width</span> of 22 px so a one-character key and a five-character key make the same silhouette down a column. <span class="specref">design language §1 · §3</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Modifier vs key</span>
+      <p>Two weights of the same object. A <strong>modifier cap</strong> is ink-3 <span class="specref">#666</span> on a <span class="specref">#E6E4DE</span> hairline with no fill — <span class="dcap mod">Super</span> — it recedes, because on a page of SUPER chords it carries no information. A <strong>terminal key cap</strong> is ink <span class="specref">#000</span> on an input-weight <span class="specref">#8C8880</span> border with a <span class="specref">#F4F2EC</span> fill — <span class="dcap term">Q</span> — it is the thing that varies and the thing you are looking for. The eye lands on the key and the modifier stays legible without competing. <span class="specref">design language §1 · §9.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Two modifiers</span>
+      <p>Modifiers chain outward-in, in the canonical order, joined by a 9 px ink-3 plus with 3 px either side: <span class="dcap mod">Super</span><span class="dplus">+</span><span class="dcap mod">Shift</span><span class="dplus">+</span><span class="dcap term">H</span>. Both modifiers recede identically, so <span class="specref">SUPER+SHIFT+H</span> and <span class="specref">SUPER+H</span> differ by one inserted grey object and the same black key sits at the end of both — the reader compares the ends of the rows, which is where the meaning is. The plus is deliberately the keyboard vernacular and not a middle dot; the middle dot is the field note's separator for facts of equal weight, and these are not. <span class="specref">design language §1 · §5</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">The held modifier is silent</span>
+      <p>In the hold overlay every row shares the modmask by construction, so <strong>the modifier is stated once in the header</strong> — <span class="specref">HOLDING SUPER</span> — and each row prints its key alone. Twenty-two rows of "SUPER" would be twenty-two repetitions of the one fact the user's own hand is currently asserting. On panel the cap inverts: <span class="specref">#F2F3F5</span> text on a <span class="specref">#26282E</span> hairline, no fill. In the help surface, where the modmask varies row to row, every chord prints in full. Same data, different context, different rendering — and the rule for which is mechanical, not editorial. <span class="specref">design language §6 · spec §12.3</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">A bare submap key</span>
+      <p>A key inside a mode must not read as a chord. It gets the cap silhouette but a filled ground and no companion — <span class="dcap bare">H</span> — and it never appears outside the bounded mode block. Filled where a global cap is hollow, alone where a global chord has a modifier, enclosed where global rows are open: three signals that this key is only true inside this room. It would be cheaper to print "H" as plain text, and it would be wrong: bare text reads as prose, and this is still something you press. <span class="specref">design language §1 · §7</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Monochrome, on purpose</span>
+      <p>Neither surface contains a single status colour. A keyboard reference has no status to report — nothing here is compliant, pending, expiring or denied — and the design language is explicit that a screen with nothing to report contains no colour. Consequences are exact: no green "available", no red "destructive" on <span class="specref">SUPER+Q</span> or <span class="specref">SUPER+SHIFT+E</span> (the compositor does not tell us which dispatchers are destructive, and inventing that judgement in a reference is the drift this plate exists to prevent), no colour-coded sections. The only ink that is not ink is the focus ring, and it is ink too: 2 px, offset 2 px, no colour dependence. <span class="specref">design language §2 · §9.4 · spec §52</span></p></div>
+    <div class="reg"><span class="no">07</span><span class="what">Futures do not appear</span>
+      <p><span class="specref">keyboard-grammar.md</span>'s future table — clipboard history, media and brightness keys, lock/DPMS, per-workspace presets — produces <strong>no rows in either surface</strong>, dashed or otherwise. §7 says a dashed stroke marks a mechanism outside the current production claim, and in a diagram that is honesty; in a list of keys to press it is noise, because every row of this surface is an instruction and a dashed instruction is one the user will follow and be failed by. The roadmap has a home and it is the grammar document. The dashed strokes on <em>this plate</em> mark the surfaces themselves, which is the correct scope: the mechanism, not the content. <span class="specref">design language §7 · spec §1.22</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the help surface is a chord and an IpcHandler away, and the hold overlay is honestly blocked on a compositor question nobody has answered yet.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Shortcuts.qml · IPC</span>
+      <p>New <span class="specref">shell/punar-shell/Shortcuts/Shortcuts.qml</span>, instantiated in <span class="specref">shell.qml</span> beside CommandCenter and Overview, with <span class="specref">IpcHandler { target: "shortcuts" }</span> and functions <span class="specref">toggle()</span> / <span class="specref">open()</span> / <span class="specref">close()</span> / <span class="specref">state()</span> — the exact contract shape the command center, overview and AI panel already use, and the same one the M2 CI exercise drives. Two layer surfaces inside it: the help <span class="specref">PanelWindow</span> (keyboard focus exclusive while open) and the hold overlay (<span class="specref">keyboardFocus: none</span>, empty input mask). One new variable in <span class="specref">hyprland.conf</span>: <span class="specref">$shortcuts = qs -p /usr/share/punar/shell ipc call shortcuts toggle</span>. <span class="specref">shell/punar-shell/README.md · ipc.md</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">The help bind</span>
+      <p>One line in <span class="specref">punar-binds.conf</span>: <span class="specref">bindd = $mod, slash, Shortcut help, exec, $shortcuts</span> — which, satisfyingly, means the help surface's own chord arrives in the help surface through the same transform as everything else, with no special case. <span class="gap">No bind exists today.</span> The mechanism, though, is proven three times over by shipped surfaces, which is why the help surface is drawn <em>solid</em> in the frame: §7's stroke claims the mechanism, not the merge. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">SUPER-hold · the honest problem</span>
+      <p>Hyprland emits no "modifier held" event. There is no dispatcher, no socket2 event and no Quickshell property that says SUPER is currently down, so the 400 ms hold must be assembled from press and release binds on the bare <span class="specref">SUPER_L</span> keysym — and every candidate has an open question on 0.56.2. <strong>(a) Release</strong>: <span class="specref">bindr</span> on <span class="specref">SUPER, SUPER_L</span> is the established tap-to-launch idiom, so a release signal is very likely available — <span class="tv">to verify</span> that it fires after a chord as well as after a bare tap, since the overlay must hide either way. <strong>(b) Long press</strong>: recent Hyprland carries an <span class="specref">o</span> (longPress) bind flag; if it fires for a modifier-only bind, and if its delay is configurable, it <em>is</em> the design — <span class="tv">to verify</span> the flag exists in 0.56.2, applies to modifier keysyms, and exposes a delay. <strong>(c) Non-consuming press + shell timer</strong>: <span class="specref">bindin</span> on <span class="specref">SUPER_L</span> to arm a 400 ms timer in the shell, paired with (a) to disarm — <span class="tv">to verify</span> that a non-consuming bind on the modifier itself does not disturb the fifty-eight chords built on it, which is the risk that would make this unshippable. Nothing above is asserted as working; the frame draws the overlay dashed for exactly this reason. <span class="specref">spec §1.22 · design language §7</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Failure modes and the fallback</span>
+      <p>A missed release — VT switch, session lock, a window grabbing the keyboard mid-hold — would strand the overlay on screen forever, so it carries a 10 s self-cancel regardless of what the compositor says, and it hides on any Hyprland focus-change event. If none of (a)–(c) verifies, the decision is already made: <strong>ship the help surface alone.</strong> <span class="specref">SUPER + /</span> satisfies the second half of §12.3 with mechanisms that exist today, and half of a discoverability requirement met honestly beats a hold overlay that works on three machines out of four. The overlay is then a compositor task, not a shell task, and it is written down as one. <span class="specref">spec §12.3 · §1.22</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Parse and cache</span>
+      <p><span class="specref">hyprctl binds -j</span> runs <strong>once per session</strong>, lazily on the first open of either surface, through a Quickshell <span class="specref">Process</span> with a JSON parse inside a try — a malformed or empty result renders the calm empty state and never an exception. The parsed rows and the built sections are cached in memory; the surfaces re-render from the cache, never from a new query. Invalidation has exactly one trigger: a config reload. The shell listens on the socket2 stream it already consumes for <span class="specref">configreloaded</span> and drops the cache when it arrives (<span class="tv">to verify</span> — that 0.56.2 emits that event name on socket2; if it does not, the fallback is to invalidate on shell restart and on an explicit <span class="specref">ipc call shortcuts reload</span>, which is honest but manual). There is no poll, no timer and no file watch: at rest the whole feature costs one cached array and nothing else. While the overlay is held, per-frame work is zero — it is a static item with no animation, no countdown and no binding that re-evaluates. <span class="specref">spec §6.3 · §11.8</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Counts today</span>
+      <p><span class="specref">punar-binds.conf</span> at this plate's date: <strong>64</strong> described binds — 58 global plus 6 inside the resize submap — folding to <strong>48</strong> rows, of which 22 sit on SUPER alone, 15 on SUPER+SHIFT, 4 on SUPER+CTRL, 1 on no modifier (<span class="specref">Print</span>), and 6 inside the mode. Zero undescribed, zero unmapped. Every number in the frame is computed from the same table the rows are, so this paragraph and the surface cannot disagree — and if they do, this paragraph is the one that is stale. <span class="specref">os/modules/desktop/hypr/punar-binds.conf</span></p></div>
+    <div class="reg"><span class="no">07</span><span class="what">Milestone</span>
+      <p><span class="specref">keyboard-grammar.md</span> books this as M2+ and it slipped; M9 and M10 are in flight. The plate asks for it in the milestone that picks up the remaining §12.1 keyboard flows — <strong>M11</strong>, alongside the battery/network/audio slots D-016 parked there — with the help surface as the shipping commitment and the hold overlay conditional on Sect V·03 verifying first. Acceptance is two lines: rename any binding's description in the config, reload, and see the new label in the surface without touching QML; delete a description, reload, and see the row disappear. <span class="specref">spec §76 · §12.3</span></p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/shortcuts.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var frame = document.getElementById('frame');
+  var scr = document.getElementById('scr');
+  var holdEl = document.getElementById('hold');
+  var helpEl = document.getElementById('help');
+  var q = document.getElementById('help-q');
+  if (!frame || !scr || !holdEl || !helpEl || !q) return;
+
+  // ---------------------------------------------------------------------
+  // RAW — a JSON copy of `hyprctl binds -j`, field for field, in config
+  // order. This is the ONLY data in the page; every row, count and section
+  // below is derived from it by the transform in Sect I.
+  // ---------------------------------------------------------------------
+  var RAW = [];
+  function b(mm, key, desc, disp, arg, submap, repeat) {
+    RAW.push({ mm: mm, key: key, desc: desc, disp: disp,
+      arg: arg || '', submap: submap || '', repeat: !!repeat });
+  }
+  var S = 64, SS = 65, SC = 68;   // SUPER, SUPER+SHIFT, SUPER+CTRL
+
+  b(S, 'H', 'Focus left', 'movefocus', 'l');
+  b(S, 'J', 'Focus down', 'movefocus', 'd');
+  b(S, 'K', 'Focus up', 'movefocus', 'u');
+  b(S, 'L', 'Focus right', 'movefocus', 'r');
+  b(SS, 'H', 'Move window left', 'movewindow', 'l');
+  b(SS, 'J', 'Move window down', 'movewindow', 'd');
+  b(SS, 'K', 'Move window up', 'movewindow', 'u');
+  b(SS, 'L', 'Move window right', 'movewindow', 'r');
+  b(S, 'G', 'Toggle window group', 'togglegroup', '');
+  b(SS, 'G', 'Move window out of group', 'moveoutofgroup', '');
+  b(S, 'bracketleft', 'Previous window in group', 'changegroupactive', 'b');
+  b(S, 'bracketright', 'Next window in group', 'changegroupactive', 'f');
+  b(SC, 'H', 'Move window into group left', 'moveintogroup', 'l');
+  b(SC, 'J', 'Move window into group below', 'moveintogroup', 'd');
+  b(SC, 'K', 'Move window into group above', 'moveintogroup', 'u');
+  b(SC, 'L', 'Move window into group right', 'moveintogroup', 'r');
+  b(S, 'R', 'Enter resize mode', 'submap', 'resize');
+  // the resize submap's own binds — note the repeat flag on HJKL (bindde)
+  b(0, 'H', 'Resize narrower', 'resizeactive', '-40 0', 'resize', true);
+  b(0, 'J', 'Resize taller', 'resizeactive', '0 40', 'resize', true);
+  b(0, 'K', 'Resize shorter', 'resizeactive', '0 -40', 'resize', true);
+  b(0, 'L', 'Resize wider', 'resizeactive', '40 0', 'resize', true);
+  b(0, 'escape', 'Exit resize mode', 'submap', 'reset', 'resize');
+  b(0, 'Return', 'Exit resize mode', 'submap', 'reset', 'resize');
+  b(S, 'F', 'Toggle fullscreen', 'fullscreen', '0');
+  b(S, 'V', 'Toggle floating', 'togglefloating', '');
+  b(SS, 'V', 'Pin floating window', 'pin', '');
+  b(S, 'C', 'Center floating window', 'centerwindow', '');
+  b(S, 'comma', 'Previous layout preset', 'exec', '/usr/lib/punar/punar-layout.sh prev');
+  b(S, 'period', 'Next layout preset', 'exec', '/usr/lib/punar/punar-layout.sh next');
+  for (var i = 1; i <= 9; i++) b(S, String(i), 'Workspace ' + i, 'workspace', String(i));
+  for (var j = 1; j <= 9; j++) b(SS, String(j), 'Move window to workspace ' + j, 'movetoworkspace', String(j));
+  b(S, 'Tab', 'Project overview', 'exec', 'qs -p /usr/share/punar/shell ipc call overview toggle');
+  b(SS, 'Tab', 'Previous workspace', 'workspace', 'e-1');
+  b(S, 'Space', 'Open command center', 'exec', 'qs -p /usr/share/punar/shell ipc call commandcenter toggle');
+  b(S, 'Q', 'Close window', 'killactive', '');
+  b(S, 'Return', 'Open terminal', 'exec', 'footclient || foot');
+  b(S, 'B', 'Open browser', 'exec', 'chromium --ozone-platform=wayland');
+  b(S, 'A', 'AI on this device', 'exec', 'qs -p /usr/share/punar/shell ipc call aipanel toggle');
+  b(S, 'T', 'Toggle scratchpad terminal', 'togglespecialworkspace', 'term');
+  b(SS, 'A', 'Toggle assistant scratchpad', 'togglespecialworkspace', 'assistant');
+  b(S, 'N', 'Toggle notes scratchpad', 'togglespecialworkspace', 'notes');
+  b(SS, 'left', 'Move window to left monitor', 'movewindow', 'mon:l');
+  b(SS, 'right', 'Move window to right monitor', 'movewindow', 'mon:r');
+  b(SS, 'up', 'Move window to upper monitor', 'movewindow', 'mon:u');
+  b(SS, 'down', 'Move window to lower monitor', 'movewindow', 'mon:d');
+  b(0, 'Print', 'Screenshot output to clipboard', 'exec', 'grim - | wl-copy --type image/png');
+  b(SS, 'S', 'Screenshot region to clipboard', 'exec', 'grim -g slurp - | wl-copy --type image/png');
+  b(SS, 'E', 'End session', 'exit', '');
+
+  // ---------------------------------------------------------------------
+  // TRANSFORM
+  // ---------------------------------------------------------------------
+  var SECTIONS = ['WINDOWS', 'WORKSPACES AND PROJECTS', 'LAYOUTS', 'SURFACES', 'SESSION', 'OTHER'];
+  var BY_DISP = {
+    movefocus: 'WINDOWS', movewindow: 'WINDOWS', killactive: 'WINDOWS',
+    submap: 'WINDOWS', resizeactive: 'WINDOWS',
+    workspace: 'WORKSPACES AND PROJECTS', movetoworkspace: 'WORKSPACES AND PROJECTS',
+    togglegroup: 'LAYOUTS', moveoutofgroup: 'LAYOUTS', changegroupactive: 'LAYOUTS',
+    moveintogroup: 'LAYOUTS', fullscreen: 'LAYOUTS', togglefloating: 'LAYOUTS',
+    pin: 'LAYOUTS', centerwindow: 'LAYOUTS',
+    togglespecialworkspace: 'SURFACES',
+    exit: 'SESSION'
+  };
+  var BY_EXEC = [
+    ['ipc call overview', 'WORKSPACES AND PROJECTS'],
+    ['ipc call commandcenter', 'SURFACES'],
+    ['ipc call aipanel', 'SURFACES'],
+    ['punar-layout.sh', 'LAYOUTS'],
+    ['footclient', 'SURFACES'],
+    ['chromium', 'SURFACES'],
+    ['grim', 'SESSION']
+  ];
+  function sectionOf(r) {
+    if (r.disp === 'exec') {
+      for (var k = 0; k < BY_EXEC.length; k++) {
+        if (r.arg.indexOf(BY_EXEC[k][0]) >= 0) return BY_EXEC[k][1];
+      }
+      return 'OTHER';
+    }
+    return BY_DISP[r.disp] || 'OTHER';
+  }
+
+  var KEYNAMES = {
+    bracketleft: '[', bracketright: ']', comma: ',', period: '.',
+    Return: '↵', Space: 'SPACE', Tab: 'TAB', escape: 'ESC',
+    left: '←', right: '→', up: '↑', down: '↓',
+    Print: 'PRINT', slash: '/'
+  };
+  function keyName(k) {
+    if (Object.prototype.hasOwnProperty.call(KEYNAMES, k)) return KEYNAMES[k];
+    return String(k).toUpperCase();     // unknown keysyms print verbatim, never dropped
+  }
+  // canonical order, never bitmask order
+  function mods(mm) {
+    var out = [];
+    if (mm & 64) out.push('SUPER');
+    if (mm & 4) out.push('CTRL');
+    if (mm & 1) out.push('SHIFT');
+    if (mm & 8) out.push('ALT');
+    return out;
+  }
+  function chordText(row) {
+    var parts = row.submap ? [] : mods(row.mm);
+    parts.push(row.keyLabel);
+    return parts.join(' + ');
+  }
+
+  // exclusion: no description, no row
+  var described = [], undescribed = 0;
+  for (var a = 0; a < RAW.length; a++) {
+    if (!RAW[a].desc || !RAW[a].desc.length) { undescribed++; continue; }
+    described.push(RAW[a]);
+  }
+
+  // range fold: same dispatcher + modmask, contiguous digit keys, labels
+  // differing only by that trailing integer
+  var ROWS = [];
+  (function fold() {
+    var prev = null;
+    for (var n = 0; n < described.length; n++) {
+      var r = described[n];
+      var m = /^(.*?) (\d+)$/.exec(r.desc);
+      var digit = /^\d$/.test(r.key);
+      if (m && digit && prev && prev.foldBase === m[1] && prev.mm === r.mm &&
+          prev.disp === r.disp && Number(r.key) === prev.foldLast + 1) {
+        prev.foldLast = Number(r.key);
+        prev.keyLabel = prev.foldFirst + '…' + prev.foldLast;
+        prev.label = prev.foldBase + ' ' + prev.foldFirst + '…' + prev.foldLast;
+        prev.folded = prev.foldLast - prev.foldFirst + 1;
+        prev.chord = chordText(prev);
+        continue;
+      }
+      var row = {
+        mm: r.mm, key: r.key, disp: r.disp, arg: r.arg, submap: r.submap,
+        repeat: r.repeat, label: r.desc, keyLabel: keyName(r.key),
+        section: sectionOf(r), folded: 1
+      };
+      if (m && digit) { row.foldBase = m[1]; row.foldFirst = Number(r.key); row.foldLast = Number(r.key); }
+      row.chord = chordText(row);
+      ROWS.push(row);
+      prev = row;
+    }
+  })();
+
+  var unmapped = 0, layerCount = { 64: 0, 65: 0, 68: 0, 0: 0 }, modeRows = [];
+  for (var c = 0; c < ROWS.length; c++) {
+    if (ROWS[c].section === 'OTHER') unmapped++;
+    if (ROWS[c].submap) modeRows.push(ROWS[c]);
+    else layerCount[ROWS[c].mm] = (layerCount[ROWS[c].mm] || 0) + 1;
+  }
+
+  // ---------------------------------------------------------------------
+  // RENDER helpers (DOM only — no markup strings)
+  // ---------------------------------------------------------------------
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+  function sectionsOf(rows) {
+    var map = {}, order = [];
+    for (var i2 = 0; i2 < SECTIONS.length; i2++) map[SECTIONS[i2]] = [];
+    for (var k2 = 0; k2 < rows.length; k2++) {
+      var s = rows[k2].section;
+      if (!map[s]) { map[s] = []; }
+      map[s].push(rows[k2]);
+    }
+    for (var i3 = 0; i3 < SECTIONS.length; i3++) {
+      if (map[SECTIONS[i3]] && map[SECTIONS[i3]].length) order.push([SECTIONS[i3], map[SECTIONS[i3]]]);
+    }
+    return order;
+  }
+
+  // ---- 02 · hold overlay ------------------------------------------------
+  var holdCols = document.getElementById('hold-cols');
+  var holdTitle = document.getElementById('hold-title');
+  var holdSub = document.getElementById('hold-sub');
+  var holdMore = document.getElementById('hold-more');
+  var LAYER_NAME = { 64: 'Holding Super', 65: 'Holding Super + Shift', 68: 'Holding Super + Ctrl' };
+
+  function renderHold(mask) {
+    holdEl.dataset.layer = String(mask);
+    holdCols.textContent = '';
+    var rows = ROWS.filter(function (r) { return !r.submap && r.mm === mask; });
+    var groups = sectionsOf(rows), gi;
+    for (gi = 0; gi < groups.length; gi++) {
+      var blk = el('div', 'hsec');
+      blk.appendChild(el('div', 'hsech', groups[gi][0]));
+      for (var ri = 0; ri < groups[gi][1].length; ri++) {
+        var row = groups[gi][1][ri];
+        var line = el('div', 'krow');
+        line.dataset.chord = row.chord;
+        line.appendChild(el('span', 'cap', row.keyLabel));
+        line.appendChild(el('span', 'klab', row.label));
+        if (row.disp === 'submap' && row.arg !== 'reset') line.appendChild(el('span', 'modetag', 'Mode'));
+        blk.appendChild(line);
+      }
+      holdCols.appendChild(blk);
+    }
+    holdTitle.textContent = LAYER_NAME[mask] || 'Holding';
+    holdSub.textContent = rows.length + ' chords';
+    var more = [];
+    if (mask !== 65 && layerCount[65]) more.push('+ Shift · ' + layerCount[65] + ' more');
+    if (mask !== 68 && layerCount[68]) more.push('+ Ctrl · ' + layerCount[68] + ' more');
+    if (mask !== 64 && layerCount[64]) more.push('Super alone · ' + layerCount[64] + ' more');
+    holdMore.textContent = more.join(' · ');
+    document.getElementById('hold-help').textContent = '? · all ' + ROWS.length + ' rows';
+  }
+
+  // ---- 05 · submap block ------------------------------------------------
+  (function renderSubmap() {
+    var box = document.getElementById('submap-rows');
+    for (var i4 = 0; i4 < modeRows.length; i4++) {
+      var r = modeRows[i4];
+      var line = el('div', 'krow');
+      line.dataset.chord = r.chord;
+      line.appendChild(el('span', 'cap', r.keyLabel));
+      line.appendChild(el('span', 'klab', r.label));
+      if (r.repeat) line.appendChild(el('span', 'rep', 'Repeats while held'));
+      box.appendChild(line);
+    }
+  })();
+
+  // ---- 03/04 · help surface --------------------------------------------
+  var helpBody = document.getElementById('help-body');
+  var helpCount = document.getElementById('help-count');
+  var sel = -1;
+
+  function chordEl(row) {
+    var wrap = el('span', 'chord');
+    var ms = mods(row.mm), i5;
+    if (!row.submap) {
+      for (i5 = 0; i5 < ms.length; i5++) {
+        wrap.appendChild(el('span', 'cap mod', ms[i5]));
+        wrap.appendChild(el('span', 'plus', '+'));
+      }
+    }
+    wrap.appendChild(el('span', 'cap term', row.keyLabel));
+    return wrap;
+  }
+  function labelEl(row, query) {
+    var span = el('span', 'lab');
+    var text = row.label;
+    var at = query ? text.toLowerCase().indexOf(query) : -1;
+    if (at < 0) { span.textContent = text; return span; }
+    span.appendChild(document.createTextNode(text.slice(0, at)));
+    var mk = el('mark', null, text.slice(at, at + query.length));
+    span.appendChild(mk);
+    span.appendChild(document.createTextNode(text.slice(at + query.length)));
+    return span;
+  }
+  function matches(row, query) {
+    if (!query) return true;
+    return (row.label + ' ' + row.chord + ' ' + row.disp).toLowerCase().indexOf(query) >= 0;
+  }
+  function rowEl(row, query) {
+    var line = el('div', 'hrow');
+    line.dataset.chord = row.chord;
+    line.dataset.label = row.label;
+    line.dataset.section = row.section;
+    line.dataset.dispatcher = row.disp;
+    line.appendChild(chordEl(row));
+    line.appendChild(labelEl(row, query));
+    if (row.disp === 'submap' && row.arg !== 'reset') line.appendChild(el('span', 'rep', 'Mode'));
+    return line;
+  }
+
+  function renderHelp() {
+    var query = q.value.trim().toLowerCase();
+    helpBody.textContent = '';
+    var cols = [el('div', 'hcol'), el('div', 'hcol'), el('div', 'hcol')];
+    var load = [0, 0, 0];
+    function place(block, weight) {          // whole sections, shortest column first
+      var t = 0, ci;
+      for (ci = 1; ci < cols.length; ci++) if (load[ci] < load[t]) t = ci;
+      cols[t].appendChild(block);
+      load[t] += weight;
+    }
+    var global = ROWS.filter(function (r) { return !r.submap && matches(r, query); });
+    var inMode = modeRows.filter(function (r) { return matches(r, query); });
+    var groups = sectionsOf(global), gi2;
+    for (gi2 = 0; gi2 < groups.length; gi2++) {
+      var blk = el('div', 'hsec');
+      blk.appendChild(el('div', 'hsech', groups[gi2][0]));
+      for (var ri2 = 0; ri2 < groups[gi2][1].length; ri2++) {
+        blk.appendChild(rowEl(groups[gi2][1][ri2], query));
+      }
+      place(blk, groups[gi2][1].length + 1);
+      if (groups[gi2][0] === 'WINDOWS' && inMode.length) place(modeBlock(inMode, query), inMode.length + 2);
+    }
+    if (!groups.length && inMode.length) place(modeBlock(inMode, query), inMode.length + 2);
+    var shown = global.length + inMode.length;
+    if (!shown) {
+      var none = el('div', 'hsec');
+      none.appendChild(el('div', 'hsech', 'No match'));
+      var nline = el('div', 'norow');
+      nline.appendChild(el('span', 'lab', 'Nothing in the binding table matches this.'));
+      none.appendChild(nline);
+      place(none, 2);
+    }
+    for (var ci2 = 0; ci2 < cols.length; ci2++) helpBody.appendChild(cols[ci2]);
+    helpCount.textContent = query
+      ? shown + ' of ' + ROWS.length + ' rows · query "' + q.value.trim() + '"'
+      : RAW.length + ' binds · ' + ROWS.length + ' rows · ' + undescribed + ' undescribed · ' + unmapped + ' unmapped';
+    sel = -1;
+    moveSel(1);
+  }
+  function modeBlock(rows, query) {
+    var box = el('div', 'modeblk');
+    box.appendChild(el('div', 'mh', 'Mode · Resize'));
+    box.appendChild(el('div', 'ms', 'Super + R enters · bare keys · both exits shown'));
+    for (var i6 = 0; i6 < rows.length; i6++) {
+      var line = el('div', 'hrow');
+      line.dataset.chord = rows[i6].chord;
+      line.dataset.label = rows[i6].label;
+      line.dataset.section = 'MODE RESIZE';
+      line.dataset.dispatcher = rows[i6].disp;
+      var wrap = el('span', 'chord');
+      wrap.appendChild(el('span', 'cap term', rows[i6].keyLabel));
+      line.appendChild(wrap);
+      line.appendChild(labelEl(rows[i6], query));
+      if (rows[i6].repeat) line.appendChild(el('span', 'rep', 'Repeats'));
+      box.appendChild(line);
+    }
+    return box;
+  }
+  function visRows() {
+    return Array.prototype.slice.call(helpBody.querySelectorAll('.hrow'));
+  }
+  function moveSel(delta) {
+    var rows = visRows();
+    if (!rows.length) { sel = -1; return; }
+    var next = sel < 0 ? 0 : sel + delta;
+    if (next < 0) next = 0;
+    if (next > rows.length - 1) next = rows.length - 1;
+    sel = next;
+    for (var i7 = 0; i7 < rows.length; i7++) rows[i7].classList.toggle('sel', i7 === sel);
+    if (rows[sel] && rows[sel].scrollIntoView) rows[sel].scrollIntoView({ block: 'nearest' });
+  }
+
+  // ---------------------------------------------------------------------
+  // STATE MACHINE
+  // ---------------------------------------------------------------------
+  var stateBtns = Array.prototype.slice.call(document.querySelectorAll('.statebtn[data-state]'));
+  function setState(s) {
+    scr.dataset.state = s;
+    for (var i8 = 0; i8 < stateBtns.length; i8++) {
+      stateBtns[i8].setAttribute('aria-selected', String(stateBtns[i8].dataset.state === s));
+    }
+    holdEl.classList.toggle('on', s === 'hold');
+    holdEl.setAttribute('aria-hidden', String(s !== 'hold'));
+    if (s === 'hold') renderHold(Number(holdEl.dataset.layer || 64));
+    if (s === 'help' || s === 'search') {
+      renderHelp();
+      document.getElementById('qrow').classList.add('kfocus');
+      try { q.focus(); } catch (e2) { /* headless-safe */ }
+    } else {
+      document.getElementById('qrow').classList.remove('kfocus');
+    }
+  }
+  function openHelp(query) {
+    q.value = query || '';
+    setState(query ? 'search' : 'help');
+  }
+  for (var i9 = 0; i9 < stateBtns.length; i9++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var s = btn.dataset.state;
+        if (s === 'hold') holdEl.dataset.layer = '64';
+        if (s === 'help') { openHelp(''); return; }
+        if (s === 'search') { openHelp('close'); return; }
+        setState(s);
+        frameFocus();
+      });
+    })(stateBtns[i9]);
+  }
+  function frameFocus() { try { frame.focus(); } catch (e3) { /* headless-safe */ } }
+
+  // ---- keyboard: S stands in for holding SUPER (real 400ms delay) -------
+  var holdTimer = null, sDown = false;
+  function beginHold() {
+    if (holdTimer) return;
+    holdTimer = setTimeout(function () {
+      holdTimer = null;
+      if (!sDown) return;
+      holdEl.dataset.layer = '64';
+      setState('hold');
+    }, 400);
+  }
+  function endHold() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (scr.dataset.state === 'hold') setState('desktop');
+  }
+
+  frame.addEventListener('keydown', function (e) {
+    var s = scr.dataset.state;
+    var typing = (e.target === q);
+
+    if (e.key === 'Escape') {
+      if (s === 'help' || s === 'search') { q.value = ''; setState('desktop'); frameFocus(); e.preventDefault(); }
+      else if (s === 'submap') { setState('desktop'); e.preventDefault(); }
+      return;
+    }
+    if (s === 'help' || s === 'search') {
+      if (e.key === 'ArrowDown') { moveSel(1); e.preventDefault(); return; }
+      if (e.key === 'ArrowUp') { moveSel(-1); e.preventDefault(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); return; }  // a reference never executes
+      if (typing) return;
+      if (e.key === '/' || e.key === '?') { try { q.focus(); } catch (e4) {} e.preventDefault(); return; }
+      if (e.key.length === 1) { q.value += e.key; onQuery(); e.preventDefault(); return; }
+      if (e.key === 'Backspace') { q.value = q.value.slice(0, -1); onQuery(); e.preventDefault(); return; }
+      return;
+    }
+    if (typing) return;
+
+    if (e.key === '?' || e.key === '/') { openHelp(''); e.preventDefault(); return; }
+    if (e.key === 'r' || e.key === 'R') { setState(s === 'submap' ? 'desktop' : 'submap'); e.preventDefault(); return; }
+    if (e.key === 's' || e.key === 'S') {
+      if (!e.repeat && !sDown) { sDown = true; beginHold(); }
+      e.preventDefault(); return;
+    }
+    if (s === 'hold') {
+      if (e.key === 'Shift') { renderHold(65); e.preventDefault(); return; }
+      if (e.key === 'Control') { renderHold(68); e.preventDefault(); return; }
+    }
+  });
+
+  frame.addEventListener('keyup', function (e) {
+    if (e.key === 's' || e.key === 'S') { sDown = false; endHold(); return; }
+    if (scr.dataset.state === 'hold' && (e.key === 'Shift' || e.key === 'Control')) renderHold(64);
+  });
+  frame.addEventListener('blur', function () { sDown = false; endHold(); });
+
+  function onQuery() {
+    renderHelp();
+    var s = scr.dataset.state;
+    if (s === 'help' || s === 'search') {
+      var next = q.value.trim() ? 'search' : 'help';
+      if (next !== s) {
+        scr.dataset.state = next;
+        for (var i10 = 0; i10 < stateBtns.length; i10++) {
+          stateBtns[i10].setAttribute('aria-selected', String(stateBtns[i10].dataset.state === next));
+        }
+      }
+    }
+  }
+  q.addEventListener('input', onQuery);
+
+  // ---- first paint ------------------------------------------------------
+  renderHold(64);
+  renderHelp();
+  document.getElementById('dfoot-left').textContent =
+    RAW.length + ' binds · ' + ROWS.length + ' rows · generated in page from a JSON copy of hyprctl binds -j';
+
+  var clock = document.getElementById('deskclock');
+  function tick() {
+    var now = new Date();
+    clock.textContent = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  }
+  tick();
+  setInterval(tick, 15000);
+})();
+</script>

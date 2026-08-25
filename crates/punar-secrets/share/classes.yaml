@@ -1,0 +1,37 @@
+# Punar credential classes — the mock provider's catalog (spec section 29,
+# docs/development/milestone-9.md section 6.1).
+#
+# This file is DATA, not code: `punar-secrets` ships no class in a Rust
+# literal, and a class that is not listed here does not exist. The image
+# installs this file at /usr/share/punar/secrets/classes.yaml.
+#
+# Naming, decided once (milestone-9.md section 6.1, ipc.md section 16.3):
+# the class `id` is kebab-case on the wire, in the audit `resource` field
+# and in the M8 ledger; the `policy_key` is snake_case because
+# schemas/policy/ai-policy.json's propertyNames pattern forbids hyphens.
+# The mapping is this declared field — never a replace('-','_') guess.
+#
+# SIMULATED: the provider is `mock`. No upstream credential authority
+# exists, the CI VM has no network, and every surface that prints a token
+# says so.
+version: 1
+provider: mock
+classes:
+  - id: github
+    display: GitHub (mock)
+    policy_key: github
+    default_ttl: 3600
+    max_ttl: 3600
+    risk: low
+  - id: aws-dev
+    display: AWS development (mock)
+    policy_key: aws_dev
+    default_ttl: 3600
+    max_ttl: 3600
+    risk: medium
+  - id: aws-prod
+    display: AWS production (mock)
+    policy_key: aws_prod
+    default_ttl: 0
+    max_ttl: 0
+    risk: high

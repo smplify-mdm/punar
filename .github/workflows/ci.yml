@@ -207,6 +207,8 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m6-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m7-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m8-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m9-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/in-agent-scope.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mock-agent \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
 
@@ -315,13 +317,16 @@ jobs:
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2..M8 exercises + RAM budgets)
+    name: desktop-test (graphical gate + M2..M9 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    # Raised from M7's 95: the in-guest M8 exercise (punar-m8-check.service,
-    # bounded at 15 min in-guest but a minute or two in practice) runs
-    # between the M7 exercise and the export, and boot-test.sh's KVM export
-    # timeout was raised from 2400 s to 3000 s to keep the same headroom.
-    timeout-minutes: 105
+    # Raised from M8's 105: the in-guest M9 exercise (punar-m9-check.service,
+    # bounded at 20 min in-guest) runs between the M8 exercise and the
+    # export. Its longest single wait is the SHIPPED 300 s approval TTL,
+    # started early so the credential and privilege groups run inside the
+    # window; in practice the exercise costs a few minutes. boot-test.sh's
+    # KVM export timeout goes from 3000 s to 3600 s to keep the same
+    # headroom.
+    timeout-minutes: 125
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -352,7 +357,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M8 exercises + export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M9 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
@@ -362,7 +367,7 @@ jobs:
       # proof files are the primary diagnostics. The screenshot is warn-only:
       # the guest deliberately continues without one (grim failure is itself
       # a signal), and boot-test already annotated its absence.
-      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register)
+      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register + M9 approval gate)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -374,6 +379,7 @@ jobs:
             os/images/out/desktop-proof/punar-m5-personal.png
             os/images/out/desktop-proof/punar-m7.png
             os/images/out/desktop-proof/punar-m8.png
+            os/images/out/desktop-proof/punar-m9.png
           if-no-files-found: warn
           retention-days: 7
 
@@ -400,7 +406,21 @@ jobs:
       # screenshot artifact above). No ledger artifact carries a workspace
       # path, an argv or a comm — that is asserted in-guest by m8-check
       # group 8, so these uploads are safe to read (milestone-8.md §12).
-      - name: Upload RAM report, M2..M8 reports and measurement data
+      # m9-*.txt covers m9-report.txt plus the launch block, the
+      # approval_required / denial renders, the credential CARDS (stderr
+      # only — the value goes to stdout and is captured into a shell
+      # variable that is never written anywhere) and the redaction sweep's
+      # COUNTS; m9-*.json are the approvals list/get objects, the exported
+      # approval document boot-test phase 11 re-validates against
+      # schemas/audit/approval.json, the agents.access result showing the
+      # M8 ledger's credential rows filled in, and the audit slices both
+      # pointer directions are proven against (the M9 screenshot rides the
+      # screenshot artifact above). No M9 artifact carries a credential
+      # value: m9-check group 9 greps every one of these files — this very
+      # tar — for both issued tokens before the export is built, with a
+      # negative control proving the grep would have found one
+      # (milestone-9.md §12).
+      - name: Upload RAM report, M2..M9 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -431,6 +451,9 @@ jobs:
             os/images/out/desktop-proof/m8-report.txt
             os/images/out/desktop-proof/m8-*.json
             os/images/out/desktop-proof/m8-*.txt
+            os/images/out/desktop-proof/m9-report.txt
+            os/images/out/desktop-proof/m9-*.json
+            os/images/out/desktop-proof/m9-*.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

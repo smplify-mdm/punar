@@ -6,7 +6,10 @@
 //! `docs/api/ipc.md`. Still no daemon logic here — only types, parsing, and
 //! file plumbing both sides must agree on.
 //!
-//! - [`PrincipalKind`] — identity types recognized by the OS (SPEC section 18).
+//! - [`principal`] — identity types recognized by the OS (SPEC section 18),
+//!   plus the shared agent-session attribution rule (docs/api/ipc.md section
+//!   12.5): one implementation of "is this peer an agent?", so `punard` and
+//!   `punar-secrets` cannot disagree about a privilege boundary (M9).
 //! - [`Decision`] — authorization decision values (SPEC section 20).
 //! - [`CapabilityId`] — validated dotted capability path such as
 //!   `security.firewall` (SPEC sections 10 and 41).
@@ -26,6 +29,14 @@
 //!   12-13; Milestone 8). Privacy is enforced in the types: a
 //!   [`ledger::ResourceClass`] cannot hold a path, a URL, or free text,
 //!   whichever way it is constructed.
+//! - [`aipolicy`] — the section 20 AI authority document, the capability ↔
+//!   policy-token map, and the layered evaluation that answers `allow` /
+//!   `deny` / `approval_required` for an agent-originated call (M9).
+//! - [`approval`] — the section 28 approval object, its M9 envelope, and
+//!   just-in-time privilege grants (SPEC sections 28, 48; docs/api/ipc.md
+//!   sections 14-15; Milestone 9). `schemas/audit/approval.json` is not
+//!   extended: everything M9 needs that the document cannot hold travels as
+//!   a sibling of the envelope.
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
@@ -43,17 +54,20 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod aipolicy;
+pub mod approval;
 pub mod audit;
 mod capability;
 mod decision;
 mod descriptor;
 pub mod ipc;
 pub mod ledger;
-mod principal;
+pub mod principal;
 mod redacted;
 pub mod time;
 
 pub use agent::{AgentClassification, AgentStatus, RegistryRecord};
+pub use approval::{Approval, ApprovalEnvelope, ApprovalKind, ApprovalStatus, Grant, Requester};
 pub use audit::{AuditEvent, AuditWriter};
 pub use capability::{CapabilityId, CapabilityIdError};
 pub use decision::Decision;

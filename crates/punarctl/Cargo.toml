@@ -9,5 +9,14 @@ publish.workspace = true
 [dependencies]
 clap = { workspace = true }
 punar-common = { workspace = true }
+# rustix (M9, docs/development/milestone-9.md section 4.3): inotify +
+# poll behind `punarctl approvals wait`. Waiting is a client concern —
+# the daemon answers `approval_required` immediately and must not park a
+# connection for the life of an approval — so the CLI watches for the
+# wake and asks the socket for the truth. Already in the workspace tree
+# for punard's SO_PEERCRED and punar-common's flock; `event` adds the
+# poll module and no new crate. Neither inotify nor poll is reachable
+# from safe std, and workspace crates are #![forbid(unsafe_code)].
+rustix = { workspace = true, features = ["event"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

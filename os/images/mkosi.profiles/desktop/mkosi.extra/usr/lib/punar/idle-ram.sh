@@ -52,15 +52,22 @@ echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 # matching. The env var name says RSS (fixed consumer contract); the VALUE is
 # summed PSS, stated wherever it is reported.
 #
-# M7 grows the unit list honestly: punar-agentd.service is a second resident
-# daemon, so it is summed into the SAME single number the budget is judged
-# against (spec 6.2 budgets the services total, not per-daemon; thresholds
-# unchanged — target 100 MB, MVP ceiling 150 MB). A unit whose cgroup is
-# missing or empty makes the whole value `absent` — a dead daemon is a gated
-# failure in tests/performance/check-budgets.sh, even under TCG, and that
-# must not be maskable by a live sibling. The list grows again as siblings
-# ship (netd M12, ...).
-PUNAR_SERVICE_UNITS="punard.service punar-agentd.service"
+# M7 grew the unit list honestly (punar-agentd.service) and M9 grows it
+# again: punar-secrets.service is a THIRD resident daemon, so it is summed
+# into the SAME single number the budget is judged against (spec 6.2 budgets
+# the services total, not per-daemon; thresholds unchanged — target 100 MB,
+# MVP ceiling 150 MB). Adding a daemon and quietly leaving it out of the sum
+# would make the budget say something untrue; raising the threshold to make
+# room would be worse. If three daemons do not fit, the honest responses in
+# order are: report the number, trim the broker (it carries no policy-engine
+# copy — it asks punard), reconsider socket activation, and only then discuss
+# folding daemons together (milestone-9.md §11).
+#
+# A unit whose cgroup is missing or empty makes the whole value `absent` — a
+# dead daemon is a gated failure in tests/performance/check-budgets.sh, even
+# under TCG, and that must not be maskable by a live sibling. The list grows
+# again as siblings ship (netd M12, ...).
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service"
 services_rss=absent
 pss_kb=0
 all_units_ok=1
@@ -175,6 +182,31 @@ systemctl start punar-m7-check.service \
 # (tools/boot-test.sh) parses it.
 systemctl start punar-m8-check.service \
     || echo "punar: idle-ram: punar-m8-check.service failed to start" >&2
+
+# M9 exercise ordering hook (milestone-9.md §12): start punar-m9-check
+# SYNCHRONOUSLY strictly AFTER the M8 exercise (which purged its own ledger
+# and left the registry clean) and strictly BEFORE the export below, so
+# m9-report.txt / m9-*.json / m9-*.txt / punar-m9.png ship in the same tar.
+#
+# Everything this exercise creates lives only inside this window: a third
+# managed agent session, the approvals and grants it raises, and — the
+# reason the ordering matters more here than anywhere else — MOCK CREDENTIAL
+# TOKENS. They are held in shell variables that are never exported and never
+# written to a file, and group 9 then greps the whole export tar, the audit
+# trail, every ledger file and every punar process's /proc/*/environ and
+# /proc/*/cmdline for each of them. That sweep is the headline assertion of
+# the milestone, and it can only be honest if it runs before the tar is
+# built — which is exactly where this line puts it.
+#
+# The services-RSS sample far above already closed, and punar-secrets was
+# resident for it (it is in PUNAR_SERVICE_UNITS), so the third daemon is in
+# the budget number rather than hiding behind this window. The agent runs in
+# its own punar-agent-<id>.scope under the user manager, not in a service
+# cgroup, so it perturbs neither gate.
+# Never fatal here: the verdict lives in m9-report.txt and the host gate
+# (tools/boot-test.sh) parses it.
+systemctl start punar-m9-check.service \
+    || echo "punar: idle-ram: punar-m9-check.service failed to start" >&2
 
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the

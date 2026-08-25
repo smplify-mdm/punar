@@ -28,10 +28,22 @@
 #
 # HONESTY NOTES (spec 1.22), all of which the assertions enforce rather than
 # merely assert around:
-#   - network_destinations, mcp_servers and credential_classes are EMPTY and
-#     are required to be named in `not_yet_observed[]` with their milestone
-#     (M12 / M9+ / M9). An empty category that is not labelled is a FAIL
-#     here, because on a surface it would read as "did not happen".
+#   - network_destinations and mcp_servers are EMPTY and are required to be
+#     named in `not_yet_observed[]` with their milestone (M12 / M11+). An
+#     empty category that is not labelled is a FAIL here, because on a
+#     surface it would read as "did not happen".
+#   - M9 AMENDMENT: credential_classes, credential_request and
+#     policy_bypass_attempt gained producers in Milestone 9 and LEFT that
+#     list. credential_classes is still empty in this exercise — because
+#     this session requested no credential, which is a fact rather than a
+#     gap — and group 6 now asserts the ROW IS ABSENT. The honesty idiom
+#     has to work in both directions, or a category with a working producer
+#     would go on claiming it has none.
+#   - M9 AMENDMENT: an agent's capability mutation is GATED now, not denied
+#     (`firewall: approval_required` in the shipped AI authority document).
+#     Nothing is applied either way — the invariant this exercise cares
+#     about — but the Level-4 denied_access producer moved to the
+#     privilege-window refusal, which policy can never turn into a yes.
 #   - Process counts are SAMPLED at scan points. Short-lived children are
 #     missed by construction and every surface must say so. `process_peak`
 #     is peak CONCURRENT pids (the kernel's pids.peak), never a spawn total.
@@ -234,8 +246,16 @@ grep_row "the evidence children were generated (dev/CI stand-in, labelled as one
     "${LAUNCH_OUT}" "PUNAR_MOCK_AGENT_CHILDREN=1"
 grep_row "the shell and git children blocked on the fifo (no busy loop, spec 6.3)" \
     "${LAUNCH_OUT}" "blocked on ./.punar-agent-fifo"
-grep_row "punard DENIED the agent's capability mutation (the Level-4 producer)" \
-    "${LAUNCH_OUT}" "capabilities.set denied by punard"
+# M9 amendment, stated rather than quietly re-worded: an agent's capability
+# mutation is no longer DENIED, it is GATED (the personal AI authority
+# document says `firewall: approval_required`). Nothing is applied either
+# way, which is the invariant M8 cared about; the Level-4 denied_access
+# producer is now the privilege-window refusal below, which policy can never
+# turn into a yes (SPEC sections 48, 60).
+grep_row "punard GATED the agent's capability mutation behind an approval (M9)" \
+    "${LAUNCH_OUT}" "capabilities.set gated by punard"
+grep_row "punard REFUSED the agent a privilege window (the Level-4 producer)" \
+    "${LAUNCH_OUT}" "privilege.request refused for an AI agent"
 
 # --- 3. source A: the scope cgroup, read directly ----------------------------
 as_punar "${CTL}" --json agents list > "${RUN_DIR}/m8-agents-list.json" 2>/dev/null
@@ -324,27 +344,34 @@ jq_check "directory zones are the workspace ZONE only — never a path (spec 21.
 jq_check "the repository is the project NAME from the workspace grant (no git remote is read)" \
     "${RUN_DIR}/m8-access.json" \
     '.summary.resources.repositories == ["atlas"]'
-jq_check "the three producerless categories are EMPTY and each is named with its milestone" \
+jq_check "the two producerless categories are EMPTY and each is named with its milestone" \
     "${RUN_DIR}/m8-access.json" \
     '(.summary.resources.network_destinations == [])
      and (.summary.resources.mcp_servers == [])
-     and (.summary.resources.credential_classes == [])
      and (.not_yet_observed | any(.level == 3 and .category == "network_destinations"
             and .milestone == "M12" and (.reason | length) > 0))
      and (.not_yet_observed | any(.level == 3 and .category == "mcp_servers"
-            and .milestone == "M9+" and (.reason | length) > 0))
-     and (.not_yet_observed | any(.level == 3 and .category == "credential_classes"
-            and .milestone == "M9" and (.reason | length) > 0))'
+            and .milestone == "M11+" and (.reason | length) > 0))'
+# M9 amendment: credential_classes LEFT not_yet_observed because its producer
+# (punar-secrets) shipped. It is empty here for a different reason — THIS
+# session requested no credential — and that is a fact, not a gap. Asserting
+# the absence of the row is what keeps the honesty idiom honest in both
+# directions: a category with a producer must not go on claiming it has none.
+jq_check "credential_classes is empty because this session asked for none, and is NOT claimed as unobservable" \
+    "${RUN_DIR}/m8-access.json" \
+    '(.summary.resources.credential_classes == [])
+     and (.not_yet_observed | any(.category == "credential_classes") | not)'
 # Two Level-4 categories have producers in M8 (denied_access from any
 # attributed deny, privilege_request from an allowed mutation); the other
 # FIVE must each be named with a milestone. Seven accounted for, none
 # quietly absent (spec 1.22) — unknown_ai_execution included, because a
 # detection has no registered session to attach a ledger to until M10.
-jq_check "the five Level-4 categories with no producer are named too (all seven accounted for)" \
+# M9 amendment: credential_request and policy_bypass_attempt gained
+# producers, so three of the seven remain pending, not five.
+jq_check "the three Level-4 categories with no producer are named too (all seven accounted for)" \
     "${RUN_DIR}/m8-access.json" \
     '[.not_yet_observed[] | select(.level == 4) | .category] | sort ==
-     ["credential_request","policy_bypass_attempt","production_access",
-      "sensitive_resource_access","unknown_ai_execution"]'
+     ["production_access","sensitive_resource_access","unknown_ai_execution"]'
 jq_check "every entry carries a real count, an ordered first/last seen, and a NAMED mediation point" \
     "${RUN_DIR}/m8-access.json" \
     '(.detail.entries | length) >= 1
@@ -372,14 +399,26 @@ jq_check "the privacy notice carries the SPEC 21.2 never-recorded list and the p
 # accept(); a call from inside the scope is stamped with the session id and
 # source ai_agent WITHOUT the agent declaring anything. The join key below is
 # the event id itself, compared across two different files.
-jq -c "select(.action == \"capabilities.set\" and .agent_session_id == \"${SID}\")" \
+# M9 amendment: the DENIED call is now the privilege-window refusal. The
+# gated capabilities.set is asserted separately just below, because "nothing
+# was applied" is still the invariant and it is now reached by a different
+# route.
+jq -c "select(.action == \"privilege.request\" and .agent_session_id == \"${SID}\")" \
     "${AUDIT_LOG}" > "${RUN_DIR}/m8-audit-denial.json" 2>/dev/null
 jq_slurp_check "the audit trail attributes the agent's DENIED call to this session — exactly once" \
     "${RUN_DIR}/m8-audit-denial.json" \
     '(length == 1) and all(.[];
-       .decision == "deny" and .result == "denied" and .source == "ai_agent"
+       .decision == "deny" and .result == "agent_privilege_refused"
+       and .source == "ai_agent"
        and .resource == "security.firewall"
        and (.event_id | test("^evt_")))'
+jq -c "select(.action == \"capabilities.set\" and .agent_session_id == \"${SID}\")" \
+    "${AUDIT_LOG}" > "${RUN_DIR}/m8-audit-gated.json" 2>/dev/null
+jq_slurp_check "the agent's capability mutation was GATED, not applied (M9: decision approval_required)" \
+    "${RUN_DIR}/m8-audit-gated.json" \
+    '(length == 1) and all(.[];
+       .decision == "approval_required" and .result == "pending"
+       and .source == "ai_agent" and .resource == "security.firewall")'
 DENIAL_EVT="$(jq -r '.event_id' "${RUN_DIR}/m8-audit-denial.json" 2>/dev/null | head -n 1)"
 if [ -n "${DENIAL_EVT}" ] && [ "${DENIAL_EVT}" != "null" ]; then
     note "ok   the denial's event id was read from the audit trail: ${DENIAL_EVT}"
@@ -785,7 +824,7 @@ fi
 
 # --- 17. stated gaps (spec 1.22) ---------------------------------------------
 note "info cross-user denial (user B may neither read nor purge user A's ledger) is NOT proven in-VM: this image has one interactive user and no tool to forge peer credentials, by design. It is proven by punar-agentd's host integration tests with the fixed-Peer harness (tests/ledger.rs), the same honest-gap pattern m7-check used for the peer-credential denial path."
-note "info network destinations, MCP servers and credential classes are absent because no mediation point observes them yet — punar-netd is M12 and punar-secrets is M9. Group 6 requires each absence to be LABELLED, which is the assertion that keeps an empty array from reading as 'did not happen'."
+note "info network destinations and MCP servers are absent because no mediation point observes them yet — punar-netd is M12 and no tool/MCP gateway exists (re-milestoned M11+ in M9, because Milestone 9 shipped a credential broker and not a gateway). Group 6 requires each absence to be LABELLED, which is the assertion that keeps an empty array from reading as 'did not happen'. Credential classes are absent for a DIFFERENT reason since M9: the producer exists (punar-secrets) and this session simply asked for no credential — group 6 asserts that its honesty row is gone, and m9-check asserts the row fills in for a session that does use one."
 note "info process classes are sampled at scan points. A child that lives and dies between two passes is missed, and process_peak is peak CONCURRENT pids, never a spawn total. Spawn-accurate history would need exactly the broad tracing SPEC 1.14 forbids."
 
 # --- verdict -----------------------------------------------------------------

@@ -1720,3 +1720,644 @@ fn privacy_verbs_reach_the_agentd_socket() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 9 — the approval gate, JIT privilege, the secret broker
+// (docs/api/ipc.md sections 14 and 16)
+// ---------------------------------------------------------------------------
+
+/// The mock broker's issued value. Deliberately carries the class-marked
+/// mock prefix of contract section 16.4, so a leak is identifiable as a
+/// mock in any grep — including the greps in these tests.
+const MOCK_TOKEN: &str = "punar-mock-aws-dev-9Qw3ZzmXk1TnP0aB";
+
+fn pending_approval() -> Value {
+    json!({
+        "v": 1,
+        "approval": {
+            "approval_id": "apr_7c1d9a4e",
+            "requester": {"type": "ai_agent", "id": "agt_4f21c09ab3e1",
+                          "agent_name": "claude-code"},
+            "user": "punar",
+            "capability": "security.firewall",
+            "resource": "disabled",
+            "reason": "Atlas integration test needs the host firewall down",
+            "risk": "high",
+            "status": "pending",
+            "expires_at": "2126-08-25T10:05:00Z"
+        },
+        "kind": "capability_set",
+        "created_at": "2126-08-25T10:00:00Z",
+        "contract": "SetFirewall(disabled)",
+        "policy": {"name": "Personal preference", "policy_id": "personal-defaults"},
+        "resolved_at": null, "resolved_by": null,
+        "consumed_at": null, "execution": null
+    })
+}
+
+/// The contract section 14.1 gate error, with the machine data the
+/// section 73 surface renders beneath the daemon's prose.
+fn approval_required_error() -> Value {
+    json!({
+        "code": "approval_required",
+        "message": "Claude Code may not disable the host firewall on this device \
+                    without your approval.\n\
+                    Why: personal defaults gate host firewall changes made by an AI \
+                    agent.\n\
+                    Next step: punarctl approvals wait apr_7c1d9a4e",
+        "details": {
+            "approval_id": "apr_7c1d9a4e",
+            "expires_at": "2126-08-25T10:05:00Z",
+            "capability": "security.firewall",
+            "resource": "disabled",
+            "decision": "approval_required",
+            "policy_ids": ["personal-defaults"]
+        }
+    })
+}
+
+/// punard's M9 half: approvals + privilege. Every other method still
+/// answers from the section 5 fixtures.
+fn m9_punard_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        // The gate: a set an AI policy gates executes NOTHING.
+        "capabilities.set" => Err(approval_required_error()),
+        "approvals.list" => Ok(json!({
+            "approvals": [pending_approval()],
+            "checked_at": "2126-08-25T10:00:30Z"
+        })),
+        "approvals.get" => {
+            assert_eq!(request["params"]["approval_id"], json!("apr_7c1d9a4e"));
+            Ok(pending_approval())
+        }
+        "approvals.resolve" => {
+            assert_eq!(request["params"]["approval_id"], json!("apr_7c1d9a4e"));
+            assert_eq!(request["params"]["decision"], json!("approved"));
+            let mut approval = pending_approval();
+            approval["approval"]["status"] = json!("approved");
+            approval["resolved_at"] = json!("2126-08-25T10:01:00Z");
+            approval["resolved_by"] = json!({"uid": 1000, "user": "punar", "pid": 812});
+            approval["execution"] = json!({
+                "result": "success", "changed": true, "audit_event_id": "evt_501"
+            });
+            Ok(approval)
+        }
+        "privilege.request" => {
+            // The reason travels verbatim — Plate D-012.
+            assert_eq!(
+                request["params"]["reason"],
+                json!("Reproducing the Atlas net bug")
+            );
+            assert_eq!(request["params"]["duration_minutes"], json!(15));
+            Err(json!({
+                "code": "approval_required",
+                "message": "Elevation for time.timezone is waiting on your approval.",
+                "details": {
+                    "approval_id": "apr_11ba32cd",
+                    "expires_at": "2126-08-25T10:05:00Z",
+                    "capability": "time.timezone",
+                    "resource": "15m",
+                    "decision": "approval_required",
+                    "policy_ids": ["personal-defaults"]
+                }
+            }))
+        }
+        "privilege.status" => Ok(json!({
+            "grants": [{"grant_id": "gnt_2b8e11c4", "capability": "time.timezone",
+                        "reason": "Reproducing the Atlas net bug",
+                        "granted_at": "2126-08-25T10:00:00Z",
+                        "expires_at": "2126-08-25T10:15:00Z"}],
+            "checked_at": "2126-08-25T10:00:30Z"
+        })),
+        "privilege.revoke" => {
+            assert_eq!(request["params"]["grant_id"], json!("gnt_2b8e11c4"));
+            Ok(json!({"revoked": ["gnt_2b8e11c4"], "revoked_at": "2126-08-25T10:03:00Z"}))
+        }
+        _ => respond(request),
+    }
+}
+
+/// The `punar-secrets` mock (contract section 16.2, closed method set).
+fn secrets_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "credential.classes" => Ok(json!({
+            "classes": [
+                {"credential": "github", "decision": "allow", "policy_key": "github",
+                 "default_ttl": 3600, "max_ttl": 3600, "provider": "mock"},
+                {"credential": "aws-dev", "decision": "request", "policy_key": "aws_dev",
+                 "default_ttl": 3600, "max_ttl": 3600, "provider": "mock"},
+                {"credential": "aws-prod", "decision": "deny", "policy_key": "aws_prod",
+                 "default_ttl": 0, "max_ttl": 0, "provider": "mock"}
+            ],
+            "provider": "mock",
+            "checked_at": "2126-08-25T10:00:00Z"
+        })),
+        "credential.request" => match request["params"]["credential"].as_str() {
+            Some("github") => Ok(json!({
+                "credential": "github",
+                "value": MOCK_TOKEN,
+                "expires_at": "2126-08-25T11:00:00Z",
+                "provider": "mock",
+                "agent_session_id": "agt_4f21c09ab3e1"
+            })),
+            Some("aws-dev") => Err(json!({
+                "code": "approval_required",
+                "message": "A dev AWS credential for Claude Code is waiting on your approval.",
+                "details": {"approval_id": "apr_11ba32cd",
+                            "expires_at": "2126-08-25T10:05:00Z",
+                            "capability": "credential.request",
+                            "resource": "aws-dev",
+                            "decision": "approval_required",
+                            "policy_ids": ["personal-defaults"]}
+            })),
+            _ => Err(json!({
+                "code": "denied",
+                "message": "Production AWS credentials are not issued on this device.\n\
+                            Why: personal defaults deny the aws-prod credential class.\n\
+                            Next step: change it in punarctl policy, or use aws-dev.",
+                "details": {"decision": "deny"}
+            })),
+        },
+        "credential.validate" => {
+            // The value reaches the broker in `params`, having arrived at
+            // punarctl on stdin — never on argv.
+            assert_eq!(request["params"]["value"], json!(MOCK_TOKEN));
+            Ok(json!({"valid": true, "credential": "github",
+                      "expires_at": "2126-08-25T11:00:00Z"}))
+        }
+        "credential.revoke" => {
+            assert_eq!(request["params"]["value"], json!(MOCK_TOKEN));
+            Ok(json!({"credential": "github", "revoked": true,
+                      "revoked_at": "2126-08-25T10:04:00Z"}))
+        }
+        other => Err(json!({
+            "code": "unknown_method",
+            "message": format!(
+                "punar-secrets does not implement {other}.\n\
+                 Why: the broker's method table is closed — after issuance it holds \
+                 only a hash, so no method can return a value twice.\n\
+                 Next step: punarctl secrets list"
+            ),
+            "details": {"method": other}
+        })),
+    }
+}
+
+fn start_secrets_mock() -> PathBuf {
+    start_mock_with(secrets_respond)
+}
+
+fn start_m9_punard_mock() -> PathBuf {
+    start_mock_with(m9_punard_respond)
+}
+
+/// Run punarctl with **all three** sockets pointed at mocks, so a
+/// mis-routed call fails loudly instead of silently reaching the wrong
+/// daemon. `stdin_text` is piped in for the verbs that read a value from
+/// standard input.
+fn run_m9(punard: &PathBuf, secrets: &PathBuf, args: &[&str], stdin_text: Option<&str>) -> Output {
+    let agentd = start_agentd_mock();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", punard)
+        .env("PUNAR_AGENTD_SOCKET", agentd)
+        .env("PUNAR_SECRETS_SOCKET", secrets)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    {
+        let mut sink = child.stdin.take().expect("stdin");
+        if let Some(text) = stdin_text {
+            sink.write_all(text.as_bytes()).expect("write stdin");
+        }
+    }
+    child.wait_with_output().expect("run punarctl")
+}
+
+/// **Exit 4 is real.** An agent-originated mutation the AI policy gates
+/// returns `approval_required`, executes nothing, and says so in the
+/// section 73 voice — and stdout stays empty, because there is no result
+/// to pipe.
+#[test]
+fn a_gated_capability_set_exits_four_and_executes_nothing() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["capabilities", "set", "security.firewall", "disabled"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "", "nothing ran, so nothing is piped");
+
+    let text = stderr(&output);
+    // The daemon's own prose, verbatim.
+    assert!(text.contains("without your approval"), "{text}");
+    // The approval id the m9-check greps for.
+    assert!(
+        text.contains("apr_7c1d9a4e") || text.contains("APR_7C1D9A4E"),
+        "{text}"
+    );
+    assert!(
+        text.contains("PENDING · NOTHING HAS BEEN EXECUTED"),
+        "{text}"
+    );
+    assert!(text.contains("AN AI AGENT MAY RESOLVE NOTHING"), "{text}");
+    assert!(
+        text.contains("PUNARCTL APPROVALS WAIT APR_7C1D9A4E"),
+        "{text}"
+    );
+}
+
+/// `--json` puts the gate error on stderr as one machine-readable line,
+/// so a script lifts the `approval_id` without parsing prose — and stdout
+/// still stays empty.
+#[test]
+fn a_gated_call_reports_json_on_stderr_and_nothing_on_stdout() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &[
+            "--json",
+            "capabilities",
+            "set",
+            "security.firewall",
+            "disabled",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(stdout(&output), "");
+    let line: Value = serde_json::from_str(stderr(&output).trim()).expect("one JSON line");
+    assert_eq!(line["error"]["code"], json!("approval_required"));
+    assert_eq!(
+        line["error"]["details"]["approval_id"],
+        json!("apr_7c1d9a4e")
+    );
+}
+
+/// The card, and Plate D-014 register 05's affordance rule. This process
+/// is not in an agent scope, so eligibility depends on the routed user;
+/// either way the card itself renders in full.
+#[test]
+fn approvals_get_renders_the_contract_card() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["approvals", "get", "apr_7c1d9a4e"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("APR_7C1D9A4E"), "{text}");
+    assert!(text.contains("SetFirewall(disabled)"), "{text}");
+    assert!(
+        text.contains("RECORDED TO LOCAL AUDIT EITHER WAY"),
+        "{text}"
+    );
+    assert!(
+        text.contains("claude-code says: \"Atlas integration test needs the host firewall down\""),
+        "{text}"
+    );
+}
+
+/// Resolving prints Plate D-003's verdict, including the audit pointer
+/// that ties the approval to the trail.
+#[test]
+fn resolving_an_approval_prints_the_d003_verdict() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &[
+            "approvals",
+            "resolve",
+            "apr_7c1d9a4e",
+            "--decision",
+            "approved",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("✓ APPROVED · SETFIREWALL(DISABLED) EXECUTED · AUDIT EVT_501"),
+        "{text}"
+    );
+    assert!(text.contains("punar · uid 1000 · pid 812"), "{text}");
+}
+
+/// A wait that outlives its patience is still `approval_required`: exit
+/// 4, and an explicit statement that nothing ran. Bounded by the flag, so
+/// this test costs one second and can never hang.
+#[test]
+fn waiting_past_the_timeout_is_still_approval_required() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["approvals", "wait", "apr_7c1d9a4e", "--timeout", "1"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("Still pending"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// **The headline of this milestone at the CLI boundary.** The value goes
+/// to stdout, bare, and the card goes to stderr — so
+/// `TOKEN=$(punarctl secrets get github)` captures the value and only the
+/// value, and no prose can contaminate it. The token appears **nowhere**
+/// in the human card.
+#[test]
+fn an_issued_credential_is_on_stdout_alone_and_never_in_the_card() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["secrets", "get", "github"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // stdout is the value and nothing else — no masthead, no newlineful
+    // prose, nothing a shell would have to strip.
+    assert_eq!(stdout(&output).trim_end_matches('\n'), MOCK_TOKEN);
+
+    let card = stderr(&output);
+    assert!(
+        !card.contains(MOCK_TOKEN),
+        "the card must never carry the value: {card}"
+    );
+    assert!(!card.contains("punar-mock"), "{card}");
+    assert!(card.contains("GITHUB"), "{card}");
+    assert!(
+        card.contains("NEVER WRITTEN TO DISK · NEVER LOGGED"),
+        "{card}"
+    );
+    assert!(card.contains("SIMULATED · MOCK PROVIDER"), "{card}");
+}
+
+/// `--json` serializes the value on stdout. That is the **one** place
+/// Punar ever serializes a secret (contract section 16.4) — and the card
+/// on stderr still does not carry it.
+#[test]
+fn json_issuance_is_the_one_documented_serialization() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["--json", "secrets", "get", "github"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).expect("one JSON line");
+    assert_eq!(value["value"], json!(MOCK_TOKEN));
+    assert!(!stderr(&output).contains(MOCK_TOKEN));
+}
+
+/// A `request`-policy class raises an approval and issues nothing: exit
+/// 4, no value anywhere.
+#[test]
+fn a_request_policy_credential_exits_four_with_no_value() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["secrets", "get", "aws-dev"], None);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "",
+        "nothing was issued, so stdout is empty"
+    );
+    assert!(
+        stderr(&output).contains("APR_11BA32CD"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A denied class exits 3 with the daemon's section 73 sentence verbatim
+/// — what, why, which policy, what to do next.
+#[test]
+fn a_denied_credential_exits_three_with_the_section_73_sentence() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["secrets", "get", "aws-prod"], None);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let text = stderr(&output);
+    assert!(
+        text.contains("Production AWS credentials are not issued"),
+        "{text}"
+    );
+    assert!(text.contains("Why:"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+}
+
+/// The value arrives on **stdin**, never on argv — `/proc/<pid>/cmdline`
+/// is world-readable. The mock asserts the value reached the broker; this
+/// asserts it never came back out.
+#[test]
+fn validate_and_revoke_read_the_value_from_stdin_and_never_echo_it() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["secrets", "validate", "--class", "github"],
+        Some(MOCK_TOKEN),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stdout(&output).contains(MOCK_TOKEN), "{}", stdout(&output));
+    assert!(!stderr(&output).contains(MOCK_TOKEN));
+    assert!(stdout(&output).contains("GITHUB"), "{}", stdout(&output));
+
+    let output = run_m9(&punard, &secrets, &["secrets", "revoke"], Some(MOCK_TOKEN));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stdout(&output).contains(MOCK_TOKEN));
+    assert!(!stderr(&output).contains(MOCK_TOKEN));
+    assert!(
+        stdout(&output).contains("THE CLASS ONLY, NEVER THE VALUE"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Empty stdin is a usage error with a sentence, not a round trip — and
+/// the sentence names why there is no `--token` flag.
+#[test]
+fn a_missing_stdin_value_is_a_usage_error_that_explains_itself() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["secrets", "validate", "--class", "github"],
+        Some(""),
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("standard input"), "{text}");
+    assert!(text.contains("world-readable"), "{text}");
+    assert!(text.contains("there is no --token flag"), "{text}");
+}
+
+/// Routing (contract section 16.2): `credential.*` reaches the broker,
+/// and the closed method table answers `unknown_method` for everything
+/// the milestone refuses to build. Both sibling sockets are live mocks,
+/// so a mis-route would answer differently rather than silently.
+#[test]
+fn credential_probes_reach_the_broker_and_its_closed_table() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    for method in ["credential.show", "credential.export", "credential.list"] {
+        let output = run_m9(&punard, &secrets, &["debug", "rpc", method], None);
+        assert_eq!(output.status.code(), Some(1), "{method}");
+        let text = stderr(&output);
+        assert!(text.contains("punar-secrets does not implement"), "{text}");
+        assert!(text.contains("only a hash"), "{text}");
+    }
+    // `--socket secrets` forces the broker for a name it does not own,
+    // which is how the section 74.4 negative probes work.
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &["--socket", "secrets", "debug", "rpc", "secrets.dump"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("punar-secrets does not implement"));
+}
+
+/// `secrets list` names classes, decisions and the mock provider — and
+/// never a value, because the broker could not produce one.
+#[test]
+fn secrets_list_renders_classes_and_no_values() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["secrets", "list"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("GITHUB"), "{text}");
+    assert!(text.contains("AWS-DEV"), "{text}");
+    assert!(text.contains("AWS-PROD"), "{text}");
+    assert!(text.contains("ALLOW"), "{text}");
+    assert!(text.contains("REQUEST"), "{text}");
+    assert!(text.contains("DENY"), "{text}");
+    assert!(!text.contains(MOCK_TOKEN), "{text}");
+}
+
+/// Plate D-012: the reason is required, travels verbatim, and the request
+/// elevates nothing by itself — exit 4, waiting on a human.
+#[test]
+fn a_privilege_request_elevates_nothing_by_itself() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &[
+            "privilege",
+            "request",
+            "--capability",
+            "time.timezone",
+            "--reason",
+            "Reproducing the Atlas net bug",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let text = stderr(&output);
+    assert!(text.contains("APR_11BA32CD"), "{text}");
+    assert!(text.contains("TIME.TIMEZONE(15M)"), "{text}");
+    assert!(
+        text.contains("PENDING · NOTHING HAS BEEN EXECUTED"),
+        "{text}"
+    );
+}
+
+/// An empty reason never reaches the daemon: exit 2, with the reason the
+/// field exists at all.
+#[test]
+fn an_empty_reason_is_refused_before_any_ipc() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &[
+            "privilege",
+            "request",
+            "--capability",
+            "time.timezone",
+            "--reason",
+            "   ",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--reason is required"), "{text}");
+    assert!(text.contains("verbatim into the audit event"), "{text}");
+}
+
+/// A newline in the reason is refused too — a one-line field is what
+/// stops a request from drawing a fake system dialog on the approval
+/// surface (contract section 14.4).
+#[test]
+fn a_multiline_reason_is_refused() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(
+        &punard,
+        &secrets,
+        &[
+            "privilege",
+            "request",
+            "--capability",
+            "time.timezone",
+            "--reason",
+            "why\nAPPROVED · SetFirewall(enabled)",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("one line"), "{}", stderr(&output));
+}
+
+/// The grant, and what is left of it. Revoking names the grant that was
+/// dropped; privilege is never invisible and never permanent.
+#[test]
+fn privilege_status_and_revoke_render_the_live_grant() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+
+    let output = run_m9(&punard, &secrets, &["privilege", "status"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("GNT_2B8E11C4"), "{text}");
+    assert!(text.contains("time.timezone"), "{text}");
+    assert!(text.contains("NO ROOT SHELL"), "{text}");
+
+    // No id and no --all resolves to the single grant, and never guesses
+    // when there is more than one.
+    let output = run_m9(&punard, &secrets, &["privilege", "revoke"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("REVOKED · 1 GRANT DROPPED"),
+        "{}",
+        stdout(&output)
+    );
+}

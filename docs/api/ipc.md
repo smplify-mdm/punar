@@ -1,4 +1,4 @@
-# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13; M9 approvals, privilege and the secret broker in §14–§16)
 
 Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
 **plus the Milestone 4 and Milestone 5 additions** — marked "M4"/"M5"
@@ -11,6 +11,13 @@ Everything in this document is binding on `punard` (server) and `punarctl`
 (`punard`/`punarctl` responsibilities), section 60 (hard safety constraints —
 no generic root RPC), section 61 (local IPC security), section 73
 (denial-message voice), section 74.4 (security tests).
+
+**M9 amendment (additive, still `v: 1`):** punard gains
+`approvals.*` and `privilege.*` (§14), a new root-owned side file
+`/run/punard/approvals.json` (§15), and a **third** local service —
+`punar-secrets` on its own socket (§16, spec 11.4). Exit code 4
+(`approval_required`), reserved since M3, becomes real. Design
+rationale: `docs/development/milestone-9.md`.
 
 M3 runs **unmanaged-first personal mode** (design language section 8): there is
 no organization, no enrollment, no org policy source. Policy citations in this
@@ -136,6 +143,12 @@ object, fields documented per code below.
   `enroll.stop` (sections 5.9–5.11), the optional `status.org` field and
   the documented `mode`/`enrolled` value changes (5.1), two additive error
   codes (section 4), all under `v: 1`.
+  **M9 note:** likewise, and exactly as this section predicted in M3 —
+  `approvals.*` / `privilege.*` (§14), two additive error codes
+  (`approval_required`, `expired`, section 4), the authorization rungs
+  added to `capabilities.set` (§14.8) with its request shape, result
+  object and audit action unchanged, and a whole sibling socket (§16),
+  all under `v: 1`.
 - A server refusing `v` reports `unsupported_version` with
   `details.supported: [1]`.
 
@@ -153,6 +166,8 @@ object, fields documented per code below.
 | `verify_failed`       | Apply succeeded but post-apply verification did not observe the desired state (spec section 42 "Verify"). Audited with `result: "verify_failed"`. | `capability`, `expected`, `observed` |
 | `internal`            | Daemon bug or I/O error. Never contains secrets (Redacted by construction). | — |
 | `conflict` (M5)       | The request contradicts current enrollment state: `enroll.start` while already enrolled, `enroll.stop` while not enrolled. | `state` |
+| `approval_required` (M9) | The call is **gated**: an approval was created and **nothing executed**. `punarctl` maps it to **exit code 4**, reserved for this since M3. Message is the section 73 gate text; §14.1. | `approval_id`, `expires_at`, `capability`, `resource`, `decision`, `policy_ids` |
+| `expired` (M9)      | An approval passed `expires_at`, or a presented credential's TTL lapsed. Distinct from `conflict` (= already resolved). §14.1, §16.5. | `expires_at` |
 | `upstream_unreachable` (M5) | The control plane did not answer (connect/call failure or timeout during `enroll.start`). Section-73 message names the stage and the next step; local state is untouched (enrollment is all-or-nothing). Sync failures **outside** `enroll.start` never surface as request errors — they queue per spec section 55 (milestone-5.md section 7). | `stage` |
 
 ## 5. Methods (M3 surface + M4/M5 additions — complete)
@@ -175,11 +190,24 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `enroll.start` (M5)     | **root only (uid 0)** | yes  | always  |
 | `enroll.status` (M5)    | any connected peer | no      | no      |
 | `enroll.stop` (M5)      | **root only (uid 0)** | yes  | always  |
+| `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no |
+| `approvals.create` (M9) | **root only (uid 0)** | yes | always |
+| `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always |
+| `approvals.consume` (M9) | **root only (uid 0)** | yes | always |
+| `privilege.request` (M9) | any connected peer **except agent-attributed peers** | yes | always |
+| `privilege.status` (M9) | any connected peer | no (lazy expiry sweep) | no |
+| `privilege.revoke` (M9) | grant owner or root | yes | always |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
 group-`punar` mutation via JIT elevation/polkit is Milestone 9 (spec
 sections 48, 61), and the denial message says so.
+**M9 amendment:** that promise is kept. `capabilities.set` keeps its
+request shape, validation, errors, result object and audit action, and
+gains two authorization rungs *around* the root-only rule — an AI
+authority path for agent-attributed peers (which is where
+`approval_required` is produced) and a time-boxed grant path for humans.
+Both are specified in §14.8; polkit itself is still not used.
 
 ### 5.1 `status`
 
@@ -1220,3 +1248,523 @@ socket client.
   authenticated view. Consumers fail closed — missing or unparsable
   renders "no ledger recorded for this session yet", never an error
   surface.
+
+---
+
+## 14. Approval + privilege contract (M9): `approvals.*`, `privilege.*`
+
+Status: **contract for the Milestone 9 implementation** (spec section 76
+Milestone 9; design rationale: `docs/development/milestone-9.md`).
+These methods live on **punard's** socket (`/run/punard/punard.sock`,
+section 1); transport, framing, envelope, versioning, timeouts and the
+existing error codes are unchanged. Still **`v: 1`** — new methods and
+optional result fields are additive per section 3.3, which has named
+"M9 (JIT elevation)" as an expected additive milestone since M3.
+
+Spec authorities: 28 (approval gates), 48 (just-in-time privilege), 20
+(decision values), 10 (typed capability API; `RequestPrivilege`), 60
+(hard safety constraints), 73 (voice).
+
+**`schemas/audit/approval.json` is the binding document schema and M9
+does not modify it.** Everything M9 needs that the schema cannot hold —
+the originating request, the resolver, the execution result, the
+consumption marker — travels as **sibling fields of the envelope**,
+never inside the document. This is the section 12 law applied to a
+second schema.
+
+### 14.1 Two new error codes
+
+| `code` | Meaning | `details` fields |
+|---|---|---|
+| `approval_required` (M9) | The call is gated: an approval was created and **nothing was executed**. `punarctl` maps this to **exit code 4**, reserved for it since M3. | `approval_id`, `expires_at`, `capability`, `resource`, `decision` (always `"approval_required"`), `policy_ids` |
+| `expired` (M9) | The approval passed `expires_at`, or the presented credential's TTL lapsed. Distinct from `conflict`, which means *already resolved*. | `expires_at` |
+
+`conflict` (M5) gains two M9 uses: resolving an already-resolved
+approval, and consuming an already-consumed one. `details.state` names
+the current status.
+
+### 14.2 Method table (additive, punard socket)
+
+| Method | AuthZ | Mutating | Audited |
+|---|---|---|---|
+| `approvals.list` | any connected peer | no (lazy expiry sweep) | no |
+| `approvals.get` | any connected peer | no (lazy expiry sweep) | no |
+| `approvals.create` | **root only (uid 0)**, and **never from an agent-shaped peer** — see 14.5 | yes | always |
+| `approvals.resolve` | **human only** — see 14.5 | yes (may execute) | always |
+| `approvals.consume` | **root only (uid 0)** | yes | always |
+| `privilege.request` | any connected peer **except agent-shaped peers** — see 14.5 | yes (creates an approval) | always |
+| `privilege.status` | any connected peer | no (lazy expiry sweep) | no |
+| `privilege.revoke` | grant owner or root | yes | always |
+
+`approvals.approve`, `approvals.deny`, `approvals.delete`,
+`privilege.grant` (as a direct call) and `privilege.extend` **do not
+exist** and answer `unknown_method`. A grant is only ever produced by
+resolving an approval; there is no path that mints privilege without a
+recorded human decision.
+
+### 14.3 The envelope (on disk and on the wire)
+
+`approvals.get` result:
+
+```json
+{"v":1,"id":"1","result":{
+  "v": 1,
+  "approval": {
+    "approval_id": "apr_7c1d9a4e",
+    "requester": {"type": "ai_agent", "id": "agt_4f21c09ab3e1"},
+    "user": "punar",
+    "capability": "security.firewall",
+    "resource": "disabled",
+    "reason": "Atlas integration test needs the host firewall down",
+    "risk": "high",
+    "status": "pending",
+    "expires_at": "2026-08-25T10:05:00Z"
+  },
+  "kind": "capability_set",
+  "created_at": "2026-08-25T10:00:00Z",
+  "request": {"method": "capabilities.set",
+              "params": {"capability": "security.firewall",
+                         "desired_state": "disabled"}},
+  "policy": {"name": "Personal preference", "policy_id": "personal-defaults"},
+  "contract": "SetFirewall(disabled)",
+  "resolved_at": null, "resolved_by": null,
+  "consumed_at": null,
+  "execution": null
+}}
+```
+
+- **`approval`** is a document that validates against
+  `schemas/audit/approval.json` **as-is**. Consumers that need the
+  spec-28 object take this member and nothing else.
+- **`kind`** is one of `capability_set`, `credential_request`,
+  `privilege_request`. It selects which sibling fields are meaningful
+  and who executes (14.6).
+- **`resource` semantics**, defined once for all three kinds so that
+  `capability(resource)` reads as Plate D-003's contract block:
+
+  | `kind` | `capability` | `resource` |
+  |---|---|---|
+  | `capability_set` | the registry capability id | the desired-state value (`"disabled"`) |
+  | `credential_request` | `credential.request` | the credential class (`"aws-dev"`) |
+  | `privilege_request` | the capability being elevated | the grant window (`"15m"`) |
+
+  `credential.request` and `privilege.request` are typed **methods**, not
+  desired-state registry entries — the M9 capability registry is still
+  exactly `security.firewall`, `system.hostname`, `time.timezone`.
+  `approval.json` binds `capability` to the `capability_id` *pattern*,
+  not to registry membership.
+- **`resolved_by`** (once resolved):
+  `{"uid": 1000, "user": "punar", "pid": 812, "cgroup": "…"}` — the
+  resolver's full identity, recorded so that an attribution escape is
+  visible after the fact even where it is not preventable (14.5).
+- **`execution`** (once an approved `capability_set` or
+  `privilege_request` has run):
+  `{"result": "success", "changed": true, "audit_event_id": "evt_501",
+  "grant_id": "gnt_2b8e11c4"}`, or
+  `{"result": "apply_failed", "error": "<§73 prose>"}`.
+  `audit_event_id` is **the link between an approval and the audit
+  trail**, and the pointer deliberately runs approval → event, exactly
+  as Plate D-003 prints it ("audit evt_501") and exactly as the M8
+  ledger references events. `audit-event.json` is **not** extended.
+- **`consumed_at`** is set when a `credential_request` approval is spent
+  (14.7). It is a sibling field, **not** a fifth `status` value: the
+  shipped enum `pending|approved|denied|expired` is not widened.
+
+### 14.4 Lifecycle, TTL and expiry
+
+```text
+pending ──resolve(approved)──▶ approved ──(consume, credential kind)──▶ consumed_at set
+   │                                       (status stays "approved")
+   ├──resolve(denied)────────▶ denied
+   └──expires_at passed──────▶ expired
+```
+
+`approved | denied | expired` are terminal.
+
+- **TTL: 300 s by default** — Plate D-003's countdown verbatim (amber
+  under a minute). The requester may ask for a **shorter** TTL
+  (`params.ttl`, clamped to `[15, 300]`) and never a longer one; the
+  maximum is policy-owned.
+- **Expiry is swept lazily**: on every read (`approvals.list`,
+  `approvals.get`, and each summary-file rewrite), at `resolve` and
+  `consume` time, and on every `reconcile` pass — which reuses the
+  existing `punard-reconcile.timer` and therefore adds **no timer**
+  (spec 6.3). Honest consequence: an `approval.expire` event's
+  `timestamp` is when the lapse was *observed*; `expires_at` on the
+  record is when it *occurred*, so the instant is always recoverable.
+- **Bounds:** at most **8 pending device-wide** and **2 pending per
+  requester session**. Beyond either, `approvals.create` returns
+  `denied` with `details.reason: "approval_flood"`, audited — approval
+  fatigue is the classic attack on an approval gate and is refused in
+  code.
+- **`reason`** is validated at creation: 1–512 bytes, valid UTF-8, **no
+  control characters and no newlines**. It is requester-authored text
+  and it *is* displayed (spec 73 requires "why" and "who requested it");
+  every surface renders it in a quoted requester voice, typographically
+  separated from system prose, as plain non-interactive text.
+
+### 14.5 `approvals.resolve` is human-only (a section-60-class rule)
+
+Params: `{"approval_id": "apr_…", "decision": "approved"|"denied"}`.
+
+Permitted **iff all three hold**:
+
+1. the peer is **not attributed to any agent session** — the section
+   12.5 cgroup rule returns `None`, and additionally the peer's cgroup
+   path contains no `punar-agent-` segment at all; **and**
+2. `peer.uid == 0`, or `peer.uid`'s username equals the approval's
+   `user` field (approvals are *routed* to a person; only that person
+   answers); **and**
+3. the approval is `pending` and not past `expires_at`.
+
+Rule 1 is checked **first** and its violation is a `denied` response
+with `result: "self_approval_refused"` in the audit event, `source:
+"ai_agent"`, `agent_session_id` set, `resource` = the `apr_` id. A
+human may resolve their own `privilege_request` (Plate D-012 draws
+exactly that — the friction is the required reason, the countdown and
+the trail). **An AI agent may resolve nothing, ever, including a
+human's request.**
+
+**Rule 1 is one rule, applied by three methods.** "Agent-shaped" — the
+peer is attributed to a session id *or* its cgroup path merely names a
+`punar-agent-` scope, whatever its uid — is the admission test for
+`approvals.resolve` (`result: "self_approval_refused"`),
+`approvals.create` (`result: "agent_create_refused"`) and
+`privilege.request` (`result: "agent_privilege_refused"`). Answering,
+authoring and asking for a window are three ways to reach the same
+human consent, so they are gated by the same test rather than by three
+tests that could drift; `punard` implements it once. `approvals.create`
+is in that list because *everything on that call is requester-authored*
+— `requester` (an agent may write `{"type": "human"}`), `reason`,
+`contract` and the `user` the card is routed to are exactly the words a
+person reads before consenting. The uid is not consulted by rule 1:
+root-ness inside an agent scope buys no bypass (SPEC section 60), and
+uid 0 remains separately required by `approvals.create` and
+`approvals.consume`. `punar-secrets` is unaffected — it is a system
+unit in `system.slice`, and the session it asks on behalf of travels in
+`requester_peer`, not in its own attribution.
+
+**Honest limit, stated in the contract rather than only in the design
+doc:** the cgroup is *evidence of attribution*, not a sandbox. An agent
+that deliberately launches a helper outside its own scope escapes
+attribution and would present as the console user; M8 already rests on
+the same foundation. M9 records the resolver's uid/pid/cgroup so an
+escape is visible after the fact, and names the real fixes (a dedicated
+uid per agent session; a logind seat-presence check) as deferred. No M9
+surface claims cryptographic proof of a human.
+
+### 14.6 Execution ownership follows capability ownership
+
+| `kind` | On `resolve(approved)` | Executor |
+|---|---|---|
+| `capability_set` | punard runs the recorded `capabilities.set` **immediately, in the resolver's request, under the store lock** — record preference → apply → verify → audit (section 5.4 pipeline, unchanged) — and writes `execution`. Exactly-once by construction. | punard |
+| `privilege_request` | punard writes the grant (section 14.8) and sets `execution.grant_id`. | punard |
+| `credential_request` | punard **flips the status and does nothing else.** | `punar-secrets`, later, via `approvals.consume` |
+
+The credential case is split deliberately: making punard issue would
+put a plaintext token inside the daemon that writes `/etc` and shells
+out to `nft`, destroying the reason `punar-secrets` is a separate
+service (spec 11.4). punard never calls `punar-secrets`; there is no
+cycle.
+
+**Attribution of an executed capability** (spec 22): the execution audit
+event carries **the requesting agent's** `agent_session_id` and
+`source: "ai_agent"`; the `approval.resolve` event carries the
+resolver's identity (`source: "human"`, `agent_session_id: "agt_none"`).
+The agent did it, the human allowed it, and the trail says both.
+
+### 14.7 `approvals.consume`
+
+Params: `{"approval_id": "apr_…"}`. Root only — in practice
+`punar-secrets`, which runs as root. Atomically sets `consumed_at` on an
+`approved`, unconsumed, unexpired approval and returns
+`{"approval": {...}, "consumed_at": "…"}`.
+
+- Already consumed → `conflict`.
+- Past `expires_at` → `expired`. **An approved credential approval still
+  expires**: a human's yes is not a standing grant, and a second
+  issuance of the same class raises a **new** approval.
+
+Always audited: `action: "approval.consume"`, `resource` = the `apr_`
+id, `decision: "allow"`, `result: "consumed"`.
+
+### 14.8 `privilege.request` / `privilege.status` / `privilege.revoke`
+
+`privilege.request` params:
+`{"capability": "<registry id>", "reason": "<1–512 bytes>",
+"duration_minutes": 15}` — `reason` is **required** (Plate D-012: it
+travels verbatim into the audit event); `duration_minutes` defaults to
+**15** (spec 48: *"Approved for 15 minutes."*), range `[1, 60]`.
+Creates a `privilege_request` approval routed to the calling user and
+returns `approval_required` (exit 4).
+
+**A peer attributed to an agent session is refused outright**
+(`denied`, `result: "agent_privilege_refused"`, audited). Agents get
+per-request approvals; they never get a time window. Spec 48 ("avoid
+permanent local admin") and spec 60 ("add persistent unrestricted
+root") both land here.
+
+On approval, punard writes a grant to
+`/var/lib/punar/grants/<gnt_id>.json` (`0600` inside `0700 root:root`):
+
+```json
+{"v": 1, "grant_id": "gnt_2b8e11c4", "approval_id": "apr_…",
+ "uid": 1000, "user": "punar", "capability": "time.timezone",
+ "reason": "Reproducing the Atlas net bug",
+ "granted_at": "…", "expires_at": "…", "revoked_at": null}
+```
+
+`privilege.status` result:
+`{"grants": [{"grant_id", "capability", "reason", "granted_at",
+"expires_at"}], "checked_at": "…"}` — the caller's own grants, or every
+grant for root.
+
+`privilege.revoke` params: `{"grant_id": "gnt_…"}` or `{"all": true}`
+(exactly one; neither or both → `invalid_params`). Owner or root.
+
+**Effect on `capabilities.set` (section 5.4), stated precisely.** The
+M3/M4/M5 request shape, validation, errors, audit action and result
+object are **unchanged**. The authorization step gains two rungs, in
+this order:
+
+```text
+1. peer attributed to an agent session (section 12.5)?
+     → AI AUTHORITY PATH: allow | deny | approval_required, from the
+       effective section 20 AI policy (personal defaults, or the org
+       layer while enrolled). Checked BEFORE the uid test, because
+       spec 60 forbids bypassing AI policy enforcement — root-ness
+       inside an agent scope does not buy a bypass.
+       A capability with no AI-policy mapping is DENIED, fail closed.
+2. otherwise HUMAN PATH:
+     uid == 0                                   → allow  (unchanged)
+     unexpired unrevoked grant for (uid, cap)   → allow  (NEW)
+     otherwise                                  → deny   (unchanged;
+       the section 73 message's long-standing "Milestone 9" pointer now
+       names `punarctl privilege request`, which exists)
+```
+
+A grant-authorized mutation is audited `decision: "allow"` with
+`details.grant_id`. A grant names **one** capability; there is no
+wildcard, no `--all` grant, and no grant for an unregistered capability.
+
+### 14.9 Audit additions (M9, punard)
+
+`approval.create`, `approval.resolve`, `approval.expire`,
+`approval.consume`, `privilege.request`, `privilege.grant`,
+`privilege.expire`, `privilege.revoke`. `resource` is the `apr_` /
+`gnt_` id on every one of them, which is how the audit trail alone names
+the approval without any change to `audit-event.json`. All are human- or
+lifecycle-paced; M9 adds no per-check or per-consult event class (spec
+6.4).
+
+---
+
+## 15. Side contract (M9): `/run/punard/approvals.json`
+
+Not IPC — the approval sibling of section 9's `status.json` and section
+13.2's `ledger.json`, written atomically (tmp + `fsync` + `rename`) by
+punard at **every** approval state transition and every grant change, so
+`punar-shell` renders the Plate D-003 overlay and the Plate D-012
+`ELEVATED` bar chip with an event-driven `FileView` and **no socket
+client in the shell**.
+
+- **`0640 root:punar`, inside the root-owned `/run/punard`
+  directory** — deliberately *not* `/run/punar` alongside
+  `status.json`/`agents.json`. That M1 directory is `0755 punar:punar`,
+  so a local process can unlink a file there and bind its own. For a
+  counts fingerprint that is a nuisance; for **the file that tells a
+  human what they are about to authorize** it is a spoofing primitive —
+  show a benign contract block over a dangerous `apr_` id and the human
+  presses `A`. Root ownership of the whole path is what makes section 61
+  "filesystem permissions" mean anything, and this is the same argument
+  that put `ledger.json` in `/run/punar-agentd`.
+- Content:
+
+```json
+{"v": 1, "updated_at": "2026-08-25T10:00:00Z",
+ "approvals": [
+   {"approval_id": "apr_7c1d9a4e", "kind": "capability_set",
+    "status": "pending",
+    "requester": {"type": "ai_agent", "id": "agt_4f21c09ab3e1",
+                  "agent_name": "claude-code"},
+    "user": "punar", "capability": "security.firewall",
+    "resource": "disabled", "risk": "high",
+    "reason": "Atlas integration test needs the host firewall down",
+    "contract": "SetFirewall(disabled)",
+    "policy": {"name": "Personal preference", "policy_id": "personal-defaults"},
+    "created_at": "…", "expires_at": "2026-08-25T10:05:00Z",
+    "execution": null}],
+ "grants": [{"grant_id": "gnt_2b8e11c4", "capability": "time.timezone",
+             "expires_at": "…"}]}
+```
+
+- The **`reason` is present by design** (spec 73 requires *why* and
+  *who requested it*; Plate D-003 renders it). It is requester-authored
+  text, validated at creation to one line of ≤ 512 printable bytes
+  (14.4), and every renderer shows it in a quoted requester voice,
+  typographically separated from system prose, as plain non-interactive
+  text with no rich formatting and no link activation. Spec 53 binds
+  Punar never to log secret values **it handles**; a free-text field a
+  requester fills in themselves is outside that guarantee, and this
+  contract says so rather than implying a redaction it cannot perform.
+- **Non-authoritative for trust decisions**, exactly as sections 9, 11
+  and 13.2 state: the socket is the authority. The overlay's Approve
+  action sends **only the `approval_id`**, and punard re-derives the
+  contract from its own record before executing anything. Consumers fail
+  closed — missing or unparsable renders "no approvals pending", never
+  an error surface.
+- The countdown is computed by the consumer from `expires_at`, so an
+  overlay renders `EXPIRED · denied by timeout` the moment the clock
+  reaches zero whether or not punard has swept yet (14.4). Pressing `A`
+  on a lapsed card gets `expired` from the daemon and the card says so.
+
+---
+
+## 16. Sibling contract (M9): `punar-secrets` socket — `credential.*`
+
+Status: **contract for the Milestone 9 implementation** (spec sections
+11.4, 29). A **separate daemon**, per spec 11.4 — rationale in
+`docs/development/milestone-9.md` §3.1, of which the load-bearing part
+is that a broker with **no state directory at all** is the strongest
+available form of the "never written to disk" promise.
+
+### 16.1 Transport — identical mechanics, third socket
+
+```text
+# usr/lib/tmpfiles.d/punar-secrets.conf
+d /run/punar-secrets 0750 root punar -
+```
+
+Socket `/run/punar-secrets/secrets.sock`, created with a restrictive
+umask then `chown root:punar` + `chmod 0660` **before** `listen()`.
+Admission is the filesystem (root or group `punar`; everyone else gets
+`EACCES` before the daemon sees them). `SO_PEERCRED` at `accept()` is
+the authorization input, and the peer's `/proc/<pid>/cgroup` feeds the
+**same section 12.5 attribution rule** — promoted to
+`punar_common::principal` so punard and `punar-secrets` share one
+implementation and cannot disagree about who an agent is. Framing,
+envelope, versioning, timeouts and error codes: sections 2–4,
+unchanged, `v: 1`.
+
+`punar-secrets.service` is ordered `After=punard.service` with **no
+`Wants`/`Requires`**: it dials punard only for approvals, and when
+punard is unreachable a `request`-policy class fails with
+`upstream_unreachable` and **issues nothing** (fail closed), while
+`allow` and `deny` classes still answer.
+
+### 16.2 Method table — closed
+
+| Method | Peer may call | Mutating | Audited |
+|---|---|---|---|
+| `status` | any connected peer | no | no |
+| `credential.classes` | any connected peer | no | no |
+| `credential.request` | any connected peer | yes (issues) | **always** |
+| `credential.validate` | any connected peer | no | only on first-observed expiry |
+| `credential.revoke` | token holder | yes | **always** |
+
+`credential.show`, `credential.export`, `credential.list` (of issued
+tokens), `secrets.dump`, `system.exec` and `shell.run` **do not exist**
+and answer `unknown_method`. This is architectural, not a policy
+setting:
+
+> **After issuance the broker holds only `sha256(token)`. There is no
+> method that returns an issued token a second time, because the broker
+> cannot produce one.**
+
+### 16.3 `credential.request`
+
+Params: `{"credential": "aws-dev", "ttl": 3600}` (`ttl` optional,
+seconds, clamped to `[5, class.max_ttl]`, default `class.default_ttl`).
+
+Class definitions are **data**, not code —
+`usr/share/punar/secrets/classes.yaml`, aligned with
+`fixtures/policies/ai-policy-engineering-standard.yaml` and the spec
+section 17 Atlas manifest `credentials` block. **Naming, decided once:**
+the class id is **kebab-case** on the wire, in audit `resource`, and in
+the M8 ledger (`github`, `aws-dev`, `aws-prod`) — spec 29's request
+example says `"credential": "aws-dev"` — while the **policy key is
+snake_case** (`aws_dev`), because `ai-policy.json`'s `propertyNames`
+pattern forbids hyphens. The mapping is a declared `policy_key` field
+on the class, never a `replace('-','_')` guess.
+
+Three outcomes, from the effective section 20 `credentials` decision
+(`allow | deny | request`) resolved through the section 39 ladder:
+
+| Policy | Response | `punarctl` exit | Audit |
+|---|---|---|---|
+| `allow` | `{"credential": "aws-dev", "value": "<token>", "expires_at": "…", "provider": "mock"}` | 0 | `credential.request`, `decision: allow`, `result: "issued"` |
+| `request` | error `approval_required` with `details.approval_id` | **4** | `credential.request`, `decision: approval_required`, `result: "pending"` |
+| `deny` | error `denied`, section 73 message | 3 | `credential.request`, `decision: deny`, `result: "denied"` |
+
+On the `request` path the broker calls punard's `approvals.create`
+(kind `credential_request`, `capability: "credential.request"`,
+`resource`: the class). A later `credential.request` for the same class
+by the same requester finds the approved approval, calls
+`approvals.consume` (14.7) — **single use** — and issues. A second
+issuance raises a **new** approval.
+
+**Every audit event carries the credential CLASS only.** Never a value,
+never a token id, never a hash. `agent_session_id` comes from the shared
+attribution rule, which is exactly what makes the M8 ledger's
+`credential_classes` and `credential_request` fill from real events.
+`project_id` is the existing `"system"` sentinel: spec 29's request
+example carries a project, but M9 has no unforgeable project mediation
+point at the broker, and a requester-supplied project would put
+forgeable data in the tamper-evident record. Display surfaces may show
+the project from the agent's registry record; the audit does not claim
+it.
+
+### 16.4 Token handling — the section 53 rule, made structural
+
+- The value is 32 bytes from `getrandom(2)`, encoded URL-safe-base64
+  behind a class-marked mock prefix (`punar-mock-aws-dev-…`) so a leaked
+  value is identifiable as a mock in any grep.
+- It is wrapped in `punar_common::Redacted` for its entire in-process
+  lifetime; `Debug`/`Display` print `[redacted]`, so no stray `{:?}` can
+  leak it.
+- The broker's in-memory map holds `{sha256(token), class, owner_uid,
+  agent_session_id, issued_at, expires_at, revoked}` and **not the
+  token**. Nothing is persisted; `punar-secrets` has **no state
+  directory**. Its only disk writes are audit events through the shared
+  `punar_common::audit` writer, and its `ReadWritePaths=` is exactly
+  `/run/punar-secrets /var/log/punar`.
+- **How the caller receives it:** `punarctl secrets get <class>` writes
+  the value to **stdout, bare, with no masthead**, and the human card
+  (class, agent, expiry, `NEVER WRITTEN TO DISK · NEVER LOGGED`,
+  `SIMULATED · MOCK PROVIDER`) to **stderr** — so
+  `TOKEN=$(punarctl secrets get aws-dev)` works and prose can never
+  contaminate the value. `--json` serializes the value on stdout; that
+  is the **one** place Punar ever serializes a secret, and Punar never
+  persists it.
+- **Environment injection into the agent scope is rejected**, on three
+  grounds: `/proc/<pid>/environ` is readable by the same uid and is
+  **inherited by every child** the agent spawns; an environment variable
+  **cannot expire**, contradicting spec 29's "short-lived"; and the
+  agent scope's cgroup is a surface `punar-agentd` samples, so a secret
+  there is one bug away from the ledger.
+- **Secrets are never accepted on argv** (`/proc/<pid>/cmdline` is
+  world-readable). `credential.validate` and `credential.revoke` read
+  the token from **stdin**. A `--token` flag does not exist and must
+  never be added.
+- **Honest leak surface:** the caller may redirect stdout to a file.
+  Punar cannot prevent that and does not claim to. The promise is
+  precise and is the sentence every surface prints: **Punar never writes
+  it.**
+
+### 16.5 `credential.validate` / `credential.revoke`
+
+`credential.validate` params: `{"credential": "github", "value":
+"<token>"}` (the value reaches `punarctl` on stdin). Result
+`{"valid": true, "credential": "github", "expires_at": "…"}` or error
+`expired` / `not_found`.
+
+Expiry is computed against the clock **on validate** — no timer, no
+sweep (spec 6.3). An expired entry is dropped on the first validate that
+observes it and audited **once** (`credential.expire`, `result:
+"expired"`). A validate of an **unknown** token is **not audited at
+all**: there is nothing to attribute, and auditing it would hand any
+local process an audit-flood primitive (spec 6.4). A **successful**
+validate is not audited either, for the same reason.
+
+`credential.revoke` params: `{"value": "<token>"}` — drops the entry
+immediately, audited `result: "revoked"`, class only.
