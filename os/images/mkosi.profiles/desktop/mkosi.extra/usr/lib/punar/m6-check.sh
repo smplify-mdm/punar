@@ -21,7 +21,7 @@
 # scratch dir → up (staged archive 0644, podman load, running container,
 # --network none, /workspace bind) → shell exit-code passthrough +
 # rootless uid-mapping write proof → status verbatim-render greps + jq on
-# --json → agent stub honesty (Milestone 7, real membership check) →
+# --json → agent launch honesty (real membership check + clean failure) →
 # destroy (container gone, project files intact, idempotent) → verdict.
 # No screenshots: this is a CLI milestone; the exported m6-status.txt is
 # the human evidence.
@@ -290,14 +290,19 @@ jq_check "status --json: shape, state, workspace mode, enforcement labels presen
      and .enforcement.network == "M12" and .enforcement.credentials == "M9"
      and .enforcement.ai == "M7"'
 
-# --- 7. agent stub honesty ---------------------------------------------------
+# --- 7. agent launch honesty -------------------------------------------------
+# M7 replaced the stub with a real launcher (milestone-7.md §5): without
+# PUNAR_AGENT_MOCK the adapter's real executable (`claude`) is absent from
+# this image, so the launch must FAIL CLEANLY rather than fake a session.
+# The managed-launch happy path is m7-check's job, not this one.
 as_punar "${ENV_BIN}" -C "${ATLAS}" agent claude-code \
     >/dev/null 2> "${RUN_DIR}/m6-agent-declared.txt"
-check_eq "agent claude-code (declared) exit code" 1 "$?"
-if grep -q 'Milestone 7' "${RUN_DIR}/m6-agent-declared.txt"; then
-    note "ok   agent stub cites Milestone 7 (no faked session)"
+agent_declared_rc=$?
+if [ "${agent_declared_rc}" -ne 0 ] \
+        && grep -qi 'claude' "${RUN_DIR}/m6-agent-declared.txt"; then
+    note "ok   declared agent with no installed executable fails cleanly (no faked session)"
 else
-    note "FAIL agent stub stderr: $(head -c 240 "${RUN_DIR}/m6-agent-declared.txt" 2>/dev/null)"
+    note "FAIL declared-agent launch: exit ${agent_declared_rc}, stderr: $(head -c 240 "${RUN_DIR}/m6-agent-declared.txt" 2>/dev/null)"
     FAILED=1
 fi
 as_punar "${ENV_BIN}" -C "${ATLAS}" agent not-in-manifest \
