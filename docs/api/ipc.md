@@ -1,4 +1,4 @@
-# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13)
 
 Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
 **plus the Milestone 4 and Milestone 5 additions** — marked "M4"/"M5"
@@ -735,9 +735,11 @@ is binding on `punar-agentd` (server) and its clients (`punar-env`,
 ### 10.2 Methods (the complete M7 surface — closed)
 
 There is no exec/shell/script method here either (spec sections 10, 60 —
-permanent). `agents.access` (spec section 11.2, ledger data) is
-**reserved for M8** and answers `unknown_method` until then, as do the
-`admin.*` names (M10).
+permanent). `agents.access` (spec section 11.2, ledger data) was
+**reserved for M8** and answered `unknown_method` in M7; **section 12
+below is its M8 contract**, together with `ledger.purge` and the
+`agents.list` ledger fingerprint. The `admin.*` names remain reserved
+(M10), and no export/query method exists at all.
 
 | Method | Peer may call | Mutating | Audited |
 |---|---|---|---|
@@ -939,3 +941,282 @@ socket client in the shell, no polling.
   staleness rule triggers the scan; the rewrite (if anything changed)
   reaches the shell through the FileView. One-shot on user action —
   still no polling loop anywhere.
+
+## 12. Ledger contract (M8): `agents.access`, `ledger.purge`
+
+Status: **contract for the Milestone 8 implementation** (spec section 76
+Milestone 8; design rationale: `docs/development/milestone-8.md`). These
+methods live on the **agentd socket** (`/run/punar-agentd/agentd.sock`,
+section 10.1); transport, framing, envelope, versioning, timeouts and
+error codes are unchanged. `punard`'s contract (sections 1–9) is
+unchanged except for the attribution rule in 12.5.
+
+**`schemas/ai-agent/ledger-summary.json` is the binding document schema
+and M8 does not modify it.** Everything the schema cannot hold (counts,
+first/last seen, honest not-yet-observed rows, retention) travels as
+**sibling fields of the result object**, never inside the document.
+
+### 12.1 Method table (additive)
+
+| Method | Peer may call | Mutating | Audited |
+|---|---|---|---|
+| `agents.access` | session **owner** or root | no (drains audit + samples cgroup first) | only when root reads a session it does not own (`ledger.read`) |
+| `ledger.purge` | session **owner** or root | yes | **always** |
+| `agents.list` (§10.2) | any connected | no | no — gains a counts-only `ledger` fingerprint per session |
+
+`ledger.export`, `ledger.query` and `admin.*` do not exist and answer
+`unknown_method`: there is no upload path in M8 (spec section 24; the
+authorized administrator query is Milestone 10).
+
+### 12.2 `agents.access`
+
+Params: `{"session_id": "agt_…"}`. Authorization: `peer.uid` equals the
+uid that owns the session, or root — a ledger is personal data about one
+user's session, which is stricter than `agents.list` and is the local
+half of spec section 24.1's "RBAC applies". Unknown id → `not_found`;
+another user's session (non-root) → `denied` with a section-73 message.
+
+Result:
+
+```json
+{"v":1,"id":"1","result":{
+  "summary": {
+    "session_id": "agt_4f21c09ab3e1",
+    "agent": "claude-code",
+    "generated_at": "2026-08-27T10:00:02Z",
+    "resources": {
+      "repositories": ["atlas"],
+      "directory_zones": ["workspace"],
+      "network_destinations": [],
+      "mcp_servers": [],
+      "credential_classes": [],
+      "process_classes": ["agent", "git", "shell"]
+    },
+    "security_events": [
+      {"event_id": "evt_502", "event_type": "denied_access",
+       "timestamp": "2026-08-27T09:59:12Z"}
+    ]
+  },
+  "detail": {
+    "status": "active",
+    "process_peak": 6,
+    "truncated": false,
+    "entries": [
+      {"category": "repositories", "resource_class": "atlas", "count": 1,
+       "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T09:58:40Z",
+       "evidence": "workspace_bind"},
+      {"category": "directory_zones", "resource_class": "workspace", "count": 1,
+       "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T09:58:40Z",
+       "evidence": "workspace_bind"},
+      {"category": "process_classes", "resource_class": "git", "count": 2,
+       "first_seen": "2026-08-27T09:58:44Z", "last_seen": "2026-08-27T10:00:02Z",
+       "evidence": "cgroup_scope"}
+    ]
+  },
+  "not_yet_observed": [
+    {"level": 3, "category": "network_destinations", "milestone": "M12",
+     "reason": "punar-netd does not exist yet; no owned mediation point observes network destinations"},
+    {"level": 3, "category": "mcp_servers", "milestone": "M9+",
+     "reason": "no tool/MCP gateway mediates MCP traffic yet (spec section 26)"},
+    {"level": 3, "category": "credential_classes", "milestone": "M9",
+     "reason": "punar-secrets is the producer of credential.request events (spec section 29)"},
+    {"level": 4, "category": "credential_request", "milestone": "M9",
+     "reason": "no credential producer exists yet"},
+    {"level": 4, "category": "policy_bypass_attempt", "milestone": "M9",
+     "reason": "approval gates arrive with M9"},
+    {"level": 4, "category": "production_access", "milestone": "M12",
+     "reason": "no network mediation exists yet"},
+    {"level": 4, "category": "sensitive_resource_access", "milestone": "M9/M12",
+     "reason": "no mediation point observes sensitive zones yet"},
+    {"level": 4, "category": "unknown_ai_execution", "milestone": "M10",
+     "reason": "the audit event exists, but a detected unmanaged process has no registered session, so in M8 it attaches to no ledger"}
+  ],
+  "retention": {"days": 14, "active": true},
+  "privacy": {
+    "local_only": true,
+    "purge_command": "punarctl privacy purge --session agt_4f21c09ab3e1",
+    "never_recorded": ["file paths inside the workspace", "prompts",
+                       "source code", "secret values", "individual file reads"],
+    "audit_trail_separate": true
+  }
+}}
+```
+
+- **`summary`** is a document that validates against
+  `ledger-summary.json` **as-is** — it is produced by a total projection
+  of `detail.entries` (group by `category`, emit distinct
+  `resource_class` values) plus the event refs. It is the exportable
+  artifact: whatever Milestone 10's authorized query ever returns is
+  this object, and the user already has it.
+- **`detail.entries[].category`** is one of the six `resources` keys —
+  no seventh category exists. `resource_class` values can never contain
+  `/`, `:` or whitespace (enforced by the daemon's `ResourceClass`
+  newtype, not by review). `evidence` is one of `cgroup_scope`,
+  `audit_event`, `workspace_bind`, `adapter_metadata` — the mediation
+  point that proved the entry.
+- **`count` semantics** for `process_classes`: distinct
+  `(pid, starttime)` pairs of that class **observed alive at a sampling
+  point**. Not a spawn count. Short-lived children between samples are
+  missed, and every renderer says so. `process_peak` is the scope
+  cgroup's `pids.peak` — peak *concurrent* pids, never a spawn total.
+- **Empty is not "none happened".** A category that is empty **and**
+  listed in `not_yet_observed` means *no mediation point observes it
+  yet*; no surface may render it without that label (spec section 1.22).
+- **`retention`**: `{"days": 14, "active": true}` while the session
+  runs; `{"days": 14, "expires_at": "…"}` once ended.
+- **Purged session**: result carries
+  `"purged_at": "…"` at the top level, `summary.resources` all empty and
+  `summary.security_events: []`; renderers must say *purged*, never
+  *nothing recorded*.
+
+### 12.3 `ledger.purge`
+
+Params: exactly one of `{"session_id": "agt_…"}` or `{"all": true}`
+(neither, or both → `invalid_params`).
+
+Authorization, verbatim: `peer.uid == session.owner_uid || peer.uid == 0`.
+`{"all": true}` from a non-root peer purges **only sessions owned by the
+calling uid**; from root it purges every session on the device. A
+non-root peer may never purge another user's ledger (`denied`, section-73
+message). This right is unconditional for one's own sessions in M8 (spec
+section 24.2): no policy can withhold it, because no organization can
+read the data either.
+
+Effect: the per-session file(s) are unlinked; each index row is replaced
+by a tombstone `{session_id, purged_at}` that **floors audit
+re-ingestion**, so a later drain cannot resurrect purged data. Result:
+`{"purged": 1, "resource_classes": 11, "security_events": 1,
+"purged_at": "…"}`.
+
+**Purge does not touch `/var/log/punar/audit.jsonl`.** The audit trail is
+the record of decisions the system made (spec section 53) and is outside
+a user's delete authority; the ledger, which is *derived* from it plus
+the scope cgroup, is not. Every surface prints this boundary in one
+sentence.
+
+Always audited: `action: "ledger.purge"`, `resource`: the session id or
+`"own"`, `decision`: `allow`/`deny`, `result`: `"purged"` (with the
+count) or `"denied"`, `agent_session_id`: the purged session's real
+`agt_` id when scoped to one session.
+
+### 12.4 `agents.list` — the ledger fingerprint (additive)
+
+Each `sessions[*]` entry gains:
+
+```json
+"ledger": {"resources": 5, "process_classes": 3,
+           "security_events": 1, "updated_at": "2026-08-27T10:00:02Z"}
+```
+
+**Counts only** — no class names, no `evt_` ids, no zones. This is what
+the panel rail and the world-readable summary file (section 11) may
+show; identifiers require `agents.access` and its ownership check.
+`detections[*]` gain no ledger field: an unregistered detection has no
+persisted session and therefore no ledger in M8 (Milestone 10).
+
+### 12.5 Attribution addition in `punard` (spec section 22)
+
+`punard` gains one rule, using a mediation point it already terminates:
+at `accept()` it already reads `SO_PEERCRED` (uid, gid, **pid**); it now
+also reads `/proc/<peer_pid>/cgroup`, and when that names
+`punar-agent-<id>.scope` it sets `agent_session_id = agt_<id>` and
+`source = "ai_agent"` on the audit event for that call. Otherwise
+nothing changes (`agt_none`, existing `source`). No new syscalls, no
+tracing, no per-call cost beyond one small read; the cgroup is
+kernel-attested and is the same chain `agents.register` verifies.
+
+Consequence: a capability call made from inside a managed agent session
+— **including a denial** — is attributed to that session in the audit
+trail whether or not the agent declared it, which is what makes the
+Level-4 half of the ledger real in M8.
+
+### 12.6 Audit additions (M8)
+
+`ledger.purge` (always), `ledger.prune` (one event per prune **batch**,
+`result`: `"expired"` / `"index_cap"` / `"orphan"`, `source: "service"`,
+`user_id: "punar-agentd"`), and `ledger.read` (only when root reads a
+ledger it does not own — the seed of Milestone 10's audited
+administrator query). No per-access, per-sample or per-drain events
+exist: spec section 6.4 forbids exactly that kind of write amplification.
+
+## 13. Side contract (M8): the ledger record and its runtime view
+
+### 13.1 `/var/lib/punar/agents/ledger/` (on disk, root-only)
+
+```text
+/var/lib/punar/agents/ledger/                  0700 root:root  (tmpfiles)
+/var/lib/punar/agents/ledger/<session_id>.json 0640 root:root
+/var/lib/punar/agents/ledger/index.json        0640 root:root
+```
+
+Per-session record:
+
+```json
+{"v": 1,
+ "session_id": "agt_4f21c09ab3e1", "agent": "claude-code",
+ "user": "punar", "project": "atlas",
+ "classification": "managed", "status": "ended",
+ "started_at": "…", "ended_at": "…", "updated_at": "…",
+ "retention_expires_at": "…",
+ "process_peak": 6, "truncated": false,
+ "entries": [{"category": "process_classes", "resource_class": "git",
+              "count": 2, "first_seen": "…", "last_seen": "…",
+              "evidence": "cgroup_scope"}],
+ "security_events": [{"event_id": "evt_502",
+                      "event_type": "denied_access", "timestamp": "…"}]}
+```
+
+`index.json` carries `{v, updated_at, tail: {dev, ino, offset},
+sessions: [{session_id, agent, project, user, classification, status,
+first_seen, last_seen, updated_at, retention_expires_at, purged_at?,
+counts: {…}}]}` — the rollup `agents.list` and retention read without
+opening every file, plus the audit tail position.
+
+Writes are **batched**: at most one atomic tmp+`fsync`+`rename` per
+session per drain/sample batch; no per-event `fsync`; **0 B/s at idle**
+(spec section 6.4). Bounds: 32 distinct resource classes per category
+per session, 256 event refs (first 128 + last 128 kept on overflow, with
+`truncated: true`), ≤ 16 KiB per file, 200 sessions in the index (oldest
+**ended** evicted first), < 4 MiB for the directory.
+
+`project` here is a **repository class**, not the launcher's project
+string: `agents.register` pattern-checks `session_id` and `agent`, but
+`registry-record.json` leaves `project` unpatterned, so a caller may
+register `project: "/home/punar/clients/acme"`. The ledger types that
+field as a `ResourceClass` (`^[a-z][a-z0-9_-]*$`), so a value that is
+not one is **absent** from the record and the index row, and the session
+claims no repository and no zone. The raw string stays in the M7
+registry record, which is where it was already accepted; it crosses into
+no ledger byte.
+
+There is **no field** in this record for a file path, argv, cwd, pid,
+`comm`, environment, prompt text, file content or secret value. `comm`
+is mapped through `/usr/share/punar/agents/process-classes.json` and an
+unmapped value becomes the literal class `unknown` — the raw string is
+never stored. `agent` and every `security_events[].event_id` are
+re-checked against their shipped-schema patterns on **both** write and
+load, so the projection onto `ledger-summary.json` stays conformant even
+if a producer upstream ever regressed.
+
+### 13.2 `/run/punar-agentd/ledger.json` (the panel's view)
+
+Not IPC — the ledger's sibling of section 11's `agents.json`, written
+atomically by `punar-agentd` at the same points, so `punar-shell` can
+render the D-005 ledger section with an event-driven `FileView` and no
+socket client.
+
+- **`0640 root:punar`, inside the root-owned `/run/punar-agentd`
+  directory** — deliberately *not* in user-writable `/run/punar` like
+  `status.json`/`agents.json`. A ledger is personal data: (a) only group
+  `punar` (the agentd socket's own admission set, section 10.1) may read
+  it, and (b) because the directory is root-owned, a local user cannot
+  unlink it and substitute a forgery.
+- Content: per-session ledger views — the same rows `agents.access`
+  returns (`entries`, event refs, `not_yet_observed`, `retention`,
+  `privacy`). `agents.json` keeps **only** the counts fingerprint
+  (section 12.4), so nothing world-readable carries ledger identifiers.
+- Non-authoritative for trust decisions, exactly as section 9/11 state:
+  the socket is the authority; `punarctl agents access` is the
+  authenticated view. Consumers fail closed — missing or unparsable
+  renders "no ledger recorded for this session yet", never an error
+  surface.

@@ -946,3 +946,111 @@ fn peercred_path_matches_actual_uid() {
     // Reads work either way.
     assert!(td.call("status", None).get("error").is_none());
 }
+
+/// M8 / docs/api/ipc.md section 12.5 — the one attribution rule `punard`
+/// gained for the AI Access Ledger.
+///
+/// A capability call made from inside a managed agent session must land in
+/// the audit trail carrying that session's id and `source: "ai_agent"`,
+/// **including when it is denied**. That denial is the Level-4
+/// `denied_access` event the ledger derives; without this rule the ledger's
+/// security-event half would be permanently empty and would have to say so.
+///
+/// The evidence is the kernel's: a `/proc/<pid>/cgroup` fixture standing in
+/// for the real scope, read through the injectable `proc_root`. Nothing
+/// here traces the call, and the agent is never asked to identify itself.
+#[test]
+fn a_denied_call_from_inside_an_agent_scope_is_attributed_to_that_session() {
+    const SESSION: &str = "agt_4f21c09ab3e1";
+    let dir = test_dir("attrib");
+    let (group_file, passwd_file) = write_nss_files(&dir);
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    // A /proc fixture: pid 4242 lives in the session's transient scope.
+    let proc_root = dir.join("proc");
+    fs::create_dir_all(proc_root.join("4242")).unwrap();
+    fs::write(
+        proc_root.join("4242").join("cgroup"),
+        format!(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+             punar-agent-{SESSION}.scope\n"
+        ),
+    )
+    .unwrap();
+    // And pid 4243, an ordinary login shell, is not in any scope.
+    fs::create_dir_all(proc_root.join("4243")).unwrap();
+    fs::write(
+        proc_root.join("4243").join("cgroup"),
+        "0::/user.slice/user-1000.slice/session-3.scope\n",
+    )
+    .unwrap();
+
+    let start = |pid: i32| {
+        let mock = MockCapability::new("mock.widget", json!("off"));
+        let cfg = DaemonConfig {
+            group_file: group_file.clone(),
+            passwd_file: passwd_file.clone(),
+            proc_root: proc_root.clone(),
+            peer_source: PeerSource::Fixed(Peer {
+                uid: 1000,
+                gid: 1000,
+                pid: Some(pid),
+            }),
+            io_timeout: Duration::from_secs(5),
+            ..DaemonConfig::new(
+                dir.join(format!("punard-{pid}.sock")),
+                state_dir.clone(),
+                dir.join("audit.jsonl"),
+            )
+        };
+        Daemon::new(cfg, Registry::new(vec![Box::new(mock)]))
+            .unwrap()
+            .spawn()
+            .unwrap()
+    };
+
+    // A mutation from uid 1000 is denied by the M3 rule either way; what
+    // changes is who the trail says asked.
+    for pid in [4242, 4243] {
+        let handle = start(pid);
+        let mut stream = UnixStream::connect(handle.socket_path()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .write_all(
+                b"{\"v\":1,\"id\":\"x\",\"method\":\"capabilities.set\",\
+                  \"params\":{\"capability\":\"mock.widget\",\"desired_state\":\"on\"}}\n",
+            )
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["error"]["code"], "denied", "pid {pid}: {response}");
+        handle.stop();
+    }
+
+    let events: Vec<Value> = fs::read_to_string(dir.join("audit.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|e: &Value| e["action"] == "capabilities.set")
+        .collect();
+    assert_eq!(events.len(), 2, "{events:#?}");
+
+    // From inside the scope: attributed, and still a denial.
+    assert_eq!(events[0]["agent_session_id"], SESSION);
+    assert_eq!(events[0]["source"], "ai_agent");
+    assert_eq!(events[0]["decision"], "deny");
+    assert_eq!(events[0]["result"], "denied");
+    // The human who owns the session keeps their name on the record.
+    assert_eq!(events[0]["user_id"], "punar");
+
+    // From outside: unchanged pre-M8 behaviour, no invented attribution.
+    assert_eq!(events[1]["agent_session_id"], "agt_none");
+    assert_eq!(events[1]["source"], "human");
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -109,6 +109,18 @@ stage_desktop_extra() {
     cp "${REPO_ROOT}/fixtures/projects/atlas/project-environment.yaml" \
        "${REPO_ROOT}/fixtures/projects/atlas/project-network-policy.json" \
        "${extra}/usr/share/punar/fixtures/projects/atlas/"
+    # M8: the comm -> process-class table for the AI Access Ledger
+    # (milestone-8.md §3.2). Staged, never committed twice, for a reason
+    # stronger than tidiness: punar-agentd compiles THIS FILE in with
+    # include_str! as its fallback, so shipping a second hand-maintained
+    # copy under mkosi.extra would create exactly the drift the compiled-in
+    # fallback exists to prevent. crates/punar-agentd/data stays the single
+    # source of truth; the adapters and signatures beside it in
+    # usr/share/punar/agents are versioned data with no compiled twin and
+    # are deliberately NOT touched here.
+    rm -f "${extra}/usr/share/punar/agents/process-classes.json"
+    install -m 0644 "${REPO_ROOT}/crates/punar-agentd/data/process-classes.json" \
+        "${extra}/usr/share/punar/agents/process-classes.json"
 }
 
 # Compile punard + punarctl from the workspace with the snapshot's own Rust

@@ -10,16 +10,23 @@ pragma ComponentBehavior: Bound
 // per detection — managed calm with the green presence dot, observed
 // quiet, unknown in the red voice, the only red on the surface) and the
 // right DETAIL pane (attribution masthead, AUTHORITY · WHAT IT MAY
-// ACCESS with §20 decision words as tracked mono, LEDGER · WHAT IT
-// ACCESSED as the dashed Milestone-8 placeholder); footer meta row.
+// ACCESS with §20 decision words as tracked mono, then — since
+// Milestone 8 — LEDGER · WHAT IT ACCESSED, the real §21 register);
+// footer meta row.
 //
 // HONESTY (spec §1.22, §23):
 //   - every authority row carries its `declared · M9/M12` enforcement
 //     label exactly as the launcher recorded it — nothing here is
 //     enforced in M7 and the surface says so on every row;
-//   - the ledger section is a DASHED placeholder reading NOT YET
-//     RECORDED · MILESTONE 8 — dashed means "not real yet", the same
-//     grammar the overview uses for empty workspaces;
+//   - the ledger renders only what an owned mediation point actually
+//     observed. A category with no producer yet keeps the DASHED
+//     honesty grammar M7 established — NOT YET OBSERVED · MILESTONE 12
+//     for network destinations, MILESTONE 9+ for MCP servers,
+//     MILESTONE 9 for credential classes — so the M8/M12 boundary stays
+//     visible exactly where the placeholder used to draw it. An empty
+//     row is never allowed to read as "accessed nothing";
+//   - process counts are distinct pids seen ALIVE AT A SAMPLING POINT,
+//     never a spawn total, and the section tagline says so;
 //   - detections are rendered as SUSPECTED, never certain, and the
 //     Inspect / Block network / Register actions of the mockup are NOT
 //     drawn: those capabilities arrive with M9/M10 and this release
@@ -29,13 +36,22 @@ pragma ComponentBehavior: Bound
 // masthead only while `Status.enrolled`; a personal device cites
 // PERSONAL DEFAULTS as the authority source and shows no org chrome.
 //
-// DATA (milestone-7.md §8.2, docs/api/ipc.md §11): the Agents singleton
-// follows `/run/punar/agents.json` with an inotify FileView — no socket
-// client in the shell, no polling, no timers. Opening the panel fires
-// ONE detached `punarctl agents list --json` (fixed argv, never a shell
-// string) so agentd's staleness-gated scan refreshes the file; the
-// FileView delivers the rewrite. A missing or unparsable file renders
-// the calm empty panel — fail closed, never an error surface.
+// DATA (milestone-7.md §8.2, milestone-8.md §8.2, docs/api/ipc.md §11
+// and §13.2): the Agents singleton follows `/run/punar/agents.json` and
+// the Ledger singleton follows `/run/punar-agentd/ledger.json`, both
+// with an inotify FileView — no socket client in the shell, no polling,
+// no timers. Opening the panel fires ONE detached
+// `punarctl agents list --json`, and one `punarctl agents access <id>
+// --json` for a session whose ledger is not on hand yet (fixed argv,
+// never a shell string) — the daemon drains and samples on that read
+// and rewrites both files; the FileViews deliver the rewrite. A missing
+// or unparsable file renders the calm empty panel — fail closed, never
+// an error surface.
+//
+// SUPER+A shows the data; SHIFT+DEL deletes it (spec §24.2 + §1.17:
+// deleting your own data cannot be terminal-only). The keystroke runs
+// `punarctl privacy purge --session <id> --yes` through the same
+// detached fixed-argv path, behind a two-step inline confirm.
 //
 // Toggled from Hyprland via Quickshell IPC:
 //   qs -p /usr/share/punar/shell ipc call aipanel toggle
@@ -57,6 +73,17 @@ Scope {
     // Session/detection id under the cursor. Kept across agents.json
     // rewrites so a rescan does not move the reader's selection.
     property string selectedId: ""
+
+    // SHIFT+DEL is two-step: the first press ARMS the focused session and
+    // the privacy card asks for confirmation in the ghost-red destructive
+    // voice; the second press runs the purge. Disarmed by any other key,
+    // by moving the selection, and by closing the panel — a destructive
+    // action never stays armed behind the reader's back.
+    property string purgeArmedId: ""
+    // The session whose purge has been handed to punarctl but whose
+    // ledger.json rewrite has not arrived yet. Cleared when the record
+    // comes back purged (or disappears).
+    property string purgeRequestedId: ""
 
     // ---- shared type grammar (DESIGN_LANGUAGE.md §1) ----
 
@@ -256,6 +283,145 @@ Scope {
             font.letterSpacing: Theme.tracking(9, 0.12)
             color: pill.loud ? Theme.statusBad : Theme.ink2
             text: pill.text
+        }
+    }
+
+    // A dashed hairline. M7 drew the whole ledger card this way to mean
+    // "not real yet"; M8 keeps that vocabulary and narrows it to the rows
+    // that are genuinely unobserved, so the reader who learned the
+    // grammar on the placeholder reads the boundary the same way.
+    component DashedRule: Canvas {
+        height: 2
+
+        onPaint: {
+            var ctx = getContext("2d");
+            ctx.clearRect(0, 0, width, height);
+            ctx.strokeStyle = String(Theme.inputBorder);
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, 0.5);
+            ctx.lineTo(width, 0.5);
+            ctx.stroke();
+        }
+        onVisibleChanged: if (visible)
+            requestPaint()
+        onWidthChanged: requestPaint()
+    }
+
+    // One ledger row (mockup .kv): the category on the left, what was
+    // actually observed on the right in the CALM muted value voice —
+    // D-005 renders ledger values muted, never green. The ledger reports;
+    // it does not approve. A `dashed` row is one nothing observes yet: it
+    // wears the dashed rule and the border ink, and its note names the
+    // milestone that will produce it.
+    component LedgerRow: Item {
+        id: lrow
+
+        property string label: ""
+        property string value: ""
+        property string note: ""
+        property bool dashed: false
+
+        height: lrow.note === "" ? 32 : 42
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Theme.hairline
+            visible: !lrow.dashed
+            color: Theme.border
+        }
+        DashedRule {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            visible: lrow.dashed
+        }
+
+        Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(0, parent.width * 0.34)
+            text: lrow.label
+            font.family: Theme.fontSans
+            font.pixelSize: 13
+            font.weight: 500
+            color: lrow.dashed ? Theme.ink3 : Theme.ink
+            elide: Text.ElideRight
+        }
+
+        Column {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(0, parent.width * 0.64)
+            spacing: 2
+
+            Meta {
+                width: parent.width
+                font.pixelSize: 10
+                font.letterSpacing: Theme.tracking(10, 0.11)
+                horizontalAlignment: Text.AlignRight
+                color: lrow.dashed ? Theme.inputBorder : Theme.ink2
+                text: lrow.value
+                elide: Text.ElideRight
+            }
+            Meta {
+                width: parent.width
+                visible: lrow.note !== ""
+                font.pixelSize: 8
+                font.weight: 500
+                font.letterSpacing: Theme.tracking(8, 0.1)
+                horizontalAlignment: Text.AlignRight
+                color: Theme.inputBorder
+                text: lrow.note
+                elide: Text.ElideRight
+            }
+        }
+    }
+
+    // One Level-4 security event (mockup .evrow) — the only red on this
+    // pane. The row carries the category, the time and the `evt_` id; the
+    // payload stays in the audit log, which is the single source of truth
+    // (spec §53) and the one place to redact.
+    component EventRow: Item {
+        id: erow
+
+        property string category: ""
+        property string detail: ""
+
+        height: 28
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Theme.hairline
+            color: Theme.border
+        }
+
+        Rectangle {
+            id: eventDot
+
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: 6
+            height: 6
+            radius: 3
+            color: Theme.statusBad
+        }
+        Meta {
+            anchors.left: eventDot.right
+            anchors.leftMargin: 10
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            font.pixelSize: 9
+            font.weight: 500
+            font.letterSpacing: Theme.tracking(9, 0.1)
+            color: Theme.statusBad
+            text: erow.category + " · " + erow.detail
+            elide: Text.ElideRight
         }
     }
 
@@ -475,6 +641,254 @@ Scope {
         return when + " · not launched through the managed runtime";
     }
 
+    // ---- ledger helpers (pure JS over the ipc.md §12.2 / §13.2 objects) ----
+
+    // The six resource categories, in Plate D-005's reading order, with
+    // the label every surface prints. The list is CLOSED: it is exactly
+    // the six keys of `schemas/ai-agent/ledger-summary.json`, so a
+    // seventh category cannot appear here by accident, and none of the
+    // six can go missing without being noticed.
+    readonly property var ledgerCategories: [
+        {
+            "key": "repositories",
+            "label": "Repositories"
+        },
+        {
+            "key": "directory_zones",
+            "label": "Directory zones"
+        },
+        {
+            "key": "process_classes",
+            "label": "Processes"
+        },
+        {
+            "key": "network_destinations",
+            "label": "Network destinations"
+        },
+        {
+            "key": "mcp_servers",
+            "label": "MCP servers"
+        },
+        {
+            "key": "credential_classes",
+            "label": "Credential classes"
+        }
+    ]
+
+    // `M12` → `Milestone 12`. An unrecognised token prints verbatim: the
+    // panel never invents a milestone it was not told about.
+    function milestoneWords(milestone: string): string {
+        if (milestone === "")
+            return "Not scheduled yet";
+        if (/^M[0-9]/.test(milestone))
+            return "Milestone " + milestone.substring(1);
+        return milestone;
+    }
+
+    // The seven §21.2 Level-4 categories, spelled for a person.
+    function eventWords(eventType: string): string {
+        switch (eventType) {
+        case "denied_access":
+            return "Denied access";
+        case "privilege_request":
+            return "Privilege request";
+        case "credential_request":
+            return "Credential request";
+        case "policy_bypass_attempt":
+            return "Policy bypass attempt";
+        case "production_access":
+            return "Production access";
+        case "sensitive_resource_access":
+            return "Sensitive resource access";
+        case "unknown_ai_execution":
+            return "Unknown AI execution";
+        case "":
+            return "Security event";
+        default:
+            return eventType.replace(/_/g, " ");
+        }
+    }
+
+    // The `summary` document inside a ledger view, tolerating a daemon
+    // that hands the bare document instead of the full result object.
+    function ledgerSummary(view: var): var {
+        if (view === null || view === undefined || typeof view !== "object")
+            return null;
+        var s = view.summary;
+        if (s !== null && s !== undefined && typeof s === "object")
+            return s;
+        return (view.resources !== undefined) ? view : null;
+    }
+
+    // The count recorded for one (category, class) pair, or -1 when the
+    // daemon sent no aggregate. -1 renders as a bare class name: a count
+    // is never guessed at.
+    function ledgerCount(view: var, category: string, resourceClass: string): int {
+        if (view === null || typeof view !== "object")
+            return -1;
+        var detail = view.detail;
+        if (detail === null || detail === undefined || typeof detail !== "object")
+            return -1;
+        var entries = detail.entries;
+        if (!Array.isArray(entries))
+            return -1;
+        for (var i = 0; i < entries.length; i++) {
+            var e = entries[i];
+            if (e !== null && typeof e === "object" && e.category === category
+                    && e.resource_class === resourceClass
+                    && typeof e.count === "number")
+                return e.count;
+        }
+        return -1;
+    }
+
+    // The `not_yet_observed` row for a Level-3 category, or null.
+    function ledgerPending(view: var, category: string): var {
+        if (view === null || typeof view !== "object")
+            return null;
+        var rows = view.not_yet_observed;
+        if (!Array.isArray(rows))
+            return null;
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (r !== null && typeof r === "object" && r.category === category && r.level !== 4)
+                return r;
+        }
+        return null;
+    }
+
+    // The six rows the LEDGER section renders. Every category appears —
+    // observed with its classes and counts, unobserved with its milestone
+    // in the dashed voice, or "None recorded" when a producer exists and
+    // simply saw nothing. The three states are never allowed to look
+    // alike (spec §1.22).
+    function ledgerRows(view: var): var {
+        var out = [];
+        var summary = root.ledgerSummary(view);
+        if (summary === null)
+            return out;
+        var resources = summary.resources;
+        if (resources === null || resources === undefined || typeof resources !== "object")
+            resources = ({});
+        var peak = (view !== null && typeof view === "object"
+                    && view.detail !== null && view.detail !== undefined
+                    && typeof view.detail === "object"
+                    && typeof view.detail.process_peak === "number")
+            ? view.detail.process_peak : -1;
+
+        for (var i = 0; i < root.ledgerCategories.length; i++) {
+            var cat = root.ledgerCategories[i];
+            var values = Array.isArray(resources[cat.key]) ? resources[cat.key] : [];
+            if (values.length > 0) {
+                var cells = [];
+                for (var j = 0; j < values.length; j++) {
+                    var name = String(values[j]);
+                    var n = root.ledgerCount(view, cat.key, name);
+                    // Process classes always carry the count (the D-005
+                    // signature `git × 12 · cargo × 4`); elsewhere a `× 1`
+                    // would be noise.
+                    cells.push((n > 1 || (n >= 0 && cat.key === "process_classes"))
+                        ? name + " × " + n : name);
+                }
+                var note = "";
+                if (cat.key === "process_classes" && peak >= 0)
+                    note = "peak " + peak + " concurrent";
+                out.push({
+                    "label": cat.label,
+                    "value": cells.join(" · "),
+                    "note": note,
+                    "dashed": false
+                });
+                continue;
+            }
+            var pending = root.ledgerPending(view, cat.key);
+            if (pending !== null) {
+                out.push({
+                    "label": cat.label,
+                    "value": "Not yet observed",
+                    "note": root.milestoneWords(root.str(pending, "milestone")),
+                    "dashed": true
+                });
+            } else {
+                out.push({
+                    "label": cat.label,
+                    "value": "None recorded",
+                    "note": "",
+                    "dashed": false
+                });
+            }
+        }
+        return out;
+    }
+
+    function ledgerEvents(view: var): var {
+        var out = [];
+        var summary = root.ledgerSummary(view);
+        if (summary === null)
+            return out;
+        var events = summary.security_events;
+        if (!Array.isArray(events))
+            return out;
+        for (var i = 0; i < events.length; i++) {
+            var e = events[i];
+            if (e === null || e === undefined || typeof e !== "object")
+                continue;
+            var parts = [];
+            var when = root.str(e, "timestamp");
+            if (when !== "")
+                parts.push(root.shortTime(when));
+            var id = root.str(e, "event_id");
+            if (id !== "")
+                parts.push(id);
+            out.push({
+                "category": root.eventWords(root.str(e, "event_type")),
+                "detail": parts.join(" · ")
+            });
+        }
+        return out;
+    }
+
+    // The Level-4 categories nothing produces yet, named with their
+    // milestones — the footnote under an empty security-events register,
+    // so "None recorded" can never be mistaken for "nothing could happen".
+    function ledgerPendingEvents(view: var): string {
+        if (view === null || typeof view !== "object")
+            return "";
+        var rows = view.not_yet_observed;
+        if (!Array.isArray(rows))
+            return "";
+        var out = [];
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (r === null || typeof r !== "object" || r.level !== 4)
+                continue;
+            var m = root.str(r, "milestone");
+            out.push(root.eventWords(root.str(r, "category")) + (m === "" ? "" : " · " + m));
+        }
+        return out.length === 0 ? "" : "Not yet observed · " + out.join(" · ");
+    }
+
+    // The retention sentence: an active session states the window, an
+    // ended one states the date its ledger disappears on.
+    function ledgerRetention(view: var): string {
+        if (view === null || typeof view !== "object")
+            return "";
+        var r = view.retention;
+        if (r === null || r === undefined || typeof r !== "object")
+            return "";
+        var days = typeof r.days === "number" ? r.days : -1;
+        var expires = root.str(r, "expires_at");
+        if (expires !== "") {
+            var d = new Date(expires);
+            var t = d.getTime();
+            var when = (t === t) ? Qt.formatDateTime(d, "d MMM yyyy") : expires;
+            return "Kept until " + when;
+        }
+        if (days >= 0)
+            return "Kept " + days + " days after the session ends";
+        return "Retention not reported";
+    }
+
     // ---- the rail model: registry sessions, then detections ----
 
     readonly property var rows: {
@@ -552,6 +966,7 @@ Scope {
         // for a list, whose staleness rule (ipc.md §10.2) triggers one
         // scan. Fixed argv — the shell never composes a shell string.
         Agents.refresh();
+        Ledger.refresh();
         try {
             Quickshell.execDetached(["punarctl", "agents", "list", "--json"]);
         } catch (e) {
@@ -559,12 +974,54 @@ Scope {
             // whatever agents.json holds (or the calm empty state).
             console.warn("punar-shell: agents refresh unavailable:", e);
         }
+        root.refreshLedger(root.selectedId);
+    }
+
+    // Ask agentd for one session's ledger, once, on user action — the
+    // read itself is what makes agentd drain the audit tail and sample the
+    // scope cgroup (milestone-8.md §5.1), and the rewrite reaches the
+    // shell through the Ledger FileView. Skipped when the record is
+    // already on hand, so walking the rail with the arrow keys does not
+    // spawn a process per row. Fixed argv, never a shell string.
+    function refreshLedger(sessionId: string): void {
+        if (sessionId === "" || Ledger.has(sessionId))
+            return;
+        try {
+            Quickshell.execDetached(["punarctl", "agents", "access", sessionId, "--json"]);
+        } catch (e) {
+            console.warn("punar-shell: ledger refresh unavailable:", e);
+        }
+    }
+
+    // SHIFT+DEL on the focused session (spec §24.2 + §1.17: deleting your
+    // own data cannot be terminal-only). Two-step by design — the first
+    // press arms and the privacy card asks, the second press acts — and
+    // the ghost-red destructive voice keeps it from being an accident.
+    // The purge itself is punarctl's job, run detached with fixed argv;
+    // the daemon is the authorization point, exactly as everywhere else.
+    function purgeKey(sessionId: string): void {
+        if (sessionId === "")
+            return;
+        if (root.purgeArmedId !== sessionId) {
+            root.purgeArmedId = sessionId;
+            return;
+        }
+        root.purgeArmedId = "";
+        root.purgeRequestedId = sessionId;
+        try {
+            Quickshell.execDetached(["punarctl", "privacy", "purge", "--session", sessionId, "--yes"]);
+        } catch (e) {
+            console.warn("punar-shell: purge unavailable:", e);
+            root.purgeRequestedId = "";
+        }
     }
 
     function dismiss(): void {
         if (!root.open)
             return;
         root.open = false;
+        // A destructive action never survives the panel closing.
+        root.purgeArmedId = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
 
@@ -625,6 +1082,18 @@ Scope {
         readonly property var entry: win.current !== null ? win.current.data : null
         readonly property bool isDetection: win.current !== null
                                             && win.current.kind === "detection"
+
+        // The M8 ledger view for the focused session (ipc.md §13.2).
+        // A detection has no ledger and will not have one in M8 — an
+        // unregistered process has no persisted session to aggregate
+        // against — so the lookup is not even attempted for one.
+        readonly property string currentId: win.current !== null ? String(win.current.id) : ""
+        readonly property var ledgerView: (win.current !== null && !win.isDetection)
+            ? Ledger.view(win.currentId) : null
+        readonly property bool hasLedger: win.ledgerView !== null
+        readonly property var ledgerRows: root.ledgerRows(win.ledgerView)
+        readonly property var ledgerEvents: root.ledgerEvents(win.ledgerView)
+        readonly property string ledgerPurgedAt: root.str(win.ledgerView, "purged_at")
 
         onVisibleChanged: {
             if (win.visible) {
@@ -853,11 +1322,27 @@ Scope {
                 onCurrentIndexChanged: {
                     if (rail.currentIndex >= 0 && rail.currentIndex < root.rows.length)
                         root.selectedId = root.rows[rail.currentIndex].id;
+                    // Moving the cursor disarms a pending purge and asks
+                    // for the newly focused session's ledger if the shell
+                    // has not seen it yet.
+                    root.purgeArmedId = "";
+                    if (root.open)
+                        root.refreshLedger(root.selectedId);
                 }
 
                 // Keyboard-first (spec §12): arrows walk the rail, Esc
                 // closes. No mouse is required anywhere on this surface.
                 Keys.onPressed: function (event) {
+                    // SHIFT+DEL deletes the focused session's local
+                    // ledger. Any other key disarms a pending confirm.
+                    if (event.key === Qt.Key_Delete
+                            && (event.modifiers & Qt.ShiftModifier) !== 0) {
+                        if (win.hasLedger && win.ledgerPurgedAt === "")
+                            root.purgeKey(root.selectedId);
+                        event.accepted = true;
+                        return;
+                    }
+                    root.purgeArmedId = "";
                     switch (event.key) {
                     case Qt.Key_Escape:
                         root.dismiss();
@@ -1175,59 +1660,281 @@ Scope {
 
                     // LEDGER — "what it accessed" (spec §21). The May/Did
                     // split is structural: two ruled sections, each with
-                    // its question in the header. M7 has no ledger, so the
-                    // card is drawn DASHED and labelled — the honesty
-                    // grammar (dashed = not real yet).
+                    // its question in the header, so the promise and the
+                    // record can never be read as one. Everything below
+                    // is DERIVED from a mediation point Punar already
+                    // owns — the session's scope cgroup, the audit stream,
+                    // the punar-env workspace grant, the adapter record.
+                    // Nothing here comes from tracing (spec §1.14).
                     Sect {
                         width: parent.width
                         visible: win.current !== null && !win.isDetection
                         title: "Ledger"
-                        tagline: "what it accessed · local only"
+                        tagline: "what it accessed · local only · level 3 · sampled at scan points"
+                    }
+
+                    // A purged ledger is NOT an empty one, and the surface
+                    // never lets the two look alike (ipc.md §12.2).
+                    Item {
+                        width: parent.width
+                        height: 44
+                        visible: win.current !== null && !win.isDetection
+                                 && win.ledgerPurgedAt !== ""
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            height: Theme.hairline
+                            color: Theme.border
+                        }
+                        Column {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 3
+
+                            Meta {
+                                width: parent.width
+                                font.weight: 600
+                                color: Theme.ink
+                                text: "Purged by you · " + root.shortTime(win.ledgerPurgedAt)
+                            }
+                            Meta {
+                                width: parent.width
+                                font.pixelSize: 8
+                                font.weight: 500
+                                font.letterSpacing: Theme.tracking(8, 0.1)
+                                color: Theme.inputBorder
+                                text: "The audit trail is separate and was not deleted"
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
+                    // The six categories. Observed rows carry their
+                    // classes and counts in the calm muted value voice;
+                    // the ones no mediation point observes yet keep the
+                    // DASHED honesty grammar with their milestone.
+                    Repeater {
+                        model: (win.current !== null && !win.isDetection
+                                && win.ledgerPurgedAt === "") ? win.ledgerRows : []
+
+                        LedgerRow {
+                            required property var modelData
+
+                            width: paneColumn.width
+                            label: modelData.label
+                            value: modelData.value
+                            note: modelData.note
+                            dashed: modelData.dashed
+                        }
+                    }
+
+                    // Fail closed: no record for this session yet (agentd
+                    // not running, not in group punar, or nothing sampled
+                    // so far). Never an error surface.
+                    Item {
+                        width: parent.width
+                        height: 34
+                        visible: win.current !== null && !win.isDetection && !win.hasLedger
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            height: Theme.hairline
+                            color: Theme.border
+                        }
+                        Meta {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            font.weight: 500
+                            text: "No ledger recorded for this session yet"
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    // SECURITY EVENTS — the only red on this pane. The
+                    // rows are REFERENCES: the payload lives in the audit
+                    // log, which is the single source of truth (spec §53).
+                    Sect {
+                        width: parent.width
+                        visible: win.hasLedger && win.ledgerPurgedAt === ""
+                        title: "Security events"
+                        tagline: "level 4 · punarctl audit tail"
+                    }
+
+                    Repeater {
+                        model: (win.hasLedger && win.ledgerPurgedAt === "")
+                            ? win.ledgerEvents : []
+
+                        EventRow {
+                            required property var modelData
+
+                            width: paneColumn.width
+                            category: modelData.category
+                            detail: modelData.detail
+                        }
                     }
 
                     Item {
                         width: parent.width
-                        height: 78
+                        height: 40
+                        visible: win.hasLedger && win.ledgerPurgedAt === ""
+                                 && win.ledgerEvents.length === 0
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            height: Theme.hairline
+                            color: Theme.border
+                        }
+                        Column {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 3
+
+                            Meta {
+                                width: parent.width
+                                font.weight: 500
+                                text: "None recorded"
+                            }
+                            // "None recorded" must never read as "nothing
+                            // could happen": the categories with no
+                            // producer yet are named, with their milestone.
+                            Meta {
+                                width: parent.width
+                                font.pixelSize: 8
+                                font.weight: 500
+                                font.letterSpacing: Theme.tracking(8, 0.1)
+                                color: Theme.inputBorder
+                                text: root.ledgerPendingEvents(win.ledgerView)
+                                visible: text !== ""
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+
+                    // The §24.2 privacy card (mockup .privacy), made real:
+                    // where the ledger lives, how long it is kept, and the
+                    // keystroke that deletes it. Unmanaged-first — the
+                    // admin line appears only while enrolled, and even
+                    // then it states the honest M8 truth: there is no
+                    // remote query path to have used.
+                    Item {
+                        width: parent.width
+                        height: privacyCard.implicitHeight + 20
                         visible: win.current !== null && !win.isDetection
 
-                        Canvas {
-                            id: ledgerOutline
-                            anchors.fill: parent
-                            anchors.topMargin: 6
-                            onPaint: {
-                                var ctx = getContext("2d");
-                                ctx.clearRect(0, 0, width, height);
-                                ctx.strokeStyle = String(Theme.inputBorder);
-                                ctx.lineWidth = 1;
-                                ctx.setLineDash([4, 4]);
-                                ctx.beginPath();
-                                ctx.roundedRect(0.5, 0.5, width - 1, height - 1,
-                                                Theme.radius, Theme.radius);
-                                ctx.stroke();
-                            }
-                            onVisibleChanged: if (visible)
-                                requestPaint()
-                            onWidthChanged: requestPaint()
-                            onHeightChanged: requestPaint()
+                        Rectangle {
+                            id: privacyCard
+
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            implicitHeight: privacyText.implicitHeight + 26
+                            height: implicitHeight
+                            radius: Theme.radius
+                            color: Theme.muted
+                            border.width: Theme.hairline
+                            border.color: root.purgeArmedId === win.currentId
+                                ? Theme.statusBad : Theme.border
 
                             Column {
-                                anchors.centerIn: parent
-                                width: parent.width - 32
-                                spacing: 8
+                                id: privacyText
+
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 15
+                                anchors.rightMargin: 15
+                                spacing: 7
 
                                 Meta {
                                     width: parent.width
-                                    font.letterSpacing: Theme.tracking(9, 0.16)
-                                    color: Theme.ink2
-                                    text: "Not yet recorded · Milestone 8"
+                                    font.pixelSize: 9
+                                    font.weight: 600
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    color: Theme.ink
+                                    text: Status.enrolled
+                                        ? "This ledger stays on this device · Admin queries are scoped, audited and visible here"
+                                        : "This ledger stays on this device · No organization is enrolled"
+                                    wrapMode: Text.WordWrap
                                 }
+
+                                // The armed confirm replaces the retention
+                                // line so the reader cannot miss it.
+                                Meta {
+                                    width: parent.width
+                                    visible: root.purgeArmedId === win.currentId
+                                    font.pixelSize: 9
+                                    font.weight: 600
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    color: Theme.statusBad
+                                    text: "Press Shift+Del again to confirm · this deletes the local ledger for "
+                                          + win.currentId + " · the audit trail is not deleted"
+                                    wrapMode: Text.WordWrap
+                                }
+                                Meta {
+                                    width: parent.width
+                                    visible: root.purgeArmedId !== win.currentId
+                                             && root.purgeRequestedId === win.currentId
+                                             && win.ledgerPurgedAt === ""
+                                    font.pixelSize: 9
+                                    font.weight: 500
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    text: "Purge requested · punarctl privacy purge --session "
+                                          + win.currentId
+                                    wrapMode: Text.WordWrap
+                                }
+                                Meta {
+                                    width: parent.width
+                                    visible: root.purgeArmedId !== win.currentId
+                                             && !(root.purgeRequestedId === win.currentId
+                                                  && win.ledgerPurgedAt === "")
+                                    font.pixelSize: 9
+                                    font.weight: 500
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    text: {
+                                        if (win.ledgerPurgedAt !== "")
+                                            return "Purged · the audit trail is separate and was not deleted · punarctl audit tail";
+                                        if (!win.hasLedger)
+                                            return "Nothing is recorded for this session yet · nothing leaves this machine";
+                                        var kept = root.ledgerRetention(win.ledgerView);
+                                        return (kept === "" ? "" : kept + " · ")
+                                            + "Delete it now: Shift+Del · punarctl privacy purge --session "
+                                            + win.currentId;
+                                    }
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                // Enrolled only, and still honest: "none"
+                                // here is a statement about a path that
+                                // does not exist yet, not about a path
+                                // nobody used (milestone-8.md §10.5).
+                                Meta {
+                                    width: parent.width
+                                    visible: Status.enrolled
+                                    font.pixelSize: 8
+                                    font.weight: 500
+                                    font.letterSpacing: Theme.tracking(8, 0.1)
+                                    color: Theme.inputBorder
+                                    text: "Last admin query · None — no remote query path exists until Milestone 10"
+                                    wrapMode: Text.WordWrap
+                                }
+                                // The never-record rules, on the surface
+                                // that shows the record (spec §21.2).
                                 Meta {
                                     width: parent.width
                                     font.pixelSize: 8
                                     font.weight: 500
                                     font.letterSpacing: Theme.tracking(8, 0.1)
                                     color: Theme.inputBorder
-                                    text: "The access ledger stays on this device when it lands · nothing is recorded yet"
+                                    text: "Never recorded · file paths inside your workspace · prompts · source code · secret values · individual file reads"
                                     wrapMode: Text.WordWrap
                                 }
                             }
@@ -1370,7 +2077,14 @@ Scope {
                     font.pixelSize: 8
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(8, 0.14)
-                    text: "↑↓ Agent · Esc Close"
+                    // The purge key is advertised only where it does
+                    // something: a detection has no ledger to delete, and
+                    // a purged one has nothing left. No dead keys, the
+                    // same rule as no dead buttons.
+                    text: "↑↓ Agent · "
+                          + ((win.hasLedger && win.ledgerPurgedAt === "")
+                             ? "Shift+Del Delete ledger · " : "")
+                          + "Esc Close"
                 }
                 Meta {
                     anchors.right: parent.right

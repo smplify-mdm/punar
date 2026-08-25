@@ -14,11 +14,12 @@
 //! # Section 60 again, on the second socket
 //!
 //! [`AgentMethod`] is a **closed** enum, exactly like
-//! [`crate::ipc::Method`]: five M7 methods, no variant that carries a
-//! command line or program, and none will ever be added. `agents.access`
-//! (the M8 Access Ledger read) and the `admin.*` names (M10) are
-//! **reserved**: they answer [`ErrorCode::UnknownMethod`] until their
-//! milestone ships — said honestly in the error prose.
+//! [`crate::ipc::Method`]: five M7 methods plus the two M8 ledger
+//! methods, no variant that carries a command line or program, and none
+//! will ever be added. `admin.*` (M10) and `ledger.export`/`ledger.query`
+//! (which do **not** exist — M8 has no upload path at all) are
+//! **reserved**: they answer [`ErrorCode::UnknownMethod`] — said honestly
+//! in the error prose.
 //!
 //! # Layering
 //!
@@ -287,6 +288,52 @@ pub struct AgentsRegisterParams {
     pub authority: AuthoritySummary,
 }
 
+/// `agents.access` params — the M8 AI Access Ledger read
+/// (docs/api/ipc.md section 12.2). Authorization is **owner or root**:
+/// a ledger is personal data about one user's session, which is stricter
+/// than `agents.list` and is the local half of spec section 24.1's "RBAC
+/// applies".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsAccessParams {
+    pub session_id: String,
+}
+
+/// `ledger.purge` params (docs/api/ipc.md section 12.3): **exactly one**
+/// of `session_id` or `all`. Neither, or both, is `invalid_params` —
+/// deleting data is never inferred from an ambiguous request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerPurgeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+}
+
+impl LedgerPurgeParams {
+    /// The scope the params name, or `None` when they name neither or
+    /// both.
+    pub fn scope(&self) -> Option<PurgeScope> {
+        match (self.session_id.as_deref(), self.all) {
+            (Some(id), None | Some(false)) if !id.is_empty() => {
+                Some(PurgeScope::Session(id.to_string()))
+            }
+            (None, Some(true)) => Some(PurgeScope::CallersOwn),
+            _ => None,
+        }
+    }
+}
+
+/// What a purge covers. `CallersOwn` scopes to the **calling uid's** own
+/// sessions for a non-root peer, and to every session for root
+/// (docs/api/ipc.md section 12.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PurgeScope {
+    Session(String),
+    CallersOwn,
+}
+
 // ---------------------------------------------------------------------------
 // The closed agentd method table
 // ---------------------------------------------------------------------------
@@ -308,22 +355,35 @@ pub enum AgentMethod {
     End(AgentsEndParams),
     /// `agents.scan` — force one detection pass now.
     Scan,
+    /// `agents.access` — the AI Access Ledger for one session (M8, spec
+    /// section 21). Owner or root; drains the audit tail and samples the
+    /// scope cgroup first so a read never shows a stale answer.
+    Access(AgentsAccessParams),
+    /// `ledger.purge` — the user deletes their own ledger (M8, spec
+    /// section 24.2). Owner or root, always audited, and it does **not**
+    /// touch the audit trail.
+    Purge(LedgerPurgeParams),
 }
 
 /// Reserved method-name prefixes/names that deserve a *specific* honest
 /// `unknown_method` answer (ipc.md section 10.2): the M8 ledger read and
 /// the M10 admin surface.
-const RESERVED_AGENTS_ACCESS: &str = "agents.access";
 const RESERVED_ADMIN_PREFIX: &str = "admin.";
+/// `ledger.export` / `ledger.query` are not "not yet" — there is **no**
+/// upload or remote-query path in M8 at all (spec section 24; the
+/// authorized administrator query is Milestone 10).
+const RESERVED_LEDGER_PREFIX: &str = "ledger.";
 
 impl AgentMethod {
     /// All wire method names, contract-table order.
-    pub const NAMES: [&'static str; 5] = [
+    pub const NAMES: [&'static str; 7] = [
         "agents.list",
         "agents.get",
         "agents.register",
         "agents.end",
         "agents.scan",
+        "agents.access",
+        "ledger.purge",
     ];
 
     /// The wire method name.
@@ -336,6 +396,8 @@ impl AgentMethod {
             AgentMethod::Register(_) => "agents.register",
             AgentMethod::End(_) => "agents.end",
             AgentMethod::Scan => "agents.scan",
+            AgentMethod::Access(_) => "agents.access",
+            AgentMethod::Purge(_) => "ledger.purge",
         }
     }
 
@@ -346,6 +408,8 @@ impl AgentMethod {
             AgentMethod::Get(p) => serde_json::to_value(p),
             AgentMethod::Register(p) => serde_json::to_value(p),
             AgentMethod::End(p) => serde_json::to_value(p),
+            AgentMethod::Access(p) => serde_json::to_value(p),
+            AgentMethod::Purge(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -364,14 +428,27 @@ impl AgentMethod {
             "agents.end" => Self::parse_required_params(method, params).map(AgentMethod::End),
             "agents.register" => Self::parse_required_params(method, params)
                 .map(|p| AgentMethod::Register(Box::new(p))),
-            RESERVED_AGENTS_ACCESS => Err(IpcError::with_details(
+            "agents.access" => Self::parse_required_params(method, params).map(AgentMethod::Access),
+            "ledger.purge" => {
+                let parsed: LedgerPurgeParams = Self::parse_required_params(method, params)?;
+                if parsed.scope().is_none() {
+                    return Err(Self::invalid_params(
+                        method,
+                        "name exactly one of session_id or all:true — deleting data is \
+                         never inferred from an ambiguous request",
+                    ));
+                }
+                Ok(AgentMethod::Purge(parsed))
+            }
+            unknown if unknown.starts_with(RESERVED_LEDGER_PREFIX) => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
-                "The method \"agents.access\" is reserved for the Milestone 8 AI Access \
-                 Ledger (spec section 21) and is not implemented yet. Next step: \
-                 `punarctl agents list` and `agents inspect <id>` are the Milestone 7 \
-                 surface."
-                    .to_string(),
-                json!({ "method": method, "reserved_for": "milestone-8" }),
+                format!(
+                    "The method {unknown:?} does not exist. The AI Access Ledger stays on \
+                     this device: there is no export, upload, or remote-query method, by \
+                     design (spec section 24). Next step: `punarctl privacy ledger` shows \
+                     what is recorded, `punarctl privacy purge` deletes it."
+                ),
+                json!({ "method": unknown, "reason": "no upload path exists" }),
             )),
             unknown if unknown.starts_with(RESERVED_ADMIN_PREFIX) => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
@@ -512,16 +589,44 @@ impl SessionRow {
     }
 }
 
+/// One `agents.list` session row: the ten record fields plus the M8
+/// **counts-only** ledger fingerprint (docs/api/ipc.md section 12.4).
+///
+/// Deliberately *not* [`SessionRow`]: `scope_unit` and `authority` are
+/// `agents.get` detail and stay out of the list. And deliberately counts
+/// only — no class names, no `evt_` ids, no zones. Identifiers require
+/// `agents.access` and its ownership check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListedSession {
+    #[serde(flatten)]
+    pub record: RegistryRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<crate::ledger::LedgerFingerprint>,
+}
+
+impl ListedSession {
+    /// A row with no ledger yet (a session registered before the ledger
+    /// recorded anything, or a record that could not be read).
+    pub fn bare(record: RegistryRecord) -> ListedSession {
+        ListedSession {
+            record,
+            ledger: None,
+        }
+    }
+}
+
 /// `agents.list` / `agents.scan` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentsListResult {
     /// RFC 3339 time of the most recent detection pass.
     pub scanned_at: String,
-    /// Sessions this boot (active + ended) — exactly the ten record
-    /// fields each.
-    pub sessions: Vec<RegistryRecord>,
+    /// Sessions this boot (active + ended) — the ten record fields each,
+    /// plus the ledger fingerprint when one exists.
+    pub sessions: Vec<ListedSession>,
     /// Current point-in-time detections (memory + `agents.json` only,
-    /// never persisted; milestone-7.md section 4.4).
+    /// never persisted; milestone-7.md section 4.4). Detections carry
+    /// **no** ledger field: an unregistered process has no persisted
+    /// session and therefore no ledger in M8 (Milestone 10 owns that).
     pub detections: Vec<SessionRow>,
 }
 
@@ -741,12 +846,72 @@ mod tests {
 
     #[test]
     fn reserved_names_answer_unknown_method_honestly() {
-        let err = AgentMethod::from_wire("agents.access", None).unwrap_err();
-        assert_eq!(err.code, ErrorCode::UnknownMethod);
-        assert!(err.message.contains("Milestone 8"), "{}", err.message);
         let err = AgentMethod::from_wire("admin.query", None).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnknownMethod);
         assert!(err.message.contains("Milestone 10"), "{}", err.message);
+    }
+
+    /// There is no upload path in M8, and the refusal says so rather
+    /// than promising a later one (spec sections 1.22, 24).
+    #[test]
+    fn there_is_no_ledger_export_or_query_method() {
+        for probe in [
+            "ledger.export",
+            "ledger.query",
+            "ledger.upload",
+            "ledger.bogus",
+        ] {
+            let err = AgentMethod::from_wire(probe, None).unwrap_err();
+            assert_eq!(err.code, ErrorCode::UnknownMethod, "{probe}");
+            assert!(
+                err.message.contains("stays on this device"),
+                "{probe}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_ledger_methods_are_in_the_table_and_typed() {
+        let access = AgentMethod::from_wire(
+            "agents.access",
+            Some(json!({ "session_id": "agt_4f21c09ab3e1" })),
+        )
+        .unwrap();
+        assert_eq!(access.name(), "agents.access");
+
+        // Exactly one scope, always.
+        let one = AgentMethod::from_wire("ledger.purge", Some(json!({ "all": true }))).unwrap();
+        assert_eq!(one.name(), "ledger.purge");
+        for ambiguous in [
+            json!({}),
+            json!({ "session_id": "agt_1", "all": true }),
+            json!({ "all": false }),
+        ] {
+            let err = AgentMethod::from_wire("ledger.purge", Some(ambiguous.clone())).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{ambiguous}");
+        }
+    }
+
+    #[test]
+    fn purge_scope_reads_exactly_one_of_the_two_forms() {
+        assert_eq!(
+            LedgerPurgeParams {
+                session_id: Some("agt_1".into()),
+                all: None
+            }
+            .scope(),
+            Some(PurgeScope::Session("agt_1".into()))
+        );
+        assert_eq!(
+            LedgerPurgeParams {
+                session_id: None,
+                all: Some(true)
+            }
+            .scope(),
+            Some(PurgeScope::CallersOwn)
+        );
+        assert_eq!(LedgerPurgeParams::default().scope(), None);
     }
 
     #[test]
@@ -802,7 +967,17 @@ mod tests {
     fn list_result_shape_matches_the_contract_example() {
         let result = AgentsListResult {
             scanned_at: "2026-08-27T10:00:02Z".into(),
-            sessions: vec![spec_19_2_record()],
+            sessions: vec![ListedSession {
+                record: spec_19_2_record(),
+                ledger: Some(crate::ledger::LedgerFingerprint {
+                    counts: crate::ledger::LedgerCounts {
+                        resources: 5,
+                        process_classes: 3,
+                        security_events: 1,
+                    },
+                    updated_at: "2026-08-27T10:00:02Z".into(),
+                }),
+            }],
             detections: vec![SessionRow {
                 suspected: Some(true),
                 executable: Some("/home/punar/Downloads/foo-agent".into()),
@@ -823,6 +998,10 @@ mod tests {
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["sessions"][0]["session_id"], "agt_123");
+        // The fingerprint is counts only (section 12.4).
+        assert_eq!(value["sessions"][0]["ledger"]["process_classes"], 3);
+        assert_eq!(value["sessions"][0]["ledger"]["security_events"], 1);
+        assert!(value["detections"][0].get("ledger").is_none());
         let detection = &value["detections"][0];
         assert_eq!(detection["suspected"], true);
         assert_eq!(detection["signature_id"], "downloads-foo-agent");

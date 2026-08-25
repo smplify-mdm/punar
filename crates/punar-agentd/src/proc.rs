@@ -78,6 +78,25 @@ impl ProcEntry {
     pub fn in_scope_of(&self, session_id: &str) -> bool {
         self.cgroup.contains(&scope_unit_name(session_id))
     }
+
+    /// The absolute cgroup path of this session's scope, as it appears
+    /// after the hierarchy prefix in `/proc/<pid>/cgroup`
+    /// (`/user.slice/…/punar-agent-<id>.scope`) — what the M8 ledger
+    /// samples `cgroup.procs` and `pids.peak` from
+    /// (`crate::ledger::classes`). `None` when this process is not in
+    /// the session's scope, so the sampler can never be pointed at a
+    /// cgroup that does not belong to the session.
+    pub fn scope_path_of(&self, session_id: &str) -> Option<String> {
+        let unit = scope_unit_name(session_id);
+        self.cgroup.lines().find_map(|line| {
+            if !line.contains(&unit) {
+                return None;
+            }
+            // v2: "0::/user.slice/…"; v1: "N:controller:/user.slice/…".
+            let path = line.rsplit_once(':').map(|(_, rest)| rest).unwrap_or(line);
+            path.starts_with('/').then(|| path.trim().to_string())
+        })
+    }
 }
 
 /// The transient systemd scope a managed session runs in
@@ -145,6 +164,33 @@ impl ProcRoot {
     /// one (fail-closed attribution).
     pub fn cgroup_of(&self, pid: u32) -> String {
         std::fs::read_to_string(self.pid_dir(pid).join("cgroup")).unwrap_or_default()
+    }
+
+    /// `/proc/<pid>/comm` alone — the one field the AI Access Ledger
+    /// reads about a process in an agent scope (milestone-8.md section
+    /// 3.2). Deliberately narrower than [`ProcRoot::entry`]: the ledger
+    /// must never touch `cmdline`, and the `comm` it does read is mapped
+    /// through the class table and discarded, never stored.
+    pub fn comm_of(&self, pid: u32) -> Option<String> {
+        let comm = std::fs::read_to_string(self.pid_dir(pid).join("comm")).ok()?;
+        let comm = comm.trim_end_matches('\n').trim().to_string();
+        (!comm.is_empty()).then_some(comm)
+    }
+
+    /// Field 22 of `/proc/<pid>/stat` — the kernel's `starttime` in clock
+    /// ticks since boot. Paired with the pid it makes a dedup key that
+    /// pid reuse cannot forge, so a long session cannot inflate a class
+    /// count by recycling numbers.
+    ///
+    /// The `comm` field of `stat` is parenthesized and may itself contain
+    /// spaces or `)`, so parsing starts after the **last** `)`, which is
+    /// the only correct way to read this file.
+    pub fn starttime_of(&self, pid: u32) -> Option<u64> {
+        let stat = std::fs::read_to_string(self.pid_dir(pid).join("stat")).ok()?;
+        let tail = &stat[stat.rfind(')')? + 1..];
+        // After the closing paren, field 3 (state) is the first token, so
+        // starttime (field 22) is token index 19.
+        tail.split_whitespace().nth(19)?.parse().ok()
     }
 
     /// Full entry for one pid, or `None` if it vanished mid-walk (a race
@@ -235,6 +281,13 @@ mod tests {
         assert!(claude.in_managed_scope());
         assert!(claude.in_scope_of("agt_4f21c09ab3e1"));
         assert!(!claude.in_scope_of("agt_deadbeef0000"));
+        assert_eq!(
+            claude.scope_path_of("agt_4f21c09ab3e1").as_deref(),
+            Some(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/punar-agent-agt_4f21c09ab3e1.scope"
+            )
+        );
+        assert_eq!(claude.scope_path_of("agt_deadbeef0000"), None);
 
         let suspect = proc.entry(2410).unwrap();
         assert_eq!(suspect.exe.as_deref(), Some("/usr/bin/dash"));
@@ -259,6 +312,33 @@ mod tests {
         // The prompt-shaped argument must not survive the read at all.
         let cmdline = b"claude\0--print\0summarize the secret quarterly numbers\0/srv/atlas\0";
         assert_eq!(absolute_args(cmdline), vec!["/srv/atlas".to_string()]);
+    }
+
+    #[test]
+    fn stat_parsing_survives_a_comm_containing_spaces_and_parens() {
+        let root = fixture_proc("stat");
+        let dir = root.join("77");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real /proc/<pid>/stat line: fields 1..=22, with a hostile comm.
+        let fields: Vec<String> = (3..=22)
+            .map(|n| match n {
+                3 => "S".to_string(),
+                22 => "918273".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        std::fs::write(
+            dir.join("stat"),
+            format!("77 (we ird) name) {}\n", fields.join(" ")),
+        )
+        .unwrap();
+        std::fs::write(dir.join("comm"), "we ird) name\n").unwrap();
+
+        let proc = ProcRoot::new(&root);
+        assert_eq!(proc.starttime_of(77), Some(918_273));
+        assert_eq!(proc.comm_of(77).as_deref(), Some("we ird) name"));
+        assert_eq!(proc.starttime_of(78), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

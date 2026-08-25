@@ -12,11 +12,22 @@
 # Behavior: print the label, prove workspace access with one touch, then
 # block until signaled. The block is `wait` on a background sleep — a
 # blocking wait, never a polling loop (SPEC section 6.3).
+#
+# M8 addition (milestone-8.md section 12): PUNAR_MOCK_AGENT_CHILDREN=1 —
+# unset by default, set ONLY by m8-check.sh — additionally spawns a fixed,
+# deterministic set of child processes inside the session's own cgroup so
+# the AI Access Ledger has real Level-3 and Level-4 evidence to derive from.
+# This is a CI stand-in and says so: a real agent's children arise from real
+# work, and Punar samples whatever is there. What the ledger records here is
+# derived from the same two mediation points as in production — the scope
+# cgroup and the audit stream — never from anything this script declares
+# about itself.
 
 set -u
 
 LABEL="PUNAR MOCK AGENT — dev/CI stand-in for a managed AI agent session; performs no AI work"
 TOUCH_FILE=".punar-agent-touch"
+FIFO=".punar-agent-fifo"
 
 if [ "${1:-}" = "--version" ]; then
     echo "punar-mock-agent 0.0-mock"
@@ -30,6 +41,50 @@ if touch "./$TOUCH_FILE" 2>/dev/null; then
     echo "Workspace write: ./$TOUCH_FILE"
 else
     echo "Workspace write: refused (./$TOUCH_FILE not writable)" >&2
+fi
+
+# Deterministic child processes for the M8 ledger exercise. Opt-in only.
+#
+# The classes chosen are the ones this image can honestly supply: `sh` and
+# `git` are installed, `node` and `cargo` are NOT and are not faked
+# (milestone-8.md section 12). Nothing here is a busy loop: every child
+# blocks in read(2) on a fifo, which is a blocking wait (SPEC section 6.3).
+#
+# Why a fifo: opening a fifo for reading blocks until a writer opens it, so
+# the writer is started FIRST and never writes and never exits; the readers
+# then open successfully and block forever in read. That gives two
+# long-lived children whose `comm` the scope-cgroup sampler can classify at
+# a scan point — which is the honest thing the ledger can see (a sampled
+# class, never a spawn history).
+if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
+    echo "Children: PUNAR_MOCK_AGENT_CHILDREN=1 (dev/CI evidence generation)"
+    rm -f "./$FIFO"
+    if mkfifo -m 600 "./$FIFO" 2>/dev/null; then
+        # The writer: opens the fifo, writes nothing, exits never.
+        sleep infinity > "./$FIFO" &
+        # Class `shell`: blocks reading the fifo. If /bin/sh resolves
+        # through a symlink the kernel may report comm=bash — both spell
+        # the same CLASS in the ledger's table, which is why every M8
+        # assertion is on the class and never on comm.
+        /bin/sh < "./$FIFO" &
+        # Class `git`: `--stdin-paths` blocks on stdin and needs no
+        # repository — no repository is created here and .git/config is
+        # never read. Punar does not mediate git and the ledger records
+        # the PROJECT NAME from the workspace grant, never a remote URL.
+        git hash-object --stdin-paths < "./$FIFO" &
+        echo "Children: shell + git blocked on ./$FIFO (long-lived, sampled at scan points)"
+    else
+        echo "Children: could not create ./$FIFO — no process-class evidence generated" >&2
+    fi
+    # A real, short-lived child that punard DENIES (mutations are root-only
+    # until M9 JIT elevation). It is gone long before any sampling pass, so
+    # it can only ever be proven by the audit stream — which is exactly the
+    # point: the ledger's two evidence paths are independent.
+    if punarctl capabilities set security.firewall enabled >/dev/null 2>&1; then
+        echo "Children: capabilities.set was ALLOWED — expected a denial from a non-root peer" >&2
+    else
+        echo "Children: capabilities.set denied by punard (the Level-4 evidence)"
+    fi
 fi
 
 echo "Waiting for SIGTERM/SIGINT — end this session with: systemctl --user stop <scope>"

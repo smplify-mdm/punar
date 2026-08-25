@@ -56,6 +56,47 @@ pub fn fake_process(
     )
     .unwrap();
     std::fs::write(dir.join("cgroup"), format!("0::{cgroup}\n")).unwrap();
+    // `stat` fields 3..=22, with field 22 (`starttime`) derived from the
+    // pid so every fixture process has a distinct, non-zero dedup key —
+    // the same shape `ProcRoot::starttime_of` parses on a real kernel.
+    let fields: Vec<String> = (3..=22)
+        .map(|n| {
+            if n == 22 {
+                (900_000 + u64::from(pid)).to_string()
+            } else {
+                n.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(
+        dir.join("stat"),
+        format!("{pid} ({comm}) {}\n", fields.join(" ")),
+    )
+    .unwrap();
+}
+
+/// Stage one fixture cgroup scope under `root`: the `cgroup.procs` and
+/// `pids.peak` files [`crate::ledger::classes::CgroupRoot`] reads on a
+/// real kernel. Returns the *relative* cgroup path, exactly as it appears
+/// in `/proc/<pid>/cgroup`.
+pub fn fixture_cgroup_scope(
+    root: &Path,
+    session_id: &str,
+    pids: &[u32],
+    peak: Option<u64>,
+) -> String {
+    let relative = managed_cgroup(session_id);
+    let dir = root.join(relative.trim_start_matches('/'));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut procs = String::new();
+    for pid in pids {
+        procs.push_str(&format!("{pid}\n"));
+    }
+    std::fs::write(dir.join("cgroup.procs"), procs).unwrap();
+    if let Some(peak) = peak {
+        std::fs::write(dir.join("pids.peak"), format!("{peak}\n")).unwrap();
+    }
+    relative
 }
 
 /// Remove a fake process — how a test makes a pid "die" between passes.

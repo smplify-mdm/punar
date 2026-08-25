@@ -238,7 +238,9 @@ fn a_managed_session_lives_and_ends() {
         format!("punar-agent-{SESSION}.scope")
     );
 
-    // agents.list shows exactly the ten record fields per session.
+    // agents.list shows exactly the ten record fields per session, plus
+    // the M8 counts-only ledger fingerprint (docs/api/ipc.md section
+    // 12.4) — and nothing else.
     let list = daemon.result("agents.list", None);
     assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
     let mut keys: Vec<&str> = list["sessions"][0]
@@ -254,6 +256,7 @@ fn a_managed_session_lives_and_ends() {
             "agent",
             "classification",
             "environment",
+            "ledger",
             "process_id",
             "project",
             "session_id",
@@ -263,6 +266,24 @@ fn a_managed_session_lives_and_ends() {
             "version"
         ]
     );
+    // The fingerprint is numbers plus one timestamp: no class names, no
+    // `evt_` ids, no zones (they need `agents.access` and its ownership
+    // check).
+    let fingerprint = list["sessions"][0]["ledger"].as_object().unwrap();
+    let mut fingerprint_keys: Vec<&str> = fingerprint.keys().map(String::as_str).collect();
+    fingerprint_keys.sort_unstable();
+    assert_eq!(
+        fingerprint_keys,
+        vec![
+            "process_classes",
+            "resources",
+            "security_events",
+            "updated_at"
+        ]
+    );
+    for numeric in ["process_classes", "resources", "security_events"] {
+        assert!(fingerprint[numeric].is_u64(), "{numeric}");
+    }
 
     // agents.get carries the launcher's authority block for the panel and
     // `punarctl agents inspect`, labels intact.
@@ -652,16 +673,20 @@ fn the_method_table_is_closed_and_the_reserved_names_are_honest() {
     for probe in ["system.exec", "shell.run", "agents.run", "status"] {
         assert_eq!(daemon.error_code(probe, None), "unknown_method", "{probe}");
     }
-    // Reserved for later milestones — named as such, not silently absent.
-    let ledger = daemon.call("agents.access", Some(json!({"session_id": SESSION})));
-    assert_eq!(ledger["error"]["code"], "unknown_method");
-    assert!(
-        ledger["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Milestone 8"),
-        "{ledger}"
-    );
+    // There is no export or remote-query path at all, and the refusal
+    // says so rather than promising one (spec sections 1.22, 24).
+    for probe in ["ledger.export", "ledger.query", "ledger.upload"] {
+        let refusal = daemon.call(probe, Some(json!({"session_id": SESSION})));
+        assert_eq!(refusal["error"]["code"], "unknown_method", "{probe}");
+        assert!(
+            refusal["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("stays on this device"),
+            "{probe}: {refusal}"
+        );
+    }
+    // Reserved for a later milestone — named as such, not silently absent.
     let admin = daemon.call("admin.query", None);
     assert_eq!(admin["error"]["code"], "unknown_method");
     assert!(

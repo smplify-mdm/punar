@@ -82,6 +82,21 @@
 #        the AI-panel screenshot with both rows, end of life, the audit
 #        lifecycle lines and negative probes on the new socket — run after
 #        the M6 exercise, before the export).
+#    10. M8 verdict (milestone-8.md §12): same pattern for m8-report.txt
+#        (punar-m8-check.service — the AI Access Ledger journey: the
+#        ledger-store preflight, a managed mock session whose children are
+#        generated deterministically (fifo-blocked shell + git, plus one
+#        short-lived capability call punard denies), the scope cgroup read
+#        straight from /sys/fs/cgroup, the schema-exact `agents.access`
+#        summary with honest not-yet-observed rows for network destinations
+#        (M12), MCP servers (M9+) and credential classes (M9), the Level-4
+#        denial joined to the audit trail BY EVENT ID, the privacy
+#        regression asserting no path/argv/comm ever reached disk, the
+#        counts-only agents.list fingerprint, the panel screenshot, the
+#        14-day retention deadline, an owner purge and its tombstone, the
+#        no-resurrection drain, a retention prune against an injected
+#        backdated ledger, and negative probes proving no export path
+#        exists — run after the M7 exercise, before the export).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
@@ -107,6 +122,13 @@
 #                                   the schema-exact registry transition log
 #     punar-m7.png                  grim capture, AI panel with a managed row
 #                                   and an unknown row (M7, Plate D-005)
+#     m8-report.txt, m8-*.txt       M8 exercise verdict + the launch block,
+#                                   the privacy ledger render and the purge
+#     m8-*.json                     agents.access result, the stored ledger
+#                                   record, index.json, the panel's runtime
+#                                   view, the attributed audit denial
+#     punar-m8.png                  grim capture, AI panel with the D-005
+#                                   ledger register (M8)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -114,7 +136,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6/M7_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6/M7/M8_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -133,7 +155,7 @@
 #                          fixed 10 min + 5 min measurement
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
-#                          — must also cover the in-guest M2..M7 exercises,
+#                          — must also cover the in-guest M2..M8 exercises,
 #                          which run between the RAM result and the export
 #                          (default: 2400 KVM, 4500 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
@@ -256,9 +278,15 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     # (podman load of a ~1.3 MB archive, one container create, a handful
     # of execs — seconds under KVM) and the M7 agent-registry exercise
     # (bounded 15 min in-guest: a 120 s registration wait, screenshot
-    # settles, a 60 s teardown wait — a minute or two under KVM) — all of
-    # which run before the guest starts streaming the export.
-    DEFAULT_EXPORT_TIMEOUT=2400
+    # settles, a 60 s teardown wait — a minute or two under KVM) and the
+    # M8 ledger exercise (bounded 15 min in-guest; ~5 min of bounded waits
+    # in the worst case — a 180 s launch+children wait, a screenshot
+    # settle, a 60 s teardown wait and a 30 s socket wait around the one
+    # deliberate punar-agentd restart — a minute or two under KVM) — all
+    # of which run before the guest starts streaming the export. Raised
+    # from M7's 2400 to keep the same headroom now that a ninth bounded
+    # in-guest exercise sits between the RAM result and the export.
+    DEFAULT_EXPORT_TIMEOUT=3000
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -273,8 +301,11 @@ else
     # M5 enrollment exercise (bounded 15 min in-guest), the M6
     # punar-env exercise (bounded 10 min in-guest, minutes in practice)
     # and the M7 agent-registry exercise (bounded 15 min in-guest; the
-    # quickshell IPC round trips and grim are the slow parts under TCG).
-    DEFAULT_EXPORT_TIMEOUT=4500
+    # quickshell IPC round trips and grim are the slow parts under TCG)
+    # and the M8 ledger exercise (bounded 15 min in-guest; under TCG the
+    # slow parts are the same quickshell/grim round trips plus the one
+    # punar-agentd restart the retention-prune assertion needs).
+    DEFAULT_EXPORT_TIMEOUT=5400
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -438,6 +469,10 @@ run_desktop() {
           "${PROOF_DIR}"/m7-*.jsonl \
           "${PROOF_DIR}"/m7-*.txt \
           "${PROOF_DIR}/punar-m7.png" \
+          "${PROOF_DIR}/m8-report.txt" \
+          "${PROOF_DIR}"/m8-*.json \
+          "${PROOF_DIR}"/m8-*.txt \
+          "${PROOF_DIR}/punar-m8.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -545,7 +580,8 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      m5-report.txt punar-m5.png punar-m5-personal.png \
-                     m7-report.txt punar-m7.png; do
+                     m7-report.txt punar-m7.png \
+                     m8-report.txt punar-m8.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -565,13 +601,20 @@ run_desktop() {
             # phase-8 verdict — and the M7 agent-registry snapshots
             # (m7-*.txt/.json/.jsonl: m7-report.txt, the launch block, the
             # inspect and list renders, agents list/scan/agents.json and the
-            # schema-exact registry transition log) for the phase-9 verdict.
+            # schema-exact registry transition log) for the phase-9 verdict
+            # — and the M8 ledger snapshots (m8-*.txt/.json: m8-report.txt,
+            # the launch block with its labelled dev/CI children, the
+            # agents.access result, the stored ledger record and index.json,
+            # the panel's runtime view, the attributed audit denial that the
+            # Level-4 join is proven against, and the privacy/purge renders)
+            # for the phase-10 verdict.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
                      "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
                      "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt \
                      "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt \
                      "${guest_dir}"/m7-*.json "${guest_dir}"/m7-*.jsonl \
-                     "${guest_dir}"/m7-*.txt; do
+                     "${guest_dir}"/m7-*.txt \
+                     "${guest_dir}"/m8-*.json "${guest_dir}"/m8-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -821,6 +864,46 @@ run_desktop() {
         warn "desktop-test: no m7-report.txt in the export and no M7 verdict on serial — the M7 exercise did not run"
     else
         echo "==> M7 exercise: no report under TCG (informational only; emulated runs are not M7-gated)"
+    fi
+
+    # Phase 10: M8 exercise verdict (milestone-8.md §12) — same pattern as
+    # the M2–M7 gates. The guest wrote /run/punar/m8-report.txt (per-assertion
+    # ok/FAIL lines + a final PUNAR_M8_OK / PUNAR_M8_FAIL line) via
+    # punar-m8-check.service: the AI Access Ledger journey — ledger-store
+    # preflight, a managed mock session with deterministic fifo-blocked
+    # children, the scope cgroup read directly from /sys/fs/cgroup (source A),
+    # the schema-exact `agents.access` summary with its honest
+    # not-yet-observed rows for the categories no mediation point observes
+    # yet (M12/M9+/M9), the Level-4 denial JOINED to the audit trail by event
+    # id (source B), the privacy regression that asserts what is NOT on disk,
+    # the counts-only `agents.list` fingerprint, the panel screenshot, the
+    # 14-day retention deadline, an owner purge with its tombstone, the
+    # no-resurrection drain, a retention prune against an injected backdated
+    # ledger, and negative probes proving no export path exists. Hard gate: a
+    # delivered FAIL — or a truncated report — fails this script. A MISSING
+    # report degrades exactly as M2–M7 do.
+    local m8_report="${PROOF_DIR}/m8-report.txt"
+    if [ -f "${m8_report}" ]; then
+        if grep -q 'PUNAR_M8_FAIL' "${m8_report}"; then
+            echo "error: M8 exercise reported PUNAR_M8_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m8_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M8_OK' "${m8_report}"; then
+            echo "==> M8 exercise: PUNAR_M8_OK ($(grep -c '^ok' "${m8_report}" || true) assertions passed)"
+        else
+            echo "error: m8-report.txt carries no PUNAR_M8_OK/PUNAR_M8_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m8_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M8_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M8 exercise reported PUNAR_M8_FAIL on the serial console (export did not deliver m8-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M8_OK' "${SERIAL_LOG}"; then
+        echo "==> M8 exercise: PUNAR_M8_OK (verdict from serial console; export did not deliver m8-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m8-report.txt in the export and no M8 verdict on serial — the M8 exercise did not run"
+    else
+        echo "==> M8 exercise: no report under TCG (informational only; emulated runs are not M8-gated)"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

@@ -1,11 +1,13 @@
-# Punar CI — Milestones 0–7 (spec 76: M0 "reproducible build and VM boot",
+# Punar CI — Milestones 0–8 (spec 76: M0 "reproducible build and VM boot",
 # M1 "idle RAM measured" graphical acceptance, M2 multitasking exercise,
 # M3 daemon/typed-IPC/capability/audit exercise, M4 policy-merge/explain/
 # drift-remediation exercise, M5 mock-control-plane enrollment/policy/
 # compliance/inventory exercise, M6 punar-env developer-environment
-# exercise, M7 AI agent registry exercise; ADR-001, milestone-1.md §10,
+# exercise, M7 AI agent registry exercise, M8 AI Access Ledger exercise;
+# ADR-001, milestone-1.md §10,
 # milestone-2.md §7, milestone-3.md §8–§9, milestone-4.md §10,
-# milestone-5.md §10, milestone-6.md §10, milestone-7.md §12).
+# milestone-5.md §10, milestone-6.md §10, milestone-7.md §12,
+# milestone-8.md §12).
 #
 # Jobs:
 #   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
@@ -17,7 +19,7 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   desktop-test  M1–M7 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#   desktop-test  M1–M8 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
 #                 in-guest canonical idle-RAM measurement + services-RSS
 #                 sample (summed PSS over the punard.service and, since M7,
 #                 punar-agentd.service cgroups — one COMBINED number, the
@@ -56,7 +58,24 @@
 #                 detected as UNKNOWN/SUSPECTED, agents.json, the AI-panel
 #                 screenshot, end of life, audit lifecycle lines and
 #                 negative probes on the new socket; verdict in
-#                 m7-report.txt; all six hard-gated in boot-test.sh),
+#                 m7-report.txt) and the in-guest M8 AI Access Ledger
+#                 exercise (milestone-8.md §12 — punar-m8-check.service:
+#                 a managed mock session whose child processes are
+#                 generated deterministically (fifo-blocked shell + git,
+#                 plus one short-lived capability call punard denies), the
+#                 scope cgroup read straight from /sys/fs/cgroup, the
+#                 schema-exact agents.access summary with honest
+#                 not-yet-observed rows for the categories no mediation
+#                 point observes yet (network M12, MCP M9+, credentials
+#                 M9), the Level-4 denial joined to the audit trail by
+#                 event id, the privacy regression asserting no path, argv
+#                 or comm ever reached disk, the counts-only agents.list
+#                 fingerprint, the AI-panel screenshot, the 14-day
+#                 retention deadline, an owner purge and its tombstone,
+#                 the no-resurrection drain, a retention prune against an
+#                 injected backdated ledger, and negative probes proving
+#                 no export path exists; verdict in m8-report.txt; all
+#                 seven hard-gated in boot-test.sh),
 #                 artifact export
 #                 (tools/boot-test.sh --mode desktop), then the
 #                 PERFORMANCE_BUDGETS.md gates
@@ -187,6 +206,7 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m5-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m6-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m7-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m8-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mock-agent \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
 
@@ -258,27 +278,33 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-  # M1+M2+M3+M4+M5+M6 graphical acceptance gate (milestone-1.md §7–§10,
+  # M1..M8 graphical acceptance gate (milestone-1.md §7–§10,
   # milestone-2.md §7, milestone-3.md §8, milestone-4.md §10,
-  # milestone-5.md §10, milestone-6.md §10). Boots the desktop image with
+  # milestone-5.md §10, milestone-6.md §10, milestone-7.md §12,
+  # milestone-8.md §12). Boots the desktop image with
   # -m 8192 -smp 4
   # -device virtio-vga + the punar.export virtio-serial channel, waits for
   # PUNAR_DESKTOP_OK, then for the in-guest canonical idle-RAM measurement
   # (10 min stabilize + 5 min window — PERFORMANCE_BUDGETS.md §2.1–2.2,
-  # ~16 min wall clock), then the guest runs the M2, M3, M4, M5 and M6
-  # exercises in order (each strictly AFTER sampling, so the idle numbers
+  # ~16 min wall clock), then the guest runs the M2..M8 exercises in order
+  # (each strictly AFTER sampling, so the idle numbers
   # stay clean; the M5 exercise starts/stops the never-enabled
   # punar-mock-smplify dev/CI mock itself; the M6 exercise's rootless
-  # containers exist only inside its window) and exports screenshots + RAM
+  # containers exist only inside its window; the M7 and M8 agent sessions
+  # live in their own user-manager scopes, in no service cgroup) and
+  # exports screenshots + RAM
   # data + the reports; boot-test.sh hard-fails on any delivered
-  # PUNAR_M2/M3/M4/M5/M6_FAIL verdict, and the RAM numbers gate against
-  # the budgets.
-  # ~95 min covers KVM boot + measurement + the six exercises (the M4
+  # PUNAR_M2/M3/M4/M5/M6/M7/M8_FAIL verdict, and the RAM numbers gate
+  # against the budgets.
+  # ~105 min covers KVM boot + measurement + the seven exercises (the M4
   # drift demo waits on wall-clock timer firings, worst case 375 s; the M5
   # exercise adds a few minutes of reconcile RPCs and bounded waits; the
   # M6 exercise adds seconds under KVM — podman load of a ~1.3 MB archive,
   # one container, a handful of execs; the M7 exercise adds a minute or two
-  # — one mock agent session, one detection fixture, one panel screenshot)
+  # — one mock agent session, one detection fixture, one panel screenshot;
+  # the M8 exercise adds a minute or two more — a second mock session with
+  # generated children, one panel screenshot and one deliberate
+  # punar-agentd restart for the retention-prune assertion)
   # + export; a TCG-degraded run
   # (broken KVM) will exceed it — that failure
   # mode is intentional surfacing; the RAM gate is warn-only under TCG, and
@@ -289,12 +315,13 @@ jobs:
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2/M3/M4/M5/M6/M7 exercises + RAM budgets)
+    name: desktop-test (graphical gate + M2..M8 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    # Raised from M6's 85: the in-guest M7 exercise (punar-m7-check.service,
+    # Raised from M7's 95: the in-guest M8 exercise (punar-m8-check.service,
     # bounded at 15 min in-guest but a minute or two in practice) runs
-    # between the M6 exercise and the export.
-    timeout-minutes: 95
+    # between the M7 exercise and the export, and boot-test.sh's KVM export
+    # timeout was raised from 2400 s to 3000 s to keep the same headroom.
+    timeout-minutes: 105
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -325,7 +352,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2/M3/M4/M5/M6 exercises + export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M8 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
@@ -335,7 +362,7 @@ jobs:
       # proof files are the primary diagnostics. The screenshot is warn-only:
       # the guest deliberately continues without one (grim failure is itself
       # a signal), and boot-test already annotated its absence.
-      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel)
+      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -346,6 +373,7 @@ jobs:
             os/images/out/desktop-proof/punar-m5.png
             os/images/out/desktop-proof/punar-m5-personal.png
             os/images/out/desktop-proof/punar-m7.png
+            os/images/out/desktop-proof/punar-m8.png
           if-no-files-found: warn
           retention-days: 7
 
@@ -363,7 +391,16 @@ jobs:
       # and the copy of /run/punar/agents.json; m7-registry.jsonl is the
       # schema-exact transition log for this boot's session (the M7
       # screenshot rides the screenshot artifact above).
-      - name: Upload RAM report, M2/M3/M4/M5/M6/M7 reports and measurement data
+      # m8-*.txt covers m8-report.txt plus the launch block (with its
+      # labelled dev/CI child generation), the privacy ledger render and
+      # the purge render; m8-*.json are the agents.access result, the
+      # stored ledger record, index.json before and after the retention
+      # prune, the panel's runtime view and the attributed audit denial
+      # the Level-4 join is proven against (the M8 screenshot rides the
+      # screenshot artifact above). No ledger artifact carries a workspace
+      # path, an argv or a comm — that is asserted in-guest by m8-check
+      # group 8, so these uploads are safe to read (milestone-8.md §12).
+      - name: Upload RAM report, M2..M8 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -391,6 +428,9 @@ jobs:
             os/images/out/desktop-proof/m7-*.json
             os/images/out/desktop-proof/m7-*.jsonl
             os/images/out/desktop-proof/m7-*.txt
+            os/images/out/desktop-proof/m8-report.txt
+            os/images/out/desktop-proof/m8-*.json
+            os/images/out/desktop-proof/m8-*.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

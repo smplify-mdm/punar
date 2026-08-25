@@ -343,6 +343,11 @@ pub struct AgentRow {
     /// section 10.3) — present for managed sessions in `agents.get`.
     #[serde(default)]
     pub authority: Option<AgentAuthority>,
+    /// The M8 counts-only ledger fingerprint (contract section 12.4).
+    /// Absent on detections by design: an unregistered process has no
+    /// persisted session and therefore no ledger until Milestone 10.
+    #[serde(default)]
+    pub ledger: Option<LedgerFingerprint>,
 }
 
 /// The authority block: named policy source + the declared rows, each
@@ -360,6 +365,226 @@ pub struct AgentAuthorityRow {
     pub decision: String,
     #[serde(default)]
     pub enforcement: String,
+}
+
+// ---------------------------------------------------------------------------
+// M8 AI Access Ledger (contract sections 12–13 — the punar-agentd socket)
+// ---------------------------------------------------------------------------
+
+/// `agents.access` result (contract section 12.2): the schema-exact
+/// `summary` document plus the sibling fields the schema deliberately
+/// cannot hold — counts, first/last seen, the honest not-yet-observed
+/// rows, retention and the privacy statement.
+///
+/// Everything but `summary` defaults, so a daemon that answers with the
+/// bare document still renders: the view then simply has no counts to
+/// print and says nothing it cannot prove.
+#[derive(Deserialize)]
+pub struct LedgerAccess {
+    pub summary: LedgerSummary,
+    #[serde(default)]
+    pub detail: Option<LedgerDetail>,
+    #[serde(default)]
+    pub not_yet_observed: Vec<NotYetObserved>,
+    #[serde(default)]
+    pub retention: Option<LedgerRetention>,
+    #[serde(default)]
+    pub privacy: Option<LedgerPrivacy>,
+    /// Set when the user purged this session's ledger (section 12.2): the
+    /// resources are empty *because they were deleted*, and every surface
+    /// must say `purged`, never `nothing recorded`.
+    #[serde(default)]
+    pub purged_at: Option<String>,
+}
+
+/// The `schemas/ai-agent/ledger-summary.json` document, unchanged by M8.
+#[derive(Deserialize)]
+pub struct LedgerSummary {
+    pub session_id: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub generated_at: String,
+    #[serde(default)]
+    pub resources: LedgerResources,
+    #[serde(default)]
+    pub security_events: Vec<LedgerEvent>,
+}
+
+/// The six resource categories, verbatim from the schema. They are the
+/// closed vocabulary: there is no seventh, and a category with no owned
+/// mediation point is an **empty array plus a `not_yet_observed` row**,
+/// never a silent absence (spec section 1.22).
+#[derive(Deserialize, Default)]
+pub struct LedgerResources {
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    #[serde(default)]
+    pub directory_zones: Vec<String>,
+    #[serde(default)]
+    pub network_destinations: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+    #[serde(default)]
+    pub credential_classes: Vec<String>,
+    #[serde(default)]
+    pub process_classes: Vec<String>,
+}
+
+impl LedgerResources {
+    /// The categories in the Plate D-005 reading order, each with the label
+    /// every surface prints for it. Observed categories come first; the
+    /// three with no producer in M8 keep their place at the bottom so the
+    /// M8/M12 boundary sits where the plate draws it.
+    pub fn categories(&self) -> [(&'static str, &'static str, &[String]); 6] {
+        [
+            ("repositories", "Repositories", &self.repositories),
+            ("directory_zones", "Directory zones", &self.directory_zones),
+            ("process_classes", "Processes", &self.process_classes),
+            (
+                "network_destinations",
+                "Network destinations",
+                &self.network_destinations,
+            ),
+            ("mcp_servers", "MCP servers", &self.mcp_servers),
+            (
+                "credential_classes",
+                "Credential classes",
+                &self.credential_classes,
+            ),
+        ]
+    }
+
+    /// Distinct resource classes recorded across every category — the one
+    /// number `privacy ledger` reports as "what is recorded".
+    pub fn total(&self) -> usize {
+        self.categories().iter().map(|(_, _, v)| v.len()).sum()
+    }
+}
+
+/// A Level-4 security event **reference** (contract section 12.2). The
+/// payload stays in `/var/log/punar/audit.jsonl` — one source of truth
+/// (spec section 53), one place to redact, and nothing the ledger could
+/// contradict.
+#[derive(Deserialize)]
+pub struct LedgerEvent {
+    pub event_id: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub timestamp: String,
+}
+
+/// The counted aggregate behind the document (contract section 12.2).
+#[derive(Deserialize)]
+pub struct LedgerDetail {
+    #[serde(default)]
+    pub status: String,
+    /// The scope cgroup's `pids.peak` — peak **concurrent** pids, never a
+    /// spawn total.
+    #[serde(default)]
+    pub process_peak: Option<u64>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub entries: Vec<LedgerEntry>,
+}
+
+impl LedgerDetail {
+    /// The count recorded for one `(category, resource_class)` pair, if the
+    /// daemon sent the aggregate at all.
+    pub fn count_of(&self, category: &str, resource_class: &str) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|e| e.category == category && e.resource_class == resource_class)
+            .map(|e| e.count)
+    }
+}
+
+/// One aggregate entry. `count` for `process_classes` is distinct
+/// `(pid, starttime)` pairs observed **alive at a sampling point** — not a
+/// spawn count, and every renderer carries that qualifier.
+#[derive(Deserialize)]
+pub struct LedgerEntry {
+    pub category: String,
+    pub resource_class: String,
+    #[serde(default)]
+    pub count: u64,
+    #[serde(default)]
+    pub first_seen: String,
+    #[serde(default)]
+    pub last_seen: String,
+    /// `cgroup_scope` · `audit_event` · `workspace_bind` ·
+    /// `adapter_metadata` — the mediation point that proved the entry.
+    #[serde(default)]
+    pub evidence: String,
+}
+
+/// An honest empty: the category exists, nothing observes it yet, and the
+/// milestone that will is named (contract section 12.2; spec section 1.22).
+#[derive(Deserialize)]
+pub struct NotYetObserved {
+    #[serde(default)]
+    pub level: u8,
+    pub category: String,
+    #[serde(default)]
+    pub milestone: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `{days, active}` while the session runs; `{days, expires_at}` once it
+/// has ended (contract section 12.2).
+#[derive(Deserialize)]
+pub struct LedgerRetention {
+    #[serde(default)]
+    pub days: u32,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// The section 24.2 guarantee, carried in the result so every renderer
+/// says the same words rather than each inventing its own.
+#[derive(Deserialize)]
+pub struct LedgerPrivacy {
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default)]
+    pub purge_command: String,
+    #[serde(default)]
+    pub never_recorded: Vec<String>,
+    #[serde(default)]
+    pub audit_trail_separate: bool,
+}
+
+/// `ledger.purge` result (contract section 12.3).
+#[derive(Deserialize)]
+pub struct LedgerPurge {
+    #[serde(default)]
+    pub purged: u64,
+    #[serde(default)]
+    pub resource_classes: u64,
+    #[serde(default)]
+    pub security_events: u64,
+    #[serde(default)]
+    pub purged_at: String,
+}
+
+/// The counts-only ledger fingerprint on an `agents.list` row (contract
+/// section 12.4). **No** class names, **no** `evt_` ids, **no** zones —
+/// identifiers require `agents.access` and its ownership check.
+#[derive(Deserialize, Clone)]
+pub struct LedgerFingerprint {
+    #[serde(default)]
+    pub resources: u64,
+    #[serde(default)]
+    pub process_classes: u64,
+    #[serde(default)]
+    pub security_events: u64,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// Display spelling of a capability state value: strings render bare

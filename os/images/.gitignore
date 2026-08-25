@@ -21,3 +21,7 @@ mkosi.profiles/desktop/mkosi.extra/usr/bin/
 # snapshot's busybox by scripts/container-build.sh (stage_env_base_oci) on
 # every build — never commit (milestone-6.md §6.2).
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci/
+# M8: the comm -> process-class table, staged from crates/punar-agentd/data
+# by scripts/container-build.sh — the daemon compiles the same file in as
+# its fallback, so a committed second copy could drift (milestone-8.md §3.2).
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/process-classes.json

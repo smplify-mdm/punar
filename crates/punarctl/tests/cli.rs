@@ -852,9 +852,10 @@ fn unimplemented_verbs_keep_their_milestone_stubs() {
     let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
     for (args, expected) in [
         (vec!["compliance"], "Milestone 5"),
-        // `agents list` / `agents inspect` are real since M7 (below);
-        // `agents access` waits for the M8 Access Ledger.
-        (vec!["agents", "access", "agt_1"], "Milestone 8"),
+        // `agents list` / `agents inspect` are real since M7 and
+        // `agents access` / `privacy ledger` / `privacy purge` since M8
+        // (below). `privacy connections` stays reserved — and says which
+        // milestone will make it real rather than going silently missing.
         (vec!["privacy", "connections"], "Milestone 12"),
         (vec!["relay", "status"], "Milestone 12"),
         (vec!["update", "status"], "not scheduled"),
@@ -998,7 +999,12 @@ fn fixture_agents_list() -> Value {
              "version": "mock", "process_id": 2143, "user": "punar",
              "project": "atlas", "environment": "punar-env-atlas",
              "status": "active", "classification": "managed",
-             "started_at": "2026-08-27T09:58:40Z"}
+             "started_at": "2026-08-27T09:58:40Z",
+             // M8 (contract section 12.4): counts only — no class names,
+             // no evt_ ids, no zones.
+             "ledger": {"resources": 5, "process_classes": 3,
+                        "security_events": 1,
+                        "updated_at": "2026-08-27T10:00:02Z"}}
         ],
         "detections": [
             {"session_id": "agt_d11e0aa7c402", "agent": "foo-agent",
@@ -1042,6 +1048,85 @@ fn fixture_agent_get(session_id: &str) -> Option<Value> {
     Some(json!({ "session": row }))
 }
 
+/// The `agents.access` example from docs/api/ipc.md section 12.2, verbatim:
+/// the schema-exact `summary` document plus the sibling fields the schema
+/// deliberately cannot hold.
+fn fixture_agents_access() -> Value {
+    json!({
+        "summary": {
+            "session_id": "agt_4f21c09ab3e1",
+            "agent": "claude-code",
+            "generated_at": "2026-08-27T10:00:02Z",
+            "resources": {
+                "repositories": ["atlas"],
+                "directory_zones": ["workspace"],
+                "network_destinations": [],
+                "mcp_servers": [],
+                "credential_classes": [],
+                "process_classes": ["agent", "git", "shell"]
+            },
+            "security_events": [
+                {"event_id": "evt_502", "event_type": "denied_access",
+                 "timestamp": "2026-08-27T09:59:12Z"}
+            ]
+        },
+        "detail": {
+            "status": "active",
+            "process_peak": 6,
+            "truncated": false,
+            "entries": [
+                {"category": "repositories", "resource_class": "atlas", "count": 1,
+                 "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T09:58:40Z",
+                 "evidence": "workspace_bind"},
+                {"category": "directory_zones", "resource_class": "workspace", "count": 1,
+                 "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T09:58:40Z",
+                 "evidence": "workspace_bind"},
+                {"category": "process_classes", "resource_class": "git", "count": 2,
+                 "first_seen": "2026-08-27T09:58:44Z", "last_seen": "2026-08-27T10:00:02Z",
+                 "evidence": "cgroup_scope"},
+                {"category": "process_classes", "resource_class": "shell", "count": 3,
+                 "first_seen": "2026-08-27T09:58:44Z", "last_seen": "2026-08-27T10:00:02Z",
+                 "evidence": "cgroup_scope"},
+                {"category": "process_classes", "resource_class": "agent", "count": 1,
+                 "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T10:00:02Z",
+                 "evidence": "cgroup_scope"}
+            ]
+        },
+        "not_yet_observed": [
+            {"level": 3, "category": "network_destinations", "milestone": "M12",
+             "reason": "punar-netd does not exist yet"},
+            {"level": 3, "category": "mcp_servers", "milestone": "M9+",
+             "reason": "no tool/MCP gateway mediates MCP traffic yet"},
+            {"level": 3, "category": "credential_classes", "milestone": "M9",
+             "reason": "punar-secrets is the producer of credential.request events"},
+            {"level": 4, "category": "credential_request", "milestone": "M9",
+             "reason": "no credential producer exists yet"},
+            {"level": 4, "category": "policy_bypass_attempt", "milestone": "M9",
+             "reason": "approval gates arrive with M9"},
+            {"level": 4, "category": "production_access", "milestone": "M12",
+             "reason": "no network mediation exists yet"},
+            {"level": 4, "category": "sensitive_resource_access", "milestone": "M9/M12",
+             "reason": "no mediation point observes sensitive zones yet"},
+            {"level": 4, "category": "unknown_ai_execution", "milestone": "M10",
+             "reason": "a detected unmanaged process has no registered session"}
+        ],
+        "retention": {"days": 14, "active": true},
+        "privacy": {
+            "local_only": true,
+            "purge_command": "punarctl privacy purge --session agt_4f21c09ab3e1",
+            "never_recorded": ["file paths inside the workspace", "prompts",
+                               "source code", "secret values", "individual file reads"],
+            "audit_trail_separate": true
+        }
+    })
+}
+
+/// `ledger.purge` result (contract section 12.3).
+fn fixture_ledger_purge() -> Value {
+    json!({"purged": 1, "resource_classes": 5, "security_events": 1,
+           "purged_at": "2026-08-27T10:05:00Z"})
+}
+
 /// The mock `punar-agentd`: the same envelope, the closed M7 method table,
 /// and the reserved-name answers the contract prescribes (section 10.2).
 fn agents_respond(request: &Value) -> Result<Value, Value> {
@@ -1071,12 +1156,59 @@ fn agents_respond(request: &Value) -> Result<Value, Value> {
                 })
             })
         }
-        "agents.access" => Err(json!({
-            "code": "unknown_method",
-            "message": "The method \"agents.access\" is reserved for the Milestone 8 AI \
-                        Access Ledger (spec section 21) and is not implemented yet.",
-            "details": {"method": method, "reserved_for": "milestone-8"}
-        })),
+        // M8 (contract section 12.2). Ownership is the daemon's call: the
+        // mock refuses one id outright so the CLI's exit-3 path is real.
+        "agents.access" => {
+            let Some(id) = request
+                .get("params")
+                .and_then(|p| p.get("session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                return Err(json!({
+                    "code": "invalid_params",
+                    "message": "agents.access needs a session_id.\n\
+                                Next step: punarctl agents list",
+                    "details": {"param": "session_id"}
+                }));
+            };
+            match id.as_str() {
+                "agt_4f21c09ab3e1" => Ok(fixture_agents_access()),
+                "agt_someoneelse" => Err(json!({
+                    "code": "denied",
+                    "message": "The access ledger for agt_someoneelse belongs to another \
+                                user.\nWhy: a ledger is personal data — only the session's \
+                                owner or root may read it.\nNext step: ask that user, or \
+                                re-run as root: sudo punarctl agents access agt_someoneelse",
+                    "details": {"session_id": id}
+                })),
+                _ => Err(json!({
+                    "code": "not_found",
+                    "message": format!(
+                        "No AI agent session {id} has an access ledger on this device.\n\
+                         Next step: punarctl agents list"
+                    ),
+                    "details": {"param": "session_id", "session_id": id}
+                })),
+            }
+        }
+        // M8 (contract section 12.3): exactly one of session_id / all.
+        "ledger.purge" => {
+            let params = request.get("params");
+            let one = params.and_then(|p| p.get("session_id")).is_some();
+            let all = params
+                .and_then(|p| p.get("all"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if one == all {
+                return Err(json!({
+                    "code": "invalid_params",
+                    "message": "ledger.purge needs exactly one of session_id or all.",
+                    "details": {"param": "session_id|all"}
+                }));
+            }
+            Ok(fixture_ledger_purge())
+        }
         other => Err(json!({
             "code": "unknown_method",
             "message": format!(
@@ -1163,7 +1295,7 @@ fn agents_scan_forces_a_pass_and_renders_the_list_view() {
 }
 
 #[test]
-fn agents_inspect_renders_authority_then_the_ledger_placeholder() {
+fn agents_inspect_renders_authority_then_the_real_ledger_register() {
     let agentd = start_agentd_mock();
     let output = run_agents(&agentd, &["agents", "inspect", "agt_4f21c09ab3e1"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -1201,9 +1333,16 @@ fn agents_inspect_renders_authority_then_the_ledger_placeholder() {
         "{text}"
     );
 
-    // Ledger · what it accessed — named as the M8 work it is.
+    // Ledger · what it accessed — real since M8, fetched by the
+    // best-effort `agents.access` follow-up and rendered under authority.
     assert!(text.contains("LEDGER · WHAT IT ACCESSED"), "{text}");
-    assert!(text.contains("MILESTONE 8"), "{text}");
+    assert!(text.contains("REPOSITORIES"), "{text}");
+    assert!(text.contains("ATLAS"), "{text}");
+    assert!(text.contains("GIT × 2 · SHELL × 3"), "{text}");
+    // The May/Did split stays structural: two registers, two questions.
+    let authority_at = text.find("AUTHORITY · WHAT IT MAY ACCESS").unwrap();
+    let ledger_at = text.find("LEDGER · WHAT IT ACCESSED").unwrap();
+    assert!(authority_at < ledger_at, "{text}");
 }
 
 #[test]
@@ -1312,13 +1451,272 @@ fn debug_probes_on_the_agentd_socket_get_unknown_method() {
         stderr(&output)
     );
 
-    // agents.access is reserved for M8 and says so — on the daemon side
-    // and in the CLI stub alike.
+    // agents.access exists since M8, so the bare probe (no params) is a
+    // typed parameter error — not a reserved-name answer, and never
+    // anything executable.
     let output = run_agents(&agentd, &["debug", "rpc", "agents.access"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("Milestone 8"),
+        stderr(&output).contains("needs a session_id"),
         "{}",
         stderr(&output)
     );
+
+    // `ledger.export`, `ledger.query` and `admin.*` do not exist: there is
+    // no upload path in M8 (contract section 12.1).
+    for method in ["ledger.export", "ledger.query", "admin.query"] {
+        let output = run_agents(&agentd, &["debug", "rpc", method, "--socket", "agentd"]);
+        assert_eq!(output.status.code(), Some(1), "{method}");
+        assert!(stderr(&output).contains("does not exist"), "{method}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M8 AI Access Ledger (contract sections 12–13)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agents_access_renders_the_ledger_register_with_counts_and_honest_gaps() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "access", "agt_4f21c09ab3e1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("P U N A R   ·   A I   A C C E S S   L E D G E R"),
+        "{text}"
+    );
+    assert!(text.contains(RULE), "{text}");
+    assert!(text.contains("LEDGER · WHAT IT ACCESSED"), "{text}");
+
+    // Level 3: the observed categories, with counts and the mediation
+    // point that proved them.
+    assert!(text.contains("REPOSITORIES"), "{text}");
+    assert!(text.contains("ATLAS"), "{text}");
+    assert!(text.contains("workspace bind"), "{text}");
+    assert!(text.contains("DIRECTORY ZONES"), "{text}");
+    assert!(text.contains("WORKSPACE"), "{text}");
+    assert!(text.contains("AGENT × 1 · GIT × 2 · SHELL × 3"), "{text}");
+    assert!(text.contains("cgroup scope"), "{text}");
+    assert!(text.contains("peak 6 concurrent"), "{text}");
+    // The count qualifier travels with the count, always.
+    assert!(
+        text.contains("SHORT-LIVED CHILDREN MAY BE MISSED"),
+        "{text}"
+    );
+
+    // Empty is never silent: each unobserved category names its milestone.
+    assert!(
+        text.contains("NOT YET OBSERVED · M12") && text.contains("NETWORK DESTINATIONS"),
+        "{text}"
+    );
+    assert!(text.contains("MCP SERVERS"), "{text}");
+    assert!(text.contains("NOT YET OBSERVED · M9+"), "{text}");
+    assert!(text.contains("CREDENTIAL CLASSES"), "{text}");
+    assert!(text.contains("punar-netd does not exist yet"), "{text}");
+
+    // Level 4: the event reference, and where the payload actually lives.
+    assert!(text.contains("SECURITY EVENTS · LEVEL 4"), "{text}");
+    assert!(text.contains("DENIED ACCESS"), "{text}");
+    assert!(text.contains("evt_502"), "{text}");
+    assert!(text.contains("PUNARCTL AUDIT TAIL"), "{text}");
+    // The five Level-4 categories with no producer are named too — all
+    // seven accounted for, including the unknown-agent one M10 owns.
+    assert!(text.contains("CREDENTIAL REQUEST (M9)"), "{text}");
+    assert!(text.contains("UNKNOWN AI EXECUTION (M10)"), "{text}");
+
+    // Retention + the section 24.2 guarantee.
+    assert!(text.contains("14 days after the session ends"), "{text}");
+    assert!(text.contains("/var/lib/punar/agents/ledger"), "{text}");
+    assert!(text.contains("NEVER RECORDED"), "{text}");
+    assert!(text.contains("prompts"), "{text}");
+    assert!(
+        text.contains("punarctl privacy purge --session agt_4f21c09ab3e1"),
+        "{text}"
+    );
+    assert!(text.contains("Milestone 10"), "{text}");
+
+    // Nothing section 21.2 forbids can appear, because nothing carries it.
+    assert!(!text.contains("/home/"), "{text}");
+    assert!(!text.to_lowercase().contains("cmdline"), "{text}");
+}
+
+#[test]
+fn agents_access_json_round_trips_the_result_verbatim() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["--json", "agents", "access", "agt_4f21c09ab3e1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_agents_access());
+    // `result.summary` alone is the schema-exact ledger-summary.json
+    // document — the artifact a future authorized query would return.
+    let summary = &value["summary"];
+    for key in ["session_id", "agent", "generated_at", "resources"] {
+        assert!(summary.get(key).is_some(), "{key}");
+    }
+    for key in [
+        "repositories",
+        "directory_zones",
+        "network_destinations",
+        "mcp_servers",
+        "credential_classes",
+        "process_classes",
+    ] {
+        assert!(summary["resources"][key].is_array(), "{key}");
+    }
+}
+
+#[test]
+fn agents_access_of_another_users_session_exits_3_with_the_section_73_voice() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "access", "agt_someoneelse"]);
+    assert_eq!(output.status.code(), Some(3), "denied must exit 3");
+    let text = stderr(&output);
+    assert!(text.contains("personal data"), "{text}");
+    assert!(text.contains("Next step"), "{text}");
+
+    let output = run_agents(&agentd, &["agents", "access", "agt_nosuchthing"]);
+    assert_eq!(output.status.code(), Some(1), "not_found must exit 1");
+    assert!(stderr(&output).contains("punarctl agents list"));
+}
+
+#[test]
+fn privacy_ledger_states_what_is_recorded_and_what_never_is() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["privacy", "ledger"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains("P U N A R   ·   P R I V A C Y"), "{text}");
+    assert!(
+        text.contains("LOCAL AI LEDGER · WHAT THIS DEVICE RECORDED"),
+        "{text}"
+    );
+    assert!(text.contains("WHAT IS RECORDED"), "{text}");
+    assert!(text.contains("1 SESSION"), "{text}");
+    assert!(text.contains("claude-code · atlas"), "{text}");
+    // The never-record list is as prominent as the record itself (24.2).
+    assert!(text.contains("NEVER RECORDED"), "{text}");
+    assert!(text.contains("source code"), "{text}");
+    assert!(text.contains("secret values"), "{text}");
+    assert!(text.contains("RETENTION"), "{text}");
+    assert!(text.contains("14 days after a session ends"), "{text}");
+    assert!(
+        text.contains("punarctl privacy purge --session <id>"),
+        "{text}"
+    );
+    assert!(text.contains("REMOTE QUERY"), "{text}");
+    assert!(text.contains("no upload path exists"), "{text}");
+    // A detection has no ledger in M8, and the reason is structural.
+    assert!(text.contains("MILESTONE 10"), "{text}");
+
+    // One session: the same register, opened from the privacy side.
+    let output = run_agents(&agentd, &["privacy", "ledger", "agt_4f21c09ab3e1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("LEDGER · WHAT IT ACCESSED"));
+
+    // `--session` is the same argument, spelled for symmetry with purge.
+    let flagged = run_agents(
+        &agentd,
+        &["privacy", "ledger", "--session", "agt_4f21c09ab3e1"],
+    );
+    assert_eq!(stdout(&flagged), stdout(&output));
+}
+
+#[test]
+fn privacy_ledger_json_is_a_labelled_composed_document() {
+    let agentd = start_agentd_mock();
+
+    // Device-wide: composed from two methods, and it says so rather than
+    // pretending to be one verbatim IPC result.
+    let output = run_agents(&agentd, &["--json", "privacy", "ledger"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert!(
+        value["source"]
+            .as_str()
+            .unwrap()
+            .contains("composed locally"),
+        "{value}"
+    );
+    assert_eq!(value["registry"], fixture_agents_list());
+    assert_eq!(value["ledgers"][0]["access"], fixture_agents_access());
+    assert_eq!(value["remote_query"]["available"], json!(false));
+    assert_eq!(value["local_only"], json!(true));
+
+    // One session: a single call, so the result is verbatim.
+    let output = run_agents(
+        &agentd,
+        &["--json", "privacy", "ledger", "agt_4f21c09ab3e1"],
+    );
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_agents_access());
+}
+
+#[test]
+fn privacy_purge_prints_what_it_deleted_and_the_audit_boundary() {
+    let agentd = start_agentd_mock();
+
+    let output = run_agents(
+        &agentd,
+        &["privacy", "purge", "--session", "agt_4f21c09ab3e1", "--yes"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("✓ PURGED · 1 SESSION · 5 RESOURCE CLASSES · 1 EVENT REFERENCE"),
+        "{text}"
+    );
+    // The one sentence that keeps the two records from being confused.
+    assert!(
+        text.contains(
+            "THE AUDIT TRAIL IS A SEPARATE RECORD AND WAS NOT DELETED · PUNARCTL AUDIT TAIL"
+        ),
+        "{text}"
+    );
+
+    // `--all` scopes to the caller's own sessions; the daemon enforces it.
+    let output = run_agents(&agentd, &["--json", "privacy", "purge", "--all", "--yes"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_ledger_purge());
+}
+
+#[test]
+fn privacy_connections_names_its_milestone_instead_of_going_missing() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["privacy", "connections"]);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(text.contains("punar-netd"), "{text}");
+    assert!(text.contains("Milestone 12"), "{text}");
+    assert!(
+        text.contains("Next step: punarctl privacy ledger"),
+        "{text}"
+    );
+}
+
+/// Routing (contract section 12): `ledger.purge` lives on the agentd
+/// socket, so an absent registry names *its* unit — never punard's.
+#[test]
+fn privacy_verbs_reach_the_agentd_socket() {
+    let punard = start_mock();
+    let missing = std::env::temp_dir().join("punarctl-no-agentd-here.sock");
+    for args in [
+        ["privacy", "ledger"].as_slice(),
+        ["privacy", "purge", "--all", "--yes"].as_slice(),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+            .args(args)
+            .env("PUNARD_SOCKET", &punard)
+            .env("PUNAR_AGENTD_SOCKET", &missing)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run punarctl");
+        assert_eq!(output.status.code(), Some(5), "{args:?}");
+        assert!(
+            stderr(&output).contains("systemctl status punar-agentd"),
+            "{args:?}"
+        );
+    }
 }

@@ -101,6 +101,12 @@ MANIFEST: list[tuple[str, str | None]] = [
     # Detection heuristics are an internal input, versioned by review rather
     # than by schema (milestone-7.md section 7.1) -- known file, no schema.
     ("os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/signatures/*.json", None),
+    # The M8 comm -> process-class table is the same kind of thing: an
+    # internal heuristic input, versioned by review, deliberately without a
+    # schema (milestone-8.md section 3.2). It is STAGED here from
+    # crates/punar-agentd/data by scripts/container-build.sh -- the daemon
+    # compiles the same file in as its fallback, so the two cannot drift.
+    ("os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/process-classes.json", None),
     # --- seed data: fixtures/projects/atlas/ (its README.md table) ----------
     ("fixtures/projects/atlas/project-environment.yaml", "schemas/project/project-environment.json"),
     ("fixtures/projects/atlas/project-network-policy.json", "schemas/network/project-network-policy.json"),

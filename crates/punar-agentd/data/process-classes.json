@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "note": "comm -> process class for the AI Access Ledger (spec 21.1 Level 3, milestone-8.md section 3.2). Data, not code: the M7 adapters-as-data precedent. Deliberately no JSON Schema — this is an internal heuristic input versioned by review, exactly like signatures/suspected.json. Installed at /usr/share/punar/agents/process-classes.json; punar-agentd compiles this same file in as its fallback, so the two cannot drift. Anything not listed here becomes the literal class \"unknown\" — the raw comm is never stored. Note the deliberate duplicate \"punar-mock-agen\": /proc/<pid>/comm is the kernel's TASK_COMM_LEN name, truncated to 15 characters, so a 16-character executable name arrives one character short.",
+  "classes": {
+    "git": "git",
+    "sh": "shell",
+    "bash": "shell",
+    "dash": "shell",
+    "zsh": "shell",
+    "node": "node",
+    "npm": "node",
+    "npx": "node",
+    "cargo": "cargo",
+    "rustc": "cargo",
+    "rustup": "cargo",
+    "python": "python",
+    "python3": "python",
+    "podman": "container",
+    "crun": "container",
+    "nvim": "editor",
+    "chromium": "browser",
+    "punarctl": "punar",
+    "punar-env": "punar",
+    "claude": "agent",
+    "punar-mock-agent": "agent",
+    "punar-mock-agen": "agent"
+  }
+}

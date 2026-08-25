@@ -157,6 +157,7 @@ mod tests {
                 started_at: "2026-08-27T09:58:40Z".into(),
             },
             scope_unit: Some("punar-agent-agt_4f21c09ab3e1.scope".into()),
+            scope_path: None,
             executable: Some("/usr/lib/punar/punar-mock-agent".into()),
             authority: Some(AuthoritySummary {
                 policy_citation: "personal-defaults".into(),

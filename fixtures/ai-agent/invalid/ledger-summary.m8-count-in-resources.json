@@ -1,0 +1,14 @@
+{
+  "session_id": "agt_4f21c09ab3e1",
+  "agent": "claude-code",
+  "generated_at": "2026-08-25T14:33:47Z",
+  "resources": {
+    "repositories": ["atlas"],
+    "directory_zones": ["workspace"],
+    "network_destinations": [],
+    "mcp_servers": [],
+    "credential_classes": [],
+    "process_classes": [{ "class": "git", "count": 12 }]
+  },
+  "security_events": []
+}

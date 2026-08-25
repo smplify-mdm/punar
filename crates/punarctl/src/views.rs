@@ -783,11 +783,683 @@ fn authority_slot(decision: &str) -> Slot {
 const DETECTION_NOTE: &str = "Detection is heuristic — suspected, not certain · \
                               scan on view · continuous detection arrives in Milestone 10";
 
-/// The Access Ledger placeholder. M7 ships the registry; the ledger (SPEC
-/// section 21) is Milestone 8, and the surface says so rather than
-/// rendering an empty section that could read as "accessed nothing".
-const LEDGER_NOTE: &str = "The AI Access Ledger (SPEC section 21) arrives in Milestone 8 · \
-                           what this agent accessed is not recorded yet";
+// ---------------------------------------------------------------------------
+// M8 AI Access Ledger (contract sections 12–13; Plate D-005's Sect III in
+// terminal grammar). The register answers SPEC section 21's question —
+// "what did it access?" — and is kept structurally apart from the
+// authority register above it, which answers "what may it access?".
+// ---------------------------------------------------------------------------
+
+/// A detection has no ledger and will not have one in M8: an unregistered
+/// process has no persisted session (milestone-7.md section 4.4), so there
+/// is nothing to aggregate against. Milestone 10 owns that work, and the
+/// surface says so rather than rendering an empty section that could read
+/// as "accessed nothing".
+const DETECTION_LEDGER_NOTE: &str = "Unknown activity has no access ledger in Milestone 8 — \
+                                     a detection has no registered session to aggregate \
+                                     against · Milestone 10";
+
+/// The SPEC section 21.2 never-record list, in the user's words. Used when
+/// the daemon sends no `privacy.never_recorded` of its own; the daemon's
+/// list always wins so the two surfaces cannot drift apart.
+const NEVER_RECORDED: &str = "file paths inside your workspace · prompts · source code · \
+                              secret values · individual file reads";
+
+/// Where the ledger lives, and the two facts that matter about the place.
+const LEDGER_STORAGE: &str = "/var/lib/punar/agents/ledger · root-only · never uploaded";
+
+/// The boundary sentence every purge prints (milestone-8.md section 10.4):
+/// the audit log is the tamper-evident record of decisions the *system*
+/// made and is outside a user's delete authority. The ledger, derived from
+/// it plus the scope cgroup, is not.
+const AUDIT_BOUNDARY: &str = "The audit trail is a separate record and was not deleted · \
+                              punarctl audit tail";
+
+/// The same boundary, stated before anything is deleted — the ledger
+/// surfaces say what purge will and will not touch, in the present tense.
+const AUDIT_SEPARATE: &str = "a separate record · not deleted by purge · punarctl audit tail";
+
+/// There is no upload path in Milestone 8 — not a path nobody used, a path
+/// that does not exist (milestone-8.md section 10.5).
+const REMOTE_QUERY: &str = "none — no upload path exists (Milestone 10 adds the authorized, \
+                            audited administrator query)";
+
+/// The count qualifier, stated wherever a process count is printed
+/// (milestone-8.md section 3.3): the number is real and so is its limit.
+const PROCESS_SAMPLING_NOTE: &str = "Processes · sampled at scan points · short-lived children \
+                                     may be missed · peak is concurrent, never a spawn total";
+
+/// The documented default retention window (milestone-8.md section 6.1).
+/// Only ever printed when the daemon reported no live value — and then it
+/// is labelled as the default, not as an observation.
+const LEDGER_RETENTION_DEFAULT_DAYS: u32 = 14;
+
+/// Human spelling of a Level-4 event category (contract section 12.2's
+/// seven-value enum). An unrecognised value is printed verbatim rather
+/// than guessed at.
+fn event_words(event_type: &str) -> String {
+    match event_type {
+        "denied_access" => "Denied access".to_string(),
+        "privilege_request" => "Privilege request".to_string(),
+        "credential_request" => "Credential request".to_string(),
+        "policy_bypass_attempt" => "Policy bypass attempt".to_string(),
+        "production_access" => "Production access".to_string(),
+        "sensitive_resource_access" => "Sensitive resource access".to_string(),
+        "unknown_ai_execution" => "Unknown AI execution".to_string(),
+        "" => "Security event".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// Human spelling of the mediation point that proved an entry (contract
+/// section 12.2's four-value evidence enum). Naming it on the row is the
+/// point of the whole design: nothing here comes from tracing.
+fn evidence_words(evidence: &str) -> String {
+    match evidence {
+        "cgroup_scope" => "cgroup scope".to_string(),
+        "audit_event" => "audit event".to_string(),
+        "workspace_bind" => "workspace bind".to_string(),
+        "adapter_metadata" => "adapter metadata".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// `class` or `class × N`. Process classes always carry the count (the
+/// D-005 signature `git × 12 · cargo × 4 · bash × 9`); the other
+/// categories stay bare at one, where a `× 1` would be noise.
+fn resource_cell(category: &str, class: &str, count: Option<u64>) -> String {
+    match count {
+        Some(n) if n > 1 || category == "process_classes" => format!("{class} × {n}"),
+        _ => class.to_string(),
+    }
+}
+
+/// English plural for a counted noun, without a dependency.
+fn plural(n: u64, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The Level-3 resource register: one row per category, in the Plate
+/// D-005 reading order, with the counts in the value column and the
+/// mediation point that proved them in the description.
+///
+/// A category with no owned producer renders its own
+/// `NOT YET OBSERVED · MILESTONE n` row carrying the daemon's reason
+/// verbatim — never an empty line that could be read as "did not happen"
+/// (SPEC section 1.22, contract section 12.2).
+fn ledger_resource_rows(style: &Style, access: &model::LedgerAccess) -> String {
+    let resources = &access.summary.resources;
+    let mut observed: Vec<Row> = Vec::new();
+    let mut pending: Vec<Row> = Vec::new();
+
+    for (key, label, values) in resources.categories() {
+        if !values.is_empty() {
+            let cells: Vec<String> = values
+                .iter()
+                .map(|class| {
+                    let count = access.detail.as_ref().and_then(|d| d.count_of(key, class));
+                    resource_cell(key, class, count)
+                })
+                .collect();
+            let mut desc: Vec<String> = Vec::new();
+            if let Some(entry) = access
+                .detail
+                .as_ref()
+                .and_then(|d| d.entries.iter().find(|e| e.category == key))
+            {
+                if !entry.evidence.is_empty() {
+                    desc.push(evidence_words(&entry.evidence));
+                }
+            }
+            if key == "process_classes" {
+                if let Some(peak) = access.detail.as_ref().and_then(|d| d.process_peak) {
+                    desc.push(format!("peak {peak} concurrent"));
+                }
+            }
+            observed.push(Row::new(
+                label,
+                &cells.join(" · "),
+                Slot::Neutral,
+                &desc.join(" · "),
+            ));
+            continue;
+        }
+        // Empty. Either an honest not-yet-observed category, or a real
+        // "nothing was observed" — and the two never render alike.
+        match access
+            .not_yet_observed
+            .iter()
+            .find(|n| n.category == key && n.level != 4)
+        {
+            Some(pendingrow) => {
+                let value = if pendingrow.milestone.is_empty() {
+                    "Not yet observed".to_string()
+                } else {
+                    format!("Not yet observed · {}", pendingrow.milestone)
+                };
+                pending.push(Row::new(label, &value, Slot::Neutral, &pendingrow.reason));
+            }
+            None => observed.push(Row::new(label, "None recorded", Slot::Neutral, "")),
+        }
+    }
+
+    let mut out = String::new();
+    if !observed.is_empty() {
+        out.push_str(&fmt::rows(style, &observed));
+    }
+    if let Some((first, last)) = observed_window(access) {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "Observed · first {} · last {}",
+                fmt::timestamp(&first),
+                fmt::timestamp(&last)
+            ),
+        ));
+    }
+    if !resources.process_classes.is_empty() {
+        out.push_str(&fmt::note(style, PROCESS_SAMPLING_NOTE));
+    }
+    if !pending.is_empty() {
+        out.push_str(&fmt::rows(style, &pending));
+    }
+    out
+}
+
+/// The Level-4 register: security events as **references** into the audit
+/// log (contract section 12.2). The payload is deliberately not duplicated
+/// here — the row names the category, the time and the `evt_` id, and
+/// points at the one place that holds the record.
+fn ledger_event_rows(style: &Style, access: &model::LedgerAccess) -> String {
+    let mut out = fmt::section(
+        style,
+        "Security events · level 4",
+        "references · punarctl audit tail",
+    );
+    let events = &access.summary.security_events;
+    if events.is_empty() {
+        out.push_str(&fmt::note(style, "None recorded"));
+    } else {
+        let rows: Vec<Row> = events
+            .iter()
+            .map(|event| {
+                Row::new(
+                    &event_words(&event.event_type),
+                    &fmt::timestamp(&event.timestamp),
+                    // The one loud register on the surface: a security
+                    // event is the thing the reader must not scroll past.
+                    Slot::Bad,
+                    &event.event_id,
+                )
+            })
+            .collect();
+        out.push_str(&fmt::rows(style, &rows));
+    }
+
+    // The Level-4 categories nothing produces yet, named with their
+    // milestone — the same honesty rule as the Level-3 rows above.
+    let waiting: Vec<String> = access
+        .not_yet_observed
+        .iter()
+        .filter(|n| n.level == 4)
+        .map(|n| {
+            if n.milestone.is_empty() {
+                event_words(&n.category)
+            } else {
+                format!("{} ({})", event_words(&n.category), n.milestone)
+            }
+        })
+        .collect();
+    if !waiting.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            &format!("Not yet observed · {}", waiting.join(" · ")),
+        ));
+    }
+    out
+}
+
+/// Retention + the section 24.2 privacy guarantee, as the closing block of
+/// every ledger surface. The daemon's own words win wherever it sent them,
+/// so the CLI and the panel cannot say different things about the same
+/// record.
+fn ledger_privacy_rows(style: &Style, access: &model::LedgerAccess) -> String {
+    let session_id = &access.summary.session_id;
+    let mut rows: Vec<Row> = Vec::new();
+
+    match &access.retention {
+        Some(retention) => {
+            let days = if retention.days == 0 {
+                LEDGER_RETENTION_DEFAULT_DAYS
+            } else {
+                retention.days
+            };
+            match &retention.expires_at {
+                Some(expires) if !expires.is_empty() => rows.push(Row::new(
+                    "Retention",
+                    &format!("kept until {}", fmt::timestamp(expires)),
+                    Slot::Neutral,
+                    &format!("{days} days after the session ended, then deleted automatically"),
+                )),
+                _ => rows.push(Row::new(
+                    "Retention",
+                    "active session",
+                    Slot::Neutral,
+                    &format!("kept {days} days after the session ends, then deleted automatically"),
+                )),
+            }
+        }
+        None => rows.push(Row::new(
+            "Retention",
+            "not reported",
+            Slot::Neutral,
+            "punar-agentd sent no retention block for this session",
+        )),
+    }
+    // `local_only` is the daemon's own claim, and it is the claim that
+    // matters most on this surface — so the row states what the daemon
+    // said, not what M8 happens to be true today. Absent, it defaults to
+    // the M8 fact: agentd has no network surface at all.
+    let local_only = access.privacy.as_ref().is_none_or(|p| p.local_only);
+    rows.push(Row::new(
+        "Stored",
+        "",
+        Slot::Neutral,
+        if local_only {
+            LEDGER_STORAGE
+        } else {
+            "/var/lib/punar/agents/ledger · root-only"
+        },
+    ));
+    let never = access
+        .privacy
+        .as_ref()
+        .filter(|p| !p.never_recorded.is_empty())
+        .map(|p| p.never_recorded.join(" · "))
+        .unwrap_or_else(|| NEVER_RECORDED.to_string());
+    rows.push(Row::new("Never recorded", "", Slot::Neutral, &never));
+    let purge = access
+        .privacy
+        .as_ref()
+        .map(|p| p.purge_command.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| format!("punarctl privacy purge --session {session_id}"));
+    rows.push(Row::new("Delete", "", Slot::Neutral, &purge));
+    if access
+        .privacy
+        .as_ref()
+        .is_none_or(|p| p.audit_trail_separate)
+    {
+        rows.push(Row::new("Audit trail", "", Slot::Neutral, AUDIT_SEPARATE));
+    }
+    rows.push(Row::new("Remote query", "", Slot::Neutral, REMOTE_QUERY));
+
+    let mut out = fmt::section(style, "Privacy · your copy of this data", "local only");
+    out.push_str(&fmt::rows(style, &rows));
+    out
+}
+
+/// The earliest `first_seen` and the latest `last_seen` across the whole
+/// aggregate: the window the record actually covers. Printed once rather
+/// than per row — a per-entry pair would bury the resource names the
+/// reader came for, and the window is what "when did this happen?" means.
+fn observed_window(access: &model::LedgerAccess) -> Option<(String, String)> {
+    let detail = access.detail.as_ref()?;
+    let first = detail
+        .entries
+        .iter()
+        .map(|e| e.first_seen.as_str())
+        .filter(|v| !v.is_empty())
+        .min()?;
+    let last = detail
+        .entries
+        .iter()
+        .map(|e| e.last_seen.as_str())
+        .filter(|v| !v.is_empty())
+        .max()?;
+    Some((first.to_string(), last.to_string()))
+}
+
+/// The whole ledger register for one session, shared verbatim by
+/// `agents access`, `agents inspect` and `privacy ledger <id>` so the
+/// three can never disagree.
+fn ledger_register(style: &Style, access: &model::LedgerAccess) -> String {
+    let mut out = fmt::section(
+        style,
+        "Ledger · what it accessed",
+        "local only · level 3 · sampled at scan points",
+    );
+
+    // A purged session is not an empty one, and the surface never lets the
+    // two look alike (contract section 12.2).
+    if let Some(purged_at) = access.purged_at.as_ref().filter(|p| !p.is_empty()) {
+        out.push_str(&fmt::verdict(
+            style,
+            Slot::Neutral,
+            &format!("Purged by you · {}", fmt::timestamp(purged_at)),
+        ));
+        out.push_str(&fmt::note(style, AUDIT_BOUNDARY));
+        out.push_str(&ledger_privacy_rows(style, access));
+        return out;
+    }
+
+    out.push_str(&ledger_resource_rows(style, access));
+    if access.detail.as_ref().is_some_and(|d| d.truncated) {
+        out.push_str(&fmt::note(
+            style,
+            "… and more (truncated) · this session exceeded the per-session bounds              (milestone-8.md section 5.3)",
+        ));
+    }
+    out.push_str(&ledger_event_rows(style, access));
+    out.push_str(&ledger_privacy_rows(style, access));
+    out
+}
+
+/// `punarctl agents access <id>` — the SPEC section 11.2 verb, real since
+/// Milestone 8. Terminal parity with Plate D-005's ledger register: the
+/// same rows in the same order as the panel, so the two surfaces are one
+/// document rendered twice.
+pub fn agent_access(style: &Style, result: &Value) -> Result<String, String> {
+    let access: model::LedgerAccess = parse(result)?;
+    let mut out = fmt::masthead(style, "AI Access Ledger", &access.summary.session_id);
+
+    // The attribution line, from what the ledger itself carries.
+    let mut parts = vec![access.summary.session_id.clone()];
+    if !access.summary.agent.is_empty() {
+        parts.push(access.summary.agent.clone());
+    }
+    if let Some(status) = access
+        .detail
+        .as_ref()
+        .map(|d| d.status.clone())
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(status);
+    }
+    if !access.summary.generated_at.is_empty() {
+        parts.push(format!(
+            "read {}",
+            fmt::timestamp(&access.summary.generated_at)
+        ));
+    }
+    out.push_str(&fmt::note(style, &parts.join(" · ")));
+    out.push_str(&ledger_register(style, &access));
+    Ok(out)
+}
+
+/// `punarctl privacy ledger <id>` — the same record, opened from the
+/// privacy side rather than the agent side.
+pub fn privacy_ledger_session(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+) -> Result<String, String> {
+    let access: model::LedgerAccess = parse(result)?;
+    let mut out = fmt::masthead(style, "Privacy", &personal_context(hostname));
+    out.push_str(&fmt::section(
+        style,
+        "Local AI ledger · what this device recorded",
+        &access.summary.session_id,
+    ));
+    out.push_str(&ledger_register(style, &access));
+    Ok(out)
+}
+
+/// `punarctl privacy ledger` — the device-wide answer to the section 24.2
+/// question, which is not the agent-side question: **what has this device
+/// recorded about me?**
+///
+/// Composed from two contract methods (the `status` → `enroll.status`
+/// precedent): `agents.list` for the sessions and their counts-only ledger
+/// fingerprints, then one `agents.access` per session for the retention
+/// date and the totals. A session whose ledger this user may not read
+/// still gets a row — with its counts and the reason — because hiding it
+/// would understate what the device holds.
+pub fn privacy_ledger(
+    style: &Style,
+    list: &Value,
+    accesses: &[(String, Value)],
+    hostname: &str,
+) -> Result<String, String> {
+    let registry: model::AgentsList = parse(list)?;
+    let mut out = fmt::masthead(style, "Privacy", &personal_context(hostname));
+    out.push_str(&fmt::section(
+        style,
+        "Local AI ledger · what this device recorded",
+        "local only · never uploaded",
+    ));
+
+    let mut classes: u64 = 0;
+    let mut events: u64 = 0;
+    let mut recorded: u64 = 0;
+    let mut retention_days: Option<u32> = None;
+    let mut never: Option<String> = None;
+    let mut rows: Vec<Row> = Vec::new();
+
+    for session in &registry.sessions {
+        let access: Option<model::LedgerAccess> = accesses
+            .iter()
+            .find(|(id, _)| *id == session.session_id)
+            .and_then(|(_, value)| serde_json::from_value(value.clone()).ok());
+
+        let mut facts: Vec<String> = Vec::new();
+        if !session.agent.is_empty() {
+            facts.push(session.agent.clone());
+        }
+        if !session.project.is_empty() {
+            facts.push(session.project.clone());
+        }
+
+        let purged = access
+            .as_ref()
+            .and_then(|a| a.purged_at.clone())
+            .filter(|p| !p.is_empty());
+        match (&access, &session.ledger) {
+            (Some(a), _) => {
+                let n = a.summary.resources.total() as u64;
+                let e = a.summary.security_events.len() as u64;
+                classes += n;
+                events += e;
+                if purged.is_none() {
+                    recorded += 1;
+                }
+                facts.push(plural(n, "resource class", "resource classes"));
+                facts.push(plural(e, "security event", "security events"));
+                if let Some(retention) = &a.retention {
+                    if retention.days > 0 {
+                        retention_days = Some(retention.days);
+                    }
+                    if let Some(expires) = retention.expires_at.as_ref().filter(|v| !v.is_empty()) {
+                        facts.push(format!("kept until {}", fmt::timestamp(expires)));
+                    } else if retention.active {
+                        facts.push("active — retention starts when it ends".to_string());
+                    }
+                }
+                if let Some(privacy) = &a.privacy {
+                    if !privacy.never_recorded.is_empty() && never.is_none() {
+                        never = Some(privacy.never_recorded.join(" · "));
+                    }
+                }
+            }
+            (None, Some(fingerprint)) => {
+                classes += fingerprint.resources;
+                events += fingerprint.security_events;
+                recorded += 1;
+                facts.push(plural(
+                    fingerprint.resources,
+                    "resource class",
+                    "resource classes",
+                ));
+                facts.push(plural(
+                    fingerprint.process_classes,
+                    "process class",
+                    "process classes",
+                ));
+                facts.push(plural(
+                    fingerprint.security_events,
+                    "security event",
+                    "security events",
+                ));
+                if !fingerprint.updated_at.is_empty() {
+                    facts.push(format!(
+                        "updated {}",
+                        fmt::timestamp(&fingerprint.updated_at)
+                    ));
+                }
+                facts.push("not readable by you — owner or root only".to_string());
+            }
+            (None, None) => facts.push("no ledger recorded".to_string()),
+        }
+
+        let state = match &purged {
+            Some(at) => format!("purged {}", fmt::timestamp(at)),
+            None => session.status.clone(),
+        };
+        rows.push(Row::new(
+            &session.session_id,
+            &state,
+            Slot::Neutral,
+            &facts.join(" · "),
+        ));
+    }
+
+    if rows.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "Nothing is recorded · no AI agent session on this device has an access ledger",
+        ));
+    } else {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "What is recorded",
+                &plural(recorded, "session", "sessions"),
+                Slot::Neutral,
+                &format!(
+                    "{} · {}",
+                    plural(classes, "resource class", "resource classes"),
+                    plural(events, "security event", "security events")
+                ),
+            )],
+        ));
+        out.push_str(&fmt::rows(style, &rows));
+    }
+
+    // Detections are named, not hidden: they have no ledger in M8 and the
+    // reason is structural, not an omission.
+    if !registry.detections.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "{} · no access ledger in Milestone 8 — a detection has no registered \
+                 session to aggregate against · Milestone 10",
+                plural(
+                    registry.detections.len() as u64,
+                    "suspected AI process",
+                    "suspected AI processes"
+                ),
+            ),
+        ));
+    }
+
+    let days = retention_days.unwrap_or(LEDGER_RETENTION_DEFAULT_DAYS);
+    let retention_desc = if retention_days.is_some() {
+        format!("{days} days after a session ends, then deleted automatically")
+    } else {
+        format!("{days} days after a session ends (the documented default; no live value read)")
+    };
+    out.push_str(&fmt::section(
+        style,
+        "The rules · what this device will not do",
+        "SPEC section 21.2 · 24",
+    ));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Never recorded",
+                "",
+                Slot::Neutral,
+                &never.unwrap_or_else(|| NEVER_RECORDED.to_string()),
+            ),
+            Row::new("Stored", "", Slot::Neutral, LEDGER_STORAGE),
+            Row::new("Retention", "", Slot::Neutral, &retention_desc),
+            Row::new(
+                "Delete",
+                "",
+                Slot::Neutral,
+                "punarctl privacy purge --session <id>  ·  punarctl privacy purge --all",
+            ),
+            Row::new("Audit trail", "", Slot::Neutral, AUDIT_SEPARATE),
+            Row::new("Remote query", "", Slot::Neutral, REMOTE_QUERY),
+        ],
+    ));
+    out.push_str(&fmt::note(
+        style,
+        concat!(
+            "You never see less than an administrator would · ",
+            "punarctl agents access <id> --json prints the exact document ",
+            "a future authorized query would return"
+        ),
+    ));
+    Ok(out)
+}
+
+/// `punarctl privacy purge` — what was deleted, and the one sentence that
+/// keeps the ledger and the audit trail from being confused for each other.
+pub fn privacy_purge(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    scope: &str,
+) -> Result<String, String> {
+    let purge: model::LedgerPurge = parse(result)?;
+    let mut out = fmt::masthead(style, "Privacy", &personal_context(hostname));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new("Scope", "", Slot::Neutral, scope),
+            Row::new(
+                "Purged at",
+                "",
+                Slot::Neutral,
+                &fmt::timestamp(&purge.purged_at),
+            ),
+            Row::new("Stored", "", Slot::Neutral, LEDGER_STORAGE),
+        ],
+    ));
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Neutral,
+        &format!(
+            "✓ Purged · {} · {} · {}",
+            plural(purge.purged, "session", "sessions"),
+            plural(purge.resource_classes, "resource class", "resource classes"),
+            plural(purge.security_events, "event reference", "event references"),
+        ),
+    ));
+    out.push_str(&fmt::note(style, AUDIT_BOUNDARY));
+    Ok(out)
+}
+
+/// `punarctl privacy connections` — reserved, and honest about it. The
+/// verb is in SPEC section 11.2 and a user who finds the `privacy` noun
+/// will type it, so it answers in the section 73 voice instead of going
+/// silently missing.
+pub fn privacy_connections_notice() -> String {
+    concat!(
+        "Local network observability is not available yet.\n",
+        "Why: nothing on this device observes network destinations — punar-netd arrives in ",
+        "Milestone 12 (network privacy prototype), and Punar does not guess at data it does ",
+        "not mediate.\n",
+        "Next step: punarctl privacy ledger",
+    )
+    .to_string()
+}
 
 /// `punarctl agents list` — one row per session and per detection:
 /// `SESSION · AGENT · PROJECT · CLASS · STATUS · STARTED`. Unmanaged-first:
@@ -859,11 +1531,21 @@ pub fn agents_list(style: &Style, result: &Value, hostname: &str) -> Result<Stri
 /// `punarctl agents inspect <id>` — Plate D-005's detail pane in terminal
 /// grammar: the attribution masthead (SPEC section 22), then the authority
 /// register with its named policy source and per-row enforcement labels,
-/// then the ledger placeholder. A detection renders the unknown card
+/// then — since Milestone 8 — the real ledger register, fetched by the
+/// caller with a best-effort `agents.access` follow-up (the `status` →
+/// `enroll.status` precedent). `ledger` is `None` when no follow-up was
+/// attempted (a detection has no ledger to fetch) and `Err(reason)` when
+/// the follow-up failed — the section then says why rather than drawing an
+/// empty ledger that would read as "accessed nothing". A detection renders
+/// the unknown card
 /// instead: what was observed, said as *suspected*, with no authority
 /// block (there is none — it was never launched through the runtime) and
 /// no actions (those are M9/M10; no dead buttons on a terminal either).
-pub fn agent_inspect(style: &Style, result: &Value) -> Result<String, String> {
+pub fn agent_inspect(
+    style: &Style,
+    result: &Value,
+    ledger: Option<Result<&Value, String>>,
+) -> Result<String, String> {
     let got: model::AgentGet = parse(result)?;
     let s = &got.session;
     let context = format!(
@@ -992,12 +1674,31 @@ pub fn agent_inspect(style: &Style, result: &Value) -> Result<String, String> {
         }
     }
 
-    out.push_str(&fmt::section(
-        style,
-        "Ledger · what it accessed",
-        "arrives in Milestone 8",
-    ));
-    out.push_str(&fmt::note(style, LEDGER_NOTE));
+    // LEDGER — "what it accessed" (SPEC section 21). The May/Did split is
+    // structural: two ruled registers, each with its question in the
+    // header, so the promise and the record can never be read as one.
+    match ledger {
+        Some(Ok(value)) => {
+            let access: model::LedgerAccess = parse(value)?;
+            out.push_str(&ledger_register(style, &access));
+        }
+        Some(Err(why)) => {
+            out.push_str(&fmt::section(
+                style,
+                "Ledger · what it accessed",
+                "not available",
+            ));
+            out.push_str(&fmt::note(style, &why));
+        }
+        None => {
+            out.push_str(&fmt::section(
+                style,
+                "Ledger · what it accessed",
+                "not recorded for unknown activity",
+            ));
+            out.push_str(&fmt::note(style, DETECTION_LEDGER_NOTE));
+        }
+    }
     Ok(out)
 }
 
@@ -1021,6 +1722,85 @@ mod tests {
         assert_eq!(decision_slot("deny"), Slot::Bad);
         assert_eq!(decision_slot("approval_required"), Slot::Warn);
         assert_eq!(decision_slot("something_else"), Slot::Neutral);
+    }
+
+    /// A purged ledger is not an empty one, and the two never render
+    /// alike (contract section 12.2).
+    #[test]
+    fn a_purged_session_renders_as_purged_not_as_nothing_recorded() {
+        let style = Style::plain();
+        let result = json!({
+            "summary": {
+                "session_id": "agt_4f21c09ab3e1",
+                "agent": "claude-code",
+                "generated_at": "2026-08-27T10:06:00Z",
+                "resources": {
+                    "repositories": [], "directory_zones": [],
+                    "network_destinations": [], "mcp_servers": [],
+                    "credential_classes": [], "process_classes": []
+                },
+                "security_events": []
+            },
+            "purged_at": "2026-08-27T10:05:00Z",
+            "retention": {"days": 14, "expires_at": "2026-09-10T14:31:00Z"},
+            "privacy": {"local_only": true, "audit_trail_separate": true,
+                        "purge_command": "punarctl privacy purge --session agt_4f21c09ab3e1",
+                        "never_recorded": ["prompts"]}
+        });
+        let text = agent_access(&style, &result).unwrap();
+        assert!(
+            text.contains("PURGED BY YOU · 2026-08-27 10:05:00"),
+            "{text}"
+        );
+        assert!(
+            text.contains("THE AUDIT TRAIL IS A SEPARATE RECORD AND WAS NOT DELETED"),
+            "{text}"
+        );
+        // Nothing may read as "this agent accessed nothing".
+        assert!(!text.contains("NONE RECORDED"), "{text}");
+        assert!(!text.contains("NOT YET OBSERVED"), "{text}");
+    }
+
+    /// An empty category is either *not yet observed* (and names its
+    /// milestone) or genuinely *none recorded* — never a blank line, and
+    /// never the wrong one of the two (SPEC section 1.22).
+    #[test]
+    fn an_empty_category_is_labelled_either_pending_or_none() {
+        let style = Style::plain();
+        let result = json!({
+            "summary": {
+                "session_id": "agt_1", "agent": "mock",
+                "generated_at": "2026-08-27T10:00:00Z",
+                "resources": {
+                    "repositories": [], "directory_zones": ["workspace"],
+                    "network_destinations": [], "mcp_servers": [],
+                    "credential_classes": [], "process_classes": []
+                },
+                "security_events": []
+            },
+            "not_yet_observed": [
+                {"level": 3, "category": "network_destinations", "milestone": "M12",
+                 "reason": "punar-netd does not exist yet"}
+            ],
+            "retention": {"days": 14, "active": true}
+        });
+        let text = agent_access(&style, &result).unwrap();
+        // Named producer-less category: pending, with its milestone.
+        let network = text
+            .lines()
+            .find(|l| l.starts_with("NETWORK DESTINATIONS"))
+            .unwrap_or_default();
+        assert!(network.contains("NOT YET OBSERVED · M12"), "{text}");
+        // Unnamed empty category: an honest "none recorded", never a
+        // borrowed milestone from another row.
+        let repositories = text
+            .lines()
+            .find(|l| l.starts_with("REPOSITORIES"))
+            .unwrap_or_default();
+        assert!(repositories.contains("NONE RECORDED"), "{text}");
+        assert!(!repositories.contains("M12"), "{text}");
+        // No process rows: no sampling qualifier claiming a count exists.
+        assert!(!text.contains("SHORT-LIVED CHILDREN"), "{text}");
     }
 
     #[test]

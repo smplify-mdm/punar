@@ -39,15 +39,18 @@ use std::time::{Duration, Instant};
 
 use punar_common::agent::{
     ADAPTERS_DIR, AGENTS_SUMMARY_PATH, AgentClassification, AgentMethod, AgentRequest, AgentStatus,
-    AgentsEndParams, AgentsEndResult, AgentsGetParams, AgentsGetResult, AgentsListResult,
-    AgentsRegisterParams, AgentsRegisterResult, REGISTRY_JSONL_PATH, RegistryRecord,
-    SCAN_STALE_AFTER_SECS, SUSPECTED_SIGNATURES_PATH, SessionRow, agent_name_ok, session_id_ok,
-    validate_registry_record,
+    AgentsAccessParams, AgentsEndParams, AgentsEndResult, AgentsGetParams, AgentsGetResult,
+    AgentsListResult, AgentsRegisterParams, AgentsRegisterResult, LedgerPurgeParams, ListedSession,
+    PurgeScope, REGISTRY_JSONL_PATH, RegistryRecord, SCAN_STALE_AFTER_SECS,
+    SUSPECTED_SIGNATURES_PATH, SessionRow, agent_name_ok, session_id_ok, validate_registry_record,
 };
 use punar_common::audit::{AGENT_SESSION_NONE, AuditWriter, PROJECT_ID_SYSTEM};
 use punar_common::ipc::{
     ErrorCode, IpcError, LineRead, MAX_REQUEST_LINE_BYTES, Response, SERVER_READ_TIMEOUT,
     read_line_bounded,
+};
+use punar_common::ledger::{
+    AgentsAccessResult, LEDGER_RUNTIME_PATH, PROCESS_CLASSES_PATH, RetentionInfo,
 };
 use punar_common::time::utc_now_rfc3339;
 use punar_common::{AuditEvent, Decision, PrincipalKind};
@@ -56,6 +59,7 @@ use serde_json::{Value, json};
 use crate::adapters::SignatureSet;
 use crate::authz::{Peer, PeerSource, may_act_on_session};
 use crate::detect::Detector;
+use crate::ledger::{LedgerConfig, LedgerEngine, SessionFacts};
 use crate::proc::{ProcRoot, scope_unit_name};
 use crate::registry::{Detection, Registry, RegistryStore, Session, replay_into};
 use crate::summary::CitationSources;
@@ -70,12 +74,30 @@ pub const ACTION_REGISTER: &str = "agents.register";
 pub const ACTION_END: &str = "agents.end";
 pub const ACTION_REAP: &str = "agents.reap";
 pub const ACTION_SCAN: &str = "agents.scan";
+/// M8 (docs/api/ipc.md section 12.6): the user deleted a ledger.
+pub const ACTION_LEDGER_PURGE: &str = "ledger.purge";
+/// M8: one event per retention **batch**, never one per file (spec 6.4).
+pub const ACTION_LEDGER_PRUNE: &str = "ledger.prune";
+/// M8: root read a ledger it does not own — the seed of Milestone 10's
+/// audited administrator query. An owner reading their own ledger is not
+/// audited: reading your own data is not an event about you.
+pub const ACTION_LEDGER_READ: &str = "agents.access";
 
 /// Audit `result` words added to the open set by M7: a detection appeared,
 /// a detection disappeared, a crashed session was closed.
 pub const RESULT_DETECTED: &str = "detected";
 pub const RESULT_CLEARED: &str = "cleared";
 pub const RESULT_REAPED: &str = "reaped";
+/// M8 result words: a ledger was deleted by its owner (or root), and a
+/// retention batch removed records.
+pub const RESULT_PURGED: &str = "purged";
+/// `resource` on a device-wide (`--all`) purge — the caller's own
+/// sessions, named without listing them.
+pub const RESOURCE_OWN_LEDGERS: &str = "own";
+/// `resource` on a prune batch; the count travels with it, because the
+/// audit schema has no numeric field and the batch size is the fact
+/// worth keeping.
+pub const RESOURCE_LEDGER: &str = "ledger";
 
 /// The facts behind one audit event. A struct rather than eight
 /// positional arguments so a call site cannot silently swap `agent` and
@@ -118,6 +140,15 @@ pub struct AgentdConfig {
     pub status_file: PathBuf,
     /// `/proc` in production, a fixture tree in tests.
     pub proc_root: PathBuf,
+    /// M8 ledger paths (docs/api/ipc.md sections 12-13), all injectable
+    /// for the same reason the rest are: a test runs the whole engine
+    /// inside a tempdir.
+    pub ledger_dir: PathBuf,
+    pub ledger_runtime_file: PathBuf,
+    pub process_classes_path: PathBuf,
+    /// `/sys/fs/cgroup` in production — the ledger samples the agent
+    /// scope's `cgroup.procs` and `pids.peak` from here.
+    pub cgroup_root: PathBuf,
     /// Group granted socket access (`punar`).
     pub group: String,
     /// `/etc/group` (injectable).
@@ -137,6 +168,7 @@ impl AgentdConfig {
     /// a flag) overrides. Test-safe by construction: derived paths live
     /// under `state_dir`, so an embedded daemon never writes to `/run`.
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> AgentdConfig {
+        let state_dir_for_ledger = state_dir.clone();
         AgentdConfig {
             socket_path,
             registry_path: state_dir.join("agents/registry.jsonl"),
@@ -147,6 +179,10 @@ impl AgentdConfig {
             adapters_dir: PathBuf::from(ADAPTERS_DIR),
             suspected_path: PathBuf::from(SUSPECTED_SIGNATURES_PATH),
             proc_root: PathBuf::from("/proc"),
+            ledger_dir: state_dir_for_ledger.join("agents/ledger"),
+            ledger_runtime_file: state_dir_for_ledger.join("ledger.json"),
+            process_classes_path: PathBuf::from(PROCESS_CLASSES_PATH),
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             group: "punar".to_string(),
             group_file: PathBuf::from("/etc/group"),
             passwd_file: PathBuf::from("/etc/passwd"),
@@ -167,6 +203,8 @@ impl AgentdConfig {
         cfg.registry_path = PathBuf::from(REGISTRY_JSONL_PATH);
         cfg.agents_file = PathBuf::from(AGENTS_SUMMARY_PATH);
         cfg.status_file = PathBuf::from("/run/punar/status.json");
+        cfg.ledger_dir = PathBuf::from(punar_common::ledger::LEDGER_DIR);
+        cfg.ledger_runtime_file = PathBuf::from(LEDGER_RUNTIME_PATH);
         cfg
     }
 }
@@ -176,6 +214,10 @@ struct Inner {
     registry: Mutex<Registry>,
     store: RegistryStore,
     detector: Detector,
+    /// The M8 AI Access Ledger (spec sections 21, 24). Its own lock; the
+    /// daemon never holds the registry lock across a ledger call, so the
+    /// two cannot deadlock.
+    ledger: LedgerEngine,
     citation: CitationSources,
     audit: Mutex<AuditWriter>,
     /// punard's device id, read lazily: agentd never creates it (punard
@@ -200,6 +242,11 @@ pub struct Daemon {
 pub struct DaemonHandle {
     inner: Arc<Inner>,
     accept_thread: JoinHandle<()>,
+    /// The ledger's `inotify` reader (Milestone 8): one thread parked in
+    /// a blocking `read(2)`. `None` when no watch could be established —
+    /// the lazy catch-up drain on every ledger read is the correctness
+    /// mechanism, and the watch is only freshness.
+    ledger_watch: Option<JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -238,6 +285,22 @@ impl Daemon {
                 replay.skipped_lines
             );
         }
+        let ledger_cfg = LedgerConfig {
+            dir: cfg.ledger_dir.clone(),
+            runtime_file: cfg.ledger_runtime_file.clone(),
+            audit_path: cfg.audit_path.clone(),
+            process_classes_path: cfg.process_classes_path.clone(),
+            cgroup_root: cfg.cgroup_root.clone(),
+            retention_days: punar_common::ledger::LEDGER_RETENTION_DAYS,
+        };
+        let ledger = LedgerEngine::open(
+            ledger_cfg,
+            ProcRoot::new(&cfg.proc_root),
+            lookup_gid(&cfg.group_file, &cfg.group),
+        );
+        for warning in &ledger.warnings {
+            eprintln!("punar-agentd: ledger: {warning}");
+        }
         let detector = Detector::new(proc, signatures, &cfg.passwd_file);
         let citation = CitationSources {
             status_file: cfg.status_file.clone(),
@@ -248,6 +311,7 @@ impl Daemon {
             registry: Mutex::new(registry),
             store,
             detector,
+            ledger,
             citation,
             audit: Mutex::new(audit),
             device_id: Mutex::new(None),
@@ -257,8 +321,13 @@ impl Daemon {
             slot_freed: Condvar::new(),
             cfg,
         });
+        // Resume the ledgers of sessions the replay carried, so a
+        // restarted daemon keeps aggregating into the same records rather
+        // than starting a second one.
+        inner.ledger.resume(&inner.active_facts());
         // First pass + first publish: the panel has a truthful file to read
-        // before anything connects.
+        // before anything connects. The pass also drains the audit tail
+        // and runs the first retention prune (crash honesty).
         inner.scan_now();
         Ok(Daemon { inner })
     }
@@ -276,9 +345,37 @@ impl Daemon {
         let accept_thread = std::thread::Builder::new()
             .name("punar-agentd-accept".to_string())
             .spawn(move || accept_loop(accept_inner, listener))?;
+
+        // The one piece of "background" work in this daemon, and it is
+        // not background at all: a thread blocked in `read(2)` on an
+        // inotify descriptor, woken only when the audit trail changes
+        // (spec 6.3 — event-driven, no timer, zero idle CPU).
+        let stop_inner = Arc::clone(&inner);
+        let drain_inner = Arc::clone(&inner);
+        let ledger_watch = crate::ledger::tail::spawn_watch(
+            &inner.cfg.audit_path,
+            &inner.cfg.ledger_dir,
+            move || stop_inner.shutdown.load(Ordering::SeqCst),
+            move || {
+                // The audit trail moved: ingest the Level-4 references it
+                // named, and republish the panel's view only if anything
+                // was actually ingested.
+                if drain_inner.ledger.drain_audit(&utc_now_rfc3339()) {
+                    drain_inner.publish_ledger_view();
+                }
+            },
+        );
+        if ledger_watch.is_none() {
+            eprintln!(
+                "punar-agentd: no inotify watch on the audit trail; the AI Access Ledger \
+                 will catch up on every read instead (still correct, just less fresh \
+                 between reads)"
+            );
+        }
         Ok(DaemonHandle {
             inner,
             accept_thread,
+            ledger_watch,
         })
     }
 }
@@ -294,6 +391,12 @@ impl DaemonHandle {
         self.inner.slot_freed.notify_all();
         let _ = UnixStream::connect(&self.inner.cfg.socket_path);
         let _ = self.accept_thread.join();
+        // Wake the ledger's blocking reader the same way the accept loop
+        // is woken — by touching something it is already watching.
+        if let Some(watch) = self.ledger_watch {
+            crate::ledger::tail::wake(&self.inner.cfg.ledger_dir);
+            let _ = watch.join();
+        }
         let _ = std::fs::remove_file(&self.inner.cfg.socket_path);
     }
 }
@@ -436,7 +539,47 @@ impl Inner {
             AgentMethod::Register(params) => self.handle_register(peer, params),
             AgentMethod::End(params) => self.handle_end(peer, params),
             AgentMethod::Scan => Ok(self.handle_scan()),
+            AgentMethod::Access(params) => self.handle_access(peer, params),
+            AgentMethod::Purge(params) => self.handle_purge(peer, params),
         }
+    }
+
+    // -- the ledger's view of the registry ------------------------------
+
+    /// The facts the ledger needs about every **active** session. Taken
+    /// under the registry lock and released immediately — no ledger call
+    /// ever runs while the registry lock is held.
+    fn active_facts(&self) -> Vec<SessionFacts> {
+        let registry = self.registry.lock().unwrap();
+        registry
+            .sessions()
+            .filter(|session| session.record.status == AgentStatus::Active)
+            .map(session_facts)
+            .collect()
+    }
+
+    /// The facts for one session, active or ended.
+    fn facts_of(&self, session_id: &str) -> Option<SessionFacts> {
+        let registry = self.registry.lock().unwrap();
+        registry.session(session_id).map(session_facts)
+    }
+
+    /// The uid that owns a session's ledger. The registry answers for
+    /// this boot; the ledger index answers for a session from a previous
+    /// one, via the username it recorded. Unknown ⇒ `None`, which
+    /// [`may_act_on_session`] treats as root-only — fail closed.
+    fn ledger_owner_uid(&self, session_id: &str) -> Option<u32> {
+        if let Some(uid) = self
+            .registry
+            .lock()
+            .unwrap()
+            .session(session_id)
+            .and_then(|session| session.owner_uid)
+        {
+            return Some(uid);
+        }
+        let user = self.ledger.owner_of(session_id)?;
+        crate::util::lookup_uid(&self.cfg.passwd_file, &user)
     }
 
     // -- reads ---------------------------------------------------------
@@ -456,15 +599,218 @@ impl Inner {
         // ever holds `last_scan` while taking `registry`, so taking them
         // in this order can never deadlock against a concurrent request.
         let scanned_at = self.last_scan.lock().unwrap().1.clone();
+        // Same rule for the ledger: its fingerprints are gathered before
+        // the registry lock is taken.
+        let mut fingerprints = self.ledger.fingerprints();
         let registry = self.registry.lock().unwrap();
         AgentsListResult {
             scanned_at,
             sessions: registry
                 .sessions()
-                .map(|session| session.record.clone())
+                .map(|session| ListedSession {
+                    // Counts only (docs/api/ipc.md section 12.4): no class
+                    // names, no `evt_` ids, no zones. Identifiers require
+                    // `agents.access` and its ownership check.
+                    ledger: fingerprints.remove(&session.record.session_id),
+                    record: session.record.clone(),
+                })
                 .collect(),
+            // Detections gain no ledger field: an unregistered process has
+            // no persisted session, so it has no ledger in M8 (M10 owns
+            // the unknown-agent ledger).
             detections: registry.detections().map(Detection::row).collect(),
         }
+    }
+
+    // -- the AI Access Ledger (docs/api/ipc.md section 12) --------------
+
+    /// `agents.access` — one session's ledger, for its **owner or root**.
+    ///
+    /// A ledger is personal data about one user's session, which is
+    /// stricter than `agents.list` and is the local half of spec section
+    /// 24.1's "RBAC applies". The read drains the audit tail and samples
+    /// the scope first, so it can never show a staler answer than the
+    /// panel.
+    fn handle_access(&self, peer: &Peer, params: &AgentsAccessParams) -> Result<Value, IpcError> {
+        let now = utc_now_rfc3339();
+        if self.ledger.refresh(&self.active_facts(), &now) {
+            self.publish_ledger_view();
+        }
+
+        if !self.ledger.knows(&params.session_id) {
+            let is_detection = self
+                .registry
+                .lock()
+                .unwrap()
+                .detection(&params.session_id)
+                .is_some();
+            let message = if is_detection {
+                format!(
+                    "{:?} is a detection, not a registered session, and detections have no \
+                     Access Ledger in this release: nothing mediates an unmanaged process, \
+                     so there is nothing honest to record (spec section 23; the \
+                     unknown-agent ledger is Milestone 10).\n\
+                     Next step: `punarctl agents inspect {}` shows what was observed.",
+                    params.session_id, params.session_id
+                )
+            } else {
+                format!(
+                    "No AI Access Ledger exists for {:?}.\n\
+                     Next step: run `punarctl agents list` to see the sessions this device \
+                     has recorded.",
+                    params.session_id
+                )
+            };
+            return Err(IpcError::with_details(
+                ErrorCode::NotFound,
+                message,
+                json!({ "session_id": params.session_id }),
+            ));
+        }
+
+        let owner_uid = self.ledger_owner_uid(&params.session_id);
+        if !may_act_on_session(peer, owner_uid) {
+            self.audit_ledger(
+                peer,
+                ACTION_LEDGER_READ,
+                &params.session_id,
+                &params.session_id,
+                Decision::Deny,
+                "denied",
+            );
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "Reading the AI Access Ledger for {:?} was denied: it belongs to \
+                     another user.\n\
+                     Policy: os default — a ledger records what an agent did on one \
+                     person's behalf, so it is read by that person, or by root (spec \
+                     sections 21, 24.1).\n\
+                     Next step: ask that user, or run the command as root.",
+                    params.session_id
+                ),
+                json!({ "session_id": params.session_id }),
+            ));
+        }
+
+        let Some(record) = self.ledger.record_of(&params.session_id) else {
+            return Err(IpcError::with_details(
+                ErrorCode::NotFound,
+                format!(
+                    "The AI Access Ledger for {:?} could not be read.\n\
+                     Next step: check /var/lib/punar/agents/ledger and the daemon journal.",
+                    params.session_id
+                ),
+                json!({ "session_id": params.session_id }),
+            ));
+        };
+
+        // Root reading someone else's ledger is itself an event — the
+        // seed of Milestone 10's audited administrator query. An owner
+        // reading their own ledger is not audited: reading your own data
+        // is not an event about you.
+        let reading_anothers = peer.is_root() && owner_uid.is_some_and(|uid| uid != peer.uid);
+        if reading_anothers {
+            self.audit_ledger(
+                peer,
+                ACTION_LEDGER_READ,
+                &record.agent,
+                &params.session_id,
+                Decision::Allow,
+                "success",
+            );
+        }
+
+        let mut result = AgentsAccessResult::from_record(&record, &now);
+        if record.is_purged() {
+            // A purged ledger has no retention story left to tell; the
+            // renderer must say *purged*, never "nothing recorded".
+            result.retention =
+                RetentionInfo::expiring(record.retention_expires_at.as_deref().unwrap_or_default());
+        }
+        Ok(to_value(result))
+    }
+
+    /// `ledger.purge` — the user deletes their own ledger (spec 24.2).
+    ///
+    /// Authorization, verbatim: `peer.uid == session.owner_uid ||
+    /// peer.uid == 0`. `--all` from a non-root peer scopes to that uid's
+    /// own sessions. The right is unconditional for one's own sessions in
+    /// M8: no policy can withhold it, because no organization can read
+    /// the data either.
+    ///
+    /// It does **not** touch `/var/log/punar/audit.jsonl`.
+    fn handle_purge(&self, peer: &Peer, params: &LedgerPurgeParams) -> Result<Value, IpcError> {
+        let now = utc_now_rfc3339();
+        let scope = params
+            .scope()
+            .expect("the method table refuses an ambiguous purge before dispatch");
+
+        let (targets, resource, audited_session) = match scope {
+            PurgeScope::Session(session_id) => {
+                if !self.ledger.knows(&session_id) {
+                    return Err(IpcError::with_details(
+                        ErrorCode::NotFound,
+                        format!(
+                            "No AI Access Ledger exists for {session_id:?}, so there is \
+                             nothing to delete.\n\
+                             Next step: `punarctl privacy ledger` lists what this device \
+                             has recorded."
+                        ),
+                        json!({ "session_id": session_id }),
+                    ));
+                }
+                let owner_uid = self.ledger_owner_uid(&session_id);
+                if !may_act_on_session(peer, owner_uid) {
+                    self.audit_ledger(
+                        peer,
+                        ACTION_LEDGER_PURGE,
+                        &session_id,
+                        &session_id,
+                        Decision::Deny,
+                        "denied",
+                    );
+                    return Err(IpcError::with_details(
+                        ErrorCode::Denied,
+                        format!(
+                            "Deleting the AI Access Ledger for {session_id:?} was denied: \
+                             it belongs to another user.\n\
+                             Policy: os default — you may always delete your own ledger, \
+                             and only your own (spec section 24.2).\n\
+                             Next step: ask that user, or run the command as root."
+                        ),
+                        json!({ "session_id": session_id }),
+                    ));
+                }
+                let audited = session_id.clone();
+                (vec![session_id.clone()], session_id, audited)
+            }
+            PurgeScope::CallersOwn => {
+                let targets = if peer.is_root() {
+                    self.ledger.all_sessions()
+                } else {
+                    self.ledger
+                        .sessions_of(&username_or_uid(&self.cfg.passwd_file, peer.uid))
+                };
+                (
+                    targets,
+                    RESOURCE_OWN_LEDGERS.to_string(),
+                    AGENT_SESSION_NONE.to_string(),
+                )
+            }
+        };
+
+        let result = self.ledger.purge(&targets, &now);
+        self.audit_ledger(
+            peer,
+            ACTION_LEDGER_PURGE,
+            &resource,
+            &audited_session,
+            Decision::Allow,
+            RESULT_PURGED,
+        );
+        self.publish_summary();
+        Ok(to_value(result))
     }
 
     fn handle_get(&self, params: &AgentsGetParams) -> Result<Value, IpcError> {
@@ -605,12 +951,18 @@ impl Inner {
         let session = Session {
             record,
             scope_unit,
+            scope_path: entry.scope_path_of(&params.session_id),
             executable: entry.exe.clone(),
             authority: Some(params.authority.clone()),
             owner_uid: process_uid.or(Some(peer.uid)),
         };
         let row = session.row();
+        let facts = session_facts(&session);
         self.registry.lock().unwrap().insert_session(session);
+        // Open this session's ledger now: the workspace grant and the
+        // agent's own process class are known at registration, so the
+        // very first `agents.access` answers something true.
+        self.ledger.begin_session(&facts, &utc_now_rfc3339());
         self.audit(self.human_event(
             peer,
             EventFacts {
@@ -701,6 +1053,7 @@ impl Inner {
             (record, row)
         };
         self.persist_transition(&record, "ended");
+        self.close_ledger(&params.session_id);
         self.audit(self.human_event(
             peer,
             EventFacts {
@@ -737,13 +1090,34 @@ impl Inner {
     /// republish `agents.json` if anything changed.
     fn scan_now(&self) {
         let now = utc_now_rfc3339();
+        #[allow(clippy::let_and_return)]
         let reaped = self.reap_dead_sessions();
 
         let accounted: HashSet<u32> = self.registry.lock().unwrap().active_pids();
         let found = self.detector.scan(&accounted, &now);
         let (appeared, disappeared) = self.registry.lock().unwrap().replace_detections(found);
 
-        *self.last_scan.lock().unwrap() = (Some(Instant::now()), now);
+        *self.last_scan.lock().unwrap() = (Some(Instant::now()), now.clone());
+
+        // The ledger's own event-driven update point: this pass already
+        // walked /proc, so the cgroup sample is one extra file per active
+        // session. No timer is involved anywhere (spec 6.3).
+        let active = self.active_facts();
+        let ledger_changed = self.ledger.refresh(&active, &now);
+        let active_ids: Vec<String> = active.iter().map(|f| f.session_id.clone()).collect();
+        let pruned = self.ledger.prune(&now, &active_ids);
+        for (reason, count) in pruned.batches() {
+            // One event per batch, naming the count — never one per file
+            // (spec 6.4).
+            self.audit(self.service_event(EventFacts {
+                action: ACTION_LEDGER_PRUNE,
+                agent: &format!("{RESOURCE_LEDGER}:{count}"),
+                session_id: AGENT_SESSION_NONE,
+                project: PROJECT_ID_SYSTEM,
+                decision: Decision::Allow,
+                result: reason,
+            }));
+        }
 
         for detection in &appeared {
             self.audit(self.service_event(EventFacts {
@@ -767,6 +1141,11 @@ impl Inner {
         }
         if !reaped.is_empty() || !appeared.is_empty() || !disappeared.is_empty() {
             self.publish_summary();
+        } else if ledger_changed || !pruned.is_empty() {
+            // The registry did not change but the ledger did — republish
+            // the panel's side file so the pane and the socket cannot
+            // show different ledgers.
+            self.publish_ledger_view();
         } else if !self.cfg.agents_file.exists() {
             // First pass of this boot: publish even with nothing to say,
             // so the panel reads a fresh empty view rather than a stale one.
@@ -795,6 +1174,7 @@ impl Inner {
                 (record, agent, project)
             };
             self.persist_transition(&record, "reaped");
+            self.close_ledger(&session_id);
             self.audit(self.service_event(EventFacts {
                 action: ACTION_REAP,
                 agent: &agent,
@@ -835,6 +1215,82 @@ impl Inner {
                 self.cfg.agents_file.display()
             );
         }
+        // The ledger's own side file, written at the same points and for
+        // the same sessions — so the panel's Ledger register and
+        // `agents.json` can never disagree about which sessions exist.
+        // It is `0640 root:punar` in the root-owned agentd runtime
+        // directory: `agents.json` stays world-readable and carries no
+        // ledger identifiers.
+        self.publish_ledger_view();
+    }
+
+    /// Rewrite `/run/punar-agentd/ledger.json` for exactly the sessions
+    /// `agents.json` lists, so the two side files always describe the
+    /// same set.
+    fn publish_ledger_view(&self) {
+        let session_ids: Vec<String> = {
+            let registry = self.registry.lock().unwrap();
+            registry
+                .sessions()
+                .map(|session| session.record.session_id.clone())
+                .collect()
+        };
+        self.ledger
+            .write_runtime_view(&session_ids, &utc_now_rfc3339());
+    }
+
+    /// Compact and close a session's ledger, then republish. Called from
+    /// both `agents.end` and the reaper: a session that died with its
+    /// launcher gets the same final sample as one that was ended
+    /// cleanly.
+    fn close_ledger(&self, session_id: &str) {
+        let Some(facts) = self.facts_of(session_id) else {
+            return;
+        };
+        let now = utc_now_rfc3339();
+        self.ledger.end_session(&facts, &now);
+        self.publish_ledger_view();
+        let active_ids: Vec<String> = self
+            .active_facts()
+            .iter()
+            .map(|f| f.session_id.clone())
+            .collect();
+        let pruned = self.ledger.prune(&now, &active_ids);
+        for (reason, count) in pruned.batches() {
+            self.audit(self.service_event(EventFacts {
+                action: ACTION_LEDGER_PRUNE,
+                agent: &format!("{RESOURCE_LEDGER}:{count}"),
+                session_id: AGENT_SESSION_NONE,
+                project: PROJECT_ID_SYSTEM,
+                decision: Decision::Allow,
+                result: reason,
+            }));
+        }
+    }
+
+    /// One ledger audit event. `resource` is the session id (or `own`),
+    /// `agent_session_id` the real `agt_` id when the action is scoped to
+    /// one session.
+    fn audit_ledger(
+        &self,
+        peer: &Peer,
+        action: &str,
+        resource: &str,
+        session_id: &str,
+        decision: Decision,
+        result: &str,
+    ) {
+        self.audit(self.human_event(
+            peer,
+            EventFacts {
+                action,
+                agent: resource,
+                session_id,
+                project: PROJECT_ID_SYSTEM,
+                decision,
+                result,
+            },
+        ));
     }
 
     /// punard's device id, or the documented `dev_unknown` sentinel when
@@ -946,6 +1402,21 @@ fn invalid_params(reason: String) -> IpcError {
         ),
         json!({ "reason": reason }),
     )
+}
+
+/// The registry session, as the ledger needs it (source **D**). One
+/// place so `agent` and `project` cannot be swapped at a call site.
+fn session_facts(session: &Session) -> SessionFacts {
+    SessionFacts {
+        session_id: session.record.session_id.clone(),
+        agent: session.record.agent.clone(),
+        user: session.record.user.clone(),
+        project: session.record.project.clone(),
+        classification: session.record.classification,
+        process_id: session.record.process_id,
+        scope_path: session.scope_path.clone(),
+        started_at: session.record.started_at.clone(),
+    }
 }
 
 fn to_value<T: serde::Serialize>(value: T) -> Value {

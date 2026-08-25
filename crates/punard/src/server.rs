@@ -100,6 +100,10 @@ pub struct DaemonConfig {
     pub group_file: PathBuf,
     /// `/etc/passwd` (injectable for tests).
     pub passwd_file: PathBuf,
+    /// `/proc` (injectable for tests). Read for exactly one thing: the
+    /// connected peer's cgroup, to attribute a call made from inside a
+    /// managed agent session (docs/api/ipc.md section 12.5).
+    pub proc_root: PathBuf,
     /// Peer identity source; `PeerSource::Fixed` is the test hook.
     pub peer_source: PeerSource,
     /// Hard cap on concurrent connections.
@@ -133,6 +137,7 @@ impl DaemonConfig {
             group: "punar".to_string(),
             group_file: PathBuf::from("/etc/group"),
             passwd_file: PathBuf::from("/etc/passwd"),
+            proc_root: PathBuf::from("/proc"),
             peer_source: PeerSource::SoPeercred,
             max_connections: 16,
             io_timeout: SERVER_READ_TIMEOUT,
@@ -699,10 +704,23 @@ impl Inner {
         }
     }
 
+    /// The audit attribution for one connected peer.
+    ///
+    /// M3: the resolved username, `source: human`. M8 adds the section-12.5
+    /// rule on top — if the peer's own cgroup says it is running inside a
+    /// `punar-agent-<id>.scope`, the event names that session and its
+    /// source becomes `ai_agent`. The agent does not get asked and cannot
+    /// opt out: the evidence is the kernel's, not the caller's. This is
+    /// what makes a *denial* inside a managed session visible to the M8
+    /// Access Ledger as a Level-4 `denied_access` event.
     fn actor_of(&self, peer: &Peer) -> AuditActor {
-        match lookup_username(&self.cfg.passwd_file, peer.uid) {
+        let actor = match lookup_username(&self.cfg.passwd_file, peer.uid) {
             Some(name) => AuditActor::cli_peer(name),
             None => AuditActor::cli_peer_uid(peer.uid),
+        };
+        match crate::authz::agent_session_of_peer(&self.cfg.proc_root, peer) {
+            Some(session_id) => actor.with_agent_session(session_id),
+            None => actor,
         }
     }
 

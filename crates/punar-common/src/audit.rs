@@ -201,6 +201,12 @@ pub struct AuditActor {
     /// `"uid:<n>"` when unresolvable, or [`USER_ID_DAEMON`].
     pub user_id: String,
     pub source: PrincipalKind,
+    /// The managed AI agent session this call came from, when the peer's
+    /// cgroup proved one (docs/api/ipc.md section 12.5; M8). `None` means
+    /// the event carries [`AGENT_SESSION_NONE`] — the M3 behaviour, and
+    /// still the answer for every call that is not made from inside a
+    /// `punar-agent-<id>.scope`.
+    pub agent_session_id: Option<String>,
 }
 
 impl AuditActor {
@@ -210,6 +216,7 @@ impl AuditActor {
         AuditActor {
             user_id: user_id.into(),
             source: PrincipalKind::Human,
+            agent_session_id: None,
         }
     }
 
@@ -227,7 +234,29 @@ impl AuditActor {
         AuditActor {
             user_id: USER_ID_DAEMON.to_string(),
             source: PrincipalKind::Service,
+            agent_session_id: None,
         }
+    }
+
+    /// Attribute this actor to a managed AI agent session (docs/api/ipc.md
+    /// section 12.5, SPEC section 22).
+    ///
+    /// The caller has already proved the claim the only way Punar accepts
+    /// it: by reading `/proc/<peer_pid>/cgroup` and finding the session's
+    /// own `punar-agent-<id>.scope`. `user_id` is deliberately left alone
+    /// — the human still owns the session, and dropping their name would
+    /// make the trail less useful, not more private. `source` becomes
+    /// [`PrincipalKind::AiAgent`]: the *proximate* actor really was the
+    /// agent, and that is what an incident review needs to read.
+    ///
+    /// This is the whole of M8's Level-4 producer. It adds no tracing and
+    /// no new mediation point: the cgroup is kernel-attested and is the
+    /// same chain `agents.register` already verifies (SPEC 1.14).
+    #[must_use]
+    pub fn with_agent_session(mut self, session_id: impl Into<String>) -> AuditActor {
+        self.agent_session_id = Some(session_id.into());
+        self.source = PrincipalKind::AiAgent;
+        self
     }
 }
 
@@ -260,7 +289,12 @@ impl AuditEvent {
             timestamp: crate::time::utc_now_rfc3339(),
             device_id: device_id.to_string(),
             user_id: Some(actor.user_id.clone()),
-            agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+            agent_session_id: Some(
+                actor
+                    .agent_session_id
+                    .clone()
+                    .unwrap_or_else(|| AGENT_SESSION_NONE.to_string()),
+            ),
             project_id: Some(PROJECT_ID_SYSTEM.to_string()),
             source: actor.source,
             action: action.to_string(),
@@ -884,6 +918,35 @@ mod tests {
         let actor = AuditActor::cli_peer_uid(1001);
         assert_eq!(actor.user_id, "uid:1001");
         assert_eq!(actor.source, PrincipalKind::Human);
+    }
+
+    /// M8 / docs/api/ipc.md section 12.5: an actor proved to be running
+    /// inside a managed agent scope stamps the session onto every event
+    /// built from it — including denials, which is the whole point.
+    #[test]
+    fn an_agent_attributed_actor_stamps_the_session_onto_its_events() {
+        let plain = AuditActor::cli_peer("punar");
+        assert_eq!(plain.agent_session_id, None);
+        assert_eq!(plain.source, PrincipalKind::Human);
+
+        let attributed = AuditActor::cli_peer("punar").with_agent_session("agt_4f21c09ab3e1");
+        assert_eq!(attributed.source, PrincipalKind::AiAgent);
+        // The human who owns the session keeps their name on the record.
+        assert_eq!(attributed.user_id, "punar");
+
+        let denial = AuditEvent::denial("dev_1", &attributed, "capabilities.set", "mock.widget");
+        assert_eq!(denial.agent_session_id.as_deref(), Some("agt_4f21c09ab3e1"));
+        assert_eq!(denial.source, PrincipalKind::AiAgent);
+        assert_eq!(denial.decision, Decision::Deny);
+        validate_event_schema(&denial).expect("an attributed denial is still schema-valid");
+
+        // The unattributed path is untouched: the M3 sentinel, exactly.
+        let plain_denial = AuditEvent::denial("dev_1", &plain, "capabilities.set", "mock.widget");
+        assert_eq!(
+            plain_denial.agent_session_id.as_deref(),
+            Some(AGENT_SESSION_NONE)
+        );
+        assert_eq!(plain_denial.source, PrincipalKind::Human);
     }
 
     #[test]

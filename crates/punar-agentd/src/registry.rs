@@ -39,6 +39,12 @@ pub struct Session {
     /// `punar-agent-<id>.scope`, present when the cgroup proved managed
     /// attribution at registration (spec section 22).
     pub scope_unit: Option<String>,
+    /// The scope's absolute cgroup path (`/user.slice/…/<unit>`), read
+    /// from `/proc/<pid>/cgroup` at registration. The M8 Access Ledger
+    /// samples `cgroup.procs` and `pids.peak` from it — the same
+    /// kernel-attested chain that proved the classification, read once
+    /// more (milestone-8.md section 3.2).
+    pub scope_path: Option<String>,
     /// Executable path observed at registration, when one was readable.
     pub executable: Option<String>,
     /// What the launcher displayed (spec section 27 step 10) — display
@@ -347,9 +353,14 @@ pub fn replay_into(
         let owner_uid = crate::util::lookup_uid(passwd_file, &record.user);
         let scope_unit = matches!(record.classification, AgentClassification::Managed)
             .then(|| crate::proc::scope_unit_name(&session_id));
+        let scope_path = scope_unit.as_ref().and_then(|_| {
+            proc.entry(record.process_id)
+                .and_then(|entry| entry.scope_path_of(&session_id))
+        });
         let mut session = Session {
             record,
             scope_unit,
+            scope_path,
             executable: None,
             // The launcher's authority summary is display data that was
             // never persisted (the record schema is exact), so a replayed
@@ -580,6 +591,7 @@ mod tests {
         registry.insert_session(Session {
             record: record("agt_4f21c09ab3e1", 2143, AgentStatus::Active),
             scope_unit: Some("punar-agent-agt_4f21c09ab3e1.scope".into()),
+            scope_path: None,
             executable: None,
             authority: None,
             owner_uid: Some(1000),
@@ -587,6 +599,7 @@ mod tests {
         registry.insert_session(Session {
             record: record("agt_old000000001", 1111, AgentStatus::Ended),
             scope_unit: None,
+            scope_path: None,
             executable: None,
             authority: None,
             owner_uid: Some(1000),

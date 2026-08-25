@@ -1,0 +1,44 @@
+# M8 in-VM AI Access Ledger exercise (milestone-8.md §12). Runs
+# m8-check.sh as ROOT — the same decided pattern as punar-m3..m7-check.service
+# (no User=, no sudo); every punar-env, punarctl, qs and grim invocation
+# inside the script runs as punar via runuser with the live session env,
+# because the ledger's first evidence source IS the managed session's
+# `systemd-run --user --scope` cgroup, and that needs the user manager
+# greetd's autologin started.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m7-check.service and BEFORE the /run/punar artifact export, so
+# m8-report.txt / m8-access.json / m8-ledger-file.json / m8-index.json /
+# m8-privacy.txt / m8-agents-list.json / m8-audit-denial.json / m8-purge.txt /
+# punar-m8.png ship in the existing export tar. Same not-enabled pattern as
+# punar-m2..m7-check — no .wants symlink, so the mkosi preset-wipe lesson
+# does not even come into play.
+#
+# The mock agent session, its fifo-blocked children and the synthetic
+# backdated ledger all exist only inside this window, which opens strictly
+# after the idle-RAM sampling and the combined services-PSS sample closed.
+# The agent runs in its own punar-agent-<id>.scope under the USER manager,
+# so it is in no service cgroup and cannot perturb the services-RSS gate
+# (milestone-7.md §11, unchanged by M8: the ledger adds no third daemon).
+
+[Unit]
+Description=Punar M8 AI Access Ledger exercise (CI)
+
+[Service]
+Type=oneshot
+# Timeout math, stated rather than copied. Bounded waits inside the script:
+#   180 s  managed session launch + child-process generation
+#    12 s  panel open settle + screenshot
+#    60 s  teardown wait after the scope stops
+#    30 s  punar-agentd socket wait after the retention-injection restart
+#   ~30 s  a few dozen RPCs, jq passes and greps
+# ~5 min of bounded waiting in the worst case. 15 min is the same generous
+# headroom M7 uses for TCG-emulated CI runs, where the quickshell IPC round
+# trips and grim are the slow parts. It is headroom, not an expectation: a
+# run that actually needs 15 minutes has already gone wrong, and the report
+# will say which assertion it stopped at.
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m8-check.sh

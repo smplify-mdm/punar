@@ -2,34 +2,37 @@
 
 > **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done;
 > Milestone 1 (Lightweight graphical workstation) has a green CI gate with
-> one acceptance item left; Milestones 2–6 (Native multitasking; `punard` +
+> one acceptance item left; Milestones 2–7 (Native multitasking; `punard` +
 > `punarctl`; Declarative desired state; Mock Smplify enrollment; Developer
-> environment manager) are done — CI-proven; Milestone 7 (AI Agent Registry)
-> is implemented on disk, uncommitted, awaiting its first CI run.** The last
-> fully green CI run is
-> [32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904)
+> environment manager; AI Agent Registry) are done — CI-proven; Milestone 8
+> (AI Access Ledger) is implemented on disk, uncommitted, awaiting its
+> first CI run.** The last fully green CI run is
+> [32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695)
 > (2026-08-25): the `punar-desktop` image (Hyprland + punar-shell) builds,
 > boots, and passes the graphical gate plus the in-VM M2 multitasking, M3
-> control-plane, M4 policy-merge/drift-remediation, M5 mock-enrollment, and
-> M6 developer-environment exercises (`PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` +
-> `PUNAR_M3_OK` + `PUNAR_M4_OK` + `PUNAR_M5_OK` + `PUNAR_M6_OK`; 209 in-VM
-> assertions; idle RAM 1162 MB mean — under the 1.5 GB hard ceiling, over
-> the 1.0 GB target; `punard` services RSS 2 MB against a 100 MB target).
-> M1's keyboard-only human walkthrough is still pending.
-> M7 — the AI agent registry, where spec sections 18–27 become a running
-> surface: `punar-agentd` serving a typed `agents.*` API on its own socket,
-> `punar-env agent <name>` launching a *managed* session into its own
-> `systemd` scope with a registry identity, two agent adapters shipped as
-> data (Claude Code and a generic shell), identity checked from peer
-> credentials and the kernel's cgroup rather than claimed, `managed` /
-> `observed` / `unknown` classification whose unknown rows always say
-> *suspected*, and the `SUPER + A` AI panel — is implemented: the full
-> tree, including the in-VM m7-check exercise and its CI wiring, is on disk
-> and statically validated locally, but it is uncommitted and nothing M7
-> has ever run in CI. What M7 shows but does not yet enforce is labeled as
-> such: authority rows read `declared · M9`/`declared · M12`, and the
-> access ledger (spec section 21) renders as a dashed Milestone-8
-> placeholder because M7 builds the registry only. See
+> control-plane, M4 policy-merge/drift-remediation, M5 mock-enrollment, M6
+> developer-environment and M7 AI-agent-registry exercises
+> (`PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` + `PUNAR_M3_OK` + `PUNAR_M4_OK` +
+> `PUNAR_M5_OK` + `PUNAR_M6_OK` + `PUNAR_M7_OK`; 282 in-VM assertions;
+> idle RAM 1175 MB mean — under the 1.5 GB hard ceiling, over the 1.0 GB
+> target; `punard` + `punar-agentd` services RSS 4 MB combined against a
+> 100 MB target). M1's keyboard-only human walkthrough is still pending.
+> M8 — the AI Access Ledger, where spec section 21 becomes a surface you
+> can read and delete: `agents.access` and `ledger.purge` on the agentd
+> socket, `punarctl agents access` / `privacy ledger` / `privacy purge`,
+> and the real ledger register replacing the dashed placeholder in the
+> `SUPER + A` panel — is implemented: the full tree, including the in-VM
+> m8-check exercise and its CI wiring, is on disk and statically validated
+> locally, but it is uncommitted and nothing M8 has ever run in CI.
+> The ledger is **derived** from mediation points Punar already owns —
+> the agent's scope cgroup, the audit stream, the `punar-env` workspace
+> grant, the registry record — with no eBPF, fanotify, ptrace or
+> `LD_PRELOAD` anywhere (spec 1.14), and its privacy rules are enforced
+> in types, not prose: no file paths inside the workspace, no prompts, no
+> source code, no secrets, no per-read events (spec 21.2). What has no
+> mediation point yet is labeled, not invented: network destinations read
+> `NOT YET OBSERVED · MILESTONE 12`, MCP servers M9+, credential classes
+> M9. Nothing leaves the device — the authorized remote query is M10. See
 > [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists
 > versus what is proven.
 

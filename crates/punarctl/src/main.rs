@@ -21,6 +21,18 @@
 //! named as the Milestone 8 work it still is. Every other SPEC section
 //! 11.2 verb keeps a milestone-labeled stub.
 //!
+//! Milestone 8 makes the AI Access Ledger real: `agents access <id>`
+//! (contract section 12.2) renders SPEC section 21's "what did it access?"
+//! register — Level-3 resource summaries with their counts, Level-4
+//! security events as audit references, and an explicit
+//! `NOT YET OBSERVED · MILESTONE n` row for every category no mediation
+//! point observes yet (SPEC section 1.22). `agents inspect` grows the same
+//! register beneath its authority block. The new `privacy` verbs are the
+//! section 24.2 half of the milestone: `privacy ledger` answers "what has
+//! this device recorded about me?", and `privacy purge` deletes it — a
+//! right no policy withholds for one's own sessions, because in Milestone
+//! 8 no organization can read the data either.
+//!
 //! The CLI never elevates itself; the daemon is the authorization point
 //! (`sudo punarctl …` is the M3 way to run mutating verbs), and a denial
 //! prints the server's SPEC section 73 message verbatim — who may act, why
@@ -41,7 +53,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use punar_common::CapabilityId;
 use serde_json::{Value, json};
 
@@ -64,11 +76,6 @@ impl std::fmt::Display for Milestone {
 const M5_ENROLLMENT: Milestone = Milestone {
     number: 5,
     name: "mock Smplify enrollment",
-};
-/// Milestone 8 — AI Access Ledger.
-const M8_ACCESS_LEDGER: Milestone = Milestone {
-    number: 8,
-    name: "AI Access Ledger",
 };
 /// Milestone 12 — network privacy prototype: observability, relay.
 const M12_NETWORK_PRIVACY: Milestone = Milestone {
@@ -215,6 +222,32 @@ enum AgentsCommand {
 
 #[derive(Subcommand)]
 enum PrivacyCommand {
+    /// Show what this device has recorded about AI agent sessions —
+    /// and, just as loudly, what it never records (SPEC section 24.2).
+    Ledger {
+        /// One session id, like `agt_123`. Omitted, the whole device is
+        /// summarized.
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+        /// The same thing, spelled as a flag for symmetry with `purge`.
+        #[arg(long, value_name = "ID", conflicts_with = "id")]
+        session: Option<String>,
+    },
+    /// Delete the local AI access ledger. Your own sessions are always
+    /// yours to delete; the audit trail is a separate record and is not
+    /// touched (SPEC sections 24.2, 53).
+    #[command(group(ArgGroup::new("scope").required(true)))]
+    Purge {
+        /// One session id, like `agt_123`.
+        #[arg(long, value_name = "ID", group = "scope")]
+        session: Option<String>,
+        /// Every session you own (root: every session on the device).
+        #[arg(long, group = "scope")]
+        all: bool,
+        /// Skip the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show current network connections and their privacy handling.
     Connections,
 }
@@ -343,6 +376,55 @@ fn rpc(
         Ok(result) => render_or_json(json, &result, render),
         Err(error) => fail(&error),
     }
+}
+
+/// Fetch one `agents.access` result per listed session, best effort.
+///
+/// `privacy ledger` is a composed view (the `status` → `enroll.status`
+/// precedent): the fingerprint on an `agents.list` row carries counts but
+/// no retention date, and the retention date is half of what the section
+/// 24.2 question asks. A session this user may not read simply has no
+/// entry here — the row then renders from its counts and says why, rather
+/// than the whole command failing on someone else's data.
+fn collect_ledgers(agents: &Client, list: &Value) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    let Some(sessions) = list.get("sessions").and_then(Value::as_array) else {
+        return out;
+    };
+    for session in sessions {
+        let Some(id) = session.get("session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(access) = agents.call("agents.access", Some(json!({ "session_id": id }))) {
+            out.push((id.to_string(), access));
+        }
+    }
+    out
+}
+
+/// `privacy ledger --json` for the device-wide view.
+///
+/// Every other `--json` in this CLI is one IPC `result` verbatim. This one
+/// cannot be: the view is composed from `agents.list` plus one
+/// `agents.access` per session, so the document names itself as a composed
+/// local view and carries both parts unmodified. Nothing is summarized
+/// away — a consumer that wants the wire objects has them.
+fn privacy_ledger_json(list: &Value, accesses: &[(String, Value)]) -> Value {
+    let ledgers: Vec<Value> = accesses
+        .iter()
+        .map(|(id, access)| json!({"session_id": id, "access": access}))
+        .collect();
+    json!({
+        "source": "punarctl privacy ledger (composed locally from agents.list + agents.access)",
+        "registry": list,
+        "ledgers": ledgers,
+        "readable": ledgers.len(),
+        "storage_path": "/var/lib/punar/agents/ledger",
+        "local_only": true,
+        "remote_query": {"available": false, "milestone": "M10"},
+        "audit_trail_separate": true,
+        "purge_command": "punarctl privacy purge --session <id>"
+    })
 }
 
 fn main() -> ExitCode {
@@ -533,29 +615,140 @@ fn main() -> ExitCode {
                         views::agents_list(&style, v, &hostname)
                     })
                 }
-                AgentsCommand::Inspect { id } => rpc(
-                    &agents,
-                    json,
-                    "agents.get",
-                    Some(json!({ "session_id": id })),
-                    |v| views::agent_inspect(&style, v),
-                ),
+                AgentsCommand::Inspect { id } => {
+                    match agents.call("agents.get", Some(json!({ "session_id": id.clone() }))) {
+                        // The ledger register is a second read (contract
+                        // section 12.2) — the `status` → `enroll.status`
+                        // precedent, and for the same reason: one result
+                        // object per method, composed by the renderer.
+                        // `--json` stays the `agents.get` result verbatim.
+                        Ok(result) => render_or_json(json, &result, |v| {
+                            let suspected = v["session"].get("suspected").and_then(Value::as_bool)
+                                == Some(true);
+                            let ledger = if suspected {
+                                // A detection has no persisted session and so
+                                // no ledger to ask for (milestone-8.md §3.1).
+                                None
+                            } else {
+                                Some(
+                                    agents
+                                        .call("agents.access", Some(json!({ "session_id": id })))
+                                        .map_err(|error| error.message()),
+                                )
+                            };
+                            let ledger = ledger.as_ref().map(|r| r.as_ref().map_err(String::clone));
+                            views::agent_inspect(&style, v, ledger)
+                        }),
+                        Err(error) => fail(&error),
+                    }
+                }
                 AgentsCommand::Scan => {
                     let hostname = local_hostname();
                     rpc(&agents, json, "agents.scan", None, |v| {
                         views::agents_list(&style, v, &hostname)
                     })
                 }
-                // Reserved, not advertised as working: the data is the M8
-                // Access Ledger, and the daemon answers unknown_method.
-                AgentsCommand::Access { id } => {
-                    stub(&format!("agents access {id}"), &M8_ACCESS_LEDGER)
+                // SPEC section 11.2's reserved verb, real since M8. The
+                // ledger is personal data: the daemon admits the session
+                // owner or root and answers `denied` (exit 3) otherwise.
+                AgentsCommand::Access { id } => rpc(
+                    &agents,
+                    json,
+                    "agents.access",
+                    Some(json!({ "session_id": id })),
+                    |v| views::agent_access(&style, v),
+                ),
+            }
+        }
+        Command::Privacy { command } => {
+            let agents = Client::for_target(Target::Agentd, socket.as_deref());
+            match command {
+                PrivacyCommand::Ledger { id, session } => {
+                    let hostname = local_hostname();
+                    match id.or(session) {
+                        // One session: a single call, so `--json` is the
+                        // `agents.access` result verbatim.
+                        Some(id) => rpc(
+                            &agents,
+                            json,
+                            "agents.access",
+                            Some(json!({ "session_id": id })),
+                            |v| views::privacy_ledger_session(&style, v, &hostname),
+                        ),
+                        // The device-wide view is composed from two
+                        // methods, so its `--json` is a composed local
+                        // document and says so in its own `source` field.
+                        None => match agents.call("agents.list", None) {
+                            Ok(list) => {
+                                let accesses = collect_ledgers(&agents, &list);
+                                if json {
+                                    print_json(&privacy_ledger_json(&list, &accesses))
+                                } else {
+                                    match views::privacy_ledger(&style, &list, &accesses, &hostname)
+                                    {
+                                        Ok(text) => {
+                                            print!("{text}");
+                                            ExitCode::SUCCESS
+                                        }
+                                        Err(why) => fail(&CallError::Protocol { why }),
+                                    }
+                                }
+                            }
+                            Err(error) => fail(&error),
+                        },
+                    }
+                }
+                PrivacyCommand::Purge { session, all, yes } => {
+                    let hostname = local_hostname();
+                    let (params, scope) = match (&session, all) {
+                        (Some(id), false) => (json!({ "session_id": id }), format!("session {id}")),
+                        (None, true) => (
+                            json!({ "all": true }),
+                            "every session you own (root: every session on this device)"
+                                .to_string(),
+                        ),
+                        // clap's required group makes both other shapes
+                        // unreachable; the daemon rejects them too
+                        // (invalid_params, contract section 12.3).
+                        _ => {
+                            eprintln!(
+                                "punarctl privacy purge: choose exactly one scope.\n\
+                                 Next step: punarctl privacy purge --session <id>, or \
+                                 punarctl privacy purge --all"
+                            );
+                            return ExitCode::from(2);
+                        }
+                    };
+                    // Destructive verb: confirm on a TTY unless --yes (the
+                    // `enroll stop` precedent). Deletion is real — the
+                    // file is unlinked and a tombstone floors re-ingestion.
+                    if !yes && !json && std::io::stdin().is_terminal() {
+                        eprint!(
+                            "Delete the local AI access ledger for {scope}? This cannot be \
+                             undone. The audit trail is a separate record and is not \
+                             deleted. Type yes to continue: "
+                        );
+                        let mut answer = String::new();
+                        let _ = std::io::stdin().read_line(&mut answer);
+                        if answer.trim() != "yes" {
+                            eprintln!("Purge aborted — nothing was deleted.");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    rpc(&agents, json, "ledger.purge", Some(params), |v| {
+                        views::privacy_purge(&style, v, &hostname, &scope)
+                    })
+                }
+                PrivacyCommand::Connections => {
+                    // Reserved honestly: the verb is in SPEC section 11.2,
+                    // and nothing on this device observes network
+                    // destinations until punar-netd (M12). Naming the
+                    // milestone beats a silent absence.
+                    eprintln!("{}", views::privacy_connections_notice());
+                    ExitCode::FAILURE
                 }
             }
         }
-        Command::Privacy { command } => match command {
-            PrivacyCommand::Connections => stub("privacy connections", &M12_NETWORK_PRIVACY),
-        },
         Command::Relay { command } => match command {
             RelayCommand::Status => stub("relay status", &M12_NETWORK_PRIVACY),
         },
@@ -606,6 +799,31 @@ mod tests {
             &["punarctl", "agents", "inspect", "agt_123"],
             &["punarctl", "agents", "access", "agt_123"],
             &["punarctl", "privacy", "connections"],
+            &["punarctl", "privacy", "ledger"],
+            &["punarctl", "privacy", "ledger", "agt_123"],
+            &["punarctl", "privacy", "ledger", "--session", "agt_123"],
+            &["punarctl", "--json", "privacy", "ledger"],
+            &["punarctl", "privacy", "purge", "--session", "agt_123"],
+            &[
+                "punarctl",
+                "privacy",
+                "purge",
+                "--session",
+                "agt_123",
+                "--yes",
+            ],
+            &["punarctl", "privacy", "purge", "--all", "--yes"],
+            // The exact argv the AI panel hands `execDetached` (fixed
+            // argv, never a shell string): shell/punar-shell/AiPanel.
+            &["punarctl", "agents", "access", "agt_123", "--json"],
+            &[
+                "punarctl",
+                "privacy",
+                "purge",
+                "--session",
+                "agt_123",
+                "--yes",
+            ],
             &["punarctl", "relay", "status"],
             &["punarctl", "audit", "tail"],
             &["punarctl", "reconcile"],
@@ -654,6 +872,48 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(example.iter()).is_err(), "{example:?}");
         }
+    }
+
+    /// `privacy purge` is destructive, so clap — not the daemon — makes
+    /// the scope explicit: exactly one of `--session` / `--all`, never
+    /// both, never neither. A usage error exits 2 before any IPC happens.
+    #[test]
+    fn privacy_purge_requires_exactly_one_scope() {
+        for example in [
+            ["punarctl", "privacy", "purge"].as_slice(),
+            ["punarctl", "privacy", "purge", "--yes"].as_slice(),
+            [
+                "punarctl",
+                "privacy",
+                "purge",
+                "--session",
+                "agt_1",
+                "--all",
+            ]
+            .as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(example.iter()).is_err(), "{example:?}");
+        }
+    }
+
+    /// `privacy ledger` takes the id positionally or as `--session`, but
+    /// never twice.
+    #[test]
+    fn privacy_ledger_rejects_two_spellings_of_one_id() {
+        assert!(
+            Cli::try_parse_from(
+                [
+                    "punarctl",
+                    "privacy",
+                    "ledger",
+                    "agt_1",
+                    "--session",
+                    "agt_2"
+                ]
+                .iter()
+            )
+            .is_err()
+        );
     }
 
     /// `audit tail` defaults to 20 events (docs/api/ipc.md section 5.5).

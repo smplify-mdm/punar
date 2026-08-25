@@ -157,6 +157,25 @@ systemctl start punar-m6-check.service \
 systemctl start punar-m7-check.service \
     || echo "punar: idle-ram: punar-m7-check.service failed to start" >&2
 
+# M8 exercise ordering hook (milestone-8.md §12): start punar-m8-check
+# SYNCHRONOUSLY strictly AFTER the M7 exercise (which left ~punar/atlas and
+# a registry this exercise re-establishes rather than inherits) and strictly
+# BEFORE the export below, so m8-report.txt / m8-access.json /
+# m8-ledger-file.json / m8-index.json / m8-privacy.txt / m8-agents-list.json /
+# m8-audit-denial.json / m8-purge.txt / punar-m8.png ship in the same tar.
+# The second managed agent session, its fifo-blocked children and the
+# synthetic backdated ledger live only inside this window — structurally
+# after the idle-RAM sampling and the services-RSS sample far above, so
+# neither gate sees them (the agent runs in its own punar-agent-<id>.scope
+# under the user manager, not in a service cgroup; M8 adds no new daemon, so
+# the services list above is unchanged). The exercise restarts
+# punar-agentd once, deliberately, to prove retention pruning against an
+# injected backdated ledger; that restart is inside this window too.
+# Never fatal here: the verdict lives in m8-report.txt and the host gate
+# (tools/boot-test.sh) parses it.
+systemctl start punar-m8-check.service \
+    || echo "punar: idle-ram: punar-m8-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

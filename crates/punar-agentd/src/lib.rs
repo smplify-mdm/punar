@@ -23,15 +23,28 @@
 //!   summary for the AI panel.
 //! - **Does not**: enforce anything. Authority rows are display-level and
 //!   carry their `declared · M9/M12` labels (SPEC section 1.22). There is
-//!   no Access Ledger here (Milestone 8), no continuous detection,
-//!   alerting, or response (Milestone 10), and detection is a heuristic
-//!   that says *suspected*, never certain (SPEC section 23).
+//!   no continuous detection, alerting, or response (Milestone 10), and
+//!   detection is a heuristic that says *suspected*, never certain (SPEC
+//!   section 23).
+//!
+//! # Milestone 8: the AI Access Ledger ([`ledger`])
+//!
+//! M8 adds the per-session Access Ledger (SPEC sections 21, 24) —
+//! `agents.access`, `ledger.purge`, and the counts-only fingerprint on
+//! `agents.list`. It is **derived** from mediation points this daemon
+//! already owns (the scope cgroup, the audit stream, the workspace grant,
+//! registry metadata): no eBPF, no fanotify, no ptrace, no `LD_PRELOAD`,
+//! and no filesystem or network tracing anywhere (SPEC 1.14). The
+//! categories with no producer yet — network destinations (M12), MCP
+//! servers (M9+), credential classes (M9) — are rendered as *not yet
+//! observed* rather than invented (SPEC 1.22).
 
 #![forbid(unsafe_code)]
 
 pub mod adapters;
 pub mod authz;
 pub mod detect;
+pub mod ledger;
 pub mod proc;
 pub mod registry;
 pub mod server;

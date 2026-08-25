@@ -21,6 +21,11 @@
 //!   table of the sibling `punar-agentd` socket, and the
 //!   `/run/punar/agents.json` summary shape (docs/api/ipc.md sections
 //!   10-11; Milestone 7).
+//! - [`ledger`] — the AI Access Ledger types (SPEC sections 21, 24;
+//!   `schemas/ai-agent/ledger-summary.json`, docs/api/ipc.md sections
+//!   12-13; Milestone 8). Privacy is enforced in the types: a
+//!   [`ledger::ResourceClass`] cannot hold a path, a URL, or free text,
+//!   whichever way it is constructed.
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
@@ -43,6 +48,7 @@ mod capability;
 mod decision;
 mod descriptor;
 pub mod ipc;
+pub mod ledger;
 mod principal;
 mod redacted;
 pub mod time;
