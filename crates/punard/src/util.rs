@@ -11,6 +11,15 @@ use std::time::{Duration, Instant};
 /// Atomically write `bytes` to `path` with `mode`: temp file in the same
 /// directory, then `rename(2)`. No fsync — crash-loss of the last write is an
 /// accepted M3 tradeoff (docs/development/milestone-3.md section 5).
+///
+/// The temp file is opened with `O_CREAT|O_EXCL` (`create_new`), never
+/// `O_CREAT`-follow: since M5 this helper also writes the section 9 status
+/// file into `/run/punar`, a directory owned by the unprivileged session
+/// user (tmpfiles.d: `0755 punar:punar`), where a predictable tmp name
+/// opened without `O_EXCL` would let that user plant a symlink and have
+/// root truncate an arbitrary file (spec section 61). A pre-existing tmp
+/// (stale crash leftover or a planted link) is unlinked and the exclusive
+/// create retried once; a second collision fails loudly rather than follow.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let parent = path
         .parent()
@@ -22,13 +31,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let tmp = parent.join(format!(".{file_name}.punard-tmp.{}", std::process::id()));
-    {
-        let mut f = OpenOptions::new()
+    let open_excl = || {
+        OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(mode)
-            .open(&tmp)?;
+            .open(&tmp)
+    };
+    {
+        let mut f = match open_excl() {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                // remove_file unlinks a symlink itself, not its target.
+                fs::remove_file(&tmp)?;
+                open_excl()?
+            }
+            Err(e) => return Err(e),
+        };
         f.write_all(bytes)?;
         f.flush()?;
     }
@@ -247,6 +266,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Spec section 61: a symlink planted at the predictable tmp path must
+    /// never be followed — the exclusive create unlinks the link itself and
+    /// writes a fresh file; the link's target is untouched.
+    #[test]
+    fn write_atomic_never_follows_a_planted_tmp_symlink() {
+        let dir = tmp_dir("symlink");
+        let victim = dir.join("victim");
+        fs::write(&victim, b"untouched\n").unwrap();
+        let path = dir.join("f");
+        let planted = dir.join(format!(".f.punard-tmp.{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        write_atomic(&path, b"payload\n", 0o600).unwrap();
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "untouched\n",
+            "the symlink target must never receive the write"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "payload\n");
+        assert!(!planted.exists(), "the planted link is gone, not followed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn group_and_passwd_lookup_parse_the_format() {
         let dir = tmp_dir("nss");
@@ -287,7 +329,10 @@ mod tests {
     fn random_hex_is_lowercase_hex_of_twice_the_byte_length() {
         let s = random_hex(32).unwrap();
         assert_eq!(s.len(), 64);
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 
     #[test]

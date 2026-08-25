@@ -1,4 +1,4 @@
-# Image pipeline (Milestones 0–3)
+# Image pipeline (Milestones 0–5)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now produces two images from one config tree
@@ -20,7 +20,13 @@ pipeline now produces two images from one config tree
   `multi-user.target.wants` symlink, 2-minute cadence), the reserved
   `/var/lib/punar/policy.d` tmpfiles entry (empty in the image —
   unmanaged-first), and the `punar-m4-check` in-VM exercise
-  ([milestone-4.md](milestone-4.md) §10–§11).
+  ([milestone-4.md](milestone-4.md) §10–§11). Milestone 5 adds the
+  `punar-mock-smplify` dev/CI mock control plane (compiled alongside
+  `punard`/`punarctl`; its unit is **never enabled** — no `[Install]`, no
+  `.wants` symlink — and is started/stopped only by the M5 check), the
+  Acme organization fixtures staged verbatim to
+  `/usr/share/punar/fixtures/acme/`, and the `punar-m5-check` in-VM
+  enrollment exercise ([milestone-5.md](milestone-5.md) §4, §10).
 
 Substrate per [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md):
 minimal Arch package payload, vendor-pinned snapshot channels, mkosi-built
@@ -70,7 +76,7 @@ CI run is the arbiter.
 | `os/images/mkosi.extra/` | Files copied verbatim into every image; currently `punar-boot-marker.service` + its enablement symlink. |
 | `os/images/mkosi.profiles/desktop/` | The M1 `punar-desktop` profile: `mkosi.conf` (the verified §2.1 package additions), `mkosi.postinst.chroot` (dev user `punar` + subuid/subgid for rootless podman, `systemctl enable greetd`, `graphical.target`, fc-cache), and `mkosi.extra/` — the versioned parts (greetd `config.toml`, `/usr/lib/punar/{session.sh,desktop-ready.sh,idle-ram.sh}`, `punar-desktop-marker.path/.service`, `punar-idle-ram.service`, tmpfiles `/run/punar`) plus build-time-staged parts (gitignored; see next row). |
 | `os/modules/desktop/`, `shell/punar-shell/`, `shell/theme/` | Source of truth for Hyprland config (`/etc/xdg/hypr/`), foot config (`/etc/xdg/foot/foot.ini`), fontconfig defaults + vendored fonts (`/usr/share/fonts/punar/`), the punar-shell QML (`/usr/share/punar/shell/`) and design tokens (`/usr/share/punar/theme/punar-tokens.json`). `container-build.sh` re-verifies the font sha256 manifest and stages these into the desktop profile's `mkosi.extra/` on every build — nothing is committed twice. |
-| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
+| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop; since M5 also the Acme fixtures `fixtures/organizations/acme/*.json` → `usr/share/punar/fixtures/acme/`, same staged-not-committed-twice pattern as the shell QML), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl -p punar-mock-smplify` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
 | `tools/build-image.sh` | Host-side wrapper: builds the builder container, runs the containerized build with the **repo root** mounted (the desktop staging needs `os/modules` + `shell/`). `tools/build-image.sh [dev|desktop|all]` (default `all`). Identical path in CI and locally. |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
 | `.github/workflows/ci.yml` | Jobs `rust`, `image`, `boot-test` on pinned `ubuntu-24.04` runners. |
@@ -91,10 +97,11 @@ CI run is the arbiter.
    (`os/images/out/punar-dev-x86_64.qcow2`), plus `SHA256SUMS` and
    `build-info.txt` (snapshot date, mkosi/qemu-img versions, git SHA).
 4. With `PUNAR_IMAGES=all` (the default) or `desktop`, the desktop content is
-   staged (font manifest verified first), `punard` + `punarctl` are compiled
-   `--release --locked` with the builder's snapshot-pinned Rust and staged
-   into the profile's `usr/bin/` (build mode only — summary mode never
-   compiles), and mkosi runs a second time with
+   staged (font manifest verified first; since M5 the Acme fixtures land in
+   `usr/share/punar/fixtures/acme/`), `punard` + `punarctl` +
+   `punar-mock-smplify` are compiled `--release --locked` with the builder's
+   snapshot-pinned Rust and staged into the profile's `usr/bin/` (build mode
+   only — summary mode never compiles), and mkosi runs a second time with
    `--profile desktop --image-id punar-desktop --hostname punar-desktop` —
    scalar overrides on the CLI, so no profile scalar-merge ambiguity — and the
    result is converted to `os/images/out/punar-desktop-x86_64.qcow2`. Both
@@ -213,6 +220,54 @@ Full decisions in [milestone-3.md](milestone-3.md) §7–§9 and
   `ram-report.txt`; `check-budgets.sh` gates it (fail > 150 MB, warn >
   100 MB; `absent` fails even under TCG).
 
+## The M5 enrollment scaffolding in the image (Milestone 5)
+
+Full decisions in [milestone-5.md](milestone-5.md) §4 and §10; the wiring
+as built:
+
+- **Mock control plane:** `/usr/bin/punar-mock-smplify` — a dev/CI mock of
+  the Smplify control plane, compiled by `stage_punar_binaries()` alongside
+  `punard`/`punarctl` and shipped in the image only because the CI VM has
+  no network (`-nic none`) and the enrollment exercise needs an in-VM
+  counterparty. Its unit `punar-mock-smplify.service` is **never enabled**
+  (no `[Install]`, no `.wants` symlink — asserted by m5-check itself);
+  only `m5-check.sh` starts and stops it, so it never runs during boot,
+  the idle-RAM window, or steady state. Transport is a root-only UDS
+  (`/run/punar-mock-smplify/api.sock`, `RuntimeDirectory` 0750 + socket
+  0600 — never localhost TCP, spec section 61); the trust-boundary
+  statement lives in the unit header and milestone-5.md §4.2. Its
+  directories come from `RuntimeDirectory`/`StateDirectory` on the unit,
+  deliberately not tmpfiles.d: `/run/punar-mock-smplify` should exist
+  exactly while the mock runs (a stale socket path is honest
+  "unreachable" for the offline exercise), and
+  `/var/lib/punar-mock-smplify` (`StateDirectory`) persists across mock
+  restarts, which the recovery and keeps-history assertions rely on.
+- **Fixtures:** `fixtures/organizations/acme/*.json` staged verbatim to
+  `/usr/share/punar/fixtures/acme/` by `stage_desktop_extra()` (gitignored
+  staging, single source of truth in `fixtures/` — the same bytes host
+  cargo tests and `./tools/validate-schemas.sh` check).
+- **M5 in-VM exercise:** `punar-m5-check.service` (root oneshot, not
+  enabled, 15 min bound) runs `/usr/lib/punar/m5-check.sh`, started
+  synchronously by `idle-ram.sh` after the M4 exercise and before the
+  export. It stops `punard-reconcile.timer` at its top (single-actor sync
+  determinism) and restarts it at the end, and walks the full journey:
+  mock discipline + personal pre-state → `enroll start acme.com` →
+  0600 stores, token grep-absent everywhere → policy.d envelope with the
+  embedded payload → spec-40 managed explain → org-pinned set behaviors
+  (non-root exit 3 citing the org policy; root recorded-but-overridden)
+  → category-only compliance/inventory asserted on the mock's RECEIVED
+  files (exact jq key allowlists — spec 24/54) with the inventory hash
+  gate → enrolled-bar screenshot `punar-m5.png` (grim under the session
+  user, m2-check's session-env pattern) → offline: cached policy still
+  enforced, transition-audited `enroll.sync` unreachable → recovery:
+  exactly one new compliance line (latest-wins queue) → offline
+  `enroll stop` → personal restore + `punar-m5-personal.png` → audit
+  lifecycle + timer restored. Verdict `PUNAR_M5_OK`/`PUNAR_M5_FAIL` in
+  `/run/punar/m5-report.txt`, gated host-side by `boot-test.sh` phase 7;
+  the mock's `received-*.jsonl` are copied into the export as
+  `m5-received-*.jsonl` (never `devices.json`, which holds the
+  server-side token record).
+
 ## The boot smoke test
 
 `tools/boot-test.sh [image.qcow2]` (spec 74.3 "boot"):
@@ -231,24 +286,33 @@ Full decisions in [milestone-3.md](milestone-3.md) §7–§9 and
 
 ## CI (canonical)
 
-`.github/workflows/ci.yml`, three jobs on **pinned `ubuntu-24.04`** — not
+`.github/workflows/ci.yml`, five jobs on **pinned `ubuntu-24.04`** — not
 `ubuntu-latest`, because GitHub is migrating `-latest` labels during 2026 and
 an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
 4 vCPU / 16 GB RAM / 14 GB SSD, with working `/dev/kvm`.
 
 1. **rust** — `cargo fmt --check`, `cargo clippy --workspace --all-targets
-   --locked -- -D warnings`, `cargo test --workspace --locked`, with
-   `Swatinem/rust-cache` caching.
-2. **image** — shellcheck on the three pipeline scripts, then
-   `tools/build-image.sh` (the same containerized path as local), then uploads
-   `punar-dev-image` (qcow2 + SHA256SUMS + build-info.txt, 7-day retention).
-   Docker caching of the builder image across runs is future work; the
-   builder rebuild costs a few minutes of pacman installs per run.
-3. **boot-test** — needs `image`; downloads the artifact, installs
+   --locked -- -D warnings`, `cargo test --workspace --locked`.
+2. **contracts** — `./tools/validate-schemas.sh` (all JSON Schemas + every
+   fixture, including the negative fixtures, in a pinned python container).
+3. **image** — pinned shellcheck (v0.11.0) on the pipeline and in-VM check
+   scripts (including `m5-check.sh`), then `tools/build-image.sh` (the same
+   containerized path as local), then uploads both image artifacts
+   (qcow2 + SHA256SUMS + build-info.txt, 7-day retention). Docker caching of
+   the builder image across runs is future work; the builder rebuild costs a
+   few minutes of pacman installs per run.
+4. **boot-test** — needs `image`; downloads the artifact, installs
    `qemu-system-x86` + `ovmf`, enables KVM for the runner user via the
    canonical udev rule (crosscutting.md §2.1), runs `tools/boot-test.sh`, and
    re-verifies the artifact checksum. If KVM is unavailable the script warns
    and degrades to TCG rather than failing.
+5. **desktop-test** — needs `image`; boots `punar-desktop` through
+   `tools/boot-test.sh --mode desktop` (PUNAR_DESKTOP_OK → idle-RAM →
+   M2/M3/M4/M5 exercises → export → the four report gates), then the
+   PERFORMANCE_BUDGETS.md gates, then uploads the screenshot artifact
+   (M1 idle + M2 overview + M5 enrolled/personal) and the report artifact
+   (ram-report + m2/m3/m4/m5 reports and snapshots, including the M5
+   mock received-state copies + serial.log).
 
 ## Local use (arm64 Mac)
 

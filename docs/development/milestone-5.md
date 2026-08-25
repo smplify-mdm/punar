@@ -730,3 +730,91 @@ screenshot wait; mock RSS; the m5-report/screenshot export additions.
 M4's CI run was **in flight** at planning time — if it lands red, its
 fixes precede M5 implementation; nothing in this plan assumes its outcome
 beyond what M3-green already proved.
+
+### Implementation status (2026-08-25 audit — tree in flux)
+
+The M4 run landed **red, narrowly**, as the paragraph above allowed for:
+run 32837156881 failed on exactly one m4-check assertion (timer
+`is-enabled` reads `disabled` under vendor-wants enablement) while
+`PUNAR_DESKTOP_OK`/`PUNAR_M2_OK`/`PUNAR_M3_OK` and every other M4
+assertion — including the drift-remediation demo — passed in-VM. The
+m4-check fix (commit 92d5f17) preceded M5 completion exactly as planned,
+but that commit also carried an early, mid-integration snapshot of this
+milestone's code; its run 32839803185 failed at `cargo fmt --check` and
+on a `punard` compile error (enroll handlers referenced before they
+existed) without reaching the VM. Consequences: M4 still has no green
+run, and HEAD's rust and image jobs are red until the finished M5 tree
+lands.
+
+The full M5 tree is now on disk (2026-08-25, later the same day): the
+committed pieces above plus the punard server integration (§5 handlers,
+status publisher, §6 reconcile-piggybacked sync, §7 offline queue),
+`punarctl enroll` verbs + §5.5 CLI amendments (`denied_org_pinned`,
+overridden verdict line), `punard/tests/enroll.rs` and punarctl test
+additions, `container-build.sh` fixture + mock-binary staging, the
+never-enabled `punar-mock-smplify.service` unit, `m5-check.sh` +
+`punar-m5-check.service` (§10 — all 19 assertion groups, both grim
+screenshots via the m2-check session-env pattern, mock received-state
+copies exported as `m5-received-*.jsonl`, timer stopped at top/restored
+at end), the idle-ram.sh chaining after m4-check, the boot-test.sh
+phase-7 hard gate (+ export-timeout bumps: KVM 1500→1800 s, TCG
+3000→3600 s), and the ci.yml wiring (shellcheck list + screenshot/report
+artifact paths + desktop-test 75→80 min). The §11 audit rotation is now
+**implemented** in `punar-common` (`AuditWriter::rotate_if_needed`:
+rename to `audit.jsonl.1` at 8 MiB checked at write time, one rotated
+file kept, unit-tested with a shrunken threshold) — the ipc.md §6
+"M5: delivered" note is no longer ahead of the code.
+
+One recorded deviation from the plan's original phrasing: the mock's
+directories are provided by `RuntimeDirectory=`/`StateDirectory=` on its
+unit rather than a tmpfiles.d entry, deliberately —
+`/run/punar-mock-smplify` should exist exactly while the mock runs
+(systemd removes it on stop, so a stale socket path is honest
+"unreachable" for the §10.2 offline steps), while the state dir persists
+across mock restarts for the recovery and keeps-history assertions. The
+rationale lives in the unit header.
+
+Verification recorded for the finished M5 tree (2026-08-25, local):
+docker `rust:1` — `cargo fmt --all --check` clean, `cargo clippy
+--workspace --all-targets --locked -- -D warnings` clean, `cargo test
+--workspace --locked` all 23 suites green (including the two new audit
+rotation tests and the punard/punarctl/mock M5 suites), `cargo check
+--workspace --locked` clean; `koalaman/shellcheck:v0.11.0` clean on all
+ten pipeline/in-VM scripts including the new `m5-check.sh`; `actionlint`
+clean on ci.yml; `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` exit
+0 (staging incl. the Acme fixture copy verified in the staged tree, both
+image summaries produced); qmllint (pinned container) was recorded clean
+by the §8 shell work and no QML changed since. Not verified locally:
+everything in-VM — the first CI run containing this tree remains the
+arbiter for every §10.2 assertion, the enroll latency bounds, the
+FileView pickup window, and the export additions.
+
+### Status audit (2026-08-25, tree + live-CI cross-check)
+
+An independent status audit re-verified the paragraphs above against the
+working tree: every file the implementation record lists is present and
+matches its description — `m5-check.sh` (19 assertion groups; mock
+started/stopped only by the script; session-user grim captures;
+always-exit-0 report contract with the host gate parsing `m5-report.txt`),
+`punar-m5-check.service`, the never-enabled `punar-mock-smplify.service`
+(no `[Install]`, §4.2 trust boundary stated in the unit header,
+`RuntimeDirectory`/`StateDirectory` deviation documented there), the
+idle-ram.sh chaining, the boot-test.sh phase-7 gate + export list, the
+ci.yml artifact/timeout wiring, `AuditWriter::rotate_if_needed` in
+`punar-common`, the `punarctl enroll` verbs, the punard server enrollment
+integration (`enroll.rs` + handlers + status publisher), the mock crate
+with its integration test, and the container-build.sh Acme-fixture +
+third-binary staging. `./tools/validate-schemas.sh` was additionally
+re-run fresh at audit time: 15 schemas metaschema-checked, 123 documents
+validated, ALL PASS — the §11 no-schema-deltas decision held.
+
+Live CI cross-check (`gh run list`, 2026-08-25): the newest run is still
+[32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185)
+(red, failed pre-VM at commit 92d5f17) — nothing has run since. The
+finished M5 tree exists only in the local working tree (modified +
+untracked files on top of 92d5f17, uncommitted and unpushed). Standing
+facts, unchanged: M4 has no green run and the amended m4-check assertion
+is unproven; nothing M5 has ever executed in CI (the one run containing
+M5 code carried the non-compiling mid-integration snapshot); the arbiter
+for every in-VM claim in this document is the first CI run containing
+the finished tree, which does not exist yet.

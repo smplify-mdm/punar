@@ -328,7 +328,11 @@ pub fn load_device_token(path: &Path) -> io::Result<Option<Redacted<String>>> {
 /// Persist the device token alone (0600, atomic). The only place the
 /// secret is exposed on the write path — greppable via `expose_secret`.
 pub fn save_device_token(path: &Path, token: &Redacted<String>) -> io::Result<()> {
-    write_atomic(path, format!("{}\n", token.expose_secret()).as_bytes(), 0o600)
+    write_atomic(
+        path,
+        format!("{}\n", token.expose_secret()).as_bytes(),
+        0o600,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -539,14 +543,18 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644
         );
-        let raw: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let keys: Vec<&str> = raw.as_object().unwrap().keys().map(String::as_str).collect();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let keys: Vec<&str> = raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         // Summary ONLY (ipc.md section 9): the world-readable file carries
-        // exactly what the bar renders.
+        // exactly what the bar renders (serde_json emits keys sorted).
         assert_eq!(
             keys,
-            ["v", "enrolled", "org_name", "compliance_overall", "ts"]
+            ["compliance_overall", "enrolled", "org_name", "ts", "v"]
         );
         assert_eq!(raw["org_name"], "Acme Engineering");
         let _ = std::fs::remove_dir_all(&dir);
@@ -573,11 +581,20 @@ mod tests {
         );
         // The privacy assertion in miniature (SPEC sections 24, 54): the
         // top-level and per-entry key sets are exact.
-        let keys: Vec<&str> = report.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["overall", "categories"]);
+        let keys: Vec<&str> = report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["categories", "overall"]);
         for entry in report["categories"].as_array().unwrap() {
-            let keys: Vec<&str> =
-                entry.as_object().unwrap().keys().map(String::as_str).collect();
+            let keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
             assert_eq!(keys, ["category", "state"]);
         }
     }
@@ -612,7 +629,10 @@ mod tests {
         assert_eq!(inventory["os"]["pretty_name"], "Punar OS 0.5 (M5)");
         assert_eq!(inventory["kernel"], "6.12.0-punar");
         assert_eq!(inventory["hostname"], "punar-desktop");
-        assert_eq!(inventory["capabilities"][0]["capability"], "security.firewall");
+        assert_eq!(
+            inventory["capabilities"][0]["capability"],
+            "security.firewall"
+        );
         assert_eq!(inventory["capabilities"][0]["supported"], true);
         assert_eq!(inventory["capabilities"][0]["current_state"], "enabled");
 

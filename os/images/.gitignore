@@ -15,4 +15,5 @@ mkosi.profiles/desktop/mkosi.extra/etc/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/shell/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/theme/
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/

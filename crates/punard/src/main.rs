@@ -62,6 +62,17 @@ struct RunArgs {
     /// Vendored punar-base nftables ruleset.
     #[arg(long, default_value = "/usr/share/punar/nftables/punar-base.nft")]
     ruleset: PathBuf,
+
+    /// M5 control-plane socket (the dev/CI mock's root-only UDS). When
+    /// omitted, the PUNAR_CONTROL_PLANE_SOCKET environment variable is
+    /// consulted, then the compiled default
+    /// (docs/development/milestone-5.md section 4.2).
+    #[arg(long, value_name = "PATH")]
+    control_plane_socket: Option<PathBuf>,
+
+    /// M5 shell summary file (docs/api/ipc.md section 9).
+    #[arg(long, default_value = punard::enroll::DEFAULT_STATUS_FILE)]
+    status_file: PathBuf,
 }
 
 fn build_registry(args: &RunArgs) -> Registry {
@@ -83,9 +94,22 @@ fn build_registry(args: &RunArgs) -> Registry {
 
 fn run(args: RunArgs) -> ExitCode {
     let registry = build_registry(&args);
+    // Control-plane endpoint precedence: flag, then environment override,
+    // then the compiled default (milestone-5.md section 4.2 — the env
+    // seam is how host tests point punard at a temp socket).
+    let control_plane_socket = args
+        .control_plane_socket
+        .or_else(|| {
+            std::env::var_os(punard::enroll::CONTROL_PLANE_SOCKET_ENV)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET));
     let cfg = DaemonConfig::new(args.socket, args.state_dir, args.audit_file);
     let cfg = DaemonConfig {
         group: args.group,
+        control_plane_socket,
+        status_file: args.status_file,
         ..cfg
     };
 

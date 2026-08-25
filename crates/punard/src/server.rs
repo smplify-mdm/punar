@@ -26,10 +26,10 @@ use punar_common::ipc::{
     AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
     EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
-    FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
-    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
-    PolicyExplainResult, PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome,
-    Request, Response, SERVER_READ_TIMEOUT, StatusResult,
+    FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
+    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
+    PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome, Request, Response,
+    SERVER_READ_TIMEOUT, StatusResult,
 };
 use punar_common::time::utc_now_rfc3339;
 use punar_common::{AuditEvent, Decision, Redacted};
@@ -39,10 +39,9 @@ use serde_json::{Value, json};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
 use crate::enroll::{
-    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
-    LastSyncRecord, OrgRecord, StatusSummary, UpstreamError, compliance_report_body,
-    inventory_body, load_device_token, load_enrollment, save_device_token, save_enrollment,
-    write_status_summary,
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources, LastSyncRecord,
+    OrgRecord, StatusSummary, UpstreamError, compliance_report_body, inventory_body,
+    load_device_token, load_enrollment, save_device_token, save_enrollment, write_status_summary,
 };
 use crate::policy::{
     EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
@@ -52,6 +51,29 @@ use crate::state::{
     migrate_m3_store,
 };
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
+
+/// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
+pub const RESOURCE_ENROLLMENT: &str = "enrollment";
+/// Audit `resource` for the M5 `enroll.sync` transition events.
+pub const RESOURCE_CONTROL_PLANE: &str = "control_plane";
+
+/// RAII guard serializing enrollment transitions (compare-exchange on a
+/// flag; released on drop).
+struct EnrollGuard<'a>(&'a AtomicBool);
+
+impl<'a> EnrollGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| EnrollGuard(flag))
+    }
+}
+
+impl Drop for EnrollGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Loop protection (SPEC section 42 "avoid remediation loops";
 /// docs/development/milestone-4.md section 5): at most this many
@@ -210,6 +232,9 @@ struct Inner {
     /// The last tuple written to the ipc.md section 9 status file, so the
     /// file is rewritten only when the summary actually changes.
     status_written: Mutex<Option<StatusSummary>>,
+    /// Serializes `enroll.start`/`enroll.stop` without holding the state
+    /// lock across the network + reconcile pipeline.
+    enroll_in_progress: AtomicBool,
     shutdown: AtomicBool,
     active: Mutex<usize>,
     slot_freed: Condvar,
@@ -332,6 +357,7 @@ impl Daemon {
                 pending_inventory: AtomicBool::new(false),
                 last_sync_outcome: Mutex::new(None),
                 status_written: Mutex::new(None),
+                enroll_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
                 slot_freed: Condvar::new(),
@@ -839,12 +865,32 @@ impl Inner {
 
         let actor = self.actor_of(peer);
         if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "capabilities.set",
-                id,
-            ));
+            // The root-only rule denies *before* policy is consulted
+            // (unchanged since M3). M5 amendment (contract section 5.4):
+            // when the target path is org-pinned, the citation names the
+            // pinning source — "personal defaults" would be a false
+            // citation on a managed path. Unpinned paths keep the M3/M4
+            // message byte-identical.
+            let pinning = {
+                let doc = self.effective.lock().unwrap();
+                doc.get(id).and_then(|entry| {
+                    (!entry.user_override_permitted).then(|| {
+                        (
+                            entry.provenance.source_name.clone(),
+                            entry.provenance.policy_id.clone(),
+                        )
+                    })
+                })
+            };
+            let mut denial_event =
+                AuditEvent::denial(&self.device_id, &actor, "capabilities.set", id);
+            if let Some((_, policy_id)) = &pinning {
+                denial_event.policy_ids = vec![policy_id.clone()];
+            }
+            self.log_audit(denial_event);
+            if let Some((source_name, policy_id)) = pinning {
+                return Err(IpcError::denied_org_pinned(id, &source_name, &policy_id));
+            }
             let state_hint = match &params.desired_state {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -1091,6 +1137,14 @@ impl Inner {
         };
         self.log_audit(AuditEvent::reconcile(&self.device_id, actor, outcome));
 
+        // M5 (milestone-5.md section 6): compliance/inventory sync
+        // piggybacks every full pass while enrolled — the existing 120 s
+        // reconcile timer is the sync cadence; no new timers, no new
+        // wakeup sources. The section 9 summary file is refreshed
+        // afterwards (write-on-change only).
+        self.sync_if_enrolled(actor);
+        self.publish_status_summary();
+
         let compliance = self.tracker.lock().unwrap().block(&self.registry);
         ReconcileResult {
             reconciled_at: utc_now_rfc3339(),
@@ -1294,6 +1348,662 @@ impl Inner {
             compliance_state: self.tracker.lock().unwrap().state_of(path),
         };
         Ok(to_value(result))
+    }
+
+    // -----------------------------------------------------------------------
+    // M5 enrollment (contract sections 5.9–5.11; milestone-5.md section 5)
+    // -----------------------------------------------------------------------
+
+    /// One schema-conformant enrollment audit event (`enroll.start`,
+    /// `enroll.stop`, `enroll.sync`; docs/api/ipc.md section 6). The
+    /// device token is [`Redacted`] by type elsewhere — no field here
+    /// could carry it.
+    fn enroll_event(
+        &self,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        result: &str,
+        policy_ids: Vec<String>,
+    ) -> AuditEvent {
+        AuditEvent {
+            event_id: next_event_id(),
+            timestamp: utc_now_rfc3339(),
+            device_id: self.device_id.clone(),
+            user_id: Some(actor.user_id.clone()),
+            agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+            project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+            source: actor.source,
+            action: action.to_string(),
+            resource: Some(resource.to_string()),
+            decision: Decision::Allow,
+            policy_ids: if policy_ids.is_empty() {
+                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
+            } else {
+                policy_ids
+            },
+            result: result.to_string(),
+        }
+    }
+
+    /// Map a control-plane failure during `enroll.start` to the contract
+    /// error codes: an unknown domain is the caller's mistake
+    /// (`invalid_params`); everything else is `upstream_unreachable` in
+    /// the section 73 voice, with local state untouched.
+    fn upstream_error(&self, stage: &str, error: UpstreamError) -> IpcError {
+        match error {
+            UpstreamError::Refused { code, message } if code == "not_found" => {
+                IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "The control plane does not know this organization: {message}\n\
+                         Policy: os default — enrollment needs a discoverable organization \
+                         (docs/api/ipc.md section 5.9).\n\
+                         Next step: check the domain spelling with your administrator."
+                    ),
+                    json!({ "param": "org_domain", "reason": "unknown organization" }),
+                )
+            }
+            UpstreamError::Refused { code, message } => IpcError::with_details(
+                ErrorCode::UpstreamUnreachable,
+                format!(
+                    "The control plane refused the {stage} step ({code}): {message}\n\
+                     Policy: os default — enrollment is all-or-nothing; nothing was changed.\n\
+                     Next step: is the control plane running and serving this device?"
+                ),
+                json!({ "stage": stage }),
+            ),
+            UpstreamError::Unreachable(why) => IpcError::with_details(
+                ErrorCode::UpstreamUnreachable,
+                format!(
+                    "The control plane at {} did not answer during the {stage} step: {why}.\n\
+                     Policy: os default — enrollment is all-or-nothing; nothing was changed.\n\
+                     Next step: is the control plane running?",
+                    self.cfg.control_plane_socket.display()
+                ),
+                json!({ "stage": stage }),
+            ),
+        }
+    }
+
+    fn conflict(&self, state: &str, message: String) -> IpcError {
+        IpcError::with_details(ErrorCode::Conflict, message, json!({ "state": state }))
+    }
+
+    /// `enroll.start` (contract section 5.9): guard → discover → register
+    /// (fresh in-memory bootstrap secret; **attestation simulated and
+    /// labeled**) → policy.fetch → strict-parse validation (the M4
+    /// loader's own code path, run over a staging directory) → policy.d
+    /// write → live recompute → one full section 42 pass (whose sync hook
+    /// is the first compliance/inventory report) → persist → status file.
+    /// All-or-nothing: any failure before the commit point leaves no
+    /// trace.
+    fn handle_enroll_start(
+        &self,
+        peer: &Peer,
+        params: &EnrollStartParams,
+    ) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "enroll.start",
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::denied_needs_root(
+                "device enrollment",
+                None,
+                &format!("sudo punarctl enroll start {}", params.org_domain),
+            ));
+        }
+        let domain = params.org_domain.trim();
+        if !domain_syntax_ok(domain) {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "{:?} is not a domain name.\n\
+                     Policy: os default — punard validates the organization domain before \
+                     any discovery call (docs/api/ipc.md section 5.9).\n\
+                     Next step: punarctl enroll start <domain>, e.g. acme.com.",
+                    params.org_domain
+                ),
+                json!({ "param": "org_domain", "reason": "not a domain name" }),
+            ));
+        }
+        // Serialize enrollment transitions without holding the state lock
+        // across the network/reconcile pipeline.
+        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
+            Some(guard) => guard,
+            None => {
+                return Err(self.conflict(
+                    "changing",
+                    "An enrollment change is already in progress.\n\
+                     Policy: os default — enrollment transitions run one at a time.\n\
+                     Next step: retry in a moment."
+                        .to_string(),
+                ));
+            }
+        };
+        if self.enrollment.lock().unwrap().is_some() {
+            self.log_audit(self.enroll_event(
+                &actor,
+                "enroll.start",
+                RESOURCE_ENROLLMENT,
+                "failure",
+                vec![],
+            ));
+            return Err(self.conflict(
+                "enrolled",
+                "This device is already enrolled.\n\
+                 Policy: os default — one organization at a time (docs/api/ipc.md \
+                 section 5.9).\n\
+                 Next step: `punarctl enroll status` shows the current organization; \
+                 `sudo punarctl enroll stop` unenrolls."
+                    .to_string(),
+            ));
+        }
+
+        let fail_audit = |stage_error: IpcError| {
+            self.log_audit(self.enroll_event(
+                &actor,
+                "enroll.start",
+                RESOURCE_ENROLLMENT,
+                "failure",
+                vec![],
+            ));
+            stage_error
+        };
+
+        // Discover.
+        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let org_doc = client
+            .org_discover(domain)
+            .map_err(|e| fail_audit(self.upstream_error("discover", e)))?;
+        let field = |value: &Value, path: &[&str]| -> Option<String> {
+            let mut cursor = value.clone();
+            for key in path {
+                cursor = cursor.get(key)?.clone();
+            }
+            cursor.as_str().map(str::to_string)
+        };
+        let (Some(org_id), Some(org_name)) = (field(&org_doc, &["id"]), field(&org_doc, &["name"]))
+        else {
+            return Err(fail_audit(self.upstream_error(
+                "discover",
+                UpstreamError::Unreachable("the organization document is missing id/name".into()),
+            )));
+        };
+        let org = OrgRecord {
+            display_name: field(&org_doc, &["enrollment", "display_name"])
+                .unwrap_or_else(|| org_name.clone()),
+            domain: field(&org_doc, &["discovery", "domain"]).unwrap_or_else(|| domain.to_string()),
+            id: org_id,
+            name: org_name,
+        };
+
+        // Register. The bootstrap secret exists only in memory, only for
+        // this call, and only behind Redacted; the returned token likewise
+        // (SPEC section 53 — nothing that cannot be printed can leak).
+        let bootstrap = Redacted::new(
+            random_hex(crate::enroll::BOOTSTRAP_SECRET_BYTES)
+                .map_err(|e| fail_audit(self.internal(&format!("bootstrap secret: {e}"))))?,
+        );
+        let (token, attestation) = client
+            .register(&self.device_id, &bootstrap)
+            .map_err(|e| fail_audit(self.upstream_error("register", e)))?;
+        // The attestation step is SIMULATED (milestone-5.md section 5.2):
+        // the label is stored and surfaced verbatim; nothing was measured.
+
+        // Fetch and validate the policy envelopes with the M4 loader's own
+        // strict parse, over a staging directory — enrollment is
+        // all-or-nothing up through the policy.d write.
+        let envelopes = client
+            .policy_fetch(&token)
+            .map_err(|e| fail_audit(self.upstream_error("policy.fetch", e)))?;
+        let staging = self.cfg.state_dir.join(".policy.d.enroll-staging");
+        let cleanup_staging = || {
+            let _ = std::fs::remove_dir_all(&staging);
+        };
+        cleanup_staging();
+        std::fs::create_dir_all(&staging)
+            .map_err(|e| fail_audit(self.internal(&format!("staging dir: {e}"))))?;
+        let mut policy_files: Vec<String> = Vec::new();
+        for envelope in &envelopes {
+            let policy_id = envelope
+                .get("policy_id")
+                .and_then(Value::as_str)
+                .filter(|id| {
+                    !id.is_empty()
+                        && id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+                })
+                .ok_or_else(|| {
+                    cleanup_staging();
+                    fail_audit(IpcError::with_details(
+                        ErrorCode::InvalidParams,
+                        "The control plane served a policy envelope without a usable \
+                         policy_id.\n\
+                         Policy: os default — enrollment writes only validated envelopes \
+                         (docs/api/ipc.md section 5.9).\n\
+                         Next step: report this to your administrator; nothing was changed."
+                            .to_string(),
+                        json!({ "param": "policy", "reason": "envelope without policy_id" }),
+                    ))
+                })?;
+            let file = format!("{policy_id}.json");
+            let bytes =
+                serde_json::to_vec_pretty(envelope).expect("fetched envelopes re-serialize");
+            crate::util::write_atomic(&staging.join(&file), &bytes, 0o600).map_err(|e| {
+                cleanup_staging();
+                fail_audit(self.internal(&format!("staging write: {e}")))
+            })?;
+            policy_files.push(file);
+        }
+        let loaded = load_policy_dir(&staging).map_err(|e| {
+            cleanup_staging();
+            fail_audit(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "A fetched policy envelope failed validation: {e}.\n\
+                     Policy: os default — enrollment is all-or-nothing; nothing was \
+                     written (docs/api/ipc.md section 5.9).\n\
+                     Next step: report this to your administrator."
+                ),
+                json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
+            ))
+        })?;
+        for unmapped in &loaded.unmapped {
+            eprintln!(
+                "punard: enrollment policy: no registered capability for {unmapped}; \
+                 ignored (its capability lands in a later milestone)"
+            );
+        }
+
+        // Commit point: move the validated envelopes into policy.d, then
+        // persist token + enrollment and flip the in-memory state.
+        let policy_dir = self.cfg.state_dir.join("policy.d");
+        if let Err(e) = std::fs::create_dir_all(&policy_dir) {
+            cleanup_staging();
+            return Err(fail_audit(self.internal(&format!("policy.d: {e}"))));
+        }
+        for file in &policy_files {
+            if let Err(e) = std::fs::rename(staging.join(file), policy_dir.join(file)) {
+                // Roll back anything moved so far — all-or-nothing.
+                for moved in &policy_files {
+                    let _ = std::fs::remove_file(policy_dir.join(moved));
+                }
+                cleanup_staging();
+                return Err(fail_audit(self.internal(&format!("policy.d write: {e}"))));
+            }
+        }
+        cleanup_staging();
+
+        let enrollment = Enrollment {
+            version: 1,
+            org,
+            enrolled_at: utc_now_rfc3339(),
+            attestation,
+            policy_files: policy_files.clone(),
+            last_sync: LastSyncRecord::default(),
+            last_inventory_hash: None,
+        };
+        let rollback_files = |files: &[String]| {
+            for file in files {
+                let _ = std::fs::remove_file(policy_dir.join(file));
+            }
+        };
+        if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
+            rollback_files(&policy_files);
+            return Err(fail_audit(
+                self.internal(&format!("device token store: {e}")),
+            ));
+        }
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), &enrollment) {
+            rollback_files(&policy_files);
+            let _ = std::fs::remove_file(self.cfg.state_dir.join("device-token"));
+            return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
+        }
+
+        let policy_ids = enrollment.policy_ids();
+        let org_result = org_info(&enrollment.org);
+        let enrolled_at = enrollment.enrolled_at.clone();
+        let attestation_label = enrollment.attestation.clone();
+        *self.device_token.lock().unwrap() = Some(token);
+        *self.enrollment.lock().unwrap() = Some(enrollment);
+        *self.org_layers.lock().unwrap() = loaded.layers;
+        self.recompute_effective();
+
+        // One full section 42 pass. Its sync hook (now enrolled) performs
+        // the first compliance + inventory report; failures there queue
+        // per SPEC section 55 — they never fail enrollment.
+        *self.last_sync_outcome.lock().unwrap() = None;
+        let report = self.reconcile_and_remediate(&actor);
+        *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
+        let first_sync = self
+            .last_sync_outcome
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(FirstSync {
+                compliance: "unreachable".to_string(),
+                inventory: "unreachable".to_string(),
+            });
+
+        self.log_audit(self.enroll_event(
+            &actor,
+            "enroll.start",
+            RESOURCE_ENROLLMENT,
+            AuditOutcome::Success.as_str(),
+            policy_ids.clone(),
+        ));
+        Ok(to_value(EnrollStartResult {
+            enrolled: true,
+            org: org_result,
+            policy_ids,
+            attestation: attestation_label,
+            enrolled_at,
+            first_sync,
+        }))
+    }
+
+    /// `enroll.status` (contract section 5.10): read-only, any connected
+    /// peer, not audited. Never the token.
+    fn handle_enroll_status(&self) -> EnrollStatusResult {
+        match &*self.enrollment.lock().unwrap() {
+            None => EnrollStatusResult {
+                enrolled: false,
+                org: None,
+                policy_ids: None,
+                enrolled_at: None,
+                attestation: None,
+                last_sync: None,
+            },
+            Some(e) => EnrollStatusResult {
+                enrolled: true,
+                org: Some(org_info(&e.org)),
+                policy_ids: Some(e.policy_ids()),
+                enrolled_at: Some(e.enrolled_at.clone()),
+                attestation: Some(e.attestation.clone()),
+                last_sync: Some(LastSync {
+                    at: e.last_sync.at.clone(),
+                    result: e.last_sync.result.clone(),
+                    pending: self.pending_compliance.load(Ordering::SeqCst)
+                        || self.pending_inventory.load(Ordering::SeqCst),
+                }),
+            },
+        }
+    }
+
+    /// `enroll.stop` (contract section 5.11): root-only local restore —
+    /// remove exactly the policy.d files this enrollment wrote, delete the
+    /// stores, recompute, one reconcile pass (recorded user preferences
+    /// resurface per SPEC section 39), rewrite the status file. Local-only
+    /// by design: M5 has no unregister RPC — the control plane keeps its
+    /// device record and received history (unenrollment stops future flow;
+    /// it cannot retract the past). Works with the control plane down.
+    fn handle_enroll_stop(&self, peer: &Peer) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "enroll.stop",
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::denied_needs_root(
+                "device enrollment",
+                None,
+                "sudo punarctl enroll stop",
+            ));
+        }
+        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
+            Some(guard) => guard,
+            None => {
+                return Err(self.conflict(
+                    "changing",
+                    "An enrollment change is already in progress.\n\
+                     Policy: os default — enrollment transitions run one at a time.\n\
+                     Next step: retry in a moment."
+                        .to_string(),
+                ));
+            }
+        };
+        let Some(enrollment) = self.enrollment.lock().unwrap().take() else {
+            self.log_audit(self.enroll_event(
+                &actor,
+                "enroll.stop",
+                RESOURCE_ENROLLMENT,
+                "failure",
+                vec![],
+            ));
+            return Err(self.conflict(
+                "personal",
+                "This device is not enrolled.\n\
+                 Policy: os default — there is no organization state to remove \
+                 (docs/api/ipc.md section 5.11).\n\
+                 Next step: `punarctl enroll status` shows the current state."
+                    .to_string(),
+            ));
+        };
+
+        let policy_dir = self.cfg.state_dir.join("policy.d");
+        for file in &enrollment.policy_files {
+            if let Err(e) = std::fs::remove_file(policy_dir.join(file)) {
+                if e.kind() != io::ErrorKind::NotFound {
+                    eprintln!(
+                        "punard: enroll.stop could not remove policy.d/{file}: {e} \
+                         (continuing; the in-memory layer is cleared regardless)"
+                    );
+                }
+            }
+        }
+        for name in ["enrollment.json", "device-token"] {
+            if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {
+                if e.kind() != io::ErrorKind::NotFound {
+                    eprintln!("punard: enroll.stop could not remove {name}: {e}");
+                }
+            }
+        }
+        *self.device_token.lock().unwrap() = None;
+        self.org_layers.lock().unwrap().clear();
+        self.pending_compliance.store(false, Ordering::SeqCst);
+        self.pending_inventory.store(false, Ordering::SeqCst);
+        *self.last_sync_outcome.lock().unwrap() = None;
+        self.recompute_effective();
+
+        // One pass against the restored personal document (the sync hook
+        // no-ops — no enrollment — and the status file flips to personal).
+        let report = self.reconcile_and_remediate(&actor);
+        *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
+
+        let removed_policy_ids = enrollment.policy_ids();
+        self.log_audit(self.enroll_event(
+            &actor,
+            "enroll.stop",
+            RESOURCE_ENROLLMENT,
+            AuditOutcome::Success.as_str(),
+            removed_policy_ids.clone(),
+        ));
+        Ok(to_value(EnrollStopResult {
+            enrolled: false,
+            removed_policy_ids,
+        }))
+    }
+
+    /// The hostname as observed by the registry (shared by `status` and
+    /// the inventory builder).
+    fn observed_hostname(&self) -> String {
+        self.registry
+            .get(crate::backends::hostname::CAPABILITY_ID)
+            .and_then(|cap| cap.observe().ok())
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// M5 sync hook (milestone-5.md sections 6, 7): runs at the end of
+    /// every full reconcile pass **when enrolled** — compliance (category
+    /// states only, SPEC sections 24/54), then inventory when its SHA-256
+    /// changed or a resend is pending. Failures queue (bounded latest-wins
+    /// booleans); `enroll.sync` is audited on **transitions only**.
+    fn sync_if_enrolled(&self, actor: &AuditActor) {
+        let Some(enrollment) = self.enrollment.lock().unwrap().clone() else {
+            *self.last_sync_outcome.lock().unwrap() = None;
+            return;
+        };
+        let token = self.device_token.lock().unwrap().clone();
+        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+
+        // Compliance: overall + per-category states. Nothing else — no
+        // values, no hostnames, no events (SPEC sections 24, 54).
+        let block = self.tracker.lock().unwrap().block(&self.registry);
+        let report = compliance_report_body(
+            block.overall.as_str(),
+            block.capabilities.iter().map(|c| {
+                (
+                    c.capability.as_str().to_string(),
+                    c.state.as_str().to_string(),
+                )
+            }),
+        );
+        let compliance_ok = match &token {
+            Some(token) => client.compliance_report(token, &report).is_ok(),
+            None => false,
+        };
+        self.pending_compliance
+            .store(!compliance_ok, Ordering::SeqCst);
+
+        // Inventory: device info + capability states, hash-gated.
+        let sources = InventorySources {
+            os_release_path: self.cfg.os_release_path.clone(),
+            kernel_release_path: self.cfg.kernel_release_path.clone(),
+        };
+        let capabilities: Vec<(String, bool, Value)> = self
+            .registry
+            .iter()
+            .map(|cap| {
+                let descriptor = self.describe(cap);
+                (
+                    descriptor.capability.as_str().to_string(),
+                    descriptor.supported,
+                    descriptor.current_state,
+                )
+            })
+            .collect();
+        let inventory = inventory_body(&sources, &self.observed_hostname(), capabilities);
+        let hash = sha256_hex(&serde_json::to_vec(&inventory).expect("inventory serializes"));
+        let must_send = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
+            || self.pending_inventory.load(Ordering::SeqCst);
+        let mut new_hash = enrollment.last_inventory_hash.clone();
+        let inventory_outcome = if !must_send {
+            "unchanged"
+        } else {
+            let sent = match &token {
+                Some(token) => client.inventory_report(token, &inventory).is_ok(),
+                None => false,
+            };
+            if sent {
+                new_hash = Some(hash);
+                "success"
+            } else {
+                "unreachable"
+            }
+        };
+        self.pending_inventory
+            .store(inventory_outcome == "unreachable", Ordering::SeqCst);
+
+        // Transition-only audit (milestone-5.md section 7): once on
+        // reachable→unreachable, once on recovery — never one event per
+        // 120 s retry.
+        let overall = if compliance_ok && inventory_outcome != "unreachable" {
+            "success"
+        } else {
+            "unreachable"
+        };
+        let previous = enrollment.last_sync.result.clone();
+        if overall == "unreachable" && previous.as_deref() != Some("unreachable") {
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.sync",
+                RESOURCE_CONTROL_PLANE,
+                "unreachable",
+                enrollment.policy_ids(),
+            ));
+        }
+        if overall == "success" && previous.as_deref() == Some("unreachable") {
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.sync",
+                RESOURCE_CONTROL_PLANE,
+                AuditOutcome::Success.as_str(),
+                enrollment.policy_ids(),
+            ));
+        }
+
+        *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
+            compliance: if compliance_ok {
+                "success".to_string()
+            } else {
+                "unreachable".to_string()
+            },
+            inventory: inventory_outcome.to_string(),
+        });
+
+        // Persist last_sync / the inventory hash — only if still enrolled
+        // (a concurrent enroll.stop wins).
+        let mut slot = self.enrollment.lock().unwrap();
+        if let Some(current) = slot.as_mut() {
+            current.last_sync = LastSyncRecord {
+                at: Some(utc_now_rfc3339()),
+                result: Some(overall.to_string()),
+            };
+            current.last_inventory_hash = new_hash;
+            if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+                eprintln!("punard: could not persist enrollment sync state: {e}");
+            }
+        }
+    }
+
+    /// Rewrite the ipc.md section 9 summary file when the tuple changed
+    /// (atomic tmp+rename, 0644). Best-effort: a write failure is logged,
+    /// never fatal — the file is non-authoritative display data.
+    fn publish_status_summary(&self) {
+        let (enrolled, org_name) = match &*self.enrollment.lock().unwrap() {
+            Some(e) => (true, Some(e.org.display_name.clone())),
+            None => (false, None),
+        };
+        let overall = self
+            .tracker
+            .lock()
+            .unwrap()
+            .block(&self.registry)
+            .overall
+            .as_str()
+            .to_string();
+        let summary = StatusSummary {
+            v: 1,
+            enrolled,
+            org_name,
+            compliance_overall: overall,
+            ts: utc_now_rfc3339(),
+        };
+        let mut written = self.status_written.lock().unwrap();
+        let unchanged = written.as_ref().is_some_and(|w| {
+            w.enrolled == summary.enrolled
+                && w.org_name == summary.org_name
+                && w.compliance_overall == summary.compliance_overall
+        });
+        if unchanged {
+            return;
+        }
+        match write_status_summary(&self.cfg.status_file, &summary) {
+            Ok(()) => *written = Some(summary),
+            Err(e) => eprintln!(
+                "punard: could not write {}: {e}",
+                self.cfg.status_file.display()
+            ),
+        }
     }
 
     fn internal(&self, detail: &str) -> IpcError {

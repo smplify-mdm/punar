@@ -56,10 +56,12 @@ stage_desktop_extra() {
     # vendored punar-base.nft, M3) is versioned and must survive staging.
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
-           "${extra}/usr/share/punar/theme"
+           "${extra}/usr/share/punar/theme" \
+           "${extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
-             "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme"
+             "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
+             "${extra}/usr/share/punar/fixtures/acme"
 
     # Hyprland config (hyprlang files; install path per their headers).
     cp "${mod}"/hypr/*.conf "${extra}/etc/xdg/hypr/"
@@ -83,6 +85,17 @@ stage_desktop_extra() {
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
+    # M5: Acme organization fixtures for the dev/CI mock control plane
+    # (milestone-5.md §4.4) — served VERBATIM by punar-mock-smplify from
+    # /usr/share/punar/fixtures/acme. Same staged-not-committed-twice
+    # pattern as the shell QML: fixtures/organizations/acme stays the single
+    # source of truth (host cargo tests and ./tools/validate-schemas.sh run
+    # against the same bytes the image ships). Only the three JSON files the
+    # mock reads (org.json + policy-source + desired-state); the referenced
+    # ai_policy_file lives outside the fixture dir and is deliberately not
+    # served until AI capabilities land (M7+).
+    cp "${REPO_ROOT}/fixtures/organizations/acme/"*.json \
+       "${extra}/usr/share/punar/fixtures/acme/"
 }
 
 # Compile punard + punarctl from the workspace with the snapshot's own Rust
@@ -103,19 +116,26 @@ stage_punar_binaries() {
     local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
     local cargo_target="${IMAGES_DIR}/cache/cargo-target"
 
-    echo "==> Building punard + punarctl (release, --locked; $(rustc --version))"
+    # punar-mock-smplify is the M5 dev/CI mock control plane (milestone-5.md
+    # §4) — built and staged alongside the product binaries because the CI VM
+    # has no network and the M5 exercise needs an in-VM counterparty. It is a
+    # test harness, not a product component: its unit is never enabled and
+    # only m5-check.sh starts/stops it.
+    echo "==> Building punard + punarctl + punar-mock-smplify (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
             CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
                 CARGO_TARGET_DIR="${cargo_target}" \
-                cargo build --release --locked -p punard -p punarctl
+                cargo build --release --locked \
+                    -p punard -p punarctl -p punar-mock-smplify
     )
 
-    echo "==> Staging punard + punarctl into ${extra}/usr/bin (gitignored)"
+    echo "==> Staging punard + punarctl + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
         "${cargo_target}/release/punarctl" \
+        "${cargo_target}/release/punar-mock-smplify" \
         "${extra}/usr/bin/"
 }
 
@@ -204,7 +224,7 @@ echo "==> Writing build metadata"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "note: unsigned development images; VM-only (no linux-firmware)"
-    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build)"
+    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only)"
 } > out/build-info.txt
 
 # Bare filenames (no ./ prefix) — CI re-verifies with `sha256sum -c` against

@@ -101,6 +101,19 @@ systemctl start punar-m3-check.service \
 systemctl start punar-m4-check.service \
     || echo "punar: idle-ram: punar-m4-check.service failed to start" >&2
 
+# M5 exercise ordering hook (milestone-5.md §10.1): start punar-m5-check
+# SYNCHRONOUSLY strictly AFTER the M4 exercise (whose set cycle left the
+# user-preference provenance the enrollment journey pins over and restores
+# to) and strictly BEFORE the export below, so m5-report.txt / m5-*.json /
+# m5-received-*.jsonl / punar-m5*.png ship in the same tar. The check
+# starts and stops the never-enabled punar-mock-smplify.service itself, so
+# the dev/CI mock runs only inside this window — structurally outside the
+# idle-RAM sampling (far above) and the punard.service-cgroup RSS sample.
+# Never fatal here: the verdict lives in m5-report.txt and the host gate
+# (tools/boot-test.sh) parses it.
+systemctl start punar-m5-check.service \
+    || echo "punar: idle-ram: punar-m5-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

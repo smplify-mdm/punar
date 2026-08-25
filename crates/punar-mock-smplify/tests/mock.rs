@@ -8,7 +8,7 @@
 //! that would break the in-VM m5-check breaks these host tests first.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -140,14 +140,33 @@ impl Drop for TestMock {
     }
 }
 
+/// Read exactly one `\n`-terminated response line, one byte at a time.
+/// Deliberately unbuffered: a per-call `BufReader` over a cloned fd would
+/// swallow any *second* pipelined response into its buffer and drop it,
+/// making the next read block until the server's 10 s read timeout closes
+/// the connection (the sequential-pipelining test would flake).
 fn read_response(stream: &mut UnixStream) -> Option<Value> {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).unwrap();
-    if n == 0 {
-        return None;
+    use std::io::Read;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte).unwrap() {
+            0 => {
+                if line.is_empty() {
+                    return None;
+                }
+                break; // trailing data without newline: treat as final line
+            }
+            _ => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+            }
+        }
     }
-    Some(serde_json::from_str(line.trim_end()).expect("response is one JSON object"))
+    let text = String::from_utf8(line).expect("response is UTF-8");
+    Some(serde_json::from_str(text.trim_end()).expect("response is one JSON object"))
 }
 
 fn read_jsonl(path: &Path) -> Vec<Value> {

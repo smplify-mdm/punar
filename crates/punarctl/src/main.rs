@@ -28,6 +28,7 @@ mod ipc;
 mod model;
 mod views;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -95,6 +96,12 @@ struct Cli {
 enum Command {
     /// Show daemon and device status.
     Status,
+    /// Enroll this device with an organization, or inspect/stop the
+    /// enrollment (Milestone 5 — against the dev/CI mock control plane).
+    Enroll {
+        #[command(subcommand)]
+        command: EnrollCommand,
+    },
     /// List capabilities from the capability registry.
     Capabilities {
         #[command(subcommand)]
@@ -224,6 +231,25 @@ enum DebugCommand {
     Rpc { method: String },
 }
 
+#[derive(Subcommand)]
+enum EnrollCommand {
+    /// Enroll with the organization at <domain> (root only; explicit by
+    /// design — enrollment is never automatic, SPEC section 24).
+    Start {
+        /// Organization domain, like `acme.com`.
+        domain: String,
+    },
+    /// Show enrollment state (never the device token).
+    Status,
+    /// Unenroll: remove the org policy layers and restore personal state
+    /// (root only; local — the org keeps what it already received).
+    Stop {
+        /// Skip the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Print the one-line stub notice for `invocation` and exit nonzero.
 fn stub(invocation: &str, milestone: &Milestone) -> ExitCode {
     eprintln!("punarctl {invocation}: not implemented until {milestone}");
@@ -265,6 +291,39 @@ fn fail(error: &CallError) -> ExitCode {
     ExitCode::from(error.exit_code())
 }
 
+/// Print a result object as one JSON line (the `--json` contract: the IPC
+/// `result` verbatim).
+fn print_json(result: &Value) -> ExitCode {
+    match serde_json::to_string(result) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&CallError::Protocol {
+            why: format!("the result could not be re-encoded ({e})"),
+        }),
+    }
+}
+
+/// Render a successful result with `render`, or print it verbatim in
+/// `--json` mode.
+fn render_or_json(
+    json: bool,
+    result: &Value,
+    render: impl FnOnce(&Value) -> Result<String, String>,
+) -> ExitCode {
+    if json {
+        return print_json(result);
+    }
+    match render(result) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => fail(&CallError::Protocol { why }),
+    }
+}
+
 /// Run one IPC call and print either the verbatim JSON result or the
 /// rendered human view. The human table and the JSON are two renderers
 /// over one result — they can never disagree.
@@ -276,27 +335,7 @@ fn rpc(
     render: impl FnOnce(&Value) -> Result<String, String>,
 ) -> ExitCode {
     match client.call(method, params) {
-        Ok(result) => {
-            if json {
-                match serde_json::to_string(&result) {
-                    Ok(line) => {
-                        println!("{line}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(e) => fail(&CallError::Protocol {
-                        why: format!("the result could not be re-encoded ({e})"),
-                    }),
-                }
-            } else {
-                match render(&result) {
-                    Ok(text) => {
-                        print!("{text}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(why) => fail(&CallError::Protocol { why }),
-                }
-            }
-        }
+        Ok(result) => render_or_json(json, &result, render),
         Err(error) => fail(&error),
     }
 }
@@ -308,7 +347,71 @@ fn main() -> ExitCode {
     let json = cli.json;
 
     match cli.command {
-        Command::Status => rpc(&client, json, "status", None, |v| views::status(&style, v)),
+        Command::Status => match client.call("status", None) {
+            // The human view's org row cites the policy ids, which live in
+            // `enroll.status` (contract section 7) — a second read, fetched
+            // only when the device is enrolled; the row degrades to the
+            // org domain if it fails. `--json` prints the status result
+            // verbatim, untouched.
+            Ok(result) => render_or_json(json, &result, |v| {
+                let policy_ids: Vec<String> =
+                    if v.get("enrolled").and_then(Value::as_bool) == Some(true) {
+                        client
+                            .call("enroll.status", None)
+                            .ok()
+                            .and_then(|s| s.get("policy_ids").cloned())
+                            .and_then(|ids| serde_json::from_value(ids).ok())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                views::status(&style, v, &policy_ids)
+            }),
+            Err(error) => fail(&error),
+        },
+        Command::Enroll { command } => {
+            let hostname = local_hostname();
+            match command {
+                EnrollCommand::Start { domain } => {
+                    // 90 s client budget for this one verb (contract
+                    // section 2): the pipeline runs a full reconcile pass
+                    // server-side.
+                    match client.call_with_timeout(
+                        "enroll.start",
+                        Some(json!({ "org_domain": domain })),
+                        crate::ipc::ENROLL_START_TIMEOUT,
+                    ) {
+                        Ok(result) => render_or_json(json, &result, |v| {
+                            views::enroll_start(&style, v, &hostname)
+                        }),
+                        Err(error) => fail(&error),
+                    }
+                }
+                EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
+                    views::enroll_status(&style, v, &hostname)
+                }),
+                EnrollCommand::Stop { yes } => {
+                    // Interactive confirmation (D-014: destructive verbs
+                    // confirm): prompted only on a TTY without --yes;
+                    // scripts and --json calls are deliberate already.
+                    if !yes && !json && std::io::stdin().is_terminal() {
+                        eprint!(
+                            "Unenroll from the organization? Org policy layers are removed \
+                             and all sync stops. Type yes to continue: "
+                        );
+                        let mut answer = String::new();
+                        let _ = std::io::stdin().read_line(&mut answer);
+                        if answer.trim() != "yes" {
+                            eprintln!("Unenroll aborted — nothing was changed.");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    rpc(&client, json, "enroll.stop", None, |v| {
+                        views::enroll_stop(&style, v, &hostname)
+                    })
+                }
+            }
+        }
         Command::Capabilities { command } => match command {
             None => {
                 let hostname = local_hostname();
@@ -331,16 +434,36 @@ fn main() -> ExitCode {
                 desired_state,
             }) => {
                 let hostname = local_hostname();
-                rpc(
-                    &client,
-                    json,
+                match client.call(
                     "capabilities.set",
                     Some(json!({
                         "capability": capability.as_str(),
                         "desired_state": desired_state,
                     })),
-                    |v| views::set(&style, v, &hostname),
-                )
+                ) {
+                    Ok(result) => render_or_json(json, &result, |v| {
+                        // M5 (contract section 5.4): an overridden set
+                        // renders the "Recorded, not applied" verdict
+                        // citing the pinning source — fetched via
+                        // `policy.explain` (the set result deliberately
+                        // stays M4-shaped). Best-effort: without it the
+                        // verdict still states the override.
+                        let pinning: Option<model::PolicyExplain> =
+                            if v.get("overridden").and_then(Value::as_bool) == Some(true) {
+                                client
+                                    .call(
+                                        "policy.explain",
+                                        Some(json!({ "path": capability.as_str() })),
+                                    )
+                                    .ok()
+                                    .and_then(|e| serde_json::from_value(e).ok())
+                            } else {
+                                None
+                            };
+                        views::set(&style, v, &hostname, pinning.as_ref())
+                    }),
+                    Err(error) => fail(&error),
+                }
             }
         },
         Command::Audit { command } => match command {
@@ -458,6 +581,11 @@ mod tests {
                 "punar-m3",
             ],
             &["punarctl", "audit", "tail", "-n", "20"],
+            &["punarctl", "enroll", "start", "acme.com"],
+            &["punarctl", "enroll", "status"],
+            &["punarctl", "enroll", "stop"],
+            &["punarctl", "enroll", "stop", "--yes"],
+            &["punarctl", "--json", "enroll", "start", "acme.com"],
             &["punarctl", "debug", "rpc", "system.exec"],
             &["punarctl", "--json", "status"],
             &["punarctl", "status", "--json"],

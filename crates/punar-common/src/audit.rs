@@ -426,6 +426,13 @@ pub enum AuditError {
     Io(#[from] io::Error),
 }
 
+/// Size-capped rotation threshold (docs/api/ipc.md §6, delivered in M5):
+/// when the live file has reached this size at write time, it is renamed
+/// to `<name>.1` (replacing any older rotated file — exactly one is kept)
+/// and a fresh live file is started. `audit.tail` reads the live file
+/// only, unchanged.
+pub const AUDIT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Append-only JSONL audit writer (see the module docs for the durability
 /// policy and permission split).
 ///
@@ -438,12 +445,25 @@ pub enum AuditError {
 pub struct AuditWriter {
     file: File,
     path: PathBuf,
+    /// Rotation threshold — [`AUDIT_ROTATE_BYTES`] in production; tests
+    /// shrink it to exercise rotation without writing 8 MiB.
+    rotate_bytes: u64,
 }
 
 impl AuditWriter {
     /// Open (or create, mode `0640`) the audit log for appending.
     pub fn open(path: impl Into<PathBuf>) -> io::Result<AuditWriter> {
         let path = path.into();
+        let file = Self::open_live(&path)?;
+        Ok(AuditWriter {
+            file,
+            path,
+            rotate_bytes: AUDIT_ROTATE_BYTES,
+        })
+    }
+
+    /// Open/create the live file (append mode, `0640` asserted).
+    fn open_live(path: &Path) -> io::Result<File> {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
@@ -451,13 +471,13 @@ impl AuditWriter {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o640);
         }
-        let file = options.open(&path)?;
+        let file = options.open(path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o640))?;
         }
-        Ok(AuditWriter { file, path })
+        Ok(file)
     }
 
     /// The path this writer appends to.
@@ -465,8 +485,31 @@ impl AuditWriter {
         &self.path
     }
 
-    /// Validate, serialize, append as one line, and fdatasync. Nothing is
-    /// written for schema-invalid events.
+    /// The `<name>.1` path the live file rotates to.
+    fn rotated_path(&self) -> PathBuf {
+        let mut os = self.path.clone().into_os_string();
+        os.push(".1");
+        PathBuf::from(os)
+    }
+
+    /// The ipc.md §6 size-capped rotation, checked at write time: once the
+    /// live file has reached the threshold, rename it to `<name>.1`
+    /// (replacing any previous rotated file — one is kept, older history
+    /// is discarded) and start a fresh live file. The event that triggered
+    /// the check lands in the fresh file, so no single write is split
+    /// across files.
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        if self.file.metadata()?.len() < self.rotate_bytes {
+            return Ok(());
+        }
+        std::fs::rename(&self.path, self.rotated_path())?;
+        self.file = Self::open_live(&self.path)?;
+        Ok(())
+    }
+
+    /// Validate, serialize, rotate if the live file is at the size cap,
+    /// append as one line, and fdatasync. Nothing is written for
+    /// schema-invalid events.
     pub fn append(&mut self, event: &AuditEvent) -> Result<(), AuditError> {
         validate_event_schema(event).map_err(AuditError::Schema)?;
         let mut line = serde_json::to_string(event)?;
@@ -475,6 +518,7 @@ impl AuditWriter {
         // below is therefore always one event per line.
         debug_assert!(!line.contains('\n'));
         line.push('\n');
+        self.rotate_if_needed()?;
         self.file.write_all(line.as_bytes())?;
         self.file.sync_data()?;
         Ok(())
@@ -960,6 +1004,90 @@ mod tests {
         let path = temp_log_path("missing");
         assert_eq!(tail(&path, 20).unwrap(), AuditTail::default());
         assert_eq!(count_events(&path).unwrap(), 0);
+    }
+
+    // -- rotation (ipc.md §6, delivered in M5) ------------------------------
+
+    #[test]
+    fn writer_rotates_at_the_threshold_keeping_one_file() {
+        let path = temp_log_path("rotate");
+        let rotated = {
+            let mut os = path.clone().into_os_string();
+            os.push(".1");
+            PathBuf::from(os)
+        };
+        let _ = std::fs::remove_file(&rotated);
+
+        let mut writer = AuditWriter::open(&path).unwrap();
+        // Shrink the threshold so the test rotates without writing 8 MiB;
+        // production keeps AUDIT_ROTATE_BYTES.
+        writer.rotate_bytes = 600;
+        let line_len = {
+            let mut probe = serde_json::to_string(&golden_set_event()).unwrap();
+            probe.push('\n');
+            probe.len() as u64
+        };
+        // Fill past the threshold, then one more append triggers rotation.
+        let mut appended = 0u64;
+        while appended * line_len < 600 {
+            writer.append(&golden_set_event()).unwrap();
+            appended += 1;
+        }
+        writer.append(&golden_set_event()).unwrap();
+
+        // Exactly one rotated file; the live file holds only the
+        // triggering event (no write is split across files) and both
+        // files together hold every event.
+        assert!(rotated.exists(), "rotated file missing");
+        assert_eq!(count_events(&path).unwrap(), 1, "fresh live file");
+        assert_eq!(count_events(&rotated).unwrap(), appended);
+        for file in [&path, &rotated] {
+            for line in std::fs::read_to_string(file).unwrap().lines() {
+                let event: AuditEvent = serde_json::from_str(line).unwrap();
+                assert_eq!(validate_event_schema(&event), Ok(()));
+            }
+        }
+
+        // A second rotation replaces the rotated file (one kept, older
+        // discarded) rather than accumulating .2/.3/...
+        let first_rotation_count = appended;
+        let mut appended = 1u64; // the triggering event already in the live file
+        while appended * line_len < 600 {
+            writer.append(&golden_set_event()).unwrap();
+            appended += 1;
+        }
+        writer.append(&golden_set_event()).unwrap();
+        assert_eq!(count_events(&path).unwrap(), 1);
+        assert_eq!(count_events(&rotated).unwrap(), appended);
+        assert_ne!(
+            count_events(&rotated).unwrap(),
+            first_rotation_count + appended,
+            "older history must be discarded, not accumulated"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn writer_never_rotates_below_the_threshold() {
+        let path = temp_log_path("norotate");
+        let rotated = {
+            let mut os = path.clone().into_os_string();
+            os.push(".1");
+            PathBuf::from(os)
+        };
+        let _ = std::fs::remove_file(&rotated);
+        let mut writer = AuditWriter::open(&path).unwrap();
+        for _ in 0..5 {
+            writer.append(&golden_set_event()).unwrap();
+        }
+        assert!(
+            !rotated.exists(),
+            "rotation must not fire below AUDIT_ROTATE_BYTES"
+        );
+        assert_eq!(count_events(&path).unwrap(), 5);
+        let _ = std::fs::remove_file(&path);
     }
 
     // -- redaction (SPEC sections 1.19, 53) ---------------------------------

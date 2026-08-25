@@ -576,7 +576,9 @@ impl Method {
                 Self::parse_required_params(method, params).map(Method::PolicyExplain)
             }
             "enroll.start" => Self::parse_required_params(method, params).map(Method::EnrollStart),
-            "enroll.status" => Self::expect_no_params(method, params).map(|()| Method::EnrollStatus),
+            "enroll.status" => {
+                Self::expect_no_params(method, params).map(|()| Method::EnrollStatus)
+            }
             "enroll.stop" => Self::expect_no_params(method, params).map(|()| Method::EnrollStop),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
@@ -1850,7 +1852,10 @@ mod tests {
             serde_json::to_string(&Mode::Personal).unwrap(),
             "\"personal\""
         );
-        assert_eq!(serde_json::to_string(&Mode::Managed).unwrap(), "\"managed\"");
+        assert_eq!(
+            serde_json::to_string(&Mode::Managed).unwrap(),
+            "\"managed\""
+        );
         assert_eq!(
             serde_json::from_str::<Mode>("\"managed\"").unwrap(),
             Mode::Managed

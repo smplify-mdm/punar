@@ -30,6 +30,23 @@ pub struct Status {
     /// result still renders (contract 3.3 tolerance).
     #[serde(default)]
     pub compliance: Option<Compliance>,
+    /// M5 addition (contract section 5.1) — present while enrolled,
+    /// absent on a personal device (enrollment adds fields, never
+    /// redraws).
+    #[serde(default)]
+    pub org: Option<Org>,
+}
+
+/// The `org` object of `status` / `enroll.*` results (contract sections
+/// 5.1, 5.9, 5.10).
+#[derive(Deserialize)]
+pub struct Org {
+    #[allow(dead_code)]
+    pub id: String,
+    #[allow(dead_code)]
+    pub name: String,
+    pub display_name: String,
+    pub domain: String,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +115,73 @@ pub struct CapabilityGet {
 pub struct CapabilitySet {
     pub descriptor: Descriptor,
     pub changed: bool,
+    /// M4/M5 (contract section 5.4): present (and `true`) only when a
+    /// higher-precedence source outranks the recorded preference —
+    /// recorded-but-overridden, not forbidden.
+    #[serde(default)]
+    pub overridden: Option<bool>,
+    /// The effective value that was applied when `overridden` is set.
+    #[serde(default)]
+    pub effective_state: Option<Value>,
+}
+
+/// `enroll.start` result (contract section 5.9).
+#[derive(Deserialize)]
+pub struct EnrollStart {
+    #[allow(dead_code)]
+    pub enrolled: bool,
+    pub org: Org,
+    pub policy_ids: Vec<String>,
+    /// The honesty label — `"simulated"` from the mock control plane,
+    /// rendered loud by design.
+    pub attestation: String,
+    #[serde(default)]
+    pub enrolled_at: Option<String>,
+    #[serde(default)]
+    pub first_sync: Option<FirstSync>,
+}
+
+/// The `first_sync` object of [`EnrollStart`].
+#[derive(Deserialize)]
+pub struct FirstSync {
+    pub compliance: String,
+    pub inventory: String,
+}
+
+/// `enroll.status` result (contract section 5.10). Unenrolled:
+/// `{"enrolled": false}` with everything else absent.
+#[derive(Deserialize)]
+pub struct EnrollStatus {
+    pub enrolled: bool,
+    #[serde(default)]
+    pub org: Option<Org>,
+    #[serde(default)]
+    pub policy_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub enrolled_at: Option<String>,
+    #[serde(default)]
+    pub attestation: Option<String>,
+    #[serde(default)]
+    pub last_sync: Option<LastSync>,
+}
+
+/// The `last_sync` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct LastSync {
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
+}
+
+/// `enroll.stop` result (contract section 5.11).
+#[derive(Deserialize)]
+pub struct EnrollStop {
+    #[allow(dead_code)]
+    pub enrolled: bool,
+    pub removed_policy_ids: Vec<String>,
 }
 
 /// `audit.tail` result (contract section 5.5). Events are

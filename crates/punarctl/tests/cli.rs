@@ -225,6 +225,78 @@ fn fixture_policy_explain(path: &str) -> Option<Value> {
     Some(entry)
 }
 
+// ---------------------------------------------------------------------------
+// M5 enrollment fixtures (contract sections 5.1, 5.4, 5.9–5.11)
+// ---------------------------------------------------------------------------
+
+fn fixture_org() -> Value {
+    json!({"id": "acme", "name": "Acme",
+           "display_name": "Acme Engineering", "domain": "acme.com"})
+}
+
+fn fixture_enroll_start() -> Value {
+    json!({
+        "enrolled": true,
+        "org": fixture_org(),
+        "policy_ids": ["eng-baseline-v12"],
+        "attestation": "simulated",
+        "enrolled_at": "2026-08-26T09:00:00Z",
+        "first_sync": {"compliance": "success", "inventory": "success"}
+    })
+}
+
+fn fixture_enroll_status() -> Value {
+    json!({
+        "enrolled": true,
+        "org": fixture_org(),
+        "policy_ids": ["eng-baseline-v12"],
+        "enrolled_at": "2026-08-26T09:00:00Z",
+        "attestation": "simulated",
+        "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
+                       "pending": false}
+    })
+}
+
+fn fixture_enroll_stop() -> Value {
+    json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"]})
+}
+
+/// A managed device's responder: `status` carries the M5 org fields; a
+/// root set on the org-pinned firewall path is recorded-but-overridden;
+/// `policy.explain` cites the pinning source (contract section 5.4).
+fn managed_respond(request: &Value) -> Result<Value, Value> {
+    let method = request["method"].as_str().expect("method must be a string");
+    match method {
+        "status" => {
+            let mut status = fixture_status();
+            let map = status.as_object_mut().unwrap();
+            map.insert("mode".to_string(), json!("managed"));
+            map.insert("enrolled".to_string(), json!(true));
+            map.insert("org".to_string(), fixture_org());
+            Ok(status)
+        }
+        "capabilities.set" => {
+            let params = request.get("params").expect("set takes params");
+            assert_eq!(params["capability"], "security.firewall");
+            Ok(json!({
+                "descriptor": firewall_descriptor(),
+                "changed": false,
+                "overridden": true,
+                "effective_state": "enabled"
+            }))
+        }
+        "policy.explain" => Ok(json!({
+            "effective_value": "enabled",
+            "source": {"kind": "organization_baseline", "rank": 2,
+                       "policy_id": "eng-baseline-v12",
+                       "name": "Acme Engineering Baseline"},
+            "user_override_permitted": false,
+            "compliance_state": "compliant"
+        })),
+        _ => respond(request),
+    }
+}
+
 /// The ipc.md section 3.2 denial example — the section 73 voice the real
 /// daemon sends a non-root `capabilities.set`.
 const DENIED_MESSAGE: &str = "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>";
@@ -298,6 +370,21 @@ fn respond(request: &Value) -> Result<Value, Value> {
             Ok(json!({"events": events[skip..].to_vec()}))
         }
         "reconcile" => Ok(fixture_reconcile()),
+        "enroll.start" => {
+            let params = params.expect("enroll.start takes params");
+            let object = params.as_object().unwrap();
+            assert_eq!(object.len(), 1, "enroll.start takes only `org_domain`");
+            assert_eq!(object["org_domain"], "acme.com");
+            Ok(fixture_enroll_start())
+        }
+        "enroll.status" => {
+            assert!(params.is_none(), "enroll.status takes no params");
+            Ok(fixture_enroll_status())
+        }
+        "enroll.stop" => {
+            assert!(params.is_none(), "enroll.stop takes no params");
+            Ok(fixture_enroll_stop())
+        }
         "policy.effective" => Ok(fixture_policy_effective()),
         "policy.explain" => {
             let params = params.expect("policy.explain takes params");
@@ -327,7 +414,7 @@ fn respond(request: &Value) -> Result<Value, Value> {
     }
 }
 
-fn handle_connection(stream: UnixStream) {
+fn handle_connection(stream: UnixStream, responder: fn(&Value) -> Result<Value, Value>) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut writer = stream;
     let mut line = String::new();
@@ -337,7 +424,7 @@ fn handle_connection(stream: UnixStream) {
         }
         let request: Value = serde_json::from_str(line.trim_end()).expect("request must be JSON");
         let id = request["id"].clone();
-        let envelope = match respond(&request) {
+        let envelope = match responder(&request) {
             Ok(result) => json!({"v": 1, "id": id, "result": result}),
             Err(error) => json!({"v": 1, "id": id, "error": error}),
         };
@@ -346,8 +433,9 @@ fn handle_connection(stream: UnixStream) {
     }
 }
 
-/// Start a mock daemon on a fresh tempdir socket; returns the socket path.
-fn start_mock() -> PathBuf {
+/// Start a mock daemon with a custom responder on a fresh tempdir socket;
+/// returns the socket path.
+fn start_mock_with(responder: fn(&Value) -> Result<Value, Value>) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
         "punarctl-mock-{}-{}",
@@ -361,13 +449,18 @@ fn start_mock() -> PathBuf {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    thread::spawn(move || handle_connection(stream));
+                    thread::spawn(move || handle_connection(stream, responder));
                 }
                 Err(_) => break,
             }
         }
     });
     path
+}
+
+/// Start the default mock daemon (the section 5 fixtures).
+fn start_mock() -> PathBuf {
+    start_mock_with(respond)
 }
 
 fn run(socket: &PathBuf, args: &[&str]) -> Output {
@@ -773,4 +866,120 @@ fn unimplemented_verbs_keep_their_milestone_stubs() {
             stderr(&output)
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// M5 enrollment verbs (contract sections 5.9–5.11, 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enroll_start_renders_the_loud_simulated_label_and_json_round_trips() {
+    let socket = start_mock();
+
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("P U N A R   ·   E N R O L L"), "{text}");
+    assert!(text.contains("ATTESTATION"), "{text}");
+    // The honesty label, loud by design (milestone-5.md section 5.2).
+    assert!(text.contains("SIMULATED"), "{text}");
+    assert!(text.contains("Acme Engineering · acme.com"), "{text}");
+    assert!(text.contains("eng-baseline-v12"), "{text}");
+    assert!(text.contains("✓ ENROLLED · ACME ENGINEERING"), "{text}");
+
+    let output = run(&socket, &["--json", "enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_enroll_start());
+    // No device token anywhere in any enrollment output, ever.
+    assert!(!stdout(&output).contains("tok_"));
+}
+
+#[test]
+fn enroll_status_and_stop_render_and_round_trip() {
+    let socket = start_mock();
+
+    let output = run(&socket, &["enroll", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("SIMULATED"), "{text}");
+    assert!(text.contains("LAST SYNC"), "{text}");
+    assert!(text.contains("SUCCESS"), "{text}");
+
+    let output = run(&socket, &["--json", "enroll", "status"]);
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_enroll_status());
+
+    // `enroll stop` without --yes: stdin is not a TTY under run(), so the
+    // interactive confirmation is skipped by design (scripts and the
+    // m5-check call it plainly).
+    let output = run(&socket, &["enroll", "stop"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("PERSONAL STATE RESTORED · ORG LAYERS REMOVED"),
+        "{text}"
+    );
+
+    let output = run(&socket, &["--json", "enroll", "stop", "--yes"]);
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_enroll_stop());
+}
+
+#[test]
+fn managed_status_renders_the_org_row_from_the_enroll_status_follow_up() {
+    let socket = start_mock_with(managed_respond);
+    let output = run(&socket, &["status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("ORGANIZATION"), "{text}");
+    // Display name + policy id (fetched via enroll.status; ipc.md § 7).
+    assert!(
+        text.contains("Acme Engineering · eng-baseline-v12"),
+        "{text}"
+    );
+    assert!(text.contains("MANAGED"), "{text}");
+    assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+
+    // --json stays the status result verbatim — no follow-up merge.
+    let output = run(&socket, &["--json", "status"]);
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value["mode"], "managed");
+    assert_eq!(value["org"]["id"], "acme");
+    assert!(value.get("policy_ids").is_none());
+}
+
+#[test]
+fn overridden_set_exits_0_with_the_recorded_not_applied_verdict() {
+    let socket = start_mock_with(managed_respond);
+    let output = run(
+        &socket,
+        &["capabilities", "set", "security.firewall", "disabled"],
+    );
+    // Recorded-but-overridden, not forbidden (SPEC section 39): exit 0.
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "RECORDED, NOT APPLIED · SECURITY.FIREWALL IS MANAGED BY \
+             ACME ENGINEERING BASELINE (ENG-BASELINE-V12) · EFFECTIVE: ENABLED"
+        ),
+        "{text}"
+    );
+
+    // --json was already complete in M4: the raw result, no extra fields.
+    let output = run(
+        &socket,
+        &[
+            "--json",
+            "capabilities",
+            "set",
+            "security.firewall",
+            "disabled",
+        ],
+    );
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value["changed"], false);
+    assert_eq!(value["overridden"], true);
+    assert_eq!(value["effective_state"], "enabled");
 }

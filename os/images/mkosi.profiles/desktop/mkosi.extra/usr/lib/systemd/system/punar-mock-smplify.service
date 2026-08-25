@@ -1,0 +1,49 @@
+# DEV/CI MOCK — NOT A PRODUCT COMPONENT (milestone-5.md §4).
+#
+# In-VM mock Smplify control plane for the Milestone 5 enrollment exercise:
+# serves the staged Acme fixtures (/usr/share/punar/fixtures/acme) verbatim
+# over a root-only UDS at /run/punar-mock-smplify/api.sock and records what
+# it receives under /var/lib/punar-mock-smplify so m5-check asserts the
+# RECEIVED side. It ships only because the CI VM has no network (-nic none)
+# and the milestone needs an in-VM counterparty — the same standing as the
+# m*-check.sh scripts.
+#
+# NEVER ENABLED, deliberately: no [Install] section, no .wants symlink
+# anywhere (m5-check asserts this discipline). Started and stopped ONLY by
+# m5-check.sh, so the mock never runs during boot, the idle-RAM sampling
+# window, or steady state (budgets: milestone-5.md §9 — the
+# PUNAR_SERVICES_RSS_MB gate reads the punard.service cgroup only, so this
+# unit is structurally outside it; it is CI scaffolding, not a service).
+#
+# Trust boundary, stated honestly (milestone-5.md §4.2 / spec section 61):
+# in production this hop is Punar ⇄ Smplify cloud over mutually
+# authenticated TLS; the mock replaces that transport with filesystem
+# admission — RuntimeDirectory 0750 root:root and a socket the binary
+# chmods 0600 root before listen(), so only root connects (punard and the
+# check). The device_token is still enforced at the protocol layer because
+# the token flow is what M5 rehearses. Never localhost TCP: a TCP mock
+# would put an unauthenticated control-plane look-alike on every CI image.
+#
+# Directories come from RuntimeDirectory/StateDirectory below rather than a
+# tmpfiles.d entry, deliberately: /run/punar-mock-smplify should exist
+# exactly while the mock runs (systemd removes it on stop — a stale socket
+# path is honest "unreachable" for the offline exercise), and the state dir
+# persists across mock restarts (StateDirectory), which the m5-check
+# stop→start recovery phase and the "mock keeps history after unenroll"
+# assertion both rely on.
+
+[Unit]
+Description=Punar mock Smplify control plane (dev/CI only — never enabled)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punar-mock-smplify
+RuntimeDirectory=punar-mock-smplify
+RuntimeDirectoryMode=0750
+StateDirectory=punar-mock-smplify
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,31 @@
+# M5 in-VM enrollment exercise (milestone-5.md §10). Runs m5-check.sh as
+# ROOT — same decided pattern as punar-m3/m4-check.service (no User=, no
+# sudo); unprivileged paths inside the script (the org-pinned set denial,
+# the grim screenshots under the session user) use runuser -u punar.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m4-check.service (whose set calls left the user-preference
+# provenance the enrollment journey pins over and restores to) and BEFORE
+# the /run/punar artifact export, so m5-report.txt / m5-*.json /
+# m5-received-*.jsonl / punar-m5*.png ship in the existing export tar.
+# Same not-enabled pattern as punar-m2/m3/m4-check — no .wants symlink,
+# so the mkosi preset-wipe lesson does not even come into play.
+#
+# The script starts and stops punar-mock-smplify.service itself (the
+# dev/CI mock's whole lifetime is this exercise — milestone-5.md §4.1),
+# and stops punard-reconcile.timer at its top / restarts it at its end
+# for single-actor sync determinism.
+
+[Unit]
+Description=Punar M5 enrollment exercise (CI)
+
+[Service]
+Type=oneshot
+# The exercise itself is quick (reconcile RPCs, two bounded 10 s
+# screenshot waits, two 15 s socket waits); 15 min is generous headroom
+# for TCG-emulated CI runs (milestone-5.md §10.1).
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m5-check.sh

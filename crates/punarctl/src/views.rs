@@ -91,10 +91,22 @@ fn compliance_rows(c: &model::Compliance) -> Vec<Row> {
     rows
 }
 
-/// `punarctl status`.
-pub fn status(style: &Style, result: &Value) -> Result<String, String> {
+/// Masthead context: `<hostname> · Personal` or `<hostname> · Managed`
+/// (M5 — enrollment adds the word, never redraws the layout).
+fn device_context(hostname: &str, enrolled: bool) -> String {
+    format!(
+        "{hostname} · {}",
+        if enrolled { "Managed" } else { "Personal" }
+    )
+}
+
+/// `punarctl status`. `org_policy_ids` is the policy-id list fetched from
+/// `enroll.status` when the device is enrolled (the status result itself
+/// carries only the org identity) — empty when unenrolled or when the
+/// follow-up read failed; the row then falls back to the org domain.
+pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Result<String, String> {
     let s: model::Status = parse(result)?;
-    let mut out = fmt::masthead(style, "Status", &personal_context(&s.hostname));
+    let mut out = fmt::masthead(style, "Status", &device_context(&s.hostname, s.enrolled));
 
     let device_desc = if s.enrolled {
         format!("{} · {} · enrolled", s.hostname, s.device_id)
@@ -114,8 +126,23 @@ pub fn status(style: &Style, result: &Value) -> Result<String, String> {
         None => "registry local · not yet reconciled".to_string(),
     };
 
-    let mut rows = vec![
-        Row::new("Device", &s.mode, Slot::Neutral, &device_desc),
+    let mut rows = vec![Row::new("Device", &s.mode, Slot::Neutral, &device_desc)];
+    if let Some(org) = &s.org {
+        // The M5 org row (ipc.md section 7): `Organization  <display
+        // name> · <policy id>`; never rendered on a personal device.
+        let detail = if org_policy_ids.is_empty() {
+            org.domain.clone()
+        } else {
+            org_policy_ids.join(" · ")
+        };
+        rows.push(Row::new(
+            "Organization",
+            "",
+            Slot::Neutral,
+            &format!("{} · {detail}", org.display_name),
+        ));
+    }
+    rows.extend([
         Row::new(
             "Daemon",
             "Ready",
@@ -131,7 +158,7 @@ pub fn status(style: &Style, result: &Value) -> Result<String, String> {
             Slot::Neutral,
             &reconcile_desc,
         ),
-    ];
+    ]);
     if let Some(audit) = &s.audit {
         rows.push(Row::new(
             "Audit",
@@ -284,12 +311,48 @@ pub fn capability(style: &Style, result: &Value, hostname: &str) -> Result<Strin
 
 /// `punarctl capabilities set <id> <state>` — post-verify descriptor plus
 /// a verdict line (the plate's one loud register).
-pub fn set(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+///
+/// M5 (contract section 5.4): `overridden: true` renders the neutral
+/// "Recorded, not applied" verdict — the preference was recorded and
+/// outranked, not forbidden (SPEC section 39; the root caller exits 0).
+/// `pinning` is the `policy.explain` entry for the capability, fetched by
+/// the caller so the verdict can cite the winning source by name; without
+/// it the verdict still states the override honestly.
+pub fn set(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    pinning: Option<&model::PolicyExplain>,
+) -> Result<String, String> {
     let outcome: model::CapabilitySet = parse(result)?;
     let d = &outcome.descriptor;
-    let mut out = fmt::masthead(style, "Set", &personal_context(hostname));
+    let overridden = outcome.overridden == Some(true);
+    let context = if overridden {
+        format!("{hostname} · Managed")
+    } else {
+        personal_context(hostname)
+    };
+    let mut out = fmt::masthead(style, "Set", &context);
     out.push_str(&fmt::rows(style, &descriptor_rows(d)));
-    if outcome.changed {
+    if overridden {
+        let effective = outcome
+            .effective_state
+            .as_ref()
+            .map(state_str)
+            .unwrap_or_else(|| state_str(&d.current_state));
+        let citation = match pinning {
+            Some(explain) => format!(
+                "{} is managed by {} ({})",
+                d.capability, explain.source.name, explain.source.policy_id
+            ),
+            None => format!("{} is managed by organization policy", d.capability),
+        };
+        out.push_str(&fmt::verdict(
+            style,
+            Slot::Neutral,
+            &format!("Recorded, not applied · {citation} · effective: {effective}"),
+        ));
+    } else if outcome.changed {
         out.push_str(&fmt::verdict(
             style,
             Slot::Ok,
@@ -530,6 +593,154 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// M5 enrollment views (contract sections 5.9–5.11; milestone-5.md § 8.3)
+// ---------------------------------------------------------------------------
+
+/// Rows shared by `enroll start` and `enroll status`: org identity, policy
+/// ids, and the loudly-labeled SIMULATED attestation (the honesty label —
+/// the mock control plane measures nothing, and the output says so).
+fn enrollment_rows(
+    org: &model::Org,
+    policy_ids: &[String],
+    attestation: &str,
+    enrolled_at: Option<&str>,
+) -> Vec<Row> {
+    let mut rows = vec![
+        Row::new(
+            "Organization",
+            "",
+            Slot::Neutral,
+            &format!("{} · {}", org.display_name, org.domain),
+        ),
+        Row::new("Policy", "", Slot::Neutral, &policy_ids.join(" · ")),
+        Row::new(
+            "Attestation",
+            attestation,
+            Slot::Warn,
+            "no real measurement — the mock control plane accepts every device",
+        ),
+    ];
+    if let Some(ts) = enrolled_at {
+        rows.push(Row::new("Enrolled", "", Slot::Neutral, &fmt::timestamp(ts)));
+    }
+    rows
+}
+
+/// `punarctl enroll start <domain>`.
+pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let outcome: model::EnrollStart = parse(result)?;
+    let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, true));
+    let mut rows = enrollment_rows(
+        &outcome.org,
+        &outcome.policy_ids,
+        &outcome.attestation,
+        outcome.enrolled_at.as_deref(),
+    );
+    if let Some(sync) = &outcome.first_sync {
+        rows.push(Row::new(
+            "First sync",
+            "",
+            Slot::Neutral,
+            &format!(
+                "compliance {} · inventory {}",
+                sync.compliance, sync.inventory
+            ),
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Ok,
+        &format!(
+            "✓ Enrolled · {} · {}",
+            outcome.org.display_name,
+            outcome.policy_ids.join(" · ")
+        ),
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Org policy applies from now on · compliance sync sends category states only",
+    ));
+    Ok(out)
+}
+
+/// `punarctl enroll status`.
+pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let status: model::EnrollStatus = parse(result)?;
+    let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, status.enrolled));
+    if !status.enrolled {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "Enrollment",
+                "None",
+                Slot::Neutral,
+                "personal device",
+            )],
+        ));
+        out.push_str(&fmt::note(
+            style,
+            "No organization is enrolled · nothing leaves this machine",
+        ));
+        return Ok(out);
+    }
+    let org = status
+        .org
+        .as_ref()
+        .ok_or_else(|| "enrolled result without an org object".to_string())?;
+    let policy_ids = status.policy_ids.clone().unwrap_or_default();
+    let attestation = status.attestation.as_deref().unwrap_or("unknown");
+    let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
+    if let Some(sync) = &status.last_sync {
+        let (value, slot) = match sync.result.as_deref() {
+            Some("success") => ("Success", Slot::Ok),
+            Some("unreachable") => ("Unreachable", Slot::Warn),
+            _ => ("Never", Slot::Neutral),
+        };
+        let mut desc = sync
+            .at
+            .as_deref()
+            .map(fmt::timestamp)
+            .unwrap_or_else(|| "no attempt yet".to_string());
+        if sync.pending {
+            desc.push_str(" · report queued — retried on the next reconcile pass");
+        }
+        rows.push(Row::new("Last sync", value, slot, &desc));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "Category-level sync only · states, never values or activity",
+    ));
+    Ok(out)
+}
+
+/// `punarctl enroll stop`.
+pub fn enroll_stop(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let outcome: model::EnrollStop = parse(result)?;
+    let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, false));
+    out.push_str(&fmt::rows(
+        style,
+        &[Row::new(
+            "Removed",
+            "",
+            Slot::Neutral,
+            &outcome.removed_policy_ids.join(" · "),
+        )],
+    ));
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Ok,
+        "Personal state restored · org layers removed",
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Unenrollment is local · reports the org already received are not retracted",
+    ));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,7 +757,7 @@ mod tests {
     #[test]
     fn views_reject_shapeless_results_with_a_reason() {
         let style = Style::plain();
-        let err = status(&style, &json!({"not": "a status"})).unwrap_err();
+        let err = status(&style, &json!({"not": "a status"}), &[]).unwrap_err();
         assert!(err.contains("unexpected result shape"));
     }
 
@@ -583,7 +794,7 @@ mod tests {
                 "last_remediation_at": null
             }
         });
-        let text = status(&style, &result).unwrap();
+        let text = status(&style, &result, &[]).unwrap();
         assert!(text.contains("OVERALL"), "{text}");
         assert!(text.contains("NON_COMPLIANT"), "{text}");
         assert!(
@@ -613,7 +824,7 @@ mod tests {
             "hostname": "punar-m3",
             "capabilities_total": 3
         });
-        let text = status(&style, &result).unwrap();
+        let text = status(&style, &result, &[]).unwrap();
         assert!(!text.contains("OVERALL"), "{text}");
         assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
     }
@@ -733,6 +944,177 @@ mod tests {
         // The M3 "reported only" wording must be gone from an M4 result.
         assert!(!text.contains("REPORTED ONLY"), "{text}");
         assert!(!text.contains("MILESTONE 3"), "{text}");
+    }
+
+    fn acme_org() -> serde_json::Value {
+        json!({"id": "acme", "name": "Acme",
+               "display_name": "Acme Engineering", "domain": "acme.com"})
+    }
+
+    #[test]
+    fn status_renders_the_org_row_only_while_enrolled() {
+        let style = Style::plain();
+        let mut result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "managed",
+            "enrolled": true,
+            "hostname": "punar-m5",
+            "capabilities_total": 3,
+            "org": acme_org()
+        });
+        let ids = vec!["eng-baseline-v12".to_string()];
+        let text = status(&style, &result, &ids).unwrap();
+        assert!(text.contains("ORGANIZATION"), "{text}");
+        assert!(
+            text.contains("Acme Engineering · eng-baseline-v12"),
+            "{text}"
+        );
+        assert!(text.contains("MANAGED"), "{text}");
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+
+        // Without the enroll.status follow-up, the row degrades to the
+        // domain instead of inventing a policy id.
+        let text = status(&style, &result, &[]).unwrap();
+        assert!(text.contains("Acme Engineering · acme.com"), "{text}");
+
+        // Personal device: byte-for-byte no org row (design section 8).
+        result["enrolled"] = json!(false);
+        result["mode"] = json!("personal");
+        result.as_object_mut().unwrap().remove("org");
+        let text = status(&style, &result, &[]).unwrap();
+        assert!(!text.contains("ORGANIZATION  "), "{text}");
+        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+    }
+
+    #[test]
+    fn overridden_set_renders_the_recorded_not_applied_verdict() {
+        let style = Style::plain();
+        let result = json!({
+            "descriptor": {
+                "capability": "security.firewall",
+                "supported": true,
+                "current_state": "enabled",
+                "desired_state": "enabled",
+                "mutable": true,
+                "requires_reboot": false,
+                "risk": "high",
+                "managed_by": "local",
+                "verification": "nftables"
+            },
+            "changed": false,
+            "overridden": true,
+            "effective_state": "enabled"
+        });
+        let pinning: model::PolicyExplain = serde_json::from_value(json!({
+            "effective_value": "enabled",
+            "source": {"kind": "organization_baseline", "rank": 2,
+                       "policy_id": "eng-baseline-v12",
+                       "name": "Acme Engineering Baseline"},
+            "user_override_permitted": false,
+            "compliance_state": "compliant"
+        }))
+        .unwrap();
+        let text = set(&style, &result, "punar-m5", Some(&pinning)).unwrap();
+        assert!(
+            text.contains(
+                "RECORDED, NOT APPLIED · SECURITY.FIREWALL IS MANAGED BY \
+                 ACME ENGINEERING BASELINE (ENG-BASELINE-V12) · EFFECTIVE: ENABLED"
+            ),
+            "{text}"
+        );
+        // Not the plain no-change verdict, and never the success one.
+        assert!(!text.contains("NO CHANGE ·"), "{text}");
+        assert!(!text.contains("✓ APPLIED"), "{text}");
+
+        // Without the explain follow-up the override is still stated.
+        let text = set(&style, &result, "punar-m5", None).unwrap();
+        assert!(text.contains("IS MANAGED BY ORGANIZATION POLICY"), "{text}");
+    }
+
+    #[test]
+    fn personal_set_render_is_unchanged_by_the_m5_fields() {
+        let style = Style::plain();
+        let result = json!({
+            "descriptor": {
+                "capability": "system.hostname",
+                "supported": true,
+                "current_state": "punar-m5",
+                "desired_state": "punar-m5",
+                "mutable": true,
+                "requires_reboot": false,
+                "risk": "low",
+                "managed_by": "local",
+                "verification": "kernel+file"
+            },
+            "changed": true
+        });
+        let text = set(&style, &result, "punar-m5", None).unwrap();
+        assert!(text.contains("✓ APPLIED"), "{text}");
+        assert!(!text.contains("RECORDED, NOT APPLIED"), "{text}");
+    }
+
+    #[test]
+    fn enroll_start_renders_the_loud_simulated_label() {
+        let style = Style::plain();
+        let result = json!({
+            "enrolled": true,
+            "org": acme_org(),
+            "policy_ids": ["eng-baseline-v12"],
+            "attestation": "simulated",
+            "enrolled_at": "2026-08-26T09:00:00Z",
+            "first_sync": {"compliance": "success", "inventory": "success"}
+        });
+        let text = enroll_start(&style, &result, "punar-m5").unwrap();
+        assert!(text.contains("ATTESTATION"), "{text}");
+        assert!(text.contains("SIMULATED"), "{text}");
+        assert!(text.contains("no real measurement"), "{text}");
+        assert!(text.contains("Acme Engineering · acme.com"), "{text}");
+        assert!(text.contains("eng-baseline-v12"), "{text}");
+        assert!(
+            text.contains("compliance success · inventory success"),
+            "{text}"
+        );
+        assert!(text.contains("✓ ENROLLED · ACME ENGINEERING"), "{text}");
+    }
+
+    #[test]
+    fn enroll_status_renders_both_states_without_a_token() {
+        let style = Style::plain();
+        let text = enroll_status(&style, &json!({"enrolled": false}), "punar-m5").unwrap();
+        assert!(text.contains("PERSONAL"), "{text}");
+        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+
+        let result = json!({
+            "enrolled": true,
+            "org": acme_org(),
+            "policy_ids": ["eng-baseline-v12"],
+            "enrolled_at": "2026-08-26T09:00:00Z",
+            "attestation": "simulated",
+            "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "unreachable",
+                           "pending": true}
+        });
+        let text = enroll_status(&style, &result, "punar-m5").unwrap();
+        assert!(text.contains("SIMULATED"), "{text}");
+        assert!(text.contains("UNREACHABLE"), "{text}");
+        assert!(text.contains("report queued"), "{text}");
+        assert!(!text.to_lowercase().contains("tok_"), "{text}");
+    }
+
+    #[test]
+    fn enroll_stop_renders_the_contract_verdict() {
+        let style = Style::plain();
+        let result = json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"]});
+        let text = enroll_stop(&style, &result, "punar-m5").unwrap();
+        // The ipc.md section 7 phrase, verbatim (uppercased by the verdict
+        // idiom).
+        assert!(
+            text.contains("PERSONAL STATE RESTORED · ORG LAYERS REMOVED"),
+            "{text}"
+        );
+        assert!(text.contains("eng-baseline-v12"), "{text}");
+        assert!(text.contains("NOT RETRACTED"), "{text}");
     }
 
     #[test]

@@ -36,9 +36,13 @@ Deliverables (spec section 76, Milestone 0):
   [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
   (2026-08-25, see M2 below). The M3 exercise phase has its green run too:
   [32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305)
-  (2026-08-25, see M3 below). The workflow in the working tree has since
-  grown the M4 exercise phase (uncommitted), which has **no** recorded run
-  yet (see M4 below).
+  (2026-08-25, see M3 below). The M4 exercise phase is committed and pushed
+  (5ae79fb, m4-check amendment 92d5f17) but has **no green run**: its first
+  run
+  [32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881)
+  failed on exactly one m4-check assertion, and the follow-up run
+  [32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185)
+  failed before reaching the VM (see M4 below).
 - [x] Repository — skeleton per spec section 67 (all section 67 directories
   and top-level documents exist; Cargo workspace members match the crates on
   disk).
@@ -199,8 +203,8 @@ org anything; policy citations are `personal-defaults` / "os default".
 
 Everything checked below exists **on disk and is statically validated** —
 re-verified 2026-08-25 by the M3 status audit against the tree as committed
-at f1ff60c (the working tree has since grown the uncommitted M4 changes —
-see M4 below): whole workspace
+at f1ff60c (the tree has since grown the committed M4 changes and the
+M5 work — see M4/M5 below): whole workspace
 green in the `docker rust:1` container (`cargo test --workspace --locked`:
 **200 tests, 0 failed**; fmt/clippy green per milestone-3.md §12);
 shellcheck v0.11.0 clean on all five touched scripts (`m3-check.sh`,
@@ -219,10 +223,13 @@ run recorded the first real services-RSS number — `PUNAR_SERVICES_RSS_MB`
 = **2 MB** (summed PSS of the `punard.service` cgroup, against the 100 MB
 warn / 150 MB fail budget) — and idle RAM mean 1160 MB / max 1167 MB (pass
 with the standing over-target warning). Every item marked "runtime-proven"
-below cites this run. One dated caveat: the run exercised `m3-check.sh` as
-committed at f1ff60c (M3 report-only reconcile); the working tree has since
-amended m3-check for M4's remediating reconcile (milestone-4.md §10.4), and
-the amended script has no recorded run yet.
+below cites this run. One dated caveat, since resolved: the run exercised
+`m3-check.sh` as committed at f1ff60c (M3 report-only reconcile); the
+version amended for M4's remediating reconcile (milestone-4.md §10.4) has
+since run in-VM and delivered `PUNAR_M3_OK` inside run
+[32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881)
+(2026-08-25) — a run that failed overall, but on an M4 assertion after the
+M3 phase had passed (see M4 below).
 
 Deliverables (spec section 76, Milestone 3) — on disk vs proven:
 
@@ -295,7 +302,7 @@ enrollment/compliance (M5), audit rotation (M5 follow-up), agent methods
 (M7+), approvals/JIT elevation (M9), `punarctl update status` (stays
 stubbed).
 
-## Current milestone: M4 — Declarative desired state (in progress)
+## M4 — Declarative desired state: implemented; CI red on one check-wiring assertion (fix pushed, unproven)
 
 Architecture plan, decisions, and as-built status:
 [`docs/development/milestone-4.md`](docs/development/milestone-4.md) (§13 is
@@ -312,11 +319,37 @@ Everything below exists **on disk and is statically validated**
 (milestone-4.md §13): workspace fmt/clippy/test green in the `docker
 rust:1` container; shellcheck v0.11.0 clean on all touched scripts;
 actionlint clean; `PUNAR_BUILD_MODE=summary` staging pass for both images
-(local emulated runs — non-authoritative per spec 1.22). **The M4 work is
-uncommitted and no CI run includes it** — the first M4-inclusive run is
-the arbiter for every in-VM claim: each milestone-4.md §10.2 assertion,
-the drift demo's 375 s bound, and the merge engine's RSS impact against
-the services gate (whose M3-run baseline is 2 MB).
+(local emulated runs — non-authoritative per spec 1.22). Milestone-4.md
+§13's "uncommitted / no CI run" statements are dated: the M4 work was
+committed as 5ae79fb and pushed 2026-08-25.
+
+The first M4-inclusive CI run has happened and **failed — narrowly**. Run
+[32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881)
+(2026-08-25, KVM runner, commit 5ae79fb): four of five jobs green (rust,
+contracts, image, boot-test); `desktop-test` ran the full in-VM chain,
+delivered `PUNAR_DESKTOP_OK`, `PUNAR_M2_OK`, and `PUNAR_M3_OK` (the first
+in-VM run of the §10.4-amended m3-check), then **`PUNAR_M4_FAIL`** with
+exactly one failing assertion in `m4-report.txt`: `punard-reconcile.timer`
+`is-enabled` returned `disabled`. Vendor `/usr/lib` wants symlinks always
+report `disabled` — enablement state tracks `/etc` only (the greetd
+semantics resurfacing in the *check*, not the wiring; the timer itself was
+wired and running). m4-check collects all failures before its verdict, so
+the single-entry failing list means **every other §10.2 assertion passed
+in-VM — including the headline timer-driven firewall-drift remediation
+demo**. That is runtime evidence, not acceptance: the milestone's gate has
+not gone green.
+
+The fix — commit 92d5f17: m4-check asserts the wants symlink plus the
+`Wants=` relationship instead of `is-enabled` — is pushed but **unproven**.
+Its run
+[32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185)
+failed before reaching the VM: `cargo fmt --check` diffs and a `punard`
+compile error in the hermetic image build, both caused by in-progress M5
+code bundled into that commit (see M5 below); `desktop-test` and
+`boot-test` were skipped, so the amended m4-check has no recorded run. The
+next green M4-inclusive run is the arbiter for the milestone (and for the
+merge engine's RSS impact against the services gate, whose M3-run baseline
+is 2 MB).
 
 Deliverables (spec section 76, Milestone 4) — on disk vs proven:
 
@@ -339,7 +372,7 @@ Deliverables (spec section 76, Milestone 4) — on disk vs proven:
   `punar-policy` and the spec section 40 org scenario is reproduced from
   the Acme fixtures in host tests. Includes the one-shot migration of the
   M3 `desired.json` (host-test-only by design — a fresh CI image has
-  nothing to migrate). Runtime CI-pending.
+  nothing to migrate). Runtime: passed in-VM inside (red) run 32837156881; green gate pending.
 - [x] Reconciliation — the full section 42 chain (observe → normalize →
   load → diff → policy → plan → apply → verify → audit → compliance) in
   one synchronous `reconcile` pass; section 43 drift classification as
@@ -349,21 +382,23 @@ Deliverables (spec section 76, Milestone 4) — on disk vs proven:
   pre-announced by making it root-only; drift trigger via the
   low-frequency `punard-reconcile.timer` (120 s cadence, justified against
   spec 6.3 in milestone-4.md §6; vendor-wants enablement per the M1 mkosi
-  lesson). Runtime CI-pending.
+  lesson). Runtime: passed in-VM inside (red) run 32837156881; green gate pending.
 - [x] Explain — `policy.effective` + `policy.explain` IPC methods;
   `punarctl policy effective` and `punarctl policy explain <path>` render
   the spec section 40 layout verbatim in D-014 grammar; `status` gains the
   section 52 personal-scope compliance block. Personal-mode strings:
   "Personal preference" / "OS default", policy id `personal-defaults`,
-  "User override: Permitted". Runtime CI-pending.
+  "User override: Permitted". Runtime: passed in-VM inside (red) run 32837156881; green gate pending.
 - [x] Firewall-drift demo — m4-check phase B: with the timer running,
   `nft destroy table inet punar-base`; the table must be restored within
   three timer periods (375 s poll budget) with a `reconcile.remediate`
   success audit event and a `drift_remediated_total` increment in
   `status`. Wired end-to-end (`m4-check.sh` + `punar-m4-check.service`,
   `idle-ram.sh` chaining after m3-check, `boot-test.sh` phase-6 hard gate
-  on `m4-report.txt`, `ci.yml` artifact upload). Runtime CI-pending — this
-  is the milestone's headline in-VM assertion.
+  on `m4-report.txt`, `ci.yml` artifact upload). The demo itself —
+  the milestone's headline in-VM assertion — **passed** inside (red) run
+  32837156881; that run's one failure was the separate timer-enablement
+  assertion. Green gate pending.
 
 Honest limits (milestone-4.md §10.3): the migration path, the org-rung
 merge scenarios, and loop-protection exhaustion cannot run in the fresh CI
@@ -375,6 +410,108 @@ Out of scope for M4 (milestone-4.md §1, each with its landing milestone):
 enrollment and any org source in the VM (M5), policy.d hot-reload (M5),
 audit rotation (M5), agent methods (M7+), approvals/JIT elevation (M9 —
 `approval_required` degrades to alert-only behavior until then).
+
+## Current milestone: M5 — Mock Smplify enrollment: implemented on disk; statically validated; no CI run yet
+
+Architecture plan, decisions, and the section 49 chain mapped honestly to
+the mock: [`docs/development/milestone-5.md`](docs/development/milestone-5.md)
+(§13 is the verification/implementation status, including the local
+validation record and the 2026-08-25 status audit). Wire contract:
+[`docs/api/ipc.md`](docs/api/ipc.md) — the M5 changes are additive under
+`v: 1`, marked "M5" there (`enroll.start`/`enroll.status`/`enroll.stop`
+§§5.9–5.11, `conflict`/`upstream_unreachable` error codes, the §9
+`/run/punar/status.json` side contract, and the §6 audit-rotation note —
+now backed by code). M5 is where unmanaged-first flips to managed and
+back, live, in the VM: enroll against an in-VM mock control plane (the CI
+VM has no network — `-nic none`), render the spec section 40 managed
+explain for real, sync category-level compliance and inventory (spec
+54/24: states only, nothing behavioral), survive the control plane dying
+(spec 55), and unenroll back to calm paper (design language §8).
+
+**The full M5 tree is on disk** (audited 2026-08-25) but split across git
+states: part committed — bundled mid-integration into 92d5f17, whose CI
+run [32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185)
+is red on it (see M4 above) — and part working-tree only (modified +
+untracked files, uncommitted and unpushed). **Nothing M5 has ever run in
+CI**: the only run containing M5 code carried a non-compiling snapshot,
+and the live check at this audit (`gh run list`, 2026-08-25) shows no run
+newer than 32839803185.
+
+Deliverables (spec section 76, Milestone 5) — on disk vs proven:
+
+- [x] Mock control plane — `crates/punar-mock-smplify` (dev/CI-only bin
+  crate: config, verbatim Acme fixture serving, NDJSON/UDS protocol,
+  received-state recording; integration-tested), hermetically staged by
+  `container-build.sh` as a third in-image binary alongside the Acme
+  fixtures (copied to `/usr/share/punar/fixtures/acme`); the
+  **never-enabled** `punar-mock-smplify.service` (no `[Install]`, no
+  wants symlink — m5-check asserts the discipline; root-only UDS, never
+  localhost TCP — the spec 61 trust boundary is documented in the unit
+  header; started/stopped only by m5-check, so it is structurally outside
+  the `PUNAR_SERVICES_RSS_MB` gate and absent from the idle-RAM window).
+  On disk + host-tested; **no CI run**.
+- [x] Device enrollment — the section 49 chain against the mock
+  (attestation **simulated and labeled**, no IdP — documented gap, per
+  spec 49's own "MVP uses a mocked Smplify control plane"):
+  `enroll.start`/`enroll.status`/`enroll.stop` in `punard`
+  (`crates/punard/src/enroll.rs` + server handlers, `Redacted` device
+  token, `/run/punar/status.json` publisher), `punarctl enroll
+  start|status|stop` in D-014 grammar, and the shell flip — `Status.qml`
+  watches `status.json` (FileView, fail-closed to personal), `Bar.qml`
+  org chrome gated on it (design language §8). Enrollment is explicit,
+  never automatic (spec 24). On disk + host-tested
+  (`crates/punard/tests/enroll.rs`, punarctl `cli.rs`); **no CI run**.
+- [x] Policy — enrollment writes real `policy-source` envelopes into
+  `/var/lib/punar/policy.d/` for the unchanged M4 loader/flattener/merge;
+  the spec 40 managed explain renders for real; managed-set behaviors
+  (non-root denial citing the org policy — `denied_org_pinned`; root
+  recorded-but-overridden with the §5.5 verdict line); `enroll.stop`
+  removes the org layers and restores personal state. On disk +
+  host-tested; **no CI run**.
+- [x] Compliance — category-level states only (spec 52/54/24), sync
+  piggybacked on the existing 120 s `punard-reconcile.timer` (no new
+  timers); spec 55 offline behavior: cached policy.d keeps enforcing
+  without the mock, bounded latest-wins queue, transition-audited
+  `unreachable`. On disk + host-tested; **no CI run**.
+- [x] Inventory — device info + capability states, nothing behavioral
+  (spec 24/54), sent at enroll then on hash change. On disk +
+  host-tested; **no CI run**.
+- [x] M5 CI exercise wiring — `m5-check.sh` (19 assertion groups:
+  mock-discipline check, the full enroll → managed explain/deny →
+  compliance/inventory asserted on the mock's RECEIVED side with exact
+  category-only key allowlists (the privacy assertion) → offline →
+  recovery → offline unenroll → personal restore; two grim screenshots —
+  enrolled org chrome and restored personal bar) +
+  `punar-m5-check.service`, `idle-ram.sh` chaining after m4-check,
+  `boot-test.sh` phase-7 hard gate on `m5-report.txt` + export additions
+  and timeout bumps, `ci.yml` artifact wiring + desktop-test 80 min. On
+  disk, shellcheck/actionlint clean; **never executed anywhere** — the
+  exercise only runs in-VM and no VM run contains it.
+- [x] Audit rotation (the M3 §6 follow-up targeted at M5) —
+  `AuditWriter::rotate_if_needed` in `punar-common`: `audit.jsonl` →
+  `audit.jsonl.1` at 8 MiB, one rotated file kept, checked at write time,
+  unit-tested; the ipc.md §6 "M5: delivered" note is no longer ahead of
+  the code. Deliberately not asserted in-VM (M5 event volumes are nowhere
+  near the cap).
+
+Static validation for the finished tree — recorded in milestone-5.md §13
+(local, non-authoritative per spec 1.22): docker `rust:1`
+fmt/clippy/check clean and `cargo test --workspace --locked` green (all
+23 suites, including the punard/punarctl/mock M5 suites and the rotation
+tests); shellcheck v0.11.0 clean on all ten scripts including
+`m5-check.sh`; actionlint clean; `PUNAR_BUILD_MODE=summary` staging pass
+with the Acme fixture copy verified; qmllint clean from the shell work
+with no QML changed since; `./tools/validate-schemas.sh` re-run at this
+audit: 15 schemas / 123 documents ALL PASS (**no M5 schema deltas** —
+deliberate, milestone-5.md §11).
+
+What remains: **nothing M5 is proven at runtime.** Every in-VM claim
+(all 19 m5-check assertion groups, the enroll latency bounds, the
+FileView pickup window, mock RSS invisibility, the export additions)
+awaits the first CI run containing the finished tree — the same run that
+must turn the rust and image jobs green again (red at HEAD on the
+mid-integration snapshot) and is also the first run that can take M4's
+gate green.
 
 ## Milestone table
 
@@ -389,8 +526,8 @@ exist and function, until sharper criteria are defined.
 | M1 — Lightweight graphical workstation | Wayland, compositor, shell, command center, terminal, browser, Git, editor, Podman, keyboard navigation | Idle RAM measured; no mouse required for core desktop use | **CI gate green** — [run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) (2026-08-25): build, boot, `PUNAR_DESKTOP_OK`, idle RAM 1162 MB mean (pass w/ over-target warning); human keyboard-only walkthrough pending |
 | M2 — Native multitasking | Tiling, stacking, floating, overview, layouts, scratchpads, named project workspaces | Not specified in spec §76 | **Done** — [run 32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021) (2026-08-25) fully green incl. the in-VM M2 exercise (`PUNAR_M2_OK`); idle RAM 1157 MB mean (pass w/ over-target warning) |
 | M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | **Done** — [run 32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305) (2026-08-25) fully green incl. the in-VM M3 exercise (`PUNAR_M3_OK`, 27 assertions); punard services RSS 2 MB (within the 100 MB target); idle RAM 1160 MB mean (pass w/ over-target warning) |
-| M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | **In progress** — implemented on disk + statically validated (checklist above; milestone-4.md §13); uncommitted, no CI run includes the M4 wiring yet — the first such run is the arbiter |
-| M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | Not started |
+| M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | **Implemented; CI red** — committed (5ae79fb + fix 92d5f17); [run 32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881) failed on exactly one m4-check assertion (timer `is-enabled` vs vendor-wants semantics) with every other assertion, incl. the drift demo, passing in-VM; the fix's [run 32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185) failed pre-VM on bundled M5 work-in-progress — no green M4 run yet |
+| M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | **Implemented on disk (current); no CI run** — full tree incl. mock crate/unit/staging, daemon + CLI + shell enrollment, m5-check + CI wiring, audit rotation (partly committed mid-integration in 92d5f17 — [run 32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185) is red on that snapshot — finished tree uncommitted); local static validation green (milestone-5.md §13); every runtime claim awaits the first CI run containing the finished tree |
 | M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | Not started |
 | M7 — AI Agent Registry | Managed sessions, Claude adapter, second/generic adapter, agent identity, classification, local UI | Not specified in spec §76 | Not started |
 | M8 — AI Access Ledger | Resource summaries, process attribution, security events, local retention, privacy controls | Not specified in spec §76 | Not started |

@@ -27,6 +27,11 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// needs no timer; reads and writes get the 15 s response budget.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// M5 (contract sections 2, 7): `enroll start` runs a full enrollment
+/// pipeline server-side (60 s processing bound), so its client budget is
+/// raised to 90 s — for that one verb only.
+pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Exit codes per Plate D-014 Sect III / docs/api/ipc.md section 7.
 /// 0 = success and 2 = usage (owned by clap) complete the set.
 pub const EXIT_ERROR: u8 = 1;
@@ -128,9 +133,20 @@ impl Client {
 
     /// Send `method` (+ optional params) and return the raw `result` value.
     pub fn call(&self, method: &str, params: Option<Value>) -> Result<Value, CallError> {
+        self.call_with_timeout(method, params, RESPONSE_TIMEOUT)
+    }
+
+    /// [`Client::call`] with an explicit response budget — used by
+    /// `enroll start` ([`ENROLL_START_TIMEOUT`], contract section 2).
+    pub fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, CallError> {
         let stream = UnixStream::connect(&self.socket).map_err(|e| self.connect_error(&e))?;
-        let _ = stream.set_read_timeout(Some(RESPONSE_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
 
         let id = format!("ctl-{}", std::process::id());
         let request = Request {
@@ -147,13 +163,13 @@ impl Client {
         let mut writer = &stream;
         writer
             .write_all(line.as_bytes())
-            .map_err(|e| self.io_error("the request could not be sent", &e))?;
+            .map_err(|e| self.io_error("the request could not be sent", &e, timeout))?;
 
         let mut reader = BufReader::new(&stream);
         let mut response_line = String::new();
         let read = reader
             .read_line(&mut response_line)
-            .map_err(|e| self.io_error("no response arrived", &e))?;
+            .map_err(|e| self.io_error("no response arrived", &e, timeout))?;
         if read == 0 {
             return Err(CallError::Unreachable {
                 path: self.socket.clone(),
@@ -198,11 +214,11 @@ impl Client {
     /// delivers no response is still an unreachable daemon (exit 5): the
     /// distinction that matters to scripts is "no answer", not which
     /// syscall noticed.
-    fn io_error(&self, what: &str, error: &io::Error) -> CallError {
+    fn io_error(&self, what: &str, error: &io::Error, timeout: Duration) -> CallError {
         let why = match error.kind() {
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => format!(
                 "{what} — the daemon did not answer within {} seconds",
-                RESPONSE_TIMEOUT.as_secs()
+                timeout.as_secs()
             ),
             _ => format!("{what} ({error})"),
         };

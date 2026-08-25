@@ -55,10 +55,19 @@
 #        punard-reconcile.timer's reconcile restores the table within
 #        375 s and audits reconcile.remediate — run after the M3 exercise,
 #        before the export; EXPORT_TIMEOUT covers its worst case).
+#     7. M5 verdict (milestone-5.md §10): same pattern for m5-report.txt
+#        (punar-m5-check.service — the full enrollment journey against the
+#        in-VM dev/CI mock control plane: enroll -> managed policy/explain/
+#        set -> category-only compliance/inventory sync -> offline ->
+#        recovery -> offline unenroll -> personal restore, plus the
+#        enrolled/personal bar screenshots — run after the M4 exercise,
+#        before the export).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
 #     punar-m2.png                  grim capture with the overview open (M2)
+#     punar-m5.png                  grim capture, enrolled bar chrome (M5)
+#     punar-m5-personal.png         grim capture, restored personal bar (M5)
 #     ram-report.txt                key=value idle-RAM + services-RSS numbers
 #     ram-samples.txt, meminfo      raw guest measurement data
 #     m2-report.txt, m2-*.json      M2 exercise verdict + hyprctl snapshots
@@ -66,14 +75,17 @@
 #                                   snapshots (+ m3-deny-stderr.txt)
 #     m4-report.txt, m4-*.json      M4 exercise verdict + policy/status/
 #                                   audit snapshots (+ m4-explain-*.txt)
+#     m5-report.txt, m5-*.json      M5 exercise verdict + enrollment/policy
+#                                   snapshots (+ m5-*.txt explains/stderr,
+#                                   m5-received-*.jsonl mock received-state)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
 #   PERFORMANCE_BUDGETS.md (fail > 1536 MB mean, warn > 1024 MB).
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
-#   and the RAM gate rests on the serial numbers. The M2 verdict is the
-#   one exception: an exported report that says PUNAR_M2_FAIL fails here.
+#   and the RAM gate rests on the serial numbers. The exercise verdicts
+#   are the exception: a delivered PUNAR_M2/M3/M4/M5_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -208,10 +220,12 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     DEFAULT_DESKTOP_TIMEOUT=900
     DEFAULT_RAM_TIMEOUT=1200
     # Covers the in-guest M2 exercise (a few minutes under KVM), the M3
-    # exercise (seconds), and the M4 exercise — whose drift demo waits on
-    # wall-clock timer firings, worst case 375 s even under KVM — all of
-    # which run before the guest starts streaming the export.
-    DEFAULT_EXPORT_TIMEOUT=1500
+    # exercise (seconds), the M4 exercise — whose drift demo waits on
+    # wall-clock timer firings, worst case 375 s even under KVM — and the
+    # M5 enrollment exercise (reconcile RPCs plus two bounded 10 s
+    # screenshot waits, a few minutes) — all of which run before the guest
+    # starts streaming the export.
+    DEFAULT_EXPORT_TIMEOUT=1800
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -221,9 +235,10 @@ else
     DEFAULT_RAM_TIMEOUT=2400
     # TCG: the in-guest M2 exercise before the export is the slow part
     # (window spawns, quickshell relaunch — bounded at 25 min in-guest),
-    # plus the M3 exercise (bounded 10 min) and the M4 drift demo (375 s
-    # wall clock — timer firings are wall-clock even under TCG).
-    DEFAULT_EXPORT_TIMEOUT=3000
+    # plus the M3 exercise (bounded 10 min), the M4 drift demo (375 s
+    # wall clock — timer firings are wall-clock even under TCG) and the
+    # M5 enrollment exercise (bounded 15 min in-guest).
+    DEFAULT_EXPORT_TIMEOUT=3600
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -373,6 +388,12 @@ run_desktop() {
           "${PROOF_DIR}/m4-report.txt" \
           "${PROOF_DIR}"/m4-*.json \
           "${PROOF_DIR}"/m4-explain-*.txt \
+          "${PROOF_DIR}/m5-report.txt" \
+          "${PROOF_DIR}"/m5-*.json \
+          "${PROOF_DIR}"/m5-*.jsonl \
+          "${PROOF_DIR}"/m5-*.txt \
+          "${PROOF_DIR}/punar-m5.png" \
+          "${PROOF_DIR}/punar-m5-personal.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -477,7 +498,8 @@ run_desktop() {
             for f in ram-samples.txt meminfo m2-report.txt punar-m2.png \
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
-                     m4-explain-unknown.txt; do
+                     m4-explain-unknown.txt \
+                     m5-report.txt punar-m5.png punar-m5-personal.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -485,10 +507,16 @@ run_desktop() {
             # M2 hyprctl -j snapshots (m2-layout-*.json, m2-clients*.json,
             # m2-workspaces*.json) — diagnostics for the phase-4 verdict —
             # the M3 punarctl --json / nft -j snapshots (m3-*.json) —
-            # diagnostics for the phase-5 verdict — and the M4 policy/
-            # status/audit snapshots (m4-*.json) for the phase-6 verdict.
+            # diagnostics for the phase-5 verdict — the M4 policy/status/
+            # audit snapshots (m4-*.json) for the phase-6 verdict — and the
+            # M5 enrollment snapshots (m5-*.json/.txt: enroll results,
+            # managed explains, denial stderr) plus the mock control
+            # plane's received-state copies (m5-received-*.jsonl — the
+            # category-only compliance/inventory privacy evidence) for the
+            # phase-7 verdict.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
-                     "${guest_dir}"/m4-*.json; do
+                     "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
+                     "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -625,6 +653,42 @@ run_desktop() {
         warn "desktop-test: no m4-report.txt in the export and no M4 verdict on serial — the M4 exercise did not run"
     else
         echo "==> M4 exercise: no report under TCG (informational only; emulated runs are not M4-gated)"
+    fi
+
+    # Phase 7: M5 exercise verdict (milestone-5.md §10) — same pattern as
+    # the M2/M3/M4 gates. The guest wrote /run/punar/m5-report.txt
+    # (per-assertion ok/FAIL lines + a final PUNAR_M5_OK / PUNAR_M5_FAIL
+    # line) via punar-m5-check.service: the mock control plane's
+    # never-enabled discipline, the full enroll→managed→offline→unenroll
+    # journey (spec 49/55), spec-40 managed explain, org-pinned set
+    # behaviors, category-only compliance/inventory on the mock's received
+    # side (spec 24/54), and the enrolled/personal bar screenshots. Hard
+    # gate: a delivered FAIL — or a truncated report — fails this script.
+    # A MISSING report degrades: serial carries the echoed report as the
+    # fallback verdict; with no verdict anywhere it is a ::warning:: under
+    # KVM and info-only under TCG.
+    local m5_report="${PROOF_DIR}/m5-report.txt"
+    if [ -f "${m5_report}" ]; then
+        if grep -q 'PUNAR_M5_FAIL' "${m5_report}"; then
+            echo "error: M5 exercise reported PUNAR_M5_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m5_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M5_OK' "${m5_report}"; then
+            echo "==> M5 exercise: PUNAR_M5_OK ($(grep -c '^ok' "${m5_report}" || true) assertions passed)"
+        else
+            echo "error: m5-report.txt carries no PUNAR_M5_OK/PUNAR_M5_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m5_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M5_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M5 exercise reported PUNAR_M5_FAIL on the serial console (export did not deliver m5-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M5_OK' "${SERIAL_LOG}"; then
+        echo "==> M5 exercise: PUNAR_M5_OK (verdict from serial console; export did not deliver m5-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m5-report.txt in the export and no M5 verdict on serial — the M5 exercise did not run"
+    else
+        echo "==> M5 exercise: no report under TCG (informational only; emulated runs are not M5-gated)"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"
