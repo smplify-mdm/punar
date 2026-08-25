@@ -276,7 +276,8 @@ jq_check "overridden set audited: capabilities.set noop with policy_ids [eng-bas
        and .policy_ids == ["eng-baseline-v12"])'
 "${CTL}" capabilities set security.firewall disabled \
     > "${RUN_DIR}/m5-set-root.txt" 2>&1
-if grep -q 'Recorded, not applied' "${RUN_DIR}/m5-set-root.txt"; then
+# fmt::verdict uppercases its text — match case-insensitively.
+if grep -qi 'recorded, not applied' "${RUN_DIR}/m5-set-root.txt"; then
     note "ok   human set renders the 'Recorded, not applied' verdict"
 else
     note "FAIL human overridden-set verdict: $(head -c 240 "${RUN_DIR}/m5-set-root.txt" 2>/dev/null)"
