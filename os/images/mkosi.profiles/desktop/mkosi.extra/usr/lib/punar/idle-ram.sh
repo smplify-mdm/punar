@@ -208,6 +208,38 @@ systemctl start punar-m8-check.service \
 systemctl start punar-m9-check.service \
     || echo "punar: idle-ram: punar-m9-check.service failed to start" >&2
 
+# M10 exercise ordering hook (milestone-10.md §16): start punar-m10-check
+# SYNCHRONOUSLY strictly AFTER the M9 exercise (which resolved its
+# approvals, revoked its grants and left the personal pre-state) and
+# strictly BEFORE the export below, so m10-report.txt / m10-*.json /
+# m10-*.txt / m10-*.jsonl / punar-m10.png ship in the same tar.
+#
+# TIMEOUT MATH, stated rather than copied (the unit carries the full
+# table): the exercise's one unavoidable wait is 300 s — the 240 s scan
+# period plus 30 s AccuracySec plus 30 s slack — because group 3 waits for
+# `punar-agentd-scan.timer` to fire ON ITS OWN, with no manual scan
+# anywhere in the window. That is the whole point of the group, so the
+# wait is absorbed rather than removed: the fixture is launched first and
+# the later groups run inside the window. TimeoutStartSec=15min is TCG
+# headroom on top.
+#
+# What this window contains, and why no budget gate sees it: two sleeping
+# shell fixtures in ~punar/Downloads, the never-enabled dev/CI control
+# plane (started and stopped by the script), and an enroll/unenroll cycle
+# that is restored before it exits. The idle-RAM sampling and the
+# services-PSS sample both closed far above. M10 adds NO new daemon —
+# the scan pass is a transient `punarctl` every four minutes, not a
+# resident process — so PUNAR_SERVICE_UNITS above is unchanged.
+#
+# The one thing this hook must NOT do is stop punar-agentd-scan.timer for
+# the measurement window: budgets are measured against the shipping
+# configuration, and a 240 s timer is half the frequency of one the RAM
+# window has contained since M4.
+# Never fatal here: the verdict lives in m10-report.txt and the host gate
+# (tools/boot-test.sh) parses it.
+systemctl start punar-m10-check.service \
+    || echo "punar: idle-ram: punar-m10-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

@@ -25,3 +25,9 @@ thiserror = { workspace = true }
 # signal-hook = safe SIGTERM handling for graceful shutdown.
 rustix = { workspace = true }
 signal-hook = { workspace = true }
+
+[dev-dependencies]
+# M10: the remote-query suite runs against a real punar-mock-smplify
+# instance on a tempdir socket — the same binary the image ships, not a
+# second in-test copy of the control-plane protocol.
+punar-mock-smplify = { workspace = true }

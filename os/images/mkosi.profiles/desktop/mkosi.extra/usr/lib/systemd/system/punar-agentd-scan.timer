@@ -1,0 +1,53 @@
+# Punar periodic shadow-AI detection (milestone-10.md §3.1/§3.2, decisions
+# 1 and 2; SPEC sections 23, 6.3, 6.4).
+#
+# M7 shipped detection with no trigger of its own and said why: periodic
+# detection is M10's deliverable by name. This is that trigger, in the only
+# shape the repo permits — SPEC 6.3 forbids continuous high-frequency
+# polling and names a low-frequency timer as the preferred alternative, and
+# punard-reconcile.timer (M4 §5) already litigated timer-vs-daemon-thread
+# and chose the timer.
+#
+# WHY 240 s, and why it is not "a second timer" in the honest sense:
+#   - It is an exact multiple of the shipping 120 s reconcile period, and
+#     AccuracySec=30 lets systemd COALESCE the two into the same wakeup. In
+#     the steady state M10 therefore adds no new wakeup INSTANT at all —
+#     only a slightly longer one every other reconcile tick.
+#   - Worst case sighting-to-alert is 240 + 30 s, which is stated on the
+#     surface (`punarctl agents list`'s footer) rather than rounded down.
+#   - Faster (60 s) would quadruple wakeups and change no decision a human
+#     or an administrator makes: M10 is not armed (law 4), so a detection
+#     four minutes old and one sixty seconds old are acted on identically.
+#   - Slower (900 s) would routinely miss agent runs that live ten minutes
+#     — a realistic shape for a coding agent — and would make the honest
+#     limitation larger than the feature.
+#
+# The timer is deliberately NOT stopped for the idle-RAM sampling window:
+# budgets are measured against the shipping configuration, and 240 s is half
+# the frequency of something that window has contained since M4.
+#
+# The honest limitation, printed on the CLI surface and stated here because
+# a unit file is where a reader looks for the cadence: a process that starts
+# and exits inside one interval, and touches nothing Punar mediates, is
+# never seen. Sampling detection has that hole by construction; closing it
+# needs exec-time notification, which is exactly the broad tracing SPEC 1.14
+# rules out. It is stated, not engineered around.
+#
+# Enabled statically via a VENDOR timers.target.wants symlink in the extra
+# tree — mkosi applies Arch's presets to /etc after extra trees, so /etc
+# enablements and postinst systemctl are preset-wiped (the twice-verified M1
+# lesson; punard-reconcile.timer's precedent). `systemctl is-enabled`
+# reports `disabled` for a /usr/lib .wants unit, so m10-check asserts the
+# SYMLINK plus `Wants=` in `systemctl show timers.target`, never is-enabled
+# (the M4 lesson).
+
+[Unit]
+Description=Punar periodic shadow-AI detection pass
+
+[Timer]
+OnBootSec=240
+OnUnitActiveSec=240
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

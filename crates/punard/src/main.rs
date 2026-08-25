@@ -76,6 +76,14 @@ struct RunArgs {
     #[arg(long, value_name = "PATH")]
     control_plane_socket: Option<PathBuf>,
 
+    /// M10 sibling `punar-agentd` socket — the single inter-daemon edge
+    /// (docs/development/milestone-10.md section 7.3). When omitted, the
+    /// PUNAR_AGENTD_SOCKET environment variable is consulted, then the
+    /// compiled default. This is an **outbound** client only; punard opens
+    /// no listener for it and agentd never calls back.
+    #[arg(long, value_name = "PATH")]
+    agentd_socket: Option<PathBuf>,
+
     /// M5 shell summary file (docs/api/ipc.md section 9).
     #[arg(long, default_value = punard::enroll::DEFAULT_STATUS_FILE)]
     status_file: PathBuf,
@@ -130,10 +138,20 @@ fn run(args: RunArgs) -> ExitCode {
                 .map(PathBuf::from)
         })
         .unwrap_or_else(|| PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET));
+    // Same precedence for the sibling daemon's socket.
+    let agentd_socket = args
+        .agentd_socket
+        .or_else(|| {
+            std::env::var_os(punard::agentd::AGENTD_SOCKET_ENV)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from(punard::agentd::DEFAULT_AGENTD_SOCKET));
     let cfg = DaemonConfig::new(args.socket, args.state_dir, args.audit_file);
     let cfg = DaemonConfig {
         group: args.group,
         control_plane_socket,
+        agentd_socket,
         status_file: args.status_file,
         approvals_file: args.approvals_file,
         ai_defaults_file: args.ai_defaults_file,

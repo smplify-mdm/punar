@@ -1415,6 +1415,27 @@ pub struct EnrollStatusResult {
     pub attestation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync: Option<LastSync>,
+    /// M10 (milestone-10.md section 13.2): the remote-query scopes the
+    /// organization asked for at enrollment, read back from
+    /// `enrollment.json`. The user can therefore check every answered query
+    /// against the grant themselves — SPEC section 24.2's guarantee 8, and
+    /// the same array `punar-agentd` enforces, not a second copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_query_scopes: Option<Vec<String>>,
+    /// M10: when the last remote query was decided, at what scope, and how.
+    /// Metadata only — the full record is `punarctl privacy queries`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_query: Option<LastQuery>,
+}
+
+/// The `enroll.status` view of the most recent remote query (M10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastQuery {
+    pub at: String,
+    pub scope: String,
+    /// `allow` | `deny` — the decision the **device** made, from local
+    /// state (SPEC section 59.4).
+    pub decision: String,
 }
 
 /// `enroll.stop` result (M5, contract section 5.11).
@@ -2436,6 +2457,8 @@ mod tests {
             enrolled_at: None,
             attestation: None,
             last_sync: None,
+            remote_query_scopes: None,
+            last_query: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),

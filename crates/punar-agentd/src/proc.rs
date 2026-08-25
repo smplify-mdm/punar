@@ -193,6 +193,35 @@ impl ProcRoot {
         tail.split_whitespace().nth(19)?.parse().ok()
     }
 
+    /// `/proc/sys/kernel/random/boot_id` — the kernel's per-boot UUID
+    /// (milestone-10.md section 4.1).
+    ///
+    /// Read **once per pass**, not once per pid: it cannot change while
+    /// the daemon runs. It scopes a detection identity to this boot, which
+    /// is what makes `starttime` — a count of ticks *since boot* — a
+    /// usable identity field at all. `None` when the kernel does not
+    /// expose it; the caller then uses the empty string, and the identity
+    /// degrades to `(exe, uid, pid, starttime)`, which is still
+    /// pid-reuse-safe within one boot.
+    pub fn boot_id(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.root.join("sys/kernel/random/boot_id")).ok()?;
+        let id = text.trim().to_string();
+        (!id.is_empty()).then_some(id)
+    }
+
+    /// The `btime` line of `/proc/stat` — wall-clock Unix seconds at
+    /// boot. Combined with a process's `starttime` ticks it gives the
+    /// process's **own** start time (milestone-10.md section 6.4), which
+    /// is what a detection record's `started_at` means from M10 onward.
+    /// `None` when unreadable; the caller falls back to the observation
+    /// time and says so rather than inventing a start.
+    pub fn boot_time_unix(&self) -> Option<u64> {
+        let stat = std::fs::read_to_string(self.root.join("stat")).ok()?;
+        stat.lines()
+            .find_map(|line| line.strip_prefix("btime "))
+            .and_then(|value| value.trim().parse().ok())
+    }
+
     /// Full entry for one pid, or `None` if it vanished mid-walk (a race
     /// the walk simply skips).
     pub fn entry(&self, pid: u32) -> Option<ProcEntry> {
@@ -339,6 +368,33 @@ mod tests {
         assert_eq!(proc.comm_of(77).as_deref(), Some("we ird) name"));
         assert_eq!(proc.starttime_of(78), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The two system-wide reads M10 adds: once per pass, never per pid.
+    #[test]
+    fn kernel_boot_facts_are_read_once_and_degrade_honestly() {
+        let root = fixture_proc("bootfacts");
+        let proc = ProcRoot::new(&root);
+        assert_eq!(
+            proc.boot_id().as_deref(),
+            Some(crate::testsupport::FIXTURE_BOOT_ID)
+        );
+        assert_eq!(
+            proc.boot_time_unix(),
+            Some(crate::testsupport::FIXTURE_BTIME)
+        );
+
+        // A kernel that exposes neither must not make the daemon invent
+        // one: both degrade to None.
+        let bare = fixture_proc("bootfacts-bare");
+        std::fs::remove_file(bare.join("sys/kernel/random/boot_id")).unwrap();
+        std::fs::write(bare.join("stat"), "cpu 1 2 3\n").unwrap();
+        let bare_proc = ProcRoot::new(&bare);
+        assert_eq!(bare_proc.boot_id(), None);
+        assert_eq!(bare_proc.boot_time_unix(), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     #[test]

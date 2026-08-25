@@ -297,7 +297,16 @@ pub struct PolicySource {
 /// `agents.list` / `agents.scan` result (contract section 10.2).
 #[derive(Deserialize)]
 pub struct AgentsList {
+    /// The view as of the last **change** — a pass that changes nothing
+    /// rewrites nothing (milestone-10.md section 3.4), so this does not
+    /// advance every four minutes and is not meant to.
     pub scanned_at: String,
+    /// M10 liveness, in-memory and served only by the socket: when a pass
+    /// last actually ran, and what asked for it.
+    #[serde(default)]
+    pub last_scan_at: Option<String>,
+    #[serde(default)]
+    pub last_scan_trigger: Option<String>,
     #[serde(default)]
     pub sessions: Vec<AgentRow>,
     /// Point-in-time detections — heuristic, never certain (SPEC section
@@ -983,4 +992,164 @@ mod tests {
         assert_eq!(state_str(&json!(true)), "true");
         assert_eq!(state_str(&json!({"a": 1})), r#"{"a":1}"#);
     }
+}
+
+// ---------------------------------------------------------------------------
+// M10 — the remote-query log (contract section 13.1's `queries.list`;
+// docs/development/milestone-10.md section 10.3). SPEC section 24.2: the
+// employee never has less visibility than the administrator, so this is
+// readable by any peer the agentd socket admits, not by root alone.
+// ---------------------------------------------------------------------------
+
+/// `alerts.list` result (contract section 17.1) — the shadow-AI alert
+/// register. One card per signature, never per scan and never per
+/// process.
+#[derive(Deserialize)]
+pub struct AlertsList {
+    #[serde(default)]
+    pub alerts: Vec<AlertRow>,
+    /// The anti-nag window in seconds, from the daemon that enforces it,
+    /// so the renderer states the rule rather than hard-coding it.
+    #[serde(default)]
+    pub quiet_window_secs: u64,
+}
+
+/// One alert card, in the `alerts.json` field list (milestone-10.md
+/// section 5.3). Tolerant like every other model here.
+#[derive(Deserialize)]
+pub struct AlertRow {
+    #[serde(default)]
+    pub alert_id: String,
+    /// The M10 `sig_` identity — one thing seen, however often it
+    /// restarts.
+    #[serde(default)]
+    pub signature_id: String,
+    /// The matched rule's **name**, the reviewable line in the data file.
+    #[serde(default)]
+    pub signature: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub executable: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub first_seen: String,
+    #[serde(default)]
+    pub last_seen: String,
+    /// How many live detections currently carry this signature — a
+    /// count, not a flag: a crash-looping agent is one card and several
+    /// processes.
+    #[serde(default)]
+    pub live: u64,
+    #[serde(default)]
+    pub detection_id: String,
+    #[serde(default)]
+    pub policy_citation: String,
+    /// `live` · `cleared` · `dismissed`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub raised_at: String,
+    #[serde(default)]
+    pub cleared_at: Option<String>,
+    #[serde(default)]
+    pub dismissed_at: Option<String>,
+    /// When a fresh sighting of this signature would raise a new card.
+    #[serde(default)]
+    pub quiet_until: Option<String>,
+}
+
+/// `alerts.dismiss` result.
+#[derive(Deserialize)]
+pub struct AlertDismissed {
+    #[serde(default)]
+    pub alert_id: String,
+    #[serde(default)]
+    pub dismissed_at: String,
+    /// Always `false`: filing a card moves no suppression state, because
+    /// there is none to move (milestone-10.md section 5.2).
+    #[serde(default)]
+    pub suppression_changed: bool,
+}
+
+/// `queries.list` result. Everything the surface prints comes from the
+/// daemon — the granted scopes, the never-answered list and the storage
+/// facts included — so the CLI invents nothing and the two cannot drift.
+#[derive(Deserialize)]
+pub struct QueriesList {
+    #[serde(default)]
+    pub queries: Vec<QueryRow>,
+    #[serde(default)]
+    pub enrolled: bool,
+    #[serde(default)]
+    pub organization: Option<String>,
+    #[serde(default)]
+    pub policy_citation: Option<String>,
+    /// The same array `punar-agentd` enforces, so the user can check every
+    /// answer against it themselves (SPEC 24.2 guarantee 8).
+    #[serde(default)]
+    pub granted_scopes: Vec<String>,
+    /// Always `false` in M10: there is no IdP, and every rendering of a
+    /// requesting admin says so.
+    #[serde(default)]
+    pub admin_identity_verified: bool,
+    #[serde(default)]
+    pub never_answered: Vec<String>,
+    #[serde(default)]
+    pub storage: Option<QueryLogStorage>,
+}
+
+/// One line of `/var/lib/punar/agents/queries.jsonl` — the six SPEC 51.1
+/// fields plus the granted scope and the result shape.
+#[derive(Deserialize)]
+pub struct QueryRow {
+    #[serde(default)]
+    pub query_id: String,
+    #[serde(default)]
+    pub received_at: String,
+    #[serde(default)]
+    pub answered_at: String,
+    #[serde(default)]
+    pub requesting_admin: String,
+    #[serde(default)]
+    pub requested_scope: String,
+    #[serde(default)]
+    pub granted_scope: Option<String>,
+    #[serde(default)]
+    pub authorization_decision: String,
+    #[serde(default)]
+    pub refusal_reason: Option<String>,
+    #[serde(default)]
+    pub result_category: String,
+    #[serde(default)]
+    pub record_counts: QueryRecordCounts,
+    #[serde(default)]
+    pub audit_event_id: Option<String>,
+}
+
+/// The *shape* of what left the device — never a second copy of the
+/// contents (milestone-10.md section 10.1).
+#[derive(Default, Deserialize)]
+pub struct QueryRecordCounts {
+    #[serde(default)]
+    pub sessions: u64,
+    #[serde(default)]
+    pub detections: u64,
+    #[serde(default)]
+    pub security_events: u64,
+}
+
+/// Where the query log lives and how long it is kept, as the daemon
+/// reports it.
+#[derive(Deserialize)]
+pub struct QueryLogStorage {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub retention_days: u32,
+    /// The boundary: this log records what the **organization** did, so a
+    /// purge of the user's own data does not remove it.
+    #[serde(default)]
+    pub purged_by_privacy_purge: bool,
 }

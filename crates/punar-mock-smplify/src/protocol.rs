@@ -13,8 +13,15 @@
 //! a failure `punard`'s local IPC deliberately lacks: [`unauthorized`]
 //! (unknown `device_token`), standing in for production mTLS/device-auth
 //! rejection so `punard`'s error path is testable (milestone-5.md section
-//! 4.2). The rest of the set matches ipc.md section 4 spellings so nobody
-//! learns two dialects.
+//! 4.2). M10 adds two more for the admin surface — [`denied`] (the asking
+//! role may not) and [`out_of_scope`] (the scope is not in the closed
+//! vocabulary). They are deliberately distinct: collapsing them would make
+//! a query log unable to tell a missing role from a missing grant
+//! (milestone-10.md section 13.1). The rest of the set matches ipc.md
+//! section 4 spellings so nobody learns two dialects.
+//!
+//! [`denied`]: ErrorCode::Denied
+//! [`out_of_scope`]: ErrorCode::OutOfScope
 //!
 //! [`Method`]: punar_common::ipc::Method
 //! [`unauthorized`]: ErrorCode::Unauthorized
@@ -35,8 +42,7 @@ pub enum ErrorCode {
     MalformedRequest,
     /// `v` != [`PROTOCOL_VERSION`]; `details.supported` lists `[1]`.
     UnsupportedVersion,
-    /// Method not in the mock's table — including `admin.devices` /
-    /// `admin.device`, reserved for Milestone 10 (SPEC section 51).
+    /// Method not in the mock's table.
     UnknownMethod,
     /// Params missing/extra/mis-shaped, or a bootstrap secret that fails
     /// the ≥32-hex-chars shape check.
@@ -45,8 +51,19 @@ pub enum ErrorCode {
     /// production device-auth failure (no such code exists on `punard`'s
     /// local IPC surface).
     Unauthorized,
-    /// `org.discover` for a domain the fixture set does not carry.
+    /// `org.discover` for a domain the fixture set does not carry, or an
+    /// `admin.*` call naming a device or query the mock has never seen.
     NotFound,
+    /// M10: the requesting admin identity is unknown to the role fixture,
+    /// or its role does not permit the scope it asked for. *You* may not —
+    /// as distinct from [`ErrorCode::OutOfScope`], which is about what a
+    /// **device** was granted (milestone-10.md sections 9.1, 13.1).
+    Denied,
+    /// M10: the scope is not in the closed four-value vocabulary. Refused
+    /// at the mock so the query is never enqueued; refused again at the
+    /// device if it ever arrives, because the device is the authority
+    /// (SPEC section 59.4).
+    OutOfScope,
     /// Mock bug or I/O error (token generation, state persistence).
     Internal,
 }
@@ -61,6 +78,8 @@ impl ErrorCode {
             ErrorCode::InvalidParams => "invalid_params",
             ErrorCode::Unauthorized => "unauthorized",
             ErrorCode::NotFound => "not_found",
+            ErrorCode::Denied => "denied",
+            ErrorCode::OutOfScope => "out_of_scope",
             ErrorCode::Internal => "internal",
         }
     }

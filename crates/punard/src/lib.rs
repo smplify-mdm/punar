@@ -25,6 +25,15 @@
 //! still no path to persistent unrestricted root, and never a generic
 //! shell. Design: docs/development/milestone-9.md.
 //!
+//! Milestone 10 (SPEC sections 24.1, 51, 59.4): `punard` became the
+//! **courier** for the Smplify remote query. It fetches pending questions
+//! on the existing M5 sync piggyback — no new timer, no new listener, no
+//! inbound path of any kind — hands each one to `punar-agentd` over the
+//! single inter-daemon edge ([`agentd`]), and posts the daemon's answer
+//! back verbatim. It never assembles an answer, never reads a ledger, and
+//! never sees a byte it was not handed. Design:
+//! docs/development/milestone-10.md sections 7, 11.
+//!
 //! Architectural law (SPEC sections 10, 60): privileged changes go through
 //! typed capability APIs only — there is **no** generic root-command RPC, no
 //! exec/shell method, ever. Authorization: socket filesystem admission +
@@ -38,6 +47,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agentd;
 pub mod aipolicy;
 pub mod approvals;
 pub mod authz;

@@ -28,9 +28,13 @@ pragma ComponentBehavior: Bound
 //   - process counts are distinct pids seen ALIVE AT A SAMPLING POINT,
 //     never a spawn total, and the section tagline says so;
 //   - detections are rendered as SUSPECTED, never certain, and the
-//     Inspect / Block network / Register actions of the mockup are NOT
-//     drawn: those capabilities arrive with M9/M10 and this release
-//     ships no dead buttons.
+//     Block network / Register actions of the mockup are NOT drawn:
+//     those capabilities arrive with M12 (punar-netd plus a policy verb)
+//     and this release ships no dead buttons. `Inspect` is no longer in
+//     that list — since M10 it is the alert card's [I] key, which opens
+//     THIS panel on the detection it names (milestone-10.md §5.1); this
+//     surface is the inspect target, so it still draws no such button of
+//     its own.
 //
 // UNMANAGED-FIRST (DESIGN_LANGUAGE.md §8): the org name appears in the
 // masthead only while `Status.enrolled`; a personal device cites
@@ -975,6 +979,27 @@ Scope {
             console.warn("punar-shell: agents refresh unavailable:", e);
         }
         root.refreshLedger(root.selectedId);
+    }
+
+    // The M10 alert card's [I] Inspect action (milestone-10.md §5.1):
+    // open this surface with the rail already sitting on the detection the
+    // card is about. `detection_id` (§4.1) is the same `agt_`-shaped
+    // identity the rail keys its detection rows by, so the panel opens ON
+    // the row and not merely near it.
+    //
+    // `restoreSelection()` is called explicitly because `show()` only
+    // re-runs it through `onOpenChanged` / `onVisibleChanged` — neither
+    // fires when the panel is ALREADY open, which is exactly the case
+    // where a second alert must move the reader to a different detection.
+    // A detection that has since cleared out of `agents.json` falls back
+    // to the first row rather than to an empty pane: the rail is the
+    // record, and an id it no longer holds is not invented here.
+    function showDetection(detectionId: string): void {
+        if (detectionId !== "")
+            root.selectedId = detectionId;
+        root.show();
+        win.restoreSelection();
+        rail.forceActiveFocus();
     }
 
     // Ask agentd for one session's ledger, once, on user action — the
@@ -2034,7 +2059,17 @@ Scope {
                                     font.pixelSize: 9
                                     font.weight: 500
                                     font.letterSpacing: Theme.tracking(9, 0.1)
-                                    text: "Visibility first · inspect, block network and register as managed arrive with enforcement (M9 / M10)"
+                                    // M10 FULFILLED THE `INSPECT` HALF OF
+                                    // THIS SENTENCE: the alert card's [I]
+                                    // opens THIS view on THIS detection
+                                    // (milestone-10.md §5.1), so naming
+                                    // inspect as pending would now be
+                                    // false. Blocking and registering a
+                                    // detection still do not exist — they
+                                    // need punar-netd and a policy verb —
+                                    // and the milestone they wait on is
+                                    // named rather than left vague.
+                                    text: "Visibility first · block network and register as managed arrive with enforcement (M12)"
                                     wrapMode: Text.WordWrap
                                 }
                             }

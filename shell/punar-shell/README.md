@@ -3,8 +3,8 @@
 The Punar desktop shell: a Quickshell (QML) top bar (M1, with the M5
 enrollment chrome), the SUPER+Space command center overlay, the
 SUPER+TAB project-workspace overview with named-workspace persistence
-(M2), and the SUPER+A AI panel (M7), implementing the field-note design
-language.
+(M2), the SUPER+A AI panel (M7), the M9 approval gate, and the M10
+shadow-AI alert region, implementing the field-note design language.
 
 - Design authority: [`docs/design/DESIGN_LANGUAGE.md`](../../docs/design/DESIGN_LANGUAGE.md)
   (binding) and the mockups — the command-center card is
@@ -13,7 +13,9 @@ language.
   [`docs/design/mockups/desktop-multitasking.html`](../../docs/design/mockups/desktop-multitasking.html)
   state 03 OVERVIEW / Plate D-007 (M2 acceptance reference), and the AI
   panel is [`docs/design/mockups/ai-panel.html`](../../docs/design/mockups/ai-panel.html)
-  / Plate D-005 (M7 acceptance reference).
+  / Plate D-005 (M7 acceptance reference), and the shadow-AI alert card is
+  [`docs/design/mockups/notifications-osd.html`](../../docs/design/mockups/notifications-osd.html)
+  Sect I / Plate D-009 (M10 acceptance reference).
 - Every design value flows through the `Theme` singleton, which loads
   [`shell/theme/punar-tokens.json`](../theme/punar-tokens.json) at runtime.
   No color is hardcoded outside `Theme/Theme.qml` (DESIGN_LANGUAGE.md §8).
@@ -29,11 +31,13 @@ language.
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
 | `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
 | `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
+| `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `CommandCenter/CommandCenter.qml` | SUPER+Space overlay + `commandcenter` IPC handler |
 | `Overview/Overview.qml` | SUPER+TAB project-workspace overview + `overview` IPC handler (Plate D-007) |
 | `AiPanel/AiPanel.qml` | SUPER+A AI panel + `aipanel` IPC handler (Plate D-005) |
 | `Approval/ApprovalOverlay.qml` | The M9 approval gate + `approval` IPC handler (Plate D-003 Sect II) |
+| `Alert/AlertStack.qml` | The M10 shadow-AI alert region + `alerts` IPC handler (Plate D-009 Sect I) |
 
 ## Running on a dev machine
 
@@ -79,6 +83,13 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
   human has to go looking for is not a gate. In it: `A` approves, `D`
   denies, `↑`/`↓` cycle when more than one is pending, and `Esc` **defers**
   — dismissal is not denial, and the request stays pending in the daemon.
+
+- The **alert region has no opening keybinding either**, for the same
+  reason: punar-agentd raises a card by writing `alerts.json`, and the
+  card appears. On it: `I` inspects (the SUPER+A panel, opened on that
+  detection), `D` dismisses to the record, `↑`/`↓` walk a multi-card
+  stack, and `Esc` **hands the keyboard back without dismissing
+  anything** — the card, the record and the alert register all stay.
 
 ## Overview — SUPER+TAB (M2, Plate D-007)
 
@@ -353,6 +364,106 @@ qs -p /usr/share/punar/shell ipc call approval pending   # count
 qs -p /usr/share/punar/shell ipc call approval selected  # the apr_ on screen
 ```
 
+## Shadow-AI alert region (M10, Plate D-009 Sect I)
+
+One layer-shell region at the D-009 toast position (top 13%, right 3.4%,
+`min(46%, 340px)` wide), rendering **only** `punar-agentd` detection
+alerts. It is the sliver `milestone-10.md` §5.6 names and nothing beside
+it: there is still no notification centre, no freedesktop notification
+daemon, no OSD, no `Super+N` and no persistent do-not-disturb toggle —
+all four are M13.
+
+The card is the D-009 anatomy: **meta row · hairline · one sentence ·
+detail · why · policy · actions · footer**.
+
+```
+UNKNOWN AI · SUSPECTED                                        14:31
+────────────────────────────────────────────────────────────────────
+Unknown AI activity suspected · foo-agent
+
+~/Downloads/foo-agent · running as punar since 14:29
+Why · an agent-named executable is running from Downloads, outside any
+managed Punar session · signature unmanaged-path-agentlike
+Policy · Personal defaults
+
+[ INSPECT I ]  SUPER+A   [ DISMISS TO RECORD D ]
+────────────────────────────────────────────────────────────────────
+Suspected, not certain · nothing was blocked · punarctl agents list
+Punar · punar-agentd
+```
+
+Voice rules, from `milestone-10.md` §5.1 (spec §73, §23, §1.22):
+
+- **"suspected" appears in the meta row and in the sentence.** Never
+  "detected AI", never "malware", never "threat".
+- **The subject of every sentence is the process, never the person.**
+  This surface passes no verdict on a human.
+- **"Nothing was blocked" is mandatory.** M10 detects, records and
+  alerts; it blocks, kills and quarantines nothing. There are no
+  `BLOCK NETWORK` / `REGISTER AS MANAGED` buttons — those need
+  punar-netd (M12) and a policy verb, and no dead button ships.
+- **Who requested it: nobody.** The footer names `Punar · punar-agentd`
+  as the source group — this is the device's own observation.
+- **Unmanaged-first (DESIGN_LANGUAGE §8):** the card renders *fully* on a
+  personal device and cites `Personal defaults`; enrollment only adds the
+  org citation and a `MANAGED` pill. The shell never upgrades a personal
+  citation into an org one.
+
+### Data — `/run/punar-agentd/alerts.json` (M10, ipc.md §20)
+
+`0640 root:punar`, atomic tmp + fsync + rename, written **only when the
+alert set changes**. Root-owned for the M9 reason restated: a forged card
+reading *"Unknown AI activity suspected · your-bank-helper"* with an
+Inspect action is a phishing primitive, and `/run/punar` is
+`0755 punar:punar`. `Services/Alerts.qml` follows it with an inotify
+`FileView` — event-driven, **zero polling, no socket client, no timers**.
+
+**Fail closed:** a missing or unparsable file renders **no** alert, never
+a placeholder alert. Dismissal sends only the `alert_id`
+(`punarctl agents alerts dismiss <id>`, detached, fixed argv); the shell
+does not read the result — the next `FileView` change is the truth.
+
+**Anti-nag is the daemon's** (§5.2: one alert per `signature_id`, plus a
+24 h quiet window). The stack keys every card by `alert_id` and remembers
+which ids it has already presented, so no rewrite of the file can
+re-toast a card the human has already been shown.
+
+### Do-not-disturb (M10 sliver, §5.5 / §5.6)
+
+DND here is **shell-local state with an IPC setter, no persistence, no
+capability and no UI toggle** — the honest minimum that makes decision 8
+verifiable. The rule: **the first sighting of a signature breaks through;
+nothing else does.** The argument is spec §24.2 — from M10 on an
+authorized administrator can query this exact fact, so a quiet-mode
+toggle that could hide it would create a state in which the admin knows
+about a process on this machine and the user does not.
+
+Under DND the card renders **without sound** (this shell plays none),
+**without focus steal** (a quiet raise never takes the keyboard) and
+**without auto-dismiss**. There is in fact no auto-dismiss timer at all,
+in either mode: M10 ships no notification centre, so a card that vanished
+on its own would leave the reader nowhere to find what they were told.
+
+IPC (`alerts` target), driven from CI with
+`qs -p /usr/share/punar/shell ipc call alerts …`:
+
+| Call | Behaviour |
+| --- | --- |
+| `open` | draw what is outstanding and take the keyboard (an explicit open is never quiet) |
+| `close` | hide the region; **changes no record** — `punarctl agents alerts` still lists it |
+| `state` | `open` / `closed` |
+| `dnd on\|off\|toggle` | set shell-local DND; returns the resulting state |
+| `cards` | ids currently drawn (read-only probe) |
+| `quiet` | of those, the ids raised while DND was on |
+| `focused` | the card under the cursor |
+
+`cards` / `quiet` / `focused` exist for the same reason `approval
+selected` does — a check must be able to assert what the human was
+actually shown without a screenshot being the only evidence. `quiet` also
+answers a question **agentd structurally cannot**: whether a raise broke
+through quietly is shell-local by §5.6, and the daemon must never be told
+to trust the shell about its own root-owned file.
+
 ## Command center data sources (M1 scope)
 
 1. Installed applications via Quickshell `DesktopEntries` — launched with
@@ -379,7 +490,7 @@ touch fails harmlessly.
 
 ## Linting
 
-All twelve `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
+All fourteen `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
 quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in a container
 built on the pinned builder base with `qt6-declarative` + `quickshell`
 installed from the same snapshot; default import path — Quickshell ships
@@ -387,10 +498,11 @@ qmldir + qmltypes under `/usr/lib/qt6/qml/Quickshell`, so no extra `-I` is
 needed; the binary lives at `/usr/lib/qt6/bin/qmllint`):
 
 ```sh
-qmllint shell.qml AiPanel/AiPanel.qml Approval/ApprovalOverlay.qml \
-        Bar/Bar.qml CommandCenter/CommandCenter.qml Overview/Overview.qml \
-        Theme/Theme.qml Services/Agents.qml Services/Approvals.qml \
-        Services/Ledger.qml Services/Status.qml \
+qmllint shell.qml AiPanel/AiPanel.qml Alert/AlertStack.qml \
+        Approval/ApprovalOverlay.qml Bar/Bar.qml \
+        CommandCenter/CommandCenter.qml Overview/Overview.qml \
+        Theme/Theme.qml Services/Agents.qml Services/Alerts.qml \
+        Services/Approvals.qml Services/Ledger.qml Services/Status.qml \
         Services/WorkspaceState.qml                       # from this directory
 ```
 
@@ -445,6 +557,23 @@ and that deleting `agents.json` fails closed to the empty panel.
   device line (`ThinkPad X1 · dev_123 · Acme Engineering`) shows only the
   mode/org part: the shell has no trustworthy device identity to print
   yet, and inventing one would be the wrong kind of fidelity.
+- Alert card (M10): **the plate's `→ api.foo.ai` is dropped.** D-009's
+  subline reads `~/Downloads/foo-agent → api.foo.ai`; nothing on this
+  device observes a network destination before M12, and the plate is the
+  acceptance reference for *anatomy*, not a licence to print a field no
+  code produced (spec §1.22, `milestone-10.md` §5.1). No destination —
+  invented, inferred or fixture-borrowed — appears on the card. The same
+  drop-shadow omission applies. The path is spelled `~/Downloads/…` when
+  the record's own `owner` makes the tilde unambiguous (D-009's and §5.1's
+  own spelling); anything outside that owner's home prints verbatim, and
+  the untouched path is always in `punarctl agents alerts`. D-009's toast
+  stack also carries an approval toast and a calm "screenshot saved"
+  toast: neither is drawn here, because M10 ships the detection alert and
+  nothing else — the approval surface stays the M9 gate. The `MANAGED`
+  pill rides the **meta row** rather than the plate's action row: at
+  340 px the action row is already full at `[I] Inspect · Super+A` +
+  `[D] Dismiss to record`, and an annotation that overlaps a button is
+  worse than one that sits a line higher. Nothing else moves.
 - Approval overlay (M9): the same drop-shadow omission. D-003's identity
   chain ends at a human's email address (`alice@acme.com`); the card
   prints whatever the record actually carries, which on a personal device

@@ -122,6 +122,35 @@ pub const CLASS_UNKNOWN: &str = "unknown";
 /// realized project workspace grant.
 pub const ZONE_WORKSPACE: &str = "workspace";
 
+/// Days a **detection** ledger is kept after the detection clears
+/// (milestone-10.md decision 11) — half the managed window.
+///
+/// Shorter on purpose: a detection is a record about a process the user
+/// never asked for, and the shortest window that still answers *what ran
+/// on this device last week* is the right one. Seven days covers a full
+/// working week plus a weekend — the realistic span of "we found
+/// something on Friday, look into it Monday" — and halves the window in
+/// which any administrator query can reach it.
+pub const DETECTION_RETENTION_DAYS: u64 = 7;
+
+/// Zone classes for the **executable's own** location, the only zone an
+/// unknown-agent ledger can honestly carry (milestone-10.md section 6.3).
+///
+/// A class, never a path: `/proc/<pid>/cwd` is trivially readable by the
+/// root daemon and would tell us the project, but recording it would put
+/// a filesystem path from inside the user's home into a file an
+/// administrator can later ask about — exactly what SPEC 21.2's
+/// never-record list protects. Refused; the zone below is derived from
+/// the executable path the detection already matched on, and the path
+/// itself never crosses into ledger storage.
+pub const ZONE_DOWNLOADS: &str = "downloads";
+/// The executable lives under `/tmp` or `/var/tmp`.
+pub const ZONE_TMP: &str = "tmp";
+/// The executable lives somewhere else under a user's home.
+pub const ZONE_HOME: &str = "home";
+/// The executable lives in a system location (`/usr`, `/bin`, `/opt`, …).
+pub const ZONE_SYSTEM: &str = "system";
+
 /// The SPEC 21.2 never-recorded list, verbatim, carried in every result
 /// so no surface has to remember it.
 pub const NEVER_RECORDED: [&str; 5] = [
@@ -491,14 +520,28 @@ pub enum Evidence {
     WorkspaceBind,
     /// Adapter / registry metadata captured at launch.
     AdapterMetadata,
+    /// The `/proc` read of one **detection pass** (Milestone 10).
+    ///
+    /// Added rather than folded into [`Evidence::AdapterMetadata`],
+    /// because this enum exists to say *how we know* and a detection was
+    /// never launched: there is no adapter and no registration behind it,
+    /// only the pass that saw the process. It is still not tracing — the
+    /// same `/proc` walk the registry has always done, reading the same
+    /// `comm` the class table maps and discards. Nothing here observes an
+    /// event as it happens; a pass observes what is running when it runs,
+    /// and the honest limitation (a process that starts and exits between
+    /// passes is never seen) is stated on every surface that claims
+    /// continuous detection.
+    DetectionScan,
 }
 
 impl Evidence {
-    pub const ALL: [Evidence; 4] = [
+    pub const ALL: [Evidence; 5] = [
         Evidence::CgroupScope,
         Evidence::AuditEvent,
         Evidence::WorkspaceBind,
         Evidence::AdapterMetadata,
+        Evidence::DetectionScan,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -507,6 +550,7 @@ impl Evidence {
             Evidence::AuditEvent => "audit_event",
             Evidence::WorkspaceBind => "workspace_bind",
             Evidence::AdapterMetadata => "adapter_metadata",
+            Evidence::DetectionScan => "detection_scan",
         }
     }
 }
@@ -967,6 +1011,23 @@ pub struct NotYetObserved {
 ///   M9/M12 → M12 (no mediation point observes sensitive zones in M9).
 ///   Re-milestoning is the honest move; leaving a row that quietly
 ///   promises the wrong milestone is not.
+///
+/// **Milestone 10 removes one row, because the producer shipped**:
+/// `unknown_ai_execution` (L4). M8 wrote the row as *"the audit event
+/// exists, but a detected unmanaged process has no registered session, so
+/// it attaches to no ledger; M10 owns the unknown-agent ledger"* — and
+/// M10 built exactly that (milestone-10.md section 6). A detection now
+/// gets a persisted record and a bounded ledger, and the `agents.scan`
+/// transition that produced it is referenced there as a Level-4
+/// `unknown_ai_execution` event. The row leaves this list, which is the
+/// documented idiom: *when a producer ships, its row leaves*. It has to
+/// leave — a list that keeps promising a milestone which already shipped
+/// is the same lie by omission, wearing the opposite mask.
+///
+/// A **managed** session's ledger still carries no `unknown_ai_execution`
+/// event, and that is not an absent producer: a managed session is by
+/// construction not an unknown AI execution. See
+/// [`not_yet_observed_for`] for the per-classification set.
 pub fn not_yet_observed() -> Vec<NotYetObserved> {
     let row = |level: u8, category: &str, milestone: &str, reason: &str| NotYetObserved {
         level,
@@ -1001,15 +1062,57 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
             "M12",
             "no mediation point observes sensitive zones yet",
         ),
-        row(
-            4,
-            SecurityEventType::UnknownAiExecution.as_str(),
-            "M10",
-            "the audit event exists, but a detected unmanaged process has no registered \
-             session, so in M8 it attaches to no ledger (spec section 23; the \
-             unknown-agent ledger is Milestone 10)",
-        ),
     ]
+}
+
+/// The not-yet-observed set for one session, by **classification**
+/// (milestone-10.md section 6.3).
+///
+/// An unmanaged detection has strictly fewer sources than a managed
+/// session, so its honest empty list is strictly longer. Two categories
+/// that have a producer for a *managed* session have none for a process
+/// Punar never launched, and saying so is the whole idiom:
+///
+/// - `repositories` — nothing granted an unmanaged agent a workspace, and
+///   `cwd` is never read, so there is no repository to name;
+/// - `credential_classes` — `punar-secrets` mediates *managed* sessions,
+///   so an unmanaged agent's credential use may never be observable by
+///   this mechanism at all. That is a permanent limitation, not a
+///   pending milestone, and the row says so.
+///
+/// `directory_zones` is **not** listed: an unknown ledger does carry one
+/// zone — the class of where the *executable* lives ([`ZONE_DOWNLOADS`]
+/// and friends), derived from the path the signature already matched.
+pub fn not_yet_observed_for(classification: AgentClassification) -> Vec<NotYetObserved> {
+    let mut rows = not_yet_observed();
+    // The dividing line is **managed**, not "unknown": both extra rows
+    // are about mediation points that exist only for a session Punar
+    // itself launched. An `observed` detection — a known agent product
+    // running outside the managed runtime — has no workspace grant and no
+    // brokered credentials either, so it gets the same honest rows.
+    if classification == AgentClassification::Managed {
+        return rows;
+    }
+    rows.push(NotYetObserved {
+        level: 3,
+        category: ResourceCategory::Repositories.as_str().to_string(),
+        milestone: "none".to_string(),
+        reason: "nothing granted this process a workspace, and Punar never reads \
+                 /proc/<pid>/cwd to infer one (milestone-10.md section 6.3): there is no \
+                 producer for an unmanaged agent's repository, in this milestone or a \
+                 later one"
+            .to_string(),
+    });
+    rows.push(NotYetObserved {
+        level: 3,
+        category: ResourceCategory::CredentialClasses.as_str().to_string(),
+        milestone: "none".to_string(),
+        reason: "punar-secrets mediates managed sessions only, so an unmanaged agent's \
+                 credential use may never be observable by this mechanism at all — an \
+                 honest permanent limitation, not a pending producer"
+            .to_string(),
+    });
+    rows
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,19 +1143,45 @@ pub struct RetentionInfo {
 
 impl RetentionInfo {
     pub fn active() -> RetentionInfo {
+        RetentionInfo::active_for(LEDGER_RETENTION_DAYS)
+    }
+
+    pub fn expiring(at: &str) -> RetentionInfo {
+        RetentionInfo::expiring_for(LEDGER_RETENTION_DAYS, at)
+    }
+
+    /// The same, for a window that is not the managed one — a detection's
+    /// is seven days (milestone-10.md decision 11). The number is
+    /// rendered on the privacy surface, so it has to be the number that
+    /// actually applies rather than the default one.
+    pub fn active_for(days: u64) -> RetentionInfo {
         RetentionInfo {
-            days: LEDGER_RETENTION_DAYS,
+            days,
             active: Some(true),
             expires_at: None,
         }
     }
 
-    pub fn expiring(at: &str) -> RetentionInfo {
+    pub fn expiring_for(days: u64, at: &str) -> RetentionInfo {
         RetentionInfo {
-            days: LEDGER_RETENTION_DAYS,
+            days,
             active: None,
             expires_at: Some(at.to_string()),
         }
+    }
+}
+
+/// How long this classification's ledger is kept.
+///
+/// A managed session's is fourteen days; a detection's is seven. Shorter
+/// on purpose: a detection is a record about a process the user never
+/// asked for, so the shortest window that still answers *what ran on this
+/// device last week* is the right one — and it halves the window in which
+/// any administrator query can reach it.
+pub fn retention_days_for(classification: AgentClassification) -> u64 {
+    match classification {
+        AgentClassification::Managed => LEDGER_RETENTION_DAYS,
+        AgentClassification::Observed | AgentClassification::Unknown => DETECTION_RETENTION_DAYS,
     }
 }
 
@@ -1109,15 +1238,21 @@ impl AgentsAccessResult {
                 truncated: record.truncated,
                 entries: record.entries.clone(),
             },
-            not_yet_observed: not_yet_observed(),
+            // Per classification since M10: an unmanaged detection has
+            // strictly fewer sources than a managed session, so its
+            // honest empty list is strictly longer.
+            not_yet_observed: not_yet_observed_for(record.classification),
             // A purged record still has the date its tombstone
             // disappears on, and the panel's side file must carry the
             // same answer the socket gives — otherwise the two surfaces
             // this builds disagree about one ledger.
-            retention: match (&record.purged_at, &record.retention_expires_at) {
-                (_, Some(at)) => RetentionInfo::expiring(at),
-                (Some(_), None) => RetentionInfo::expiring(""),
-                (None, None) => RetentionInfo::active(),
+            retention: {
+                let days = retention_days_for(record.classification);
+                match (&record.purged_at, &record.retention_expires_at) {
+                    (_, Some(at)) => RetentionInfo::expiring_for(days, at),
+                    (Some(_), None) => RetentionInfo::expiring_for(days, ""),
+                    (None, None) => RetentionInfo::active_for(days),
+                }
             },
             privacy: PrivacyNotice::for_session(&record.session_id),
             purged_at: record.purged_at.clone(),
@@ -1623,18 +1758,19 @@ mod tests {
             .filter(|r| r.level == 4)
             .map(|r| r.category.as_str())
             .collect();
+        // M10 shipped the unknown-agent ledger, so `unknown_ai_execution`
+        // left this list for the same reason `credential_classes` left it
+        // in M9: a category with a producer is not "not yet observed".
         assert_eq!(
             level4,
-            vec![
-                "production_access",
-                "sensitive_resource_access",
-                "unknown_ai_execution"
-            ]
+            vec!["production_access", "sensitive_resource_access"]
         );
-        // All seven Level-4 categories are accounted for: four have
-        // producers as of M9 (`denied_access`, `privilege_request`,
-        // `credential_request`, `policy_bypass_attempt`) and the other
-        // three are named here. None is quietly absent (spec 1.22).
+        // The invariant this test actually exists for: **all seven**
+        // Level-4 categories are accounted for — each either has a
+        // producer or is named here with a milestone. None is quietly
+        // absent (spec 1.22). Asserting the list's exact contents is
+        // asserting a snapshot; asserting the partition is asserting the
+        // rule, and the rule is what must survive the next milestone.
         let named: Vec<&str> = level4.clone();
         for event_type in SecurityEventType::ALL {
             let has_producer = matches!(
@@ -1643,10 +1779,14 @@ mod tests {
                     | SecurityEventType::PrivilegeRequest
                     | SecurityEventType::CredentialRequest
                     | SecurityEventType::PolicyBypassAttempt
+                    // M10: the detection pass itself
+                    // (`crate::ledger` consumers see it through
+                    // `punar_agentd::ledger::tail::classify`).
+                    | SecurityEventType::UnknownAiExecution
             );
             assert!(
-                has_producer || named.contains(&event_type.as_str()),
-                "{} is neither produced nor named as pending",
+                has_producer != named.contains(&event_type.as_str()),
+                "{} must be produced or named as pending, never both and never neither",
                 event_type.as_str()
             );
         }
@@ -1656,10 +1796,51 @@ mod tests {
         }
     }
 
+    /// An unmanaged detection's honest empty list is strictly longer
+    /// than a managed session's, because it has strictly fewer sources
+    /// (milestone-10.md section 6.3).
+    #[test]
+    fn an_unmanaged_ledger_names_the_two_sources_it_can_never_have() {
+        let base = not_yet_observed();
+        for classification in [AgentClassification::Unknown, AgentClassification::Observed] {
+            let rows = not_yet_observed_for(classification);
+            assert!(rows.len() > base.len(), "{classification:?}");
+            let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
+            assert!(categories.contains(&"repositories"), "{categories:?}");
+            assert!(categories.contains(&"credential_classes"), "{categories:?}");
+            // `directory_zones` is NOT listed: an unknown ledger does
+            // carry one — the zone class of where the executable lives.
+            assert!(!categories.contains(&"directory_zones"), "{categories:?}");
+            // The two extra rows are permanent limitations, not pending
+            // producers, and they say so rather than promising a date.
+            for row in rows
+                .iter()
+                .filter(|r| r.category == "repositories" || r.category == "credential_classes")
+            {
+                assert_eq!(row.milestone, "none", "{row:?}");
+                assert!(!row.reason.is_empty());
+            }
+        }
+        assert_eq!(
+            not_yet_observed_for(AgentClassification::Managed),
+            base,
+            "a managed session has the workspace grant and the broker"
+        );
+    }
+
     #[test]
     fn the_result_always_carries_the_privacy_notice_and_the_honesty_rows() {
         let result = AgentsAccessResult::from_record(&populated_record(), "2026-08-27T10:00:02Z");
-        assert_eq!(result.not_yet_observed.len(), 5);
+        // A **managed** session gets the base list; every row names a
+        // milestone. The count is not asserted — it moves whenever a
+        // producer ships, which is the idiom working, not a regression.
+        assert!(!result.not_yet_observed.is_empty());
+        assert!(
+            result
+                .not_yet_observed
+                .iter()
+                .all(|row| !row.milestone.is_empty() && !row.reason.is_empty())
+        );
         assert!(result.privacy.local_only);
         assert!(result.privacy.audit_trail_separate);
         assert_eq!(

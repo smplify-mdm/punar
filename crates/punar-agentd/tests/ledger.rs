@@ -409,7 +409,13 @@ fn access_returns_the_schema_exact_summary_and_its_siblings() {
             )
         })
         .collect();
-    assert_eq!(honest.len(), 5);
+    // The invariant, not a count of the day: every producerless category
+    // is named with a milestone, and no category that *has* a producer
+    // appears. M9 removed two rows because their producers shipped; M10
+    // removed a third for the same reason, so asserting "five rows"
+    // would be asserting a snapshot rather than the rule.
+    assert!(!honest.is_empty());
+    assert!(honest.iter().all(|(_, milestone)| !milestone.is_empty()));
     assert!(honest.contains(&("network_destinations", "M12")));
     // M9 re-milestoned this rather than leaving it promising M9+: the
     // milestone shipped a credential broker, not a tool gateway.
@@ -423,9 +429,15 @@ fn access_returns_the_schema_exact_summary_and_its_siblings() {
             .iter()
             .any(|(cat, _)| *cat == "policy_bypass_attempt")
     );
-    // All seven Level-4 categories are accounted for: four have producers
-    // as of M9, the other three are named here.
-    assert!(honest.contains(&("unknown_ai_execution", "M10")));
+    // Left the list in M10 — the unknown-agent ledger is the producer,
+    // and the `agents.scan` / `detected` transition is referenced there
+    // (milestone-10.md section 6). A managed session's ledger carries no
+    // `unknown_ai_execution` event because a managed session is not one,
+    // which is a different fact from "nothing observes this yet".
+    assert!(
+        !honest.iter().any(|(cat, _)| *cat == "unknown_ai_execution"),
+        "M10 shipped the producer, so the row must have left the list: {honest:?}"
+    );
 
     // Level 4 — a reference, joined to the audit trail by event id.
     let events = summary["security_events"].as_array().unwrap();
@@ -974,7 +986,15 @@ fn the_runtime_view_matches_the_socket_and_is_not_world_readable() {
     assert_eq!(file["v"], 1);
     let view = &file["sessions"][0];
     assert_eq!(view["summary"]["session_id"], SESSION);
-    assert_eq!(view["not_yet_observed"].as_array().unwrap().len(), 5);
+    // Same invariant as above: every row names a milestone, and the list
+    // is the classification-aware one (a managed session's).
+    let honest = view["not_yet_observed"].as_array().unwrap();
+    assert!(!honest.is_empty());
+    assert!(
+        honest
+            .iter()
+            .all(|row| !row["milestone"].as_str().unwrap_or_default().is_empty())
+    );
     assert_eq!(view["retention"]["days"], 14);
 
     // Same rows as the socket, so the pane and the CLI cannot disagree.

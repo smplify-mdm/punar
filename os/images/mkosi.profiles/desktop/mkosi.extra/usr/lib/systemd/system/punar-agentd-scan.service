@@ -1,0 +1,38 @@
+# Punar shadow-AI detection pass, one shot (milestone-10.md §3.1; SPEC
+# sections 23, 53). Driven by punar-agentd-scan.timer; never enabled itself.
+#
+# THE PASS RUNS THROUGH punarctl, NOT INSIDE THE DAEMON. The rationale is
+# M4 §5's, inherited verbatim: the timer path is then the SAME socket, the
+# same authorization and the same audit path a human uses, so there is
+# exactly one code path to verify and punar-agentd gains no internal clock.
+# The cost is one transient process every four minutes, which the budget
+# section measures rather than assumes.
+#
+# `--trigger timer` is the whole point of the flag (milestone-10.md §3.4):
+# it travels into the audit event's `resource` field, so a detection
+# produced by this unit is distinguishable in /var/log/punar/audit.jsonl
+# from one produced by a typed command. m10-check group 3 proves periodic
+# detection actually fired by asserting exactly that, with no manual scan
+# anywhere in the window — an assertion that would be worthless if the
+# trigger were assumed rather than recorded.
+#
+# A pass that changes nothing writes nothing: no agents.json rewrite, no
+# audit line, no disk I/O (milestone-10.md decision 4, SPEC 6.4). The steady
+# state of periodic detection is zero bytes, which is what makes a 240 s
+# timer compatible with the batch-I/O rule at all.
+#
+# No User= — the pass reads every process's /proc entry, which is root's
+# job. No [Install] section: the .timer carries the vendor-wants symlink.
+# A failure here is not fatal to anything: the next tick tries again, and
+# `punarctl agents list` still refreshes a stale view on demand (M7's 30 s
+# staleness rule, unchanged).
+
+[Unit]
+Description=Punar shadow-AI detection pass (oneshot)
+After=punar-agentd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/punarctl agents scan --trigger timer
+StandardOutput=journal
+StandardError=journal

@@ -38,16 +38,48 @@
 //! categories with no producer yet — network destinations (M12), MCP
 //! servers (M9+), credential classes (M9) — are rendered as *not yet
 //! observed* rather than invented (SPEC 1.22).
+//!
+//! # Milestone 10: periodic detection and the local alert
+//!
+//! M10 makes the device notice on its own and tell the user first (SPEC
+//! sections 12.1, 23, 73; `docs/development/milestone-10.md`):
+//!
+//! - **[`identity`]** — `detection_id` (one running process) and
+//!   `signature_id` (one thing seen). Two identities, deliberately: the
+//!   set-diff and the ledger bind to the process, the alert binds to the
+//!   thing.
+//! - **The scan diff is the event.** `agents.scan` gains a `--trigger`
+//!   that travels into the audit trail, and a pass whose detection set is
+//!   unchanged writes **nothing at all** — no `agents.json` rewrite, no
+//!   audit line, no disk I/O (SPEC 6.4). The periodic pass is a systemd
+//!   timer calling `punarctl`, not a thread in this daemon (SPEC 6.3).
+//! - **[`detections`]** — persisted detection records and bounded
+//!   unknown-agent ledgers, closing the question M8 wrote down and left
+//!   open. The ledger is strictly *smaller* than a managed one: a process
+//!   class, a zone class, and the Level-4 event references. No child
+//!   walk, no `cwd`, no cmdline, ever.
+//! - **[`alerts`]** — one alert per signature, a 24 h quiet window, a
+//!   root-owned state file, and dismissal that files rather than
+//!   destroys.
+//!
+//! **Still does not**: block, kill, quarantine, or throttle anything.
+//! M10 detects, records and alerts. A red card that cannot act is honest;
+//! a red card that silently acts is not (SPEC 23, 1.22).
 
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod alerts;
 pub mod authz;
 pub mod detect;
+pub mod detections;
+pub mod identity;
 pub mod ledger;
 pub mod proc;
+pub mod queries;
 pub mod registry;
 pub mod server;
+pub mod sha256;
 pub mod summary;
 pub mod util;
 

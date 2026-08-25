@@ -249,15 +249,42 @@ enum AgentsCommand {
         /// Agent session id, like `agt_123`.
         id: String,
     },
+    /// The shadow-AI alert register: one card per signature, never per
+    /// scan and never per process (milestone-10.md section 5.2).
+    Alerts {
+        #[command(subcommand)]
+        command: Option<AlertsCommand>,
+        /// Include cards already filed. Dismissal files, it never
+        /// destroys, so they are still here.
+        #[arg(long)]
+        all: bool,
+    },
     /// Force one detection pass now and print the refreshed registry.
     ///
-    /// Hidden on purpose: the advertised Milestone 7 surface is `list` and
-    /// `inspect` (milestone-7.md section 9), and `list` already refreshes
-    /// a stale view by itself (contract section 10.2). This verb exists so
-    /// the in-VM exercise — and anyone debugging detection — can ask for a
+    /// Hidden on purpose: the advertised surface is `list`, `inspect` and
+    /// `alerts`, and since M10 the pass runs on a timer by itself
+    /// (`punar-agentd-scan.timer`, every 4 minutes). This verb exists so
+    /// the timer unit — and anyone debugging detection — can ask for a
     /// pass *now* without a raw `debug rpc`.
     #[command(hide = true)]
-    Scan,
+    Scan {
+        /// What asked for this pass. It travels into the audit event, so
+        /// a detection produced by the timer is distinguishable from one
+        /// produced by a typed command (milestone-10.md section 3.4).
+        /// Absent means `manual` — never an assumed timer.
+        #[arg(long, value_parser = ["manual", "timer", "register", "enroll"])]
+        trigger: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlertsCommand {
+    /// File one card. It is never deleted: the alert stays in the
+    /// register with its dismissal time, and suppression does not move.
+    Dismiss {
+        /// Alert id, like `alr_7c1d9a4e`.
+        alert_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -383,6 +410,19 @@ enum PrivacyCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Show every question an administrator asked about this device, what
+    /// scope it was asked at, and what this device decided (SPEC sections
+    /// 24.2, 51.1).
+    ///
+    /// Readable by any peer the agentd socket admits — withholding the log
+    /// of who asked about you *from you* would invert the promise this
+    /// command exists to keep. On a personal device it prints one calm
+    /// sentence and exits 0: there is no remote-query path here.
+    Queries {
+        /// Only queries decided at or after this RFC 3339 timestamp.
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+    },
     /// Show current network connections and their privacy handling.
     Connections,
 }
@@ -411,8 +451,18 @@ enum UpdateCommand {
 
 #[derive(Subcommand)]
 enum DebugCommand {
-    /// Send `method` with no params and print the raw response.
-    Rpc { method: String },
+    /// Send `method` and print the raw response.
+    Rpc {
+        method: String,
+        /// A JSON object of params, verbatim. Exists so a negative probe
+        /// can be *specific* — "this well-formed question was refused" is
+        /// a different claim from "a request with no params was rejected"
+        /// — and so the in-VM exercise can drive the dev/CI control plane
+        /// over `--socket <path>` without a second client binary in the
+        /// image (milestone-10.md section 16, groups 7-13).
+        #[arg(long, value_name = "JSON")]
+        params: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -544,11 +594,34 @@ fn collect_ledgers(agents: &Client, list: &Value) -> Vec<(String, Value)> {
 /// `agents.access` per session, so the document names itself as a composed
 /// local view and carries both parts unmodified. Nothing is summarized
 /// away — a consumer that wants the wire objects has them.
-fn privacy_ledger_json(list: &Value, accesses: &[(String, Value)]) -> Value {
+fn privacy_ledger_json(
+    list: &Value,
+    accesses: &[(String, Value)],
+    queries: Option<&Value>,
+) -> Value {
     let ledgers: Vec<Value> = accesses
         .iter()
         .map(|(id, access)| json!({"session_id": id, "access": access}))
         .collect();
+    // M10: the `remote_query` block was `{"available": false, "milestone":
+    // "M10"}` in M8, by design and with the milestone named. It now carries
+    // the live log — or, when the daemon could not answer, says exactly
+    // that. "Not read" and "none" are different, and a consumer must be
+    // able to tell them apart.
+    let remote_query = match queries {
+        Some(queries) => json!({
+            "available": true,
+            "log": queries,
+            "command": "punarctl privacy queries",
+        }),
+        None => json!({
+            "available": true,
+            "log": Value::Null,
+            "read": false,
+            "reason": "punar-agentd did not answer queries.list",
+            "command": "punarctl privacy queries",
+        }),
+    };
     json!({
         "source": "punarctl privacy ledger (composed locally from agents.list + agents.access)",
         "registry": list,
@@ -556,7 +629,7 @@ fn privacy_ledger_json(list: &Value, accesses: &[(String, Value)]) -> Value {
         "readable": ledgers.len(),
         "storage_path": "/var/lib/punar/agents/ledger",
         "local_only": true,
-        "remote_query": {"available": false, "milestone": "M10"},
+        "remote_query": remote_query,
         "audit_trail_separate": true,
         "purge_command": "punarctl privacy purge --session <id>"
     })
@@ -1110,12 +1183,25 @@ fn main() -> ExitCode {
             ),
         },
         Command::Debug { command } => match command {
-            DebugCommand::Rpc { method } => {
+            DebugCommand::Rpc { method, params } => {
                 // The probe follows the same routing as the real verbs, so
                 // a negative probe reaches the daemon that owns the name
                 // (contract section 10.5) — `--socket agentd` forces it.
                 let probe = Client::for_target(Target::of_method(&method), socket.as_deref());
-                match probe.call(&method, None) {
+                let params = match params.as_deref().map(serde_json::from_str::<Value>) {
+                    None => None,
+                    Some(Ok(value)) => Some(value),
+                    Some(Err(why)) => {
+                        // Refused here rather than sent as a string: a
+                        // daemon answering `invalid_params` to a typo in
+                        // the probe would look like a daemon refusing the
+                        // method, and a probe that lies about which thing
+                        // said no is worse than no probe.
+                        eprintln!("punarctl: --params is not valid JSON: {why}");
+                        return ExitCode::from(2);
+                    }
+                };
+                match probe.call(&method, params) {
                     Ok(result) => {
                         println!("{result}");
                         ExitCode::SUCCESS
@@ -1375,31 +1461,52 @@ fn main() -> ExitCode {
                         // object per method, composed by the renderer.
                         // `--json` stays the `agents.get` result verbatim.
                         Ok(result) => render_or_json(json, &result, |v| {
-                            let suspected = v["session"].get("suspected").and_then(Value::as_bool)
-                                == Some(true);
-                            let ledger = if suspected {
-                                // A detection has no persisted session and so
-                                // no ledger to ask for (milestone-8.md §3.1).
-                                None
-                            } else {
-                                Some(
-                                    agents
-                                        .call("agents.access", Some(json!({ "session_id": id })))
-                                        .map_err(|error| error.message()),
-                                )
-                            };
+                            // M10 closed M8's open question: a detection has
+                            // a persisted record and a bounded ledger
+                            // (milestone-10.md section 6), so the follow-up
+                            // runs for detections too. The register that
+                            // comes back is strictly smaller than a managed
+                            // one, and says why for every empty category.
+                            let ledger = Some(
+                                agents
+                                    .call("agents.access", Some(json!({ "session_id": id })))
+                                    .map_err(|error| error.message()),
+                            );
                             let ledger = ledger.as_ref().map(|r| r.as_ref().map_err(String::clone));
                             views::agent_inspect(&style, v, ledger)
                         }),
                         Err(error) => fail(&error),
                     }
                 }
-                AgentsCommand::Scan => {
+                AgentsCommand::Scan { trigger } => {
                     let hostname = local_hostname();
-                    rpc(&agents, json, "agents.scan", None, |v| {
+                    // Absent means `manual`, and the daemon decides that,
+                    // not this process: a CLI that filled in a default
+                    // trigger could label a typed command as a timer.
+                    let params = trigger.map(|t| json!({ "trigger": t }));
+                    rpc(&agents, json, "agents.scan", params, |v| {
                         views::agents_list(&style, v, &hostname)
                     })
                 }
+                AgentsCommand::Alerts { command, all } => match command {
+                    Some(AlertsCommand::Dismiss { alert_id }) => rpc(
+                        &agents,
+                        json,
+                        "alerts.dismiss",
+                        Some(json!({ "alert_id": alert_id })),
+                        |v| views::agent_alert_dismissed(&style, v),
+                    ),
+                    None => {
+                        let hostname = local_hostname();
+                        rpc(
+                            &agents,
+                            json,
+                            "alerts.list",
+                            Some(json!({ "include_dismissed": all })),
+                            |v| views::agents_alerts(&style, v, &hostname),
+                        )
+                    }
+                },
                 // SPEC section 11.2's reserved verb, real since M8. The
                 // ledger is personal data: the daemon admits the session
                 // owner or root and answers `denied` (exit 3) otherwise.
@@ -1433,11 +1540,27 @@ fn main() -> ExitCode {
                         None => match agents.call("agents.list", None) {
                             Ok(list) => {
                                 let accesses = collect_ledgers(&agents, &list);
+                                // M10: the `REMOTE QUERY` footer line M8
+                                // wrote as a placeholder goes live. Best
+                                // effort — a daemon that cannot answer
+                                // `queries.list` leaves the row on its
+                                // honest static sentence rather than on a
+                                // fabricated zero.
+                                let queries = agents.call("queries.list", None).ok();
                                 if json {
-                                    print_json(&privacy_ledger_json(&list, &accesses))
+                                    print_json(&privacy_ledger_json(
+                                        &list,
+                                        &accesses,
+                                        queries.as_ref(),
+                                    ))
                                 } else {
-                                    match views::privacy_ledger(&style, &list, &accesses, &hostname)
-                                    {
+                                    match views::privacy_ledger(
+                                        &style,
+                                        &list,
+                                        &accesses,
+                                        &hostname,
+                                        queries.as_ref(),
+                                    ) {
                                         Ok(text) => {
                                             print!("{text}");
                                             ExitCode::SUCCESS
@@ -1489,6 +1612,13 @@ fn main() -> ExitCode {
                     }
                     rpc(&agents, json, "ledger.purge", Some(params), |v| {
                         views::privacy_purge(&style, v, &hostname, &scope)
+                    })
+                }
+                PrivacyCommand::Queries { since } => {
+                    let hostname = local_hostname();
+                    let params = since.as_ref().map(|since| json!({ "since": since }));
+                    rpc(&agents, json, "queries.list", params, |v| {
+                        views::privacy_queries(&style, v, &hostname)
                     })
                 }
                 PrivacyCommand::Connections => {
@@ -1551,6 +1681,15 @@ mod tests {
             &["punarctl", "agents", "inspect", "agt_123"],
             &["punarctl", "agents", "access", "agt_123"],
             &["punarctl", "privacy", "connections"],
+            &["punarctl", "privacy", "queries"],
+            &["punarctl", "--json", "privacy", "queries"],
+            &[
+                "punarctl",
+                "privacy",
+                "queries",
+                "--since",
+                "2026-08-25T00:00:00Z",
+            ],
             &["punarctl", "privacy", "ledger"],
             &["punarctl", "privacy", "ledger", "agt_123"],
             &["punarctl", "privacy", "ledger", "--session", "agt_123"],

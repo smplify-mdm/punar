@@ -14,12 +14,17 @@
 //! # Section 60 again, on the second socket
 //!
 //! [`AgentMethod`] is a **closed** enum, exactly like
-//! [`crate::ipc::Method`]: five M7 methods plus the two M8 ledger
-//! methods, no variant that carries a command line or program, and none
-//! will ever be added. `admin.*` (M10) and `ledger.export`/`ledger.query`
-//! (which do **not** exist — M8 has no upload path at all) are
-//! **reserved**: they answer [`ErrorCode::UnknownMethod`] — said honestly
-//! in the error prose.
+//! [`crate::ipc::Method`]: five M7 methods, the two M8 ledger methods and
+//! the two M10 alert methods, no variant that carries a command line or
+//! program. "Closed" means *exhaustively dispatched and reviewed*, not
+//! *frozen*: a milestone may add a typed method, and adding one fails to
+//! compile until every dispatch table names it — which is the section 60
+//! review point. What will never be added is a variant that carries
+//! something executable.
+//!
+//! `admin.*` and `ledger.export`/`ledger.query` (which do **not** exist —
+//! there is no upload path at all) stay **reserved**: they answer
+//! [`ErrorCode::UnknownMethod`], said honestly in the error prose.
 //!
 //! # Layering
 //!
@@ -65,6 +70,247 @@ pub const SCAN_STALE_AFTER_SECS: u64 = 30;
 
 /// Version field of `/run/punar/agents.json` (section 11).
 pub const AGENTS_SUMMARY_VERSION: u32 = 1;
+
+// -- Milestone 10 (docs/api/ipc.md sections 17, 20; milestone-10.md) --------
+
+/// The local shadow-AI **alert** state file (milestone-10.md section 5.3;
+/// proposed `docs/api/ipc.md` section 20).
+///
+/// `0640 root:punar` in the **root-owned** `/run/punar-agentd`, never in
+/// the user-writable `/run/punar`: a forged card reading *"Unknown AI
+/// activity suspected · your-bank-helper"* with an `Inspect` action is a
+/// phishing primitive, and M9 already moved `approvals.json` out of
+/// `/run/punar` for exactly this reason. Display data whose authority is
+/// the socket; consumers fail closed (missing or unparsable ⇒ **no**
+/// alert, never a placeholder alert).
+pub const ALERTS_RUNTIME_PATH: &str = "/run/punar-agentd/alerts.json";
+
+/// Version field of `/run/punar-agentd/alerts.json`.
+pub const ALERTS_FILE_VERSION: u32 = 1;
+
+/// Append-only detection persistence: one schema-exact
+/// `registry-record.json` line per detection **state change**
+/// (`0600 root:root`; milestone-10.md section 6.4). This is the file that
+/// closes M8's open question — a detected unmanaged process now has a
+/// persisted record, and therefore a ledger.
+pub const DETECTIONS_JSONL_PATH: &str = "/var/lib/punar/agents/detections.jsonl";
+
+/// The sibling index for everything `registry-record.json` cannot hold
+/// (`signature_id`, the matched signature name, the executable path, the
+/// zone class, `cleared_at`). Third application of the M8 Decision-0 law:
+/// a shipped schema never grows a property to suit a later milestone.
+pub const DETECTIONS_INDEX_PATH: &str = "/var/lib/punar/agents/detections-index.json";
+
+/// The periodic detection cadence (`punar-agentd-scan.timer`), stated on
+/// every surface that claims continuous detection: an exact multiple of
+/// the 120 s reconcile timer so systemd **coalesces** the two wakeups
+/// (milestone-10.md decision 2).
+pub const SCAN_PERIOD_SECS: u64 = 240;
+
+/// How long an alert stays suppressed after its last live detection
+/// clears (milestone-10.md section 5.2). A crash-looping agent yields one
+/// alert a day; a genuinely new appearance next week yields a fresh one.
+pub const ALERT_QUIET_WINDOW_SECS: u64 = 24 * 60 * 60;
+
+/// How many alert records are retained (live, cleared and filed together)
+/// before the oldest **non-live** one is evicted. Dismissal files rather
+/// than destroys (D-009 Sect I register 03), so the register has to be
+/// bounded somewhere; a live alert is never evicted.
+pub const MAX_RETAINED_ALERTS: usize = 64;
+
+/// What asked for a detection pass (milestone-10.md section 3.4). It
+/// travels into the `agents.scan` audit event's `resource` field so a
+/// check can prove a detection came from the **timer** and not from a
+/// command a check script typed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanTrigger {
+    /// A human ran `punarctl agents scan` (the default: an unlabelled
+    /// request is a typed one, never a claimed timer).
+    #[default]
+    Manual,
+    /// `punar-agentd-scan.timer` → `punarctl agents scan --trigger timer`.
+    Timer,
+    /// A managed session registered, or a session was reaped.
+    Register,
+    /// An enrollment transition completed (punard → agentd).
+    Enroll,
+}
+
+impl ScanTrigger {
+    pub const ALL: [ScanTrigger; 4] = [
+        ScanTrigger::Manual,
+        ScanTrigger::Timer,
+        ScanTrigger::Register,
+        ScanTrigger::Enroll,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanTrigger::Manual => "manual",
+            ScanTrigger::Timer => "timer",
+            ScanTrigger::Register => "register",
+            ScanTrigger::Enroll => "enroll",
+        }
+    }
+}
+
+impl std::fmt::Display for ScanTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `agents.scan` params. Optional on the wire — M7 sent none, and an
+/// absent `trigger` is [`ScanTrigger::Manual`], never an assumed timer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentsScanParams {
+    #[serde(default)]
+    pub trigger: ScanTrigger,
+}
+
+/// Display state of one alert card (milestone-10.md sections 5.2, 5.4).
+///
+/// `dismissed` is a **display** state, not a suppression state: filing a
+/// card never changes what will or will not be raised, because a
+/// signature was never going to be raised twice anyway. That is why M10
+/// has no snooze, no per-alert mute and no user-facing suppression
+/// setting to explain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertState {
+    /// At least one detection of this signature is live and the card
+    /// stands.
+    Live,
+    /// The last live detection cleared; the 24 h quiet window is running.
+    Cleared,
+    /// The user filed the card. It stays in the register and in the
+    /// detection record — dismissal never destroys.
+    Dismissed,
+}
+
+impl AlertState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AlertState::Live => "live",
+            AlertState::Cleared => "cleared",
+            AlertState::Dismissed => "dismissed",
+        }
+    }
+}
+
+/// One alert as `/run/punar-agentd/alerts.json` carries it — **exactly**
+/// the milestone-10.md section 5.3 field list and nothing else.
+///
+/// What is absent is the contract: no pid, no cgroup path, no `comm`, no
+/// command line, no argv, no environment, no hash of anything secret. The
+/// one path present is the single matched executable — the datum D-009's
+/// card is built around, and one the same user can already print with
+/// `punarctl agents list`. Spec 24.2 is the rule: the card may not tell
+/// the user *less* than they can already read, and it may not carry more
+/// than the surface it mirrors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertRow {
+    /// `alr_`-prefixed, stable for the life of this alert.
+    pub alert_id: String,
+    /// The **anti-nag key** — `sig_` + 12 hex (milestone-10.md 4.2).
+    pub signature_id: String,
+    pub agent: String,
+    /// The matched executable path.
+    pub executable: String,
+    pub owner: String,
+    pub first_seen: String,
+    /// Last sighting **as of the last alert-set change**. Liveness is
+    /// in-memory state served by `alerts.list`; the file is a change log,
+    /// exactly as `agents.json`'s `scanned_at` is (milestone-10.md 3.4).
+    pub last_seen: String,
+    /// How many live detections currently carry this signature.
+    pub live: u64,
+    /// The most recent `detection_id` of this signature.
+    pub detection_id: String,
+    /// The matched signature's **name** (`unmanaged-path-agentlike`), the
+    /// reviewable rule in the data file — not the `sig_` identity above.
+    pub signature: String,
+    /// `personal-defaults`, or the org policy id when enrolled.
+    pub policy_citation: String,
+    pub state: AlertState,
+}
+
+/// The whole `/run/punar-agentd/alerts.json` document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsFile {
+    pub v: u32,
+    pub updated_at: String,
+    pub alerts: Vec<AlertRow>,
+}
+
+/// One alert as the **socket** returns it: the file's row plus the
+/// lifecycle timestamps the display file has no reason to carry. The
+/// socket is the authority; the file is display data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedAlert {
+    #[serde(flatten)]
+    pub row: AlertRow,
+    pub raised_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
+    /// When the anti-nag window expires and a fresh sighting of this
+    /// signature would raise a new card. Absent while the alert is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_until: Option<String>,
+}
+
+/// `alerts.list` params.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsListParams {
+    /// Filed cards are listed too when asked for — "I clicked it away and
+    /// now I cannot find it" has an answer (milestone-10.md 5.4).
+    #[serde(default)]
+    pub include_dismissed: bool,
+}
+
+/// `alerts.list` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsListResult {
+    pub alerts: Vec<ListedAlert>,
+    /// The anti-nag window, so a renderer states the rule rather than
+    /// hard-coding it.
+    pub quiet_window_secs: u64,
+}
+
+/// `alerts.dismiss` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsDismissParams {
+    pub alert_id: String,
+}
+
+/// `alerts.dismiss` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsDismissResult {
+    pub dismissed: bool,
+    pub alert_id: String,
+    pub dismissed_at: String,
+    /// Always `false` in M10 and stated on the surface: filing a card
+    /// changes nothing about what will be raised.
+    pub suppression_changed: bool,
+}
+
+/// Whether a string is a well-formed alert id (`^alr_[a-f0-9]{12}$`).
+pub fn alert_id_ok(value: &str) -> bool {
+    value
+        .strip_prefix("alr_")
+        .is_some_and(|rest| rest.len() == 12 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Whether a string is a well-formed signature identity
+/// (`^sig_[a-f0-9]{12}$`, milestone-10.md section 4.2).
+pub fn signature_identity_ok(value: &str) -> bool {
+    value
+        .strip_prefix("sig_")
+        .is_some_and(|rest| rest.len() == 12 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+}
 
 // ---------------------------------------------------------------------------
 // Registry record (schemas/ai-agent/registry-record.json — exact)
@@ -168,6 +414,99 @@ pub fn agent_name_ok(name: &str) -> bool {
         [first, mid @ .., last] => edge_ok(first) && edge_ok(last) && mid.iter().all(inner_ok),
     }
 }
+
+/// Longest `AuthoritySummary` string this daemon will store, and the
+/// largest number of rows. Generous for a display block, far too small to
+/// be a payload.
+pub const AUTHORITY_FIELD_MAX_BYTES: usize = 128;
+/// Row cap for [`validate_authority_summary`].
+pub const AUTHORITY_MAX_ROWS: usize = 32;
+
+/// Validate the authority block a launcher hands to `agents.register`.
+///
+/// # Why a display block needs a validator
+///
+/// [`AuthoritySummary`] is not derived by this daemon. It is supplied by
+/// the caller of `agents.register` — a peer that only has to own the
+/// process it is registering and either be inside its own agent scope or
+/// match a known-agent signature, both of which an unprivileged local
+/// process can arrange. Through M7-M9 that was tolerable: the block was
+/// display data, rendered to the person whose machine it described.
+///
+/// Milestone 10 changed what it is. The `authority` query scope exports
+/// these rows **off the device**, to an administrator who is told they are
+/// reading "the org's own policy, read back" (milestone-10.md section
+/// 8.1). Unvalidated, the three strings are a channel through which a
+/// local unprivileged process chooses what its organization believes: it
+/// can spell an `enforcement` of `enforced` over something merely
+/// declared, and it can carry a file path, a prompt or a terminal escape
+/// out through a surface documented as carrying zone classes and decision
+/// words.
+///
+/// This function closes the second half — bounded, single-line, printable,
+/// the M9 `approval::validate_reason` rule. It cannot close the first
+/// half, because nothing on this device measures the rows; that is why
+/// the export labels them `declared by the local launcher · not verified
+/// by this device`, exactly as the requesting admin's identity is labelled
+/// (milestone-10.md section 9.1). Spec 1.22: an administrator must not be
+/// told something is verified when it is asserted.
+pub fn validate_authority_summary(authority: &AuthoritySummary) -> Result<(), Vec<String>> {
+    fn check(violations: &mut Vec<String>, name: &str, value: &str) {
+        if value.trim().is_empty() {
+            violations.push(format!("{name} must not be blank"));
+        } else if value.len() > AUTHORITY_FIELD_MAX_BYTES {
+            violations.push(format!(
+                "{name} must be at most {AUTHORITY_FIELD_MAX_BYTES} bytes; this one is {}",
+                value.len()
+            ));
+        } else if let Some(c) = value.chars().find(|c| c.is_control()) {
+            violations.push(format!(
+                "{name} must be a single line of printable text; found {c:?}"
+            ));
+        }
+    }
+
+    let mut violations = Vec::new();
+    check(
+        &mut violations,
+        "policy_citation",
+        &authority.policy_citation,
+    );
+    if authority.rows.len() > AUTHORITY_MAX_ROWS {
+        violations.push(format!(
+            "authority.rows must hold at most {AUTHORITY_MAX_ROWS} rows; this one holds {}",
+            authority.rows.len()
+        ));
+    }
+    for (index, row) in authority.rows.iter().enumerate() {
+        check(
+            &mut violations,
+            &format!("authority.rows[{index}].zone"),
+            &row.zone,
+        );
+        check(
+            &mut violations,
+            &format!("authority.rows[{index}].decision"),
+            &row.decision,
+        );
+        check(
+            &mut violations,
+            &format!("authority.rows[{index}].enforcement"),
+            &row.enforcement,
+        );
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+/// The honesty label the `authority` query scope carries beside the rows
+/// [`validate_authority_summary`] guards (milestone-10.md section 9.1's
+/// discipline, applied to the other asserted identity in the answer).
+pub const AUTHORITY_SOURCE_LABEL: &str =
+    "declared by the local launcher · not verified by this device";
 
 /// Validate a record against the registry-record schema contract (the
 /// Rust-side mirror, the [`crate::audit::validate_event_schema`] pattern):
@@ -353,8 +692,19 @@ pub enum AgentMethod {
     Register(Box<AgentsRegisterParams>),
     /// `agents.end` — owner/root marks a session ended.
     End(AgentsEndParams),
-    /// `agents.scan` — force one detection pass now.
-    Scan,
+    /// `agents.scan` — force one detection pass now. M10 carries the
+    /// **trigger** into the audit event so a detection produced by the
+    /// timer is distinguishable from one produced by a typed command
+    /// (milestone-10.md section 3.4).
+    Scan(AgentsScanParams),
+    /// `alerts.list` — the shadow-AI alert register (M10, spec sections
+    /// 12.1, 73). Readable by any peer the socket admitted: withholding
+    /// it from the user would violate spec 24.2, since from M10 onward an
+    /// authorized administrator can query the same fact.
+    AlertsList(AlertsListParams),
+    /// `alerts.dismiss` — file one card. Owner of the detection, or
+    /// root. It **never** deletes and never changes suppression.
+    AlertsDismiss(AlertsDismissParams),
     /// `agents.access` — the AI Access Ledger for one session (M8, spec
     /// section 21). Owner or root; drains the audit tail and samples the
     /// scope cgroup first so a read never shows a stale answer.
@@ -363,6 +713,18 @@ pub enum AgentMethod {
     /// section 24.2). Owner or root, always audited, and it does **not**
     /// touch the audit trail.
     Purge(LedgerPurgeParams),
+    /// `query.answer` — one administrator question the device **fetched**
+    /// (M10, spec sections 24.1, 51). **Root peer only**: the only caller
+    /// is `punard`, the courier. The data owner re-evaluates
+    /// authorization from local state and never from the request, and a
+    /// refusal comes back as a *successful result* carrying
+    /// `authorization_decision: "deny"` — never an error frame, because a
+    /// courier that receives an error has no decision to relay.
+    QueryAnswer(Box<crate::query::PendingQuery>),
+    /// `queries.list` — the local record of every question an
+    /// administrator asked about this device. Readable by **any admitted
+    /// peer**: withholding it from the user would violate spec 24.2.
+    QueriesList(crate::query::QueriesListParams),
 }
 
 /// Reserved method-name prefixes/names that deserve a *specific* honest
@@ -376,7 +738,7 @@ const RESERVED_LEDGER_PREFIX: &str = "ledger.";
 
 impl AgentMethod {
     /// All wire method names, contract-table order.
-    pub const NAMES: [&'static str; 7] = [
+    pub const NAMES: [&'static str; 11] = [
         "agents.list",
         "agents.get",
         "agents.register",
@@ -384,6 +746,10 @@ impl AgentMethod {
         "agents.scan",
         "agents.access",
         "ledger.purge",
+        "alerts.list",
+        "alerts.dismiss",
+        "query.answer",
+        "queries.list",
     ];
 
     /// The wire method name.
@@ -395,21 +761,30 @@ impl AgentMethod {
             AgentMethod::Get(_) => "agents.get",
             AgentMethod::Register(_) => "agents.register",
             AgentMethod::End(_) => "agents.end",
-            AgentMethod::Scan => "agents.scan",
+            AgentMethod::Scan(_) => "agents.scan",
             AgentMethod::Access(_) => "agents.access",
             AgentMethod::Purge(_) => "ledger.purge",
+            AgentMethod::AlertsList(_) => "alerts.list",
+            AgentMethod::AlertsDismiss(_) => "alerts.dismiss",
+            AgentMethod::QueryAnswer(_) => "query.answer",
+            AgentMethod::QueriesList(_) => "queries.list",
         }
     }
 
     /// The `params` value for the wire envelope.
     pub fn params_value(&self) -> Option<Value> {
         let params = match self {
-            AgentMethod::List | AgentMethod::Scan => return None,
+            AgentMethod::List => return None,
+            AgentMethod::Scan(p) => serde_json::to_value(p),
             AgentMethod::Get(p) => serde_json::to_value(p),
             AgentMethod::Register(p) => serde_json::to_value(p),
             AgentMethod::End(p) => serde_json::to_value(p),
             AgentMethod::Access(p) => serde_json::to_value(p),
             AgentMethod::Purge(p) => serde_json::to_value(p),
+            AgentMethod::AlertsList(p) => serde_json::to_value(p),
+            AgentMethod::AlertsDismiss(p) => serde_json::to_value(p),
+            AgentMethod::QueryAnswer(p) => serde_json::to_value(p),
+            AgentMethod::QueriesList(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -423,12 +798,30 @@ impl AgentMethod {
     pub fn from_wire(method: &str, params: Option<Value>) -> Result<AgentMethod, IpcError> {
         match method {
             "agents.list" => Self::expect_no_params(method, params).map(|()| AgentMethod::List),
-            "agents.scan" => Self::expect_no_params(method, params).map(|()| AgentMethod::Scan),
+            // M7 sent `agents.scan` with no params and still may: an
+            // absent `trigger` is `manual`, never an assumed timer.
+            "agents.scan" => Self::parse_optional_params(method, params).map(AgentMethod::Scan),
+            "alerts.list" => {
+                Self::parse_optional_params(method, params).map(AgentMethod::AlertsList)
+            }
+            "alerts.dismiss" => {
+                Self::parse_required_params(method, params).map(AgentMethod::AlertsDismiss)
+            }
             "agents.get" => Self::parse_required_params(method, params).map(AgentMethod::Get),
             "agents.end" => Self::parse_required_params(method, params).map(AgentMethod::End),
             "agents.register" => Self::parse_required_params(method, params)
                 .map(|p| AgentMethod::Register(Box::new(p))),
             "agents.access" => Self::parse_required_params(method, params).map(AgentMethod::Access),
+            // The question is required and strict: an administrator query
+            // with a missing or mis-shaped field is refused as invalid,
+            // never answered best-effort.
+            "query.answer" => Self::parse_required_params(method, params)
+                .map(|p| AgentMethod::QueryAnswer(Box::new(p))),
+            // The user's own log: no params needed to read your own
+            // record of who asked about you.
+            "queries.list" => {
+                Self::parse_optional_params(method, params).map(AgentMethod::QueriesList)
+            }
             "ledger.purge" => {
                 let parsed: LedgerPurgeParams = Self::parse_required_params(method, params)?;
                 if parsed.scope().is_none() {
@@ -444,20 +837,29 @@ impl AgentMethod {
                 ErrorCode::UnknownMethod,
                 format!(
                     "The method {unknown:?} does not exist. The AI Access Ledger stays on \
-                     this device: there is no export, upload, or remote-query method, by \
-                     design (spec section 24). Next step: `punarctl privacy ledger` shows \
+                     this device: there is no export method and no upload path, by design \
+                     (spec section 24). Since Milestone 10 one thing can leave — the \
+                     answer to a question the device itself FETCHED, at a scope the \
+                     organization was granted, decided here and recorded in \
+                     `punarctl privacy queries`. That is `query.answer`, and it is not a \
+                     ledger export: nothing streams, nothing uploads continuously, and no \
+                     administrator can pull. Next step: `punarctl privacy ledger` shows \
                      what is recorded, `punarctl privacy purge` deletes it."
                 ),
-                json!({ "method": unknown, "reason": "no upload path exists" }),
+                json!({ "method": unknown, "reason": "no export or upload path exists" }),
             )),
             unknown if unknown.starts_with(RESERVED_ADMIN_PREFIX) => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
-                    "The method {unknown:?} does not exist; admin.* names are reserved \
-                     for the Milestone 10 shadow-AI detection MVP. Next step: run \
-                     `punarctl --help` for the supported commands."
+                    "The method {unknown:?} does not exist on this socket. admin.* names \
+                     belong to the CONTROL PLANE, not to the device: an administrator \
+                     asks the organization, the organization holds the question, and this \
+                     device fetches it and decides for itself (spec sections 24.1, 59.4). \
+                     Nothing listens here for an administrator. Next step: \
+                     `punarctl privacy queries` shows every question that reached this \
+                     device and what was decided."
                 ),
-                json!({ "method": unknown, "reserved_for": "milestone-10" }),
+                json!({ "method": unknown, "belongs_to": "control-plane" }),
             )),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
@@ -480,6 +882,21 @@ impl AgentMethod {
                 method,
                 "this method takes no parameters",
             )),
+        }
+    }
+
+    /// Params that may be omitted entirely: `None` (or `{}`) yields the
+    /// type's `Default`. Used only where every field has a **safe**
+    /// default — `agents.scan`'s `manual` trigger and `alerts.list`'s
+    /// "live cards only".
+    fn parse_optional_params<P: serde::de::DeserializeOwned + Default>(
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<P, IpcError> {
+        match params {
+            None => Ok(P::default()),
+            Some(value) => serde_json::from_value(value)
+                .map_err(|err| Self::invalid_params(method, &err.to_string())),
         }
     }
 
@@ -618,8 +1035,26 @@ impl ListedSession {
 /// `agents.list` / `agents.scan` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentsListResult {
-    /// RFC 3339 time of the most recent detection pass.
+    /// RFC 3339 time of the most recent **change** to the detection set.
+    ///
+    /// M10 amendment (milestone-10.md section 3.4): a pass that changes
+    /// nothing writes nothing, so this stamp — the one `agents.json`
+    /// carries — means *the view as of the last change*. Liveness is
+    /// [`AgentsListResult::last_scan_at`] below, which is in-memory state
+    /// the socket serves and no file records.
     pub scanned_at: String,
+    /// When the last detection pass actually ran, whether or not it
+    /// changed anything. In-memory only: the socket is the authority, the
+    /// file is a change log.
+    #[serde(default)]
+    pub last_scan_at: String,
+    /// What asked for that pass.
+    #[serde(default)]
+    pub last_scan_trigger: ScanTrigger,
+    /// `agents.scan` only: whether this pass changed the detection set.
+    /// Absent on `agents.list`, which did not necessarily run one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<bool>,
     /// Sessions this boot (active + ended) — the ten record fields each,
     /// plus the ledger fingerprint when one exists.
     pub sessions: Vec<ListedSession>,
@@ -844,11 +1279,88 @@ mod tests {
         }
     }
 
+    /// M7/M8 asserted that `admin.*` was "reserved for Milestone 10".
+    /// M10 shipped, so the honest answer is no longer a promise about a
+    /// milestone but the invariant that milestone established: an
+    /// administrator's question never arrives at this socket at all —
+    /// the device fetches it from the control plane and decides it
+    /// itself (milestone-10.md laws 1 and 2).
     #[test]
     fn reserved_names_answer_unknown_method_honestly() {
         let err = AgentMethod::from_wire("admin.query", None).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnknownMethod);
-        assert!(err.message.contains("Milestone 10"), "{}", err.message);
+        assert!(err.message.contains("CONTROL PLANE"), "{}", err.message);
+        assert!(
+            err.message.contains("Nothing listens here"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("punarctl privacy queries"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("reserved"),
+            "a fulfilled reservation must stop advertising itself: {}",
+            err.message
+        );
+    }
+
+    /// The two remote-query methods are in the table, typed, and strict.
+    /// `query.answer` requires its params — an administrator query with a
+    /// missing field is refused as invalid, never answered best-effort —
+    /// and `queries.list` needs none, because reading your own record of
+    /// who asked about you takes no argument (spec 24.2).
+    #[test]
+    fn the_remote_query_methods_are_typed_and_strict() {
+        let answer = AgentMethod::from_wire(
+            "query.answer",
+            Some(json!({
+                "query_id": "qry_1",
+                "requesting_admin": "cio@acme.com",
+                "organization": "acme.com",
+                "requested_scope": "inventory",
+                "received_at": "2026-08-25T14:02:09Z",
+            })),
+        )
+        .unwrap();
+        assert_eq!(answer.name(), "query.answer");
+
+        assert_eq!(
+            AgentMethod::from_wire("query.answer", None)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        // Nothing executable, and nothing undeclared, may ride along.
+        assert_eq!(
+            AgentMethod::from_wire(
+                "query.answer",
+                Some(json!({
+                    "query_id": "qry_1",
+                    "requesting_admin": "cio@acme.com",
+                    "organization": "acme.com",
+                    "requested_scope": "inventory",
+                    "received_at": "2026-08-25T14:02:09Z",
+                    "command": "/bin/sh",
+                })),
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidParams
+        );
+
+        assert_eq!(
+            AgentMethod::from_wire("queries.list", None).unwrap().name(),
+            "queries.list"
+        );
+        assert_eq!(
+            AgentMethod::from_wire("queries.list", Some(json!({ "limit": 5 })))
+                .unwrap()
+                .name(),
+            "queries.list"
+        );
     }
 
     /// There is no upload path in M8, and the refusal says so rather
@@ -966,6 +1478,9 @@ mod tests {
     #[test]
     fn list_result_shape_matches_the_contract_example() {
         let result = AgentsListResult {
+            last_scan_at: "2026-08-27T10:00:00Z".into(),
+            last_scan_trigger: ScanTrigger::Timer,
+            changed: None,
             scanned_at: "2026-08-27T10:00:02Z".into(),
             sessions: vec![ListedSession {
                 record: spec_19_2_record(),
@@ -1076,6 +1591,154 @@ mod tests {
                 AgentClassification::Unknown.as_str(),
             ]
         );
+    }
+
+    // -- Milestone 10 ---------------------------------------------------
+
+    /// `agents.scan` kept its M7 shape on the wire: no params is still
+    /// valid, and it means `manual` — never an assumed timer.
+    #[test]
+    fn an_unlabelled_scan_is_manual_and_a_labelled_one_is_not() {
+        assert_eq!(
+            AgentMethod::from_wire("agents.scan", None).unwrap(),
+            AgentMethod::Scan(AgentsScanParams {
+                trigger: ScanTrigger::Manual
+            })
+        );
+        assert_eq!(
+            AgentMethod::from_wire("agents.scan", Some(json!({}))).unwrap(),
+            AgentMethod::Scan(AgentsScanParams {
+                trigger: ScanTrigger::Manual
+            })
+        );
+        for trigger in ScanTrigger::ALL {
+            let parsed =
+                AgentMethod::from_wire("agents.scan", Some(json!({"trigger": trigger.as_str()})))
+                    .unwrap();
+            assert_eq!(parsed, AgentMethod::Scan(AgentsScanParams { trigger }));
+            // And it round-trips through the envelope the CLI sends.
+            let request = AgentRequest {
+                id: "t1".into(),
+                method: parsed,
+            };
+            let back = AgentRequest::parse_json_line(&request.to_json_line()).unwrap();
+            assert_eq!(back.method, request.method);
+        }
+        // A trigger nobody defined is refused, not coerced to `manual`:
+        // the audit trail must never carry a word the enum does not have.
+        assert_eq!(
+            AgentMethod::from_wire("agents.scan", Some(json!({"trigger": "cron"})))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+    }
+
+    #[test]
+    fn the_alert_methods_are_in_the_closed_table() {
+        assert!(AgentMethod::NAMES.contains(&"alerts.list"));
+        assert!(AgentMethod::NAMES.contains(&"alerts.dismiss"));
+        assert_eq!(
+            AgentMethod::from_wire("alerts.list", None).unwrap(),
+            AgentMethod::AlertsList(AlertsListParams {
+                include_dismissed: false
+            })
+        );
+        assert_eq!(
+            AgentMethod::from_wire("alerts.list", Some(json!({"include_dismissed": true})))
+                .unwrap()
+                .name(),
+            "alerts.list"
+        );
+        // Dismissal names its target explicitly — never "the current one".
+        assert_eq!(
+            AgentMethod::from_wire("alerts.dismiss", None)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        assert_eq!(
+            AgentMethod::from_wire("alerts.bogus", None)
+                .unwrap_err()
+                .code,
+            ErrorCode::UnknownMethod
+        );
+        // Every name in the table parses, and no name carries a program.
+        for name in AgentMethod::NAMES {
+            let refusal = AgentMethod::from_wire(name, None);
+            assert!(
+                refusal.is_ok() || refusal.unwrap_err().code == ErrorCode::InvalidParams,
+                "{name} must be known, whatever its params"
+            );
+        }
+    }
+
+    /// The `alerts.json` side contract (milestone-10.md section 5.3):
+    /// exactly twelve fields, and none of them can hold a pid, an argv or
+    /// a `comm` — there is nowhere to put one.
+    #[test]
+    fn the_alert_row_is_exactly_the_documented_field_list() {
+        let file = AlertsFile {
+            v: ALERTS_FILE_VERSION,
+            updated_at: "2026-08-25T14:31:00Z".into(),
+            alerts: vec![AlertRow {
+                alert_id: "alr_a1b2c3d4e5f6".into(),
+                signature_id: "sig_0f1e2d3c4b5a".into(),
+                agent: "foo-agent".into(),
+                executable: "/home/punar/Downloads/foo-agent".into(),
+                owner: "punar".into(),
+                first_seen: "2026-08-25T14:31:00Z".into(),
+                last_seen: "2026-08-25T14:31:00Z".into(),
+                live: 1,
+                detection_id: "agt_d11e0aa7c402".into(),
+                signature: "unmanaged-path-agentlike".into(),
+                policy_citation: "personal-defaults".into(),
+                state: AlertState::Live,
+            }],
+        };
+        let value: Value = serde_json::to_value(&file).unwrap();
+        let mut keys: Vec<&str> = value["alerts"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "agent",
+                "alert_id",
+                "detection_id",
+                "executable",
+                "first_seen",
+                "last_seen",
+                "live",
+                "owner",
+                "policy_citation",
+                "signature",
+                "signature_id",
+                "state",
+            ]
+        );
+        assert_eq!(value["alerts"][0]["state"], "live");
+        // Consumers fail closed on an unparsable file, so the shape has
+        // to round-trip exactly.
+        let back: AlertsFile = serde_json::from_value(value).unwrap();
+        assert_eq!(back, file);
+    }
+
+    #[test]
+    fn identity_shapes_are_checkable() {
+        assert!(alert_id_ok("alr_a1b2c3d4e5f6"));
+        assert!(!alert_id_ok("alr_short"));
+        assert!(!alert_id_ok("agt_a1b2c3d4e5f6"));
+        assert!(signature_identity_ok("sig_0f1e2d3c4b5a"));
+        assert!(!signature_identity_ok("sig_0f1e2d3c4b5"));
+        assert!(!signature_identity_ok("downloads-foo-agent"));
+        // The M7 wire field keeps its M7 meaning: a rule *name*, which is
+        // deliberately not a `sig_` identity.
+        assert!(!signature_identity_ok("unmanaged-path-agentlike"));
     }
 
     #[test]

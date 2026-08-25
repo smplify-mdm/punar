@@ -26,6 +26,24 @@ use std::path::{Path, PathBuf};
 /// unlinks the link itself, not its target — and the exclusive create is
 /// retried once; a second collision fails loudly rather than follow.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_atomic_inner(path, bytes, mode, false)
+}
+
+/// [`write_atomic`] plus an `fsync` of the temp file before the rename
+/// (milestone-10.md section 5.3).
+///
+/// Used for the two files M10 adds whose *absence after a crash* would be
+/// a lie rather than a nuisance: `/run/punar-agentd/alerts.json`, which
+/// tells a human what to believe, and the detection index, which is the
+/// sibling half of a schema-exact record already on disk. A summary file
+/// the panel re-derives on the next pass does not need this; a card
+/// asserting "unknown AI suspected" does, because the alternative is
+/// showing yesterday's card as if it were today's.
+pub fn write_atomic_synced(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_atomic_inner(path, bytes, mode, true)
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], mode: u32, sync: bool) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -57,6 +75,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         };
         file.write_all(bytes)?;
         file.flush()?;
+        if sync {
+            file.sync_all()?;
+        }
     }
     // Mode is asserted after create in case of a restrictive umask.
     fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
@@ -102,6 +123,25 @@ pub fn lookup_uid(passwd_file: &Path, name: &str) -> Option<u32> {
     None
 }
 
+/// Look up a home directory by uid in an `/etc/passwd`-format file.
+///
+/// M10's provenance rules are written with `~/Downloads/` prefixes
+/// (milestone-10.md section 3.5), and `~` means *the home of the user who
+/// owns the process*, resolved here. A uid with no account resolves to
+/// `None`, and a `~/` prefix then matches **nothing** — never `/`, which
+/// would turn one rule into a filesystem-wide one.
+pub fn lookup_home(passwd_file: &Path, uid: u32) -> Option<String> {
+    let content = fs::read_to_string(passwd_file).ok()?;
+    for line in content.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 && fields[2].parse() == Ok(uid) {
+            let home = fields[5].trim();
+            return (!home.is_empty()).then(|| home.to_string());
+        }
+    }
+    None
+}
+
 /// The peer's username, or the `uid:<n>` fallback the audit trail uses
 /// when the uid resolves to no account (`punar_common::audit::AuditActor`'s
 /// convention, mirrored here).
@@ -109,30 +149,18 @@ pub fn username_or_uid(passwd_file: &Path, uid: u32) -> String {
     lookup_username(passwd_file, uid).unwrap_or_else(|| format!("uid:{uid}"))
 }
 
-/// FNV-1a (64-bit), the whole of `punar-agentd`'s hashing needs: it makes
-/// the **synthesized** session id of a detection stable across scan passes
-/// (same executable + pid ⇒ same `agt_` id, so a still-running suspected
-/// process does not "disappear and reappear" between passes and does not
-/// churn transition audit events).
-///
-/// Not a security primitive and never used as one — detections are
-/// heuristics (spec section 23), and nothing authenticates on this value.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// A schema-valid `agt_`-prefixed id synthesized from a detection's
-/// identity (`^agt_[A-Za-z0-9]+$`; 12 lowercase hex digits like the ids
-/// `punar-env` mints for managed sessions).
-pub fn synthesized_session_id(executable: &str, pid: u32) -> String {
-    let hash = fnv1a64(format!("{executable}\u{0}{pid}").as_bytes());
-    format!("agt_{:012x}", hash & 0xffff_ffff_ffff)
-}
+// # Where detection identity used to live
+//
+// M7 minted a detection's `agt_` id here, from FNV-1a over
+// `(executable, pid)`. M10 replaced it with `crate::identity`: the M7
+// construction could not survive **pid reuse** — a recycled pid running
+// the same binary produced the *same* id, which would have let a new
+// process silently inherit a dead detection's persisted record and its
+// ledger. The replacement adds the kernel's `starttime` ticks and the
+// boot id and is SHA-256, and it is now the only place a detection
+// identity is minted. The old function was removed rather than
+// deprecated: two competing identity constructions inside one daemon is
+// the bug, not the migration.
 
 #[cfg(test)]
 mod tests {
@@ -197,17 +225,25 @@ mod tests {
         assert_eq!(lookup_uid(&passwd, "punar"), Some(1000));
         assert_eq!(lookup_username(&passwd, 4242), None);
         assert_eq!(username_or_uid(&passwd, 4242), "uid:4242");
+        assert_eq!(lookup_home(&passwd, 1000).as_deref(), Some("/home/punar"));
+        assert_eq!(lookup_home(&passwd, 0).as_deref(), Some("/root"));
+        assert_eq!(
+            lookup_home(&passwd, 4242),
+            None,
+            "an unknown uid has no home, so a ~/ rule matches nothing"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn synthesized_ids_are_stable_schema_valid_and_pid_specific() {
-        let a = synthesized_session_id("/home/punar/Downloads/foo-agent", 2410);
-        let b = synthesized_session_id("/home/punar/Downloads/foo-agent", 2410);
-        let c = synthesized_session_id("/home/punar/Downloads/foo-agent", 2411);
-        assert_eq!(a, b, "the same process keeps its id across scan passes");
-        assert_ne!(a, c);
-        assert!(punar_common::agent::session_id_ok(&a), "{a}");
-        assert_eq!(a.len(), "agt_".len() + 12);
+    fn write_atomic_synced_produces_the_same_file_and_mode() {
+        let dir = tmp_dir("atomic-sync");
+        let path = dir.join("alerts.json");
+        write_atomic_synced(&path, b"{\"v\":1}\n", 0o640).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"v\":1}\n");
+        let mode =
+            std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path).unwrap().permissions());
+        assert_eq!(mode & 0o777, 0o640, "alerts.json is 0640 root:punar");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

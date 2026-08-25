@@ -27,6 +27,11 @@ publish = false
 [workspace.dependencies]
 # Internal crates
 punar-common = { path = "crates/punar-common" }
+# dev-only counterparty: M10's punard suite drives the *real* dev/CI mock
+# control plane over a tempdir socket, so the courier path is exercised
+# against the binary the image ships rather than a second in-test
+# reimplementation of the same protocol (milestone-10.md section 7).
+punar-mock-smplify = { path = "crates/punar-mock-smplify" }
 punar-policy = { path = "crates/punar-policy" }
 
 # External

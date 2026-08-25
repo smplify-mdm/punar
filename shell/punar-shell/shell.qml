@@ -9,12 +9,15 @@
 //                                                ELEVATED countdown chip)
 //   docs/design/mockups/desktop-multitasking.html (Plate D-007 — overview)
 //   docs/design/mockups/ai-panel.html (Plate D-005 — AI panel)
+//   docs/design/mockups/notifications-osd.html (Plate D-009 Sect I — the
+//                                               M10 shadow-AI alert card)
 // All design values flow through the Theme singleton (punar-tokens.json).
 
 import QtQuick
 import Quickshell
 import Quickshell.Io
 import "AiPanel"
+import "Alert"
 import "Approval"
 import "Bar"
 import "CommandCenter"
@@ -54,6 +57,28 @@ ShellRoot {
     // machine where punar-agentd never wrote that file the panel opens
     // to its calm empty state.
     AiPanel {
+        id: aiPanel
+    }
+
+    // The M10 shadow-AI alert region (Plate D-009 Sect I). Like the M9
+    // gate it has no keybinding of its own: punar-agentd raises a card by
+    // writing /run/punar-agentd/alerts.json, the Alerts singleton's
+    // FileView follows the change, and the card appears — because an
+    // alert the human has to go looking for is not an alert. On a machine
+    // where agentd never wrote that file, nothing is ever drawn (fail
+    // closed). Driven in CI with:
+    //   qs -p /usr/share/punar/shell ipc call alerts open
+    //
+    // [I] Inspect is wired here rather than inside the card so the alert
+    // surface never reaches into another surface directly: it asks, and
+    // the shell root hands the detection to the SUPER+A panel, which opens
+    // with its rail already sitting on that detection (milestone-10.md
+    // §5.1). A shell built without an AI panel simply has nothing
+    // connected to the signal.
+    AlertStack {
+        onInspectRequested: function (detectionId) {
+            aiPanel.showDetection(detectionId);
+        }
     }
 
     // Ready marker (milestone-1.md §7 / survey decision 6): once the bar is

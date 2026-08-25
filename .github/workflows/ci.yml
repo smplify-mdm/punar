@@ -74,8 +74,22 @@
 #                 retention deadline, an owner purge and its tombstone,
 #                 the no-resurrection drain, a retention prune against an
 #                 injected backdated ledger, and negative probes proving
-#                 no export path exists; verdict in m8-report.txt; all
-#                 seven hard-gated in boot-test.sh),
+#                 no export path exists; verdict in m8-report.txt) and the
+#                 in-guest M10 shadow-AI exercise (milestone-10.md §16 —
+#                 punar-m10-check.service: periodic detection fired by the
+#                 240 s timer with NO manual scan in the window, exactly
+#                 one alert per signature across passes, a clear and a
+#                 restart, the Plate D-009 alert card screenshot, the
+#                 do-not-disturb breakthrough, the unknown-agent ledger
+#                 re-validated on the host against
+#                 schemas/ai-agent/ledger-summary.json, an authorized
+#                 admin query answered within one reconcile pass over a
+#                 path with no inbound listener, an out-of-scope query
+#                 refused by the DEVICE and audited, the query log printed
+#                 by the unprivileged user, both personal-device gates
+#                 proven separately, and the fleet view's `—` where nobody
+#                 answered; verdict in m10-report.txt; all hard-gated in
+#                 boot-test.sh),
 #                 artifact export
 #                 (tools/boot-test.sh --mode desktop), then the
 #                 PERFORMANCE_BUDGETS.md gates
@@ -208,6 +222,7 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m7-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m8-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m9-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m10-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/in-agent-scope.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mock-agent \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
@@ -317,16 +332,19 @@ jobs:
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2..M9 exercises + RAM budgets)
+    name: desktop-test (graphical gate + M2..M10 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    # Raised from M8's 105: the in-guest M9 exercise (punar-m9-check.service,
-    # bounded at 20 min in-guest) runs between the M8 exercise and the
-    # export. Its longest single wait is the SHIPPED 300 s approval TTL,
-    # started early so the credential and privilege groups run inside the
-    # window; in practice the exercise costs a few minutes. boot-test.sh's
-    # KVM export timeout goes from 3000 s to 3600 s to keep the same
-    # headroom.
-    timeout-minutes: 125
+    # Raised from M9's 125: the in-guest M10 exercise
+    # (punar-m10-check.service, bounded at 15 min in-guest) runs between the
+    # M9 exercise and the export. Its one unavoidable wait is 300 s — the
+    # 240 s scan period plus 30 s AccuracySec plus slack — because the
+    # detection group waits for punar-agentd-scan.timer to fire ON ITS OWN,
+    # with no manual scan anywhere in the window; the later groups run
+    # inside that wait, so the incremental cost is the remainder. A timer
+    # firing is wall clock, so it costs the same under TCG as under KVM.
+    # boot-test.sh's KVM export timeout goes from 3600 s to 4200 s to keep
+    # the same headroom.
+    timeout-minutes: 135
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -367,7 +385,7 @@ jobs:
       # proof files are the primary diagnostics. The screenshot is warn-only:
       # the guest deliberately continues without one (grim failure is itself
       # a signal), and boot-test already annotated its absence.
-      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register + M9 approval gate)
+      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register + M9 approval gate + M10 shadow-AI alert)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -380,6 +398,7 @@ jobs:
             os/images/out/desktop-proof/punar-m7.png
             os/images/out/desktop-proof/punar-m8.png
             os/images/out/desktop-proof/punar-m9.png
+            os/images/out/desktop-proof/punar-m10.png
           if-no-files-found: warn
           retention-days: 7
 
@@ -420,7 +439,21 @@ jobs:
       # tar — for both issued tokens before the export is built, with a
       # negative control proving the grep would have found one
       # (milestone-9.md §12).
-      - name: Upload RAM report, M2..M9 reports and measurement data
+      # m10-*.txt covers m10-report.txt plus the alert register render, the
+      # dismissal render, the query log the UNPRIVILEGED user printed, the
+      # purge render and the mock's fleet text (the one artifact where `—`
+      # versus `0` is the assertion); m10-*.json are the agents.json and
+      # alerts.json snapshots, the alert register, the detection ledger
+      # summary boot-test phase 12b re-validates against
+      # schemas/ai-agent/ledger-summary.json, the answered and refused
+      # query documents, and the local query log; m10-*.jsonl are the
+      # schema-exact detection transition records and the mock's
+      # received-answers log (the M10 screenshot rides the screenshot
+      # artifact above). No M10 artifact carries a prompt, a command line,
+      # a cwd or a network destination — the exported query documents carry
+      # zone CLASSES, never paths, and that is asserted in-guest by
+      # m10-check groups 6-8 (milestone-10.md §8.3, §16).
+      - name: Upload RAM report, M2..M10 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -454,6 +487,10 @@ jobs:
             os/images/out/desktop-proof/m9-report.txt
             os/images/out/desktop-proof/m9-*.json
             os/images/out/desktop-proof/m9-*.txt
+            os/images/out/desktop-proof/m10-report.txt
+            os/images/out/desktop-proof/m10-*.json
+            os/images/out/desktop-proof/m10-*.jsonl
+            os/images/out/desktop-proof/m10-*.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

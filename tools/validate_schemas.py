@@ -98,6 +98,13 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/agents/unknown-agent/ledger-summary.json", "schemas/ai-agent/ledger-summary.json"),
     # --- seed data: fixtures/organizations/ (fixtures/README.md table) ------
     ("fixtures/organizations/acme/org.json", None),  # no organization schema yet
+    # M10 admin role table (milestone-10.md section 9.1): a dev/CI RBAC
+    # fixture read only by punar-mock-smplify, versioned by review rather
+    # than by schema -- like the detection signatures below. Deliberately
+    # schema-less: these are fixture strings, not authenticated principals,
+    # and the device re-evaluates authorization from its own enrollment.json
+    # regardless of anything in here (SPEC section 59.4).
+    ("fixtures/organizations/acme/admins.json", None),
     ("fixtures/organizations/acme/desired-state-*.json", "schemas/desired-state/desired-state.json"),
     ("fixtures/organizations/acme/policy-source-*.json", "schemas/policy/policy-source.json"),
     # --- seed data: fixtures/policies/ (fixtures/README.md table) -----------

@@ -54,9 +54,10 @@ use std::sync::Mutex;
 
 use punar_common::agent::{AgentClassification, AgentStatus};
 use punar_common::ledger::{
-    AgentsAccessResult, Evidence, LEDGER_RECORD_VERSION, LEDGER_RETENTION_DAYS, LedgerFingerprint,
-    LedgerIndex, LedgerPurgeResult, LedgerRecord, LedgerRuntimeFile, PROCESS_CLASSES_PATH,
-    ResourceCategory, ResourceClass, SecurityEventRef, TailPosition, ZONE_WORKSPACE,
+    AgentsAccessResult, DETECTION_RETENTION_DAYS, Evidence, LEDGER_RECORD_VERSION,
+    LEDGER_RETENTION_DAYS, LedgerFingerprint, LedgerIndex, LedgerPurgeResult, LedgerRecord,
+    LedgerRuntimeFile, PROCESS_CLASSES_PATH, ResourceCategory, ResourceClass, SecurityEventRef,
+    TailPosition, ZONE_WORKSPACE,
 };
 
 use crate::ledger::classes::{CgroupRoot, ClassTable, sample_scope};
@@ -86,6 +87,12 @@ pub struct LedgerConfig {
     pub cgroup_root: PathBuf,
     /// Days after `ended_at` a ledger is kept.
     pub retention_days: u64,
+    /// Days after a **detection clears** its ledger is kept — half the
+    /// managed window (milestone-10.md decision 11). A detection is a
+    /// record about a process the user never asked for, so the shortest
+    /// window that still answers *what ran on this device last week* is
+    /// the right one.
+    pub detection_retention_days: u64,
 }
 
 impl LedgerConfig {
@@ -99,6 +106,7 @@ impl LedgerConfig {
             process_classes_path: PathBuf::from(PROCESS_CLASSES_PATH),
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             retention_days: LEDGER_RETENTION_DAYS,
+            detection_retention_days: DETECTION_RETENTION_DAYS,
         }
     }
 }
@@ -120,6 +128,30 @@ pub struct SessionFacts {
     /// (`/user.slice/…/punar-agent-<id>.scope`), when the session is
     /// managed.
     pub scope_path: Option<String>,
+    pub started_at: String,
+}
+
+/// What the registry knows about a **detection**, as its bounded ledger
+/// needs it (milestone-10.md section 6.3).
+///
+/// Compare [`SessionFacts`]: there is no `scope_path` (a detection has no
+/// cgroup), no `project` (never inferred from `cwd`), and no
+/// `classification` (a detection's ledger is always `unknown`). The
+/// smaller struct is the privacy argument in the type system — a field
+/// that does not exist cannot be filled in later by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectionFacts {
+    pub detection_id: String,
+    pub agent: String,
+    pub user: String,
+    /// The detected pid — read once for its `comm`, which is mapped
+    /// through the class table and **discarded**. The pid itself never
+    /// reaches the ledger.
+    pub process_id: u32,
+    /// `downloads` · `tmp` · `home` · `system` · `unknown` — a class,
+    /// never a path.
+    pub zone: &'static str,
+    /// The process's own start time.
     pub started_at: String,
 }
 
@@ -397,6 +429,234 @@ impl LedgerEngine {
         self.flush(std::slice::from_ref(&facts.session_id), now);
     }
 
+    /// Open the bounded ledger of an **unmanaged detection** — M8's open
+    /// question, answered (milestone-10.md section 6).
+    ///
+    /// Everything a managed session's ledger gets from a source that does
+    /// not exist here is simply absent, and each absence has a reason
+    /// written down in [`punar_common::ledger::not_yet_observed_for`]:
+    ///
+    /// | M8 source | For a detection |
+    /// |---|---|
+    /// | A — the agent scope cgroup | none: the process is not in a `punar-agent-*.scope`. The **detected executable's own** process class is recorded instead, from the one `comm` the pass already read. The children of the process are **not** walked. |
+    /// | B — audit filtered by session id | the detection *transitions* are attributable: the `agents.scan` / `detected` event is classified `unknown_ai_execution` and referenced here. This is the ledger's one real entry. |
+    /// | C — workspace grant | none: nothing granted it a workspace. Repositories are not observed, and are **never** inferred from `cwd`. |
+    /// | D — session metadata | partial: the agent name, the owner, the timestamps, and the **zone class** of where the executable lives — a class, never a path. |
+    ///
+    /// Three refusals deserve their own sentence, because each was a real
+    /// temptation. **No child-process walk**: walking `/proc` for
+    /// descendants of a suspicious pid would produce a per-user process
+    /// graph, precisely the broad tracing spec 1.14 rules out and a far
+    /// more invasive artefact than anything M8 collects about a *managed*
+    /// agent. **No `cwd` read**: it would tell us the project, and would
+    /// put a path from inside the user's home into a record an
+    /// administrator can later ask about. **No cmdline, argv or
+    /// environment**: these routinely carry prompts, API keys and file
+    /// paths in the wild, there is no field for them in any schema, and
+    /// none is added.
+    ///
+    /// The result validates against `ledger-summary.json` **unchanged**.
+    pub fn begin_detection(&self, facts: &DetectionFacts, now: &str) {
+        // No project, ever: `project` is the M7 `"unknown"` sentinel for
+        // a detection, and inferring one from `cwd` is the refusal above.
+        let mut record = LedgerRecord::new(
+            &facts.detection_id,
+            &facts.agent,
+            &facts.user,
+            None,
+            AgentClassification::Unknown,
+            &facts.started_at,
+        );
+        record.updated_at = now.to_string();
+
+        let mut seen = BTreeSet::new();
+        // A — the detected executable's own process class, and nothing
+        // below it in the tree.
+        if let Some(comm) = self.proc.comm_of(facts.process_id) {
+            let starttime = self.proc.starttime_of(facts.process_id).unwrap_or(0);
+            seen.insert((facts.process_id, starttime));
+            if let Ok(class) =
+                ResourceClass::new(ResourceCategory::ProcessClasses, self.table.class_of(&comm))
+            {
+                record.observe(
+                    ResourceCategory::ProcessClasses,
+                    class,
+                    1,
+                    Evidence::DetectionScan,
+                    now,
+                );
+            }
+        }
+        // D — the zone class of the executable's own location. The path
+        // it was derived from stops here: `ResourceClass` refuses any
+        // string containing `/`, so a path is unrepresentable in this
+        // field however it is constructed.
+        if let Ok(zone) = ResourceClass::new(ResourceCategory::DirectoryZones, facts.zone) {
+            record.observe(
+                ResourceCategory::DirectoryZones,
+                zone,
+                1,
+                Evidence::DetectionScan,
+                now,
+            );
+        }
+
+        let mut active = ActiveLedger {
+            record,
+            seen,
+            // No scope: a detection is never cgroup-sampled, which is
+            // what keeps its ledger structurally smaller than a managed
+            // one rather than smaller by policy.
+            scope_path: None,
+            dirty: true,
+        };
+
+        {
+            let mut state = self.state.lock().unwrap();
+            // B, replayed. The `agents.scan` / `detected` audit event is
+            // written **before** this call, so its reference is already
+            // waiting in the pending queue — one write per detection
+            // instead of two, using the machinery M8 built for exactly
+            // this ordering.
+            let held = state.take_pending(&facts.detection_id);
+            let tombstoned = state
+                .index
+                .row(&facts.detection_id)
+                .is_some_and(|row| row.is_tombstone());
+            if !tombstoned {
+                for item in held {
+                    match item {
+                        PendingAttribution::Event(reference) => {
+                            active.record.observe_security_event(reference);
+                        }
+                        PendingAttribution::Class(class) => {
+                            active.record.observe(
+                                ResourceCategory::CredentialClasses,
+                                class,
+                                1,
+                                Evidence::AuditEvent,
+                                now,
+                            );
+                        }
+                    }
+                }
+            }
+            state.active.insert(facts.detection_id.clone(), active);
+        }
+        self.flush(std::slice::from_ref(&facts.detection_id), now);
+    }
+
+    /// Bring an existing detection's ledger back into memory after an
+    /// **agentd restart**, returning whether it was resumed.
+    ///
+    /// Without this, restarting the daemon while a detected process is
+    /// still running would look like a fresh sighting: a second `active`
+    /// line in `detections.jsonl`, a second `detected` audit event, and
+    /// a ledger that starts over and forgets the references it already
+    /// held. It is the detection half of
+    /// [`LedgerEngine::resume`], and the reason a restart is bookkeeping
+    /// rather than news.
+    ///
+    /// `false` when there is nothing to resume — no record, a tombstoned
+    /// one (the purge floor wins, always), or one already closed. The
+    /// caller then treats the detection as genuinely new.
+    pub fn resume_detection(&self, detection_id: &str) -> bool {
+        {
+            let state = self.state.lock().unwrap();
+            if state.active.contains_key(detection_id) {
+                return true;
+            }
+            if state
+                .index
+                .row(detection_id)
+                .is_some_and(|row| row.is_tombstone())
+            {
+                return false;
+            }
+        }
+        let Some(record) = self.store.load_record(detection_id) else {
+            return false;
+        };
+        if record.status != AgentStatus::Active
+            || record.classification == AgentClassification::Managed
+        {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap();
+        state.active.insert(
+            detection_id.to_string(),
+            ActiveLedger {
+                record,
+                // The pid dedup set is memory-only and was dropped at
+                // shutdown; an empty one only risks re-counting a class
+                // the record already holds, which `observe` folds into
+                // the existing entry.
+                seen: BTreeSet::new(),
+                scope_path: None,
+                // Nothing changed by resuming, so nothing is written.
+                dirty: false,
+            },
+        );
+        true
+    }
+
+    /// Close a detection's ledger when the process is gone. Same
+    /// compaction as [`LedgerEngine::end_session`], with the shorter
+    /// seven-day retention window.
+    pub fn end_detection(&self, detection_id: &str, now: &str) {
+        self.drain_audit(now);
+        let record = {
+            let mut state = self.state.lock().unwrap();
+            let Some(mut entry) = state.active.remove(detection_id) else {
+                return;
+            };
+            entry.seen.clear();
+            entry.record.status = AgentStatus::Ended;
+            entry.record.ended_at = Some(now.to_string());
+            entry.record.updated_at = now.to_string();
+            entry.record.retention_expires_at = plus_days(now, self.cfg.detection_retention_days);
+            entry.record.sort_entries();
+            entry.record
+        };
+        if let Err(e) = self.store.write_record(&record) {
+            eprintln!(
+                "punar-agentd: could not write the final ledger for detection {}: {e}",
+                record.session_id
+            );
+            return;
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            state.index.upsert(index_row(&record));
+        }
+        self.write_index(now);
+    }
+
+    /// Write **every** dirty active record, not only the named ones.
+    ///
+    /// M8's [`LedgerEngine::flush`] takes a list because every active
+    /// ledger was a registered session and the caller had that list to
+    /// hand. A detection's ledger is active too but is not in
+    /// `active_facts()` (it has no scope to sample), so a reference the
+    /// audit drain attached to it would never be persisted by the named
+    /// flush. Same batching rule — at most one write per record per
+    /// batch — applied to the right set.
+    pub fn flush_dirty(&self, now: &str) -> bool {
+        let ids: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            state
+                .active
+                .iter()
+                .filter(|(_, entry)| entry.dirty)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        self.flush(&ids, now)
+    }
+
     /// Sample every named active session's scope cgroup, then drain the
     /// audit tail, then write once per changed session. The single
     /// refresh path — used by `agents.scan`, by every ledger read, and at
@@ -406,8 +666,9 @@ impl LedgerEngine {
     pub fn refresh(&self, active: &[SessionFacts], now: &str) -> bool {
         self.sample_active(active, now);
         let drained = self.drain_audit(now);
-        let ids: Vec<String> = active.iter().map(|f| f.session_id.clone()).collect();
-        self.flush(&ids, now) || drained
+        // Every dirty record, not only the sampled sessions: since M10 an
+        // unmanaged detection's ledger is active without being sampled.
+        self.flush_dirty(now) || drained
     }
 
     /// Drain only — the cheap path a ledger read takes when it does not
@@ -1009,6 +1270,7 @@ mod tests {
             process_classes_path: dir.join("absent-classes.json"),
             cgroup_root: dir.join("cgroup"),
             retention_days: LEDGER_RETENTION_DAYS,
+            detection_retention_days: DETECTION_RETENTION_DAYS,
         };
         let engine = LedgerEngine::open(cfg, ProcRoot::new(&proc_root), None);
         Harness {
@@ -1602,6 +1864,7 @@ mod tests {
             process_classes_path: h.dir.join("absent-classes.json"),
             cgroup_root: h.dir.join("cgroup"),
             retention_days: LEDGER_RETENTION_DAYS,
+            detection_retention_days: DETECTION_RETENTION_DAYS,
         };
         let restarted = LedgerEngine::open(cfg, ProcRoot::new(&h.proc_root), None);
         restarted.resume(std::slice::from_ref(&facts));

@@ -114,7 +114,14 @@ pub fn build(
                 // drop it by forgetting (spec section 23).
                 suspected: true,
                 executable: detection.executable.clone(),
-                observed_at: detection.record.started_at.clone(),
+                // The moment **this daemon** first saw the process.
+                // M7 conflated it with `started_at` because the detector
+                // did not read the kernel's tick stamp; M10 reads it, so
+                // `record.started_at` is now the process's own start and
+                // the observation time has its own field
+                // (milestone-10.md section 6.4). The meaning of this
+                // field in `agents.json` is unchanged.
+                observed_at: detection.observed_at.clone(),
             })
             .collect(),
         ts: now.to_string(),
@@ -183,7 +190,11 @@ mod tests {
                 started_at: "2026-08-27T09:59:55Z".into(),
             },
             executable: "/home/punar/Downloads/foo-agent".into(),
-            signature_id: "downloads-foo-agent".into(),
+            signature_name: "downloads-foo-agent".into(),
+            signature_id: "sig_a1b2c3d4e5f6".into(),
+            zone: "downloads",
+            observed_at: "2026-08-27T09:59:55Z".into(),
+            owner_uid: Some(1000),
         }]);
         registry
     }

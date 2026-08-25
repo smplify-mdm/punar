@@ -779,9 +779,15 @@ fn authority_slot(decision: &str) -> Slot {
     }
 }
 
-/// The honest footer under every detection surface.
+/// The honest footer under every detection surface (milestone-10.md
+/// section 14). Two facts, both of which a user is entitled to without
+/// asking: the cadence is real and periodic since M10, and sampling
+/// detection has a hole by construction. Closing that hole needs
+/// exec-time notification — the broad tracing spec 1.14 rules out — so it
+/// is stated, never engineered around.
 const DETECTION_NOTE: &str = "Detection is heuristic — suspected, not certain · \
-                              scan on view · continuous detection arrives in Milestone 10";
+                              continuous · every 4 min · a process that starts and exits \
+                              inside one interval is not seen";
 
 // ---------------------------------------------------------------------------
 // M8 AI Access Ledger (contract sections 12–13; Plate D-005's Sect III in
@@ -790,14 +796,16 @@ const DETECTION_NOTE: &str = "Detection is heuristic — suspected, not certain 
 // authority register above it, which answers "what may it access?".
 // ---------------------------------------------------------------------------
 
-/// A detection has no ledger and will not have one in M8: an unregistered
-/// process has no persisted session (milestone-7.md section 4.4), so there
-/// is nothing to aggregate against. Milestone 10 owns that work, and the
-/// surface says so rather than rendering an empty section that could read
-/// as "accessed nothing".
-const DETECTION_LEDGER_NOTE: &str = "Unknown activity has no access ledger in Milestone 8 — \
-                                     a detection has no registered session to aggregate \
-                                     against · Milestone 10";
+/// M8 said a detection had no ledger and named M10 as the owner of that
+/// work. **M10 shipped it**, so this note no longer explains an absence —
+/// it explains a *shape*: an unknown agent's ledger is strictly smaller
+/// than a managed one, because Punar mediates nothing for a process it
+/// did not launch. The invariant the surface must keep asserting is that
+/// every empty category is *not yet observed*, never *did not happen*.
+const DETECTION_LEDGER_NOTE: &str = "This ledger is bounded by what an unmanaged process \
+                                     can be observed through: a process class, a zone \
+                                     class and the security-event references · no cwd, \
+                                     no command line, no child processes, ever";
 
 /// The SPEC section 21.2 never-record list, in the user's words. Used when
 /// the daemon sends no `privacy.never_recorded` of its own; the daemon's
@@ -819,10 +827,50 @@ const AUDIT_BOUNDARY: &str = "The audit trail is a separate record and was not d
 /// surfaces say what purge will and will not touch, in the present tense.
 const AUDIT_SEPARATE: &str = "a separate record · not deleted by purge · punarctl audit tail";
 
-/// There is no upload path in Milestone 8 — not a path nobody used, a path
-/// that does not exist (milestone-8.md section 10.5).
-const REMOTE_QUERY: &str = "none — no upload path exists (Milestone 10 adds the authorized, \
-                            audited administrator query)";
+/// The M10 boundary beside it: the record of who asked about this device
+/// is a record of what the ORGANIZATION did, so a purge of the user's own
+/// data does not remove it — and a user deleting the evidence of a query
+/// would be deleting their own recourse (milestone-10.md section 10.1).
+const QUERY_LOG_BOUNDARY: &str = "The remote-query log is a record of what the organization \
+                                  asked and was not deleted · punarctl privacy queries";
+
+/// M8 wrote this line as a placeholder for M10 and said so. M10 fulfils it,
+/// so the placeholder is replaced by the **invariant** it was protecting:
+/// nothing is uploaded continuously, an administrator's question is scoped
+/// and audited, and the user can read the whole record with one command
+/// (SPEC sections 24, 24.2; milestone-10.md section 10.3).
+///
+/// Used where the surface has no live count to show (the per-session
+/// register). The device-wide register calls [`remote_query_line`] instead,
+/// which prints the real numbers.
+const REMOTE_QUERY: &str = "scoped, audited, never continuous · see who asked with \
+                            punarctl privacy queries";
+
+/// The device-wide `Remote query` row, from the live query log when one
+/// could be read. Fails **closed to the honest static sentence** rather
+/// than to a fabricated zero: "no queries" and "could not ask" are
+/// different, and only one of them is a claim.
+fn remote_query_line(log: Option<&model::QueriesList>) -> String {
+    match log {
+        None => REMOTE_QUERY.to_string(),
+        Some(log) if !log.enrolled => "none — no organization is enrolled · no \
+             remote-query path exists on this device"
+            .to_string(),
+        Some(log) => {
+            let total = log.queries.len() as u64;
+            let refused = log
+                .queries
+                .iter()
+                .filter(|q| q.result_category == "refused")
+                .count() as u64;
+            format!(
+                "{} · {} refused · punarctl privacy queries",
+                plural(total, "query", "queries"),
+                refused
+            )
+        }
+    }
+}
 
 /// The count qualifier, stated wherever a process count is printed
 /// (milestone-8.md section 3.3): the number is real and so is its limit.
@@ -1224,7 +1272,13 @@ pub fn privacy_ledger(
     list: &Value,
     accesses: &[(String, Value)],
     hostname: &str,
+    queries: Option<&Value>,
 ) -> Result<String, String> {
+    // Best-effort: a daemon that does not answer `queries.list` leaves the
+    // row on its honest static sentence rather than on a fabricated zero.
+    let query_log: Option<model::QueriesList> =
+        queries.and_then(|v| serde_json::from_value(v.clone()).ok());
+    let query_log = query_log.as_ref();
     let registry: model::AgentsList = parse(list)?;
     let mut out = fmt::masthead(style, "Privacy", &personal_context(hostname));
     out.push_str(&fmt::section(
@@ -1349,14 +1403,17 @@ pub fn privacy_ledger(
         out.push_str(&fmt::rows(style, &rows));
     }
 
-    // Detections are named, not hidden: they have no ledger in M8 and the
-    // reason is structural, not an omission.
+    // Detections are named, not hidden. M8 said they had no ledger and
+    // named M10 as the owner; M10 shipped it, so the honest line is now
+    // about the ledger's SHAPE and its shorter window, not its absence
+    // (milestone-10.md sections 6.3, 6.5).
     if !registry.detections.is_empty() {
         out.push_str(&fmt::note(
             style,
             &format!(
-                "{} · no access ledger in Milestone 8 — a detection has no registered \
-                 session to aggregate against · Milestone 10",
+                "{} · each has a bounded detection ledger — a process class, a zone \
+                 class and the security-event references, kept 7 days after it clears · \
+                 punarctl agents access <detection id>",
                 plural(
                     registry.detections.len() as u64,
                     "suspected AI process",
@@ -1395,7 +1452,12 @@ pub fn privacy_ledger(
                 "punarctl privacy purge --session <id>  ·  punarctl privacy purge --all",
             ),
             Row::new("Audit trail", "", Slot::Neutral, AUDIT_SEPARATE),
-            Row::new("Remote query", "", Slot::Neutral, REMOTE_QUERY),
+            Row::new(
+                "Remote query",
+                "",
+                Slot::Neutral,
+                &remote_query_line(query_log),
+            ),
         ],
     ));
     out.push_str(&fmt::note(
@@ -1403,8 +1465,223 @@ pub fn privacy_ledger(
         concat!(
             "You never see less than an administrator would · ",
             "punarctl agents access <id> --json prints the exact document ",
-            "a future authorized query would return"
+            "an authorized query returns"
         ),
+    ));
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// M10 — `punarctl privacy queries`, the SPEC section 24.2 command
+// (docs/development/milestone-10.md section 10.3)
+// ---------------------------------------------------------------------------
+
+/// The calm personal-device sentence. Not an error, not an upsell, not an
+/// empty table that could read as "nobody has asked *yet*" — a statement
+/// that the path does not exist here (milestone-10.md section 11).
+const NO_QUERY_PATH: &str = "No organization is enrolled · no remote-query path exists on \
+                             this device · nothing has ever been asked.";
+
+/// The honesty label on every rendering of a requesting administrator.
+/// There is no IdP in M10, and a surface that printed an identity as though
+/// it were verified would be the exact dishonesty SPEC section 1.22
+/// forbids.
+const IDENTITY_UNVERIFIED: &str = "not verified by this device";
+
+/// `punarctl privacy queries` — who asked about this device, what they
+/// asked for, and what was decided.
+///
+/// Readable by any peer the agentd socket admits, deliberately: withholding
+/// the log of who asked about the user *from the user* would invert SPEC
+/// section 24.2, which is the promise this whole milestone exists to keep.
+pub fn privacy_queries(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let log: model::QueriesList = parse(result)?;
+    let mut out = fmt::masthead(style, "Privacy", &personal_context(hostname));
+
+    if !log.enrolled && log.queries.is_empty() {
+        out.push_str(&fmt::section(
+            style,
+            "Remote AI queries · who asked about this device",
+            "personal device",
+        ));
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "Remote query",
+                "none",
+                Slot::Neutral,
+                NO_QUERY_PATH,
+            )],
+        ));
+        out.push_str(&fmt::note(
+            style,
+            "Nothing listens on this device · a query would have to be fetched by \
+             the device itself, and an unenrolled device fetches nothing",
+        ));
+        return Ok(out);
+    }
+
+    let total = log.queries.len() as u64;
+    let refused = log
+        .queries
+        .iter()
+        .filter(|q| q.result_category == "refused")
+        .count() as u64;
+    let answered = total - refused;
+    out.push_str(&fmt::section(
+        style,
+        "Who asked about this device",
+        &format!(
+            "{} · {answered} answered · {refused} refused",
+            plural(total, "query", "queries")
+        ),
+    ));
+
+    if log.queries.is_empty() {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "Queries",
+                "none",
+                Slot::Neutral,
+                "no administrator has asked this device anything",
+            )],
+        ));
+    } else {
+        let mut rows: Vec<Row> = Vec::new();
+        // Newest last, like `audit tail`: a log reads downward.
+        for query in &log.queries {
+            let when = fmt::timestamp(if query.answered_at.is_empty() {
+                &query.received_at
+            } else {
+                &query.answered_at
+            });
+            // The slot follows the **decision**, and the words follow the
+            // result: a refusal is red because the device said deny, not
+            // because a string happened to say "refused".
+            let slot = match query.authorization_decision.as_str() {
+                "allow" => Slot::Ok,
+                "deny" => Slot::Bad,
+                _ => Slot::Warn,
+            };
+            let verdict = match query.result_category.as_str() {
+                "answered" => match query.granted_scope.as_deref() {
+                    Some(granted) if granted != query.requested_scope => {
+                        format!("answered at {granted}")
+                    }
+                    _ => "answered".to_string(),
+                },
+                "refused" => match query.refusal_reason.as_deref() {
+                    Some("out_of_scope") | None => "refused · out of scope".to_string(),
+                    Some(other) => format!("refused · {}", other.replace('_', " ")),
+                },
+                other => other.to_string(),
+            };
+            let mut facts: Vec<String> = vec![verdict];
+            if query.result_category == "answered" {
+                let counts = &query.record_counts;
+                // The *shape* of what left, never a second copy of it.
+                for (n, one, many) in [
+                    (counts.sessions, "session", "sessions"),
+                    (counts.detections, "detection", "detections"),
+                    (counts.security_events, "event", "events"),
+                ] {
+                    if n > 0 {
+                        facts.push(plural(n, one, many));
+                    }
+                }
+            }
+            // Every row carries a handle you can look up: the audit event
+            // when there is one, the query id otherwise.
+            match query.audit_event_id.as_ref().filter(|e| !e.is_empty()) {
+                Some(event) => facts.push(event.clone()),
+                None if !query.query_id.is_empty() => facts.push(query.query_id.clone()),
+                None => {}
+            }
+            rows.push(Row::new(
+                &format!("{when}  {}", query.requesting_admin),
+                &query.requested_scope,
+                slot,
+                &facts.join(" · "),
+            ));
+        }
+        out.push_str(&fmt::rows(style, &rows));
+    }
+
+    out.push('\n');
+    out.push_str(&fmt::section(
+        style,
+        "The rules · what an administrator can and cannot get",
+        "SPEC section 24.1 · 51.1",
+    ));
+
+    let mut rules: Vec<Row> = Vec::new();
+    // The daemon's own honesty flag, not a CLI-side assumption: if a
+    // future milestone ever authenticates an administrator, this line
+    // changes because the daemon changed, not because the CLI was edited.
+    let verification = if log.admin_identity_verified {
+        "verified by this device"
+    } else {
+        IDENTITY_UNVERIFIED
+    };
+    let asserted = match &log.organization {
+        Some(org) if !org.is_empty() => format!("asserted by {org} · {verification}"),
+        _ => format!("asserted by the organization · {verification}"),
+    };
+    rules.push(Row::new("Identities", "", Slot::Neutral, &asserted));
+    // The daemon's own list always wins, so the CLI and the daemon cannot
+    // disagree about what is refused.
+    let never = if log.never_answered.is_empty() {
+        punar_common::query::NEVER_ANSWERED.join(" · ")
+    } else {
+        log.never_answered.join(" · ")
+    };
+    rules.push(Row::new("Never answered", "", Slot::Neutral, &never));
+    let granted = if log.granted_scopes.is_empty() {
+        "none — nothing was granted at enrollment".to_string()
+    } else {
+        let citation = log
+            .policy_citation
+            .as_ref()
+            .filter(|c| !c.is_empty())
+            .map(|c| format!("   ({c})"))
+            .unwrap_or_default();
+        format!("{}{citation}", log.granted_scopes.join(" · "))
+    };
+    rules.push(Row::new("Granted scopes", "", Slot::Neutral, &granted));
+    if let Some(storage) = &log.storage {
+        let path = if storage.path.is_empty() {
+            punar_common::query::QUERIES_LOG_PATH
+        } else {
+            storage.path.as_str()
+        };
+        rules.push(Row::new(
+            "Where",
+            "",
+            Slot::Neutral,
+            &format!("{path} · kept {} days", storage.retention_days),
+        ));
+        if !storage.purged_by_privacy_purge {
+            rules.push(Row::new(
+                "Purge",
+                "",
+                Slot::Neutral,
+                "this log is NOT deleted by punarctl privacy purge — it records what \
+                 the organization did, and deleting it would delete your own recourse",
+            ));
+        }
+    }
+    rules.push(Row::new(
+        "See also",
+        "",
+        Slot::Neutral,
+        "punarctl privacy ledger  ·  punarctl audit tail",
+    ));
+    out.push_str(&fmt::rows(style, &rules));
+    out.push_str(&fmt::note(
+        style,
+        "Nothing can be answered that you cannot print · an answer is a subset of \
+         what punarctl agents access --json already shows you",
     ));
     Ok(out)
 }
@@ -1443,6 +1720,13 @@ pub fn privacy_purge(
         ),
     ));
     out.push_str(&fmt::note(style, AUDIT_BOUNDARY));
+    // The second boundary, since M10. Both are printed because a user who
+    // deletes their ledger is entitled to know exactly what remains, and
+    // the two remainders have different reasons: the audit trail is the
+    // decision record, and the query log is a record of what the
+    // ORGANIZATION did — deleting it would delete the user's own recourse
+    // (milestone-10.md section 10.1).
+    out.push_str(&fmt::note(style, QUERY_LOG_BOUNDARY));
     Ok(out)
 }
 
@@ -1515,10 +1799,21 @@ pub fn agents_list(style: &Style, result: &Value, hostname: &str) -> Result<Stri
     }
 
     let suspected = list.detections.len();
+    // Two clocks, deliberately (milestone-10.md section 3.4): `scanned_at`
+    // is the view as of the last CHANGE — a pass that changes nothing
+    // writes nothing — and `last_scan_at` is when a pass last actually
+    // ran, which only the socket can answer because no file records it.
+    let liveness = match (&list.last_scan_at, &list.last_scan_trigger) {
+        (Some(at), Some(trigger)) if !at.is_empty() => {
+            format!(" · last pass {} ({trigger})", fmt::timestamp(at))
+        }
+        (Some(at), None) if !at.is_empty() => format!(" · last pass {}", fmt::timestamp(at)),
+        _ => String::new(),
+    };
     out.push_str(&fmt::note(
         style,
         &format!(
-            "{} session{} · {suspected} suspected · scanned {}",
+            "{} session{} · {suspected} suspected · last change {}{liveness}",
             list.sessions.len(),
             if list.sessions.len() == 1 { "" } else { "s" },
             fmt::timestamp(&list.scanned_at),
@@ -1699,6 +1994,160 @@ pub fn agent_inspect(
             out.push_str(&fmt::note(style, DETECTION_LEDGER_NOTE));
         }
     }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------
+// Milestone 10 — the shadow-AI alert register (contract section 17.1;
+// Plate D-009 in terminal grammar).
+//
+// The card the shell draws and this register are the same record read two
+// ways, and the voice rules are the same on both: the word *suspected*
+// appears, the subject of every sentence is the process rather than the
+// person, and `nothing was blocked` is printed because M10 is not armed
+// (milestone-10.md law 4). A red line that cannot act is honest; a red
+// line that implies it acted is not.
+// ---------------------------------------------------------------------
+
+/// The two sentences every alert surface must carry, in the CLI's voice.
+const ALERT_FOOTER: &str = "Suspected, not certain · nothing was blocked · \
+                            punarctl agents list";
+
+/// `punarctl agents alerts [--all]` — the register behind the card.
+pub fn agents_alerts(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let list: model::AlertsList = parse(result)?;
+    let mut out = fmt::masthead(style, "AI Alerts", &personal_context(hostname));
+
+    let live = list.alerts.iter().filter(|a| a.state == "live").count();
+    out.push_str(&fmt::section(
+        style,
+        "Unknown AI · suspected",
+        &format!(
+            "{} · {live} live",
+            plural(list.alerts.len() as u64, "alert", "alerts")
+        ),
+    ));
+
+    if list.alerts.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No alerts · nothing unmanaged has been suspected on this device",
+        ));
+        out.push_str(&fmt::note(style, DETECTION_NOTE));
+        return Ok(out);
+    }
+
+    let rows: Vec<Row> = list
+        .alerts
+        .iter()
+        .map(|alert| {
+            let state = match alert.state.as_str() {
+                // The state word carries the verdict; the slot follows it.
+                "live" => Slot::Bad,
+                "cleared" => Slot::Warn,
+                _ => Slot::Neutral,
+            };
+            // The executable path is Level-1 LOCAL data: the user sees
+            // it here and on the card, and the export carries a zone
+            // class instead (milestone-10.md section 8.3 point 3).
+            let mut tail = vec![
+                format!("{} · running as {}", alert.executable, alert.owner),
+                format!("signature {} · {}", alert.signature, alert.signature_id),
+                format!(
+                    "first seen {} · last seen {}",
+                    fmt::timestamp(&alert.first_seen),
+                    fmt::timestamp(&alert.last_seen)
+                ),
+                format!(
+                    "{} live · latest {}",
+                    alert.live,
+                    alert.detection_id.to_uppercase()
+                ),
+                format!("raised {}", fmt::timestamp(&alert.raised_at)),
+            ];
+            if let Some(at) = alert.cleared_at.as_deref() {
+                tail.push(format!("cleared {}", fmt::timestamp(at)));
+            }
+            if alert.state == "dismissed" {
+                if let Some(at) = alert.dismissed_at.as_deref() {
+                    // "I clicked it away and now I cannot find it" has an
+                    // answer, and the answer is this line.
+                    tail.push(format!("filed {} · not deleted", fmt::timestamp(at)));
+                }
+            } else if let Some(until) = alert.quiet_until.as_deref() {
+                tail.push(format!("quiet until {}", fmt::timestamp(until)));
+            }
+            Row::new(
+                &alert.alert_id,
+                &format!("{} · {}", alert.agent, alert.state),
+                state,
+                &tail.join(" · "),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+
+    let citation = list
+        .alerts
+        .first()
+        .map(|a| policy_words(&a.policy_citation))
+        .unwrap_or_else(|| "personal defaults".to_string());
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Policy",
+                &citation,
+                Slot::Neutral,
+                "the citation the card carries",
+            ),
+            Row::new(
+                "Anti-nag",
+                &format!("{} h", list.quiet_window_secs / 3600),
+                Slot::Neutral,
+                "one alert per signature · a sighting inside the window updates the \
+                 record silently",
+            ),
+        ],
+    ));
+    out.push_str(&fmt::note(style, ALERT_FOOTER));
+    out.push_str(&fmt::note(style, DETECTION_NOTE));
+    Ok(out)
+}
+
+/// `punarctl agents alerts dismiss <alr_id>` — filing, never deleting.
+pub fn agent_alert_dismissed(style: &Style, result: &Value) -> Result<String, String> {
+    let filed: model::AlertDismissed = parse(result)?;
+    let mut out = fmt::verdict(
+        style,
+        Slot::Ok,
+        "dismissed · filed to the record · not deleted",
+    );
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Alert",
+                &filed.alert_id,
+                Slot::Neutral,
+                &format!("filed {}", fmt::timestamp(&filed.dismissed_at)),
+            ),
+            Row::new(
+                "Suppression",
+                if filed.suppression_changed {
+                    "changed"
+                } else {
+                    "unchanged"
+                },
+                Slot::Neutral,
+                "dismissing files a card · it was never going to be raised twice",
+            ),
+        ],
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Still listed by `punarctl agents alerts --all`, and still in the detection record",
+    ));
     Ok(out)
 }
 

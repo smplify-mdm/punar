@@ -1,0 +1,49 @@
+# M10 in-VM shadow-AI detection exercise (milestone-10.md §16). Runs
+# m10-check.sh as ROOT — the same decided pattern as
+# punar-m2..m9-check.service (no User=, no sudo); every unprivileged step
+# inside the script runs as punar via runuser with the live session env.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m9-check.service and BEFORE the /run/punar artifact export, so
+# m10-report.txt / m10-*.json / m10-*.txt / m10-*.jsonl / punar-m10.png ship
+# in the existing export tar. Same not-enabled pattern as m2..m9 — no
+# .wants symlink, so the mkosi preset-wipe lesson does not arise.
+#
+# WHAT THE WINDOW CONTAINS, and why it perturbs no budget gate: two sleeping
+# shell fixtures in ~punar/Downloads, one mock control-plane process
+# (punar-mock-smplify, started and stopped by the script — never enabled),
+# and an enroll/unenroll cycle that is restored before the script exits.
+# The idle-RAM sampling and the combined services-PSS sample both closed far
+# above this line. M10 adds NO new daemon, so PUNAR_SERVICE_UNITS in
+# idle-ram.sh is unchanged: punard.service punar-agentd.service
+# punar-secrets.service.
+#
+# THE ONE THING THIS UNIT MUST NOT DO is stop punar-agentd-scan.timer.
+# Group 3 exists to watch that timer fire on its own; a check that armed the
+# thing it is asserting would prove nothing (milestone-10.md §16).
+
+[Unit]
+Description=Punar M10 shadow-AI detection, alert and remote-query exercise (CI)
+
+[Service]
+Type=oneshot
+# Timeout math, stated rather than copied. Bounded waits inside the script:
+#   300 s  the periodic-detection wait — 240 s period + 30 s AccuracySec +
+#          30 s slack. This is the ONLY unavoidable wait in the milestone,
+#          and it is absorbed: group 2 launches the fixture first, then
+#          groups 4-13 run inside the window wherever they do not depend on
+#          it, so the incremental cost is the remainder, not 300 s.
+#    60 s  mock control-plane start/stop, enroll and unenroll round trips
+#    45 s  three reconcile passes at the M5 pattern (one per punarctl call,
+#          with the reconcile timer stopped so each pass is exactly one)
+#    12 s  alert surface open + settle + grim
+#   ~90 s  ~80 RPCs, jq passes, greps, sha256sum comparisons and the
+#          screenshot export
+# ~8-9 min of bounded waiting in the worst case, most of it overlapped.
+# 15 min is TCG headroom, not an expectation: a run that needs it has
+# already gone wrong, and the report names the assertion it stopped at.
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m10-check.sh

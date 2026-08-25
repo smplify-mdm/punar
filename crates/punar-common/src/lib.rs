@@ -37,6 +37,13 @@
 //!   sections 14-15; Milestone 9). `schemas/audit/approval.json` is not
 //!   extended: everything M9 needs that the document cannot hold travels as
 //!   a sibling of the envelope.
+//! - [`query`] — the Milestone 10 remote-query vocabulary: the closed
+//!   four-value scope enum (SPEC section 21.2's observation levels), the
+//!   pulled-query wire shapes, the three-way authorization intersection
+//!   evaluated from **local** state, and the SPEC 51.1 query-log record.
+//!   Shared because milestone-10.md section 8.1 requires the same closed
+//!   enum in both daemons, and two copies of an authorization boundary are
+//!   two things that can drift.
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
@@ -63,6 +70,7 @@ mod descriptor;
 pub mod ipc;
 pub mod ledger;
 pub mod principal;
+pub mod query;
 mod redacted;
 pub mod time;
 

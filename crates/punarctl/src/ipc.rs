@@ -30,9 +30,17 @@ pub const AGENTD_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
 /// "never written to disk" promise (milestone-9.md section 3.1).
 pub const SECRETS_SOCKET: &str = "/run/punar-secrets/secrets.sock";
 
-/// Method-name prefix that routes to [`AGENTD_SOCKET`] (contract section
-/// 10.5: `agents.*` names auto-route, even under `debug rpc`).
-pub const AGENTD_METHOD_PREFIX: &str = "agents.";
+/// Method-name prefixes that route to [`AGENTD_SOCKET`] (contract section
+/// 10.5: these names auto-route, even under `debug rpc`).
+///
+/// M10 adds three (contract sections 17.1, 17.8, 17.9): `alerts.*` is the
+/// shadow-AI alert register, and `query.answer` / `queries.list` belong to
+/// the daemon that owns the data an administrator asked about — never to
+/// the courier that carried the question. Routing them here is not a
+/// convenience: a probe that reached punard would get `unknown_method`
+/// from the wrong daemon, and "the wrong thing said no" is the kind of
+/// diagnostic that costs an afternoon.
+pub const AGENTD_METHOD_PREFIXES: [&str; 4] = ["agents.", "alerts.", "query.", "queries."];
 
 /// Method-name prefix that routes to [`SECRETS_SOCKET`] (contract section
 /// 16.2). `approvals.*` and `privilege.*` deliberately do **not** appear
@@ -312,7 +320,10 @@ impl Target {
     /// the approval store lives with the executor of the capabilities it
     /// gates (milestone-9.md section 3.2).
     pub fn of_method(method: &str) -> Target {
-        if method.starts_with(AGENTD_METHOD_PREFIX) {
+        if AGENTD_METHOD_PREFIXES
+            .iter()
+            .any(|prefix| method.starts_with(prefix))
+        {
             Target::Agentd
         } else if method.starts_with(CREDENTIAL_METHOD_PREFIX) {
             Target::Secrets

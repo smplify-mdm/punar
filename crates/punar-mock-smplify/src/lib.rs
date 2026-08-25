@@ -31,10 +31,22 @@
 //! (strict envelope, 4096-byte lines, sequential per connection, 10 s
 //! timeouts), `result` XOR `error` responses. The method table
 //! ([`server`]): `org.discover`, `enroll.register`, `policy.fetch`,
-//! `compliance.report`, `inventory.report`; `admin.devices`/`admin.device`
-//! are **reserved for Milestone 10** (SPEC section 51) and answer
-//! `unknown_method` — m5-check asserts the received side by reading
-//! `/var/lib/punar-mock-smplify/` directly instead.
+//! `compliance.report`, `inventory.report` (M5); `queries.pending` /
+//! `queries.answer` (M10, device-facing — the device dials outward and
+//! collects questions addressed to it); and the admin surface
+//! `admin.devices`, `admin.device`, `admin.ai_query`, `admin.query_result`,
+//! `admin.fleet` (M10, SPEC section 51), role-gated by [`rbac`].
+//!
+//! # The law this crate must not break (milestone-10.md law 1)
+//!
+//! **Nothing here ever dials a device.** An `admin.ai_query` enqueues a
+//! question and returns `{query_id, status: "pending"}` immediately; the
+//! *administrator's* client is the thing that waits, by polling
+//! `admin.query_result`. The device answers when it next runs its own
+//! reconcile-piggybacked sync and pulls the queue. There is no push
+//! channel, no callback, no device address stored anywhere in this crate,
+//! and no code path that opens a connection to an endpoint. That is not a
+//! policy this crate follows — it is a capability it does not have.
 //!
 //! # Data posture
 //!
@@ -52,6 +64,8 @@
 
 pub mod config;
 pub mod fixtures;
+pub mod fleet;
 pub mod protocol;
+pub mod rbac;
 pub mod server;
 pub mod state;

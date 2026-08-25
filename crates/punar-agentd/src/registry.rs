@@ -11,11 +11,22 @@
 //!   not forget this boot's sessions, and a session whose process is gone
 //!   is closed with a synthesized `ended` line — crash honesty, not a
 //!   pretend-still-running row.
-//! - **Detections** are point-in-time heuristics (spec section 23). They
-//!   live in memory and in `/run/punar/agents.json` only, and are **never**
-//!   persisted: writing every scan pass into the registry file would churn
+//! - **Detections** are point-in-time heuristics (spec section 23). M7
+//!   kept them in memory and in `/run/punar/agents.json` only, because
+//!   writing every scan pass into the registry file would churn
 //!   sentinel-heavy records and imply a certainty the detector does not
-//!   have. The durable story for observations is the M8 ledger.
+//!   have.
+//!
+//!   **Milestone 10 changed that, and the reason the objection no longer
+//!   applies is that M10 does not write passes — it writes *transitions*.**
+//!   A detection's identity is stable for the life of its process
+//!   ([`crate::identity`]), so the set-diff emits one record when a
+//!   detection appears and one when it clears, and a pass that changes
+//!   nothing writes nothing at all. Those records go to
+//!   `/var/lib/punar/agents/detections.jsonl` ([`crate::detections`]),
+//!   schema-exact, `classification: "unknown"`, and each opens a bounded
+//!   ledger — closing the question M8 wrote down and left open
+//!   (milestone-10.md section 6).
 //!
 //! Runtime extras that are *not* in the ten-field record (the verified
 //! scope unit, the executable path, the launcher's authority display
@@ -70,15 +81,47 @@ impl Session {
 /// One current detection — `observed` (known agent outside the managed
 /// runtime) or `unknown` (suspected agentic activity). Every surface that
 /// renders one says *suspected*, never certain (spec section 23).
+///
+/// # The two `signature` fields, and why they are not one
+///
+/// M7 shipped a wire field named `signature_id` on detection rows whose
+/// value is the **matched rule's name** (`downloads-foo-agent`) — see
+/// `docs/api/ipc.md` section 10.2, the AI panel, and `punarctl`. M10
+/// introduces a *different* thing that section 4.2 also calls
+/// `signature_id`: `sig_` + 12 hex over `(exe, uid)`, the anti-nag key.
+///
+/// Both keep their names, in their own contracts:
+///
+/// - [`Detection::signature_name`] is the M7 value and is what the wire
+///   row's `signature_id` carries. The shipped contract does not move
+///   for a later milestone (the M8 Decision-0 law, third application).
+/// - [`Detection::signature_id`] is the M10 identity and appears under
+///   that name in `alerts.json` — a **new** file, whose field list
+///   milestone-10.md section 5.3 fixes — beside a `signature` field
+///   carrying the rule name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detection {
     pub record: RegistryRecord,
     /// The single matched path — never a full command line
     /// (`crate::proc` module note; spec section 53).
     pub executable: String,
-    /// Which signature matched: an adapter name for `observed`, a
-    /// suspected-pattern id for `unknown`.
+    /// Which rule matched: an adapter name for `observed`, a
+    /// suspected-pattern or provenance-rule id for `unknown`. This is the
+    /// value the wire row's `signature_id` field has carried since M7.
+    pub signature_name: String,
+    /// The M10 signature **identity** (`sig_` + 12 hex over exe + uid) —
+    /// the alert key. One thing seen, however many times it restarts.
     pub signature_id: String,
+    /// The zone **class** of where the executable lives (`downloads`,
+    /// `tmp`, `home`, `system`). A class, never a path — it is what the
+    /// unknown-agent ledger records instead of the location.
+    pub zone: &'static str,
+    /// When **this daemon** first saw the process, as distinct from
+    /// `record.started_at`, which since M10 is the process's own start.
+    pub observed_at: String,
+    /// Owner uid, for `alerts.dismiss` authorization. `None` when
+    /// `/proc/<pid>/status` did not answer — root-only, fail closed.
+    pub owner_uid: Option<u32>,
 }
 
 impl Detection {
@@ -87,7 +130,9 @@ impl Detection {
         SessionRow {
             suspected: Some(true),
             executable: Some(self.executable.clone()),
-            signature_id: Some(self.signature_id.clone()),
+            // The M7 contract: this field is the matched rule's *name*.
+            // The M10 `sig_` identity lives in `alerts.json`, not here.
+            signature_id: Some(self.signature_name.clone()),
             ..SessionRow::from_record(self.record.clone())
         }
     }
@@ -169,8 +214,11 @@ impl Registry {
     /// the `enroll.sync` precedent of auditing changes, not passes).
     ///
     /// A detection that persists across passes keeps its original
-    /// `started_at`, so a still-running suspect does not appear to restart
-    /// every time someone opens the panel.
+    /// `observed_at`, so a still-running suspect does not appear to be
+    /// freshly noticed every time someone opens the panel. `started_at`
+    /// needs no such care since M10: it is the process's own start,
+    /// derived from the kernel's tick stamp, and is the same on every
+    /// pass by construction.
     pub fn replace_detections(
         &mut self,
         found: Vec<Detection>,
@@ -181,6 +229,7 @@ impl Registry {
             let id = detection.record.session_id.clone();
             match self.detections.get(&id) {
                 Some(previous) => {
+                    detection.observed_at = previous.observed_at.clone();
                     detection.record.started_at = previous.record.started_at.clone();
                 }
                 None => appeared.push(detection.clone()),
@@ -557,7 +606,11 @@ mod tests {
                 started_at: at.to_string(),
             },
             executable: "/home/punar/Downloads/foo-agent".to_string(),
-            signature_id: "downloads-foo-agent".to_string(),
+            signature_name: "downloads-foo-agent".to_string(),
+            signature_id: "sig_a1b2c3d4e5f6".to_string(),
+            zone: "downloads",
+            observed_at: at.to_string(),
+            owner_uid: Some(1000),
         };
 
         let (appeared, gone) = registry

@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "_note": "dev/CI fixture — not a product component. These are fixture strings, not authenticated principals: punar-mock-smplify has no IdP, and every surface that renders a requesting admin labels the identity 'asserted by the organization · not verified by this device' (milestone-10.md section 9.1). The device re-evaluates authorization from its own enrollment.json regardless of anything here (SPEC section 59.4).",
+  "roles": {
+    "helpdesk": ["inventory"],
+    "fleet_viewer": ["inventory", "authority"],
+    "security_admin": ["inventory", "authority", "resource_summary", "security_events"]
+  },
+  "admins": {
+    "helpdesk@acme.com": "helpdesk",
+    "cio@acme.com": "fleet_viewer",
+    "secops@acme.com": "security_admin"
+  }
+}

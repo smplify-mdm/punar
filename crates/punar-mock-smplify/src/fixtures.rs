@@ -22,6 +22,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::rbac::AdminDirectory;
+
 /// A fixture-tree defect. One string, verbose on purpose — the only reader
 /// is a person staring at a failed check.
 #[derive(Debug)]
@@ -49,6 +51,10 @@ pub struct FixtureSet {
     /// Composed policy-source envelopes (envelope fields verbatim +
     /// embedded `policy` payload) — the `policy.fetch` result set.
     pub policies: Vec<Value>,
+    /// M10: the admin role table (`admins.json`), read only by the mock and
+    /// served to nobody. Absent ⇒ the admin surface refuses everything and
+    /// names the missing file (milestone-10.md section 9.1).
+    pub admins: AdminDirectory,
 }
 
 /// Load and compose the fixture tree at `dir`.
@@ -130,6 +136,7 @@ pub fn load(dir: &Path) -> Result<FixtureSet, FixtureError> {
         domain,
         organization,
         policies: vec![envelope],
+        admins: AdminDirectory::load(dir),
     })
 }
 

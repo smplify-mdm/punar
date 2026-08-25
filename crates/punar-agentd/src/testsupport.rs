@@ -21,9 +21,36 @@ pub fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// A fixture `/proc` root.
+/// The fixture kernel boot id — one of the two fields that make pid
+/// reuse unable to collide with a live detection identity
+/// (milestone-10.md section 4.1).
+pub const FIXTURE_BOOT_ID: &str = "6f2c6b1e-0e2a-4c37-9f4e-6b6f2a1d9c31";
+
+/// The fixture `btime` (2026-08-25T00:00:00Z), the base a detection's own
+/// `started_at` is derived from.
+pub const FIXTURE_BTIME: u64 = 1_787_616_000;
+
+/// A fixture `/proc` root, carrying the two **system-wide** files M10
+/// reads once per pass: `sys/kernel/random/boot_id` and the `btime` line
+/// of `stat`.
 pub fn fixture_proc(tag: &str) -> PathBuf {
-    temp_dir(&format!("proc-{tag}"))
+    let root = temp_dir(&format!("proc-{tag}"));
+    fixture_proc_system(&root, FIXTURE_BOOT_ID, FIXTURE_BTIME);
+    root
+}
+
+/// Write the system-wide `/proc` files into an existing fixture root, so
+/// a test that built its own root (the integration harness) gets the same
+/// kernel facts.
+pub fn fixture_proc_system(root: &Path, boot_id: &str, btime: u64) {
+    let random = root.join("sys/kernel/random");
+    std::fs::create_dir_all(&random).unwrap();
+    std::fs::write(random.join("boot_id"), format!("{boot_id}\n")).unwrap();
+    std::fs::write(
+        root.join("stat"),
+        format!("cpu  1 2 3 4 5 6 7 8 9 10\nbtime {btime}\nprocesses 1234\n"),
+    )
+    .unwrap();
 }
 
 /// Write one fake process into a fixture `/proc` root: the same five files
@@ -164,6 +191,13 @@ pub fn fixture_suspected(dir: &Path) -> PathBuf {
       "note": "hero-demo fixture signature" },
     { "id": "downloads-agent-like", "exe_glob": "*/Downloads/*-agent",
       "note": "agent-named executable run from Downloads" }
+  ],
+  "provenance": [
+    { "id": "unmanaged-path-agentlike",
+      "unmanaged_path_prefixes": ["~/Downloads/", "/tmp/", "~/.local/bin/"],
+      "name_tokens": ["agent", "-ai", "llm", "copilot", "mcp"],
+      "require": "both",
+      "note": "path provenance + agent-like name; either alone is not a signal" }
   ]
 }
 "#,

@@ -47,30 +47,37 @@ Deliverables (spec section 76, Milestone 0):
   exercise phase went green in run
   [32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695)
   (2026-08-25, all five jobs green — `PUNAR_M7_OK`, 74 assertions; see M7
-  below). Two runs have happened since, both carrying M8 code: run
+  below). The M8 and M9 exercise phases then went green **together, and
+  for the first time**, in run
+  [32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+  (commit `7943f3c` "Repair M5/M8/M9", 2026-08-25 21:05–21:39 UTC) — the
+  **newest run and the newest green one**: all five jobs green,
+  `PUNAR_DESKTOP_OK` after 20 s, `PUNAR_M2_OK` (33) + `PUNAR_M3_OK` (28)
+  + `PUNAR_M4_OK` (29) + `PUNAR_M5_OK` (63) + `PUNAR_M6_OK` (55) +
+  `PUNAR_M7_OK` (74) + **`PUNAR_M8_OK` (123)** + **`PUNAR_M9_OK` (137)**
+  = **542 in-VM assertions**, the M9 approval document re-validated
+  host-side against the unchanged `schemas/audit/approval.json`
+  (boot-test phase 11b), idle RAM mean 1155 MB / max 1160 MB (pass with
+  the standing over-target warning), services RSS 6 MB summed over the
+  three daemon cgroups. The two red runs on the road there: run
   [32874683680](https://github.com/smplify-mdm/punar/actions/runs/32874683680)
-  (commit `9027438`) was **red** — `desktop-test` only, the other four
-  jobs green — on one stale **m7**-check assertion, and run
+  (commit `9027438`, M8) red in `desktop-test` on one stale **m7**-check
+  assertion, and run
+  [32891877422](https://github.com/smplify-mdm/punar/actions/runs/32891877422)
+  (commit `a53598b`, M9) red on the defects `7943f3c` then repaired.
+- **The M8 silent-skip is closed, by evidence.** Run
   [32877949285](https://github.com/smplify-mdm/punar/actions/runs/32877949285)
-  (commit `f31a8f2`, 2026-08-25 17:27–17:55 UTC) is the **newest run and
-  the newest green one**: all five jobs green, `PUNAR_DESKTOP_OK` after
-  20 s, `PUNAR_M2_OK` (33) + `PUNAR_M3_OK` (28) + `PUNAR_M4_OK` (29) +
-  `PUNAR_M5_OK` (63) + `PUNAR_M6_OK` (55) + `PUNAR_M7_OK` (74) = **282
-  in-VM assertions**, idle RAM mean 1163 MB / max 1171 MB (pass with the
-  standing over-target warning), services RSS 4 MB (punard +
-  punar-agentd).
-- **That green run did not execute the M8 exercise, and said so.** It
-  carried a `::warning::` — *"no m8-report.txt in the export and no M8
-  verdict on serial — the M8 exercise did not run"* — because
-  `m8-check.sh` shipped mode `100644`, so `punar-m8-check.service`
-  failed its `ExecStart`, no report reached the export, and `boot-test`
-  degraded a **missing** verdict to a warning rather than a failure.
-  Commit `dc2dc47` restores the exec bit and makes a missing M2..M8
-  verdict a hard failure under KVM, but it is **not pushed** (local
-  `main` is two commits ahead of `origin/main`: `f65c7ad` design plates
-  and `dc2dc47`). So **no CI run has ever executed the M8 exercise and
-  no `PUNAR_M8_OK` exists anywhere** (see M8 below), and the M9 tree is
-  working-tree only on top of those two unpushed commits (see M9 below).
+  went green in the morning **without executing m8-check at all** —
+  `m8-check.sh` shipped mode `100644`, `punar-m8-check.service` failed
+  its `ExecStart`, and `boot-test` degraded a **missing** verdict to a
+  `::warning::`. Commit `dc2dc47` restored the exec bit and made a
+  missing M2..M9 verdict a hard failure under KVM; run `32899132191`
+  then delivered the first `PUNAR_M8_OK` and the first `PUNAR_M9_OK`
+  that have ever existed. **Both milestones are now runtime-proven, not
+  merely built.** `origin/main` is `7943f3c`; local `main` is five
+  **docs-only** commits ahead of it (`dab66ae`, `8a38c8f`, `e6f20dc`,
+  `a273d0d`, `b31a031`), and the M10 tree is working-tree only on top of
+  those (see M10 below) — **no CI run contains one byte of M10.**
 - [x] Repository — skeleton per spec section 67 (all section 67 directories
   and top-level documents exist; Cargo workspace members match the crates on
   disk).
@@ -867,7 +874,25 @@ Ledger** (spec 21) is M8 — the section below; authority **enforcement**
 is M9/M12; continuous shadow-AI detection with local alerts and remote
 queries is M10.
 
-## M8 — AI Access Ledger: committed and pushed; host jobs CI-green; the in-VM exercise has still never run
+## M8 — AI Access Ledger: done (CI exercise green)
+
+> **Superseding update, 2026-08-25 21:39 UTC.** Run
+> [32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+> (commit `7943f3c`) delivered **`PUNAR_M8_OK`, 123 assertions** — the
+> first M8 verdict that has ever existed. Every "**no CI run**" and
+> "never executed" annotation in the deliverable list below is **dated**:
+> it described the state before that run, and is kept as the record of
+> how the milestone was validated on the way there. The exercise reached
+> green after two repairs, both recorded in `7943f3c`: a **product** fix
+> — a pre-registration race dropped an attribution that arrived before
+> its session was registered, so the Level-4 denial reference never
+> joined the ledger (attributions are now held in a bounded,
+> oldest-dropped, tombstone-respecting buffer, with three new tests) —
+> and one **check** correction, an over-strict retention clause replaced
+> by the invariant it was meant to express. No assertion was weakened to
+> obtain green. What M8 still does not claim is unchanged: network
+> destinations remain **M12**, MCP servers **M11+**, and both render as
+> `NOT YET OBSERVED · MILESTONE n`.
 
 Design plan and as-built record:
 [`docs/development/milestone-8.md`](docs/development/milestone-8.md) (§14
@@ -940,14 +965,16 @@ replacing the placeholder — with `rust`, `contracts`, `image` and
 host-side gates — fmt, clippy, the workspace tests, the schema/fixture
 contracts, the containerized mkosi build of both images including every
 M8 file, and the `punar-dev` boot — are now CI-proven at HEAD's parent.
-**The in-VM M8 exercise is not.** It never ran in either run:
+**The in-VM M8 exercise ran in neither of those two runs.**
 `m8-check.sh` shipped non-executable, its never-enabled oneshot failed
 `ExecStart`, and `boot-test` degraded the missing verdict to a
 `::warning::` instead of failing — a green run that claimed a milestone
-which had not executed. Commit `dc2dc47` (local, **unpushed**) restores
-the exec bit and turns a missing M2..M8 verdict into a hard failure
-under KVM. **No `PUNAR_M8_OK` exists anywhere**, and every in-VM claim
-below is still unproven.
+which had not executed. Commit `dc2dc47` restored the exec bit and
+turned a missing M2..M9 verdict into a hard failure under KVM; run
+[32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+(commit `7943f3c`) then executed the exercise and delivered
+**`PUNAR_M8_OK`, 123 assertions**. The in-VM claims below were unproven
+when they were written and are proven now.
 
 Deliverables (spec section 76, Milestone 8) — on disk vs proven:
 
@@ -1034,14 +1061,14 @@ full CI script list including `m8-check.sh`) exit 0 with zero findings;
 `.qml` files, and `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` with
 its `sha256sum` equality check on the staged `process-classes.json`.
 
-What remains: **nothing M8 is proven at runtime.** Every in-VM claim —
-all seventeen m8-check groups, the second mock session and its generated
-children, the scope-cgroup read, the schema-exact `agents.access`
-summary, the Level-4 denial join, the privacy regression, the panel
-screenshot, the retention prune, the purge and its tombstone, the
-negative probes, and the 105-min job budget — awaits a CI run in which
-the exercise actually starts, which needs the unpushed `dc2dc47`. No
-`PUNAR_M8_OK` exists anywhere. Out of scope by spec sectioning and
+What remains: **nothing.** Every in-VM claim — all seventeen m8-check
+groups, the second mock session and its generated children, the
+scope-cgroup read, the schema-exact `agents.access` summary, the Level-4
+denial join (the one the attribution race was breaking), the privacy
+regression, the panel screenshot, the retention prune, the purge and its
+tombstone, and the negative probes — executed in run
+[32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+and passed: **`PUNAR_M8_OK`, 123 assertions**. Out of scope by spec sectioning and
 tracked in milestone-8.md §13: network destinations are **M12**
 (`punar-netd`), a ledger for unknown/unmanaged agents and the authorized
 administrator query **M10**, org-governed retention **M10+**, and the
@@ -1053,7 +1080,32 @@ changes — and one was **re-milestoned honestly**: MCP servers and tools
 moved M9+ → **M11+**, because M9 shipped the credential broker, not a
 tool gateway. `sensitive_resource_access` likewise settled on **M12**.
 
-## Current milestone: M9 — Approval gates + secret broker: implemented on disk; statically validated; uncommitted; no CI run
+## M9 — Approval gates + secret broker: done (CI exercise green)
+
+> **Superseding update, 2026-08-25 21:39 UTC.** M9 was committed
+> (`a53598b`), pushed, run **red** once
+> ([32891877422](https://github.com/smplify-mdm/punar/actions/runs/32891877422)),
+> repaired in `7943f3c`, and is now green: run
+> [32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+> delivered **`PUNAR_M9_OK`, 137 assertions** — the first M9 verdict
+> that has ever existed — plus the host-side re-validation of the
+> exported approval document against the unchanged
+> `schemas/audit/approval.json` (boot-test phase 11b, `[PASS]`). Every
+> "**no CI run**", "uncommitted" and "never executed" statement in the
+> body below is **dated**, and is kept as the record of how M9 was
+> validated before it ran. **The repair found no defect in the approval
+> gate**: the approve → execute → verify → audit path was read end to
+> end and was correct. What was wrong was the *checking*: one assertion
+> observed the applied timezone through a stale proxy instead of the
+> applied state (replaced by a strictly stronger one), three `jq`
+> filters had scoping/precedence errors and were **exiting 5 rather
+> than evaluating** — each now evaluates and each was proved to still
+> FAIL when the property it guards is removed — and the redaction sweep
+> was grepping the mock provider's token *prefix*, a non-secret format
+> string, instead of the issued secret. The two assertions that test the
+> **actual issued credentials** passed with zero hits across everything
+> Punar writes, the journal, and every process `environ`/`cmdline`. No
+> assertion was weakened to obtain green.
 
 Design plan and as-built record:
 [`docs/development/milestone-9.md`](docs/development/milestone-9.md)
@@ -1243,15 +1295,18 @@ by this audit: `qmllint` 6.11.2 over all twelve `.qml` files, and
 `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` with its check that
 both staged M9 data files are present.
 
-What remains: **nothing M9 is proven at runtime, and neither is M8.**
-`m9-check` has never executed; **no `PUNAR_M9_OK` exists anywhere**, no
-`punar-m9.png` has been taken, phase 11 and 11b have never run end to
-end, the redaction sweep has never been run against a real export tar,
-the three-daemon `PUNAR_SERVICES_RSS_MB` is unmeasured, and the 125-min
-`desktop-test` budget is untested. The road to the arbiter run also
-passes through the two unpushed commits: until `dc2dc47` lands, a
-missing M2..M8 verdict is still only a warning, so a run could go green
-without either exercise having started. Known gaps stated rather than
+What remains: **nothing.** All thirteen m9-check groups executed in run
+[32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+— **`PUNAR_M9_OK`, 137 assertions** — `punar-m9.png` was taken, phases
+11 and 11b ran end to end (the exported approval document validates
+against the unchanged schema on the host), the redaction sweep ran in
+the VM and found **zero** hits for the issued secrets across everything
+Punar writes, the journal, and every process `environ`/`cmdline`, and
+the three-daemon `PUNAR_SERVICES_RSS_MB` measured **6 MB** against an
+unchanged 100 MB target (`boot-test.sh`'s printed label still says
+*"punard + punar-agentd"* while `idle-ram.sh` sums three units — the
+number covers three daemons, the label under-reports it; tracked in
+milestone-10.md §22.5). Known gaps stated rather than
 absorbed, per milestone-9.md §15.4 and §13: the expiry group uses the
 **shipped 300 s TTL** (`--ttl 15` does not exist and must not), there is
 **no graphical path back to a deferred approval card** in M9 (the
@@ -1262,6 +1317,199 @@ there is no upstream credential authority and the CI VM has no network.
 Out of scope by spec sectioning: MCP servers and tools are **M11+**,
 network destinations and sensitive-zone observation **M12**, the
 unknown-agent ledger and the authorized administrator query **M10**.
+
+## Current milestone: M10 — Shadow AI detection MVP: implemented on disk; statically validated; uncommitted; no CI run
+
+Design plan, build record and status:
+[`docs/development/milestone-10.md`](docs/development/milestone-10.md)
+(§21 is the build record, **§22 is the status of record**). Wire
+contract: [`docs/api/ipc.md`](docs/api/ipc.md) **§17–§20 — additive and
+still `v: 1`**: `alerts.list`, `alerts.dismiss`, `query.answer` (root
+peer only) and `queries.list` (any admitted peer) on the M7 agentd
+socket, amended `agents.scan`/`agents.list` results, punard's courier
+behaviour, the control-plane methods the mock now serves, and the
+`/run/punar-agentd/alerts.json` side contract. M10 is where spec section
+23's promise stops depending on someone looking: **the device notices on
+its own, tells the user first, remembers exactly enough, and answers an
+administrator only within a scope the user can read back.**
+
+**The four architectural laws** (milestone-10.md §0), each load-bearing
+rather than decorative: (1) **Punar is not a server** — M10 opens no
+inbound socket, port or listener of any kind; a remote query reaches the
+device only because *the device fetched it* on the reconcile-piggybacked
+sync M5 already shipped; (2) **the transport is not the authority** —
+`punard` carries queries and answers, `punar-agentd` decides what may be
+answered, re-evaluating authorization from **local** state
+(`enrollment.json`, read by the data owner itself) and never from the
+request (spec 59.4, compromised control plane); (3) **the user learns
+first and can always read the record** — every query, answered or
+refused, lands in `/var/lib/punar/agents/queries.jsonl` and is printed
+by an **unprivileged** `punarctl privacy queries`, and the answer's
+content is never larger than what the same user can already print about
+themselves (spec 24.2); (4) **suspected, never certain, and never
+armed** — M10 detects, records and alerts; it blocks nothing, kills
+nothing and quarantines nothing, and the alert card says so in words.
+
+Deliverables (spec section 76, Milestone 10) — on disk vs proven:
+
+- [x] Known/observed/unknown classification, now **continuous** — M7
+  shipped the vocabulary and an on-demand scan and deferred the trigger
+  by name; M10 adds `punar-agentd-scan.timer` (`OnBootSec=240`,
+  `OnUnitActiveSec=240`, `AccuracySec=30`, armed by a **vendor**
+  `timers.target.wants` symlink, never `/etc`, never `is-enabled`) whose
+  oneshot runs `/usr/bin/punarctl agents scan --trigger timer` — the
+  timer path is the same socket, authorization and audit path a human
+  uses, and the daemon gains no internal clock. 240 s is an exact
+  multiple of the shipping 120 s reconcile period so systemd
+  **coalesces** the two wakeups. Three event-driven immediate triggers
+  (register, session reap, enrollment transition) and **no polling
+  loop** (spec 6.3). A scan **diff** is the event: an unchanged pass
+  writes zero bytes (spec 6.4). One new detection input, expressed as
+  **data** not code — `unmanaged-path-agentlike` in `suspected.json`,
+  `require: "both"` (an unmanaged path prefix **and** an agent-like name
+  token; either alone is not a signal). Built and tested on the host;
+  **no CI run** — that the timer fires, and that a detection appears
+  with **no** manual scan in the window, is m10-check group 3 and has
+  never been observed.
+- [x] Fixture unknown agent, made real — `fixtures/agents/unknown-agent/`
+  has described a *persisted, ledgered* unknown agent since M7. M10
+  closes M8's open question in the affirmative: detections get a
+  schema-exact `registry-record.json` in
+  `/var/lib/punar/agents/detections.jsonl` and a
+  `ledger-summary.json`-conformant ledger, **strictly smaller than a
+  managed one by construction** — a process class, a **zone class** for
+  where the executable lives, and the Level-4 `unknown_ai_execution`
+  event references, with everything else an explicit
+  `not_yet_observed[]` row. **No child-process walk, no `cwd` read, no
+  cmdline/argv/environment** — the three refusals are structural, and
+  `project` is `"unknown"` rather than inferred. Two identities do two
+  jobs: `detection_id` (exe ‖ uid ‖ boot id ‖ pid ‖ start ticks) for the
+  set-diff and the record, `signature_id` (exe ‖ uid) for the alert.
+  Retention **7 days** after the detection clears, purgeable
+  unconditionally by the owning user. Built and tested; **no CI run** —
+  m10-check group 6, plus boot-test **phase 12b** which replays the
+  exported summary against the unchanged schema on the host (the image
+  has no JSON-Schema validator).
+- [x] Local alert (Plate D-009) — `/run/punar-agentd/alerts.json`,
+  **`0640 root:punar`**, atomic write on change only: the M9
+  root-owned-summary lesson applied, because a forged *"Unknown AI
+  activity suspected"* card with an `Inspect` action is a phishing
+  primitive and `/run/punar` is user-writable. The shell reads it with a
+  `FileView` (`Services/Alerts.qml`, the established
+  `Status`/`Agents`/`Ledger`/`Approvals` pattern — inotify, no polling,
+  no socket client) and draws one layer-shell region
+  (`Alert/AlertStack.qml`) with the D-009 anatomy and `I`/`D` keys.
+  **One alert per `signature_id`**, not per scan and not per process,
+  with a **24 h quiet window** after the last live detection clears, so
+  a crash-looping agent yields one card a day. Dismissal **files, never
+  destroys**. The first sighting **breaks through do-not-disturb** —
+  argued from spec 24.2, not taste: an administrator can query this
+  exact fact from this milestone onward, so no quiet toggle may create a
+  state where the admin knows and the user does not; under DND it
+  renders without sound, without focus steal and without auto-dismiss.
+  The card deliberately **drops the plate's `→ api.foo.ai` subline**:
+  nothing observes network destinations before M12 (spec 1.22). Built,
+  `qmllint` clean per milestone-10.md §21.3; **no CI run** — the card,
+  the screenshot `punar-m10.png` and the DND breakthrough are m10-check
+  groups 4–5 and have never been rendered in a VM.
+- [x] Smplify remote query (spec 51, 24.1, 51.1) — the device **pulls**
+  pending queries on the existing sync piggyback when enrolled
+  (`queries.pending` → `query.answer` on the agentd socket →
+  `queries.answer` back), so there is no listener, no long poll, no new
+  timer and no new wakeup; the **administrator's** client is the thing
+  that waits, and every surface states the ≤ one-reconcile-period
+  latency. Scope is a **closed enum of four** — `inventory`,
+  `authority`, `resource_summary`, `security_events`, one per spec 21.2
+  observation level — with no wildcard and no free text; an unrecognised
+  value is refused `out_of_scope`, never answered best-effort.
+  Authorization is a **three-way intersection evaluated by the data
+  owner**: `requested ∩ org_granted ∩ device_builtin_max`, where
+  `org_granted` is read by agentd **from `enrollment.json` itself**,
+  never from the request. **Fail closed**: no file, or no
+  `remote_query_scopes` key, means the empty set. The mock enforces RBAC
+  too (`fixtures/organizations/acme/admins.json`, three roles) and the
+  device does not trust it — two independent checks, and the device's is
+  the one that decides. The refusal list is closed and **mostly
+  structural**: prompts, source, file paths, cmdlines, secrets, pids and
+  cgroup paths, process trees and audit payloads are refused because
+  **no field exists to carry them**, not because a filter drops them.
+  Every query is recorded with all six spec-51.1 fields; the **answered
+  payload is deliberately not stored**. Built, with integration tests in
+  three crates; **no CI run** — the enrolled answer, the device-side
+  refusal, the unprivileged `privacy queries` read and the personal-mode
+  inert path are m10-check groups 7–10.
+- [x] Unmanaged-first, structurally (DESIGN_LANGUAGE §8) — three
+  independent, each-sufficient gates make the query path inert on a
+  personal device: the sync hook that pulls queries runs only when
+  enrolled (M5's gate, `m5-check`-proven since); agentd's intersection
+  reads `enrollment.json` and no file means the empty set; and no
+  inbound path exists at all. Stated with its honest limit: **"inert" is
+  not "absent"** — the enterprise query code ships in every binary, and
+  a build with it compiled out is the stronger claim M10 does not make.
+- [x] M10 CI exercise wiring — `m10-check.sh` (**13 groups, ~113 static
+  assertion sites** — 80 helper calls plus 33 hand-written assertion
+  blocks — and 10 stated-gap `info` lines), the never-enabled root oneshot
+  `punar-m10-check.service` started synchronously by `idle-ram.sh` after
+  the M9 exercise and before the export, `boot-test.sh` **phase 12**
+  (verdict hard-gated: a `PUNAR_M10_FAIL`, a truncated report **or a
+  missing report under KVM** all fail the script) and **phase 12b**
+  (host-side schema replay), `ci.yml` job renamed to M2..M10 with
+  `desktop-test` raised 125 → 135 min and the M10 artifacts uploaded.
+  The check script is mode **0755 on disk** — the M8 trap — but is **not
+  yet committed**, so the bit must survive `git add`. Shellcheck clean;
+  **never executed anywhere**.
+- [x] Budgets (spec 6.2–6.4) — **no new daemon**, so
+  `PUNAR_SERVICE_UNITS` is unchanged at three units and the 100 MB
+  target / 150 MB ceiling are untouched; the scan is a transient
+  `punarctl` every four minutes and is **not** stopped for the idle-RAM
+  sampling window, because budgets are measured against the shipping
+  configuration. Steady-state disk I/O is **zero writes**. The claim
+  that the 240 s timer coalesces with the 120 s reconcile timer is
+  arithmetic until a CI run measures it.
+
+Static validation for the M10 tree — local and non-authoritative per
+spec 1.22, **re-run by this audit on 2026-08-25** against the working
+tree: `cargo fmt --all -- --check` and `cargo clippy --workspace
+--all-targets -- -D warnings` both exit 0 in the pinned `rust:1`
+container; `cargo test --workspace` green — **840 passed, 0 failed**
+across 34 suites (719 at M9); `./tools/validate-schemas.sh` — 15 schemas
+metaschema-checked, **132 documents validated, ALL PASS**, and **no
+schema was edited by M10** (M8's Decision-0 law holds for a third
+milestone: everything the shipped schemas cannot hold travels as a
+sibling field of the IPC result or in a separate local record);
+`shellcheck v0.11.0` (pinned container) clean on `m10-check.sh`,
+`idle-ram.sh` and `boot-test.sh`. Recorded in milestone-10.md §21.3 and
+**not** re-run by this audit: `actionlint`, `qmllint` 6.11.2 over all
+fourteen `.qml` files, `PUNAR_BUILD_MODE=summary ./tools/build-image.sh`,
+and the replay of every `jq` filter in `m10-check.sh` against real
+documents (40 filters, none exiting 5 — the M9 failure mode).
+
+What remains: **nothing M10 claims is proven at runtime.** Ten of the
+eleven §19 done-conditions are designed and gated, not observed; only
+"`ipc.md` §17–§20 landed additively" is verifiable by reading the tree.
+`m10-check` has never executed, **no `PUNAR_M10_OK` exists anywhere**,
+no `punar-m10.png` has been taken, the timer has never been seen firing,
+no query has crossed a real reconcile pass, and the 135-min
+`desktop-test` budget is untested. The tree is also **uncommitted** (48
+modified files, 21 new paths) on top of five docs-only unpushed commits;
+`git status` additionally shows **8.1 GB** of untracked `target-docker*/`
+container build cache that `.gitignore` does not cover, so `git add -A`
+here would commit it. Two assertions M10 makes stale are left for their
+owners and named in milestone-10.md §22.5: `m8-check.sh` line **371**
+(the Level-4 `not_yet_observed[]` list — M10 ships
+`unknown_ai_execution`'s producer) and line **375** (evidence ⊆ the four
+M8 values — M10 adds `detection_scan`); both still pass today because
+both read a **managed** session's ledger, and both should be widened to
+assert the partition rather than the literal list. Out of scope by spec
+sectioning and tracked in milestone-10.md §17–§18: **blocking, killing
+or quarantining** an unmanaged agent is M12 plus a policy verb (M10
+renders no dead buttons), network destinations and MCP activity as
+detection inputs or ledger rows are M12/M11+, the notification centre,
+the freedesktop daemon, the OSD and a persistent DND toggle are **M13**,
+real cloud/transport/RBAC/IdP and any cross-device fleet **UI** are
+Phase 2, behavioural risk scoring is Phase 3, and every tracing
+mechanism spec 1.14 forbids — eBPF, fanotify, ptrace, `LD_PRELOAD`,
+exec-time notification — is **permanently out**, not deferred.
 
 ## Milestone table
 
@@ -1280,9 +1528,9 @@ exist and function, until sharper criteria are defined.
 | M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | **Done** — [run 32849448721](https://github.com/smplify-mdm/punar/actions/runs/32849448721) (2026-08-25) fully green incl. the in-VM M5 exercise (`PUNAR_M5_OK`, 63 assertions — enroll → managed → offline → unenroll journey, category-only sync asserted on the mock's received side); idle RAM 1156 MB mean (pass w/ over-target warning); the finished tree's first run [32846674987](https://github.com/smplify-mdm/punar/actions/runs/32846674987) was red on exactly one case-sensitive verdict grep in m5-check |
 | M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | **Done** — [run 32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904) (2026-08-25) fully green incl. the in-VM M6 exercise (`PUNAR_M6_OK`, 56 assertions — offline `podman load` → rootless `up`/`shell`/`status`/`destroy`, Atlas fixture byte-identical throughout); idle RAM 1162 MB mean (pass w/ over-target warning), services RSS 2 MB; the finished tree's first run [32852810872](https://github.com/smplify-mdm/punar/actions/runs/32852810872) was red on m6-check calling `diff`, which the image does not ship |
 | M7 — AI Agent Registry | Managed sessions, Claude adapter, second/generic adapter, agent identity, classification, local UI | Not specified in spec §76 | **Done** — [run 32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695) (2026-08-25, commit `f95c9c4`) fully green on all five jobs incl. the in-VM M7 exercise (`PUNAR_M7_OK`, 74 assertions — managed mock session in its own `punar-agent-<id>.scope`, kernel-checked cgroup attribution, schema-exact `registry.jsonl` transitions, adapters-as-data, the `foo-agent` fixture found as `UNKNOWN · SUSPECTED`, the Plate D-005 panel screenshot); services RSS **4 MB combined** (punard + punar-agentd, within the 100 MB target); idle RAM 1175 MB mean (pass w/ over-target warning, +13 MB for the second daemon); the M7 tree's own push [run 32865062323](https://github.com/smplify-mdm/punar/actions/runs/32865062323) was red on one stale **m6**-check assertion expecting the removed `punar-env agent` stub message, not on M7 code |
-| M8 — AI Access Ledger | Resource summaries, process attribution, security events, local retention, privacy controls | Not specified in spec §76 | **Committed and pushed; host jobs CI-green; the in-VM exercise has never run** — [run 32877949285](https://github.com/smplify-mdm/punar/actions/runs/32877949285) (2026-08-25, commit `f31a8f2`) is green on all five jobs, so M8's fmt/clippy/tests, the schema contracts and the mkosi build of every M8 file are CI-proven; **but that run never executed m8-check** — `m8-check.sh` shipped non-executable, its oneshot failed `ExecStart`, and boot-test degraded the missing verdict to a `::warning::`, so the run went green while claiming a milestone that had not run. Unpushed commit `dc2dc47` restores the exec bit and makes a missing M2..M8 verdict a hard failure. M8's own push [run 32874683680](https://github.com/smplify-mdm/punar/actions/runs/32874683680) (commit `9027438`) was red in `desktop-test` on one stale **m7**-check assertion, fixed by `f31a8f2`. **No `PUNAR_M8_OK` exists anywhere.** The ledger derived from four mediation points Punar already owns (the agent scope cgroup, the audit stream filtered by `agent_session_id`, the punar-env workspace grant, adapter/registry metadata) with **no** eBPF/fanotify/ptrace/LD_PRELOAD anywhere (spec 1.14); the shipped `ledger-summary.json` schema unchanged and privacy enforced in **types** (`ResourceClass` has no `From<String>`; construction rejects `/`, `:`, `\`, whitespace, non-printable ASCII and a leading `.` — spec 21.2); `agents.access` + `ledger.purge` additive on the agentd socket (ipc.md §12–§13), `punarctl agents access` / `privacy ledger` / `privacy purge` (`privacy connections` reserved as M12), the Plate D-005 ledger register replacing the dashed placeholder in `AiPanel.qml`, 14-day post-`ended_at` retention pruned event-driven with no timers, and one `punard` attribution rule (ipc.md §12.5) that makes Level-4 denials real, plus m8-check (17 groups) + CI wiring (boot-test phase 10, `desktop-test` 95 → 105 min). Host gates measured green against the M8 tree on 2026-08-25 (fmt, clippy, `cargo test` 534/0, schemas 15/127 ALL PASS, shellcheck v0.11.0, actionlint; qmllint + mkosi summary recorded in milestone-8.md §14.2). Network destinations stay **M12** and are labelled `NOT YET OBSERVED` on every surface; the credential rows M8 deferred to M9 now have real producers **on disk** in the M9 tree, and MCP servers were re-milestoned M9+ → **M11+** |
-| M9 — Approval gates + secret broker | Local graphical approval, short-lived mock credentials, redaction tests | Not specified in spec §76 | **Implemented on disk (current); statically validated; uncommitted; no CI run** — the approval gate is **real**: an agent-originated typed call returns `approval_required` with **nothing applied** and `punarctl` exit **4** (the code reserved since M3), a Plate D-003 overlay appears unbidden with the identity chain, the amber-under-a-minute countdown and A/D bindings, and the capability executes only after a human resolves — verified against a live `nft` read, not a cached descriptor. `approvals.*` + `privilege.*` additive on punard's `v: 1` socket, `/run/punard/approvals.json` (`0640 root:punar`, summary only) for the shell, and a **third daemon** `punar-secrets` on `/run/punar-secrets/secrets.sock` serving `credential.classes/request/validate/revoke` from a **data** catalog of three mock classes. `schemas/audit/approval.json` and `audit-event.json` unchanged by one byte — the sibling-envelope law from M8. An AI agent may resolve **nothing** (cgroup-attested, audited) and may never hold a privilege **window** (`privilege.request` refused for agent peers, always); a token leaves the broker **once, on a fd**, and the broker keeps only `sha256(token)` so no method can return it twice. M8's `credential_classes` / `credential_request` / `policy_bypass_attempt` rows got real producers (eight `not_yet_observed` rows → five); `punar-secrets.service` joined the services-PSS sum with thresholds **unchanged**. Host gates re-run green by this audit (fmt, clippy, `cargo test` **719/0** across 30 binaries, schemas **15/132 ALL PASS**, shellcheck v0.11.0 over 17 scripts, actionlint; qmllint + mkosi summary recorded in milestone-9.md §15.5, not re-run); **m9-check (13 groups, ~129 assertion sites) has never executed, no `PUNAR_M9_OK` exists anywhere**, and the three-daemon `PUNAR_SERVICES_RSS_MB` is unmeasured |
-| M10 — Shadow AI detection MVP | Known/observed/unknown classification, fixture unknown agent, local alert, Smplify remote query | Not specified in spec §76 | Not started — M7 landed the §19.1 classification vocabulary, the unknown-agent fixture and an **on-demand** scan; M10 owns continuous detection, the local alert, and the Smplify remote query |
+| M8 — AI Access Ledger | Resource summaries, process attribution, security events, local retention, privacy controls | Not specified in spec §76 | **Done** — [run 32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191) (2026-08-25, commit `7943f3c`) fully green on all five jobs incl. the in-VM M8 exercise (**`PUNAR_M8_OK`, 123 assertions** — the first M8 verdict that has ever existed): the scope-cgroup read, the schema-exact `agents.access` summary, the Level-4 denial join, the privacy regression, the panel screenshot, the retention prune, the purge and its tombstone, and the negative probes. The road there is the milestone's own lesson: [run 32874683680](https://github.com/smplify-mdm/punar/actions/runs/32874683680) (`9027438`) was red on a stale **m7**-check assertion, and [run 32877949285](https://github.com/smplify-mdm/punar/actions/runs/32877949285) (`f31a8f2`) went **green without executing m8-check at all** — the script shipped `100644`, its oneshot failed `ExecStart`, and boot-test degraded a missing verdict to a `::warning::`; `dc2dc47` restored the bit and made a missing M2..M9 verdict a hard failure. `7943f3c` then fixed the one real defect the exercise found: a pre-registration race dropped an attribution arriving before its session existed, so the Level-4 denial reference never joined the ledger (attributions are now held in a bounded, oldest-dropped, tombstone-respecting buffer, +3 tests), plus one over-strict retention assertion replaced by the invariant it meant. The ledger derives from four mediation points Punar already owns with **no** eBPF/fanotify/ptrace/LD_PRELOAD anywhere (spec 1.14); `ledger-summary.json` unchanged and privacy enforced in **types**; `agents.access` + `ledger.purge` additive (ipc.md §12–§13); 14-day retention pruned event-driven with no timers. Network destinations stay **M12**, MCP servers **M11+**, both labelled `NOT YET OBSERVED` |
+| M9 — Approval gates + secret broker | Local graphical approval, short-lived mock credentials, redaction tests | Not specified in spec §76 | **Done** — [run 32899132191](https://github.com/smplify-mdm/punar/actions/runs/32899132191) (2026-08-25, commit `7943f3c`) fully green on all five jobs incl. the in-VM M9 exercise (**`PUNAR_M9_OK`, 137 assertions** — the first M9 verdict that has ever existed) and boot-test phase 11b, which replays the guest-exported approval document against the unchanged `schemas/audit/approval.json` on the host (`[PASS]`). M9's own push, [run 32891877422](https://github.com/smplify-mdm/punar/actions/runs/32891877422) (`a53598b`), was red — and the repair found **no defect in the approval gate**: the approve → execute → verify → audit path was read end to end and was correct. What was wrong was the checking — one assertion observed the applied timezone through a stale proxy (replaced by a strictly stronger one), three `jq` filters had scoping/precedence errors and were **exiting 5 instead of evaluating** (each now evaluates, and each was proved to still FAIL when its guarded property is removed), and the redaction sweep grepped the mock provider's non-secret token *prefix* rather than the issued secret; the two assertions that test the **actual** issued credentials passed with zero hits across everything Punar writes, the journal, and every process `environ`/`cmdline`. No assertion was weakened to get green. The gate is real: an agent-originated typed call returns `approval_required` with **nothing applied** and `punarctl` exit **4**, a Plate D-003 overlay appears unbidden, and the capability executes only after a human resolves — verified against a live `nft` read. `approvals.*` + `privilege.*` additive on punard's `v: 1` socket; a **third daemon** `punar-secrets` issues mock credentials whose value leaves **once, on a fd**, with only `sha256(token)` retained; an AI agent may resolve **nothing** and may never hold a privilege window; `schemas/audit/approval.json` unchanged by one byte. Three-daemon services RSS measured **6 MB** against an unchanged 100 MB target |
+| M10 — Shadow AI detection MVP | Known/observed/unknown classification, fixture unknown agent, local alert, Smplify remote query | Not specified in spec §76 | **Implemented on disk (current); statically validated; uncommitted; no CI run** — classification becomes **continuous**: `punar-agentd-scan.timer` (240 s, `AccuracySec=30`, vendor `.wants` symlink) runs `punarctl agents scan --trigger timer` through the same socket/authz/audit path a human uses, coalescing with the 120 s reconcile timer, with three event-driven immediate triggers and **no polling loop**; an unchanged pass writes **zero bytes**. One new detection input, as **data**: `unmanaged-path-agentlike`, `require: "both"` (unmanaged path **and** agent-like name — either alone is not a signal). M8's open question is closed in the affirmative: a detection gets a schema-exact `registry-record.json` in `detections.jsonl` and a `ledger-summary.json`-valid ledger that is **strictly smaller than a managed one by construction** — a process class, a zone class, the `unknown_ai_execution` references, everything else `not_yet_observed[]`; **no child-process walk, no `cwd`, no cmdline**, `project` is `unknown`, retention 7 days, purgeable. The alert lives in `/run/punar-agentd/alerts.json` (**`0640 root:punar`** — the M9 lesson: a forged card is a phishing primitive), is drawn by a `FileView`-watched layer-shell region with the D-009 anatomy, is raised **once per `signature_id`** with a 24 h quiet window, **files rather than destroys** on dismiss, and **breaks through do-not-disturb on first sighting** — argued from spec 24.2, because an admin can query this fact and the user must never know last. The plate's `→ api.foo.ai` subline is deliberately dropped: nothing observes network destinations before M12. The remote query is a **pull** on the existing sync piggyback — no listener, no long poll, no new timer; four closed scopes; authorization is a three-way intersection evaluated by the **data owner** reading `enrollment.json` itself and failing closed; the mock enforces RBAC too and the device does not trust it; the refusal list is closed and **mostly structural** (no field exists to carry a prompt, a path or a cmdline); every query is recorded with all six spec-51.1 fields and the **payload is not stored**; an **unprivileged** `punarctl privacy queries` shows the user everything that was asked. `ipc.md` §17–§20 landed additively, still `v: 1`, and **no schema was edited**. Host gates re-run green by this audit (fmt, clippy, `cargo test` **840/0** across 34 suites, schemas **15/132 ALL PASS**, shellcheck v0.11.0; actionlint, qmllint and the mkosi summary recorded in milestone-10.md §21.3, not re-run); **`m10-check` (13 groups, ~113 assertion sites) has never executed, no `PUNAR_M10_OK` exists anywhere**, `punar-m10.png` does not exist, and the timer has never been observed firing. Status of record: milestone-10.md **§22** |
 | M11 — Browser/web-app integration | Current Chromium, native launcher integration, project/browser context prototype, web-app install flow | Not specified in spec §76 | Not started |
 | M12 — Network privacy prototype | Local network observability, project-route policy, relay abstraction, simulated or prototype private relay | Not specified in spec §76 | Not started |
 | M13 — Demo polish | First boot, enrollment, keyboard UX, AI panel, privacy panel, deterministic demo | Not specified in spec §76 | Not started |

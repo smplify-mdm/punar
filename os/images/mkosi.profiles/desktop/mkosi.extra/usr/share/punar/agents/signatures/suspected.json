@@ -1,12 +1,13 @@
 {
   "v": 1,
   "_comment": [
-    "Suspected-AI heuristic patterns (SPEC section 23; milestone-7.md 7.1).",
-    "Read by punar-agentd; a match classifies a process as UNKNOWN and every",
-    "surface labels it SUSPECTED, never certain. Deliberately NOT a schema:",
-    "this is an internal heuristic input, versioned by review, and it is",
-    "kept small on purpose — a broad pattern set would trade false calm for",
-    "false accusations, and section 23 forbids claiming perfect detection.",
+    "Suspected-AI heuristic patterns (SPEC section 23; milestone-7.md 7.1,",
+    "milestone-10.md 3.5). Read by punar-agentd; a match classifies a process",
+    "as UNKNOWN and every surface labels it SUSPECTED, never certain.",
+    "Deliberately NOT a schema: this is an internal heuristic input, versioned",
+    "by review, and it is kept small on purpose — a broad pattern set would",
+    "trade false calm for false accusations, and section 23 forbids claiming",
+    "perfect detection.",
     "exe_glob is matched against the executable path and against absolute",
     "path arguments; '*' spans '/' so */Downloads/* patterns work.",
     "Keys starting with '_' are ignored by the loader (serde) and exist so",
@@ -22,6 +23,34 @@
       "id": "downloads-agent-like",
       "exe_glob": "*/Downloads/*-agent",
       "note": "An agent-named executable run straight out of a Downloads directory — the generic shape of the fixture above. Suspected only: plenty of innocent programs are named this way, which is exactly why the classification is UNKNOWN and the word on every surface is 'suspected'."
+    }
+  ],
+  "_provenance_comment": [
+    "Milestone 10 adds exactly ONE new detection input, and it is data, not",
+    "code: executable path provenance (milestone-10.md decision 22, 3.5).",
+    "require:\"both\" is the whole decision. A match needs an unmanaged path",
+    "prefix AND an agent-like token in the executable's own file name —",
+    "never either alone. Path alone would classify every downloaded binary",
+    "as suspected AI, which is how a detection product becomes something",
+    "users turn off; name alone is already the exe_glob list above.",
+    "A rule whose 'require' is anything other than \"both\", or that is",
+    "missing either half, is loaded INERT with a startup warning: a",
+    "heuristic must never be widened by a typo or an omission.",
+    "'~/' resolves against the OWNING USER's home directory from",
+    "/etc/passwd — never a wildcard, and never another user's home.",
+    "name_tokens are matched case-insensitively against the file name only,",
+    "never against arguments: an argument vector can carry a prompt, and",
+    "punar-agentd never retains one (spec section 53).",
+    "Rules are tried AFTER the exe_glob patterns above, so a hand-written",
+    "glob keeps naming the specific thing it was written for."
+  ],
+  "provenance": [
+    {
+      "id": "unmanaged-path-agentlike",
+      "unmanaged_path_prefixes": ["~/Downloads/", "/tmp/", "~/.local/bin/"],
+      "name_tokens": ["agent", "-ai", "llm", "copilot", "mcp"],
+      "require": "both",
+      "note": "path provenance + agent-like name; either alone is not a signal"
     }
   ]
 }

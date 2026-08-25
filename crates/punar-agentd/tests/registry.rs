@@ -22,7 +22,8 @@ use std::time::Duration;
 use punar_agentd::authz::{Peer, PeerSource};
 use punar_agentd::server::{AgentdConfig, Daemon, DaemonHandle};
 use punar_agentd::testsupport::{
-    fake_process, fixture_adapters, fixture_nss, fixture_suspected, kill_process, managed_cgroup,
+    FIXTURE_BOOT_ID, FIXTURE_BTIME, fake_process, fixture_adapters, fixture_nss,
+    fixture_proc_system, fixture_suspected, kill_process, managed_cgroup,
 };
 use serde_json::{Value, json};
 
@@ -65,6 +66,10 @@ impl TestDaemon {
         let dir = test_dir(tag);
         let proc_root = dir.join("proc");
         fs::create_dir_all(&proc_root).unwrap();
+        // The two system-wide files M10's detection identity reads, so
+        // these tests drive the shipping construction rather than its
+        // degraded fallback.
+        fixture_proc_system(&proc_root, FIXTURE_BOOT_ID, FIXTURE_BTIME);
         prepare(&proc_root);
         fixture_nss(&dir);
         fixture_adapters(&dir);
@@ -686,15 +691,21 @@ fn the_method_table_is_closed_and_the_reserved_names_are_honest() {
             "{probe}: {refusal}"
         );
     }
-    // Reserved for a later milestone — named as such, not silently absent.
+    // M7 reserved `admin.*` "for Milestone 10" and this test asserted that
+    // wording. M10 has now shipped, and the answer is no longer a promise
+    // about a milestone — it is the INVARIANT the milestone established:
+    // admin.* names belong to the control plane, nothing on this device
+    // listens for an administrator, and the device's own record of what
+    // was asked is one command away (milestone-10.md laws 1 and 3).
     let admin = daemon.call("admin.query", None);
     assert_eq!(admin["error"]["code"], "unknown_method");
+    let message = admin["error"]["message"].as_str().unwrap();
+    assert!(message.contains("CONTROL PLANE"), "{admin}");
+    assert!(message.contains("Nothing listens here"), "{admin}");
+    assert!(message.contains("punarctl privacy queries"), "{admin}");
     assert!(
-        admin["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Milestone 10"),
-        "{admin}"
+        !message.contains("reserved"),
+        "the reservation was fulfilled; the refusal must not still promise it: {admin}"
     );
 
     // Unknown ids are not found; a bad envelope is malformed; a wrong
@@ -758,4 +769,86 @@ fn a_restart_replays_the_registry_and_closes_dead_sessions() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[1]["status"], "ended");
     assert_eq!(lines[1]["session_id"], SESSION);
+}
+
+/// **Attack: choose what your organization believes.**
+///
+/// The `authority` block is supplied by whoever calls `agents.register`.
+/// Through M7-M9 that was display data, rendered to the person whose
+/// machine it described. Milestone 10's `authority` query scope exports it
+/// **off the device**, to an administrator told they are reading "the
+/// org's own policy, read back" (milestone-10.md section 8.1). An
+/// unprivileged local process therefore had a channel through which it
+/// chose its organization's view of its own machine: a forged
+/// `enforcement` reading `enforced` over something merely declared, a file
+/// path or a prompt smuggled out through a field documented as carrying
+/// zone classes, and a terminal escape delivered to whatever renders the
+/// answer.
+///
+/// The block is now bounded, single-line and printable before it is
+/// stored, and the export labels the rows as asserted rather than
+/// measured — because nothing on this device measures them, and spec 1.22
+/// forbids letting an administrator believe otherwise.
+#[test]
+fn the_launcher_authority_block_is_bounded_printable_and_labelled_asserted() {
+    let daemon = TestDaemon::start(
+        "authority-forgery",
+        Peer::user(PUNAR_UID),
+        Duration::from_secs(30),
+        |proc| {
+            fake_process(
+                proc,
+                2143,
+                "punar-mock-agen",
+                "/usr/lib/punar/punar-mock-agent",
+                &["/usr/lib/punar/punar-mock-agent"],
+                PUNAR_UID,
+                &managed_cgroup(SESSION),
+            );
+        },
+    );
+
+    let probes: Vec<(&str, Value)> = vec![
+        (
+            "a terminal escape in a decision word",
+            json!({"zone": "network.internet",
+                   "decision": "\u{1b}[32mallow\u{1b}[0m",
+                   "enforcement": "declared · M12"}),
+        ),
+        (
+            "a newline that forges a second row",
+            json!({"zone": "network.internet\nfilesystem.home",
+                   "decision": "allow",
+                   "enforcement": "declared · M12"}),
+        ),
+        (
+            "a file path where a zone class belongs",
+            json!({"zone": "x".repeat(400),
+                   "decision": "allow",
+                   "enforcement": "declared · M12"}),
+        ),
+        (
+            "a blank field",
+            json!({"zone": "", "decision": "allow", "enforcement": "declared · M12"}),
+        ),
+    ];
+    for (label, row) in probes {
+        let mut params = register_params(SESSION, 2143);
+        params["authority"]["rows"] = json!([row]);
+        let response = daemon.call("agents.register", Some(params));
+        assert_eq!(
+            response["error"]["code"], "invalid_params",
+            "{label} must not be stored: {response}"
+        );
+    }
+
+    // A well-formed block still registers, and `agents.get` still renders
+    // it — the guard refuses garbage, not authority blocks.
+    let registered = daemon.result("agents.register", Some(register_params(SESSION, 2143)));
+    assert_eq!(registered["classification"], "managed", "{registered}");
+    let got = daemon.result("agents.get", Some(json!({"session_id": SESSION})));
+    assert_eq!(
+        got["session"]["authority"]["rows"][0]["enforcement"],
+        "declared · M9"
+    );
 }

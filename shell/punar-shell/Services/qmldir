@@ -1,4 +1,5 @@
 singleton Agents 1.0 Agents.qml
+singleton Alerts 1.0 Alerts.qml
 singleton Approvals 1.0 Approvals.qml
 singleton Ledger 1.0 Ledger.qml
 singleton Status 1.0 Status.qml

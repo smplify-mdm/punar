@@ -881,8 +881,14 @@ e.g. `*/Downloads/foo-agent`) → `unknown`. Reaps dead managed pids,
 drops vanished detections. Result: the `agents.list` shape. Detection
 is **heuristic** — results carry `suspected: true` and every rendering
 says *suspected*, never certain (spec section 23). No continuous or
-timer-driven scanning exists in M7 (spec section 6.3; periodic
-detection is the Milestone 10 deliverable).
+timer-driven scanning exists in M7 (spec section 6.3).
+
+**Amended by M10 (§17):** `agents.scan` gains an optional `trigger`,
+`agents.list` and `agents.scan` gain `last_scan_at` /
+`last_scan_trigger`, and `alerts.list` / `alerts.dismiss` join the
+table. Periodic detection ships as a systemd timer calling
+`punarctl agents scan --trigger timer` through this same socket — still
+no timer inside the daemon.
 
 ### 10.3 Authority is display-level in M7
 
@@ -1080,8 +1086,12 @@ Result:
   no seventh category exists. `resource_class` values can never contain
   `/`, `:` or whitespace (enforced by the daemon's `ResourceClass`
   newtype, not by review). `evidence` is one of `cgroup_scope`,
-  `audit_event`, `workspace_bind`, `adapter_metadata` — the mediation
-  point that proved the entry.
+  `audit_event`, `workspace_bind`, `adapter_metadata` and, since M10,
+  `detection_scan` — the mediation point that proved the entry. The M10
+  value was added rather than folded into `adapter_metadata` because
+  this enum exists to say *how we know*, and a detection was never
+  launched: there is no adapter and no registration behind it, only the
+  pass that saw the process.
 - **`count` semantics** for `process_classes`: distinct
   `(pid, starttime)` pairs of that class **observed alive at a sampling
   point**. Not a spawn count. Short-lived children between samples are
@@ -1090,8 +1100,21 @@ Result:
 - **Empty is not "none happened".** A category that is empty **and**
   listed in `not_yet_observed` means *no mediation point observes it
   yet*; no surface may render it without that label (spec section 1.22).
+- **`not_yet_observed` moves between milestones, in both directions,
+  and the example above is an M8 snapshot.** A row leaves when its
+  producer ships (`credential_classes`, `credential_request` and
+  `policy_bypass_attempt` left in M9; `unknown_ai_execution` left in
+  M10 — §17.6), and a row is re-milestoned when the honest date moves
+  (`mcp_servers` M9+ → M11+). **Since M10 the list is also
+  classification-aware**: an unmanaged detection's gains `repositories`
+  and `credential_classes` with `milestone: "none"` — permanent
+  limitations for a process Punar never launched, not pending
+  producers. Consumers must read the rows, never assume a fixed set.
 - **`retention`**: `{"days": 14, "active": true}` while the session
-  runs; `{"days": 14, "expires_at": "…"}` once ended.
+  runs; `{"days": 14, "expires_at": "…"}` once ended. **Since M10 the
+  window is per classification**: a managed session's is 14 days, an
+  unmanaged **detection's** is 7 (§17.6). The `days` field always states
+  the window that actually applies.
 - **Purged session**: result carries
   `"purged_at": "…"` at the top level, `summary.resources` all empty and
   `summary.security_events: []`; renderers must say *purged*, never
@@ -1139,8 +1162,11 @@ Each `sessions[*]` entry gains:
 **Counts only** — no class names, no `evt_` ids, no zones. This is what
 the panel rail and the world-readable summary file (section 11) may
 show; identifiers require `agents.access` and its ownership check.
-`detections[*]` gain no ledger field: an unregistered detection has no
-persisted session and therefore no ledger in M8 (Milestone 10).
+`detections[*]` gain no ledger **fingerprint**: the list is a now-view
+of processes. **Amended by M10 (§17.6):** a detection does have a ledger
+from M10 onward, read with `agents.access <detection_id>` under the same
+owner-or-root check as a session's; the row in `agents.list` still
+carries no fingerprint.
 
 ### 12.5 Attribution addition in `punard` (spec section 22)
 
@@ -1768,3 +1794,562 @@ validate is not audited either, for the same reason.
 
 `credential.revoke` params: `{"value": "<token>"}` — drops the entry
 immediately, audited `result: "revoked"`, class only.
+
+---
+
+## 17. `punar-agentd` additions (M10): periodic detection, alerts, and the answered query
+
+Status: **shipped in Milestone 10** (spec sections 12.1, 23, 73;
+`docs/development/milestone-10.md` §3–§6, §13.1). Additive, still
+`v: 1`. Nothing here changes an existing method, error code or side
+contract.
+
+> **Law 4 — suspected, never certain, and never armed.** M10 detects,
+> records and alerts. It blocks nothing, kills nothing and quarantines
+> nothing. Every surface below says *suspected*, and the alert card says
+> `nothing was blocked` in words, because a user who believes they are
+> protected when they are not is worse off than one who knows.
+
+### 17.1 Method table
+
+| Method | Params | Result | Authz |
+|---|---|---|---|
+| `agents.scan` **(amended)** | `{"trigger": "manual"｜"timer"｜"register"｜"enroll"}` — optional; absent means `manual`; **a non-root peer's claim is recorded as `manual`** (§17.1) | existing result **+** `last_scan_at`, `last_scan_trigger`, `changed` | unchanged |
+| `agents.list` **(amended)** | — | existing result **+** `last_scan_at`, `last_scan_trigger` | unchanged |
+| `alerts.list` | `{"include_dismissed": false}` — optional | `{"alerts": [...], "quiet_window_secs": 86400}` | any admitted peer |
+| `alerts.dismiss` | `{"alert_id": "alr_…"}` | `{"dismissed": true, "alert_id", "dismissed_at", "suppression_changed": false}` | owner of the detection, or root |
+| `query.answer` | `{"query_id", "requesting_admin", "organization", "requested_scope", "session_id"?, "received_at"}` | `{"query_id", "authorization_decision", "granted_scope"?, "result_category", "payload"?, "refusal_reason"?, "refusal_message"?, "audit_event_id"}` | **root peer only** (`peer.uid == 0`) |
+| `queries.list` | `{"since"?, "limit"?}` — optional | `{"queries": [...], "enrolled", "organization"?, "policy_citation"?, "granted_scopes", "admin_identity_verified", "never_answered", "storage"}` | any admitted peer (spec 24.2) |
+
+`agents.access` **(amended)**: accepts a `detection_id` as well as a
+managed `session_id`. The returned `result.summary` remains a
+schema-exact `ledger-summary.json` document and `result.detail` remains
+the M8 sibling aggregate — **no new fields**. Authorization is the M8
+rule verbatim: owner or root, and an unknown owner is root-only.
+
+**The `trigger` is provenance, so it is not taken from the caller.**
+`agents.scan` is open to every peer the socket admits — the desktop
+user, and any AI agent running as them — while all three non-manual
+triggers name a **root** caller: the timer unit (no `User=`), punard on
+an enrollment transition, and the daemon's own register/reap path. A
+trigger honoured from an unprivileged peer would let any local process
+write `<agent>:timer` into the section 53 record, making "the device
+noticed this on its own" a claim anyone can forge — and making the
+`m10-check` group 3 assertion satisfiable by a typed command. A non-root
+peer's non-manual claim is therefore **downgraded to `manual`**, never
+honoured and never refused: `manual` is what actually happened, and the
+audit trail records what happened.
+
+`alerts.list` runs **no** staleness-gated detection pass, deliberately —
+unlike `agents.list`. A read must not be able to manufacture a
+detection: if it could, the first person to *look* would be the one who
+produced the `agents.scan` / `detected` event, labelled `manual` and
+therefore indistinguishable from a typed command. The register is
+derived state whose freshness is the scan's job.
+
+`alerts.list` is readable by **any peer the socket admitted**,
+deliberately. From M10 onward an authorized administrator can query the
+existence of unmanaged agents on this device, so a register the user
+could not read would create a state in which the administrator knows
+about a process on the user's machine and the user does not — the exact
+inversion spec 24.2 forbids.
+
+### 17.2 The diff is the event
+
+`agents.scan` compares the detection **set** against the previous one:
+
+| Transition | Emitted, once | Written |
+|---|---|---|
+| absent → present | audit `agents.scan`, `result: "detected"` | `detections.jsonl` (`active`), a ledger, `agents.json`, and `alerts.json` iff the signature is new |
+| present → absent | audit `agents.scan`, `result: "cleared"` | `detections.jsonl` (`ended`), the ledger closes, `agents.json` |
+| present → present | **nothing** | **nothing** |
+| empty diff | **nothing** | **nothing** |
+
+The steady state of periodic detection is therefore **zero bytes
+written** (spec 6.4), and the audit trail is a log of *events* rather
+than a log of *scans*.
+
+Consequence, stated because it looks like a bug otherwise:
+`agents.json`'s `scanned_at` does **not** advance on a no-change pass.
+Its meaning is *the view as of the last change*. Liveness — when a pass
+last actually ran — is in-memory state served as `last_scan_at` /
+`last_scan_trigger`. **The socket is the authority; the file is a change
+log.**
+
+`trigger` travels into the audit event's `resource` field as
+`<agent>:<trigger>` (e.g. `foo-agent:timer`). `audit-event.json` has no
+field for a trigger and does not grow one — the composite is the same
+idiom M8 already uses for `ledger:<count>` on a prune batch.
+
+### 17.3 Identity
+
+```
+detection_id = "agt_" + hex12( sha256( exe ‖ 0x00 ‖ uid ‖ 0x00 ‖ boot_id
+                                       ‖ 0x00 ‖ pid ‖ 0x00 ‖ starttime ) )
+signature_id = "sig_" + hex12( sha256( exe ‖ 0x00 ‖ uid ) )
+```
+
+`detection_id` names one **running process** and is stable for its whole
+life — the property the set-diff depends on. `starttime` (field 22 of
+`/proc/<pid>/stat`) and `boot_id` are what make **pid reuse** unable to
+collide: a recycled pid yields a *different* id, reported as one process
+clearing and another appearing, which is the correct semantics.
+
+`signature_id` names one **thing seen** and is deliberately coarser:
+restarting the same binary is the same thing seen. It is the anti-nag
+key and the fleet-dedup key. Both are hashes, so either may appear in an
+exported inventory answer without leaking where a binary lives.
+
+> **Naming collision, resolved rather than papered over.** The M7 wire
+> field `signature_id` on `agents.list` detection rows carries the
+> matched **rule's name** (`downloads-foo-agent`), and it keeps that
+> meaning unchanged — a shipped contract does not move for a later
+> milestone. The M10 `sig_` identity appears under the name
+> `signature_id` only in `alerts.json` (§20), a new file, beside a
+> `signature` field carrying the rule name.
+
+### 17.4 The anti-nag rule
+
+**One alert per `signature_id`** — not per scan, not per process.
+
+- First sighting of a signature with no live alert record → **raise**,
+  and one `agents.alert_raise` audit event.
+- Any further detection of that signature → the record's `last_seen`,
+  `live` and `detection_id` update. Never re-raise.
+- When the last live detection clears, the record moves to `cleared` and
+  starts a **24 h quiet window** (`quiet_window_secs`). A sighting inside
+  the window updates it silently; the first sighting *after* the window
+  raises a fresh alert with a fresh `alert_id`.
+
+`alerts.dismiss` **files** a card; it never deletes one, and it never
+changes suppression — hence `suppression_changed: false` on the wire.
+There is no snooze, no per-alert mute and no user-facing suppression
+state, which is the point.
+
+### 17.5 Audit actions added
+
+`agents.alert_raise` (`result: "raised"`, `source: "service"`) and
+`agents.alert_dismiss` (`result: "dismissed"`, `source: "human"`). Both
+carry the detection's `agt_` id as `agent_session_id`. Counting
+`agents.alert_raise` events is how a check proves the anti-nag rule.
+
+`admin.ai_query` (`result: "answered"` | `"refused"`,
+`source: "organization"`, `user_id`: the **requesting administrator**,
+`resource`: the requested scope) — one event per decided remote query,
+answered or refused (§17.8). The `user_id` choice is deliberate: the
+schema describes it as the human in whose session the event occurred,
+and a remote query occurs in no local session, so the field carries the
+only human the line is about. `punarctl audit tail` must be readable on
+its own, and an audit line about an administrative query that does not
+name the administrator is a line nobody can act on. Every rendering
+carries the *asserted by the organization · not verified by this device*
+label, because M10 has no IdP.
+
+### 17.6 Detection persistence and the unknown-agent ledger
+
+`/var/lib/punar/agents/detections.jsonl` (`0600 root:root`, append-only)
+holds one **schema-exact** `registry-record.json` document per detection
+state change — `active` when it appears, `ended` when it clears. Never
+one per pass.
+
+Everything the shipped schema cannot hold (`signature_id`, the matched
+signature name, the executable path, the zone class, `cleared_at`) lives
+in the sibling `/var/lib/punar/agents/detections-index.json`. Third
+application of the M8 Decision-0 law.
+
+Each detection gets a **bounded** ledger, readable with
+`agents.access <detection_id>`. It is strictly smaller than a managed
+session's, by construction:
+
+| M8 source | For a detection |
+|---|---|
+| A — agent scope cgroup | none; the executable's **own** process class is recorded instead. The children of the process are **not** walked. |
+| B — attributed audit | the detection transition itself: the `agents.scan` / `detected` event is classified `unknown_ai_execution` and referenced here. |
+| C — workspace grant | none. Repositories are not observed and are **never** inferred from `cwd`. |
+| D — session metadata | partial: agent name, owner, timestamps, and a **zone class** (`downloads`, `tmp`, `home`, `system`) for where the executable lives — a class, never a path. |
+
+Three permanent refusals: **no child-process walk** (it would produce a
+per-user process graph — the tracing spec 1.14 rules out), **no `cwd`
+read**, and **no cmdline, argv or environment** (they routinely carry
+prompts, API keys and paths; no schema has a field for them and none is
+added).
+
+`not_yet_observed[]` is **classification-aware** from M10: an unmanaged
+detection's list gains `repositories` and `credential_classes` with
+`milestone: "none"` — permanent limitations for a process Punar never
+launched, not pending producers. And `unknown_ai_execution` **left** the
+list device-wide, because M10 shipped its producer.
+
+Retention is **7 days after the detection clears**, half the managed
+window. `punarctl privacy purge` deletes detection records and their
+ledgers unconditionally for the owning user. The `unknown_ai_execution`
+**audit** event survives purge, exactly as M8 guarantee 4 already says:
+purge removes the derived summary, never the decision record.
+
+### 17.7 The honest limitation
+
+Sampling detection has one hole by construction, and it is stated on
+every surface that claims continuous detection rather than engineered
+around: **a process that starts and exits inside one interval, and
+touches nothing Punar mediates, is never seen.** Closing it needs
+exec-time notification, which is exactly the broad tracing spec 1.14
+rules out.
+
+### 17.8 `query.answer` — the data owner decides
+
+`punar-agentd` is the only owner of AI data, so it is the only thing
+that answers an administrator's question. `punard` is a courier (§18):
+it hands over the question exactly as it fetched it and posts back this
+result byte-identical.
+
+**Root peer only.** The one caller is punard. A non-root peer gets a
+`denied` error frame — not an authorization outcome, because a local
+user asking this device to answer a question nobody asked is a caller
+who is not admitted, not a decision to relay.
+
+**A refusal is a `result`, never an error frame.** An out-of-scope query
+comes back with `authorization_decision: "deny"`, `refusal_reason:
+"out_of_scope"` and the section-73 `refusal_message`. This is contract,
+not style: punard treats an error frame as *there is no decision to
+relay* and leaves the query pending for the next pass, so a refusal
+encoded as an error would never reach the administrator who asked. No
+new error code is added for it (§13's `denied` still means *you* may
+not; `out_of_scope` is a decision the device made about itself, and it
+travels in the result where the query log and the audit event can both
+carry it).
+
+**The fields that are not the scope are validated before anything
+happens.** Law 2 covers the *scope*: `authorize` reads the grant from
+local state, so no request can widen one. The rest of a `query.answer`
+param block is chosen by whatever answered `queries.pending` too, and
+those fields are used as **keys**, not as prose — `session_id` is a
+ledger lookup key, `requesting_admin` / `requested_scope` /
+`received_at` are pattern-checked `audit-event.json` fields, and all of
+them are rendered by `punarctl privacy queries` and appended to a
+365-day log. So each is checked first: `session_id`, when present, must
+match `^agt_[A-Za-z0-9]+$` (the shipped schema pattern — a narrowing key
+is an agent session id or it is nothing); `query_id`,
+`requesting_admin`, `organization` and `requested_scope` must be
+non-blank, at most 256 bytes (64 for the scope) and free of control
+characters; `received_at` must be RFC 3339.
+
+A param block that fails these is an **`invalid_params` error frame**,
+and *nothing* is projected, audited or recorded. This is the "the params
+were rejected" case §18 already names: the query stays pending on the
+control plane, and nothing leaves the device. It is deliberately **not**
+recorded as a refusal — a refusal is a decision about a question, and
+this is a thing that never became a question; writing attacker-chosen
+bytes into the user's privacy log to prove someone sent garbage would be
+the harm rather than the defence.
+
+A narrowing `session_id` also **filters** the answered set rather than
+replacing it. Section 8.1's rule — a query may narrow an answer, never
+widen it — is structural: the ledger-backed scopes intersect the request
+with the set the unnarrowed answer would have carried, so a narrowing
+key can never become a lookup, and never a path.
+
+**Authorization is computed from local state only:**
+
+```
+answered_scope = requested_scope ∩ org_granted ∩ device_builtin_max
+```
+
+`org_granted` is read by agentd **from `/var/lib/punar/enrollment.json`
+itself**. There is no parameter through which a scope grant can be
+passed, which is what makes spec 59.4 structural here rather than
+aspirational: a compromised control plane cannot talk the endpoint into
+exceeding what enrollment established, because the endpoint does not
+listen to it on that subject. Absent file, absent key, or unparsable
+file ⇒ the **empty set** ⇒ everything is refused.
+
+`device_builtin_max` is the closed four-value scope enum — `inventory`,
+`authority`, `resource_summary`, `security_events`. There is no
+wildcard, no `all` and no free text; an unrecognised value cannot become
+a scope at all, so it can never survive the intersection.
+
+**The `authority` answer labels its rows.** The rows come from the
+`authority` block the local launcher handed to `agents.register` — they
+are asserted by a process on this device, not measured by it. The
+payload therefore carries `authority_source: "declared by the local
+launcher · not verified by this device"`, the same honesty label
+`admin_identity_verified: false` carries for the requesting admin. The
+block itself is bounded, single-line and printable at ingestion
+(`agents.register` refuses anything else), because Milestone 10 is what
+turned that display data into export data.
+
+**What an answer may contain** is the projection of data the owning user
+can already print about themselves (spec 24.2): counts and per-session /
+per-detection rows at `inventory`, the org's own policy read back at
+`authority`, M8's `ledger-summary.json` document verbatim at
+`resource_summary`, and Level-4 event **references** —
+`{event_id, event_type, timestamp}` — at `security_events`. What it may
+never contain is refused because **no field exists to carry it**: no
+prompts, no source, no file paths (zone *classes* only), no command
+lines, argv or environment, no secret values, no pids or cgroup paths,
+and no audit event payloads.
+
+Every decided query — answered or refused — appends one record to
+`/var/lib/punar/agents/queries.jsonl` (`0600 root`, six spec-51.1 fields
+plus the granted scope and the identity-honesty flag, **never the
+payload**) and one `admin.ai_query` audit event
+(`source: "organization"`, `user_id`: the requesting admin,
+`resource`: the requested scope, `decision`: `allow` | `deny`).
+
+### 17.9 `queries.list` — the section 24.2 command's data
+
+Readable by **any peer the socket admitted**, deliberately: withholding
+the record of who asked about the user from the user would be the exact
+inversion spec 24.2 forbids, and root-only would be absurd on a
+single-user personal device. The result carries the granted scopes the
+daemon actually enforces, the never-answered list and the storage facts,
+so `punarctl privacy queries` invents nothing and the two cannot drift.
+
+The query log is **not** deleted by `punarctl privacy purge`: it records
+what the *organization* did, not data about the user's work, and a user
+deleting the evidence of a query would delete their own recourse. Both
+purge boundaries — the audit trail and this log — are printed on the
+purge surface.
+
+---
+
+## 18. `punard` additions (M10): the remote-query courier
+
+Status: **shipped in Milestone 10** (spec sections 24.1, 51, 59.4;
+`docs/development/milestone-10.md` §7, §11, §13.2). Additive, still
+`v: 1`. Nothing here changes an existing method, error code or side
+contract.
+
+> **Law 1 — Punar is not a server.** Nothing in M10 opens an inbound
+> socket, port or listener of any kind. A remote query reaches this
+> device only because **this device went and fetched it**, on a schedule
+> it already owned. An administrator with a valid token and this
+> device's address has nowhere to send a request. Everything below is an
+> **outbound** client.
+
+### 18.1 `enroll.status` — amended
+
+`enroll.status` gains two optional result fields while enrolled. They
+are absent on a personal device — enrollment *annotates*, it never
+restructures (DESIGN_LANGUAGE §8):
+
+| Field | Value |
+|---|---|
+| `remote_query_scopes` | the scopes the organization asked for at enrollment, read back from `enrollment.json` — the **same array** `punar-agentd` enforces, not a second copy |
+| `last_query` | `{at, scope, decision}` — metadata about the most recent remote query. Never a payload. |
+
+`remote_query_scopes` is published so the user can check every answered
+query against the grant themselves (spec 24.2, guarantee 8). The full
+record is `punarctl privacy queries` (§17).
+
+### 18.2 The sync piggyback — observable behaviour, therefore contract
+
+At the end of every reconcile pass, **when enrolled**, punard's M5 sync
+hook runs. M10 adds two calls to that same hook and **no new timer, no
+new listener and no new wakeup**:
+
+```text
+reconcile pass ends
+  └─ enrolled? ─ no ─→ nothing              (§11 gate A — M5's existing gate)
+                └ yes ─→ compliance.report            (M5)
+                       ├─ inventory.report            (M5, hash-gated)
+                       ├─ queries.pending {device_token}      → [ {query_id, …}, … ]
+                       └─ for each: query.answer  (agentd socket, §17)
+                                  → queries.answer {device_token, query_id, answer}
+```
+
+Answer latency is therefore **one reconcile period (~120 s) plus the
+round trip**, and the waiting happens on the *administrator's* side —
+which is where a request the device did not initiate ought to wait. At
+most `16` queries are drained per pass.
+
+Offline behaviour is M5 §7 unchanged: an unreachable control plane means
+the pull does not happen. Queries stay pending upstream and are answered
+on the next successful pass. **No spool, no queue, no new state.**
+
+### 18.3 The courier discipline
+
+**punard is the only control-plane client; `punar-agentd` is the only
+owner of AI data.** M10 keeps both laws by making punard a courier:
+
+- it hands the fetched question to `punar-agentd` **exactly as fetched**
+  — the `query.answer` params carry no scope grant, no role, no policy
+  and no token, so there is no field through which a courier, or a
+  compromised control plane, could widen what comes back (spec 59.4);
+- it posts the daemon's answer back **byte-identical**; it never
+  assembles an answer, never reads a ledger, and never sees a byte it
+  was not handed;
+- if `punar-agentd` cannot be reached, or answers with an error frame,
+  **punard produces nothing** — no synthesized refusal, no "assume
+  denied", no partial answer. The query stays pending and is retried.
+
+### 18.4 The single inter-daemon edge
+
+`punard → punar-agentd` is the **only** inter-daemon call in the system,
+and it is one-directional: `punar-agentd` never calls `punard` (its
+relationship to punard's data is reading an append-only file, §12.5,
+which is not a call). The graph is a DAG, and
+`punar-agentd.service` gains **no** `After=`/`Requires=` on punard as a
+result: a call that fails because the peer is not up is a non-fatal
+retry next pass.
+
+Besides `query.answer`, punard makes one other call over this edge:
+`agents.scan {trigger: "enroll"}` on an enrollment transition
+(`enroll.start` / `enroll.stop` completing). It is fire-and-forget with
+a 2 s timeout and a non-fatal failure path — **enrollment must never
+fail because a bookkeeping daemon was busy.**
+
+`RestrictAddressFamilies=AF_UNIX` stays on `punar-agentd.service`. Even
+in the mock world where the control plane is a local socket, agentd
+never speaks to it.
+
+---
+
+## 19. Control-plane protocol additions (M10): `punar-mock-smplify`
+
+Status: **shipped in Milestone 10** (spec section 51;
+`docs/development/milestone-10.md` §7, §9.1, §12, §13.3). The
+counterparty is the **dev/CI mock — not a product component**; its unit
+is never enabled and its `--help` says so. In production this hop is
+Punar ⇄ Smplify cloud over mutually authenticated TLS; here it is a
+root-only UDS with NDJSON, §2–§4 framing unchanged, `v: 1`.
+
+### 19.1 Device-facing (`device_token` authenticated, as M5)
+
+| Method | Params | Result |
+|---|---|---|
+| `queries.pending` | `{device_token}` | `{queries: [{query_id, requesting_admin, organization, requested_scope, session_id?, received_at}]}` |
+| `queries.answer` | `{device_token, query_id, answer}` | `{accepted: true}` |
+
+A device sees only its **own** queue: the token resolves to exactly one
+`device_id` and the filter is on that id. Delivery does **not** consume
+an entry — a device that fetched a query and then lost power gets it
+again, and an administrator is never answered with permanent silence
+because of one dropped connection. `queries.answer` stores the answer
+**verbatim**; the mock does not inspect, reshape or second-guess it,
+because the device is the authority about its own data. Answering a
+query addressed to another device is `not_found`.
+
+The pulled question's field list is the whole field list. There is no
+`payload`, no `filter`, no `path` and no `expression` — nothing an
+administrator could use to ask for something the closed scope
+vocabulary cannot name.
+
+### 19.2 Admin-facing (the names M5 reserved, now real)
+
+| Method | Params | Result |
+|---|---|---|
+| `admin.devices` | `{admin}` | `{devices: [{device_id, enrolled_at, last_sync, compliance_state, attestation}], identity_verified: false}` |
+| `admin.device` | `{admin, device_id}` | that device's received inventory + compliance (**category states only**), and its query history |
+| `admin.ai_query` | `{admin, device_id, scope, session_id?}` | `{query_id, status: "pending", note}` |
+| `admin.query_result` | `{admin, query_id}` | `{status: "pending"\|"answered"\|"refused", answer?, identity_verified: false}` |
+| `admin.fleet` | `{admin}` | the §12.1 fleet aggregate as structured data |
+
+`admin.ai_query` returns immediately and **sends nothing anywhere**; the
+administrator's client polls `admin.query_result`. `admin.query_result`
+answers only the administrator who asked. `admin.fleet` is role-gated to
+`fleet_viewer` and above, expressed as *a role that may ask about
+`authority`* so a fixture that renames roles cannot silently open the
+view.
+
+### 19.3 Two new error codes, deliberately distinct
+
+| Code | Meaning |
+|---|---|
+| `denied` | the requesting identity is unknown to the org's role table, or its role does not permit that scope — ***you* may not** |
+| `out_of_scope` | the scope is not in the closed four-value vocabulary — **this scope does not exist** |
+
+Collapsing them was considered and rejected: they produce different
+section-73 messages and different query-log rows, and one code could not
+distinguish "this admin lacks the role" from "this device was never
+granted the scope". Both refusals happen **before** enqueuing, so a
+query the organization may not ask never reaches a device at all.
+
+### 19.4 RBAC, and the honest boundary
+
+`fixtures/organizations/acme/admins.json` maps identities to roles and
+roles to scopes (`helpdesk` → `inventory`; `fleet_viewer` → `inventory`,
+`authority`; `security_admin` → all four). An **absent or unreadable**
+table knows nobody and permits nothing; every `admin.*` call then
+refuses and names the missing file.
+
+> These identities are **fixture strings, not authenticated
+> principals**. There is no IdP, no SSO, no signature and no session.
+> Every surface that renders a requesting admin carries
+> `identity_verified: false`, and every refusal says so. This check is
+> **defence in depth**: the device re-evaluates authorization from its
+> own `enrollment.json` and refuses whatever that file does not grant,
+> regardless of anything decided here (spec 59.4). Of the two checks,
+> **the device's is the one that decides.**
+
+### 19.5 Mock state
+
+Two files join `/var/lib/punar-mock-smplify/` (0700 root):
+`queries.json` (the pending/answered queue, atomic rewrite, 0600) and
+`received-answers.jsonl` (append-only, what devices returned, verbatim).
+Both persist across restarts, deliberately: the check stops and starts
+the mock, and a queue that forgot on restart would drop questions behind
+the check's back.
+
+**The queue stores no way to reach a device** — no address, endpoint,
+host, port, URL or callback. That is not a policy this crate follows; it
+is a capability it does not have.
+
+---
+
+## 20. Side contract (M10): `/run/punar-agentd/alerts.json`
+
+```text
+/run/punar-agentd/alerts.json   0640 root:punar
+```
+
+**Root-owned, deliberately.** M9 §8.1 moved `approvals.json` out of the
+user-writable `/run/punar` because a file that tells a human what to
+believe must not be replaceable by an unprivileged process. The argument
+is at least as strong here: a forged card reading *"Unknown AI activity
+suspected · your-bank-helper"* with an `Inspect` action is a phishing
+primitive, and `/run/punar` is `0755 punar:punar`. `/run/punar-agentd`
+already exists root-owned since M8's `ledger.json` (§13.2).
+
+```json
+{ "v": 1,
+  "updated_at": "2026-08-25T14:31:00Z",
+  "alerts": [
+    { "alert_id": "alr_9c2f01ab77de",
+      "signature_id": "sig_0f1e2d3c4b5a",
+      "agent": "foo-agent",
+      "executable": "/home/punar/Downloads/foo-agent",
+      "owner": "punar",
+      "first_seen": "2026-08-25T14:31:00Z",
+      "last_seen": "2026-08-25T14:31:00Z",
+      "live": 1,
+      "detection_id": "agt_d11e0aa7c402",
+      "signature": "unmanaged-path-agentlike",
+      "policy_citation": "personal-defaults",
+      "state": "live" } ] }
+```
+
+Rules:
+
+- **Written only when the alert set changes** — a raise, a clear, a
+  dismissal, or a fresh raise after the quiet window. Counters and
+  timestamps moving is *not* a set change, so a pass that finds the same
+  processes still running writes nothing (spec 6.4). The file's
+  `last_seen` therefore means *as of the last set change*, exactly as
+  `agents.json`'s `scanned_at` does; live values come from `alerts.list`.
+- **Atomic**: exclusive-create temp file, `fsync`, `rename`.
+- **Display data whose authority is the socket.** Consumers **fail
+  closed**: a missing or unparsable file renders **no** alert, never a
+  placeholder alert.
+- `state` is `live` · `cleared` · `dismissed`. A `dismissed` card is
+  filed, not destroyed — it stays in `alerts.list --all` and in the
+  detection record.
+- **Exactly the twelve fields above.** No pid, no cgroup path, no
+  `comm`, no command line, no argv, no environment, no hash of anything
+  secret. The one path present is the single matched executable — the
+  datum the D-009 card is built around, and one the same user can
+  already print with `punarctl agents list`. Spec 24.2 is the rule: the
+  card may not tell the user *less* than they can already read, and it
+  carries nothing more than the surface it mirrors.
+- There is **no** `quiet` or do-not-disturb field. DND is shell-local
+  state in M10, so `punar-agentd` cannot know about it and does not
+  invent a flag it could not fill (spec 1.22).

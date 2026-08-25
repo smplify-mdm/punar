@@ -12,6 +12,10 @@
     "baseline_policy_id": "eng-baseline-v12",
     "ai_policy": "engineering-standard",
     "ai_policy_id": "eng-ai-v3",
-    "ai_policy_file": "../../policies/ai-policy-engineering-standard.yaml"
+    "ai_policy_file": "../../policies/ai-policy-engineering-standard.yaml",
+    "remote_query_scopes": [
+      "inventory",
+      "authority"
+    ]
   }
 }

@@ -25,8 +25,27 @@
 //! nudge, no `/proc` polling (spec section 6.3). A detection pass runs when
 //! `agents.scan` asks for one, or when `agents.list` finds the previous
 //! pass older than [`punar_common::agent::SCAN_STALE_AFTER_SECS`].
-//! Continuous detection is Milestone 10's deliverable and is not quietly
-//! shipped here.
+//!
+//! **Milestone 10 kept it that way.** Periodic detection is a systemd
+//! timer (`punar-agentd-scan.timer`, 240 s) that runs
+//! `punarctl agents scan --trigger timer` through this same socket, authz
+//! and audit path — so there is exactly one code path to verify and the
+//! daemon gains no internal clock. The three immediate triggers
+//! (`agents.register`, a session ending, an enrollment transition) are
+//! events, not intervals.
+//!
+//! # And a pass that changes nothing writes nothing
+//!
+//! [`Inner::scan_now`] compares the detection **set** against the previous
+//! one and acts only on the difference. In the steady state — the same
+//! processes still running — it emits no audit line, rewrites no
+//! `agents.json`, touches no ledger and does not write `alerts.json`: the
+//! idle write rate of periodic detection is exactly zero bytes (spec 6.4).
+//! The consequence, stated because it looks like a bug otherwise:
+//! `agents.json`'s `scanned_at` means *the view as of the last change*.
+//! When a pass last actually ran is in-memory state the socket serves as
+//! `last_scan_at` / `last_scan_trigger`, because the socket is the
+//! authority and the file is a change log.
 
 use std::collections::HashSet;
 use std::io::{self, BufReader, Write};
@@ -38,11 +57,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use punar_common::agent::{
-    ADAPTERS_DIR, AGENTS_SUMMARY_PATH, AgentClassification, AgentMethod, AgentRequest, AgentStatus,
+    ADAPTERS_DIR, AGENTS_SUMMARY_PATH, ALERT_QUIET_WINDOW_SECS, ALERTS_RUNTIME_PATH,
+    AUTHORITY_SOURCE_LABEL, AgentClassification, AgentMethod, AgentRequest, AgentStatus,
     AgentsAccessParams, AgentsEndParams, AgentsEndResult, AgentsGetParams, AgentsGetResult,
-    AgentsListResult, AgentsRegisterParams, AgentsRegisterResult, LedgerPurgeParams, ListedSession,
-    PurgeScope, REGISTRY_JSONL_PATH, RegistryRecord, SCAN_STALE_AFTER_SECS,
-    SUSPECTED_SIGNATURES_PATH, SessionRow, agent_name_ok, session_id_ok, validate_registry_record,
+    AgentsListResult, AgentsRegisterParams, AgentsRegisterResult, AgentsScanParams,
+    AlertsDismissParams, AlertsDismissResult, AlertsListParams, AlertsListResult,
+    DETECTIONS_INDEX_PATH, DETECTIONS_JSONL_PATH, LedgerPurgeParams, ListedSession, PurgeScope,
+    REGISTRY_JSONL_PATH, RegistryRecord, SCAN_STALE_AFTER_SECS, SUSPECTED_SIGNATURES_PATH,
+    ScanTrigger, SessionRow, agent_name_ok, session_id_ok, validate_authority_summary,
+    validate_registry_record,
 };
 use punar_common::audit::{AGENT_SESSION_NONE, AuditWriter, PROJECT_ID_SYSTEM};
 use punar_common::ipc::{
@@ -52,15 +75,23 @@ use punar_common::ipc::{
 use punar_common::ledger::{
     AgentsAccessResult, LEDGER_RUNTIME_PATH, PROCESS_CLASSES_PATH, RetentionInfo,
 };
+use punar_common::query::{
+    AuthorizationDecision, NEVER_ANSWERED, PendingQuery, QUERIES_LOG_PATH, QueriesListParams,
+    QueriesListResult, QueryAnswerResult, QueryLogStorage, QueryRecord, QueryScope, RecordCounts,
+    authorize, read_org_granted_scopes,
+};
 use punar_common::time::utc_now_rfc3339;
 use punar_common::{AuditEvent, Decision, PrincipalKind};
 use serde_json::{Value, json};
 
 use crate::adapters::SignatureSet;
+use crate::alerts::{AlertConfig, AlertEngine, DismissError, Observation};
 use crate::authz::{Peer, PeerSource, may_act_on_session};
 use crate::detect::Detector;
-use crate::ledger::{LedgerConfig, LedgerEngine, SessionFacts};
+use crate::detections::{DetectionIndex, DetectionIndexRow, DetectionStore};
+use crate::ledger::{DetectionFacts, LedgerConfig, LedgerEngine, SessionFacts};
 use crate::proc::{ProcRoot, scope_unit_name};
+use crate::queries::QueryLog;
 use crate::registry::{Detection, Registry, RegistryStore, Session, replay_into};
 use crate::summary::CitationSources;
 use crate::util::{lookup_gid, username_or_uid};
@@ -82,6 +113,17 @@ pub const ACTION_LEDGER_PRUNE: &str = "ledger.prune";
 /// audited administrator query. An owner reading their own ledger is not
 /// audited: reading your own data is not an event about you.
 pub const ACTION_LEDGER_READ: &str = "agents.access";
+/// M10 (milestone-10.md section 5): an alert was raised. **Once per
+/// `signature_id`** — this is the audit half of the anti-nag rule, and a
+/// check counts these events to prove it.
+pub const ACTION_ALERT_RAISE: &str = "agents.alert_raise";
+/// M10: the user filed a card. Never a deletion.
+pub const ACTION_ALERT_DISMISS: &str = "agents.alert_dismiss";
+/// M10 (milestone-10.md section 10.2): one administrator query, answered
+/// or refused. `source: organization`, `user_id`: the requesting admin —
+/// an audit line about an administrative query that does not name the
+/// administrator is a line nobody can act on.
+pub const ACTION_ADMIN_QUERY: &str = "admin.ai_query";
 
 /// Audit `result` words added to the open set by M7: a detection appeared,
 /// a detection disappeared, a crashed session was closed.
@@ -98,6 +140,9 @@ pub const RESOURCE_OWN_LEDGERS: &str = "own";
 /// audit schema has no numeric field and the batch size is the fact
 /// worth keeping.
 pub const RESOURCE_LEDGER: &str = "ledger";
+/// M10 result words: a card was raised, and a card was filed.
+pub const RESULT_RAISED: &str = "raised";
+pub const RESULT_DISMISSED: &str = "dismissed";
 
 /// The facts behind one audit event. A struct rather than eight
 /// positional arguments so a call site cannot silently swap `agent` and
@@ -136,6 +181,16 @@ pub struct AgentdConfig {
     pub suspected_path: PathBuf,
     /// The panel's summary file (section 11).
     pub agents_file: PathBuf,
+    /// M10 (milestone-10.md sections 5.3, 6.4): the root-owned alert
+    /// state file and the detection persistence pair. Injectable for the
+    /// same reason everything else here is — a test runs the whole
+    /// engine inside a tempdir.
+    pub alerts_file: PathBuf,
+    pub detections_path: PathBuf,
+    pub detections_index_path: PathBuf,
+    /// M10 (milestone-10.md section 10.1): the local record of every
+    /// question an administrator asked about this device.
+    pub queries_path: PathBuf,
     /// punard's section 9 status file — read for the enrolled flag.
     pub status_file: PathBuf,
     /// `/proc` in production, a fixture tree in tests.
@@ -173,6 +228,10 @@ impl AgentdConfig {
             socket_path,
             registry_path: state_dir.join("agents/registry.jsonl"),
             agents_file: state_dir.join("agents.json"),
+            alerts_file: state_dir.join("alerts.json"),
+            detections_path: state_dir.join("agents/detections.jsonl"),
+            detections_index_path: state_dir.join("agents/detections-index.json"),
+            queries_path: state_dir.join("agents/queries.jsonl"),
             status_file: state_dir.join("status.json"),
             state_dir,
             audit_path,
@@ -202,6 +261,10 @@ impl AgentdConfig {
         );
         cfg.registry_path = PathBuf::from(REGISTRY_JSONL_PATH);
         cfg.agents_file = PathBuf::from(AGENTS_SUMMARY_PATH);
+        cfg.alerts_file = PathBuf::from(ALERTS_RUNTIME_PATH);
+        cfg.detections_path = PathBuf::from(DETECTIONS_JSONL_PATH);
+        cfg.detections_index_path = PathBuf::from(DETECTIONS_INDEX_PATH);
+        cfg.queries_path = PathBuf::from(QUERIES_LOG_PATH);
         cfg.status_file = PathBuf::from("/run/punar/status.json");
         cfg.ledger_dir = PathBuf::from(punar_common::ledger::LEDGER_DIR);
         cfg.ledger_runtime_file = PathBuf::from(LEDGER_RUNTIME_PATH);
@@ -225,12 +288,43 @@ struct Inner {
     /// picks it up on the next audit rather than caching a sentinel
     /// forever.
     device_id: Mutex<Option<String>>,
-    /// Monotonic time of the last detection pass (staleness gate) and the
-    /// wall-clock stamp reported with it.
-    last_scan: Mutex<(Option<Instant>, String)>,
+    /// M10: the alert engine (milestone-10.md section 5) and the
+    /// detection persistence pair (section 6). Each has its own lock, and
+    /// neither is ever held across a call into the other or into the
+    /// registry, so none of the four can deadlock against another.
+    alerts: AlertEngine,
+    detections: DetectionStore,
+    detection_index: Mutex<DetectionIndex>,
+    /// M10: the append-only query log. Its own file, its own lock-free
+    /// discipline (one `write_all` to an `O_APPEND` fd), and no shared
+    /// state with the registry or the ledger.
+    queries: QueryLog,
+    /// When the last pass ran, when the detection set last **changed**,
+    /// and what asked for the pass.
+    last_scan: Mutex<ScanState>,
     shutdown: AtomicBool,
     active: Mutex<usize>,
     slot_freed: Condvar,
+}
+
+/// Liveness of the detection pass, in memory only.
+///
+/// Two clocks, because M10 separates two facts that M7 conflated
+/// (milestone-10.md section 3.4). `changed_at` is what `agents.json`
+/// carries and means *the view as of the last change* — a pass that
+/// changes nothing does not advance it, because a pass that changes
+/// nothing writes nothing. `last_at` is *when a pass actually ran*, which
+/// only the socket can answer, because no file records it.
+#[derive(Debug)]
+struct ScanState {
+    /// Monotonic instant of the last pass — the staleness gate.
+    at: Option<Instant>,
+    /// Wall clock of the last change to the detection set.
+    changed_at: String,
+    /// Wall clock of the last pass, changed or not.
+    last_at: String,
+    /// What asked for that pass.
+    trigger: ScanTrigger,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -292,6 +386,7 @@ impl Daemon {
             process_classes_path: cfg.process_classes_path.clone(),
             cgroup_root: cfg.cgroup_root.clone(),
             retention_days: punar_common::ledger::LEDGER_RETENTION_DAYS,
+            detection_retention_days: punar_common::ledger::DETECTION_RETENTION_DAYS,
         };
         let ledger = LedgerEngine::open(
             ledger_cfg,
@@ -307,15 +402,36 @@ impl Daemon {
             enrollment_file: cfg.state_dir.join("enrollment.json"),
         };
 
+        let detections = DetectionStore::new(&cfg.detections_path, &cfg.detections_index_path);
+        let detection_index = detections.load_index();
+        let alerts = AlertEngine::new(AlertConfig::new(
+            &cfg.alerts_file,
+            lookup_gid(&cfg.group_file, &cfg.group),
+        ));
+        // A restart is not a new sighting: rebuild the alert register
+        // from the file this daemon last wrote, so a package update does
+        // not re-raise every standing card (milestone-10.md section 5.2).
+        alerts.resume();
+
+        let now = utc_now_rfc3339();
         let inner = Arc::new(Inner {
             registry: Mutex::new(registry),
             store,
             detector,
             ledger,
+            alerts,
+            detections,
+            detection_index: Mutex::new(detection_index),
+            queries: QueryLog::new(&cfg.queries_path),
             citation,
             audit: Mutex::new(audit),
             device_id: Mutex::new(None),
-            last_scan: Mutex::new((None, utc_now_rfc3339())),
+            last_scan: Mutex::new(ScanState {
+                at: None,
+                changed_at: now.clone(),
+                last_at: now,
+                trigger: ScanTrigger::Manual,
+            }),
             shutdown: AtomicBool::new(false),
             active: Mutex::new(0),
             slot_freed: Condvar::new(),
@@ -328,7 +444,11 @@ impl Daemon {
         // First pass + first publish: the panel has a truthful file to read
         // before anything connects. The pass also drains the audit tail
         // and runs the first retention prune (crash honesty).
-        inner.scan_now();
+        //
+        // The trigger is `manual`: this is a human (or systemd) starting
+        // the daemon, and calling it `timer` would let a check "prove"
+        // a periodic detection that never fired.
+        inner.scan_now(ScanTrigger::Manual);
         Ok(Daemon { inner })
     }
 
@@ -538,9 +658,13 @@ impl Inner {
             AgentMethod::Get(params) => self.handle_get(params),
             AgentMethod::Register(params) => self.handle_register(peer, params),
             AgentMethod::End(params) => self.handle_end(peer, params),
-            AgentMethod::Scan => Ok(self.handle_scan()),
+            AgentMethod::Scan(params) => Ok(self.handle_scan(peer, params)),
             AgentMethod::Access(params) => self.handle_access(peer, params),
             AgentMethod::Purge(params) => self.handle_purge(peer, params),
+            AgentMethod::AlertsList(params) => Ok(self.handle_alerts_list(params)),
+            AgentMethod::AlertsDismiss(params) => self.handle_alerts_dismiss(peer, params),
+            AgentMethod::QueryAnswer(params) => self.handle_query_answer(peer, params),
+            AgentMethod::QueriesList(params) => Ok(self.handle_queries_list(params)),
         }
     }
 
@@ -569,14 +693,23 @@ impl Inner {
     /// one, via the username it recorded. Unknown ⇒ `None`, which
     /// [`may_act_on_session`] treats as root-only — fail closed.
     fn ledger_owner_uid(&self, session_id: &str) -> Option<u32> {
-        if let Some(uid) = self
-            .registry
-            .lock()
-            .unwrap()
-            .session(session_id)
-            .and_then(|session| session.owner_uid)
         {
-            return Some(uid);
+            let registry = self.registry.lock().unwrap();
+            if let Some(uid) = registry
+                .session(session_id)
+                .and_then(|session| session.owner_uid)
+            {
+                return Some(uid);
+            }
+            // A live detection answers for its own ledger: the process
+            // runs as somebody, and that somebody owns the record about
+            // it (milestone-10.md section 6).
+            if let Some(uid) = registry
+                .detection(session_id)
+                .and_then(|detection| detection.owner_uid)
+            {
+                return Some(uid);
+            }
         }
         let user = self.ledger.owner_of(session_id)?;
         crate::util::lookup_uid(&self.cfg.passwd_file, &user)
@@ -589,22 +722,68 @@ impl Inner {
         to_value(self.list_result())
     }
 
-    fn handle_scan(&self) -> Value {
-        self.scan_now();
-        to_value(self.list_result())
+    /// `agents.scan` — one detection pass, on request.
+    ///
+    /// # The trigger is provenance, so it is not taken from the caller
+    ///
+    /// milestone-10.md section 3.4 puts `--trigger` into the audit event
+    /// specifically so a detection produced by `punar-agentd-scan.timer`
+    /// is distinguishable from one produced by a command a human — or a
+    /// check script — typed. That distinction is worth nothing if the
+    /// claim comes from whoever is calling: `agents.scan` is open to every
+    /// peer the socket admits, which includes the desktop user and any AI
+    /// agent running as them, and all three non-manual triggers name a
+    /// **root** caller (the timer unit, punard on an enrollment
+    /// transition, the daemon on its own register/reap path).
+    ///
+    /// So a non-root peer's claimed trigger is **downgraded to
+    /// [`ScanTrigger::Manual`]**, never honoured and never refused.
+    /// Downgrading rather than refusing is the honest option and the safe
+    /// one: `manual` is *what actually happened* — somebody typed a
+    /// command — and turning a provenance question into an availability
+    /// question would break nothing an attacker cares about while
+    /// breaking a user who passed the wrong flag.
+    fn handle_scan(&self, peer: &Peer, params: &AgentsScanParams) -> Value {
+        let trigger = if peer.is_root() {
+            params.trigger
+        } else {
+            if params.trigger != ScanTrigger::Manual {
+                eprintln!(
+                    "punar-agentd: uid {} claimed scan trigger {:?}; recording it as \
+                     {:?} — the timer, enrollment and register triggers are root's, and \
+                     the audit trail records what happened",
+                    peer.uid,
+                    params.trigger.as_str(),
+                    ScanTrigger::Manual.as_str()
+                );
+            }
+            ScanTrigger::Manual
+        };
+        let changed = self.scan_now(trigger);
+        let mut result = self.list_result();
+        result.changed = Some(changed);
+        to_value(result)
     }
 
     fn list_result(&self) -> AgentsListResult {
-        // Read the scan stamp first and let its guard go: no code path
+        // Read the scan stamps first and let the guard go: no code path
         // ever holds `last_scan` while taking `registry`, so taking them
         // in this order can never deadlock against a concurrent request.
-        let scanned_at = self.last_scan.lock().unwrap().1.clone();
+        let (scanned_at, last_scan_at, last_scan_trigger) = {
+            let last = self.last_scan.lock().unwrap();
+            (last.changed_at.clone(), last.last_at.clone(), last.trigger)
+        };
         // Same rule for the ledger: its fingerprints are gathered before
         // the registry lock is taken.
         let mut fingerprints = self.ledger.fingerprints();
         let registry = self.registry.lock().unwrap();
         AgentsListResult {
             scanned_at,
+            last_scan_at,
+            last_scan_trigger,
+            // `agents.list` did not necessarily run a pass, so it makes
+            // no claim about whether one changed anything.
+            changed: None,
             sessions: registry
                 .sessions()
                 .map(|session| ListedSession {
@@ -615,9 +794,10 @@ impl Inner {
                     record: session.record.clone(),
                 })
                 .collect(),
-            // Detections gain no ledger field: an unregistered process has
-            // no persisted session, so it has no ledger in M8 (M10 owns
-            // the unknown-agent ledger).
+            // Detection rows still carry no ledger **fingerprint**: the
+            // list is a now-view of processes, and a detection's ledger
+            // is read with `agents.access <detection_id>` under the same
+            // owner-or-root check as a session's (M10).
             detections: registry.detections().map(Detection::row).collect(),
         }
     }
@@ -638,6 +818,12 @@ impl Inner {
         }
 
         if !self.ledger.knows(&params.session_id) {
+            // M10 amendment: a detection **does** have a ledger now
+            // (milestone-10.md section 6), so reaching here for a
+            // detection id means the pass that would have opened it has
+            // not run yet — a live id the daemon has not scanned into
+            // existence. Say that, rather than M8's "detections have no
+            // ledger", which is no longer true.
             let is_detection = self
                 .registry
                 .lock()
@@ -646,18 +832,15 @@ impl Inner {
                 .is_some();
             let message = if is_detection {
                 format!(
-                    "{:?} is a detection, not a registered session, and detections have no \
-                     Access Ledger in this release: nothing mediates an unmanaged process, \
-                     so there is nothing honest to record (spec section 23; the \
-                     unknown-agent ledger is Milestone 10).\n\
-                     Next step: `punarctl agents inspect {}` shows what was observed.",
-                    params.session_id, params.session_id
+                    "{:?} is a detection whose ledger has not been opened yet.\n\
+                     Next step: run `punarctl agents scan`, then ask again.",
+                    params.session_id
                 )
             } else {
                 format!(
                     "No AI Access Ledger exists for {:?}.\n\
-                     Next step: run `punarctl agents list` to see the sessions this device \
-                     has recorded.",
+                     Next step: run `punarctl agents list` to see the sessions and \
+                     detections this device has recorded.",
                     params.session_id
                 )
             };
@@ -801,6 +984,14 @@ impl Inner {
         };
 
         let result = self.ledger.purge(&targets, &now);
+        // M10 decision 11: the user's delete authority reaches the
+        // DETECTION records too, not only their ledgers. A record about a
+        // process the user never asked for is data derived about their
+        // machine, and M8's privacy guarantee 2 is not narrowed for it —
+        // no policy, org or otherwise, may withhold that authority.
+        // The audit event survives, exactly as M8 guarantee 4 says: purge
+        // removes the derived summary, never the decision record.
+        self.purge_detection_records(&targets, &now);
         self.audit_ledger(
             peer,
             ACTION_LEDGER_PURGE,
@@ -854,6 +1045,14 @@ impl Inner {
             return Err(invalid_params(format!(
                 "agent {:?} must match ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$.",
                 params.agent
+            )));
+        }
+        // The launcher's display block becomes export data at the M10
+        // `authority` scope, so it is bounded and printable before it is
+        // stored — never after (punar_common::agent::validate_authority_summary).
+        if let Err(violations) = validate_authority_summary(&params.authority) {
+            return Err(invalid_params(format!(
+                "the authority block is not renderable display data: {violations:?}"
             )));
         }
         if self.registry.lock().unwrap().contains(&params.session_id) {
@@ -975,6 +1174,12 @@ impl Inner {
             },
         ));
         self.publish_summary();
+        // Immediate trigger 1 (milestone-10.md section 3.3): a managed
+        // launch is the moment the process landscape changes, and the
+        // moment a sibling unmanaged agent is most likely to be running.
+        // Event-driven, which is spec 6.3's stated preference over any
+        // interval.
+        self.scan_now(ScanTrigger::Register);
         Ok(to_value(AgentsRegisterResult {
             session: row,
             classification,
@@ -1066,7 +1271,570 @@ impl Inner {
             },
         ));
         self.publish_summary();
+        // Immediate trigger 2: a session ending is the same moment, seen
+        // from the other side.
+        self.scan_now(ScanTrigger::Register);
         Ok(to_value(AgentsEndResult { session: row }))
+    }
+
+    // -- alerts (milestone-10.md section 5) ----------------------------
+
+    /// `alerts.list` — the shadow-AI alert register.
+    ///
+    /// Readable by **any peer the socket admitted**, deliberately.
+    /// Withholding it from the user would violate spec 24.2: from M10
+    /// onward an authorized administrator can query the existence of
+    /// unmanaged agents on this device, so a surface the user cannot read
+    /// would create a state in which the administrator knows about a
+    /// process on the user's machine and the user does not.
+    fn handle_alerts_list(&self, params: &AlertsListParams) -> Value {
+        // Deliberately **no** staleness-gated pass here, unlike
+        // `agents.list`.
+        //
+        // A read must not be able to manufacture a detection. If
+        // `alerts.list` ran a pass, the first person to *look* could be
+        // the one who produces the `agents.scan` / `detected` event —
+        // and that event would be labelled `manual`, making it
+        // indistinguishable from a typed command and destroying the one
+        // property that lets a check prove periodic detection actually
+        // fired (milestone-10.md section 3.4, `m10-check` group 3).
+        //
+        // The register is derived state whose freshness is the scan's
+        // job; the cadence is stated on the surface instead. Nothing is
+        // lost: a read still gets everything the last pass knew.
+        to_value(AlertsListResult {
+            alerts: self.alerts.list(params.include_dismissed),
+            quiet_window_secs: ALERT_QUIET_WINDOW_SECS,
+        })
+    }
+
+    /// `alerts.dismiss` — file one card.
+    ///
+    /// Owner of the detection that raised it, or root: an alert names a
+    /// process running as one user, so it is put away by that user. An
+    /// alert whose owner is unknown (resumed from the file after a daemon
+    /// restart, before the next sighting re-attaches the owner) is
+    /// root-only — fail closed, the [`may_act_on_session`] rule verbatim.
+    ///
+    /// **It files; it never destroys, and it never changes suppression.**
+    /// The card stays in the register and in the detection record, and
+    /// the signature was already never going to be raised twice.
+    fn handle_alerts_dismiss(
+        &self,
+        peer: &Peer,
+        params: &AlertsDismissParams,
+    ) -> Result<Value, IpcError> {
+        if !self.alerts.knows(&params.alert_id) {
+            return Err(IpcError::with_details(
+                ErrorCode::NotFound,
+                format!(
+                    "No alert with id {:?} is in the register.\n\
+                     Next step: `punarctl agents alerts --all` lists every card, including \
+                     the ones already filed.",
+                    params.alert_id
+                ),
+                json!({ "alert_id": params.alert_id }),
+            ));
+        }
+        let owner_uid = self.alerts.owner_uid_of(&params.alert_id);
+        if !may_act_on_session(peer, owner_uid) {
+            self.audit(self.human_event(
+                peer,
+                EventFacts {
+                    action: ACTION_ALERT_DISMISS,
+                    agent: &params.alert_id,
+                    session_id: AGENT_SESSION_NONE,
+                    project: PROJECT_ID_SYSTEM,
+                    decision: Decision::Deny,
+                    result: "denied",
+                },
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "Filing alert {:?} was denied: it is about a process running as \
+                     another user.\n\
+                     Policy: os default — an alert is put away by the person it is about, \
+                     or by root (spec section 24.2).\n\
+                     Next step: ask that user, or run the command as root.",
+                    params.alert_id
+                ),
+                json!({ "alert_id": params.alert_id }),
+            ));
+        }
+
+        let now = utc_now_rfc3339();
+        let filed = match self.alerts.dismiss(&params.alert_id, &now) {
+            Ok(filed) => filed,
+            Err(DismissError::NotFound) => {
+                return Err(IpcError::with_details(
+                    ErrorCode::NotFound,
+                    format!("No alert with id {:?} is in the register.", params.alert_id),
+                    json!({ "alert_id": params.alert_id }),
+                ));
+            }
+        };
+        if filed.newly_dismissed {
+            // The alert set changed, so the file is rewritten — and the
+            // shell's FileView, not this call's result, is what the card
+            // disappears on.
+            self.alerts.write(&now);
+            self.audit(self.human_event(
+                peer,
+                EventFacts {
+                    action: ACTION_ALERT_DISMISS,
+                    agent: &format!("{}:{}", filed.row.agent, filed.row.signature),
+                    session_id: &filed.row.detection_id,
+                    project: PROJECT_ID_SYSTEM,
+                    decision: Decision::Allow,
+                    result: RESULT_DISMISSED,
+                },
+            ));
+        }
+        Ok(to_value(AlertsDismissResult {
+            dismissed: true,
+            alert_id: params.alert_id.clone(),
+            dismissed_at: filed.dismissed_at,
+            // Stated on the wire, not only in the CLI's prose: filing a
+            // card moves no suppression state, because there is none to
+            // move (milestone-10.md section 5.2).
+            suppression_changed: false,
+        }))
+    }
+
+    // -- the remote query (milestone-10.md sections 7-10) ---------------
+
+    /// `query.answer` — one administrator question the device **fetched**,
+    /// decided here.
+    ///
+    /// # Law 2, made structural
+    ///
+    /// The transport is not the authority. `punard` is a courier: it hands
+    /// over the question exactly as it pulled it and posts back whatever
+    /// this method returns, byte-identical. **Nothing in `params` can
+    /// widen what may be answered.** The grant is read from
+    /// `/var/lib/punar/enrollment.json` by this daemon, through a function
+    /// whose only input is a path (`read_org_granted_scopes`), so there is
+    /// no parameter through which a compromised control plane could pass
+    /// one (spec 59.4).
+    ///
+    /// # A refusal is a result, not an error
+    ///
+    /// An out-of-scope query returns `Ok` carrying
+    /// `authorization_decision: "deny"` and the section-73 message. An
+    /// error frame would mean *the call did not happen*, and the courier
+    /// would then have no decision to relay and would leave the query
+    /// pending forever. The one thing that *is* an error frame here is a
+    /// non-root peer: that is not a refusal to answer a question, it is a
+    /// refusal to accept the caller.
+    fn handle_query_answer(&self, peer: &Peer, params: &PendingQuery) -> Result<Value, IpcError> {
+        if !peer.is_root() {
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "Answering an administrator query was denied: query.answer is called by \
+                 punard, the only control-plane client, and by nothing else.\n\
+                 Policy: os default — the courier runs as root and the data owner checks \
+                 the peer, so a local user cannot make this device answer a question \
+                 nobody asked (ipc.md section 17.8, spec section 61).\n\
+                 Next step: `punarctl privacy queries` shows every question that did \
+                 reach this device."
+                    .to_string(),
+                json!({ "method": "query.answer", "required": "root peer" }),
+            ));
+        }
+
+        // Law 2, the half that is not about scope. `authorize` below makes
+        // the *scope* untrusted-safe; every other field of the question is
+        // also chosen by whatever answered `queries.pending`, and those
+        // fields are used as keys — a ledger lookup key, a pattern-checked
+        // audit field, a line on the spec 24.2 surface, a line in a
+        // 365-day log. A control plane that can choose them can reach past
+        // the scope check without ever widening a scope (spec 59.4), so
+        // they are checked here, before anything is projected, audited or
+        // written. See `PendingQuery::validate` for each vector by name.
+        if let Err(why) = params.validate() {
+            eprintln!(
+                "punar-agentd: refusing a malformed pending query: {why} — nothing was \
+                 projected, audited or recorded; it stays pending on the control plane"
+            );
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "This device will not answer that question: {why}\n\
+                     Policy: os default — a question whose fields this device cannot read \
+                     is not a question it can decide, and a decision it cannot record is \
+                     one it does not make (spec sections 51.1, 59.4).\n\
+                     Next step: `punarctl privacy queries` shows every question that did \
+                     reach this device."
+                ),
+                json!({ "method": "query.answer", "reason": "malformed_query" }),
+            ));
+        }
+
+        let now = utc_now_rfc3339();
+        // The middle term of the intersection, read from local state by
+        // the daemon that holds the data. Never from the request.
+        let grant = read_org_granted_scopes(&self.citation.enrollment_file);
+        let authorization = authorize(&params.requested_scope, &grant);
+
+        let (payload, counts) = match authorization.granted_scope {
+            Some(scope) => {
+                let (payload, counts) = self.project_answer(scope, params, &now);
+                (Some(payload), counts)
+            }
+            None => (None, RecordCounts::default()),
+        };
+
+        // The audit event is written BEFORE the answer leaves, so a
+        // device that dies mid-answer has still recorded the question.
+        let decision = match authorization.decision {
+            AuthorizationDecision::Allow => Decision::Allow,
+            AuthorizationDecision::Deny => Decision::Deny,
+        };
+        let result_word = authorization.result_category().as_str();
+        let policy_ids = match &grant.policy_citation {
+            Some(citation) => vec![citation.clone()],
+            None => vec![self.citation.citation()],
+        };
+        let event = {
+            let mut event = self.event(
+                params.requesting_admin.clone(),
+                // Already in the shipped `principal_kind` enum: the
+                // organization asked, not a human on this device.
+                PrincipalKind::Organization,
+                EventFacts {
+                    action: ACTION_ADMIN_QUERY,
+                    agent: &params.requested_scope,
+                    session_id: params.session_id.as_deref().unwrap_or(AGENT_SESSION_NONE),
+                    project: PROJECT_ID_SYSTEM,
+                    decision,
+                    result: result_word,
+                },
+            );
+            event.policy_ids = policy_ids;
+            event
+        };
+        let audit_event_id = event.event_id.clone();
+        self.audit(event);
+
+        let record = QueryRecord {
+            query_id: params.query_id.clone(),
+            received_at: params.received_at.clone(),
+            answered_at: now.clone(),
+            requesting_admin: params.requesting_admin.clone(),
+            // There is no IdP in M10, and every surface says so.
+            admin_identity_verified: false,
+            organization: params.organization.clone(),
+            device_id: self.device_id(),
+            requested_scope: params.requested_scope.clone(),
+            granted_scope: authorization.granted_scope,
+            authorization_decision: authorization.decision,
+            refusal_reason: authorization.refusal_reason.map(str::to_string),
+            result_category: authorization.result_category(),
+            record_counts: counts,
+            audit_event_id: Some(audit_event_id.clone()),
+        };
+        if let Err(e) = self.queries.append(&record, &now) {
+            // The answer still goes back — the audit event is already
+            // written and the organization's question was decided — but
+            // the failure is loud, because the user's own copy of the
+            // record is the section 24.2 guarantee.
+            eprintln!(
+                "punar-agentd: FAILED to record query {} in {}: {e}",
+                params.query_id,
+                self.queries.path().display()
+            );
+        }
+
+        Ok(to_value(QueryAnswerResult {
+            query_id: params.query_id.clone(),
+            authorization_decision: authorization.decision,
+            granted_scope: authorization.granted_scope,
+            result_category: authorization.result_category(),
+            payload,
+            refusal_reason: authorization.refusal_reason.map(str::to_string),
+            refusal_message: (!authorization.message.is_empty())
+                .then(|| authorization.message.clone()),
+            audit_event_id: Some(audit_event_id),
+        }))
+    }
+
+    /// `queries.list` — the section 24.2 command's data.
+    ///
+    /// Readable by **any peer the socket admitted**, deliberately:
+    /// withholding the record of who asked about the user from the user
+    /// would be the exact inversion spec 24.2 forbids, and root-only would
+    /// be absurd on a single-user personal device.
+    ///
+    /// Everything the surface prints comes from here — the granted scopes
+    /// the daemon actually enforces, the never-answered list, and the
+    /// storage facts — so the CLI invents nothing and the two cannot
+    /// drift.
+    fn handle_queries_list(&self, params: &QueriesListParams) -> Value {
+        let grant = read_org_granted_scopes(&self.citation.enrollment_file);
+        to_value(QueriesListResult {
+            queries: self.queries.list(params.since.as_deref(), params.limit),
+            enrolled: grant.enrolled,
+            organization: grant.organization.clone(),
+            policy_citation: grant.policy_citation.clone(),
+            granted_scopes: grant.scopes.clone(),
+            admin_identity_verified: false,
+            never_answered: NEVER_ANSWERED.iter().map(|s| s.to_string()).collect(),
+            storage: QueryLogStorage {
+                path: self.queries.path().display().to_string(),
+                ..QueryLogStorage::default()
+            },
+        })
+    }
+
+    /// Project the answer for one **granted** scope.
+    ///
+    /// Every branch is a projection of data the owning user can already
+    /// print about themselves (spec 24.2 guarantee 9). What is absent is
+    /// absent because **no field exists to carry it**, not because a
+    /// filter drops it: there is no executable path, no pid, no cmdline,
+    /// no username, no `cwd` and no project anywhere below.
+    fn project_answer(
+        &self,
+        scope: QueryScope,
+        params: &PendingQuery,
+        now: &str,
+    ) -> (Value, RecordCounts) {
+        let narrow = params.session_id.as_deref();
+        match scope {
+            QueryScope::Inventory => self.project_inventory(narrow, now),
+            QueryScope::Authority => self.project_authority(narrow, now),
+            QueryScope::ResourceSummary => self.project_resource_summary(narrow, now),
+            QueryScope::SecurityEvents => self.project_security_events(narrow, now),
+        }
+    }
+
+    /// Level 1 — counts, sessions, detections. Note what is **not** here
+    /// even at the coarsest scope: no executable path (only `zone`), no
+    /// pid, no user, no project, no cwd, no cmdline
+    /// (milestone-10.md section 8.2).
+    fn project_inventory(&self, narrow: Option<&str>, now: &str) -> (Value, RecordCounts) {
+        let zones = {
+            let index = self.detection_index.lock().unwrap();
+            index
+                .rows
+                .iter()
+                // Narrowed back to the closed class set on the way out:
+                // the stored value is a `String` in a struct whose
+                // neighbouring field is a full executable path, and
+                // section 8.3's guarantee is that only classes leave.
+                .map(|(id, row)| {
+                    (
+                        id.clone(),
+                        crate::identity::zone_class_or_unknown(&row.zone),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<String, &'static str>>()
+        };
+        let registry = self.registry.lock().unwrap();
+        let mut managed = 0u32;
+        let mut observed = 0u32;
+        let mut unknown = 0u32;
+        let mut sessions = Vec::new();
+        for session in registry.sessions() {
+            let record = &session.record;
+            if narrow.is_some_and(|id| id != record.session_id) {
+                continue;
+            }
+            match record.classification {
+                AgentClassification::Managed => managed += 1,
+                AgentClassification::Observed => observed += 1,
+                AgentClassification::Unknown => unknown += 1,
+            }
+            sessions.push(json!({
+                "session_id": record.session_id,
+                "agent": record.agent,
+                "classification": record.classification,
+                "status": record.status,
+                "started_at": record.started_at,
+            }));
+        }
+        let mut detections = Vec::new();
+        for detection in registry.detections() {
+            let record = &detection.record;
+            if narrow.is_some_and(|id| id != record.session_id) {
+                continue;
+            }
+            match record.classification {
+                AgentClassification::Managed => managed += 1,
+                AgentClassification::Observed => observed += 1,
+                AgentClassification::Unknown => unknown += 1,
+            }
+            detections.push(json!({
+                // The coarse identity: an administrator needs "how many
+                // distinct unmanaged things", not process churn.
+                "signature_id": detection.signature_id,
+                "agent": record.agent,
+                "classification": record.classification,
+                // The honesty label travels in the data (spec 23).
+                "suspected": true,
+                "zone": zones
+                    .get(&record.session_id)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        crate::identity::zone_class_or_unknown(detection.zone)
+                    }),
+                "first_seen": detection.observed_at,
+                "live": record.status == AgentStatus::Active,
+            }));
+        }
+        let counts = RecordCounts {
+            sessions: sessions.len() as u32,
+            detections: detections.len() as u32,
+            security_events: 0,
+        };
+        let payload = json!({
+            "query_id": Value::Null,
+            "scope": QueryScope::Inventory,
+            "answered_at": now,
+            "counts": {"managed": managed, "observed": observed, "unknown": unknown},
+            "sessions": sessions,
+            "detections": detections,
+            "not_yet_observed": punar_common::ledger::not_yet_observed(),
+        });
+        (payload, counts)
+    }
+
+    /// Level 2 — the organization's own policy, read back. Display-level
+    /// authority rows carry their `declared · M9/M12` enforcement labels
+    /// unchanged: an administrator must not be told that something is
+    /// enforced when it is declared (spec 1.22).
+    fn project_authority(&self, narrow: Option<&str>, now: &str) -> (Value, RecordCounts) {
+        let registry = self.registry.lock().unwrap();
+        let mut sessions = Vec::new();
+        for session in registry.sessions() {
+            let record = &session.record;
+            if narrow.is_some_and(|id| id != record.session_id) {
+                continue;
+            }
+            let Some(authority) = session.authority.as_ref() else {
+                continue;
+            };
+            sessions.push(json!({
+                "session_id": record.session_id,
+                "agent": record.agent,
+                "classification": record.classification,
+                "policy_citation": authority.policy_citation,
+                "rows": authority.rows,
+            }));
+        }
+        let counts = RecordCounts {
+            sessions: sessions.len() as u32,
+            ..RecordCounts::default()
+        };
+        let payload = json!({
+            "query_id": Value::Null,
+            "scope": QueryScope::Authority,
+            "answered_at": now,
+            "sessions": sessions,
+            // Spec 1.22, and the same discipline section 9.1 applies to
+            // the requesting admin's identity: these rows are asserted by
+            // the process that registered the session, not measured by
+            // this device. An administrator reading them must be told
+            // that, or `enforcement: "enforced"` becomes a claim the
+            // device never made.
+            "authority_source": AUTHORITY_SOURCE_LABEL,
+            // A detection has no authority block at all: nothing granted
+            // an unmanaged process anything, so there is nothing to read
+            // back. Said, rather than rendered as an empty allowance.
+            "detections": Value::Array(Vec::new()),
+            "not_yet_observed": punar_common::ledger::not_yet_observed(),
+        });
+        (payload, counts)
+    }
+
+    /// The session ids one ledger-backed projection may read.
+    ///
+    /// milestone-10.md section 8.1: *"A query may optionally name one
+    /// `session_id` to narrow the answer; it may never widen it."* This
+    /// function is that sentence, made structural: narrowing **filters**
+    /// the set the unnarrowed answer would have carried, it does not
+    /// replace it. Substituting the requested id for the set — the obvious
+    /// reading — would have turned the narrowing key into a direct lookup
+    /// against `LedgerEngine::record_of`, which resolves an unknown id by
+    /// reading `<ledger dir>/<id>.json`; a control plane choosing that
+    /// string chooses a **path**, and reaches records the unnarrowed answer
+    /// deliberately excludes (a tombstoned one, or a file outside the
+    /// directory entirely). `PendingQuery::validate` already refuses a
+    /// non-`agt_` key; this is the second, independent gate, and it is the
+    /// one that holds even if a caller other than the courier ever arrives.
+    fn narrowed_sessions(&self, narrow: Option<&str>) -> Vec<String> {
+        let all = self.ledger.all_sessions();
+        match narrow {
+            Some(id) => all.into_iter().filter(|known| known == id).collect(),
+            None => all,
+        }
+    }
+
+    /// Level 3 — M8's `result.summary` **verbatim**, the same
+    /// `ledger-summary.json` document `punarctl agents access --json`
+    /// hands the user. The administrator's view is a subset of the
+    /// user's by construction rather than by promise.
+    fn project_resource_summary(&self, narrow: Option<&str>, now: &str) -> (Value, RecordCounts) {
+        let ids = self.narrowed_sessions(narrow);
+        let mut summaries = Vec::new();
+        let mut events = 0u32;
+        for id in ids {
+            let Some(record) = self.ledger.record_of(&id) else {
+                continue;
+            };
+            let summary = record.summary(now);
+            events += summary.security_events.len() as u32;
+            summaries.push(to_value(summary));
+        }
+        let counts = RecordCounts {
+            sessions: summaries.len() as u32,
+            detections: 0,
+            security_events: events,
+        };
+        let payload = json!({
+            "query_id": Value::Null,
+            "scope": QueryScope::ResourceSummary,
+            "answered_at": now,
+            "summaries": summaries,
+            "not_yet_observed": punar_common::ledger::not_yet_observed(),
+        });
+        (payload, counts)
+    }
+
+    /// Level 4 — event **references** only: `{event_id, event_type,
+    /// timestamp}`. The action, resource, decision and policy ids stay on
+    /// the device. An administrator who needs the payload asks the human,
+    /// which is the correct social protocol and is printed in the answer.
+    fn project_security_events(&self, narrow: Option<&str>, now: &str) -> (Value, RecordCounts) {
+        let ids = self.narrowed_sessions(narrow);
+        let mut events = Vec::new();
+        for id in ids {
+            let Some(record) = self.ledger.record_of(&id) else {
+                continue;
+            };
+            for reference in &record.security_events {
+                events.push(json!({
+                    "event_id": reference.event_id,
+                    "event_type": reference.event_type,
+                    "timestamp": reference.timestamp,
+                }));
+            }
+        }
+        let counts = RecordCounts {
+            security_events: events.len() as u32,
+            ..RecordCounts::default()
+        };
+        let payload = json!({
+            "query_id": Value::Null,
+            "scope": QueryScope::SecurityEvents,
+            "answered_at": now,
+            "security_events": events,
+            "payloads_withheld": "event payloads stay on this device (spec 53); \
+                                  ask the person who uses it",
+            "not_yet_observed": punar_common::ledger::not_yet_observed(),
+        });
+        (payload, counts)
     }
 
     // -- detection -----------------------------------------------------
@@ -1075,33 +1843,117 @@ impl Inner {
     fn scan_if_stale(&self) {
         let stale = {
             let last = self.last_scan.lock().unwrap();
-            match last.0 {
+            match last.at {
                 Some(instant) => instant.elapsed() >= self.cfg.scan_stale_after,
                 None => true,
             }
         };
         if stale {
-            self.scan_now();
+            // A staleness-triggered pass is still a `manual` one: a human
+            // asked for the list. Nothing here may claim the timer fired.
+            self.scan_now(ScanTrigger::Manual);
         }
     }
 
-    /// One detection pass: reap managed sessions whose process is gone,
-    /// re-derive the detection set, audit only the transitions, and
-    /// republish `agents.json` if anything changed.
-    fn scan_now(&self) {
+    /// One detection pass.
+    ///
+    /// # The diff is the event (milestone-10.md section 3.4)
+    ///
+    /// The pass compares the detection **set** against the previous one
+    /// and emits `detected` / `cleared` **once per detection identity**.
+    ///
+    /// | Transition | Emitted, once | Written |
+    /// |---|---|---|
+    /// | absent → present | audit `agents.scan` / `detected` | `detections.jsonl` (`active`), a ledger, `agents.json`, and `alerts.json` iff the signature is new |
+    /// | present → absent | audit `agents.scan` / `cleared` | `detections.jsonl` (`ended`), the ledger closes, `agents.json` |
+    /// | present → present | **nothing** | **nothing** |
+    /// | empty diff | **nothing** | **nothing** |
+    ///
+    /// That last row is what makes a 240 s timer compatible with spec
+    /// 6.4: **the steady state of periodic detection is zero bytes
+    /// written.** It also makes the audit log a log of *events* rather
+    /// than a log of *scans*, which is what keeps `punarctl audit tail`
+    /// readable after a week of uptime.
+    ///
+    /// # Ordering, and why it is this order
+    ///
+    /// The transition events are audited **before** the detection
+    /// ledgers are opened. That is deliberate: the drain then holds the
+    /// `unknown_ai_execution` reference as a pending attribution, and
+    /// [`crate::ledger::LedgerEngine::begin_detection`] applies it as
+    /// part of the record's first write — one write per new detection
+    /// instead of two, reusing the machinery M8 built for exactly this
+    /// race.
+    ///
+    /// Returns whether the pass changed anything, which is what
+    /// `agents.scan` reports back as `changed`.
+    fn scan_now(&self, trigger: ScanTrigger) -> bool {
         let now = utc_now_rfc3339();
-        #[allow(clippy::let_and_return)]
         let reaped = self.reap_dead_sessions();
 
         let accounted: HashSet<u32> = self.registry.lock().unwrap().active_pids();
         let found = self.detector.scan(&accounted, &now);
         let (appeared, disappeared) = self.registry.lock().unwrap().replace_detections(found);
+        let registry_changed =
+            !reaped.is_empty() || !appeared.is_empty() || !disappeared.is_empty();
 
-        *self.last_scan.lock().unwrap() = (Some(Instant::now()), now.clone());
+        // A detection this device already recorded, whose ledger can be
+        // resumed, is the **same execution seen again** after an agentd
+        // restart — not a new sighting. Splitting it out here is what
+        // stops a restart producing a second `detected` event, a second
+        // `active` record and a ledger that forgets what it held. The
+        // identity is what makes the split possible at all: the same
+        // process keeps the same id across daemon lifetimes, because the
+        // id is derived from the kernel's facts and not from ours.
+        let (resumed, appeared): (Vec<Detection>, Vec<Detection>) = appeared
+            .into_iter()
+            .partition(|detection| self.ledger.resume_detection(&detection.record.session_id));
+        if !resumed.is_empty() {
+            eprintln!(
+                "punar-agentd: resumed {} detection(s) still running from before this \
+                 daemon started; a restart is bookkeeping, not a new sighting",
+                resumed.len()
+            );
+        }
 
-        // The ledger's own event-driven update point: this pass already
-        // walked /proc, so the cgroup sample is one extra file per active
-        // session. No timer is involved anywhere (spec 6.3).
+        {
+            let mut last = self.last_scan.lock().unwrap();
+            last.at = Some(Instant::now());
+            last.last_at = now.clone();
+            last.trigger = trigger;
+            // `scanned_at` in `agents.json` means "as of the last
+            // change", so it only moves when something changed.
+            if registry_changed {
+                last.changed_at = now.clone();
+            }
+        }
+
+        // 1. The transitions, audited once each. The trigger travels in
+        //    `resource` so a check can prove a detection came from the
+        //    timer and not from a command a check script typed.
+        for detection in &appeared {
+            self.audit_scan_transition(detection, RESULT_DETECTED, trigger);
+        }
+        for detection in &disappeared {
+            self.audit_scan_transition(detection, RESULT_CLEARED, trigger);
+        }
+
+        // 2. Let the drain see those events before any detection ledger
+        //    exists, so the references are held rather than dropped.
+        if !appeared.is_empty() || !disappeared.is_empty() {
+            self.ledger.drain_audit(&now);
+        }
+
+        // 3. Persist the transitions and open/close their ledgers.
+        self.persist_detection_transitions(&appeared, &disappeared, &now);
+
+        // 4. The alert engine sees the whole live set, because the
+        //    anti-nag rule is a statement about the set.
+        self.reconcile_alerts(&now);
+
+        // 5. The M8 ledger's own event-driven update point: this pass
+        //    already walked /proc, so the cgroup sample is one extra file
+        //    per active session. No timer is involved anywhere (6.3).
         let active = self.active_facts();
         let ledger_changed = self.ledger.refresh(&active, &now);
         let active_ids: Vec<String> = active.iter().map(|f| f.session_id.clone()).collect();
@@ -1118,30 +1970,11 @@ impl Inner {
                 result: reason,
             }));
         }
+        let detections_pruned = self.prune_detections(&now);
 
-        for detection in &appeared {
-            self.audit(self.service_event(EventFacts {
-                action: ACTION_SCAN,
-                agent: &detection.record.agent,
-                session_id: &detection.record.session_id,
-                project: &detection.record.project,
-                decision: Decision::Allow,
-                result: RESULT_DETECTED,
-            }));
-        }
-        for detection in &disappeared {
-            self.audit(self.service_event(EventFacts {
-                action: ACTION_SCAN,
-                agent: &detection.record.agent,
-                session_id: &detection.record.session_id,
-                project: &detection.record.project,
-                decision: Decision::Allow,
-                result: RESULT_CLEARED,
-            }));
-        }
-        if !reaped.is_empty() || !appeared.is_empty() || !disappeared.is_empty() {
+        if registry_changed {
             self.publish_summary();
-        } else if ledger_changed || !pruned.is_empty() {
+        } else if ledger_changed || !pruned.is_empty() || detections_pruned {
             // The registry did not change but the ledger did — republish
             // the panel's side file so the pane and the socket cannot
             // show different ledgers.
@@ -1150,6 +1983,220 @@ impl Inner {
             // First pass of this boot: publish even with nothing to say,
             // so the panel reads a fresh empty view rather than a stale one.
             self.publish_summary();
+        }
+        registry_changed || ledger_changed || !pruned.is_empty() || detections_pruned
+    }
+
+    /// One `agents.scan` transition event. `resource` carries the agent
+    /// name **and** the trigger, because `audit-event.json` has no field
+    /// for a trigger and the M8 Decision-0 law says a shipped schema does
+    /// not grow one for a later milestone. The composite is the same idiom
+    /// M8 already uses for `ledger:<count>` on a prune batch.
+    fn audit_scan_transition(&self, detection: &Detection, result: &str, trigger: ScanTrigger) {
+        self.audit(self.service_event(EventFacts {
+            action: ACTION_SCAN,
+            agent: &format!("{}:{}", detection.record.agent, trigger.as_str()),
+            session_id: &detection.record.session_id,
+            project: &detection.record.project,
+            decision: Decision::Allow,
+            result,
+        }));
+    }
+
+    /// Append the schema-exact records, update the sibling index, and
+    /// open or close each detection's ledger. Writes only on a
+    /// transition — an unchanged pass never reaches this function with
+    /// anything to do.
+    fn persist_detection_transitions(
+        &self,
+        appeared: &[Detection],
+        disappeared: &[Detection],
+        now: &str,
+    ) {
+        if appeared.is_empty() && disappeared.is_empty() {
+            return;
+        }
+        {
+            let mut index = self.detection_index.lock().unwrap();
+            for detection in appeared {
+                if let Err(e) = self.detections.append(&detection.record) {
+                    eprintln!(
+                        "punar-agentd: FAILED to persist the detected record for {}: {e}",
+                        detection.record.session_id
+                    );
+                    continue;
+                }
+                index.rows.insert(
+                    detection.record.session_id.clone(),
+                    DetectionIndexRow {
+                        detection_id: detection.record.session_id.clone(),
+                        signature_id: detection.signature_id.clone(),
+                        signature: detection.signature_name.clone(),
+                        executable: detection.executable.clone(),
+                        zone: detection.zone.to_string(),
+                        user: detection.record.user.clone(),
+                        observed_at: detection.observed_at.clone(),
+                        cleared_at: None,
+                        retention_expires_at: None,
+                    },
+                );
+            }
+            for detection in disappeared {
+                let mut ended = detection.record.clone();
+                ended.status = AgentStatus::Ended;
+                if let Err(e) = self.detections.append(&ended) {
+                    eprintln!(
+                        "punar-agentd: FAILED to persist the cleared record for {}: {e}",
+                        ended.session_id
+                    );
+                }
+                if let Some(row) = index.rows.get_mut(&detection.record.session_id) {
+                    crate::detections::clear_row(row, now);
+                }
+            }
+            index.updated_at = now.to_string();
+        }
+        self.write_detection_index();
+
+        // Ledgers second: `begin_detection` writes once, applying the
+        // reference the drain in step 2 is already holding.
+        for detection in appeared {
+            self.ledger.begin_detection(
+                &DetectionFacts {
+                    detection_id: detection.record.session_id.clone(),
+                    agent: detection.record.agent.clone(),
+                    user: detection.record.user.clone(),
+                    process_id: detection.record.process_id,
+                    zone: detection.zone,
+                    started_at: detection.record.started_at.clone(),
+                },
+                now,
+            );
+        }
+        for detection in disappeared {
+            self.ledger.end_detection(&detection.record.session_id, now);
+        }
+    }
+
+    /// Retention for the detection **transition log** (7 days after a
+    /// detection clears). The ledger records themselves are pruned by the
+    /// M8 machinery, which already reads each record's own
+    /// `retention_expires_at`.
+    ///
+    /// Checking costs an in-memory scan of the index; it writes only when
+    /// something actually expired, so the steady state stays at zero
+    /// bytes.
+    fn prune_detections(&self, now: &str) -> bool {
+        let expired = {
+            let index = self.detection_index.lock().unwrap();
+            crate::detections::expired(&index, now)
+        };
+        if expired.is_empty() {
+            return false;
+        }
+        let keep = {
+            let mut index = self.detection_index.lock().unwrap();
+            for id in &expired {
+                index.rows.remove(id);
+            }
+            index.updated_at = now.to_string();
+            index
+                .rows
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+        if let Err(e) = self.detections.rewrite_keeping(&keep) {
+            eprintln!("punar-agentd: could not compact the detection log: {e}");
+        }
+        self.write_detection_index();
+        self.audit(self.service_event(EventFacts {
+            action: ACTION_LEDGER_PRUNE,
+            agent: &format!("detections:{}", expired.len()),
+            session_id: AGENT_SESSION_NONE,
+            project: PROJECT_ID_SYSTEM,
+            decision: Decision::Allow,
+            result: "expired",
+        }));
+        true
+    }
+
+    /// Drop the persisted detection records (and index rows) for ids the
+    /// user just purged. Silent when none of the targets is a detection —
+    /// a managed session's purge touches nothing here.
+    fn purge_detection_records(&self, targets: &[String], now: &str) {
+        let keep = {
+            let mut index = self.detection_index.lock().unwrap();
+            let mut removed = 0usize;
+            for id in targets {
+                if index.rows.remove(id).is_some() {
+                    removed += 1;
+                }
+            }
+            if removed == 0 {
+                return;
+            }
+            index.updated_at = now.to_string();
+            index
+                .rows
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+        if let Err(e) = self.detections.rewrite_keeping(&keep) {
+            eprintln!("punar-agentd: could not compact the detection log after a purge: {e}");
+        }
+        self.write_detection_index();
+    }
+
+    fn write_detection_index(&self) {
+        let index = self.detection_index.lock().unwrap().clone();
+        if let Err(e) = self.detections.write_index(&index) {
+            eprintln!("punar-agentd: could not write the detection index: {e}");
+        }
+    }
+
+    /// Run the anti-nag rule over the current **unknown** detection set,
+    /// audit each raise once, and write `alerts.json` only if the alert
+    /// set changed.
+    ///
+    /// Only `unknown` detections raise a card. An `observed` detection is
+    /// a *known* agent product running outside the managed runtime — the
+    /// D-005 panel shows it, and putting it behind a card that reads
+    /// "Unknown AI activity suspected" would be false (spec 1.22). It
+    /// still gets a persisted record and a ledger, because the question
+    /// "what ran on this device last week" is the same question.
+    fn reconcile_alerts(&self, now: &str) {
+        let citation = self.citation.citation();
+        let live: Vec<Observation> = {
+            let registry = self.registry.lock().unwrap();
+            registry
+                .detections()
+                .filter(|detection| detection.record.classification == AgentClassification::Unknown)
+                .map(|detection| Observation {
+                    signature_id: detection.signature_id.clone(),
+                    signature: detection.signature_name.clone(),
+                    detection_id: detection.record.session_id.clone(),
+                    agent: detection.record.agent.clone(),
+                    executable: detection.executable.clone(),
+                    owner: detection.record.user.clone(),
+                    owner_uid: detection.owner_uid,
+                })
+                .collect()
+        };
+        let change = self.alerts.reconcile(&live, &citation, now);
+        for row in &change.raised {
+            self.audit(self.service_event(EventFacts {
+                action: ACTION_ALERT_RAISE,
+                agent: &format!("{}:{}", row.agent, row.signature),
+                session_id: &row.detection_id,
+                project: PROJECT_ID_SYSTEM,
+                decision: Decision::Allow,
+                result: RESULT_RAISED,
+            }));
+        }
+        if change.changed {
+            self.alerts.write(now);
         }
     }
 
@@ -1202,7 +2249,7 @@ impl Inner {
     /// Rewrite `/run/punar/agents.json`. Best effort by contract: the file
     /// is display data, so a failure is reported and the request continues.
     fn publish_summary(&self) {
-        let scanned_at = self.last_scan.lock().unwrap().1.clone();
+        let scanned_at = self.last_scan.lock().unwrap().changed_at.clone();
         let citation = self.citation.citation();
         let summary = {
             let registry = self.registry.lock().unwrap();
@@ -1233,6 +2280,14 @@ impl Inner {
             registry
                 .sessions()
                 .map(|session| session.record.session_id.clone())
+                // Since M10 the current detections belong here too: the
+                // two side files must describe the same set, and a
+                // detection now has a ledger to describe.
+                .chain(
+                    registry
+                        .detections()
+                        .map(|detection| detection.record.session_id.clone()),
+                )
                 .collect()
         };
         self.ledger

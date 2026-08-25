@@ -120,6 +120,26 @@
 #        filling in for real, a one-minute privilege grant that works and
 #        then does not, and the negative probes — run after the M8 exercise,
 #        before the export).
+#    12. M10 verdict (milestone-10.md §16): same pattern for m10-report.txt
+#        (punar-m10-check.service — the shadow-AI detection MVP: the scan
+#        timer's vendor-wants symlink and 240 s cadence asserted from
+#        `systemctl show`, a real sleeping fixture in ~punar/Downloads
+#        detected BY THE TIMER with no manual scan in the window (proved
+#        from the trigger recorded in the audit event), exactly one alert
+#        per signature across repeated passes, a clear and a restart inside
+#        the 24 h quiet window, the D-009 card rendered through the shell's
+#        own IPC and screenshotted, the do-not-disturb breakthrough for a
+#        second signature, the unknown-agent ledger validated TWICE — by jq
+#        in the guest and, on this host, against
+#        schemas/ai-agent/ledger-summary.json — an enrolled device
+#        answering an authorized inventory query within one reconcile pass
+#        with no inbound listener anywhere, an out-of-scope query refused
+#        by the DEVICE and audited, the role gate refusing independently at
+#        the mock, the whole query log printed by the UNPRIVILEGED user,
+#        both personal-device gates proven separately, a purge that leaves
+#        the query log and audit trail intact, and the fleet view's `—`
+#        where nobody answered — run after the M9 exercise, before the
+#        export).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
@@ -164,6 +184,19 @@
 #                                   proven against
 #     punar-m9.png                  grim capture, the Plate D-003 approval
 #                                   overlay with a live contract card (M9)
+#     m10-report.txt, m10-*.txt     M10 exercise verdict + the alert
+#                                   register render, the query log the
+#                                   unprivileged user printed, the purge
+#                                   render and the mock's fleet output
+#     m10-*.json, m10-*.jsonl       agents.json and alerts.json snapshots,
+#                                   the alert register, the detection
+#                                   ledger summary this script re-validates
+#                                   against the shipped schema, the
+#                                   schema-exact detection records and their
+#                                   sibling index, the local query log, and
+#                                   the answered/refused query documents
+#     punar-m10.png                 grim capture, the Plate D-009 shadow-AI
+#                                   alert card (M10)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -171,7 +204,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2..M9_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2..M10_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -322,10 +355,14 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     # M9 approval/credential/privilege exercise (bounded 20 min in-guest;
     # its longest single wait is the SHIPPED 300 s approval TTL, started
     # early so the credential and privilege groups run inside the window,
-    # plus a 65 s grant-expiry wait and a 180 s launch wait). Raised from
-    # M8's 3000 to keep the same headroom now that a tenth bounded in-guest
-    # exercise sits between the RAM result and the export.
-    DEFAULT_EXPORT_TIMEOUT=3600
+    # plus a 65 s grant-expiry wait and a 180 s launch wait) and the M10
+    # shadow-AI exercise (bounded 15 min in-guest; its one unavoidable wait
+    # is 300 s — the 240 s scan period plus 30 s AccuracySec plus slack —
+    # because group 3 waits for the timer to fire ON ITS OWN, and a timer
+    # firing is wall clock under any accelerator). Raised from M9's 3600 to
+    # keep the same headroom now that an eleventh bounded in-guest exercise
+    # sits between the RAM result and the export.
+    DEFAULT_EXPORT_TIMEOUT=4200
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -347,8 +384,11 @@ else
     # approval/credential/privilege exercise (bounded 20 min in-guest; its
     # waits are wall-clock TTLs — a 300 s approval expiry and a 65 s grant
     # expiry — so they cost the same under TCG as under KVM, while the
-    # quickshell/grim round trips are the slow parts).
-    DEFAULT_EXPORT_TIMEOUT=7200
+    # quickshell/grim round trips are the slow parts) and the M10 shadow-AI
+    # exercise (bounded 15 min in-guest; its 300 s detection-timer wait is
+    # wall clock, so it costs the same under TCG, and the quickshell/grim
+    # round trips and the mock enroll/unenroll cycle are the slow parts).
+    DEFAULT_EXPORT_TIMEOUT=7800
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -520,6 +560,11 @@ run_desktop() {
           "${PROOF_DIR}"/m9-*.json \
           "${PROOF_DIR}"/m9-*.txt \
           "${PROOF_DIR}/punar-m9.png" \
+          "${PROOF_DIR}/m10-report.txt" \
+          "${PROOF_DIR}"/m10-*.json \
+          "${PROOF_DIR}"/m10-*.jsonl \
+          "${PROOF_DIR}"/m10-*.txt \
+          "${PROOF_DIR}/punar-m10.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -629,7 +674,8 @@ run_desktop() {
                      m5-report.txt punar-m5.png punar-m5-personal.png \
                      m7-report.txt punar-m7.png \
                      m8-report.txt punar-m8.png \
-                     m9-report.txt punar-m9.png; do
+                     m9-report.txt punar-m9.png \
+                     m10-report.txt punar-m10.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -674,7 +720,9 @@ run_desktop() {
                      "${guest_dir}"/m7-*.json "${guest_dir}"/m7-*.jsonl \
                      "${guest_dir}"/m7-*.txt \
                      "${guest_dir}"/m8-*.json "${guest_dir}"/m8-*.txt \
-                     "${guest_dir}"/m9-*.json "${guest_dir}"/m9-*.txt; do
+                     "${guest_dir}"/m9-*.json "${guest_dir}"/m9-*.txt \
+                     "${guest_dir}"/m10-*.json "${guest_dir}"/m10-*.jsonl \
+                     "${guest_dir}"/m10-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -1048,6 +1096,81 @@ run_desktop() {
         fi
     else
         warn "desktop-test: no m9-approval-doc.json in the export; the host-side schema replay was skipped"
+    fi
+
+    # Phase 12: M10 exercise verdict (milestone-10.md §16) — same pattern as
+    # the M2–M9 gates. The guest wrote /run/punar/m10-report.txt (per-assertion
+    # ok/FAIL lines + a final PUNAR_M10_OK / PUNAR_M10_FAIL line) via
+    # punar-m10-check.service: periodic shadow-AI detection fired BY THE
+    # TIMER with no manual scan anywhere in the window (proved from the
+    # trigger recorded in the audit event, not from the wall clock), exactly
+    # one alert per signature across repeated passes, a clear and a restart,
+    # the D-009 card rendered and screenshotted with `suspected` and
+    # `nothing was blocked` in it and the plate's `api.foo.ai` deliberately
+    # absent, the unknown-agent ledger with its Level-4 reference and its
+    # honest empty categories, an enrolled device answering an authorized
+    # inventory query within ONE reconcile pass over a path with no inbound
+    # listener, an out-of-scope query refused BY THE DEVICE and audited, the
+    # role gate refusing independently at the mock, the whole query log
+    # printed by the UNPRIVILEGED user, a personal device answering nothing
+    # across three passes (gate A) and refusing a forced question with no
+    # enrollment file (gate B), a purge that leaves the query log and the
+    # audit trail intact, and the fleet view's `—` where nobody answered.
+    # Hard gate: a delivered FAIL — or a truncated report — fails this
+    # script. A MISSING report degrades exactly as M2–M9 do.
+    local m10_report="${PROOF_DIR}/m10-report.txt"
+    if [ -f "${m10_report}" ]; then
+        if grep -q 'PUNAR_M10_FAIL' "${m10_report}"; then
+            echo "error: M10 exercise reported PUNAR_M10_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m10_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M10_OK' "${m10_report}"; then
+            echo "==> M10 exercise: PUNAR_M10_OK ($(grep -c '^ok' "${m10_report}" || true) assertions passed)"
+        else
+            echo "error: m10-report.txt carries no PUNAR_M10_OK/PUNAR_M10_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m10_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M10_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M10 exercise reported PUNAR_M10_FAIL on the serial console (export did not deliver m10-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M10_OK' "${SERIAL_LOG}"; then
+        echo "==> M10 exercise: PUNAR_M10_OK (verdict from serial console; export did not deliver m10-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        echo "error: no m10-report.txt in the export and no M10 verdict on serial — the M10 exercise did not run" >&2
+        exit 1
+    else
+        echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
+    fi
+
+    # Phase 12b: the other half of the M10 unknown-agent-ledger assertion,
+    # for the same reason phase 11b exists. The image has no JSON-Schema
+    # validator, so m10-check checks the detection's ledger summary with jq
+    # in the guest and exports the document; here it is replayed against the
+    # SHIPPED schemas/ai-agent/ledger-summary.json. That split is deliberate
+    # and is the assertion that keeps the M8 Decision-0 law honest for a
+    # third milestone: an unknown agent's ledger validates against the
+    # UNCHANGED schema, or M10 bent a shipped contract to fit
+    # (milestone-10.md §6.3, §16 group 6).
+    local m10_doc="${PROOF_DIR}/m10-detection-summary.json"
+    if [ -s "${m10_doc}" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            if docker run --rm -v "${REPO_ROOT}:/w" -v "${PROOF_DIR}:/proof:ro" \
+                    -w /w python:3.12-slim sh -c \
+                    "pip install -q jsonschema pyyaml referencing && \
+                     python tools/validate_schemas.py \
+                       --document /proof/m10-detection-summary.json \
+                       --schema schemas/ai-agent/ledger-summary.json"; then
+                echo "==> M10 detection ledger validates against schemas/ai-agent/ledger-summary.json"
+            else
+                echo "error: the unknown-agent ledger punar-agentd emitted does NOT validate against schemas/ai-agent/ledger-summary.json" >&2
+                exit 1
+            fi
+        else
+            warn "desktop-test: docker is unavailable, so the exported M10 detection ledger was not re-validated against schemas/ai-agent/ledger-summary.json (the in-guest jq shape assertions still ran)"
+        fi
+    else
+        warn "desktop-test: no m10-detection-summary.json in the export; the host-side schema replay was skipped"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

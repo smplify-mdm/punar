@@ -104,16 +104,32 @@ pub const MUTATING_ACTION_PREFIXES: [&str; 1] = ["enroll."];
 /// 3. `action == credential.request` → `credential_request`
 ///    (**producer since M9**: `punar-secrets`)
 ///
-/// The three remaining enum values — `production_access` (M12),
-/// `sensitive_resource_access` (M12) and `unknown_ai_execution` (the
-/// audit event exists today, but a detected process has no persisted
-/// session, so it attaches to no ledger until M10) — have no producer
-/// here and are reported in
-/// [`punar_common::ledger::not_yet_observed`] instead of being quietly
-/// absent: four of the seven are live, three are pending.
+/// 4. `action == agents.scan` **and** `result == "detected"` →
+///    `unknown_ai_execution` (**producer since M10**: the detection pass
+///    itself). This is the rule that closes M8's open question. M8 wrote
+///    that the audit event existed but attached to no ledger because a
+///    detected process had no persisted session; M10 gives it one
+///    ([`crate::detections`]), so the transition that produced it is
+///    referenced in that ledger and the row leaves
+///    [`punar_common::ledger::not_yet_observed`].
+///
+///    It sits **ahead** of the generic rules for the same reason rule 0
+///    does: `agents.scan` is an allowed, non-mutating action, so without
+///    an explicit rule it would classify as nothing at all. And only
+///    `detected` matches — the matching `cleared` transition is the same
+///    execution ending, not a second execution.
+///
+/// The two remaining enum values — `production_access` (M12) and
+/// `sensitive_resource_access` (M12) — have no producer here and are
+/// reported in [`punar_common::ledger::not_yet_observed`] instead of
+/// being quietly absent: five of the seven are live, two are pending.
 pub fn classify(event: &AuditEvent) -> Option<SecurityEventType> {
     if event.action == APPROVAL_RESOLVE_ACTION && event.decision == Decision::Deny {
         return Some(SecurityEventType::PolicyBypassAttempt);
+    }
+    if event.action == crate::server::ACTION_SCAN && event.result == crate::server::RESULT_DETECTED
+    {
+        return Some(SecurityEventType::UnknownAiExecution);
     }
     if event.decision == Decision::Deny {
         return Some(SecurityEventType::DeniedAccess);

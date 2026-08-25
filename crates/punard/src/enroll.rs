@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use punar_common::Redacted;
+use punar_common::query::{
+    CP_METHOD_QUERIES_ANSWER, CP_METHOD_QUERIES_PENDING, PendingQuery, ScopeSet,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -229,6 +232,73 @@ impl ControlPlaneClient {
         )
         .map(|_| ())
     }
+
+    /// M10: `queries.pending {device_token}` — **the device asks** for the
+    /// questions addressed to it (milestone-10.md section 7.2).
+    ///
+    /// This is the whole of the remote-query inbound path, and it is an
+    /// outbound call. There is no listener, no port, no push channel and no
+    /// callback anywhere in Punar; a remote query reaches this device only
+    /// because this device went and fetched it, on a schedule it already
+    /// owned. An administrator with a perfectly valid token and this
+    /// device's IP address has nowhere to send a request.
+    ///
+    /// A malformed entry is **dropped, not guessed at**: the wire type is
+    /// strict, and a question this build cannot parse is a question it must
+    /// not answer.
+    pub fn queries_pending(
+        &self,
+        token: &Redacted<String>,
+    ) -> Result<Vec<PendingQuery>, UpstreamError> {
+        let result = self.call(
+            CP_METHOD_QUERIES_PENDING,
+            json!({ "device_token": token.expose_secret() }),
+        )?;
+        let Some(items) = result.get("queries").and_then(Value::as_array) else {
+            return Err(UpstreamError::Unreachable(
+                "queries.pending answered without a queries array".into(),
+            ));
+        };
+        Ok(items
+            .iter()
+            .filter_map(
+                |item| match serde_json::from_value::<PendingQuery>(item.clone()) {
+                    Ok(query) => Some(query),
+                    Err(e) => {
+                        eprintln!(
+                            "punard: dropping an unparseable pending query ({e}) — a question \
+                         this build cannot read is a question it must not answer"
+                        );
+                        None
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// M10: `queries.answer {device_token, query_id, answer}` — post back
+    /// what `punar-agentd` decided, **verbatim**.
+    ///
+    /// `answer` is an opaque [`Value`] on purpose. punard did not build it
+    /// and does not understand it; typing it here would create a place
+    /// where a courier could reshape a payload, and the whole point of
+    /// milestone-10.md section 7.3 is that no such place exists.
+    pub fn queries_answer(
+        &self,
+        token: &Redacted<String>,
+        query_id: &str,
+        answer: &Value,
+    ) -> Result<(), UpstreamError> {
+        self.call(
+            CP_METHOD_QUERIES_ANSWER,
+            json!({
+                "device_token": token.expose_secret(),
+                "query_id": query_id,
+                "answer": answer,
+            }),
+        )
+        .map(|_| ())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +341,54 @@ pub struct Enrollment {
     /// SHA-256 hex of the last successfully reported inventory (the hash
     /// gate, milestone-5.md section 6).
     pub last_inventory_hash: Option<String>,
+    /// M10: the remote-query scopes the **organization asked for at
+    /// enrollment**, taken from the org document and written here once
+    /// (milestone-10.md section 9.2).
+    ///
+    /// This array is the middle term of the authorization intersection, and
+    /// `punar-agentd` reads it **from this file itself** — never from the
+    /// request, never from anything punard passes it. That is what makes
+    /// SPEC section 59.4 hold: a compromised control plane cannot talk the
+    /// endpoint into exceeding what enrollment established, because the
+    /// endpoint does not listen to it on this subject.
+    ///
+    /// `#[serde(default)]` so an `enrollment.json` written by the M5/M9
+    /// build still loads — and defaults to the **empty set**, which grants
+    /// nothing. An organization that never asked for a scope never gets
+    /// one.
+    #[serde(default)]
+    pub remote_query_scopes: Vec<String>,
+    /// M10: the last remote query this device answered or refused, for
+    /// `enroll.status`. Metadata only — never a payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_query: Option<LastQueryRecord>,
+}
+
+/// The `enroll.status` view of the most recent remote query
+/// (milestone-10.md section 13.2). Three fields, none of which is data
+/// about the user's work: when, at what scope, and what was decided. The
+/// full record — including who asked — is the user's own
+/// `punarctl privacy queries`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastQueryRecord {
+    pub at: String,
+    pub scope: String,
+    pub decision: String,
 }
 
 impl Enrollment {
+    /// The granted scopes as a parsed, closed [`ScopeSet`]. Values this
+    /// build has no name for grant nothing, and are not silently promoted
+    /// to anything that does.
+    pub fn granted_scopes(&self) -> ScopeSet {
+        let values: Vec<Value> = self
+            .remote_query_scopes
+            .iter()
+            .map(|s| Value::String(s.clone()))
+            .collect();
+        ScopeSet::parse_json(Some(&Value::Array(values))).0
+    }
+
     /// The policy ids recorded at enrollment (file stem = policy id by the
     /// enrollment chain's own naming rule).
     pub fn policy_ids(&self) -> Vec<String> {
@@ -464,6 +579,8 @@ mod tests {
             policy_files: vec!["eng-baseline-v12.json".into()],
             last_sync: LastSyncRecord::default(),
             last_inventory_hash: None,
+            remote_query_scopes: vec!["inventory".into(), "authority".into()],
+            last_query: None,
         }
     }
 
@@ -643,6 +760,60 @@ mod tests {
         let degraded = inventory_body(&absent, "h", []);
         assert_eq!(degraded["os"]["id"], "unknown");
         assert_eq!(degraded["kernel"], "unknown");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the grant round-trips, and an `enrollment.json` written by an
+    /// earlier build still loads — defaulting to the **empty set**, which
+    /// grants nothing. An organization that never asked for a scope never
+    /// gets one (milestone-10.md section 9.2).
+    #[test]
+    fn the_remote_query_grant_round_trips_and_defaults_to_nothing() {
+        let dir = tmp("scopes");
+        let path = dir.join("enrollment.json");
+        let enrollment = sample_enrollment();
+        save_enrollment(&path, &enrollment).unwrap();
+        let loaded = load_enrollment(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.granted_scopes().as_words(),
+            ["inventory", "authority"]
+        );
+
+        // An M5/M9-shaped file: no `remote_query_scopes` key at all.
+        let mut raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("remote_query_scopes");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let legacy = load_enrollment(&path).unwrap().unwrap();
+        assert!(legacy.remote_query_scopes.is_empty());
+        assert!(
+            legacy.granted_scopes().is_empty(),
+            "an absent key is the empty set, never a permissive default"
+        );
+
+        // A value this build has no name for grants nothing and is not
+        // silently promoted to anything that does.
+        raw.as_object_mut().unwrap().insert(
+            "remote_query_scopes".to_string(),
+            json!(["inventory", "telepathy", "all", "*"]),
+        );
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let odd = load_enrollment(&path).unwrap().unwrap();
+        assert_eq!(odd.granted_scopes().as_words(), ["inventory"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The grant file has no field that could carry a device token, and the
+    /// query methods have no field that could carry a payload. Privacy in
+    /// the types, on the transport side.
+    #[test]
+    fn the_enrollment_store_still_holds_no_secret_after_m10() {
+        let dir = tmp("nosecret");
+        let path = dir.join("enrollment.json");
+        save_enrollment(&path, &sample_enrollment()).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("token"), "{raw}");
+        assert!(raw.contains("remote_query_scopes"), "{raw}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

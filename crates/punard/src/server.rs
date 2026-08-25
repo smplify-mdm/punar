@@ -34,13 +34,14 @@ use punar_common::ipc::{
     ApprovalsResolveParams, AuditStatus, AuditTailParams, CapabilitiesGetParams,
     CapabilitiesSetParams, CapabilityCompliance, Classification as WireClassification,
     ComplianceBlock, ComplianceState, EnrollStartParams, EnrollStartResult, EnrollStatusResult,
-    EnrollStopResult, ErrorCode, FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method,
-    Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
+    EnrollStopResult, ErrorCode, FirstSync, IpcError, LastQuery, LastSync, MAX_REQUEST_LINE_BYTES,
+    Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
     PolicyExplainParams, PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams,
     PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
     ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
     StatusResult,
 };
+use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
@@ -50,9 +51,10 @@ use crate::approvals::{self, ApprovalStore};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
 use crate::enroll::{
-    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources, LastSyncRecord,
-    OrgRecord, StatusSummary, UpstreamError, compliance_report_body, inventory_body,
-    load_device_token, load_enrollment, save_device_token, save_enrollment, write_status_summary,
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
+    LastQueryRecord, LastSyncRecord, OrgRecord, StatusSummary, UpstreamError,
+    compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
+    save_enrollment, write_status_summary,
 };
 use crate::policy::{
     EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
@@ -69,6 +71,10 @@ use m9::MutationAuthority;
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
+/// M10 `--trigger` value punard sends to the data owner on an enrollment
+/// transition (milestone-10.md sections 3.3, 13.1).
+pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
+
 /// Audit `resource` for the M5 `enroll.sync` transition events.
 pub const RESOURCE_CONTROL_PLANE: &str = "control_plane";
 
@@ -153,6 +159,11 @@ pub struct DaemonConfig {
     /// user. 1000 in the image (`punar`); injectable for tests. Not a
     /// presence check: see `Inner::console_user`.
     pub console_uid: u32,
+    /// M10: the sibling `punar-agentd` socket — the single inter-daemon
+    /// edge (milestone-10.md section 7.3). **Outbound only.** punard opens
+    /// no listener for it, agentd never calls back, and the graph stays a
+    /// DAG. Injectable for tests / overridable via `PUNAR_AGENTD_SOCKET`.
+    pub agentd_socket: PathBuf,
 }
 
 impl DaemonConfig {
@@ -177,6 +188,7 @@ impl DaemonConfig {
             approvals_file,
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
+            agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
         }
     }
 }
@@ -1677,6 +1689,26 @@ impl Inner {
                 UpstreamError::Unreachable("the organization document is missing id/name".into()),
             )));
         };
+        // M10 (milestone-10.md section 9.2): the remote-query grant is read
+        // out of the organization document **once, here, at enrollment**,
+        // and written into `enrollment.json`. It is never taken from a
+        // query, never widened at runtime, and never passed to the data
+        // owner — agentd reads the file itself. An org document with no
+        // `remote_query_scopes` grants nothing, and that is the correct
+        // default: an organization that never asked for a scope never gets
+        // one.
+        let remote_query_scopes: Vec<String> = org_doc
+            .get("enrollment")
+            .and_then(|e| e.get("remote_query_scopes"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let org = OrgRecord {
             display_name: field(&org_doc, &["enrollment", "display_name"])
                 .unwrap_or_else(|| org_name.clone()),
@@ -1791,6 +1823,8 @@ impl Inner {
             policy_files: policy_files.clone(),
             last_sync: LastSyncRecord::default(),
             last_inventory_hash: None,
+            remote_query_scopes,
+            last_query: None,
         };
         let rollback_files = |files: &[String]| {
             for file in files {
@@ -1818,6 +1852,14 @@ impl Inner {
         *self.org_layers.lock().unwrap() = loaded.layers;
         self.reload_ai_authority();
         self.recompute_effective();
+
+        // M10 trigger 3 (milestone-10.md section 3.3): enrolling changes
+        // what may be asked about this device, so the data owner gets a
+        // chance to refresh its view before the first query arrives.
+        // Fire-and-forget, 2 s, non-fatal — enrollment must never fail
+        // because a bookkeeping daemon was busy.
+        self.agentd()
+            .scan_on_enrollment_transition(SCAN_TRIGGER_ENROLL);
 
         // One full section 42 pass. Its sync hook (now enrolled) performs
         // the first compliance + inventory report; failures there queue
@@ -1856,6 +1898,9 @@ impl Inner {
     /// peer, not audited. Never the token.
     fn handle_enroll_status(&self) -> EnrollStatusResult {
         match &*self.enrollment.lock().unwrap() {
+            // Personal device: no organization, therefore no grant and no
+            // query history — not an empty grant that could be widened, but
+            // the absence of the concept (milestone-10.md section 11).
             None => EnrollStatusResult {
                 enrolled: false,
                 org: None,
@@ -1863,6 +1908,8 @@ impl Inner {
                 enrolled_at: None,
                 attestation: None,
                 last_sync: None,
+                remote_query_scopes: None,
+                last_query: None,
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -1875,6 +1922,15 @@ impl Inner {
                     result: e.last_sync.result.clone(),
                     pending: self.pending_compliance.load(Ordering::SeqCst)
                         || self.pending_inventory.load(Ordering::SeqCst),
+                }),
+                // The grant, read back from the same array agentd enforces
+                // (SPEC section 24.2 guarantee 8) — not a second copy that
+                // could drift from the one that decides.
+                remote_query_scopes: Some(e.granted_scopes().as_words()),
+                last_query: e.last_query.as_ref().map(|q| LastQuery {
+                    at: q.at.clone(),
+                    scope: q.scope.clone(),
+                    decision: q.decision.clone(),
                 }),
             },
         }
@@ -1953,6 +2009,11 @@ impl Inner {
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
         self.reload_ai_authority();
+        // M10 trigger 3, the other half: unenrolling changes what may be
+        // asked back to *nothing*, and answering a stale view afterwards
+        // would be worse than answering a fresh one late.
+        self.agentd()
+            .scan_on_enrollment_transition(SCAN_TRIGGER_ENROLL);
         self.pending_compliance.store(false, Ordering::SeqCst);
         self.pending_inventory.store(false, Ordering::SeqCst);
         *self.last_sync_outcome.lock().unwrap() = None;
@@ -2058,6 +2119,15 @@ impl Inner {
         self.pending_inventory
             .store(inventory_outcome == "unreachable", Ordering::SeqCst);
 
+        // M10: the query pull, on the same hook and the same cadence. It is
+        // deliberately last: compliance and inventory are this device's
+        // obligations, and answering questions is a courtesy that must not
+        // delay them.
+        let last_query = match &token {
+            Some(token) => self.drain_pending_queries(&client, token),
+            None => None,
+        };
+
         // Transition-only audit (milestone-5.md section 7): once on
         // reachable→unreachable, once on recovery — never one event per
         // 120 s retry.
@@ -2104,10 +2174,119 @@ impl Inner {
                 result: Some(overall.to_string()),
             };
             current.last_inventory_hash = new_hash;
+            if last_query.is_some() {
+                current.last_query = last_query;
+            }
             if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
                 eprintln!("punard: could not persist enrollment sync state: {e}");
             }
         }
+    }
+
+    /// A client for the single inter-daemon edge. Constructed per use — it
+    /// is one connection per call, like every other Punar client.
+    fn agentd(&self) -> crate::agentd::AgentdClient {
+        crate::agentd::AgentdClient::new(&self.cfg.agentd_socket)
+    }
+
+    /// M10: the query pull, riding the M5 sync piggyback
+    /// (milestone-10.md section 7.2).
+    ///
+    /// ```text
+    /// reconcile pass ends
+    ///   └─ enrolled? ─ no ─→ nothing            (gate A — M5's existing gate)
+    ///                 └ yes ─→ compliance.report          (M5)
+    ///                        ├─ inventory.report          (M5, hash-gated)
+    ///                        ├─ queries.pending  {device_token}
+    ///                        └─ for each: query.answer → queries.answer
+    /// ```
+    ///
+    /// **No new timer, no new listener, no new wakeup.** One extra request
+    /// pair on a hook that already runs, at a cadence this device already
+    /// chose. Answer latency is therefore one reconcile period plus the
+    /// round trip, and the waiting happens on the administrator's side —
+    /// which is where a request that a device did not initiate ought to
+    /// wait.
+    ///
+    /// Offline behaviour is M5 section 7 unchanged: an unreachable control
+    /// plane means the pull simply does not happen. Queries stay pending on
+    /// the control plane and are answered on the next successful pass. No
+    /// spool, no queue, no new state.
+    ///
+    /// The courier discipline, enforced here and worth reading as a whole:
+    /// punard fetches, hands over, and posts back. If the data owner cannot
+    /// be reached, or answers with an error frame, **punard produces
+    /// nothing** — no synthesized refusal, no "assume denied", no partial
+    /// answer. The query stays pending and is retried. The only bytes that
+    /// ever reach the control plane are the bytes `punar-agentd` returned.
+    fn drain_pending_queries(
+        &self,
+        client: &ControlPlaneClient,
+        token: &Redacted<String>,
+    ) -> Option<LastQueryRecord> {
+        let pending = match client.queries_pending(token) {
+            Ok(pending) => pending,
+            Err(UpstreamError::Unreachable(_)) => return None,
+            Err(UpstreamError::Refused { code, message }) => {
+                // `unknown_method` here means the control plane predates
+                // M10; anything else is a refusal on its side. Either way
+                // there is nothing to answer, and nothing to record.
+                eprintln!(
+                    "punard: queries.pending refused by the control plane: {code}: {message}"
+                );
+                return None;
+            }
+        };
+        if pending.is_empty() {
+            return None;
+        }
+
+        let agentd = self.agentd();
+        let mut last: Option<LastQueryRecord> = None;
+        for query in pending.into_iter().take(MAX_QUERIES_PER_SYNC) {
+            // The data owner decides. punard hands over the question as it
+            // was fetched — no grant, no role, no policy, nothing that
+            // could widen the answer (SPEC section 59.4).
+            let answer = match agentd.query_answer(&query) {
+                Ok(answer) => answer,
+                Err(e) => {
+                    eprintln!(
+                        "punard: punar-agentd did not decide query {} ({e}) — it stays \
+                         pending and is retried next pass; punard never answers on its \
+                         behalf",
+                        query.query_id
+                    );
+                    continue;
+                }
+            };
+            // Posted back byte-identical. punard does not read the payload
+            // and has no field in which it could edit one.
+            if let Err(e) = client.queries_answer(token, &query.query_id, &answer) {
+                let why = match e {
+                    UpstreamError::Unreachable(why) => why,
+                    UpstreamError::Refused { code, message } => format!("{code}: {message}"),
+                };
+                eprintln!(
+                    "punard: could not post the answer to query {}: {why} — it stays \
+                     pending",
+                    query.query_id
+                );
+                continue;
+            }
+            // Metadata only, for `enroll.status`: when, at what scope, and
+            // what the **device** decided. Never the payload — one exported
+            // copy is enough to protect (milestone-10.md section 10.1).
+            last = Some(LastQueryRecord {
+                at: utc_now_rfc3339(),
+                scope: query.requested_scope.clone(),
+                decision: answer
+                    .get("authorization_decision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            });
+        }
+        last
     }
 
     /// Rewrite the ipc.md section 9 summary file when the tuple changed

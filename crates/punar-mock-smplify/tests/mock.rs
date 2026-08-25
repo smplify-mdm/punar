@@ -485,15 +485,39 @@ fn inventory_reports_append_to_their_own_log() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn admin_methods_are_reserved_for_m10() {
+fn the_m5_reserved_admin_names_are_real_and_role_gated() {
+    // M5 asserted that `admin.devices` / `admin.device` answered
+    // `unknown_method` and named Milestone 10. M10 fulfils that placeholder,
+    // so the assertion is restated as the **invariant** it was protecting:
+    // the reserved names went to the SPEC section 51 admin surface and
+    // nowhere else, and they are gated on an admin identity — they never
+    // became an open surface.
     let mock = TestMock::start("admin");
-    for method in ["admin.devices", "admin.device"] {
-        let error = mock.call_err(method, json!({}), "unknown_method");
-        assert_eq!(error["details"]["method"], method);
-        assert_eq!(error["details"]["reserved_for"], "M10");
+    let stranger = "attacker@evil.example";
+    for (method, params) in [
+        ("admin.devices", json!({"admin": stranger})),
+        (
+            "admin.device",
+            json!({"admin": stranger, "device_id": "dev_it01"}),
+        ),
+        (
+            "admin.ai_query",
+            json!({"admin": stranger, "device_id": "dev_it01", "scope": "inventory"}),
+        ),
+        (
+            "admin.query_result",
+            json!({"admin": stranger, "query_id": "qry_0"}),
+        ),
+        ("admin.fleet", json!({"admin": stranger})),
+    ] {
+        // No identity at all is a params error, never a silent success.
+        mock.call_err(method, json!({}), "invalid_params");
+        // An identity the org fixture does not know is refused, and the
+        // refusal says the identity was never verified in the first place.
+        let error = mock.call_err(method, params, "denied");
         assert!(
-            error["message"].as_str().unwrap().contains("Milestone 10"),
-            "reserved-name message: {error}"
+            error["message"].as_str().unwrap().contains("no IdP"),
+            "every admin refusal states the honesty boundary: {error}"
         );
     }
 }

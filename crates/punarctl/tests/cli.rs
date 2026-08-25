@@ -1018,6 +1018,50 @@ fn fixture_agents_list() -> Value {
     })
 }
 
+/// The `alerts.list` example (contract section 17.1): one card per
+/// signature, in the milestone-10.md section 5.3 field list. Two rows so
+/// `--all` has something to include and something to leave out.
+fn fixture_alerts_list(include_dismissed: bool) -> Value {
+    let live = json!({
+        "alert_id": "alr_9f3c2a10bb41",
+        "signature_id": "sig_7a18557a94d2",
+        "agent": "foo-agent",
+        "executable": "/home/punar/Downloads/foo-agent",
+        "owner": "punar",
+        "first_seen": "2026-08-27T09:59:55Z",
+        "last_seen": "2026-08-27T10:00:02Z",
+        "live": 1,
+        "detection_id": "agt_d11e0aa7c402",
+        "signature": "downloads-foo-agent",
+        "policy_citation": "personal-defaults",
+        "state": "live",
+        "raised_at": "2026-08-27T09:59:55Z"
+    });
+    let filed = json!({
+        "alert_id": "alr_2b7710dd0c93",
+        "signature_id": "sig_3c99ab120fe4",
+        "agent": "bar-agent",
+        "executable": "/home/punar/Downloads/bar-agent",
+        "owner": "punar",
+        "first_seen": "2026-08-26T21:10:00Z",
+        "last_seen": "2026-08-26T22:40:00Z",
+        "live": 0,
+        "detection_id": "agt_aa02bb44cc66",
+        "signature": "downloads-agent-like",
+        "policy_citation": "personal-defaults",
+        "state": "dismissed",
+        "raised_at": "2026-08-26T21:10:00Z",
+        "cleared_at": "2026-08-26T22:40:00Z",
+        "dismissed_at": "2026-08-26T22:41:00Z"
+    });
+    let alerts = if include_dismissed {
+        json!([live, filed])
+    } else {
+        json!([live])
+    };
+    json!({"alerts": alerts, "quiet_window_secs": 86400})
+}
+
 /// The `agents.get` example (section 10.2): the row plus `scope_unit` and
 /// the display-level authority summary captured at launch (section 10.3).
 fn fixture_agent_get(session_id: &str) -> Option<Value> {
@@ -1129,16 +1173,112 @@ fn fixture_ledger_purge() -> Value {
 
 /// The mock `punar-agentd`: the same envelope, the closed M7 method table,
 /// and the reserved-name answers the contract prescribes (section 10.2).
+/// The M10 `queries.list` result: two answered, one refused — the shape
+/// milestone-10.md section 10.3 draws. Note what it does **not** carry:
+/// no payloads, no paths, no pids. The record says who asked what and what
+/// was decided, and that is all it is able to say.
+fn fixture_queries_list() -> Value {
+    json!({
+        "enrolled": true,
+        "organization": "acme.com",
+        "policy_citation": "Acme Engineering · eng-ai-v3",
+        "granted_scopes": ["inventory", "authority"],
+        "admin_identity_verified": false,
+        "never_answered": [
+            "prompts and conversation content",
+            "source code, file contents, diffs",
+            "file paths (zone classes only)",
+            "command lines, argv, environment variables",
+            "secret values and credential material",
+            "audit event payloads",
+            "anything outside the granted scope"
+        ],
+        "storage": {
+            "path": "/var/lib/punar/agents/queries.jsonl",
+            "retention_days": 365,
+            "max_records": 10000,
+            "purged_by_privacy_purge": false
+        },
+        "queries": [
+            {"query_id": "qry_7c1a00000001", "received_at": "2026-08-25T13:40:00Z",
+             "answered_at": "2026-08-25T13:40:02Z", "requesting_admin": "cio@acme.com",
+             "admin_identity_verified": false, "organization": "acme.com",
+             "device_id": "dev_1", "requested_scope": "authority",
+             "granted_scope": "authority", "authorization_decision": "allow",
+             "result_category": "answered",
+             "record_counts": {"sessions": 1, "detections": 0, "security_events": 0},
+             "audit_event_id": "evt_609"},
+            {"query_id": "qry_7c1a00000002", "received_at": "2026-08-25T13:58:00Z",
+             "answered_at": "2026-08-25T13:58:03Z", "requesting_admin": "cio@acme.com",
+             "admin_identity_verified": false, "organization": "acme.com",
+             "device_id": "dev_1", "requested_scope": "inventory",
+             "granted_scope": "inventory", "authorization_decision": "allow",
+             "result_category": "answered",
+             "record_counts": {"sessions": 1, "detections": 1, "security_events": 0},
+             "audit_event_id": "evt_610"},
+            {"query_id": "qry_7c1a00000003", "received_at": "2026-08-25T14:02:09Z",
+             "answered_at": "2026-08-25T14:02:11Z", "requesting_admin": "secops@acme.com",
+             "admin_identity_verified": false, "organization": "acme.com",
+             "device_id": "dev_1", "requested_scope": "resource_summary",
+             "granted_scope": null, "authorization_decision": "deny",
+             "refusal_reason": "out_of_scope", "result_category": "refused",
+             "record_counts": {"sessions": 0, "detections": 0, "security_events": 0},
+             "audit_event_id": "evt_611"}
+        ]
+    })
+}
+
 fn agents_respond(request: &Value) -> Result<Value, Value> {
     assert_eq!(request["v"], json!(1), "client must send v: 1");
     let method = request["method"].as_str().expect("method must be a string");
     match method {
-        "agents.list" | "agents.scan" => {
+        "agents.list" => {
             assert!(
                 request.get("params").is_none(),
                 "no-param methods omit params entirely"
             );
             Ok(fixture_agents_list())
+        }
+        // M10: `agents.scan` may carry a trigger, and an absent one means
+        // `manual` — decided by the daemon, never filled in by the CLI
+        // (milestone-10.md section 3.4).
+        "agents.scan" => {
+            if let Some(params) = request.get("params") {
+                let trigger = params["trigger"].as_str().expect("trigger is a string");
+                assert!(
+                    ["manual", "timer", "register", "enroll"].contains(&trigger),
+                    "the trigger vocabulary is closed: {trigger}"
+                );
+            }
+            Ok(fixture_agents_list())
+        }
+        "alerts.list" => {
+            let include = request
+                .get("params")
+                .and_then(|p| p.get("include_dismissed"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(fixture_alerts_list(include))
+        }
+        "alerts.dismiss" => {
+            let id = request["params"]["alert_id"]
+                .as_str()
+                .expect("alert_id param")
+                .to_string();
+            if id == "alr_9f3c2a10bb41" {
+                Ok(json!({
+                    "dismissed": true,
+                    "alert_id": id,
+                    "dismissed_at": "2026-08-27T10:05:00Z",
+                    "suppression_changed": false
+                }))
+            } else {
+                Err(json!({
+                    "code": "not_found",
+                    "message": format!("No alert with id {id:?} is in the register."),
+                    "details": {"alert_id": id}
+                }))
+            }
         }
         "agents.get" => {
             let id = request["params"]["session_id"]
@@ -1192,6 +1332,9 @@ fn agents_respond(request: &Value) -> Result<Value, Value> {
                 })),
             }
         }
+        // M10 (contract section 13.1): the user's own query log. Readable
+        // by any admitted peer — SPEC section 24.2.
+        "queries.list" => Ok(fixture_queries_list()),
         // M8 (contract section 12.3): exactly one of session_id / all.
         "ledger.purge" => {
             let params = request.get("params");
@@ -1272,7 +1415,20 @@ fn agents_list_renders_the_registry_and_says_suspected() {
         text.contains("DETECTION IS HEURISTIC — SUSPECTED, NOT CERTAIN"),
         "{text}"
     );
-    assert!(text.contains("MILESTONE 10"), "{text}");
+    // M7 promised "continuous detection arrives in Milestone 10" here and
+    // this test asserted that string. M10 shipped the timer, so the
+    // footer now states the INVARIANT the promise was standing in for:
+    // the cadence is real, and sampling detection has a hole that no
+    // cadence closes (milestone-10.md section 3.2).
+    assert!(text.contains("CONTINUOUS · EVERY 4 MIN"), "{text}");
+    assert!(
+        text.contains("STARTS AND EXITS INSIDE ONE INTERVAL IS NOT SEEN"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("ARRIVES IN MILESTONE 10"),
+        "the deferral was fulfilled; the footer must not still defer: {text}"
+    );
     assert!(text.contains("1 SESSION · 1 SUSPECTED"), "{text}");
     // Unmanaged-first: no org chrome on a personal device.
     assert!(!text.to_lowercase().contains("organization"), "{text}");
@@ -1292,6 +1448,96 @@ fn agents_scan_forces_a_pass_and_renders_the_list_view() {
     let output = run_agents(&agentd, &["--json", "agents", "scan"]);
     let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
     assert_eq!(value, fixture_agents_list());
+}
+
+/// M10: the alert register, in the same voice as the D-009 card. The
+/// words are the assertion — a surface that renders a red row and implies
+/// something was blocked is worse than no surface (law 4, spec 1.22).
+#[test]
+fn agents_alerts_renders_the_register_and_never_claims_an_action() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "alerts"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains("P U N A R   ·   A I   A L E R T S"), "{text}");
+    // Suspected, never certain (spec 23) — in the header and in the row.
+    assert!(text.to_uppercase().contains("SUSPECTED"), "{text}");
+    assert!(text.contains("ALR_9F3C2A10BB41"), "{text}");
+    // The executable path is Level-1 LOCAL data: the user sees it here,
+    // and the export carries a zone class instead (section 8.3).
+    assert!(text.contains("/home/punar/Downloads/foo-agent"), "{text}");
+    assert!(text.contains("downloads-foo-agent"), "{text}");
+    assert!(text.contains("sig_7a18557a94d2"), "{text}");
+    assert!(text.to_uppercase().contains("POLICY"), "{text}");
+    // `fmt::rows` uppercases label and value — the standing lesson that
+    // every rendered-word assertion is case-insensitive.
+    assert!(text.to_uppercase().contains("PERSONAL DEFAULTS"), "{text}");
+    // The anti-nag rule is stated from the daemon's own value.
+    assert!(text.to_uppercase().contains("24 H"), "{text}");
+    // Law 4, in words, because a user who believes they are protected
+    // when they are not is worse off than one who knows.
+    assert!(
+        text.to_uppercase().contains("NOTHING WAS BLOCKED"),
+        "{text}"
+    );
+    // The plate's `→ api.foo.ai` is a datum no code produces before M12.
+    assert!(!text.contains("api.foo.ai"), "{text}");
+    // And no dead buttons anywhere: M10 renders no action it cannot take.
+    assert!(!text.to_uppercase().contains("BLOCK NETWORK"), "{text}");
+    // Live cards only, unless asked.
+    assert!(!text.contains("bar-agent"), "{text}");
+
+    let output = run_agents(&agentd, &["agents", "alerts", "--all"]);
+    let text = stdout(&output);
+    assert!(text.contains("bar-agent"), "{text}");
+    assert!(text.to_uppercase().contains("NOT DELETED"), "{text}");
+}
+
+/// Dismissal files a card. It never destroys one, and it never moves
+/// suppression — because there is none to move (section 5.2).
+#[test]
+fn agents_alerts_dismiss_files_the_card_and_says_that_plainly() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(
+        &agentd,
+        &["agents", "alerts", "dismiss", "alr_9f3c2a10bb41"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output).to_uppercase();
+    assert!(text.contains("DISMISSED"), "{text}");
+    assert!(text.contains("FILED TO THE RECORD"), "{text}");
+    assert!(text.contains("NOT DELETED"), "{text}");
+    assert!(text.contains("UNCHANGED"), "{text}");
+
+    let output = run_agents(&agentd, &["agents", "alerts", "dismiss", "alr_nosuchcard"]);
+    assert_eq!(output.status.code(), Some(1), "not_found must exit 1");
+    assert!(
+        stderr(&output).contains("No alert with id"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// The trigger travels to the daemon or is absent; the CLI never fills in
+/// a default, because a CLI that labelled a typed command as a timer would
+/// destroy the one property `m10-check` group 3 exists to prove.
+#[test]
+fn agents_scan_carries_the_trigger_and_invents_none() {
+    let agentd = start_agentd_mock();
+    for trigger in ["manual", "timer", "register", "enroll"] {
+        let output = run_agents(&agentd, &["agents", "scan", "--trigger", trigger]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{trigger}: {}",
+            stderr(&output)
+        );
+    }
+    // The vocabulary is closed at the CLI too: an invented trigger never
+    // reaches the socket.
+    let output = run_agents(&agentd, &["agents", "scan", "--trigger", "cron"]);
+    assert_ne!(output.status.code(), Some(0));
 }
 
 #[test]
@@ -1469,6 +1715,51 @@ fn debug_probes_on_the_agentd_socket_get_unknown_method() {
         assert_eq!(output.status.code(), Some(1), "{method}");
         assert!(stderr(&output).contains("does not exist"), "{method}");
     }
+
+    // M10 routing (contract section 10.5): the alert register and the two
+    // remote-query methods belong to the daemon that owns the data, and a
+    // bare probe must reach it WITHOUT `--socket`. If it reached punard
+    // instead, the answer would still be `unknown_method` — from the wrong
+    // daemon — and a probe that hides which thing said no is worse than no
+    // probe. The mock agentd here answers these names, so a mis-route
+    // fails loudly rather than looking like a refusal.
+    let output = run_agents(&agentd, &["debug", "rpc", "alerts.list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let listed: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(listed["quiet_window_secs"], json!(86400), "{listed}");
+
+    // `--params` makes a negative probe SPECIFIC: this is a well-formed
+    // question refused, not a request with no params rejected.
+    let output = run_agents(
+        &agentd,
+        &[
+            "debug",
+            "rpc",
+            "alerts.dismiss",
+            "--params",
+            r#"{"alert_id":"alr_nosuchcard"}"#,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("No alert with id"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A typo in the probe is refused by the CLI, before any socket is
+    // dialled: a daemon answering `invalid_params` to a broken --params
+    // would look like a daemon refusing the method.
+    let output = run_agents(
+        &agentd,
+        &["debug", "rpc", "alerts.list", "--params", "{oops"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not valid JSON"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,7 +1825,13 @@ fn agents_access_renders_the_ledger_register_with_counts_and_honest_gaps() {
         text.contains("punarctl privacy purge --session agt_4f21c09ab3e1"),
         "{text}"
     );
-    assert!(text.contains("Milestone 10"), "{text}");
+    // M8 wrote the `REMOTE QUERY` row as a placeholder naming Milestone 10.
+    // M10 fulfils it, so the assertion is restated as the invariant the
+    // placeholder was protecting: nothing is uploaded continuously, and the
+    // user has a command that shows every question that was asked.
+    assert!(text.contains("REMOTE QUERY"), "{text}");
+    assert!(text.contains("never continuous"), "{text}");
+    assert!(text.contains("punarctl privacy queries"), "{text}");
 
     // Nothing section 21.2 forbids can appear, because nothing carries it.
     assert!(!text.contains("/home/"), "{text}");
@@ -1605,10 +1902,28 @@ fn privacy_ledger_states_what_is_recorded_and_what_never_is() {
         text.contains("punarctl privacy purge --session <id>"),
         "{text}"
     );
+    // M10: the device-wide row is live — three queries, one refused, read
+    // from the daemon's own log rather than from a CLI-side constant.
     assert!(text.contains("REMOTE QUERY"), "{text}");
-    assert!(text.contains("no upload path exists"), "{text}");
-    // A detection has no ledger in M8, and the reason is structural.
-    assert!(text.contains("MILESTONE 10"), "{text}");
+    assert!(text.contains("3 queries · 1 refused"), "{text}");
+    assert!(text.contains("punarctl privacy queries"), "{text}");
+    assert!(
+        !text.contains("no upload path exists"),
+        "the M8 placeholder is gone, not merely hidden: {text}"
+    );
+    // M8 rendered "a detection has no ledger · Milestone 10" here and this
+    // test asserted the milestone tag. M10 landed the unknown-agent
+    // ledger, so the invariant to assert is the one that outlives both
+    // milestones: a suspected process is NAMED on this surface, its
+    // ledger's shape is stated, and its shorter retention window is
+    // stated with it (milestone-10.md sections 6.3, 6.5).
+    assert!(text.contains("SUSPECTED AI PROCESS"), "{text}");
+    assert!(text.contains("BOUNDED DETECTION LEDGER"), "{text}");
+    assert!(text.contains("7 DAYS AFTER IT CLEARS"), "{text}");
+    assert!(
+        !text.contains("NO ACCESS LEDGER IN MILESTONE 8"),
+        "the open question was closed; the surface must not still pose it: {text}"
+    );
 
     // One session: the same register, opened from the privacy side.
     let output = run_agents(&agentd, &["privacy", "ledger", "agt_4f21c09ab3e1"]);
@@ -1621,6 +1936,176 @@ fn privacy_ledger_states_what_is_recorded_and_what_never_is() {
         &["privacy", "ledger", "--session", "agt_4f21c09ab3e1"],
     );
     assert_eq!(stdout(&flagged), stdout(&output));
+}
+
+/// M10 (milestone-10.md section 10.3): the SPEC section 24.2 command.
+/// Every question, who asked it, what scope, and what this device decided —
+/// with the honesty label on the identity and the never-answered list as
+/// prominent as the record itself.
+#[test]
+fn privacy_queries_shows_who_asked_and_what_was_refused() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["privacy", "queries"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains("P U N A R   ·   P R I V A C Y"), "{text}");
+    assert!(text.contains(RULE), "{text}");
+    assert!(text.contains("WHO ASKED ABOUT THIS DEVICE"), "{text}");
+    assert!(
+        text.contains("3 QUERIES · 2 ANSWERED · 1 REFUSED"),
+        "{text}"
+    );
+
+    // Each row: when, who, at what scope, and the verdict.
+    let refused = text
+        .lines()
+        .find(|l| l.contains("SECOPS@ACME.COM"))
+        .unwrap_or_default();
+    assert!(refused.contains("RESOURCE_SUMMARY"), "{text}");
+    assert!(refused.contains("refused · out of scope"), "{text}");
+    assert!(refused.contains("evt_611"), "{text}");
+
+    let answered = text
+        .lines()
+        .find(|l| l.contains("13:58") && l.contains("CIO@ACME.COM"))
+        .unwrap_or_default();
+    assert!(answered.contains("INVENTORY"), "{text}");
+    // The *shape* of what left, never a second copy of the contents.
+    assert!(answered.contains("1 session"), "{text}");
+    assert!(answered.contains("1 detection"), "{text}");
+
+    // SPEC section 9.1's honesty label, on every rendering of an admin.
+    assert!(
+        text.contains("asserted by acme.com · not verified by this device"),
+        "{text}"
+    );
+    // The refusal list, and the grant the user can check answers against.
+    assert!(text.contains("NEVER ANSWERED"), "{text}");
+    assert!(text.contains("prompts"), "{text}");
+    assert!(text.contains("secret values"), "{text}");
+    assert!(text.contains("outside the granted scope"), "{text}");
+    assert!(text.contains("GRANTED SCOPES"), "{text}");
+    assert!(text.contains("inventory · authority"), "{text}");
+    assert!(text.contains("Acme Engineering · eng-ai-v3"), "{text}");
+    // Where it lives, and the boundary that keeps purge from deleting it.
+    assert!(
+        text.contains("/var/lib/punar/agents/queries.jsonl"),
+        "{text}"
+    );
+    assert!(text.contains("kept 365 days"), "{text}");
+    assert!(
+        text.contains("NOT deleted by punarctl privacy purge"),
+        "{text}"
+    );
+
+    // Nothing SPEC 21.2 forbids can appear, because nothing carries it.
+    // ("audit event payloads" is in the *never answered* list, which is the
+    //  opposite of a leak, so the probe is for structure, not the word.)
+    assert!(!text.contains("/home/"), "{text}");
+    assert!(!text.to_lowercase().contains("cmdline"), "{text}");
+    assert!(
+        !text.contains('{') && !text.contains('}'),
+        "the log surface renders records, never an answered payload: {text}"
+    );
+}
+
+/// `--json` is the `queries.list` result verbatim — one call, one document.
+#[test]
+fn privacy_queries_json_is_the_result_verbatim() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["--json", "privacy", "queries"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_queries_list());
+}
+
+/// `--since` travels as a param; the daemon does the filtering, because the
+/// daemon owns the log. Omitted, no `params` object is sent at all
+/// (contract section 3.1).
+fn queries_since_responder(request: &Value) -> Result<Value, Value> {
+    if request["method"] == json!("queries.list") {
+        let since = request
+            .get("params")
+            .and_then(|p| p.get("since"))
+            .and_then(Value::as_str);
+        return match since {
+            Some("2026-08-25T14:00:00Z") => Ok(fixture_queries_list()),
+            other => Err(json!({
+                "code": "invalid_params",
+                "message": format!("since travelled as {other:?}, not the value typed"),
+                "details": {"param": "since"}
+            })),
+        };
+    }
+    agents_respond(request)
+}
+
+#[test]
+fn privacy_queries_since_is_a_daemon_side_filter() {
+    let agentd = start_mock_with(queries_since_responder);
+    let output = run_agents(
+        &agentd,
+        &["privacy", "queries", "--since", "2026-08-25T14:00:00Z"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the daemon saw the timestamp it was given: {}",
+        stderr(&output)
+    );
+
+    // And without the flag, the responder above sees no `since` at all and
+    // refuses — proving the CLI omits the param rather than inventing one.
+    let bare = run_agents(&agentd, &["privacy", "queries"]);
+    assert_eq!(bare.status.code(), Some(1), "{}", stdout(&bare));
+    assert!(
+        stderr(&bare).contains("since travelled as None"),
+        "{}",
+        stderr(&bare)
+    );
+}
+
+/// The personal-device sentence: calm, exit 0, no error and no upsell.
+/// Not an empty table that could read as "nobody has asked *yet*" — a
+/// statement that the path does not exist here (milestone-10.md section 11).
+fn personal_queries_responder(request: &Value) -> Result<Value, Value> {
+    if request["method"] == json!("queries.list") {
+        return Ok(json!({
+            "queries": [],
+            "enrolled": false,
+            "granted_scopes": [],
+            "admin_identity_verified": false,
+            "never_answered": [],
+            "storage": {
+                "path": "/var/lib/punar/agents/queries.jsonl",
+                "retention_days": 365,
+                "max_records": 10000,
+                "purged_by_privacy_purge": false
+            }
+        }));
+    }
+    agents_respond(request)
+}
+
+#[test]
+fn privacy_queries_on_a_personal_device_is_one_calm_line_and_exit_0() {
+    let agentd = start_mock_with(personal_queries_responder);
+    let output = run_agents(&agentd, &["privacy", "queries"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("No organization is enrolled"), "{text}");
+    assert!(text.contains("no remote-query path exists"), "{text}");
+    assert!(text.contains("nothing has ever been asked"), "{text}");
+    // fmt::note uppercases, per the Plate D-014 grammar.
+    assert!(
+        text.to_lowercase()
+            .contains("nothing listens on this device"),
+        "{text}"
+    );
+    // No error voice, no upsell, no "enroll to enable".
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(!text.to_lowercase().contains("enroll to"), "{text}");
 }
 
 #[test]
@@ -1641,7 +2126,15 @@ fn privacy_ledger_json_is_a_labelled_composed_document() {
     );
     assert_eq!(value["registry"], fixture_agents_list());
     assert_eq!(value["ledgers"][0]["access"], fixture_agents_access());
-    assert_eq!(value["remote_query"]["available"], json!(false));
+    // M8 shipped `{"available": false, "milestone": "M10"}` here, by design
+    // and with the milestone named. M10 makes it live: the block carries
+    // the log itself, and a consumer can tell "none" from "not read".
+    assert_eq!(value["remote_query"]["available"], json!(true));
+    assert_eq!(value["remote_query"]["log"], fixture_queries_list());
+    assert_eq!(
+        value["remote_query"]["command"],
+        json!("punarctl privacy queries")
+    );
     assert_eq!(value["local_only"], json!(true));
 
     // One session: a single call, so the result is verbatim.

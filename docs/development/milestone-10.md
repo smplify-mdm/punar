@@ -1589,6 +1589,326 @@ Written here, and printed on the surfaces named:
   For an unmanaged agent, Punar mediates nothing, so it observes almost
   nothing. Every empty category renders `NOT YET OBSERVED · MILESTONE n`
   — *not observed*, never *did not happen*.
-- **This document is a plan.** Nothing in §16 has been run. When M10 is
-  built, this section gains a verification subsection stating exactly
-  which gates were executed and which were not, in the M8/M9 style.
+- **This document was a plan when §1–§19 were written.** §21 is the build
+  record: what shipped, which gates were actually executed on the host,
+  and — stated plainly — that **nothing in §16 has run in a VM yet**,
+  because the CI VM is the only place `m10-check` can execute. **§22 is
+  the status of record**: the audit of the whole milestone against spec
+  76 M10, the live CI state as of 2026-08-25, and the on-disk-and-static
+  versus CI-pending split, item by item against §19.
+
+---
+
+## 21. Build record and verification (image wiring + `m10-check`)
+
+*Written to spec 1.22 by the cluster that landed the systemd wiring, the
+in-VM exercise and the host gates, on top of the detection/alert and
+remote-query clusters. What is claimed here is what was run; what was not
+run is named as such.*
+
+### 21.1 What shipped in this cluster
+
+**Image wiring** (`os/images/mkosi.profiles/desktop/mkosi.extra/`):
+
+- `usr/lib/systemd/system/punar-agentd-scan.timer` — `OnBootSec=240`,
+  `OnUnitActiveSec=240`, `AccuracySec=30`, armed by the **vendor**
+  symlink `usr/lib/systemd/system/timers.target.wants/punar-agentd-scan.timer`
+  (never `/etc`, never `is-enabled` — the M1/M4 lessons). The 240 s
+  period is an exact multiple of the shipping 120 s reconcile period, so
+  systemd coalesces the two wakeups; the unit file carries that argument
+  and the honest limitation, because a unit file is where a reader looks
+  for a cadence.
+- `usr/lib/systemd/system/punar-agentd-scan.service` — `Type=oneshot`,
+  `ExecStart=/usr/bin/punarctl agents scan --trigger timer`. The pass
+  runs through the CLI, not inside the daemon, so the timer path is the
+  same socket, authorization and audit path a human uses (§3.1).
+- `usr/lib/systemd/system/punar-m10-check.service` — root oneshot,
+  `TimeoutStartSec=15min`, **never enabled** (no `.wants` symlink),
+  started synchronously by `idle-ram.sh` after `punar-m9-check.service`
+  and before the artifact export.
+- `usr/lib/punar/m10-check.sh` — **committed 0755** (the trap that
+  silently skipped M8: a check script without the executable bit fails
+  `ExecStart` and the milestone quietly does not run).
+- **No new tmpfiles.** Everything M10 writes lands in directories that
+  already exist and already carry their modes: `/run/punar-agentd`
+  (`0750 root:punar`, M8) for `alerts.json`, and
+  `/var/lib/punar/agents` (`0700 root:root`, M7) for `detections.jsonl`,
+  `detections-index.json` and `queries.jsonl`.
+- **No new daemon**, so `PUNAR_SERVICE_UNITS` in `idle-ram.sh` is
+  unchanged (`punard.service punar-agentd.service punar-secrets.service`).
+  The scan pass is a transient `punarctl` every four minutes; counting it
+  as resident memory would be false, and the timer is deliberately **not**
+  stopped for the sampling window — budgets are measured against the
+  shipping configuration.
+- The `foo-agent` fixture staging is unchanged from M7
+  (`usr/lib/punar/foo-agent-fixture.sh`); `m10-check` installs it at
+  **two** paths so the DND breakthrough has a genuinely second signature,
+  and removes both at exit.
+
+**Host gates**: `tools/boot-test.sh` gains **phase 12** (the
+`PUNAR_M10_OK` / `PUNAR_M10_FAIL` verdict, hard-gated exactly like
+M2–M9) and **phase 12b** (the exported detection ledger replayed against
+the *unchanged* `schemas/ai-agent/ledger-summary.json` on the host,
+because the image has no JSON-Schema validator — the same split M9 uses
+for the approval document). Export timeouts rise 3600 → 4200 s (KVM) and
+7200 → 7800 s (TCG); the `desktop-test` job budget rises 125 → 135 min.
+`ci.yml` lints `m10-check.sh` and uploads `m10-report.txt`, `m10-*.json`,
+`m10-*.jsonl`, `m10-*.txt` and `punar-m10.png`.
+
+**Interface friction reconciled** (crates, outside the two feature
+clusters' authorship, all of it required for §16 to be runnable at all):
+
+- `punar-agentd` gained the two methods the remote-query cluster
+  documented as its integration seam and could not write: **`query.answer`**
+  (root peer only; the three-way intersection read from
+  `enrollment.json` by the data owner; a refusal is a **result**, never
+  an error frame) and **`queries.list`** (any admitted peer — spec 24.2),
+  plus `crates/punar-agentd/src/queries.rs` (the `0600` append-only query
+  log, bounded at 365 days / 10 000 records) and the four scope
+  projections. `punarctl privacy queries`, shipped by that cluster, had
+  no daemon behind it until this landed.
+- `punarctl` gained `agents scan --trigger`, `agents alerts [--all]`,
+  `agents alerts dismiss <id>`, the M10 `agents list` footer, and
+  `debug rpc --params` (which is what lets the in-VM exercise drive both
+  sockets without a second client binary in the image). `alerts.*`,
+  `query.*` and `queries.*` now auto-route to the agentd socket.
+- `ledger.purge` now also deletes the **detection records**, not only
+  their ledgers (decision 11), and the purge surface prints **both**
+  boundary sentences (audit trail, query log).
+- `ipc.md` §17 gained the two method rows plus §17.8/§17.9 and the
+  `admin.ai_query` audit action; §17's heading now names the answered
+  query. Additive, still `v: 1`.
+
+### 21.2 Assertions this cluster made stale, and how they now read
+
+M10 fulfils placeholders written by M7 and M8. Every one below was
+rewritten to assert the **invariant**, not the old text:
+
+| Was | Now |
+|---|---|
+| `punar-common::agent` refused `admin.*` with *"reserved for the Milestone 10 shadow-AI detection MVP"* (asserted in `punar-common` and `punar-agentd/tests/registry.rs`) | the refusal states the invariant M10 established — `admin.*` belongs to the **control plane**, nothing on this device listens for an administrator, and `punarctl privacy queries` shows what did arrive. The tests assert that, plus that the word *reserved* is gone |
+| the `ledger.*` refusal said *"there is no export, upload, or remote-query method"* | still true about export and upload; it now names the one thing that can leave — an answer to a query the device **fetched**, at a granted scope, recorded locally — and says why that is not a ledger export |
+| `punarctl`'s detection footer promised *"continuous detection arrives in Milestone 10"* (asserted in `cli.rs`) | states the cadence (`continuous · every 4 min`) **and** the hole sampling detection has by construction. The test asserts both and asserts the deferral string is gone |
+| the privacy-ledger surface said a detection has *"no access ledger in Milestone 8 … Milestone 10"* (asserted in `cli.rs`) | states the ledger's **shape** and its shorter window: a process class, a zone class and the event references, kept 7 days after it clears. The test asserts the invariant and that the old sentence is gone |
+| `punarctl agents inspect` skipped the ledger fetch for detections | fetches it, because detections have one now |
+
+Two stale assertions were left for their owners and are named here so the
+integrator can see them: **`m8-check.sh` line ~374** asserts that
+`not_yet_observed[]` still contains the `unknown_ai_execution` row (M10
+shipped its producer, so the row leaves — the documented idiom), and
+**line ~381** asserts `Evidence ⊆` the four M8 values (M10 adds
+`detection_scan`). Both read a **managed** session's ledger today, so
+both still pass; both should be widened to assert the partition rather
+than the list.
+
+### 21.3 Verification (run, not asserted)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all` (docker `rust:1`) | applied; `--check` clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` | all green, including 5 new `punar-agentd/tests/remote_query.rs` integration tests and 3 new `punarctl/tests/cli.rs` tests |
+| `./tools/validate-schemas.sh` | 15 schemas, 132 documents, ALL PASS |
+| `shellcheck` v0.11.0 (pinned) | clean on `m10-check.sh`, `idle-ram.sh` and `boot-test.sh` |
+| `actionlint` | clean |
+| `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` | succeeds |
+| `qmllint` 6.11.2 (pinned container) | 14 `.qml` files, zero warnings |
+| **every `jq` filter in `m10-check.sh`** | **replayed against real documents** — 40 filters against `agents.json`, `alerts.json`, the `alerts.list` result, `agents.access`, the detection summary, `detections.jsonl`, `detections-index.json`, `queries.jsonl`, `enroll.status`, and the mock's `admin.ai_query` / `admin.query_result` documents, all produced by running the real daemons and the real mock. 39 evaluated **true**; the fortieth (the DND breakthrough card) evaluated true against a document carrying the second signature. **None** exited 5 — the M9 failure mode where a broken filter silently reports "false" |
+
+**NOT run, and why.** There is no VM on this machine, so **nothing in
+§16 has executed**: the timer has never been observed firing, no alert
+card has been screenshotted, no query has crossed a real reconcile pass,
+and `punar-m10.png` does not exist yet. Everything in §16 is *designed
+and gated*, not *observed*. The first CI run on this branch is the
+evidence, and until it is green no sentence anywhere may claim M10
+passed in the VM.
+
+**Two in-VM behaviours are predicted rather than proven**, and are called
+out because they are where a first run is most likely to fail:
+
+1. **The alert may already exist when `m10-check` starts.** The scan
+   timer has been running since `OnBootSec=240`, and `m7-check` installs
+   and runs the same `foo-agent` fixture earlier in the same boot. The
+   anti-nag rule makes that *correct* — one card per signature, no
+   re-raise inside the 24 h window — and the exercise is written for it:
+   group 2 kills leftovers and records the detection ids that already
+   exist, and group 3 requires a **new** one. The alert-raise count
+   assertion (`exactly one`) holds whether the raise happened in M7's
+   window or this one, which is the property being asserted.
+2. **The shell's card may have been drawn in an earlier window.** The
+   alert region never re-toasts a known `alert_id`, so `alerts cards`
+   reports a card that has been standing since M7's window rather than
+   one drawn during group 5. The assertion is that a card is drawn and
+   that the screenshot shows it — both hold either way; the DND
+   breakthrough uses a genuinely new signature (`bar-agent`) precisely so
+   it cannot be satisfied by a standing card.
+
+**`PUNAR_SERVICES_RSS_MB` is unchanged by M10** — no new daemon — and no
+number is quoted here, because the only honest source is a CI run's
+`punar-desktop-ram-report` artifact.
+
+---
+
+## 22. Status — audited 2026-08-25
+
+*This section is the status of record for M10. §21 is the build record
+written by the cluster that landed the wiring; this section is the audit
+of the whole milestone against spec 76 M10, and it separates what is
+**on disk and statically verified** from what is **CI-pending** — a
+distinction spec 1.22 makes mandatory, because M10 is the milestone whose
+central claims (a timer fires; a card is drawn; a query crosses a
+reconcile pass) are only observable in a VM.*
+
+### 22.1 Delivery state, stated plainly
+
+**Implemented on disk. Uncommitted. No CI run contains one byte of M10.**
+
+- `origin/main` is `7943f3c` ("Repair M5/M8/M9"). Local `main` is **five
+  docs-only commits ahead** (`dab66ae` user-blocked list, `8a38c8f` +
+  `e6f20dc` ADR-003, `a273d0d` competitive position, `b31a031` design:
+  theme system / app catalog / execution trust) — **none** of them M10.
+- Every M10 artefact is **working-tree only**: **48 modified files and 21
+  new paths** (two of those paths are directories holding one file each),
+  including `crates/punar-agentd/src/{alerts,detections,
+  identity,queries,sha256}.rs`, `crates/punar-common/src/query.rs`,
+  `crates/punard/src/agentd.rs`, `crates/punar-mock-smplify/src/{rbac,
+  fleet}.rs`, four new test files, `shell/punar-shell/Alert/AlertStack.qml`,
+  `shell/punar-shell/Services/Alerts.qml`, the two scan units, the
+  vendor `timers.target.wants` symlink, `punar-m10-check.service`,
+  `usr/lib/punar/m10-check.sh`, `fixtures/organizations/acme/admins.json`,
+  and `ipc.md` §17–§20.
+- `m10-check.sh` is mode **0755 on disk** (`-rwxr-xr-x`). It is *not yet
+  committed*, so the M8 trap — a check script committed `100644`, whose
+  oneshot then fails `ExecStart` while the run goes green — is **avoided
+  but not yet proven avoided**. The bit must survive `git add`; verify
+  with `git ls-files -s …/m10-check.sh` reading `100755` before pushing.
+- **Warning for whoever commits this tree:** `git status` also shows
+  `target-docker/` and `target-docker-ctl/` as untracked — **8.1 GB** of
+  container build cache that `.gitignore` does not cover (it lists
+  `target/` only). They are not M10 artefacts. A `git add -A` here would
+  commit them. Either extend `.gitignore` or stage M10's paths explicitly.
+
+### 22.2 The live CI state, recorded as it is
+
+The newest run is
+[**32899132191**](https://github.com/smplify-mdm/punar/actions/runs/32899132191)
+(commit `7943f3c`, 2026-08-25 21:05 UTC, 33m37s) and it is **green on all
+five jobs**. The M5/M8/M9 repair resolved **green**:
+
+| In-VM exercise | Verdict | Assertions |
+|---|---|---|
+| desktop gate | `PUNAR_DESKTOP_OK` after 20 s (KVM) | — |
+| M2 | `PUNAR_M2_OK` | 33 |
+| M3 | `PUNAR_M3_OK` | 28 |
+| M4 | `PUNAR_M4_OK` | 29 |
+| M5 | `PUNAR_M5_OK` | 63 |
+| M6 | `PUNAR_M6_OK` | 55 |
+| M7 | `PUNAR_M7_OK` | 74 |
+| **M8** | **`PUNAR_M8_OK` — the first M8 verdict that has ever existed** | **123** |
+| **M9** | **`PUNAR_M9_OK` — the first M9 verdict that has ever existed** | **137** |
+| | **total** | **542** |
+
+Also from that run: the M9 approval document exported from the guest
+**validates host-side** against the unchanged
+`schemas/audit/approval.json` (boot-test phase 11b, `[PASS]`); idle RAM
+**mean 1155 MB / max 1160 MB** — under the 1536 MB hard ceiling, over the
+1024 MB target, carried as the standing CI warning; services RSS **6 MB**
+summed over the three daemon cgroups.
+
+**So both of M10's inherited "never run" caveats are now closed by
+evidence, not by assertion:** M8's ledger and M9's approval gate are
+CI-exercised, and the two milestones M10 builds on are proven at runtime
+before M10's first line of CI. M10 is the only milestone in the tree with
+**zero** in-VM evidence.
+
+### 22.3 On-disk and statically verified vs CI-pending, per §19
+
+| §19 item | On disk | Statically verified | CI-pending |
+|---|---|---|---|
+| 1 — scan timer ships vendor-wants, fires at 240 s, detection with no manual scan | unit + service + `timers.target.wants/punar-agentd-scan.timer` symlink | unit text asserted by review; `OnUnitActiveSec=240`, `AccuracySec=30` present | **the fire itself** — never observed |
+| 2 — exactly one alert across scans/clear/restart; renders in `punar-m10.png`; speaks the §5.1 words | `alerts.rs`, `AlertStack.qml`, `Alerts.qml`, m10-check group 4/5 | anti-nag logic unit-tested; card copy reviewed against Plate D-009 | **the card, the screenshot, the DND breakthrough** |
+| 3 — detection has a persisted record + `ledger-summary.json`-valid ledger | `detections.rs`, `detections.jsonl` writer, ledger projection | `cargo test` green; schema validator green on the shipped corpus | **the exported `m10-detection-summary.json` replayed against the schema (phase 12b)** |
+| 4 — enrolled device answers an authorized `inventory` query in one reconcile pass | `punard/src/agentd.rs` courier, `queries.rs`, mock `queries.pending`/`answer` | 5 `remote_query.rs` integration tests | **the pass, end to end, over a real timer** |
+| 5 — out-of-scope query refused **by the device**, recorded, audited | three-way intersection reading `enrollment.json` | integration-tested | **the in-VM refusal + `queries.jsonl` row** |
+| 6 — `punarctl privacy queries` shows it to an **unprivileged** user | CLI + `queries.list` (any admitted peer) | CLI tests | **the `runuser -u punar` path** |
+| 7 — unenrolled device answers/records/connects nothing (gates A *and* B) | M5 sync gate + agentd fail-closed | tested at unit level | **the three-pass inert window and the forced `query.answer` probe** |
+| 8 — purge removes the detection ledger, leaves query log + audit intact | `ledger.purge` widened to detection records | tested | **the sha256 before/after in-VM** |
+| 9 — fleet output distinguishes `—` from `0` | `fleet.rs` | tested | **the rendered text** |
+| 10 — `PUNAR_M10_OK`, phase 12 green, artifacts uploaded | `m10-check.sh` (13 groups, **~113 static assertion sites** — 80 helper calls + 33 hand-written assertion blocks — plus 10 stated-gap `info` lines), boot-test phase 12 + 12b, ci.yml uploads | shellcheck clean; every `jq` filter replayed (§21.3) | **the verdict — no `PUNAR_M10_OK` exists anywhere** |
+| 11 — `ipc.md` §17–§20 landed additively, still `v: 1` | §17 (agentd: `alerts.list`, `alerts.dismiss`, `query.answer`, `queries.list`, amended `agents.scan`/`agents.list`), §18 (punard courier), §19 (control plane), §20 (`alerts.json` side contract) | **done — verified by reading the file** | — |
+
+Ten of eleven done-conditions are **designed and gated, not observed**.
+The honest one-line summary: *M10 is implemented and statically clean;
+nothing in §16 has ever executed.*
+
+### 22.4 Static gates re-run by this audit (not inherited claims)
+
+Run on this machine, 2026-08-25, against the working tree as audited:
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` (docker `rust:1`) | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` | **840 passed / 0 failed** across 34 suites (was 719 at M9) |
+| `./tools/validate-schemas.sh` | **15 schemas metaschema-checked, 132 documents, ALL PASS** — no schema was edited by M10 (the Decision-0 law holds for a third milestone) |
+| `shellcheck` v0.11.0 (pinned) on `m10-check.sh`, `idle-ram.sh`, `boot-test.sh` | clean |
+
+Not re-run by this audit, and therefore **inherited from §21.3 rather
+than re-observed**: `actionlint`, `qmllint` 6.11.2 (pinned container),
+and `PUNAR_BUILD_MODE=summary ./tools/build-image.sh`. They are recorded
+there as green against the same tree; this section does not restate them
+as its own measurement.
+
+### 22.5 Assertions and printed text this milestone makes stale
+
+§21.2 lists the placeholders M10 **already rewrote** to assert the
+invariant. What remains open for the integrator:
+
+1. **`m8-check.sh` line 371** — asserts the Level-4 `not_yet_observed[]`
+   set is exactly
+   `["production_access","sensitive_resource_access","unknown_ai_execution"]`.
+   M10 ships `unknown_ai_execution`'s producer, so that row leaves the
+   list for any ledger that has one. It reads a **managed** session's
+   ledger today, so it still passes; widen it to assert the **partition**
+   (every Level-4 category is either produced or named with a milestone)
+   rather than the literal three.
+2. **`m8-check.sh` line 375** — asserts `evidence ⊆ {cgroup_scope,
+   audit_event, workspace_bind, adapter_metadata}`. M10 adds a fifth
+   value, `detection_scan` (`punar-common/src/ledger.rs:553`). Same
+   situation: passes today because the document under test is managed;
+   widen it to "every evidence value is a named mediation point", which
+   is the invariant M8 meant.
+3. **`tools/boot-test.sh` line 643** prints *"Services RSS from guest
+   (summed PSS, **punard + punar-agentd** cgroups)"* while
+   `idle-ram.sh` has summed **three** units since M9
+   (`punard.service punar-agentd.service punar-secrets.service`). The
+   number is right; the label under-reports what it covers. Pre-existing,
+   not M10's doing, but it is a status-facing print and it is wrong.
+4. **`.github/workflows/ci.yml` line 378** names the desktop step
+   *"M2..M9 exercises"* and line 306's comment says *"M2..M8"*, while the
+   job name (line 335) already says **M2..M10**. Cosmetic, and exactly
+   the kind of drift that later gets read as evidence.
+
+M10 introduces **no** new placeholder of its own that a later milestone
+must come back and delete: every unobservable category renders as a
+`not_yet_observed[]` row carrying its owning milestone, which is a data
+row, not a sentence for a human to remember.
+
+### 22.6 What the first M10 CI run will decide
+
+§21.3 already names the two predicted-not-proven behaviours (a standing
+alert from `m7-check`'s fixture in the same boot; a card drawn in an
+earlier window). Beyond those, the first run decides three things this
+audit cannot:
+
+- whether a 240 s timer **actually coalesces** with the 120 s reconcile
+  timer under `AccuracySec=30` in the CI VM, or merely runs beside it —
+  the wakeup claim in §3.2 and §15 is arithmetic until a run shows it;
+- the four-daemon-era `PUNAR_SERVICES_RSS_MB` (still three daemons; M10
+  adds none) and whether M10's resident alert/detection/query state moves
+  the 6 MB measured on 2026-08-25 at all;
+- whether the 300 s group-3 wait really is absorbed by groups 4–9, or
+  whether `desktop-test` needs more than the 135 min it was raised to.
+
+Until that run is green, **no sentence in this repository may say M10
+passed**, and this section is the place that says so.

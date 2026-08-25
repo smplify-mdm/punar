@@ -18,7 +18,19 @@
 //! | `policy.fetch` | `{device_token}` | `{"policies": [<envelope + embedded policy>]}` |
 //! | `compliance.report` | `{device_token, report}` | `{"accepted": true}` |
 //! | `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` |
-//! | `admin.devices`, `admin.device` | — | `unknown_method` (**reserved for M10**, SPEC section 51) |
+//! | `queries.pending` | `{device_token}` | `{"queries": [<PendingQuery>, …]}` — **the device asks; nothing is pushed** |
+//! | `queries.answer` | `{device_token, query_id, answer}` | `{"accepted": true}` — the answer is stored verbatim |
+//! | `admin.devices` | `{admin}` | `{"devices": [{device_id, enrolled_at, last_sync, compliance_state}]}` |
+//! | `admin.device` | `{admin, device_id}` | that device's received inventory + compliance + answered-query history |
+//! | `admin.ai_query` | `{admin, device_id, scope, session_id?}` | `{query_id, status: "pending"}`, or `denied` / `out_of_scope` |
+//! | `admin.query_result` | `{admin, query_id}` | `{status, answer?}` |
+//! | `admin.fleet` | `{admin}` | the section 12.1 aggregate as structured data |
+//!
+//! The admin half is role-gated by [`crate::rbac`] **before** a query is
+//! enqueued — an administrator without the role cannot even ask. That check
+//! is defence in depth and nothing more: the device re-evaluates
+//! authorization from its own `enrollment.json` and is the one that
+//! decides (SPEC section 59.4).
 
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -31,10 +43,13 @@ use punar_common::ipc::{MAX_REQUEST_LINE_BYTES, SERVER_READ_TIMEOUT, SERVER_WRIT
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use punar_common::query::{MAX_QUERIES_PER_SYNC, PendingQuery, QueryScope};
+
 use crate::config::MockConfig;
 use crate::fixtures::{self, FixtureError, FixtureSet};
+use crate::fleet;
 use crate::protocol::{self, ErrorCode, MockError, error_line, result_line};
-use crate::state::{ATTESTATION_SIMULATED, StateStore};
+use crate::state::{ATTESTATION_SIMULATED, QueryStatus, StateStore};
 
 /// Minimum bootstrap secret length the mock accepts: 32 hex characters.
 /// (`punard` sends 64 — a 32-byte secret hex-encoded; the mock's bar is the
@@ -69,6 +84,7 @@ impl std::error::Error for StartupError {
 
 struct Inner {
     socket_path: PathBuf,
+    state_dir: PathBuf,
     fixtures: FixtureSet,
     // One lock over devices + the append files: handlers run on connection
     // threads, and the received-side JSONL must interleave whole lines.
@@ -97,6 +113,7 @@ impl MockServer {
         Ok(MockServer {
             inner: Arc::new(Inner {
                 socket_path: cfg.socket,
+                state_dir: cfg.state_dir,
                 fixtures,
                 state: Mutex::new(state),
                 shutdown: AtomicBool::new(false),
@@ -336,6 +353,52 @@ struct InventoryReportParams {
     inventory: Value,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueriesPendingParams {
+    device_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueriesAnswerParams {
+    device_token: String,
+    query_id: String,
+    answer: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminParams {
+    admin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminDeviceParams {
+    admin: String,
+    device_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminAiQueryParams {
+    admin: String,
+    device_id: String,
+    /// Untrusted, and kept a `String` on purpose: an unrecognised value
+    /// must be *refusable* as `out_of_scope`, not unparseable.
+    scope: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminQueryResultParams {
+    admin: String,
+    query_id: String,
+}
+
 fn parse_params<T: serde::de::DeserializeOwned>(
     method: &str,
     params: Option<Value>,
@@ -361,19 +424,17 @@ fn dispatch(inner: &Inner, method: &str, params: Option<Value>) -> Result<Value,
         "policy.fetch" => policy_fetch(inner, params),
         "compliance.report" => compliance_report(inner, params),
         "inventory.report" => inventory_report(inner, params),
-        // Reserved so nobody invents a different admin surface later:
-        // remote device queries are SPEC section 51, Milestone 10. m5-check
-        // reads the state directory as root instead.
-        "admin.devices" | "admin.device" => Err(MockError::with_details(
-            ErrorCode::UnknownMethod,
-            format!(
-                "{method} is reserved for the Milestone 10 admin surface (SPEC \
-                 section 51) and is not implemented by this dev/CI mock. \
-                 Next step: m5-check asserts received state by reading the \
-                 mock's state directory directly."
-            ),
-            json!({"method": method, "reserved_for": "M10"}),
-        )),
+        // M10 device-facing: the device dials outward and collects the
+        // questions addressed to it. There is no inverse of these two
+        // methods anywhere in this crate.
+        "queries.pending" => queries_pending(inner, params),
+        "queries.answer" => queries_answer(inner, params),
+        // M10 admin-facing (the names M5 reserved, now real).
+        "admin.devices" => admin_devices(inner, params),
+        "admin.device" => admin_device(inner, params),
+        "admin.ai_query" => admin_ai_query(inner, params),
+        "admin.query_result" => admin_query_result(inner, params),
+        "admin.fleet" => admin_fleet(inner, params),
         _ => Err(MockError::with_details(
             ErrorCode::UnknownMethod,
             format!("{method} is not a method of the mock control plane."),
@@ -451,7 +512,7 @@ fn policy_fetch(inner: &Inner, params: Option<Value>) -> Result<Value, MockError
 fn compliance_report(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: ComplianceReportParams = parse_params("compliance.report", params)?;
     require_object("compliance.report", "report", &p.report)?;
-    let state = inner.state.lock().unwrap();
+    let mut state = inner.state.lock().unwrap();
     let device_id = require_token(&state, &p.device_token)?;
     state
         .append_compliance(&device_id, &p.report)
@@ -462,12 +523,325 @@ fn compliance_report(inner: &Inner, params: Option<Value>) -> Result<Value, Mock
 fn inventory_report(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: InventoryReportParams = parse_params("inventory.report", params)?;
     require_object("inventory.report", "inventory", &p.inventory)?;
-    let state = inner.state.lock().unwrap();
+    let mut state = inner.state.lock().unwrap();
     let device_id = require_token(&state, &p.device_token)?;
     state
         .append_inventory(&device_id, &p.inventory)
         .map_err(internal)?;
     Ok(json!({"accepted": true}))
+}
+
+// ---------------------------------------------------------------------------
+// M10 device-facing: the pull (milestone-10.md section 7.2)
+// ---------------------------------------------------------------------------
+
+/// `queries.pending {device_token}` — hand this device the questions
+/// addressed to **it**, oldest first, capped at
+/// [`MAX_QUERIES_PER_SYNC`].
+///
+/// A device sees only its own queue: the token resolves to exactly one
+/// `device_id` and the filter is on that id. Delivery does not consume the
+/// entry — a device that fetched and then lost power gets the question
+/// again, and an administrator is never answered with permanent silence
+/// because of one dropped connection.
+fn queries_pending(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: QueriesPendingParams = parse_params("queries.pending", params)?;
+    let mut state = inner.state.lock().unwrap();
+    let device_id = require_token(&state, &p.device_token)?;
+    let entries = state
+        .pending_for_device(&device_id, MAX_QUERIES_PER_SYNC)
+        .map_err(internal)?;
+    let queries: Vec<PendingQuery> = entries
+        .into_iter()
+        .map(|e| PendingQuery {
+            query_id: e.query_id,
+            requesting_admin: e.requesting_admin,
+            organization: e.organization,
+            requested_scope: e.requested_scope,
+            session_id: e.session_id,
+            received_at: e.created_at,
+        })
+        .collect();
+    Ok(json!({ "queries": queries }))
+}
+
+/// `queries.answer {device_token, query_id, answer}` — record what the
+/// device decided, verbatim. The mock does not inspect, reshape or
+/// second-guess the payload: the device is the authority about its own
+/// data (milestone-10.md section 7.3).
+fn queries_answer(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: QueriesAnswerParams = parse_params("queries.answer", params)?;
+    require_object("queries.answer", "answer", &p.answer)?;
+    let mut state = inner.state.lock().unwrap();
+    let device_id = require_token(&state, &p.device_token)?;
+    let accepted = state
+        .record_answer(&device_id, &p.query_id, &p.answer)
+        .map_err(internal)?;
+    if !accepted {
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            format!(
+                "No query {:?} is addressed to this device. Next step: a device may \
+                 answer only questions it fetched from its own queue.",
+                p.query_id
+            ),
+            json!({"query_id": p.query_id}),
+        ));
+    }
+    Ok(json!({ "accepted": true }))
+}
+
+// ---------------------------------------------------------------------------
+// M10 admin-facing (SPEC section 51; milestone-10.md sections 9.1, 13.3)
+// ---------------------------------------------------------------------------
+
+/// Resolve an admin identity against the role fixture, or refuse.
+///
+/// The refusal names the honest boundary every time: these are fixture
+/// strings, not authenticated principals. There is no IdP in M10 and
+/// pretending otherwise would be the exact dishonesty SPEC section 1.22
+/// forbids.
+fn require_admin<'a>(inner: &'a Inner, admin: &str) -> Result<&'a str, MockError> {
+    let directory = &inner.fixtures.admins;
+    if !directory.is_loaded() {
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            "This mock has no admin role table, so it grants no administrator \
+             anything. Next step: stage fixtures/organizations/acme/admins.json \
+             into the fixture directory (milestone-10.md section 9.1)."
+                .to_string(),
+            json!({"reason": "admins.json not loaded"}),
+        ));
+    }
+    directory.role_of(admin).ok_or_else(|| {
+        MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "{admin:?} is not an administrator of this organization. Identities \
+                 here are asserted by the organization fixture and are not verified \
+                 by anything — this mock has no IdP. Next step: use an identity \
+                 listed in admins.json."
+            ),
+            json!({"admin": admin, "identity_verified": false}),
+        )
+    })
+}
+
+fn admin_devices(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminParams = parse_params("admin.devices", params)?;
+    require_admin(inner, &p.admin)?;
+    let state = inner.state.lock().unwrap();
+    let devices: Vec<Value> = state
+        .devices()
+        .map(|(id, record)| {
+            json!({
+                "device_id": id,
+                "enrolled_at": record.registered_at,
+                "last_sync": record.last_sync,
+                "compliance_state": record.compliance_state,
+                "attestation": record.attestation,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "devices": devices,
+        "identity_verified": false,
+    }))
+}
+
+fn admin_device(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminDeviceParams = parse_params("admin.device", params)?;
+    require_admin(inner, &p.admin)?;
+    let state = inner.state.lock().unwrap();
+    let Some(record) = state.device(&p.device_id) else {
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            format!("No device {:?} is registered with this mock.", p.device_id),
+            json!({"device_id": p.device_id}),
+        ));
+    };
+    // The received side, read back from the append-only logs. Whatever a
+    // device sent is all there is: the mock has no other source, and it
+    // cannot ask for more without the device's cooperation.
+    let inventory = last_received(
+        &inner.state_dir,
+        crate::state::INVENTORY_FILE,
+        &p.device_id,
+        "inventory",
+    );
+    let compliance = last_received(
+        &inner.state_dir,
+        crate::state::COMPLIANCE_FILE,
+        &p.device_id,
+        "report",
+    );
+    let queries: Vec<Value> = state
+        .queries()
+        .iter()
+        .filter(|e| e.device_id == p.device_id)
+        .map(|e| {
+            json!({
+                "query_id": e.query_id,
+                "requesting_admin": e.requesting_admin,
+                "requested_scope": e.requested_scope,
+                "created_at": e.created_at,
+                "status": e.status.as_str(),
+                "answered_at": e.answered_at,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "device_id": p.device_id,
+        "enrolled_at": record.registered_at,
+        "last_sync": record.last_sync,
+        "compliance_state": record.compliance_state,
+        "attestation": record.attestation,
+        "inventory": inventory,
+        "compliance": compliance,
+        "queries": queries,
+        "identity_verified": false,
+    }))
+}
+
+/// `admin.ai_query` — the RBAC gate, then the queue. Nothing is sent.
+///
+/// Two refusals happen here and both happen **before** enqueuing, so a
+/// query the organization may not ask never reaches a device at all:
+/// `out_of_scope` for a scope outside the closed vocabulary, `denied` for a
+/// scope the asking role does not carry. The device's own check runs later
+/// and independently, and it is the one that decides.
+fn admin_ai_query(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminAiQueryParams = parse_params("admin.ai_query", params)?;
+    require_admin(inner, &p.admin)?;
+    let Some(scope) = QueryScope::from_wire(&p.scope) else {
+        return Err(MockError::with_details(
+            ErrorCode::OutOfScope,
+            format!(
+                "{:?} is not a query scope. The vocabulary is closed: {}. There is no \
+                 wildcard and no free text. Next step: ask again at one of those \
+                 scopes.",
+                p.scope,
+                QueryScope::vocabulary()
+            ),
+            json!({"scope": p.scope, "vocabulary": QueryScope::ALL.map(|s| s.as_str())}),
+        ));
+    };
+    if !inner.fixtures.admins.permits(&p.admin, scope) {
+        let permitted = inner
+            .fixtures
+            .admins
+            .scopes_of(&p.admin)
+            .map(|s| s.to_prose())
+            .unwrap_or_else(|| "nothing".to_string());
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "The role {:?} may ask for {permitted}, not {}. The query was not \
+                 enqueued and no device will ever see it. Next step: an \
+                 administrator with a broader role asks, or the organization \
+                 changes the role.",
+                inner.fixtures.admins.role_of(&p.admin).unwrap_or("unknown"),
+                scope.as_str()
+            ),
+            json!({"admin": p.admin, "scope": scope.as_str(), "permitted": permitted}),
+        ));
+    }
+    let mut state = inner.state.lock().unwrap();
+    if state.device(&p.device_id).is_none() {
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            format!("No device {:?} is registered with this mock.", p.device_id),
+            json!({"device_id": p.device_id}),
+        ));
+    }
+    let entry = state
+        .enqueue_query(
+            &p.device_id,
+            &p.admin,
+            &inner.fixtures.domain,
+            scope.as_str(),
+            p.session_id,
+        )
+        .map_err(internal)?;
+    Ok(json!({
+        "query_id": entry.query_id,
+        "status": QueryStatus::Pending.as_str(),
+        // Stated on every surface that shows a query (milestone-10.md
+        // section 7.2): the waiting happens on the administrator's side,
+        // which is where a request the device did not initiate ought to
+        // wait.
+        "note": "the device answers on its next sync · one reconcile period (~120 s) \
+                 plus the round trip · nothing is pushed to the device",
+    }))
+}
+
+fn admin_query_result(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminQueryResultParams = parse_params("admin.query_result", params)?;
+    require_admin(inner, &p.admin)?;
+    let state = inner.state.lock().unwrap();
+    let Some(entry) = state.query(&p.query_id) else {
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            format!("No query {:?} was ever asked of this mock.", p.query_id),
+            json!({"query_id": p.query_id}),
+        ));
+    };
+    // An administrator reads back their own question. Anything wider would
+    // let one role's query become another role's answer, which is the RBAC
+    // gate with extra steps.
+    if entry.requesting_admin != p.admin {
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "Query {:?} was asked by a different administrator. Next step: the \
+                 administrator who asked reads the answer.",
+                p.query_id
+            ),
+            json!({"query_id": p.query_id}),
+        ));
+    }
+    Ok(json!({
+        "query_id": entry.query_id,
+        "device_id": entry.device_id,
+        "requested_scope": entry.requested_scope,
+        "status": entry.status.as_str(),
+        "answered_at": entry.answered_at,
+        "answer": entry.answer,
+        "identity_verified": false,
+    }))
+}
+
+fn admin_fleet(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminParams = parse_params("admin.fleet", params)?;
+    require_admin(inner, &p.admin)?;
+    if !inner.fixtures.admins.permits_fleet(&p.admin) {
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "The role {:?} may not read the fleet view. Next step: a \
+                 fleet_viewer or a security_admin reads it.",
+                inner.fixtures.admins.role_of(&p.admin).unwrap_or("unknown")
+            ),
+            json!({"admin": p.admin}),
+        ));
+    }
+    let state = inner.state.lock().unwrap();
+    Ok(fleet::aggregate(&state).to_json())
+}
+
+/// Read the last received line for one device out of an append-only log.
+/// Best-effort: an absent log is `null`, never a fabricated empty object —
+/// `—` and `0` are different here too.
+fn last_received(state_dir: &Path, file: &str, device_id: &str, key: &str) -> Value {
+    let Ok(text) = std::fs::read_to_string(state_dir.join(file)) else {
+        return Value::Null;
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|v| v.get("device_id").and_then(Value::as_str) == Some(device_id))
+        .and_then(|v| v.get(key).cloned())
+        .unwrap_or(Value::Null)
 }
 
 /// Resolve a token or answer `unauthorized` — the protocol-layer check that
