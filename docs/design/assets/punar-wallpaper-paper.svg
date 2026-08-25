@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Punar wallpaper — paper variant. Plate D-015 (docs/design/mockups/wallpaper.html).
+     Field Note design language: instrument, not ornament. This asset is the ONLY
+     surface in the system that asserts nothing, so it carries no annotated mechanism
+     and no claim strokes (DESIGN_LANGUAGE.md §7) — it is drafting substrate: the
+     construction the plates are drawn ON.
+
+     COLOUR — every value is a punar-tokens.json token, nothing invented:
+       field = #FAF9F6
+       hairline = muted #F4F2EC (1.06:1 on paper) · emphasis = raise-2 #EDEAE2 (1.14:1) — both strictly
+       lighter than the 1px window-border token #E6E4DE (1.21:1).
+
+     GEOMETRY — viewBox 1600x1000 (16:10 reference). Dial centred at (1152, 500):
+     vertically centred so the tightest landscape crop cannot touch it, horizontally
+     at 72% so the composition is off-centre. Outer radius 208.
+
+     ASPECT RATIO — preserveAspectRatio="xMidYMid meet" (fit, never crop). The field
+     is a FLAT token colour, so the letterbox bars meet produces are the same colour
+     as the field and are invisible; the field rect and the chain lines overscan far
+     past the viewBox so the renderer paints those bars itself. Result: no crop on any
+     aspect ratio — 16:9, 16:10, 3:2, 21:9, 32:9, and portrait all keep the whole
+     composition, only its scale changes.
+
+     BUDGET — no raster, no gradient, no filter, no <text> (therefore no font
+     dependency at the compositor layer), no animation, no script. Single-digit KB.
+
+     RIM — the 60-slot tick ring spells PUNAR in Morse, starting at twelve and running
+     clockwise: one slot per symbol, 1 blank slot between symbols, 3 between letters;
+     long tick = dash, medium tick = dot, hairline = silence. Slots 35-59 are silence.
+     It is an easter egg at 1.14:1 against the field — it costs legibility nothing. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"
+     viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet" role="img">
+  <title>Punar — instrument field (paper)</title>
+
+  <!-- 01 · FIELD. Overscanned so letterboxing is painted, not left to the clear colour. -->
+  <rect x="-6000" y="-4000" width="13600" height="9000" fill="#FAF9F6"/>
+
+  <g fill="none" stroke="#F4F2EC" stroke-width="1">
+    <!-- 02 · CENTRE LINES. ISO chain pattern, bleeding off every edge. -->
+    <path stroke-dasharray="40 8 6 8" d="M-6000 500H7600M1152 -4000V5000"/>
+    <!-- 03 · CONCENTRIC HAIRLINES. Rim, then three inner steps. -->
+    <circle cx="1152" cy="500" r="208"/>
+    <circle cx="1152" cy="500" r="160"/>
+    <circle cx="1152" cy="500" r="108"/>
+    <circle cx="1152" cy="500" r="56"/>
+    <!-- 04 · RADIALS. Eight, offset 22.5° so they never sit on the centre lines. -->
+    <path stroke-dasharray="3 8" d="M1196.4 392.8L1228.5 315.2M1259.2 455.6L1336.8 423.5M1259.2 544.4L1336.8 576.5M1196.4 607.2L1228.5 684.8M1107.6 607.2L1075.5 684.8M1044.8 544.4L967.2 576.5M1044.8 455.6L967.2 423.5M1107.6 392.8L1075.5 315.2"/>
+    <!-- 05 · TICK RING, silence (46 of 60 slots). -->
+    <path d="M1172.9 301.1L1173.7 293.1M1213.8 309.8L1216.3 302.2M1252 326.8L1256 319.9M1285.8 351.4L1291.2 345.4M1300.6 366.2L1306.6 360.8M1313.8 382.4L1320.3 377.7M1334.7 418.7L1342 415.4M1347.6 458.4L1355.5 456.8M1352 500L1360 500M1350.9 520.9L1358.9 521.7M1347.6 541.6L1355.5 543.2M1334.7 581.3L1342 584.6M1313.8 617.6L1320.3 622.3M1300.6 633.8L1306.6 639.2M1285.8 648.6L1291.2 654.6M1252 673.2L1256 680.1M1213.8 690.2L1216.3 697.8M1193.6 695.6L1195.2 703.5M1172.9 698.9L1173.7 706.9M1131.1 698.9L1130.3 706.9M1090.2 690.2L1087.7 697.8M1052 673.2L1048 680.1M1034.4 661.8L1029.7 668.3M1018.2 648.6L1012.8 654.6M1003.4 633.8L997.4 639.2M990.2 617.6L983.7 622.3M978.8 600L971.9 604M969.3 581.3L962 584.6M961.8 561.8L954.2 564.3M956.4 541.6L948.5 543.2M953.1 520.9L945.1 521.7M952 500L944 500M953.1 479.1L945.1 478.3M956.4 458.4L948.5 456.8M961.8 438.2L954.2 435.7M969.3 418.7L962 415.4M978.8 400L971.9 396M990.2 382.4L983.7 377.7M1003.4 366.2L997.4 360.8M1018.2 351.4L1012.8 345.4M1034.4 338.2L1029.7 331.7M1052 326.8L1048 319.9M1070.7 317.3L1067.4 310M1090.2 309.8L1087.7 302.2M1110.4 304.4L1108.8 296.5M1131.1 301.1L1130.3 293.1"/>
+  </g>
+
+  <g fill="none" stroke="#EDEAE2" stroke-width="1.5">
+    <!-- 06 · TICK RING, Morse dots (8 slots). -->
+    <path d="M1152 308L1152 292M1264.9 344.7L1274.3 331.7M1318.3 404L1332.1 396M1334.6 440.7L1349.8 435.7M1318.3 596L1332.1 604M1264.9 655.3L1274.3 668.3M1152 692L1152 708M1073.9 675.4L1067.4 690"/>
+    <!-- 07 · TICK RING, Morse dashes (6 slots). -->
+    <path d="M1189 325.9L1195.2 296.5M1224.4 337.4L1236.6 310M1329 481.4L1358.9 478.3M1321.3 555L1349.8 564.3M1224.4 662.6L1236.6 690M1115 674.1L1108.8 703.5"/>
+  </g>
+
+  <!-- 08 · DATUM POINT. The origin of the construction. -->
+  <circle cx="1152" cy="500" r="4" fill="#EDEAE2"/>
+</svg>

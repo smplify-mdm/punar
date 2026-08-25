@@ -1,0 +1,723 @@
+<meta charset="utf-8">
+<title>Punar Menubar</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document, one live bar frame. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  /* The frame is a display: every dimension inside it is a share of the frame's
+     own width (1cqw = 1% of it), so the bar reads at true proportion at any
+     viewport instead of overflowing when the page narrows. px values first as
+     the fallback; the cqw line wins where container queries exist. */
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    container-type: inline-size;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .frame:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .scr { position: absolute; inset: 0; display: flex; flex-direction: column; background: #EDEAE2; }
+
+  /* ---- the bar itself ---- */
+  .bar { flex: none; height: 30px; background: #FAF9F6; border-bottom: 1px solid #E6E4DE;
+    display: flex; align-items: center; padding: 0 12px; gap: 8px; position: relative; z-index: 3;
+    overflow: hidden;
+    height: 3.42cqw; padding: 0 1.37cqw; gap: 0.91cqw; }
+  .zone { display: flex; align-items: center; min-width: 0; }
+  .zl { flex: 0 1 auto; overflow: hidden; }
+  .zl .hm { overflow: hidden; text-overflow: ellipsis; }
+  .zc { flex: 1 1 8px; min-width: 6px; justify-content: center; }
+  .zr { flex: 0 0 auto; gap: 0; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-size: 1.025cqw;
+    font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: #666; line-height: 1;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hm strong { color: #000; font-weight: 600; }
+
+  /* centre: reserved for modality only, never for status */
+  #modeslot { display: none; align-items: center; padding: 0.23cqw 0.91cqw; border-radius: 6px;
+    background: #000; color: #FAF9F6; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 8.5px; font-size: 0.97cqw; font-weight: 600; letter-spacing: 0.13em; text-transform: uppercase; }
+
+  #cluster { display: flex; align-items: center; gap: 0; }
+  .slot { font: inherit; background: transparent; border: 0; padding: 0.34cqw 0.3cqw; margin: 0; cursor: pointer;
+    display: none; align-items: center; gap: 0.57cqw; border-radius: 4px;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-size: 1.025cqw; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; line-height: 1;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    transition: opacity 300ms cubic-bezier(0.2,0,0,1), transform 300ms cubic-bezier(0.2,0,0,1); }
+  .slot.on { display: inline-flex; }
+  .slot.arrive { animation: arrive 300ms cubic-bezier(0.2,0,0,1) both; }
+  @keyframes arrive { from { opacity: 0; transform: translateX(4px); } to { opacity: 1; transform: none; } }
+  .slot { position: relative; margin-right: 17px; margin-right: 1.64cqw; }
+  .slot.endcap { margin-right: 0; }
+  .slot::after { content: "·"; position: absolute; left: 100%; margin-left: 0.68cqw; color: #8C8880; letter-spacing: 0; }
+  .slot.endcap::after { content: ""; margin: 0; }
+  .slot .val { color: #000; font-weight: 600; }
+  .slot:focus-visible, .slot.kfocus { outline: 2px solid #000; outline-offset: -1px; color: #000; }
+  /* §7 stroke semantics: a slot whose whole path is not yet operating is dashed. */
+  .slot.unshipped { border-bottom: 1px dashed #8C8880; }
+  .slot.warn .val, .slot.warn .lab { color: #8A5A00; }
+  .dot { width: 0.57cqw; height: 0.57cqw; min-width: 3px; min-height: 3px; border-radius: 50%; flex: none; }
+  .dot.b { background: #A31F2C; } .dot.w { background: #8A5A00; } .dot.k { background: #2E6B21; }
+  /* the one thing that may never be missed */
+  #unknown-flag { display: none; align-items: center; gap: 0.46cqw; margin-left: 0.68cqw;
+    color: #A31F2C; font-weight: 600; }
+  #unknown-flag.on { display: inline-flex; }
+  #unknown-flag .val { color: #A31F2C; }
+  .sep { color: #8C8880; margin: 0 0.68cqw; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 9px; font-size: 1.025cqw; display: none; }
+  .sep.on { display: inline; }
+  #clock { color: #333; }
+
+  /* ---- desktop behind the bar ---- */
+  .desk { flex: 1; position: relative; min-height: 0; padding: 10px; display: flex; gap: 8px; }
+  .win { flex: 1; border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6; overflow: hidden;
+    display: flex; flex-direction: column; min-width: 0; }
+  .win.wpanel { background: #08090A; border-color: #26282E; flex: 0 0 46%; }
+  .wbar { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; padding: 6px 10px;
+    border-bottom: 1px solid #E6E4DE; flex: none; }
+  .wpanel .wbar { color: #7B8290; border-bottom-color: #26282E; }
+  .wbody { flex: 1; min-height: 0; padding: 10px 12px; overflow: hidden; }
+  .tline { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-size: 1.14cqw; color: #F2F3F5;
+    line-height: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tline .tp { color: #7B8290; } .tline .tout { color: #A8ADB6; }
+  .sk { height: 7px; border-radius: 2px; background: #EDEAE2; margin: 9px 0; }
+  .sk.d { background: #E6E4DE; }
+
+  /* ---- popover ---- */
+  #popover { position: absolute; top: 0.91cqw; width: 268px; width: 30.5cqw; background: #FAF9F6;
+    border: 1px solid #E6E4DE;
+    border-radius: 10px; box-shadow: 0 18px 36px -18px rgb(28 24 16 / .16), 0 2px 6px rgb(28 24 16 / .07);
+    padding: 1.25cqw 1.48cqw 1.14cqw; z-index: 6; opacity: 0; visibility: hidden;
+    transition: opacity 300ms cubic-bezier(0.2,0,0,1); }
+  #popover.on { opacity: 1; visibility: visible; }
+  #pop-title { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-size: 1.025cqw; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  #pop-title b { color: #000; }
+  #popover hr { border: 0; border-top: 1px solid #E6E4DE; margin: 8px 0; }
+  #pop-rows { font-family: "Geist Mono", ui-monospace, monospace; font-size: 9px; font-size: 1.025cqw; letter-spacing: 0.09em;
+    text-transform: uppercase; color: #666; line-height: 1.95; font-variant-numeric: tabular-nums; }
+  #pop-rows b { color: #000; font-weight: 600; }
+  #pop-rows .bad { color: #A31F2C; font-weight: 600; }
+  #pop-rows .warn { color: #8A5A00; font-weight: 600; }
+  #pop-rows .ok { color: #2E6B21; font-weight: 600; }
+  #pop-source { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; letter-spacing: 0.1em;
+    text-transform: uppercase; color: #8C8880; line-height: 1.9; margin-top: 8px;
+    border-top: 1px solid #E6E4DE; padding-top: 7px; }
+  #pop-action { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8.5px; font-size: 0.97cqw; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #000; margin-top: 7px; cursor: pointer;
+    background: transparent; border: 0; padding: 0; text-align: left; }
+  #pop-action:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+
+  /* ---- opened-surface stub ---- */
+  #stub { position: absolute; inset: 10px; border: 1px dashed #8C8880; border-radius: 10px; background: #FAF9F6;
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; z-index: 5;
+    font-family: "Geist Mono", ui-monospace, monospace; text-align: center; }
+  #stub.on { display: flex; }
+  #stub .st { font-size: 1.25cqw; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: #000; }
+  #stub .ss { font-size: 0.97cqw; letter-spacing: 0.14em; text-transform: uppercase; color: #666; line-height: 2; }
+
+  /* ---- narrow rendering strip ---- */
+  .narrowwrap { flex: none; border-top: 1px solid #E6E4DE; background: #FAF9F6; padding: 9px 12px 10px; z-index: 2; }
+  .nlab { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #666; margin-bottom: 6px; }
+  #narrowbar { width: 71%; height: 2.96cqw; border: 1px solid #E6E4DE; border-radius: 6px; background: #FAF9F6;
+    display: flex; align-items: center; padding: 0 1.03cqw; gap: 0.8cqw; overflow: hidden; }
+  #narrowbar .zc { flex: 1 1 auto; }
+  #narrowbar .slot { font-size: 0.97cqw; margin-right: 1.3cqw; padding: 0.3cqw 0.3cqw; }
+  #narrowbar .slot.endcap { margin-right: 0; }
+  #narrowbar .slot::after { margin-left: 0.57cqw; }
+  #narrowbar .hm { font-size: 0.97cqw; }
+  #narrowbar .sep { font-size: 0.97cqw; margin: 0 0.57cqw; }
+  /* detail level 1: slots shed detail, never presence */
+  #narrowbar .det { display: none; }
+
+  .barfoot { flex: none; border-top: 1px solid #E6E4DE; background: #FAF9F6; padding: 7px 12px 8px;
+    display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-size: 0.91cqw; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  .reg p .gap { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #A31F2C; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) {
+    .slot, .statebtn, #popover { transition: none; }
+    .slot.arrive { animation: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar · Menubar</strong></div>
+        <div class="meta">The live bar · identity, cluster, clock</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-016</strong></div>
+        <div class="meta">08 · 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>Nothing appears in the bar that you cannot open.</h1>
+    <p class="deck">Today's bar names a workspace and tells the time. Underneath it, punard, punar-agentd and Hyprland already know which agents are running, which approval is counting down, and whether something unrecognised started talking to a model. The bar carries exactly that much — a fixed row of slots, each one a doorway to the surface that owns it, reachable in one chord. On a personal, idle machine it says two things and looks finished.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Menubar states">
+      <button class="statebtn" id="sb-calm" data-state="calm" role="tab" aria-selected="true">01 · Calm</button>
+      <button class="statebtn" id="sb-working" data-state="working" role="tab" aria-selected="false">02 · Working</button>
+      <button class="statebtn" id="sb-attention" data-state="attention" role="tab" aria-selected="false">03 · Attention</button>
+      <button class="statebtn" id="sb-managed" data-state="managed" role="tab" aria-selected="false">04 · Managed</button>
+      <button class="statebtn" id="sb-popover" data-state="popover" role="tab" aria-selected="false">05 · Popover</button>
+      <span class="demohint">B stands in for Super + B · ← → · ↵ · Esc</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" aria-label="Interactive menubar demo">
+      <div class="scr" id="scr" data-state="calm">
+
+        <div class="bar" id="bar" data-state="calm">
+          <div class="zone zl">
+            <span class="hm"><strong>Punar</strong> · <span id="wsname">1</span></span>
+          </div>
+          <div class="zone zc">
+            <span id="modeslot">Resize · HJKL · Esc</span>
+          </div>
+          <div class="zone zr">
+            <div id="cluster" role="toolbar" aria-label="Status cluster">
+              <button class="slot" id="slot-agents" data-slot="agents" tabindex="0" aria-label="AI sessions">
+                <span class="lab">AI</span><span class="val" id="agents-count">1</span>
+                <span id="unknown-flag"><span class="dot b"></span><span class="lab">Unknown AI</span><span class="val">1</span></span>
+              </button>
+              <button class="slot unshipped" id="slot-env" data-slot="env" tabindex="0" aria-label="Developer environments">
+                <span class="lab">Env</span><span class="val">1</span><span class="det"> Atlas</span>
+              </button>
+              <button class="slot unshipped" id="slot-creds" data-slot="creds" tabindex="0" aria-label="Short-lived credentials">
+                <span class="lab">Cred</span><span class="det val">aws-dev</span><span class="val" id="cred-ttl">41m</span>
+              </button>
+              <button class="slot unshipped warn" id="slot-approvals" data-slot="approvals" tabindex="0" aria-label="Pending approvals">
+                <span class="dot w"></span><span class="lab">Approval</span><span class="val">1</span><span class="val" id="appr-count">01:58</span>
+              </button>
+              <button class="slot" id="slot-org" data-slot="org" tabindex="0" aria-label="Organization compliance">
+                <span class="det lab">Acme Engineering</span><span class="dot k"></span><span class="lab">Compliant</span>
+              </button>
+            </div>
+            <span class="sep" id="clocksep">·</span>
+            <span class="hm" id="clock">08:26</span>
+          </div>
+        </div>
+
+        <div class="desk" id="desk">
+          <div class="win wpanel">
+            <div class="wbar" id="termbar">Terminal · ~</div>
+            <div class="wbody">
+              <div class="tline"><span class="tp" id="termp">alice@punar ~ %</span> <span id="termcmd"></span></div>
+              <div class="tline"><span class="tout" id="termout"></span></div>
+            </div>
+          </div>
+          <div class="win">
+            <div class="wbar">Editor · atlas/src/main.rs</div>
+            <div class="wbody">
+              <div class="sk d" style="width:34%"></div>
+              <div class="sk" style="width:78%"></div>
+              <div class="sk" style="width:62%"></div>
+              <div class="sk" style="width:81%"></div>
+              <div class="sk d" style="width:28%"></div>
+              <div class="sk" style="width:69%"></div>
+            </div>
+          </div>
+
+          <div id="popover" role="dialog" aria-label="Slot detail">
+            <div id="pop-title"></div>
+            <hr>
+            <div id="pop-rows"></div>
+            <div id="pop-source"></div>
+            <button id="pop-action" type="button"></button>
+          </div>
+
+          <div id="stub" role="dialog" aria-label="Opened surface">
+            <div class="st" id="stub-title">AI Panel</div>
+            <div class="ss" id="stub-sub">Opened from the bar · Esc returns focus to the window</div>
+          </div>
+        </div>
+
+        <div class="narrowwrap">
+          <div class="nlab">Same state at 1366 × 768 · detail level 1 · nothing hidden, only shortened</div>
+          <div id="narrowbar" aria-hidden="true">
+            <span class="hm"><strong>Punar</strong> · <span id="n-wsname">1</span></span>
+            <span class="zc"></span>
+            <span class="slot" data-nslot="agents"><span class="lab">AI</span><span class="val">1</span><span class="nflag" id="n-unknown"> <span class="lab" style="color:#A31F2C">Unknown AI</span> <span class="val" style="color:#A31F2C">1</span></span></span>
+            <span class="slot unshipped" data-nslot="env"><span class="lab">Env</span><span class="val">1</span><span class="det"> Atlas</span></span>
+            <span class="slot unshipped" data-nslot="creds"><span class="lab">Cred</span><span class="det val">aws-dev </span><span class="val">41m</span></span>
+            <span class="slot unshipped warn" data-nslot="approvals"><span class="dot w"></span><span class="lab">Appr</span><span class="val">1</span><span class="val" id="n-appr">01:58</span></span>
+            <span class="slot" data-nslot="org"><span class="det lab">Acme Engineering</span><span class="dot k"></span><span class="det lab">Compliant</span></span>
+            <span class="sep" id="n-clocksep">·</span>
+            <span class="hm" id="n-clock">08:26</span>
+          </div>
+        </div>
+
+        <div class="barfoot">
+          <span id="footleft">Personal · idle · nothing to report</span>
+          <span>Dashed slot = mechanism not yet operating · bar drawn to display scale</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I · Zone register</h2>
+    <p class="assertion">Three zones, one of them deliberately empty — and a slot is earned, never granted.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Left · identity</span>
+      <p><span class="specref">PUNAR · &lt;workspace&gt;</span> — brand in ink, context in ink-3, the masthead grammar the shipped bar already uses. It answers <em>where am I</em>, never <em>what is wrong</em>. A named project workspace prints its name; an unnamed one prints its number. Nothing else ever lands here — not the org, not the app, not a launcher. <span class="specref">design language §5 · spec §14.1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Centre · reserved</span>
+      <p>Empty, and reserved for exactly one class of thing: <strong>modality</strong>. When a submap is active the centre prints the instrument chip already specified in D-007 — <span class="specref">RESIZE · HJKL · ESC</span> — state, verbs, exit. Modes are transient and self-cancelling, so the centre is empty almost always; status is persistent, so it may never move in here. Giving status the centre would put the loudest thing in the calmest place and leave the bar with nowhere to announce a mode. <span class="specref">spec §12.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Right · the cluster</span>
+      <p>Fixed order, left to right: <span class="specref">AI · ENV · CRED · APPROVAL · ORG · CLOCK</span> — by lifecycle (what you started, what you hold, what waits on you, what watches you, then time). Severity never reorders anything: position is stable so muscle memory holds, and urgency is carried by colour, word and focus-landing instead. 8px middle-dot gutters between slots, 12px bar margin, 30px bar height, clock always last and always tabular so its width never jitters. The cluster is right-anchored and grows <em>leftward</em> into empty space, so the clock and the org annotation never jump under the pointer. <span class="specref">design language §1 · §5</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">What earns a slot</span>
+      <p>All four must hold. <strong>Observable</strong> — the fact arrives on a file or IPC event the shell already receives, with no poll and no inference. <strong>Live</strong> — it is running, pending or expiring right now; configuration belongs in System Control. <strong>Owned</strong> — some surface owns it, so activating the slot is a doorway and not a dead end. <strong>Absent when over</strong> — the slot disappears when the thing stops, so its presence is information. Battery, Wi-Fi and volume fail <em>live</em> at rest: they earn a slot only when they have something to say. <span class="specref">spec §1.22 · §6.3 · §63</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Overflow · 1366 × 768</span>
+      <p>Slots shed <em>detail</em>, never <em>presence</em> — there is no overflow menu, because a hidden alarm is a missable alarm. Ladder, first to give up: workspace subtitle → environment name → credential name → agent name → org name truncated at 12ch → compliance word (the dot keeps the colour). Never collapsed at any width: the words <span class="specref">UNKNOWN AI</span>, the approval countdown, and the clock. If the row still overflows after that, the identity zone truncates before any of those three. <span class="specref">spec §5.1 · §11.8</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II · The calm register</h2>
+    <p class="assertion">The default bar is two facts wide, and it is the finished design — every other state is a temporary annotation on it.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The calm rule</span>
+      <p>Personal, idle, nothing running: <span class="specref">PUNAR · 1</span> at the left, empty centre, <span class="specref">08:26</span> at the right. No cluster, no separator, no colour, no icons, no placeholder greyed-out widgets waiting to light up. A masthead with nothing to report is complete, not empty — the hairline rule closing the bar is what makes it read as finished. This is state 01 in the frame, and it is what the shipped bar already renders today. <span class="specref">design language §2 · §8</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">How it grows</span>
+      <p>Slots arrive one at a time from the right cluster, each on a single 300ms fade-and-4px-slide on the standard curve, and leave on a 150ms fade followed by a 300ms width collapse. The bar's height, background, rule and type never change — growth is horizontal and additive only. It never becomes two rows, never changes colour as a whole, never reflows the left zone. <span class="specref">spec §13.4</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Colour discipline</span>
+      <p>The bar spends no colour on things that are merely <em>true</em>. A running agent, a live environment, a valid credential are facts and render in ink. Colour appears only for a decision or a deviation: warn for pending and expiring (an approval, a credential under five minutes, a remediating device), bad for an unrecognised AI process or a non-compliant device. Consequence: the calm bar and the working bar are both monochrome, and the first colour a user ever sees in the bar means something. <span class="specref">design language §2 · spec §52</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">The unmissable one</span>
+      <p>An unknown AI detection is the only slot allowed four reinforcements at once: a <em>word</em> and not a glyph (<span class="specref">UNKNOWN AI 1</span> — an icon can be ignored, a sentence cannot), the bad colour on word and dot, one arrival animation, and immunity from every collapse rule. It is deliberately phrased as an observation, never a guarantee — the bar counts what was detected and never claims the absence of what was not. The out-of-band alert belongs to the notification plate; the bar is the residue that stays until it is dealt with. <span class="specref">spec §23 · §1.22</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">What may never animate</span>
+      <p>Anything at rest. No pulsing dot, no blinking, no spinner, no marquee, no progress sweep, no second hand. A changing count cross-fades its numeral over 150ms and does not count up. A countdown is a text substitution, not an animation. Reduced-motion collapses all of it to instant opacity. <span class="specref">spec §13.4</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III · Doorway register</h2>
+    <p class="assertion">The keyboard is the primary path into the bar, because the bar's most urgent item must not also be its most expensive to reach.</p>
+    <div class="reg"><span class="no">01</span><span class="what">The chord</span>
+      <p><span class="specref">SUPER + B</span> focuses the status cluster. Focus lands on the leftmost slot — unless something is warn or bad, in which case it lands on the highest-severity slot, because if the bar is shouting you almost certainly pressed the key because of it. <span class="specref">← →</span> (and <span class="specref">H L</span>) walk the visible slots without wrapping, so the ends are felt. <span class="specref">↵</span> opens the owning surface. <span class="specref">ESC</span> releases focus back to the window that had it. <span class="specref">spec §12.1 · §13.3</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Why not a tray</span>
+      <p>On a full-screen tiling desktop a mouse-only tray costs a pointer trip of the entire display height into a 30px target, and it prices information by how alarming it is — exactly backwards. The chord costs the same two keystrokes whatever the bar is showing, composes with the rest of the SUPER family, and satisfies the requirement that every first-party workflow be keyboard-operable. The mouse still works: click focuses a slot and opens its popover, a second click or <span class="specref">↵</span> opens the surface. <span class="specref">spec §3.3 · §12.1 · §12.3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Every slot is a door</span>
+      <p>Agents → AI panel (<span class="specref">SUPER+A</span>). Approvals → the approval overlay. Credentials → the AI panel's authority view. Environments → the project workspace detail. Org and compliance → System Control. Workspace → the overview (<span class="specref">SUPER+TAB</span>). The destinations already own their own chords; the bar's model is the discovery path, not the only one. A slot with no destination is a slot that should not exist &mdash; which is the scope of the claim above the fold: it binds the cluster. Identity and the clock are not slots and open nothing, and that is why neither of them is ever allowed to carry status. <span class="specref">spec §12.2 · §63 · §14.2</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Popover anatomy</span>
+      <p>Focus and hover both open it; it is 268px wide, anchored to the slot's right edge, clamped inside the display, and never covers the clock. Five parts, in order: a tracked mono <strong>title</strong> with the count; a hairline; at most <strong>three rows</strong> of detail in registry vocabulary, with "and N more" beyond that — it never scrolls, because the bar summarises and the owning surface details; a <strong>source line</strong> naming the file and its freshness (<span class="specref">/run/punar/agents.json · scanned 10:00:02</span>) so the OS shows its evidence; and one <strong>action line</strong> — <span class="specref">↵ Open AI panel · Super + A</span>. No other buttons. Nothing in a popover is destructive, and nothing in a popover is the only way to reach something. <span class="specref">spec §40 · §73</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Focus is not theft</span>
+      <p>The bar takes keyboard focus only while the cluster is focused, and gives it back on <span class="specref">ESC</span> or on any click outside. At rest the layer surface requests no keyboard focus at all, so typing into an editor can never fall into the bar. The focus ring is a 2px ink ring drawn <em>inset</em> — a 30px bar has no room for a 2px offset — and carries no colour dependence. <span class="specref">design language §9.4 · spec §12</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV · Data-source register</h2>
+    <p class="assertion">Every slot names the event that produces it; the two that have no event yet are drawn dashed and do not render on a real machine.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Workspace · M2 · shipped</span>
+      <p>Hyprland <span class="specref">socket2</span> events through <span class="specref">Quickshell.Hyprland</span> (<span class="specref">focusedWorkspace</span>), with persisted names from <span class="specref">~/.local/state/punar/workspaces.json</span>. Event-driven; a rename lands the moment <span class="specref">renameworkspace</span> fires. Already live in Bar.qml. <span class="specref">spec §14.1</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">AI sessions · M7 · shipped</span>
+      <p><span class="specref">/run/punar/agents.json</span> → <span class="specref">counts.managed</span> + <span class="specref">counts.observed</span>, followed by the existing <span class="specref">Agents</span> singleton's FileView inotify watch. No new plumbing: the cluster binds to properties that already exist. Solid stroke. <span class="specref">ipc.md §11 · spec §19</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Unknown AI · M7 file / M10 quality</span>
+      <p>Same file, <span class="specref">counts.unknown</span> and <span class="specref">detections[]</span> (classification, suspected, observed_at). The file contract ships; detection <em>quality</em> is Milestone 10, and the honest reading of spec §23 is that this slot reports what was detected and never implies completeness. Freshness comes from a one-shot <span class="specref">punarctl agents list --json</span> on user action — never a loop. <span class="specref">spec §23 · §6.3</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Approvals · M9 · in flight</span>
+      <p><span class="specref">/run/punar/approvals.json</span> — pending summaries with <span class="specref">expires_at</span>, written atomically by punard on every queue change, watched with the same FileView pattern. Milestone 9 is being built right now, so the slot is drawn <strong>dashed</strong> here and must not render until the file exists. The countdown is computed locally from <span class="specref">expires_at</span>; the file is not re-read to tick. <span class="specref">spec §28 · design language §7</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Credentials · M9 · in flight</span>
+      <p>Short-lived grants with TTL, same milestone, same side-contract shape — a <span class="specref">grants[]</span> array alongside the approvals, carrying credential name, project and <span class="specref">expires_at</span> only. Never the token, never a fingerprint of it. Dashed until M9 lands. <span class="specref">spec §29</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Environments · the gap</span>
+      <p><span class="gap">No data source today.</span> <span class="specref">punar-env</span> containers are reachable only by running <span class="specref">podman</span>, and running podman on a timer to fill a bar slot is exactly the polling loop §6.3 prohibits. The fix, and the only acceptable one: <strong>punar-env writes <span class="specref">/run/punar/envs.json</span></strong> — <span class="specref">{v, envs:[{project, name, state, started_at}], ts}</span> — atomically (tmp+rename in <span class="specref">/run/punar</span>, 0644) on <span class="specref">up</span>, <span class="specref">down</span> and <span class="specref">destroy</span>, exactly as punard does for status.json and agentd for agents.json. Until that file exists the slot does not render at all. Marked <strong>M10+</strong>, dashed in the frame. <span class="specref">spec §17 · §11.6 · ipc.md §9 · §11</span></p></div>
+    <div class="reg"><span class="no">07</span><span class="what">Org · compliance · M5 · shipped</span>
+      <p><span class="specref">/run/punar/status.json</span> → <span class="specref">enrolled</span>, <span class="specref">org_name</span>, <span class="specref">compliance_overall</span>, through the existing <span class="specref">Status</span> singleton. Fails closed to personal on a missing or unparsable file — an unenrolled machine renders no org chrome and no "unenrolled" warning. Already live in Bar.qml. <span class="specref">spec §52 · §49 · design language §8</span></p></div>
+    <div class="reg"><span class="no">08</span><span class="what">Clock · M1 · shipped</span>
+      <p>Quickshell <span class="specref">SystemClock</span> at <span class="specref">Minutes</span> precision — one wake per minute, the only unconditional timer the bar owns. Geist Mono is inherently tabular, so the width is stable across every minute. <span class="specref">spec §6.3</span></p></div>
+    <div class="reg"><span class="no">09</span><span class="what">Battery · net · audio</span>
+      <p>Quickshell services exist; nothing is wired. <strong>Design-ready, implementation Milestone 11.</strong> When wired they follow the §04 slot rule rather than the tray habit: battery appears at ≤20% or on a critical discharge event, network appears when down or when the relay is off, audio appears only while muted with an active stream. A charged laptop on Wi-Fi shows nothing, which is the point. <span class="specref">spec §12.1 · §33</span></p></div>
+    <div class="reg"><span class="no">10</span><span class="what">Countdown ticks</span>
+      <p>The bar owns <strong>no timer at rest</strong>. A tick timer exists only while a countdown slot exists: 60s interval while more than a minute remains (whole minutes rendered), 1s interval under a minute, stopped and destroyed when the last countdown slot disappears. It performs no I/O — it re-renders a local subtraction against a timestamp already in memory. That is the whole of the concession to §6.3, and it is bounded by how long an approval can be pending. <span class="specref">spec §6.3 · §28</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V · Implementation notes</h2>
+    <p class="assertion">Design mockup — the calm bar ships today; the cluster is one new component and two new singletons on top of it.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Bar.qml</span>
+      <p>Unchanged in structure. The right-hand <span class="specref">Row</span> gains exactly one child before the org labels: <span class="specref">StatusCluster { }</span>. The existing <span class="specref">visible:</span> gating on the org chrome stays as the template — Row positioners already skip invisible items, which is precisely the "grows leftward, clock never moves" behaviour the zone register asks for. <span class="specref">shell/punar-shell/Bar/Bar.qml</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">StatusCluster.qml</span>
+      <p>New <span class="specref">Bar/StatusCluster.qml</span>: a <span class="specref">FocusScope</span> wrapping a Row of fixed-order <span class="specref">StatusSlot</span> children, each bound to a Services singleton and each with its own <span class="specref">visible:</span> expression. <span class="specref">Keys.onLeftPressed/onRightPressed</span> walk the visible children, <span class="specref">Keys.onReturnPressed</span> emits <span class="specref">activated(slot)</span>, <span class="specref">Keys.onEscapePressed</span> drops focus. Order is child order in the file — there is no sort function to get wrong. <span class="specref">spec §11.8</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">StatusSlot.qml</span>
+      <p>New <span class="specref">Bar/StatusSlot.qml</span>: <span class="specref">label</span>, <span class="specref">value</span>, <span class="specref">severity</span> ("none"|"warn"|"bad"), <span class="specref">operating</span> (false draws the dashed underbar, the §7 production-claim rule applied to our own chrome), <span class="specref">detailLevel</span> (3→0, driven by the cluster measuring implicitWidth against available width — pure layout, no data change), and an <span class="specref">activated()</span> signal. Reuses Bar.qml's <span class="specref">MetaLabel</span> grammar verbatim. <span class="specref">design language §7 · §1</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">New singletons</span>
+      <p><span class="specref">Services/Approvals.qml</span> and <span class="specref">Services/Envs.qml</span>, both copies of the <span class="specref">Status.qml</span> shape: a <span class="specref">FileView</span> with <span class="specref">watchChanges: true</span>, <span class="specref">onFileChanged: reload()</span>, a defensive <span class="specref">JSON.parse</span> in a try, and a <span class="specref">resetEmpty()</span> fail-closed path so a missing file renders <em>no slot</em> rather than an error. Registered in <span class="specref">Services/qmldir</span>. <span class="specref">Agents</span> and <span class="specref">Status</span> need no changes at all. <span class="specref">ipc.md §9 · §11</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Focus and popover</span>
+      <p>A Hyprland global bind <span class="specref">SUPER, B</span> dispatches to the shell, which calls <span class="specref">cluster.forceActiveFocus()</span> and raises <span class="specref">WlrLayershell.keyboardFocus</span> from <span class="specref">none</span> to <span class="specref">exclusive</span> for the duration — the bar must never hold keyboard focus at rest. The popover is a separate <span class="specref">PopupWindow</span> on the overlay layer, <span class="specref">visible: cluster.focusedSlot !== null</span>, positioned from the slot's mapped x. <span class="specref">spec §12.1</span></p></div>
+    <div class="reg"><span class="no">06</span><span class="what">States not drawn</span>
+      <p>The modality chip in the centre zone is specified here and drawn in D-007, not repeated. Battery, network and audio slots are specified in words (Sect IV·09) and will be drawn when M11 wires them. Multi-monitor bar duplication and per-monitor workspace labels follow spec §15 and are not claimed by this plate. All dashed, none solid.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar · Field Note design language</span>
+      <span class="meta">docs/design/mockups/menubar.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  var frame = document.getElementById('frame');
+  var scr = document.getElementById('scr');
+  var bar = document.getElementById('bar');
+  var cluster = document.getElementById('cluster');
+  var pop = document.getElementById('popover');
+  var stub = document.getElementById('stub');
+  if (!frame || !bar || !cluster || !pop || !stub) return;
+
+  var slots = Array.prototype.slice.call(cluster.querySelectorAll('.slot'));
+  var nslots = Array.prototype.slice.call(document.querySelectorAll('#narrowbar .slot'));
+  var stateBtns = Array.prototype.slice.call(document.querySelectorAll('.statebtn[data-state]'));
+
+  // Which slots exist in each demo state. Order is DOM order, always.
+  var VIS = {
+    calm: [],
+    working: ['agents', 'env'],
+    attention: ['agents', 'env', 'creds', 'approvals'],
+    managed: ['agents', 'env', 'creds', 'approvals', 'org'],
+    popover: ['agents', 'env', 'creds', 'approvals']
+  };
+  var WS = { calm: '1', working: 'Atlas', attention: 'Atlas', managed: 'Atlas', popover: 'Atlas' };
+  var UNKNOWN = { calm: false, working: false, attention: true, managed: true, popover: true };
+  var FOOT = {
+    calm: 'Personal · idle · nothing to report',
+    working: 'Personal · 1 agent · 1 environment · no colour spent',
+    attention: 'Personal · unknown AI detected · approval expiring',
+    managed: 'Enrolled · org chrome added · every other slot identical',
+    popover: 'Focus on AI slot · popover open · ↵ opens the AI panel'
+  };
+
+  var POP = {
+    agents: {
+      title: 'AI sessions · <b>1 managed</b> · <b>1 unknown</b>',
+      rows: '<b>agt_4f21</b> claude-code · atlas · <span class="ok">active</span><br>' +
+            '<span class="bad">agt_d11e</span> foo-agent · <span class="bad">unknown · suspected</span><br>' +
+            '~/Downloads/foo-agent · seen 09:59:55',
+      source: '/run/punar/agents.json · scanned 10:00:02<br>detected, not guaranteed — spec §23',
+      action: '↵ Open AI panel · Super + A'
+    },
+    env: {
+      title: 'Environments · <b>1 running</b>',
+      rows: '<b>atlas</b> devcontainer · node 24 · rust stable<br>up 41m · postgres attached',
+      source: 'proposed /run/punar/envs.json · M10+<br>no state file today — slot does not ship yet',
+      action: '↵ Open project workspace'
+    },
+    creds: {
+      title: 'Credentials · <b>1 live grant</b>',
+      rows: '<b>aws-dev</b> · project atlas · agt_4f21<br>expires 09:07 · <span class="warn">41m left</span>',
+      source: 'proposed grants[] beside approvals.json · M9<br>ttl only — never the token',
+      action: '↵ Open authority view · Super + A'
+    },
+    approvals: {
+      title: 'Approvals · <b>1 pending</b>',
+      rows: '<b>apr_123</b> system.install_package · libvirt<br>agt_4f21 claude-code · risk <span class="warn">medium</span><br>' +
+            'required by project Atlas · <span class="warn">expires in <span id="pop-count">01:58</span></span>',
+      source: '/run/punar/approvals.json · M9 in flight<br>countdown computed locally from expires_at',
+      action: '↵ Open approval overlay'
+    },
+    org: {
+      title: 'Organization · <b>Acme Engineering</b>',
+      rows: 'compliance · <span class="ok">compliant</span><br>last summary 09:02:00<br>enrolled 26 Aug 2026',
+      source: '/run/punar/status.json · M5<br>absent file reads as personal — fail closed',
+      action: '↵ Open System Control · Super + S'
+    }
+  };
+  var TERM = {
+    calm: ['Terminal · ~', 'alice@punar ~ %', '', ''],
+    working: ['Terminal · ~/atlas', 'alice@punar ~/atlas %', 'punarctl agents list',
+              'agt_4f21 · claude-code · active · atlas'],
+    attention: ['Terminal · ~/atlas', 'alice@punar ~/atlas %', 'punarctl agents list',
+                'agt_4f21 · claude-code · active · atlas   agt_d11e · unknown · suspected'],
+    managed: ['Terminal · ~/atlas', 'alice@punar ~/atlas %', 'punarctl agents list',
+              'agt_4f21 · claude-code · active · atlas   agt_d11e · unknown · suspected'],
+    popover: ['Terminal · ~/atlas', 'alice@punar ~/atlas %', 'punarctl agents list',
+              'agt_4f21 · claude-code · active · atlas   agt_d11e · unknown · suspected']
+  };
+  var STUB = {
+    agents: ['AI Panel', 'Super + A · registry, authority, ledger · Esc returns focus'],
+    env: ['Project workspace', 'Atlas · environments and windows · Esc returns focus'],
+    creds: ['AI Panel · Authority', 'Short-lived grants and their TTLs · Esc returns focus'],
+    approvals: ['Approval overlay', 'apr_123 · approve or deny · Esc returns focus'],
+    org: ['System Control', 'Super + S · compliance detail · Esc returns focus']
+  };
+
+  var state = 'calm';
+  var focusIdx = -1;
+  var remaining = 118; // seconds, demo approval
+  var tickTimer = null;
+
+  function visibleSlots() {
+    return slots.filter(function (s) { return s.classList.contains('on'); });
+  }
+
+  function fmt(sec) {
+    if (sec < 0) sec = 0;
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // No timer at rest: started only when an approval slot exists, stopped otherwise.
+  function stopTick() {
+    if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
+  }
+  function startTick() {
+    stopTick();
+    tickTimer = setInterval(function () {
+      remaining = remaining > 0 ? remaining - 1 : 0;
+      var t = fmt(remaining);
+      var a = document.getElementById('appr-count');
+      var n = document.getElementById('n-appr');
+      var p = document.getElementById('pop-count');
+      if (a) a.textContent = t;
+      if (n) n.textContent = t;
+      if (p) p.textContent = t;
+    }, 1000);
+  }
+
+  function renderNarrow(list) {
+    nslots.forEach(function (s) {
+      s.classList.toggle('on', list.indexOf(s.dataset.nslot) >= 0);
+    });
+    var vis = nslots.filter(function (s) { return s.classList.contains('on'); });
+    nslots.forEach(function (s) { s.classList.remove('endcap'); });
+    if (vis.length) vis[vis.length - 1].classList.add('endcap');
+    var sep = document.getElementById('n-clocksep');
+    if (sep) sep.classList.toggle('on', vis.length > 0);
+    var nu = document.getElementById('n-unknown');
+    if (nu) nu.style.display = UNKNOWN[state] ? 'inline' : 'none';
+    var nw = document.getElementById('n-wsname');
+    if (nw) nw.textContent = WS[state];
+  }
+
+  function setState(s) {
+    if (!VIS[s]) return;
+    var prev = state;
+    state = s;
+    scr.dataset.state = s;
+    bar.dataset.state = s;
+    stateBtns.forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.state === s)); });
+
+    var list = VIS[s];
+    slots.forEach(function (el) {
+      var want = list.indexOf(el.dataset.slot) >= 0;
+      var had = el.classList.contains('on');
+      el.classList.toggle('on', want);
+      el.setAttribute('aria-hidden', String(!want));
+      el.tabIndex = want ? 0 : -1;
+      if (want && !had && prev !== s) {
+        el.classList.remove('arrive');
+        void el.offsetWidth;
+        el.classList.add('arrive');
+      }
+    });
+    var vis = visibleSlots();
+    slots.forEach(function (el) { el.classList.remove('endcap'); });
+    if (vis.length) vis[vis.length - 1].classList.add('endcap');
+    document.getElementById('clocksep').classList.toggle('on', vis.length > 0);
+    document.getElementById('wsname').textContent = WS[s];
+    document.getElementById('unknown-flag').classList.toggle('on', UNKNOWN[s]);
+    document.getElementById('footleft').textContent = FOOT[s];
+    document.getElementById('agents-count').textContent = (s === 'calm') ? '0' : '1';
+
+    var t = TERM[s];
+    if (t) {
+      document.getElementById('termbar').textContent = t[0];
+      document.getElementById('termp').textContent = t[1];
+      document.getElementById('termcmd').textContent = t[2];
+      document.getElementById('termout').textContent = t[3];
+    }
+
+    renderNarrow(list);
+    closeStub();
+    blurCluster();
+
+    if (list.indexOf('approvals') >= 0) startTick(); else stopTick();
+
+    if (s === 'popover') {
+      var i = vis.indexOf(document.getElementById('slot-agents'));
+      focusSlot(i >= 0 ? i : 0);
+    }
+  }
+
+  function popoverFor(el) {
+    var d = POP[el.dataset.slot];
+    if (!d) return;
+    document.getElementById('pop-title').innerHTML = d.title;
+    document.getElementById('pop-rows').innerHTML = d.rows;
+    document.getElementById('pop-source').innerHTML = d.source;
+    document.getElementById('pop-action').textContent = d.action;
+    var pw = pop.getBoundingClientRect().width || 268;
+    var barRect = bar.getBoundingClientRect();
+    var r = el.getBoundingClientRect();
+    var left = (r.right - barRect.left) - pw;
+    var max = barRect.width - pw - 10;
+    if (left > max) left = max;
+    if (left < 10) left = 10;
+    pop.style.left = Math.round(left) + 'px';
+    pop.classList.add('on');
+  }
+  function closePopover() { pop.classList.remove('on'); }
+
+  function focusSlot(i) {
+    var vis = visibleSlots();
+    if (!vis.length) return;
+    if (i < 0) i = 0;
+    if (i > vis.length - 1) i = vis.length - 1;
+    focusIdx = i;
+    slots.forEach(function (el) { el.classList.remove('kfocus'); });
+    var el = vis[i];
+    el.classList.add('kfocus');
+    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+    popoverFor(el);
+  }
+  function blurCluster() {
+    focusIdx = -1;
+    slots.forEach(function (el) { el.classList.remove('kfocus'); });
+    closePopover();
+  }
+  function moveFocus(d) {
+    var vis = visibleSlots();
+    if (!vis.length) return;
+    if (focusIdx < 0) { focusSlot(0); return; }
+    focusSlot(focusIdx + d);
+  }
+  // Focus lands on the highest-severity slot when the bar has something to say.
+  function enterCluster() {
+    var vis = visibleSlots();
+    if (!vis.length) return;
+    var bad = vis.findIndex(function (el) {
+      return el.dataset.slot === 'agents' && UNKNOWN[state];
+    });
+    if (bad < 0) bad = vis.findIndex(function (el) { return el.classList.contains('warn'); });
+    focusSlot(bad >= 0 ? bad : 0);
+  }
+
+  function openStub(el) {
+    if (!el) return;
+    var d = STUB[el.dataset.slot];
+    if (!d) return;
+    document.getElementById('stub-title').textContent = d[0];
+    document.getElementById('stub-sub').textContent = d[1];
+    stub.classList.add('on');
+    closePopover();
+  }
+  function closeStub() { stub.classList.remove('on'); }
+
+  slots.forEach(function (el, i) {
+    el.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var vis = visibleSlots();
+      var vi = vis.indexOf(el);
+      if (vi < 0) return;
+      if (focusIdx === vi && pop.classList.contains('on')) openStub(el);
+      else focusSlot(vi);
+    });
+    el.addEventListener('mouseenter', function () {
+      if (el.classList.contains('on') && !stub.classList.contains('on')) popoverFor(el);
+    });
+  });
+  cluster.addEventListener('mouseleave', function () {
+    if (focusIdx < 0) closePopover();
+  });
+
+  document.getElementById('pop-action').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var vis = visibleSlots();
+    if (focusIdx >= 0 && vis[focusIdx]) openStub(vis[focusIdx]);
+  });
+
+  cluster.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'l') { moveFocus(1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'h') { moveFocus(-1); e.preventDefault(); }
+    else if (e.key === 'Enter') {
+      var vis = visibleSlots();
+      if (focusIdx >= 0) openStub(vis[focusIdx]);
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      if (stub.classList.contains('on')) closeStub();
+      else { blurCluster(); frame.focus(); }
+      e.preventDefault();
+    }
+  });
+
+  frame.addEventListener('keydown', function (e) {
+    if (e.target !== frame) return;
+    if (e.key === 'b' || e.key === 'B') { enterCluster(); e.preventDefault(); }
+    else if (e.key === 'Escape') {
+      if (stub.classList.contains('on')) { closeStub(); e.preventDefault(); }
+      else if (focusIdx >= 0) { blurCluster(); e.preventDefault(); }
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { enterCluster(); e.preventDefault(); }
+  });
+
+  frame.addEventListener('click', function (e) {
+    if (e.target === frame || e.target === scr || e.target.classList.contains('desk')) {
+      closeStub(); blurCluster();
+    }
+  });
+
+  stateBtns.forEach(function (b) {
+    b.addEventListener('click', function () { setState(b.dataset.state); frame.focus(); });
+  });
+
+  // Clock: minute-aligned, one wake per minute — the SystemClock(Minutes) rule.
+  function paintClock() {
+    var now = new Date();
+    var t = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    var c = document.getElementById('clock');
+    var n = document.getElementById('n-clock');
+    if (c) c.textContent = t;
+    if (n) n.textContent = t;
+    var ms = (60 - now.getSeconds()) * 1000 + (1000 - now.getMilliseconds());
+    setTimeout(paintClock, Math.max(1000, ms));
+  }
+  paintClock();
+
+  setState('calm');
+})();
+</script>

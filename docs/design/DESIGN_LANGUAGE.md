@@ -288,3 +288,16 @@ choosing with Smplify nowhere in sight — and first-class when it is.
   (punarctl status/explain/inspect, punar-env up, and an in-terminal §28
   approval in the §6 terminal palette — mastheads, middle dots, tabular
   columns, status-only color; --json and exit codes dashed as planned).
+- [`mockups/wallpaper.html`](mockups/wallpaper.html) — Wallpaper (§7 as a
+  field: the boot dial from the greeter plate with its progress arc removed,
+  because an idle desktop asserts nothing; two ~5 KB token-only SVGs in
+  [`assets/`](assets/), watermark contrast measured against both text colours
+  and kept under the window-border hairline, flat-field letterboxing so no
+  aspect ratio crops; the one shell surface with no data inputs at all).
+- [`mockups/menubar.html`](mockups/menubar.html) — Menubar (§5 masthead grown
+  into a bar: identity left, centre reserved for modality only, a fixed
+  lifecycle-ordered status cluster that severity never reorders; the four-part
+  slot rule, §2 colour only for a decision or deviation, SUPER+B landing on the
+  highest-severity slot; §8 personal calm as the default and org chrome as one
+  appended slot, every element traced to its file and milestone with
+  approvals, credentials and environments dashed).

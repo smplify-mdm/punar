@@ -1,0 +1,484 @@
+<meta charset="utf-8">
+<title>Punar Wallpaper</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Committed single-theme page: paper field-note document. The two SVG symbols
+     below are the shipped assets inlined verbatim — docs/design/assets/. */
+  * { box-sizing: border-box; }
+  body { background: #FAF9F6; color: #333; margin: 0; padding: 56px 24px 96px;
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .meta { font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #666; }
+  .meta strong { color: #000; font-weight: 600; }
+  .mast { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
+  .rule { border: 0; border-top: 2px solid #000; margin: 14px 0 0; }
+  h1 { font-weight: 700; font-size: clamp(38px, 7vw, 58px); line-height: 1.04; letter-spacing: -0.028em;
+    color: #000; margin: 56px 0 24px; text-wrap: balance; }
+  .deck { font-size: 19px; line-height: 1.55; color: #333; max-width: 62ch; margin: 0 0 8px; }
+  section { margin-top: 84px; }
+  h2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin: 0 0 6px; }
+  h2::after { content: ""; display: block; border-top: 1px solid #E6E4DE; margin-top: 10px; }
+  .assertion { font-weight: 500; font-size: 17px; color: #000; margin: 18px 0 28px; max-width: 60ch; }
+  p { max-width: 65ch; }
+
+  /* ---- demo chrome (D-007 scaffolding) ---- */
+  .statebar { display: flex; gap: 8px; margin: 28px 0 14px; flex-wrap: wrap; align-items: center; }
+  .statebtn { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666;
+    background: transparent; border: 1px solid #E6E4DE; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    transition: all 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .statebtn[aria-selected="true"] { color: #FAF9F6; background: #000; border-color: #000; }
+  .statebtn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .demohint { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: #666; text-transform: uppercase; margin-left: auto; align-self: center; }
+
+  .frame { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden;
+    border: 1px solid #E6E4DE; background: #FAF9F6; box-shadow: 0 30px 70px -30px rgb(28 24 16 / 0.2); }
+  .frame:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+  .wpnote { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #666; margin-top: 12px;
+    font-variant-numeric: tabular-nums; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .wpnote strong { color: #000; font-weight: 600; }
+
+  /* ---- stage ---- */
+  .wpdefs { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .stage { position: absolute; inset: 0; }
+  .wpfill { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .stage[data-state="scale"] .wpfill { display: none; }
+
+  /* legibility probe — text sitting directly on the motif (states 01/02) */
+  .probe { position: absolute; left: 54%; top: 40%; width: 40%; display: none;
+    transition: opacity 300ms cubic-bezier(0.2, 0, 0, 1); }
+  .stage[data-state="paper"] .probe, .stage[data-state="panel"] .probe { display: block; }
+  .probe .pr1 { font-size: clamp(13px, 1.65vw, 21px); font-weight: 500; line-height: 1.3;
+    letter-spacing: -0.02em; color: #000; margin-bottom: 10px; }
+  .probe .pr2 { font-family: "Geist Mono", ui-monospace, monospace; font-size: clamp(7px, 0.86vw, 11px);
+    font-weight: 500; letter-spacing: 0.13em; text-transform: uppercase; color: #666;
+    font-variant-numeric: tabular-nums; line-height: 1.9; }
+  .stage[data-variant="panel"] .probe .pr1 { color: #F2F3F5; }
+  .stage[data-variant="panel"] .probe .pr2 { color: #7B8290; }
+
+  /* ---- with-windows overlay ---- */
+  .desk { position: absolute; inset: 0; display: none; flex-direction: column; }
+  .stage[data-state="windows"] .desk { display: flex; }
+  .dbar { flex: none; background: #FAF9F6; border-bottom: 1px solid #E6E4DE;
+    padding: 0.75% 1.4%; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .stage[data-variant="panel"] .dbar { background: #08090A; border-bottom-color: #26282E; }
+  .hm { font-family: "Geist Mono", ui-monospace, monospace; font-size: clamp(6.5px, 0.78vw, 10px);
+    font-weight: 500; letter-spacing: 0.15em; text-transform: uppercase; color: #666;
+    font-variant-numeric: tabular-nums; }
+  .hm strong { color: #000; font-weight: 600; }
+  .stage[data-variant="panel"] .hm { color: #7B8290; }
+  .stage[data-variant="panel"] .hm strong { color: #F2F3F5; }
+  .tiles { flex: 1; min-height: 0; display: flex; gap: 1.5%; padding: 2.6%; }
+  .wn { flex: 1; min-width: 0; border: 1px solid #E6E4DE; border-radius: 10px; background: #FAF9F6;
+    overflow: hidden; display: flex; flex-direction: column; }
+  .wn.active { border-color: #000; box-shadow: 0 0 0 1px #000; }
+  .wn.dark { background: #08090A; border-color: #26282E; }
+  .stage[data-variant="panel"] .wn { background: #08090A; border-color: #26282E; }
+  .stage[data-variant="panel"] .wn.active { border-color: #F2F3F5; box-shadow: 0 0 0 1px #F2F3F5; }
+  .wn.dark.active { border-color: #000; box-shadow: 0 0 0 1px #000; }
+  .stage[data-variant="panel"] .wn.dark.active { border-color: #F2F3F5; box-shadow: 0 0 0 1px #F2F3F5; }
+  .wnb { flex: none; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: clamp(6px, 0.7vw, 9px); font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase;
+    color: #666; padding: 2.6% 4%; border-bottom: 1px solid #E6E4DE; }
+  .wn.dark .wnb, .stage[data-variant="panel"] .wn .wnb { color: #7B8290; border-bottom-color: #26282E; }
+  .wnbody { flex: 1; min-height: 0; padding: 4%; overflow: hidden; }
+  .sk { height: 6px; border-radius: 2px; background: #EDEAE2; margin: 3.4% 0; }
+  .sk.s { width: 62%; } .sk.t { width: 40%; }
+  .wn.dark .sk, .stage[data-variant="panel"] .wn .sk { background: #26282E; }
+  .tl { font-family: "Geist Mono", ui-monospace, monospace; font-size: clamp(6px, 0.72vw, 9.5px);
+    color: #F2F3F5; line-height: 2.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tl .tp { color: #7B8290; } .tl .to { color: #A8ADB6; } .tl .cs { color: #A3E047; }
+
+  /* ---- scale test ---- */
+  .scale { position: absolute; inset: 0; display: none; grid-template-columns: 30% 1fr;
+    gap: 3%; align-content: center; align-items: center; padding: 4% 4%; }
+  .stage[data-state="scale"] .scale { display: grid; }
+  .scol { display: flex; flex-direction: column; gap: 9%; min-width: 0; }
+  .scap { font-family: "Geist Mono", ui-monospace, monospace; font-size: clamp(6px, 0.72vw, 9.5px);
+    font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #666;
+    font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+  .scap b { color: #000; font-weight: 600; }
+  .sbox { border: 1px solid #E6E4DE; border-radius: 6px; overflow: hidden; background: #FAF9F6; }
+  .sbox svg { display: block; width: 100%; height: 100%; }
+  .sbox.a { aspect-ratio: 1366 / 768; }
+  .sbox.b { aspect-ratio: 3440 / 1440; }
+  .sbox.c { aspect-ratio: 1 / 1; }
+
+  .simtag { font-family: "Geist Mono", ui-monospace, monospace; font-size: 8px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; border: 1px dashed #8C8880;
+    border-radius: 6px; padding: 2px 7px; }
+
+  /* ---- registers ---- */
+  .reg { display: grid; grid-template-columns: 44px 200px 1fr; gap: 8px 20px; padding: 15px 0;
+    border-bottom: 1px solid #E6E4DE; align-items: baseline; }
+  .reg:last-of-type { border-bottom: 0; }
+  .reg .no { font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-weight: 600; color: #000; }
+  .reg .what { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #666; }
+  .reg p { margin: 0; font-size: 15px; color: #333; }
+  .reg p .specref { font-family: "Geist Mono", ui-monospace, monospace; font-size: 10.5px; color: #666; }
+  .ratios { width: 100%; border-collapse: collapse; margin: 24px 0 0;
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .ratios th { text-align: left; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #666; font-size: 10px; border-bottom: 1px solid #000; padding: 0 12px 7px 0; }
+  .ratios td { padding: 8px 12px 8px 0; border-bottom: 1px solid #E6E4DE; color: #333; }
+  .ratios td:first-child { color: #000; }
+  @media (max-width: 620px) { .reg { grid-template-columns: 44px 1fr; } .reg p { grid-column: 1 / -1; } }
+  footer { margin-top: 96px; }
+  @media (prefers-reduced-motion: reduce) { .statebtn, .probe { transition: none; } }
+</style>
+
+<svg class="wpdefs" aria-hidden="true" focusable="false">
+  <symbol id="wp-paper" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet">
+  <!-- 01 · FIELD. Overscanned so letterboxing is painted, not left to the clear colour. -->
+  <rect x="-6000" y="-4000" width="13600" height="9000" fill="#FAF9F6"/>
+
+  <g fill="none" stroke="#F4F2EC" stroke-width="1">
+    <!-- 02 · CENTRE LINES. ISO chain pattern, bleeding off every edge. -->
+    <path stroke-dasharray="40 8 6 8" d="M-6000 500H7600M1152 -4000V5000"/>
+    <!-- 03 · CONCENTRIC HAIRLINES. Rim, then three inner steps. -->
+    <circle cx="1152" cy="500" r="208"/>
+    <circle cx="1152" cy="500" r="160"/>
+    <circle cx="1152" cy="500" r="108"/>
+    <circle cx="1152" cy="500" r="56"/>
+    <!-- 04 · RADIALS. Eight, offset 22.5° so they never sit on the centre lines. -->
+    <path stroke-dasharray="3 8" d="M1196.4 392.8L1228.5 315.2M1259.2 455.6L1336.8 423.5M1259.2 544.4L1336.8 576.5M1196.4 607.2L1228.5 684.8M1107.6 607.2L1075.5 684.8M1044.8 544.4L967.2 576.5M1044.8 455.6L967.2 423.5M1107.6 392.8L1075.5 315.2"/>
+    <!-- 05 · TICK RING, silence (46 of 60 slots). -->
+    <path d="M1172.9 301.1L1173.7 293.1M1213.8 309.8L1216.3 302.2M1252 326.8L1256 319.9M1285.8 351.4L1291.2 345.4M1300.6 366.2L1306.6 360.8M1313.8 382.4L1320.3 377.7M1334.7 418.7L1342 415.4M1347.6 458.4L1355.5 456.8M1352 500L1360 500M1350.9 520.9L1358.9 521.7M1347.6 541.6L1355.5 543.2M1334.7 581.3L1342 584.6M1313.8 617.6L1320.3 622.3M1300.6 633.8L1306.6 639.2M1285.8 648.6L1291.2 654.6M1252 673.2L1256 680.1M1213.8 690.2L1216.3 697.8M1193.6 695.6L1195.2 703.5M1172.9 698.9L1173.7 706.9M1131.1 698.9L1130.3 706.9M1090.2 690.2L1087.7 697.8M1052 673.2L1048 680.1M1034.4 661.8L1029.7 668.3M1018.2 648.6L1012.8 654.6M1003.4 633.8L997.4 639.2M990.2 617.6L983.7 622.3M978.8 600L971.9 604M969.3 581.3L962 584.6M961.8 561.8L954.2 564.3M956.4 541.6L948.5 543.2M953.1 520.9L945.1 521.7M952 500L944 500M953.1 479.1L945.1 478.3M956.4 458.4L948.5 456.8M961.8 438.2L954.2 435.7M969.3 418.7L962 415.4M978.8 400L971.9 396M990.2 382.4L983.7 377.7M1003.4 366.2L997.4 360.8M1018.2 351.4L1012.8 345.4M1034.4 338.2L1029.7 331.7M1052 326.8L1048 319.9M1070.7 317.3L1067.4 310M1090.2 309.8L1087.7 302.2M1110.4 304.4L1108.8 296.5M1131.1 301.1L1130.3 293.1"/>
+  </g>
+
+  <g fill="none" stroke="#EDEAE2" stroke-width="1.5">
+    <!-- 06 · TICK RING, Morse dots (8 slots). -->
+    <path d="M1152 308L1152 292M1264.9 344.7L1274.3 331.7M1318.3 404L1332.1 396M1334.6 440.7L1349.8 435.7M1318.3 596L1332.1 604M1264.9 655.3L1274.3 668.3M1152 692L1152 708M1073.9 675.4L1067.4 690"/>
+    <!-- 07 · TICK RING, Morse dashes (6 slots). -->
+    <path d="M1189 325.9L1195.2 296.5M1224.4 337.4L1236.6 310M1329 481.4L1358.9 478.3M1321.3 555L1349.8 564.3M1224.4 662.6L1236.6 690M1115 674.1L1108.8 703.5"/>
+  </g>
+
+  <!-- 08 · DATUM POINT. The origin of the construction. -->
+  <circle cx="1152" cy="500" r="4" fill="#EDEAE2"/>
+  </symbol>
+  <symbol id="wp-panel" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet">
+  <!-- 01 · FIELD. Overscanned so letterboxing is painted, not left to the clear colour. -->
+  <rect x="-6000" y="-4000" width="13600" height="9000" fill="#08090A"/>
+
+  <g fill="none" stroke="#26282E" stroke-width="1" stroke-opacity=".42">
+    <!-- 02 · CENTRE LINES. ISO chain pattern, bleeding off every edge. -->
+    <path stroke-dasharray="40 8 6 8" d="M-6000 500H7600M1152 -4000V5000"/>
+    <!-- 03 · CONCENTRIC HAIRLINES. Rim, then three inner steps. -->
+    <circle cx="1152" cy="500" r="208"/>
+    <circle cx="1152" cy="500" r="160"/>
+    <circle cx="1152" cy="500" r="108"/>
+    <circle cx="1152" cy="500" r="56"/>
+    <!-- 04 · RADIALS. Eight, offset 22.5° so they never sit on the centre lines. -->
+    <path stroke-dasharray="3 8" d="M1196.4 392.8L1228.5 315.2M1259.2 455.6L1336.8 423.5M1259.2 544.4L1336.8 576.5M1196.4 607.2L1228.5 684.8M1107.6 607.2L1075.5 684.8M1044.8 544.4L967.2 576.5M1044.8 455.6L967.2 423.5M1107.6 392.8L1075.5 315.2"/>
+    <!-- 05 · TICK RING, silence (46 of 60 slots). -->
+    <path d="M1172.9 301.1L1173.7 293.1M1213.8 309.8L1216.3 302.2M1252 326.8L1256 319.9M1285.8 351.4L1291.2 345.4M1300.6 366.2L1306.6 360.8M1313.8 382.4L1320.3 377.7M1334.7 418.7L1342 415.4M1347.6 458.4L1355.5 456.8M1352 500L1360 500M1350.9 520.9L1358.9 521.7M1347.6 541.6L1355.5 543.2M1334.7 581.3L1342 584.6M1313.8 617.6L1320.3 622.3M1300.6 633.8L1306.6 639.2M1285.8 648.6L1291.2 654.6M1252 673.2L1256 680.1M1213.8 690.2L1216.3 697.8M1193.6 695.6L1195.2 703.5M1172.9 698.9L1173.7 706.9M1131.1 698.9L1130.3 706.9M1090.2 690.2L1087.7 697.8M1052 673.2L1048 680.1M1034.4 661.8L1029.7 668.3M1018.2 648.6L1012.8 654.6M1003.4 633.8L997.4 639.2M990.2 617.6L983.7 622.3M978.8 600L971.9 604M969.3 581.3L962 584.6M961.8 561.8L954.2 564.3M956.4 541.6L948.5 543.2M953.1 520.9L945.1 521.7M952 500L944 500M953.1 479.1L945.1 478.3M956.4 458.4L948.5 456.8M961.8 438.2L954.2 435.7M969.3 418.7L962 415.4M978.8 400L971.9 396M990.2 382.4L983.7 377.7M1003.4 366.2L997.4 360.8M1018.2 351.4L1012.8 345.4M1034.4 338.2L1029.7 331.7M1052 326.8L1048 319.9M1070.7 317.3L1067.4 310M1090.2 309.8L1087.7 302.2M1110.4 304.4L1108.8 296.5M1131.1 301.1L1130.3 293.1"/>
+  </g>
+
+  <g fill="none" stroke="#26282E" stroke-width="1.5" stroke-opacity=".75">
+    <!-- 06 · TICK RING, Morse dots (8 slots). -->
+    <path d="M1152 308L1152 292M1264.9 344.7L1274.3 331.7M1318.3 404L1332.1 396M1334.6 440.7L1349.8 435.7M1318.3 596L1332.1 604M1264.9 655.3L1274.3 668.3M1152 692L1152 708M1073.9 675.4L1067.4 690"/>
+    <!-- 07 · TICK RING, Morse dashes (6 slots). -->
+    <path d="M1189 325.9L1195.2 296.5M1224.4 337.4L1236.6 310M1329 481.4L1358.9 478.3M1321.3 555L1349.8 564.3M1224.4 662.6L1236.6 690M1115 674.1L1108.8 703.5"/>
+  </g>
+
+  <!-- 08 · DATUM POINT. The origin of the construction. -->
+  <circle cx="1152" cy="500" r="4" fill="#26282E" fill-opacity=".75"/>
+  </symbol>
+</svg>
+
+<div class="wrap">
+  <header>
+    <div class="mast">
+      <div>
+        <div class="meta"><strong>Punar &middot; Wallpaper</strong></div>
+        <div class="meta">The desktop field</div>
+      </div>
+      <div style="text-align:right">
+        <div class="meta"><strong>Plate D-015</strong></div>
+        <div class="meta">08 &middot; 2026</div>
+      </div>
+    </div>
+    <hr class="rule">
+    <h1>The desktop is the sheet a plate is drawn on, not a picture hung on a wall.</h1>
+    <p class="deck">Punar&rsquo;s background is the same instrument that draws the boot ring &mdash; a sixty-slot dial, four concentric hairlines, dashed radials, one datum point &mdash; printed on the field at watermark contrast. Two five-kilobyte SVGs, paper and panel, one construction. It is the only surface in the system that asserts nothing, and that is exactly why it can be everywhere.</p>
+  </header>
+
+  <section>
+    <h2>Sequence</h2>
+    <div class="statebar" role="tablist" aria-label="Wallpaper states">
+      <button class="statebtn" id="sb-paper" data-state="paper" role="tab" aria-selected="true">01 &middot; Paper</button>
+      <button class="statebtn" id="sb-panel" data-state="panel" role="tab" aria-selected="false">02 &middot; Panel</button>
+      <button class="statebtn" id="sb-windows" data-state="windows" role="tab" aria-selected="false">03 &middot; With windows</button>
+      <button class="statebtn" id="sb-scale" data-state="scale" role="tab" aria-selected="false">04 &middot; Scale test</button>
+      <span class="demohint">Click frame &middot; &larr;&rarr; or 1&ndash;4 &middot; P / N sets surface</span>
+    </div>
+
+    <div class="frame" id="frame" tabindex="0" role="group" aria-label="Interactive wallpaper demo">
+      <div class="stage" id="stage" data-state="paper" data-variant="paper">
+
+        <svg class="wpfill" aria-hidden="true" focusable="false"><use class="wpuse" href="#wp-paper" width="100%" height="100%"></use></svg>
+
+        <div class="probe" id="probe">
+          <div class="pr1" id="probe-a">Nothing on this field has to fight it.</div>
+          <div class="pr2" id="probe-b">Ink on field 20.0:1 &middot; over motif 17.5:1 &middot; AA needs 4.5:1</div>
+        </div>
+
+        <div class="desk" id="desk">
+          <div class="dbar">
+            <div class="hm"><strong>Punar</strong> &middot; 1 &middot; Atlas</div>
+            <div class="hm" id="deskclock">08:26</div>
+          </div>
+          <div class="tiles">
+            <div class="wn dark active" id="wn-term">
+              <div class="wnb">Terminal &middot; ~/atlas</div>
+              <div class="wnbody">
+                <div class="tl"><span class="tp">alice@punar ~/atlas %</span> punarctl status</div>
+                <div class="tl"><span class="to">personal &middot; no organization enrolled</span></div>
+                <div class="tl"><span class="tp">alice@punar ~/atlas %</span> <span class="cs">&#9615;</span></div>
+              </div>
+            </div>
+            <div class="wn" id="wn-editor">
+              <div class="wnb">Editor &middot; wallpaper.svg</div>
+              <div class="wnbody">
+                <div class="sk"></div><div class="sk s"></div><div class="sk"></div>
+                <div class="sk t"></div><div class="sk s"></div><div class="sk"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="scale" id="scale">
+          <div class="scol">
+            <div>
+              <div class="scap"><b>1366 &times; 768</b> &middot; 16:9 &middot; dial 319 px</div>
+              <div class="sbox a"><svg aria-hidden="true" focusable="false"><use class="wpuse" href="#wp-paper" width="100%" height="100%"></use></svg></div>
+            </div>
+            <div>
+              <div class="scap"><b>Rim detail</b> &middot; 90 &times; 90 units &middot; 18&times;</div>
+              <div class="sbox c"><svg viewBox="1320 425 90 90" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false"><use class="wpuse" href="#wp-paper" width="1600" height="1000"></use></svg></div>
+            </div>
+          </div>
+          <div>
+            <div class="scap"><b>3440 &times; 1440</b> &middot; 21:9 &middot; dial 599 px &middot; same file, same composition, no crop</div>
+            <div class="sbox b"><svg aria-hidden="true" focusable="false"><use class="wpuse" href="#wp-paper" width="100%" height="100%"></use></svg></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div class="wpnote">
+      <span id="wpnote-l"><strong>01 &middot; Paper</strong> &middot; punar-wallpaper-paper.svg &middot; 4,906 bytes</span>
+      <span id="wpnote-r">Field #FAF9F6 &middot; hairline #F4F2EC 1.06:1 &middot; emphasis #EDEAE2 1.14:1</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sect I &middot; Motif register</h2>
+    <p class="assertion">The wallpaper is the drawing the plates are drawn on &mdash; the one Punar surface that asserts nothing.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Lineage</span>
+      <p>The boot dial in Plate D-002 is sixty ticks with uneven emphasis, a progress arc drawn clockwise from twelve, and a solid centre dot. The wallpaper is that same construction with the arc removed &mdash; because an idle desktop is not doing anything, and a ring that implied progress would be a claim. Boot finishes, the arc dissolves, the instrument stays as the field. <span class="specref">design language &sect;7 &middot; Plate D-002</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Construction</span>
+      <p>Four concentric hairlines at r&nbsp;208 / 160 / 108 / 56; a sixty-slot tick ring on the rim; eight dashed radials offset 22.5&deg; so they never lie on the centre lines; ISO chain lines through the datum, bleeding off every edge; one filled datum point at the origin. No stations, no numbered mechanisms, no annotations &mdash; nothing that a register below could name. <span class="specref">design language &sect;3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">No claim strokes</span>
+      <p>&sect;7 gives stroke a meaning: solid marks an operating production path, dashed marks a mechanism outside the current claim. The wallpaper annotates no mechanism, so it is drawn entirely in construction-line vocabulary &mdash; the dashed radials are drafting construction, not unshipped futures. The rule this plate adds: if the field ever carries an annotated element it must obey &sect;7 in full, so it never will. <span class="specref">design language &sect;7 &middot; spec &sect;1.22</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">The rim</span>
+      <p>The sixty slots spell <span class="specref">PUNAR</span> in Morse, starting at twelve and running clockwise: one slot per symbol, one blank slot between symbols, three between letters. Long tick is a dash, medium tick a dot, plain hairline is silence; slots 35&ndash;59 are silent. It sits at 1.14:1 against paper and 1.22:1 against panel, which is why it is allowed to exist &mdash; &sect;7 permits the rim to reward close reading, never at the cost of legibility. <span class="specref">design language &sect;7</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">One field, no org</span>
+      <p>There is no managed wallpaper and there never will be. Enrollment is additive chrome on panels and mastheads; it does not get to touch the desktop field, brand it, or watermark it. A personal machine and an enrolled machine show the identical background. <span class="specref">design language &sect;8 &middot; spec &sect;3.2</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect II &middot; Legibility register</h2>
+    <p class="assertion">A background that changes what anything on top of it means is not a background.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Contrast ceiling</span>
+      <p>Paper: hairline <span class="specref">#F4F2EC</span> at 1.06:1 and emphasis <span class="specref">#EDEAE2</span> at 1.14:1 against <span class="specref">#FAF9F6</span>. Panel has no token between surface and edge, so both tones are <span class="specref">#26282E</span> at two opacities &mdash; 0.42 gives 1.10:1 and 0.75 gives 1.22:1 against <span class="specref">#08090A</span>. The rule: no wallpaper stroke may exceed <strong>1.25:1</strong> against its own field. <span class="specref">design language &sect;2 &middot; &sect;9.5</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">The border wins</span>
+      <p>Every wallpaper stroke is strictly lighter than the 1px window-border token &mdash; <span class="specref">#E6E4DE</span> reads 1.21:1 on paper, <span class="specref">#26282E</span> reads 1.35:1 on panel. In relative luminance the border&rsquo;s step is 1.38&times; (paper) and 1.58&times; (panel) the motif&rsquo;s darkest step. Edge contrast, not ink area, decides which line reads as a boundary, and contrast is a colour fact independent of resolution. <span class="specref">design language &sect;3</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Text on top</span>
+      <p>Ink on bare paper measures 19.95:1 and falls to 17.47:1 where it crosses the darkest stroke. Panel-fg on bare panel measures 17.95:1 and falls to 14.69:1. The motif costs 12% of the ratio on paper and 18% on panel, and neither crosses a class boundary &mdash; everything stays above AAA&rsquo;s 7:1, four times AA&rsquo;s 4.5:1. State 01 and 02 put live type on the motif so this is checked by eye, not asserted. <span class="specref">design language &sect;9.5 &middot; spec &sect;12</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">The bar is opaque</span>
+      <p>The shell bar is a filled surface rectangle closed by a hairline (<span class="specref">Bar.qml: color: Theme.paperSurface</span>), so the field passes behind it and never through it. The wallpaper cannot change one number in the bar&rsquo;s contrast budget, and state 03 draws it that way. <span class="specref">design language &sect;5</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Acceptance</span>
+      <p>Every number above was measured, not asserted: the two SVGs were rendered at 3840&times;2400 and every pixel histogrammed, giving a worst stroke of <span class="specref">#EDEAE2</span> at 1.142:1 on paper and <span class="specref">rgb(30,32,36)</span> at 1.222:1 on panel. The same check is headless and cheap &mdash; screenshot the desktop, histogram it, assert the darkest pixel that is not a window sits at or below 1.25:1 against the field. It rides the existing desktop screenshot job; no new harness. <span class="specref">spec &sect;12</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect III &middot; Geometry register</h2>
+    <p class="assertion">Fit, never crop &mdash; because the field is one flat colour, letterboxing is invisible.</p>
+    <div class="reg"><span class="no">01</span><span class="what">viewBox</span>
+      <p><span class="specref">viewBox="0 0 1600 1000"</span> &mdash; a 16:10 reference sheet &mdash; with <span class="specref">preserveAspectRatio="xMidYMid meet"</span>. The dial sits at (1152, 500): vertically centred, horizontally at 72%, outer radius 208. Vertical centring is not taste; it is what makes the worst crop harmless.</p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Why meet, not slice</span>
+      <p><span class="specref">meet</span> fits the whole drawing and letterboxes the remainder. Normally that is fatal for a wallpaper; here the field is a single flat token, so the bars are the same colour as the field and are literally invisible. The field rect overscans to <span class="specref">13600 &times; 9000</span> and the chain lines run from &minus;6000 to 7600, and a root <span class="specref">&lt;svg&gt;</span> clips to its viewport rather than its viewBox &mdash; so the renderer paints those bars itself. Nothing is ever cropped, on any aspect ratio, including portrait.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Aspect behaviour</span>
+      <p>The dial&rsquo;s diameter is always 41.6% of the fitted height; its horizontal position is always 72% of the fitted width. The composition is a constant and only its scale moves. Even if a consumer ignores <span class="specref">preserveAspectRatio</span> and slices instead, every landscape ratio is still safe: 32:9 under slice leaves the band y&nbsp;&isin;&nbsp;[275, 725], and the dial spans [292, 708]. Only portrait needs <span class="specref">meet</span>.</p>
+      <table class="ratios">
+        <tr><th>Output</th><th>Ratio</th><th>Fit scale</th><th>Dial</th><th>Result</th></tr>
+        <tr><td>1366 &times; 768</td><td>16:9</td><td>0.768</td><td>319 px</td><td>whole composition</td></tr>
+        <tr><td>1920 &times; 1200</td><td>16:10</td><td>1.200</td><td>499 px</td><td>exact fit, no bars</td></tr>
+        <tr><td>2560 &times; 1706</td><td>3:2</td><td>1.600</td><td>666 px</td><td>whole composition</td></tr>
+        <tr><td>3440 &times; 1440</td><td>21:9</td><td>1.440</td><td>599 px</td><td>whole composition</td></tr>
+        <tr><td>3840 &times; 2160</td><td>16:9</td><td>2.160</td><td>899 px</td><td>whole composition</td></tr>
+        <tr><td>3840 &times; 1080</td><td>32:9</td><td>1.080</td><td>449 px</td><td>whole composition</td></tr>
+        <tr><td>1080 &times; 1920</td><td>9:16</td><td>0.675</td><td>281 px</td><td>whole composition</td></tr>
+      </table></div>
+    <div class="reg"><span class="no">04</span><span class="what">Nothing edge-critical</span>
+      <p>Every closed form &mdash; four circles, sixty ticks, the datum point &mdash; lives inside r&nbsp;208 of the centre. The only geometry that touches an edge is a chain line, which is supposed to run off the sheet; a drafting centre line that ends inside the frame would be the error, not the bleed. <span class="specref">design language &sect;3</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Stroke scale</span>
+      <p>Widths are drawing units &mdash; 1 for hairlines, 1.5 for emphasis &mdash; and they scale with the output: 0.77 / 1.15 device px at 1366&times;768, 2.16 / 3.24 at 4K. Deliberate: this is a drawing, so it enlarges like one. UI hairlines stay 1 device pixel and still out-rank the field, because they out-rank it by colour and colour does not scale. <span class="specref">Sect II &middot; 02</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect IV &middot; Budget register</h2>
+    <p class="assertion">A background that costs five kilobytes cannot cost the image.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Bytes</span>
+      <p><span class="specref">punar-wallpaper-paper.svg</span> is 4,906 bytes and <span class="specref">punar-wallpaper-panel.svg</span> is 5,030 bytes. Of that, 2,508 and 2,569 bytes are geometry; the rest is the comment header that makes the file hand-checkable without a renderer. Together they are 9.7 KB of the image &mdash; less than one icon. <span class="specref">PERFORMANCE_BUDGETS.md</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">No raster</span>
+      <p>A PNG carrying this drawing at 4K would run into the hundreds of kilobytes and be wrong at every other resolution and every other aspect ratio; a JPEG would band a flat warm field visibly. Both rejected. The image ships one vector per surface and rasterizes it once, at the size the output actually is.</p></div>
+    <div class="reg"><span class="no">03</span><span class="what">No gradients, no fonts</span>
+      <p>No gradient, no filter, no mask, no <span class="specref">&lt;text&gt;</span>. The flat field is what makes the letterbox trick work, and the absence of text means the wallpaper renders identically before Instrument Sans and Geist Mono are loaded &mdash; which matters, because the background layer is up before the bar is. <span class="specref">design language &sect;1</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Zero idle cost</span>
+      <p>No animation, no script, no timer inside the asset, and no data behind it. It is rasterized once per output at startup and is a static texture thereafter, so its contribution to idle CPU is exactly zero &mdash; which is the only contribution &sect;6.3 permits. <span class="specref">spec &sect;6.3 &middot; PERFORMANCE_BUDGETS.md</span></p></div>
+  </section>
+
+  <section>
+    <h2>Sect V &middot; Implementation notes</h2>
+    <p class="assertion">The assets ship today; getting them on screen is a layer window, no new service and no new data.</p>
+    <div class="reg"><span class="no">01</span><span class="what">Data source: none</span>
+      <p>The wallpaper is the only shell surface with zero inputs. It does not read <span class="specref">/run/punar/status.json</span>, <span class="specref">agents.json</span>, or <span class="specref">approvals.json</span>; it holds no IPC subscription and no timer. Nothing the machine can observe is allowed to change the field &mdash; which is also why it can never lie. <span class="specref">spec &sect;1.22</span></p></div>
+    <div class="reg"><span class="no">02</span><span class="what">Choosing a variant</span>
+      <p>Honestly: there is no appearance preference anywhere in the tree today &mdash; <span class="specref">Theme.qml</span> reads <span class="specref">punar-tokens.json</span> and nothing else &mdash; so until one exists the shell hardcodes paper. The addition is <span class="specref">~/.config/punar/appearance.json</span> &nbsp;<span class="specref">{"surface":"paper"|"panel"}</span> followed by a <span class="specref">FileView { watchChanges: true }</span>, exactly the inotify pattern <span class="specref">Status.qml</span> already uses: event-driven, zero polling, fail-safe to paper when absent. No time-of-day switching &mdash; that needs a clock timer, and this plate refuses one. <span class="specref">spec &sect;6.3 &middot; design language &sect;6</span> <span class="simtag">M11</span></p></div>
+    <div class="reg"><span class="no">03</span><span class="what">Delivery &mdash; recommended</span>
+      <p>A Quickshell background layer window inside the existing <span class="specref">punar-shell</span> process: <span class="specref">PanelWindow</span> anchored on all four edges with <span class="specref">WlrLayershell.layer: WlrLayer.Background</span>, namespace <span class="specref">punar-wallpaper</span>, <span class="specref">exclusionZone: 0</span>, <span class="specref">color: Theme.paperSurface</span>, holding one <span class="specref">Image { fillMode: PreserveAspectFit; sourceSize: Qt.size(width, height) }</span>; a <span class="specref">Variants</span> over <span class="specref">Quickshell.screens</span> covers multi-monitor. Cost: no new process, no new unit, no new socket &mdash; one texture at output size (about 8 MB at 1080p, 33 MB at 4K) and a few kilobytes of parsed SVG. It needs the <span class="specref">qtsvg</span> image plugin present in the image; that is the one real packaging dependency this plate adds. <span class="simtag">M11</span></p></div>
+    <div class="reg"><span class="no">04</span><span class="what">Delivery &mdash; alternative</span>
+      <p><span class="specref">hyprpaper</span> would mean a second daemon with its own RSS, its own IPC socket and its own unit, for a picture that never changes. Worse, its loader is bitmap-oriented: before choosing it, verify whether it can read SVG at all &mdash; if it cannot, the asset must be pre-rasterized per resolution at build or first boot, which throws away the resolution independence this whole plate is built on. Recommendation: the Quickshell layer window. <span class="specref">spec &sect;6.3</span></p></div>
+    <div class="reg"><span class="no">05</span><span class="what">Backstop</span>
+      <p>Set the compositor clear colour (<span class="specref">misc:background_color</span>) to the same token, so the gap between compositor start and shell start is the field colour and not black. Three independent mechanisms &mdash; the SVG&rsquo;s own <span class="specref">preserveAspectRatio</span>, the QML <span class="specref">fillMode</span>, and the window&rsquo;s <span class="specref">color</span> &mdash; all land on the same picture, and any two can fail.</p></div>
+    <div class="reg"><span class="no">06</span><span class="what">Milestone</span>
+      <p>The two SVGs are shippable now: static files, no code, no dependency on anything unbuilt. The layer window is <strong>design-ready, implementation M11</strong> with the rest of the shell-services pass &mdash; it blocks nothing and nothing blocks it. It is deliberately not claimed for M1 or M2: the desktop is flat paper today and this page does not pretend otherwise. <span class="specref">spec &sect;76</span></p></div>
+    <div class="reg"><span class="no">07</span><span class="what">Not designed</span>
+      <p>Per-workspace fields, user-supplied images, a picker UI, and any animated variant are not designed and not planned. The field is a system constant; if that changes it earns its own plate.</p></div>
+  </section>
+
+  <footer>
+    <hr class="rule">
+    <div class="mast">
+      <span class="meta">Punar &middot; Field Note design language</span>
+      <span class="meta">docs/design/mockups/wallpaper.html</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  var stage = document.getElementById('stage');
+  var frame = document.getElementById('frame');
+  var noteL = document.getElementById('wpnote-l');
+  var noteR = document.getElementById('wpnote-r');
+  var probeB = document.getElementById('probe-b');
+  if (!stage || !frame) return;
+
+  var btns = Array.prototype.slice.call(document.querySelectorAll('.statebtn[data-state]'));
+  var uses = Array.prototype.slice.call(document.querySelectorAll('.wpuse'));
+  var ORDER = ['paper', 'panel', 'windows', 'scale'];
+
+  var LABEL = {
+    paper:   '01 &middot; Paper',
+    panel:   '02 &middot; Panel',
+    windows: '03 &middot; With windows',
+    scale:   '04 &middot; Scale test'
+  };
+  var FACT = {
+    paper:   'punar-wallpaper-paper.svg &middot; 4,906 bytes',
+    panel:   'punar-wallpaper-panel.svg &middot; 5,030 bytes',
+    windows: 'opaque bar &middot; tiled work &middot; the field frames it and loses nothing',
+    scale:   'one file &middot; 1366&times;768, 3440&times;1440, and an 18&times; rim crop'
+  };
+  var TONE = {
+    paper: 'Field #FAF9F6 &middot; hairline #F4F2EC 1.06:1 &middot; emphasis #EDEAE2 1.14:1',
+    panel: 'Field #08090A &middot; hairline #26282E/.42 1.10:1 &middot; emphasis /.75 1.22:1'
+  };
+  var PROBE = {
+    paper: 'Ink on field 20.0:1 &middot; over motif 17.5:1 &middot; AA needs 4.5:1',
+    panel: 'Panel-fg on field 18.0:1 &middot; over motif 14.7:1 &middot; AA needs 4.5:1'
+  };
+  var BYTES = { paper: '4,906', panel: '5,030' };
+
+  function variant() { return stage.getAttribute('data-variant') === 'panel' ? 'panel' : 'paper'; }
+
+  function render() {
+    var s = stage.getAttribute('data-state');
+    var v = variant();
+    for (var i = 0; i < uses.length; i++) uses[i].setAttribute('href', '#wp-' + v);
+    for (var j = 0; j < btns.length; j++) {
+      btns[j].setAttribute('aria-selected', btns[j].getAttribute('data-state') === s ? 'true' : 'false');
+    }
+    var fact = FACT[s] || '';
+    if (s === 'windows' || s === 'scale') {
+      fact = fact + ' &middot; ' + v + ' &middot; ' + BYTES[v] + ' bytes';
+    }
+    if (noteL) noteL.innerHTML = '<strong>' + (LABEL[s] || '') + '</strong> &middot; ' + fact;
+    if (noteR) noteR.innerHTML = TONE[v];
+    if (probeB) probeB.innerHTML = PROBE[v];
+    clockGate();
+  }
+
+  function setState(s) {
+    if (ORDER.indexOf(s) < 0) return;
+    stage.setAttribute('data-state', s);
+    if (s === 'paper' || s === 'panel') stage.setAttribute('data-variant', s);
+    render();
+  }
+  function setVariant(v) {
+    stage.setAttribute('data-variant', v === 'panel' ? 'panel' : 'paper');
+    var s = stage.getAttribute('data-state');
+    if (s === 'paper' || s === 'panel') stage.setAttribute('data-state', v === 'panel' ? 'panel' : 'paper');
+    render();
+  }
+
+  for (var k = 0; k < btns.length; k++) {
+    (function (b) {
+      b.addEventListener('click', function () { setState(b.getAttribute('data-state')); frame.focus(); });
+    })(btns[k]);
+  }
+  frame.addEventListener('click', function () {
+    var cur = ORDER.indexOf(stage.getAttribute('data-state'));
+    setState(ORDER[(cur + 1) % ORDER.length]);
+  });
+
+  frame.addEventListener('keydown', function (e) {
+    var cur = ORDER.indexOf(stage.getAttribute('data-state'));
+    if (cur < 0) cur = 0;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { setState(ORDER[(cur + 1) % ORDER.length]); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { setState(ORDER[(cur + ORDER.length - 1) % ORDER.length]); e.preventDefault(); }
+    else if (e.key >= '1' && e.key <= '4') { setState(ORDER[(+e.key) - 1]); e.preventDefault(); }
+    else if (e.key === 'p' || e.key === 'P') { setVariant('paper'); e.preventDefault(); }
+    else if (e.key === 'n' || e.key === 'N') { setVariant('panel'); e.preventDefault(); }
+    else if (e.key === 'Escape') { setState('paper'); e.preventDefault(); }
+  });
+
+  // Bar clock in state 03 — the one live value on this plate, and it is a
+  // clock, not machine data. Its interval exists only while state 03 is on
+  // screen (spec §6.3: a tick belongs to an open surface, never to rest);
+  // in the shell this is a Qt SystemClock binding, not a timer we own.
+  var clock = document.getElementById('deskclock');
+  var clockTimer = null;
+  function tick() {
+    if (!clock) return;
+    var now = new Date();
+    clock.textContent = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  }
+  function clockGate() {
+    var live = stage.getAttribute('data-state') === 'windows';
+    if (live && clockTimer === null) { tick(); clockTimer = setInterval(tick, 15000); }
+    else if (!live && clockTimer !== null) { clearInterval(clockTimer); clockTimer = null; }
+  }
+
+  tick();
+  render();
+})();
+</script>
