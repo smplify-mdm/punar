@@ -30,7 +30,7 @@
 #   naming    renameworkspace 1 Atlas → workspaces JSON; workspace
 #             name:Atlas navigation
 #   specials  togglespecialworkspace assistant/notes via monitors JSON
-#   overview  qs ipc call overview toggle/state; grim screenshot
+#   overview  qs -p /usr/share/punar/shell ipc call overview toggle/state; grim screenshot
 #             punar-m2.png with the overview open (Plate D-007 proof)
 #   state     ~/.local/state/punar/workspaces.json validated with jq
 #             against the milestone-2.md §6 shape
@@ -256,9 +256,9 @@ done
 # --- 7. overview (Plate D-007 surface; IPC contract milestone-2.md §5) -------
 # Tolerate whitespace/quoting variance in the ipc client's echo of the
 # string return value — the contract value is the literal open/closed.
-ov_state() { qs ipc call overview state 2>/dev/null | tr -d '[:space:]"'; }
+ov_state() { qs -p /usr/share/punar/shell ipc call overview state 2>/dev/null | tr -d '[:space:]"'; }
 check_eq "overview state before toggle" closed "$(ov_state)"
-qs ipc call overview toggle >/dev/null 2>&1
+qs -p /usr/share/punar/shell ipc call overview toggle >/dev/null 2>&1
 sleep 2
 check_eq "overview state after toggle" open "$(ov_state)"
 # Proof of rendering with the overview up — the file the CI uploads.
@@ -268,7 +268,7 @@ else
     note "FAIL grim screenshot with overview open failed"
     FAILED=1
 fi
-qs ipc call overview toggle >/dev/null 2>&1
+qs -p /usr/share/punar/shell ipc call overview toggle >/dev/null 2>&1
 sleep 2
 check_eq "overview state after second toggle" closed "$(ov_state)"
 

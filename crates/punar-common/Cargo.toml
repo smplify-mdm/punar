@@ -1,6 +1,6 @@
 [package]
 name = "punar-common"
-description = "Core Punar domain types shared by all services (SPEC sections 18, 20, 41, 53)"
+description = "Core Punar domain types, typed IPC contract, and audit plumbing shared by all services (SPEC sections 18, 20, 41, 53, 60, 61)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,8 @@ publish.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
+# serde_json graduated from dev-dependency in M3: the IPC envelope carries
+# params/results/state values as structured JSON and the audit writer emits
+# JSONL. Already in the workspace dependency set — no new supply chain.
 serde_json = { workspace = true }
+thiserror = { workspace = true }

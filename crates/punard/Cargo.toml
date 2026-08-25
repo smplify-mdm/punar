@@ -1,6 +1,6 @@
 [package]
 name = "punard"
-description = "Punar privileged local control-plane daemon (SPEC section 11.1) — Milestone 0 CLI skeleton"
+description = "Punar privileged local control-plane daemon (SPEC sections 10, 11.1, 41, 53, 60, 61) — Milestone 3: UDS NDJSON server, capability registry, audit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +8,12 @@ publish.workspace = true
 
 [dependencies]
 clap = { workspace = true }
+punar-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Justifications for both live at the workspace [workspace.dependencies] table:
+# rustix = SO_PEERCRED + pre-listen socket setup without unsafe;
+# signal-hook = safe SIGTERM handling for graceful shutdown.
+rustix = { workspace = true }
+signal-hook = { workspace = true }
