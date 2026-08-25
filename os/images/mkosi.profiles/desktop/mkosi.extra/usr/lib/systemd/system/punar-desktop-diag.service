@@ -1,0 +1,24 @@
+# Prints a bounded session-stack diagnosis to the serial console when the
+# desktop ready-marker has not appeared by punar-desktop-diag.timer's
+# OnBootSec — so a failed graphical CI run names its own cause in the
+# serial log instead of requiring a local image autopsy.
+# Enabled statically via multi-user.target.wants (extra-tree symlink,
+# vendor level: mkosi applies distro presets to /etc enablements after
+# extra trees — see git history of mkosi.postinst.chroot).
+
+[Unit]
+Description=Punar desktop failure self-diagnosis
+ConditionPathExists=!/run/punar/desktop-ready
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh -c '\
+  echo "PUNAR_DESKTOP_DIAG_BEGIN"; \
+  systemctl is-enabled greetd; \
+  systemctl status greetd --no-pager -l | head -12; \
+  journalctl -u greetd --no-pager -n 30; \
+  journalctl _UID=1000 --no-pager -p warning -n 30; \
+  ls -la /run/punar/ 2>&1; \
+  echo "PUNAR_DESKTOP_DIAG_END"'

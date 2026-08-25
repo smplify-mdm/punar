@@ -17,13 +17,14 @@ echo 'punar:100000:65536' > /etc/subuid
 echo 'punar:100000:65536' > /etc/subgid
 
 # Session chain: greetd (autologin -> /usr/lib/punar/session.sh -> Hyprland).
-# Enablement is DECLARATIVE: the extra tree ships
-# etc/systemd/system/display-manager.service and default.target symlinks
-# (graphical.target Wants=display-manager.service pulls greetd in). Runtime
-# `systemctl enable` here did not survive into the final image (verified on
-# the CI-built image 2026-08-25: is-enabled=disabled, no alias symlink,
-# while extra-tree .wants symlinks all persisted) — so we ship symlinks like
-# every other unit in this image and keep postinst free of systemctl.
+# Enablement is DECLARATIVE at the VENDOR level: the extra tree ships
+# usr/lib/systemd/system/graphical.target.wants/greetd.service. mkosi
+# applies the distro's systemd presets (Arch: disable *) to /etc
+# enablements AFTER extra trees — verified twice on CI-built images
+# 2026-08-25: runtime `systemctl enable` and hand-placed /etc symlinks
+# were both preset-wiped, while every /usr/lib .wants symlink survived.
+# default.target needs nothing: upstream systemd already defaults to
+# graphical.target. Keep postinst free of systemctl.
 
 # Pre-warm the fontconfig cache for the vendored fonts (first session start
 # should not pay the scan). Non-fatal: fontconfig also scans at runtime.

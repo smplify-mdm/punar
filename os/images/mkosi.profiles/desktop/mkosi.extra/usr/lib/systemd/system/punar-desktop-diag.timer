@@ -1,0 +1,9 @@
+[Unit]
+Description=Punar desktop failure self-diagnosis trigger
+
+[Timer]
+OnBootSec=150s
+AccuracySec=5s
+
+[Install]
+WantedBy=multi-user.target
