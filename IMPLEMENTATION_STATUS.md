@@ -34,8 +34,11 @@ Deliverables (spec section 76, Milestone 0):
   (2026-08-25, all five jobs green — see M1 below). The M2 exercise phase
   inside `desktop-test` has since gone green as well: run
   [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
-  (2026-08-25, see M2 below). The workflow on disk has since grown the M3
-  exercise phase, which has **no** recorded run yet (see M3 below).
+  (2026-08-25, see M2 below). The M3 exercise phase has its green run too:
+  [32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305)
+  (2026-08-25, see M3 below). The workflow in the working tree has since
+  grown the M4 exercise phase (uncommitted), which has **no** recorded run
+  yet (see M4 below).
 - [x] Repository — skeleton per spec section 67 (all section 67 directories
   and top-level documents exist; Cargo workspace members match the crates on
   disk).
@@ -181,11 +184,13 @@ Out of scope for M2 (decided in milestone-2.md §2, not regressions):
 reopening), §14.4 activities, §15 monitor-layout memory, mouse
 drag-to-tile.
 
-## Current milestone: M3 — `punard` + `punarctl` (in progress)
+## M3 — `punard` + `punarctl`: done (CI exercise green)
 
 Architecture plan, decisions, and as-built list:
 [`docs/development/milestone-3.md`](docs/development/milestone-3.md)
-(§12 is the implementation status). Binding wire contract:
+(§12 is the implementation status; its "no CI run yet / CI is the arbiter"
+statements are dated 2026-08-25 and predate the green run recorded here).
+Binding wire contract:
 [`docs/api/ipc.md`](docs/api/ipc.md). The build-strategy decision is
 recorded as
 [ADR-002 Distribution of First-Party Binaries](docs/architecture/adr/ADR-002-first-party-binaries.md).
@@ -193,7 +198,9 @@ Everything M3 ships runs in personal mode (design language section 8): no
 org anything; policy citations are `personal-defaults` / "os default".
 
 Everything checked below exists **on disk and is statically validated** —
-re-verified 2026-08-25 by this status audit unless noted: whole workspace
+re-verified 2026-08-25 by the M3 status audit against the tree as committed
+at f1ff60c (the working tree has since grown the uncommitted M4 changes —
+see M4 below): whole workspace
 green in the `docker rust:1` container (`cargo test --workspace --locked`:
 **200 tests, 0 failed**; fmt/clippy green per milestone-3.md §12);
 shellcheck v0.11.0 clean on all five touched scripts (`m3-check.sh`,
@@ -202,10 +209,20 @@ actionlint clean on `ci.yml`; contract validation 15 schemas / 123
 documents ALL PASS. The `mkosi summary` pass for both images with the M3
 staging and the ~50 s in-builder compile probe are recorded in
 milestone-3.md §12 (emulated local runs — non-authoritative per spec 1.22).
-**None of it has executed in CI**: the green run 32825539021 predates the
-M3 image wiring, so no CI run has built the image with the staged binaries
-or executed `punar-m3-check`. The first M3-inclusive run is the arbiter
-for every item marked "runtime CI-pending".
+
+The arbiter run has happened: CI run
+[32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305)
+(2026-08-25, KVM runner, all five jobs green) built the desktop image with
+the hermetically staged binaries and executed `punar-m3-check` inside the
+booted VM, delivering **`PUNAR_M3_OK` (27 assertions passed)**. The same
+run recorded the first real services-RSS number — `PUNAR_SERVICES_RSS_MB`
+= **2 MB** (summed PSS of the `punard.service` cgroup, against the 100 MB
+warn / 150 MB fail budget) — and idle RAM mean 1160 MB / max 1167 MB (pass
+with the standing over-target warning). Every item marked "runtime-proven"
+below cites this run. One dated caveat: the run exercised `m3-check.sh` as
+committed at f1ff60c (M3 report-only reconcile); the working tree has since
+amended m3-check for M4's remediating reconcile (milestone-4.md §10.4), and
+the amended script has no recorded run yet.
 
 Deliverables (spec section 76, Milestone 3) — on disk vs proven:
 
@@ -217,13 +234,13 @@ Deliverables (spec section 76, Milestone 3) — on disk vs proven:
   the firewall os-default). `punard.service` + vendor-level
   `multi-user.target.wants/` symlink + `tmpfiles.d/punard.conf` in the
   desktop extra tree (the M1 preset lesson applied). Unit/integration
-  tests green, incl. a socketpair authz matrix. Runtime CI-pending
-  (m3-check rows 1–2, 9; boot reconcile in-image).
+  tests green, incl. a socketpair authz matrix. Runtime-proven (run
+  32828986305: m3-check rows 1–2, 9; boot reconcile in-image).
 - [x] Typed IPC — versioned `{v:1, id, method, params}` NDJSON envelope,
   closed six-method set, **no exec/shell method** (spec sections 10, 60;
   m3-check row 10 probes for it); wire contract in `docs/api/ipc.md`;
   envelope serde round-trip and contract-example tests in `punar-common`.
-  Runtime CI-pending (every in-VM RPC).
+  Runtime-proven (run 32828986305 — every m3-check RPC ran in-VM).
 - [x] Capability registry — three real capabilities behind one
   observe/apply/verify/descriptor trait: `security.firewall` (nftables
   table `inet punar-base`, inbound-drop; ruleset vendored at
@@ -233,26 +250,26 @@ Deliverables (spec section 76, Milestone 3) — on disk vs proven:
   (`/etc/localtime` symlink, traversal-guarded). Descriptors conform to
   `schemas/capability/capability-descriptor.json`; `nft` parser tested
   against fixtures captured from the pinned `nftables 1:1.1.6-3`. Real
-  apply/verify in-image runtime CI-pending (rows 4–7).
+  in-image apply/verify runtime-proven (run 32828986305, rows 4–7).
 - [x] CLI — `punarctl` real `status`, `capabilities [get|set]`,
   `audit tail`, `reconcile`, global `--json`, hidden `debug rpc`; human
   output per Plate D-014 through one formatter module (personal mode — no
   org rows); section-73 denial voice; exit-code contract (0/1/2/3/5, 4
   reserved). 42 punarctl tests green incl. D-014 snapshot tests against a
-  mock daemon. Other subcommands keep their milestone stubs. Runtime
-  CI-pending (rows 3–6, 9).
+  mock daemon. Other subcommands keep their milestone stubs.
+  Runtime-proven (run 32828986305, rows 3–6, 9).
 - [x] Audit — every mutation and every denial appended to
   `/var/log/punar/audit.jsonl` (0640 root:punar, punard-only writes),
   events conform to `schemas/audit/audit-event.json` with documented
   sentinels (`agt_none`, `project_id:"system"`; daemon-initiated events
   use `source:"service"` — milestone-3.md §12 errata). Schema-conformance
-  tested host-side; in-VM file modes + emitted-line shape check
-  CI-pending (rows 5–6, 8).
+  tested host-side; in-VM file modes + emitted-line shape proven (run
+  32828986305, rows 5–6, 8).
 - [x] Hermetic in-image binary build — ADR-002: snapshot `rust 1:1.97.1-1`
   in the builder container; `stage_punar_binaries()` compiles `--release
   --locked` and stages `usr/bin/{punard,punarctl}` (gitignored) before
   mkosi; summary mode never compiles. Full image build with staged
-  binaries CI-pending.
+  binaries proven (run 32828986305).
 - [x] M3 CI exercise + budget wiring — `/usr/lib/punar/m3-check.sh` +
   `punar-m3-check.service` (ten assertions: socket perms, typed status,
   group-read authz, allowed mutation + audit, **non-root denial in the
@@ -262,19 +279,102 @@ Deliverables (spec section 76, Milestone 3) — on disk vs proven:
   phase-5 M3 verdict gate; `PUNAR_SERVICES_RSS_MB` (summed PSS of the
   `punard.service` cgroup) exported and gated by `check-budgets.sh`
   (fail > 150 MB, warn > 100 MB, dead-daemon `absent` fails even under
-  TCG). Statically validated; **no recorded run**.
+  TCG). Exercised end-to-end in run 32828986305: `PUNAR_M3_OK`, and the
+  first real `PUNAR_SERVICES_RSS_MB` = 2 MB, within the 100 MB target.
 
-What only the first M3-inclusive CI run will prove (milestone-3.md §12
-"CI is the arbiter" list): the hermetic image build with the staged
-binaries, all ten m3-check assertions, the real socket/audit file modes,
-boot reconcile applying `punar-base` in the image, and the first real
-`PUNAR_SERVICES_RSS_MB` number against the 100/150 MB services budget.
+Everything on milestone-3.md §12's "CI is the arbiter" list is now proven
+by run 32828986305: the hermetic image build with the staged binaries, the
+m3-check assertions (27 passed), the real socket/audit file modes, boot
+reconcile applying `punar-base` in the image, and the first real
+`PUNAR_SERVICES_RSS_MB` number (2 MB) against the 100/150 MB services
+budget.
 
 Out of scope for M3 (decided in milestone-3.md §1, each with its landing
 milestone): desired-state schemas/policy merge/drift remediation (M4),
 enrollment/compliance (M5), audit rotation (M5 follow-up), agent methods
 (M7+), approvals/JIT elevation (M9), `punarctl update status` (stays
 stubbed).
+
+## Current milestone: M4 — Declarative desired state (in progress)
+
+Architecture plan, decisions, and as-built status:
+[`docs/development/milestone-4.md`](docs/development/milestone-4.md) (§13 is
+the implementation status). The wire contract for every M4 method and
+result extension is [`docs/api/ipc.md`](docs/api/ipc.md) — all changes are
+additive under `v: 1` and marked "M4" there. M4 stays unmanaged-first
+personal mode (design language section 8): the merge engine and its tests
+know all seven section 39 sources — the org rungs are exercised host-side
+against the `fixtures/organizations/acme` fixtures — but the VM renders
+only OS defaults and user preferences; nothing org-shaped appears in any
+VM output.
+
+Everything below exists **on disk and is statically validated**
+(milestone-4.md §13): workspace fmt/clippy/test green in the `docker
+rust:1` container; shellcheck v0.11.0 clean on all touched scripts;
+actionlint clean; `PUNAR_BUILD_MODE=summary` staging pass for both images
+(local emulated runs — non-authoritative per spec 1.22). **The M4 work is
+uncommitted and no CI run includes it** — the first M4-inclusive run is
+the arbiter for every in-VM claim: each milestone-4.md §10.2 assertion,
+the drift demo's 375 s bound, and the merge engine's RSS impact against
+the services gate (whose M3-run baseline is 2 MB).
+
+Deliverables (spec section 76, Milestone 4) — on disk vs proven:
+
+- [x] Schemas — shipped early (M3): `schemas/desired-state` (section 38
+  `DeviceDesiredState`), `schemas/policy` (ai-policy + policy-source with
+  precedence ranks), `schemas/capability`, `schemas/audit`;
+  `./tools/validate-schemas.sh` validates them and the Acme fixtures. M4's
+  deliberate decision (milestone-4.md §9): **no schema deltas** — the new
+  IPC result shapes are contracted by ipc.md; `policy.d` envelopes are
+  already covered by `policy-source.json` + `schemas/desired-state`; the
+  daemon's private stores (`preferences.json`, `os-defaults.json`,
+  `effective.json`) are documented internals, deliberately not public
+  schemas.
+- [x] Preference/policy merge — layered desired-state store in `punard`
+  (`crates/punard/src/policy.rs`, `state.rs`): compiled or
+  observation-seeded OS defaults, a `preferences.json` user-preference
+  layer written only by `capabilities.set`, and a root-only
+  `/var/lib/punar/policy.d/` org drop directory (loader + tests now, files
+  arrive with M5 enrollment); the section 39 ladder is encoded in
+  `punar-policy` and the spec section 40 org scenario is reproduced from
+  the Acme fixtures in host tests. Includes the one-shot migration of the
+  M3 `desired.json` (host-test-only by design — a fresh CI image has
+  nothing to migrate). Runtime CI-pending.
+- [x] Reconciliation — the full section 42 chain (observe → normalize →
+  load → diff → policy → plan → apply → verify → audit → compliance) in
+  one synchronous `reconcile` pass; section 43 drift classification as
+  data (`auto_remediate` in personal mode; `alert_only` /
+  `approval_required` representable and org-testable); N=3 loop
+  protection; `reconcile` now remediates — the semantic change M3
+  pre-announced by making it root-only; drift trigger via the
+  low-frequency `punard-reconcile.timer` (120 s cadence, justified against
+  spec 6.3 in milestone-4.md §6; vendor-wants enablement per the M1 mkosi
+  lesson). Runtime CI-pending.
+- [x] Explain — `policy.effective` + `policy.explain` IPC methods;
+  `punarctl policy effective` and `punarctl policy explain <path>` render
+  the spec section 40 layout verbatim in D-014 grammar; `status` gains the
+  section 52 personal-scope compliance block. Personal-mode strings:
+  "Personal preference" / "OS default", policy id `personal-defaults`,
+  "User override: Permitted". Runtime CI-pending.
+- [x] Firewall-drift demo — m4-check phase B: with the timer running,
+  `nft destroy table inet punar-base`; the table must be restored within
+  three timer periods (375 s poll budget) with a `reconcile.remediate`
+  success audit event and a `drift_remediated_total` increment in
+  `status`. Wired end-to-end (`m4-check.sh` + `punar-m4-check.service`,
+  `idle-ram.sh` chaining after m3-check, `boot-test.sh` phase-6 hard gate
+  on `m4-report.txt`, `ci.yml` artifact upload). Runtime CI-pending — this
+  is the milestone's headline in-VM assertion.
+
+Honest limits (milestone-4.md §10.3): the migration path, the org-rung
+merge scenarios, and loop-protection exhaustion cannot run in the fresh CI
+VM — they are covered by host `cargo test` (synthetic M3 stores, Acme
+fixtures, a failing mock backend); the VM asserts only that loop
+protection does not fire in the happy path.
+
+Out of scope for M4 (milestone-4.md §1, each with its landing milestone):
+enrollment and any org source in the VM (M5), policy.d hot-reload (M5),
+audit rotation (M5), agent methods (M7+), approvals/JIT elevation (M9 —
+`approval_required` degrades to alert-only behavior until then).
 
 ## Milestone table
 
@@ -288,8 +388,8 @@ exist and function, until sharper criteria are defined.
 | M0 — Foundation evaluation | Substrate ADR; resource-budget baseline; VM build; CI; repository | Reproducible build and VM boot | **Done** — acceptance met, [CI run 32788238871](https://github.com/smplify-mdm/punar/actions/runs/32788238871); budget baseline recorded in [run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) |
 | M1 — Lightweight graphical workstation | Wayland, compositor, shell, command center, terminal, browser, Git, editor, Podman, keyboard navigation | Idle RAM measured; no mouse required for core desktop use | **CI gate green** — [run 32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) (2026-08-25): build, boot, `PUNAR_DESKTOP_OK`, idle RAM 1162 MB mean (pass w/ over-target warning); human keyboard-only walkthrough pending |
 | M2 — Native multitasking | Tiling, stacking, floating, overview, layouts, scratchpads, named project workspaces | Not specified in spec §76 | **Done** — [run 32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021) (2026-08-25) fully green incl. the in-VM M2 exercise (`PUNAR_M2_OK`); idle RAM 1157 MB mean (pass w/ over-target warning) |
-| M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | **In progress** — implemented on disk + statically validated (checklist above; ADR-002; milestone-3.md §12); no CI run includes the M3 wiring yet — the first such run is the arbiter |
-| M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | Not started |
+| M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | **Done** — [run 32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305) (2026-08-25) fully green incl. the in-VM M3 exercise (`PUNAR_M3_OK`, 27 assertions); punard services RSS 2 MB (within the 100 MB target); idle RAM 1160 MB mean (pass w/ over-target warning) |
+| M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | **In progress** — implemented on disk + statically validated (checklist above; milestone-4.md §13); uncommitted, no CI run includes the M4 wiring yet — the first such run is the arbiter |
 | M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | Not started |
 | M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | Not started |
 | M7 — AI Agent Registry | Managed sessions, Claude adapter, second/generic adapter, agent identity, classification, local UI | Not specified in spec §76 | Not started |

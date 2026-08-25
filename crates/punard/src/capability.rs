@@ -145,6 +145,7 @@ pub mod mock {
     struct MockInner {
         id: CapabilityId,
         state: Mutex<Value>,
+        default_desired: Option<Value>,
         apply_calls: AtomicUsize,
         fail_apply: AtomicBool,
         verify_false: AtomicBool,
@@ -152,10 +153,22 @@ pub mod mock {
 
     impl MockCapability {
         pub fn new(id: &str, initial_state: Value) -> Self {
+            Self::build(id, initial_state, None)
+        }
+
+        /// A mock with a compiled-in OS default (models `security.firewall`,
+        /// whose default is fixed rather than observation-seeded — M4 layer
+        /// store, docs/development/milestone-4.md section 3.1).
+        pub fn with_default(id: &str, initial_state: Value, default: Value) -> Self {
+            Self::build(id, initial_state, Some(default))
+        }
+
+        fn build(id: &str, initial_state: Value, default_desired: Option<Value>) -> Self {
             MockCapability {
                 inner: Arc::new(MockInner {
                     id: CapabilityId::new(id).expect("valid mock capability id"),
                     state: Mutex::new(initial_state),
+                    default_desired,
                     apply_calls: AtomicUsize::new(0),
                     fail_apply: AtomicBool::new(false),
                     verify_false: AtomicBool::new(false),
@@ -227,7 +240,7 @@ pub mod mock {
         }
 
         fn default_desired(&self) -> Option<Value> {
-            None
+            self.inner.default_desired.clone()
         }
     }
 }

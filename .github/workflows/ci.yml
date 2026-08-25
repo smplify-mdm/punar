@@ -1,7 +1,8 @@
-# Punar CI — Milestones 0–3 (spec 76: M0 "reproducible build and VM boot",
+# Punar CI — Milestones 0–4 (spec 76: M0 "reproducible build and VM boot",
 # M1 "idle RAM measured" graphical acceptance, M2 multitasking exercise,
-# M3 daemon/typed-IPC/capability/audit exercise; ADR-001, milestone-1.md §10,
-# milestone-2.md §7, milestone-3.md §8–§9).
+# M3 daemon/typed-IPC/capability/audit exercise, M4 policy-merge/explain/
+# drift-remediation exercise; ADR-001, milestone-1.md §10, milestone-2.md §7,
+# milestone-3.md §8–§9, milestone-4.md §10).
 #
 # Jobs:
 #   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
@@ -21,9 +22,14 @@
 #                 in-guest M3 daemon/CLI exercise (milestone-3.md §8 —
 #                 punar-m3-check.service: socket perms, typed IPC, authz
 #                 denial voice, audit schema, firewall drift/apply, no-exec
-#                 probe; verdict in m3-report.txt; both hard-gated in
-#                 boot-test.sh), artifact export (tools/boot-test.sh --mode
-#                 desktop), then the PERFORMANCE_BUDGETS.md gates
+#                 probe; verdict in m3-report.txt) and the in-guest M4
+#                 policy exercise (milestone-4.md §10 — punar-m4-check.service:
+#                 policy effective/explain provenance, preference-layer set
+#                 cycle, section 52 compliance, timer-driven firewall-drift
+#                 demo via punard-reconcile.timer; verdict in m4-report.txt;
+#                 all three hard-gated in boot-test.sh), artifact export
+#                 (tools/boot-test.sh --mode desktop), then the
+#                 PERFORMANCE_BUDGETS.md gates
 #                 (tests/performance/check-budgets.sh: whole-system fail
 #                 mean > 1536 MB / warn > 1024 MB; services fail > 150 MB /
 #                 warn > 100 MB, absent fails even under TCG; other TCG
@@ -146,7 +152,8 @@ jobs:
             os/modules/desktop/hypr/punar-layout.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m4-check.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -216,31 +223,35 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-  # M1+M2 graphical acceptance gate (milestone-1.md §7–§10, milestone-2.md
-  # §7). Boots the desktop image with -m 8192 -smp 4 -device virtio-vga +
+  # M1+M2+M3+M4 graphical acceptance gate (milestone-1.md §7–§10,
+  # milestone-2.md §7, milestone-3.md §8, milestone-4.md §10). Boots the
+  # desktop image with -m 8192 -smp 4 -device virtio-vga +
   # the punar.export virtio-serial channel, waits for PUNAR_DESKTOP_OK,
   # then for the in-guest canonical idle-RAM measurement (10 min stabilize
   # + 5 min window — PERFORMANCE_BUDGETS.md §2.1–2.2, ~16 min wall clock),
-  # then the guest runs the M2 multitasking exercise (punar-m2-check.service
+  # then the guest runs the M2, M3 and M4 exercises in order (each
   # strictly AFTER sampling, so the idle numbers stay clean) and exports
-  # screenshots + RAM data + the M2 report; boot-test.sh hard-fails on a
-  # PUNAR_M2_FAIL verdict, and the RAM numbers gate against the budgets.
-  # ~55 min covers KVM boot + measurement + M2 exercise + export; a
-  # TCG-degraded run (broken KVM) will exceed it — that failure mode is
-  # intentional surfacing; the RAM gate is warn-only under TCG, and a
-  # MISSING M2 report is warn (KVM) / info (TCG) — though a delivered
-  # PUNAR_M2_FAIL always fails.
+  # screenshots + RAM data + the reports; boot-test.sh hard-fails on any
+  # delivered PUNAR_M2/M3/M4_FAIL verdict, and the RAM numbers gate
+  # against the budgets.
+  # ~75 min covers KVM boot + measurement + the three exercises (the M4
+  # drift demo waits on wall-clock timer firings, worst case 375 s) +
+  # export; a TCG-degraded run (broken KVM) will exceed it — that failure
+  # mode is intentional surfacing; the RAM gate is warn-only under TCG, and
+  # a MISSING report is warn (KVM) / info (TCG) — though a delivered FAIL
+  # always fails.
   # "No mouse required" (the other M1/M2 acceptance criterion) is not
   # CI-provable: it is a human keyboard-only walkthrough, with the keybind
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2/M3 exercises + RAM budgets)
+    name: desktop-test (graphical gate + M2/M3/M4 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    # Raised from M2's 55: the in-guest M3 exercise (punar-m3-check.service,
-    # bounded at 10 min in-guest, seconds under KVM) runs between the M2
-    # exercise and the export.
-    timeout-minutes: 65
+    # Raised from M3's 65: the in-guest M4 exercise (punar-m4-check.service,
+    # bounded at 12 min in-guest; its timer-driven drift demo waits on
+    # wall-clock firings, worst case 375 s even under KVM) runs between the
+    # M3 exercise and the export.
+    timeout-minutes: 75
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -271,7 +282,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2 exercise + export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2/M3/M4 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
@@ -292,7 +303,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload RAM report, M2/M3 reports and measurement data
+      - name: Upload RAM report, M2/M3/M4 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -306,6 +317,9 @@ jobs:
             os/images/out/desktop-proof/m3-report.txt
             os/images/out/desktop-proof/m3-*.json
             os/images/out/desktop-proof/m3-deny-stderr.txt
+            os/images/out/desktop-proof/m4-report.txt
+            os/images/out/desktop-proof/m4-*.json
+            os/images/out/desktop-proof/m4-explain-*.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

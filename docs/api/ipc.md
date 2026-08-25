@@ -1,6 +1,9 @@
-# Punar local IPC — `punard` wire contract (v1, Milestone 3)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–4)
 
-Status: **contract for the M3 implementation** (spec section 76, Milestone 3).
+Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
+**plus the Milestone 4 additions** — marked "M4" throughout; the protocol
+version stays `v: 1` per section 3.3 (new methods and optional result fields
+are additive). M4 design rationale: `docs/development/milestone-4.md`.
 Everything in this document is binding on `punard` (server) and `punarctl`
 (client). Spec authorities: section 10 (typed capability API only), section 11
 (`punard`/`punarctl` responsibilities), section 60 (hard safety constraints —
@@ -115,7 +118,11 @@ object, fields documented per code below.
   adding an optional *result* field is **not** a version bump; clients must
   tolerate unknown fields in `result` (server→client direction only).
 - M4 (desired-state/policy merge), M5 (enrollment), M9 (JIT elevation) are
-  expected to add methods and result fields under `v: 1`.
+  expected to add methods and result fields under `v: 1`. **M4 note:** this
+  is exactly how M4 landed — `policy.effective` + `policy.explain` (sections
+  5.7, 5.8), the `status.compliance` block (5.1), new optional
+  `capabilities.set` / `reconcile` result fields (5.4, 5.6), all under
+  `v: 1`.
 - A server refusing `v` reports `unsupported_version` with
   `details.supported: [1]`.
 
@@ -133,21 +140,23 @@ object, fields documented per code below.
 | `verify_failed`       | Apply succeeded but post-apply verification did not observe the desired state (spec section 42 "Verify"). Audited with `result: "verify_failed"`. | `capability`, `expected`, `observed` |
 | `internal`            | Daemon bug or I/O error. Never contains secrets (Redacted by construction). | — |
 
-## 5. Methods (M3 surface — complete)
+## 5. Methods (M3 surface + M4 additions — complete)
 
 The method set is closed. There is **no** exec, shell, script, or
 run-as-root method, by architecture (spec section 10 "Prohibited:
 RunRootShell(command)"; section 60). The 74.4 security test probes this via
 `punarctl debug rpc system.exec` and must get `unknown_method`.
 
-| Method              | AuthZ (M3)            | Mutating | Audited |
+| Method              | AuthZ                 | Mutating | Audited |
 |---------------------|-----------------------|----------|---------|
 | `status`            | any connected peer    | no       | no      |
 | `capabilities.list` | any connected peer    | no       | no      |
 | `capabilities.get`  | any connected peer    | no       | no      |
 | `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) |
 | `audit.tail`        | any connected peer    | no       | no      |
-| `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only) | always |
+| `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always |
+| `policy.effective` (M4) | any connected peer | no      | no      |
+| `policy.explain` (M4)   | any connected peer | no      | no      |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -178,6 +187,33 @@ persisted `/var/lib/punar/device-id`, `0600`) — the first real slice of the
 spec 11.1 "device identity" responsibility. `mode` is `"personal"` until M5;
 no org fields exist in the result (design section 8: enrollment adds fields,
 never redraws).
+
+**M4 addition — `compliance` result field** (optional per 3.3; always
+present since M4). Spec section 52 states, **personal scope** (the device
+measured against its own effective document — OS defaults + user
+preferences; no org involved before M5):
+
+```json
+"compliance": {
+  "overall": "compliant",
+  "capabilities": [
+    {"capability": "security.firewall", "state": "compliant"},
+    {"capability": "system.hostname",   "state": "compliant"},
+    {"capability": "time.timezone",     "state": "compliant"}
+  ],
+  "drift_remediated_total": 2,
+  "last_remediation_at": "2026-08-25T09:14:02Z"
+}
+```
+
+`state` ∈ `compliant | remediating | non_compliant | unknown | unsupported
+| exception` (section 52). States are computed at reconcile time (the boot
+reconcile guarantees a value before the socket opens);
+`drift_remediated_total` is a monotonic in-memory counter of successful
+remediations since daemon start (`last_remediation_at` is `null` until the
+first one). `overall` = worst of `non_compliant > unknown > remediating >
+exception > compliant`. Semantics and computation:
+docs/development/milestone-4.md section 5.
 
 ### 5.2 `capabilities.list`
 
@@ -219,6 +255,22 @@ Errors: `denied` (non-root — the section 73 test path), `not_found`,
 `invalid_params` (state not in `allowed_desired_states` / fails the
 capability's syntax rules), `apply_failed`, `verify_failed`.
 
+**M4 semantics — compatibility stated precisely.** Request shape, authz
+(root-only), validation, errors, and the audit action are **unchanged**.
+The recording step changes: the request is recorded as a **User Preference
+layer entry** (`/var/lib/punar/preferences.json`; the M3 `desired.json` is
+migrated once and retired — milestone-4.md section 3.3), the effective
+document is recomputed through the section 39 merge, and the **effective**
+value for the capability is applied + verified. In personal mode nothing
+outranks a user preference, so effective == requested and the
+`{descriptor, changed}` result is **byte-identical to M3** — existing
+callers observe no difference. When a higher-precedence source overrides
+(engine/tests only until M5), the preference is still recorded, the
+effective value is applied, and the result additionally carries
+`"overridden": true` and `"effective_state": <value>` (optional fields per
+3.3; never emitted in personal mode). `audit.policy_ids` cites the winning
+source's policy id (`["personal-defaults"]` in personal mode — unchanged).
+
 ### 5.5 `audit.tail`
 
 Params: `{"n": 20}` (optional; default 20; max 1000 — larger values are
@@ -254,6 +306,101 @@ not loosen later.
 Audited as `action: "reconcile"`, `resource: "capability_registry"`,
 `decision: "allow"`, `result: "drift_detected"` | `"clean"`.
 
+**M4 semantics — reconcile remediates per policy** (the semantic change M3
+pre-announced by making the method root-only: "M4 will make it applying,
+and the authz surface must not loosen later"). One synchronous pass of the
+full spec section 42 chain — observe → normalize → load (layered merge) →
+diff → policy (spec 43 classify: `auto_remediate | alert_only |
+approval_required`; personal default `auto_remediate` for all three
+capabilities) → plan → apply → verify → audit → compliance. Design:
+docs/development/milestone-4.md section 5.
+
+Every M3 result field keeps its M3 meaning (`drift` / `drift_count`
+describe the **pre-remediation** observation). Additive result fields:
+
+- per capability: `"classification": "auto_remediate" | "alert_only" |
+  "approval_required"` and `"remediation": "applied" | "none" |
+  "apply_failed" | "verify_failed" | "alert_only" | "suppressed"`
+  (`suppressed` = loop protection engaged; `approval_required` classifies
+  as such but behaves as `alert_only` until M9 delivers approvals);
+- top level: `"remediated_count": <n>` and `"compliance": {...}` (same
+  shape as the `status` compliance block, section 5.1).
+
+**Loop protection:** at most **3** consecutive failed remediation attempts
+per capability; then the capability is `non_compliant`, one audit event with
+`result: "attempts_exhausted"` is emitted on the transition, and further
+attempts are suppressed until the effective value changes, a manual
+`capabilities.set` succeeds, or the daemon restarts. A successful verify
+resets the counter.
+
+Each remediation **attempt** is audited individually: `action:
+"reconcile.remediate"`, `resource: <capability id>`, `decision: "allow"`,
+`result: "success" | "apply_failed" | "verify_failed" |
+"attempts_exhausted"`, `policy_ids: [<winning policy id>]` — in addition to
+the M3 summary event above, which is unchanged.
+
+### 5.7 `policy.effective` (M4)
+
+Params: none. Read-only, any connected peer, not audited. Returns the
+effective document produced by the spec section 39 layered merge
+(OS defaults + user preferences in personal mode; org layers join in M5):
+
+```json
+{"v":1,"id":"1","result":{
+  "computed_at": "2026-08-25T09:14:02Z",
+  "entries": [
+    {"path": "security.firewall", "effective_value": "enabled",
+     "source": {"kind": "local_user_preference", "rank": 5,
+                "policy_id": "personal-defaults",
+                "name": "Personal preference"},
+     "user_override_permitted": true,
+     "compliance_state": "compliant"},
+    {"path": "system.hostname", "effective_value": "punar-m3",
+     "source": {"kind": "local_user_preference", "rank": 5,
+                "policy_id": "personal-defaults",
+                "name": "Personal preference"},
+     "user_override_permitted": true,
+     "compliance_state": "compliant"},
+    {"path": "time.timezone", "effective_value": "UTC",
+     "source": {"kind": "os_secure_default", "rank": 6,
+                "policy_id": "personal-defaults",
+                "name": "OS default"},
+     "user_override_permitted": true,
+     "compliance_state": "compliant"}
+  ]
+}}
+```
+
+`source.kind` and `source.rank` are the `policy_source_kind` enum and
+precedence-rank mapping of `schemas/policy/policy-source.json` (1 = hard OS
+safety constraint … 6 = OS default; lower rank wins).
+`user_override_permitted` is `true` iff the winning rank is ≥ 5 — a user
+may override the OS default or their own preference; anything above the
+User Preference rung pins the value (personal mode: always `true`).
+
+### 5.8 `policy.explain` (M4)
+
+Params: `{"path": "security.firewall"}` — a capability path from the
+effective document. Read-only, any connected peer, not audited. Result is
+one `policy.effective` entry without `path` — exactly the spec section 40
+information set:
+
+```json
+{"v":1,"id":"1","result":{
+  "effective_value": "enabled",
+  "source": {"kind": "local_user_preference", "rank": 5,
+             "policy_id": "personal-defaults",
+             "name": "Personal preference"},
+  "user_override_permitted": true,
+  "compliance_state": "compliant"
+}}
+```
+
+Unknown path → `not_found` (`details.param: "path"` sibling shape to the
+capability case; the section 73 message names the path and points at
+`punarctl policy effective`). `punarctl policy explain <path>` renders this
+in the spec 40 layout verbatim (milestone-4.md section 7).
+
 ## 6. Audit contract (spec section 53)
 
 - File: `/var/log/punar/audit.jsonl` — one `AuditEvent` JSON object per line,
@@ -286,9 +433,27 @@ Audited as `action: "reconcile"`, `resource: "capability_registry"`,
   - `resource`: the capability id, or `"capability_registry"` for
     `reconcile`.
   - `policy_ids`: `["personal-defaults"]` — the M3 built-in root-only rule.
-    Real policy ids arrive with the M4 merge.
+    Real policy ids arrive with the M4 merge. **(M4: delivered — the array
+    cites the winning source's `policy_id` from the section 39 merge; in
+    personal mode this is still `"personal-defaults"` for every path.)**
   - `result`: `"success"` | `"noop"` | `"denied"` | `"failure"` |
-    `"verify_failed"` | `"drift_detected"` | `"clean"`.
+    `"verify_failed"` | `"drift_detected"` | `"clean"`. **M4 adds**
+    `"apply_failed"` and `"attempts_exhausted"` (remediation attempts,
+    section 5.6) — the schema's `result` is an open string by design, so
+    no schema change.
+- **M4 additions to the audited set:** every remediation attempt
+  (`action: "reconcile.remediate"`, resource = capability id) and the
+  one-shot M3-store migration (`action: "state.migrate"`,
+  `resource: "state_store"`, `source: "service"`, `user_id: "punard"`).
+  Both action names match the schema's dotted-lowercase `action` pattern —
+  no schema change. Read methods (including the new `policy.*`) remain
+  unaudited.
+- **Honest attribution limit (M4):** reconcile runs triggered by
+  `punard-reconcile.timer` arrive through `punarctl` as uid 0, so their
+  events carry `user_id: "root"`, `source: "human"` — the daemon sees only
+  peer credentials and cannot distinguish the timer from an administrator.
+  A client-asserted "I am the timer" flag would be spoofable and is not
+  added.
 - **What is audited:** every `capabilities.set` (allow and deny, all
   results), every `reconcile`, every `denied` authorization. Read methods are
   not audited in M3 (nothing privileged happens; revisit with remote queries,
@@ -315,18 +480,31 @@ Audited as `action: "reconcile"`, `resource: "capability_registry"`,
 - Exit codes (D-014 Sect III): `0` success · `1` runtime/daemon error ·
   `2` usage (clap) · `3` denied · `4` approval_required (reserved until M9) ·
   `5` daemon unreachable.
+- **M4 verbs:** `punarctl policy effective` (D-014 table over 5.7) and
+  `punarctl policy explain <path>` (spec section 40 layout verbatim over
+  5.8; personal-mode strings "Personal preference" / "OS default",
+  `personal-defaults`, "Permitted"); `punarctl status` renders the 5.1
+  compliance block per the spec section 52 example. Personal mode still
+  shows no org rows — personal compliance (device vs. its own effective
+  document) is not an org row. Rendering contract:
+  docs/development/milestone-4.md section 7.
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The
   server's method table is the enforcement point; this flag adds no server
   capability.
 
-## 8. Explicit non-goals of this contract (M3)
+## 8. Explicit non-goals of this contract (M3, amended M4)
 
 - No generic execution method of any kind (spec sections 10, 60) — permanent.
+  There is also **no write-side `policy.*` method**: the only policy
+  mutations are `capabilities.set` (user preference) and, from M5, the
+  enrollment-managed `policy.d` drop.
 - No TCP, no abstract-namespace sockets (path perms are the admission
   mechanism), no SCM_RIGHTS fd passing.
-- No policy merge (`policy.*` arrives M4), no enrollment (`M5`), no approvals
-  or JIT elevation (`M9`), no agent methods (`M7+`).
+- ~~No policy merge (`policy.*` arrives M4)~~ **(M4: landed — sections 5.7,
+  5.8)**; no enrollment (`M5`), no approvals or JIT elevation (`M9` —
+  `approval_required` classifications behave as alert-only until then), no
+  agent methods (`M7+`).
 - No event subscription/streaming; `audit.tail` is pull-only. Revisit when
-  the shell needs live updates (M4+).
+  the shell needs live updates (M5+).

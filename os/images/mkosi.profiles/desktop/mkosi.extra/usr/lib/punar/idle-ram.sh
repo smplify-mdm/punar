@@ -91,6 +91,16 @@ systemctl start punar-m2-check.service \
 systemctl start punar-m3-check.service \
     || echo "punar: idle-ram: punar-m3-check.service failed to start" >&2
 
+# M4 exercise ordering hook (milestone-4.md §10.1): start punar-m4-check
+# SYNCHRONOUSLY strictly AFTER the M3 exercise (whose set calls establish
+# the user-preference provenance m4-check asserts on) and strictly BEFORE
+# the export below, so m4-report.txt / m4-*.json / m4-explain-*.txt ship in
+# the same tar and the timer-driven drift demo (worst case 375 s) never
+# touches the idle window. Never fatal here: the verdict lives in
+# m4-report.txt and the host gate (tools/boot-test.sh) parses it.
+systemctl start punar-m4-check.service \
+    || echo "punar: idle-ram: punar-m4-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

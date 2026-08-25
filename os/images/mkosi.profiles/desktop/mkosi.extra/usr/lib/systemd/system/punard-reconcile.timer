@@ -1,0 +1,22 @@
+# Punar drift trigger (milestone-4.md §6; SPEC sections 42/43). Fires the
+# oneshot punard-reconcile.service every 2 minutes so firewall/hostname/
+# timezone drift is observed and remediated without any resident poll loop —
+# punard itself stays zero-wakeup (spec 6.3: each firing is one short-lived
+# punarctl doing three reads and at most one nft spawn, then full idle).
+# AccuracySec=15 bounds firing jitter so the m4-check drift demo's
+# "≤ 3 periods" window (375 s) is a testable bound, not a sloppy one.
+#
+# Enabled statically via multi-user.target.wants (extra-tree symlink, vendor
+# level: mkosi applies distro presets to /etc enablements after extra trees —
+# the M1 lesson; repo precedent punar-desktop-diag.timer).
+
+[Unit]
+Description=Punar scheduled reconcile trigger (drift remediation)
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=15
+
+[Install]
+WantedBy=multi-user.target

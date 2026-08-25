@@ -3,19 +3,21 @@
 > **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done; Milestone 1
 > (Lightweight graphical workstation) has a green CI gate with one acceptance
 > item left; Milestone 2 (Native multitasking) is done — CI-proven; Milestone 3
-> (`punard` + `punarctl`) is in progress.** The `punar-desktop` image (Hyprland
-> + punar-shell) builds, boots, and passes the graphical gate plus the in-VM M2
-> multitasking exercise in CI
-> ([run 32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021),
-> `PUNAR_DESKTOP_OK` + `PUNAR_M2_OK`; idle RAM measured at 1157 MB mean — under
-> the 1.5 GB hard ceiling, over the 1.0 GB target). M1's keyboard-only human
-> walkthrough is still pending. M3 — the `punard` daemon, typed IPC over a
-> Unix socket, the first three real capabilities (firewall, hostname,
-> timezone), the real `punarctl` CLI, and the audit trail — is implemented and
-> statically validated on disk (the hermetic in-image build strategy is
-> ADR-002); no CI run includes it yet. See
-> [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists versus
-> what is proven.
+> (`punard` + `punarctl`) is done — CI-proven; Milestone 4 (Declarative
+> desired state) is in progress.** The `punar-desktop` image (Hyprland +
+> punar-shell) builds, boots, and passes the graphical gate plus the in-VM M2
+> multitasking and M3 control-plane exercises in CI
+> ([run 32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305),
+> `PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` + `PUNAR_M3_OK`; idle RAM measured at
+> 1160 MB mean — under the 1.5 GB hard ceiling, over the 1.0 GB target;
+> `punard` services RSS 2 MB against a 100 MB target). M1's keyboard-only
+> human walkthrough is still pending. M4 — the layered desired-state store
+> with the spec section 39 preference/policy merge, remediating
+> reconciliation with a timer-driven firewall-drift demo, and
+> `punarctl policy effective` / `policy explain` — is implemented and
+> statically validated on disk; it is uncommitted and no CI run includes it
+> yet. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what
+> exists versus what is proven.
 
 Punar, by Smplify, is a lightweight, privacy-first, AI-native Linux operating
 system for developer workstations. It targets existing 8–16 GB enterprise

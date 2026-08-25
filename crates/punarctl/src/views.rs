@@ -2,9 +2,14 @@
 //! `fmt` idioms only (Plate D-014: no command formats itself).
 //!
 //! Unmanaged-first (design language section 8): personal mode draws **no**
-//! org, compliance, or enrollment rows; policy citations say "personal
-//! defaults" / "os default"; the absence of an organization renders calm
-//! and uncolored. Enrollment (M5) adds rows, never redraws.
+//! org or enrollment rows; policy citations say "Personal preference" /
+//! "OS default" / `personal-defaults`; the absence of an organization
+//! renders calm and uncolored. Enrollment (M5) adds rows, never redraws.
+//! M4 amendment to the M3 note "no compliance rows in personal mode":
+//! **personal** compliance — the device measured against its own
+//! preferences and OS defaults (SPEC section 52, milestone-4.md section 7)
+//! — now exists and renders; org rows still never render before
+//! enrollment.
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -35,6 +40,55 @@ fn state_slot(descriptor: &model::Descriptor) -> Slot {
 
 fn personal_context(hostname: &str) -> String {
     format!("{hostname} · Personal")
+}
+
+/// SPEC section 52 states on the terminal semantic slots (fmt.rs: lime
+/// for compliant, peach for pending, red for broken/unknown).
+fn compliance_slot(state: &str) -> Slot {
+    match state {
+        "compliant" => Slot::Ok,
+        "remediating" | "exception" => Slot::Warn,
+        "non_compliant" | "unknown" => Slot::Bad,
+        // `unsupported` and anything a newer daemon invents stay calm.
+        _ => Slot::Neutral,
+    }
+}
+
+/// Row label for a capability in the SPEC section 52 compliance block
+/// ("per-capability rows: Firewall, Hostname, Timezone" —
+/// milestone-4.md section 7). Unknown ids render as themselves.
+fn compliance_label(capability: &str) -> &str {
+    match capability {
+        "security.firewall" => "Firewall",
+        "system.hostname" => "Hostname",
+        "time.timezone" => "Timezone",
+        other => other,
+    }
+}
+
+/// The SPEC section 52 block (Overall + per-capability rows), shared by
+/// `status`. Personal scope: the device vs. its own effective document.
+fn compliance_rows(c: &model::Compliance) -> Vec<Row> {
+    let remediation = match (c.drift_remediated_total, &c.last_remediation_at) {
+        (0, _) => "no drift remediated since daemon start".to_string(),
+        (n, Some(ts)) => format!("drift remediated {n} · last {}", fmt::timestamp(ts)),
+        (n, None) => format!("drift remediated {n}"),
+    };
+    let mut rows = vec![Row::new(
+        "Overall",
+        &c.overall,
+        compliance_slot(&c.overall),
+        &format!("personal scope · {remediation}"),
+    )];
+    for capability in &c.capabilities {
+        rows.push(Row::new(
+            compliance_label(&capability.capability),
+            &capability.state,
+            compliance_slot(&capability.state),
+            "",
+        ));
+    }
+    rows
 }
 
 /// `punarctl status`.
@@ -87,6 +141,12 @@ pub fn status(style: &Style, result: &Value) -> Result<String, String> {
         ));
     }
     out.push_str(&fmt::rows(style, &rows));
+    if let Some(compliance) = &s.compliance {
+        // M4: the SPEC section 52 block, its own aligned block below the
+        // daemon rows (the spec example draws it as a separate stanza).
+        out.push('\n');
+        out.push_str(&fmt::rows(style, &compliance_rows(compliance)));
+    }
     if !s.enrolled {
         out.push_str(&fmt::note(
             style,
@@ -310,7 +370,11 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
     Ok(out)
 }
 
-/// `punarctl reconcile` — M3 reports drift, never remediates.
+/// `punarctl reconcile` — since M4 the daemon remediates drift per the
+/// effective policy (contract section 5.6); `remediated_count` present is
+/// the marker. An M3-shaped result (report-only daemon) still renders
+/// with the M3 wording — the view never claims a remediation that did
+/// not happen.
 pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let report: model::Reconcile = parse(result)?;
     let mut out = fmt::masthead(style, "Reconcile", &personal_context(hostname));
@@ -318,108 +382,152 @@ pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String
         .capabilities
         .iter()
         .map(|entry| {
+            // `drift` is the pre-remediation observation (contract 5.6);
+            // the remediation outcome refines the row verdict.
             let (value, slot) = if !entry.verified {
                 ("Unverified", Slot::Bad)
             } else if entry.drift {
-                ("Drift", Slot::Warn)
+                match entry.remediation.as_deref() {
+                    Some("applied") => ("Remediated", Slot::Ok),
+                    Some("suppressed") => ("Suppressed", Slot::Bad),
+                    Some("apply_failed" | "verify_failed") => ("Drift", Slot::Bad),
+                    _ => ("Drift", Slot::Warn),
+                }
             } else {
                 ("Ok", Slot::Ok)
             };
-            Row::new(
-                &entry.capability,
-                value,
-                slot,
-                &format!(
-                    "desired {} · observed {}",
-                    state_str(&entry.desired_state),
-                    state_str(&entry.current_state)
-                ),
-            )
+            let mut desc = format!(
+                "desired {} · observed {}",
+                state_str(&entry.desired_state),
+                state_str(&entry.current_state)
+            );
+            if entry.drift {
+                // SPEC section 43: how the effective policy classified the
+                // drift, then what the daemon did about it.
+                if let Some(classification) = &entry.classification {
+                    desc.push_str(&format!(" · classification {classification}"));
+                }
+                if let Some(remediation) = &entry.remediation {
+                    desc.push_str(&format!(" · remediation {remediation}"));
+                }
+            }
+            Row::new(&entry.capability, value, slot, &desc)
         })
         .collect();
     out.push_str(&fmt::rows(style, &rows));
 
     let total = report.capabilities.len();
-    if report.drift_count == 0 {
-        out.push_str(&fmt::verdict(
+    match (report.drift_count, report.remediated_count) {
+        (0, _) => out.push_str(&fmt::verdict(
             style,
             Slot::Ok,
             &format!("Clean · {total} capabilities verified"),
-        ));
-    } else {
-        out.push_str(&fmt::verdict(
+        )),
+        // M3 daemon: reported only, and the verdict says so.
+        (drift, None) => out.push_str(&fmt::verdict(
             style,
             Slot::Warn,
-            &format!(
-                "Drift detected · {} of {total} capabilities · reported only",
-                report.drift_count
-            ),
-        ));
+            &format!("Drift detected · {drift} of {total} capabilities · reported only"),
+        )),
+        (drift, Some(remediated)) if remediated >= drift => out.push_str(&fmt::verdict(
+            style,
+            Slot::Ok,
+            &format!("✓ Drift remediated · {drift} of {total} capabilities · verified"),
+        )),
+        (drift, Some(remediated)) => out.push_str(&fmt::verdict(
+            style,
+            Slot::Warn,
+            &format!("Drift detected · {drift} of {total} capabilities · {remediated} remediated"),
+        )),
     }
     let mut closing = String::new();
     if let Some(ts) = &report.reconciled_at {
         closing.push_str(&format!("Reconciled {} · ", fmt::timestamp(ts)));
     }
-    closing.push_str(
-        "Milestone 3 reports drift without remediating · the desired-state merge arrives in Milestone 4",
-    );
+    closing.push_str(if report.remediated_count.is_some() {
+        "Remediation follows your effective policy · every attempt lands in the local audit log"
+    } else {
+        "Milestone 3 reports drift without remediating · the desired-state merge arrives in Milestone 4"
+    });
     out.push_str(&fmt::note(style, &closing));
     Ok(out)
 }
 
-const POLICY_NOTE: &str = "No policy is loaded until Milestone 4 · the preference/policy merge and explain engine arrive there";
+/// Shared closing note for the policy views: where the effective document
+/// comes from in personal mode (SPEC section 39 merge, no org sources).
+const POLICY_NOTE: &str =
+    "Merged from OS defaults + your preferences · no organization is enrolled";
 
-/// `punarctl policy effective` — honest personal-mode answer; no engine
-/// exists yet, and this view never pretends otherwise.
-pub fn policy_effective(style: &Style, hostname: &str) -> String {
+/// `punarctl policy effective` — D-014 table over contract section 5.7:
+/// one row per path, `security.firewall  enabled  Personal preference ·
+/// personal-defaults` (milestone-4.md section 7). The value cell carries
+/// the entry's compliance color, matching how `capabilities` colors
+/// observed state by health.
+pub fn policy_effective(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let doc: model::PolicyEffective = parse(result)?;
     let mut out = fmt::masthead(style, "Policy", &personal_context(hostname));
-    out.push_str(&fmt::rows(
-        style,
-        &[
+    let rows: Vec<Row> = doc
+        .entries
+        .iter()
+        .map(|entry| {
             Row::new(
-                "Source",
-                "You · this device",
-                Slot::Neutral,
-                "no organization is enrolled",
-            ),
-            Row::new(
-                "Policy",
-                "Personal defaults",
-                Slot::Neutral,
-                "built-in rule · mutations need root",
-            ),
-        ],
-    ));
-    out.push_str(&fmt::note(style, POLICY_NOTE));
-    out
+                &entry.path,
+                &state_str(&entry.explain.effective_value),
+                compliance_slot(&entry.explain.compliance_state),
+                &format!(
+                    "{} · {}",
+                    entry.explain.source.name, entry.explain.source.policy_id
+                ),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let mut closing = String::new();
+    if let Some(ts) = &doc.computed_at {
+        closing.push_str(&format!("Computed {} · ", fmt::timestamp(ts)));
+    }
+    closing.push_str(POLICY_NOTE);
+    out.push_str(&fmt::note(style, &closing));
+    Ok(out)
 }
 
-/// `punarctl policy explain <capability>` — the Plate D-014 explain
-/// anatomy in personal mode, minus the rows only an engine could fill.
-pub fn policy_explain(style: &Style, capability: &str) -> String {
-    let mut out = fmt::masthead(style, "Policy Explain", capability);
+/// `punarctl policy explain <path>` — the SPEC section 40 layout verbatim
+/// in the Plate D-014 field-note grammar: EFFECTIVE VALUE / SOURCE /
+/// POLICY / USER OVERRIDE / COMPLIANCE rows over contract section 5.8.
+/// Source and policy names stay in the mixed-case description column
+/// (the plate's anatomy) so `personal-defaults` renders verbatim.
+pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<String, String> {
+    let explain: model::PolicyExplain = parse(result)?;
+    let override_desc = if explain.user_override_permitted {
+        "Permitted · it is your device"
+    } else {
+        // Renderable, but never reached before M5: only a source above
+        // the User Preference rung (rank < 5) pins a value.
+        "Not permitted · a higher-precedence source pins this value"
+    };
+    let mut out = fmt::masthead(style, "Policy Explain", path);
     out.push_str(&fmt::rows(
         style,
         &[
-            Row::new("Capability", capability, Slot::Neutral, ""),
             Row::new(
-                "Source",
-                "You · this device",
+                "Effective value",
+                &state_str(&explain.effective_value),
                 Slot::Neutral,
-                "no organization is enrolled",
+                "",
             ),
-            Row::new("Policy", "Personal defaults", Slot::Neutral, ""),
-            Row::new("User override", "Permitted", Slot::Ok, "it is your device"),
+            Row::new("Source", "", Slot::Neutral, &explain.source.name),
+            Row::new("Policy", "", Slot::Neutral, &explain.source.policy_id),
+            Row::new("User override", "", Slot::Neutral, override_desc),
             Row::new(
                 "Compliance",
+                &explain.compliance_state,
+                compliance_slot(&explain.compliance_state),
                 "",
-                Slot::Neutral,
-                "not enrolled · local state only",
             ),
         ],
     ));
     out.push_str(&fmt::note(style, POLICY_NOTE));
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -443,19 +551,188 @@ mod tests {
     }
 
     #[test]
-    fn policy_views_are_honest_about_milestone_4_and_show_no_org() {
+    fn compliance_slots_map_the_spec_52_states() {
+        assert_eq!(compliance_slot("compliant"), Slot::Ok);
+        assert_eq!(compliance_slot("remediating"), Slot::Warn);
+        assert_eq!(compliance_slot("exception"), Slot::Warn);
+        assert_eq!(compliance_slot("non_compliant"), Slot::Bad);
+        assert_eq!(compliance_slot("unknown"), Slot::Bad);
+        assert_eq!(compliance_slot("unsupported"), Slot::Neutral);
+        assert_eq!(compliance_slot("invented_later"), Slot::Neutral);
+    }
+
+    #[test]
+    fn status_renders_the_personal_compliance_stanza() {
         let style = Style::plain();
-        for text in [
-            policy_effective(&style, "punar-m3"),
-            policy_explain(&style, "security.firewall"),
-        ] {
-            assert!(text.contains("MILESTONE 4"));
-            assert!(text.contains("PERSONAL DEFAULTS"));
-            let lower = text.to_lowercase();
-            assert!(!lower.contains("org "));
-            assert!(!lower.contains("acme"));
-            assert!(!lower.contains("compliant"));
-        }
+        let result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "personal",
+            "enrolled": false,
+            "hostname": "punar-m4",
+            "capabilities_total": 3,
+            "compliance": {
+                "overall": "non_compliant",
+                "capabilities": [
+                    {"capability": "security.firewall", "state": "non_compliant"},
+                    {"capability": "system.hostname", "state": "compliant"},
+                    {"capability": "time.timezone", "state": "compliant"}
+                ],
+                "drift_remediated_total": 0,
+                "last_remediation_at": null
+            }
+        });
+        let text = status(&style, &result).unwrap();
+        assert!(text.contains("OVERALL"), "{text}");
+        assert!(text.contains("NON_COMPLIANT"), "{text}");
+        assert!(
+            text.contains("personal scope · no drift remediated since daemon start"),
+            "{text}"
+        );
+        // SPEC section 52 rows carry the friendly capability labels.
+        assert!(text.contains("FIREWALL"), "{text}");
+        assert!(text.contains("HOSTNAME"), "{text}");
+        assert!(text.contains("TIMEZONE"), "{text}");
+        // Personal compliance is not an org row (design section 8).
+        let lower = text.to_lowercase();
+        assert!(!lower.contains("org "));
+        assert!(!lower.contains("acme"));
+        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+    }
+
+    #[test]
+    fn status_without_a_compliance_block_still_renders_m3_shaped() {
+        let style = Style::plain();
+        let result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.1.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "personal",
+            "enrolled": false,
+            "hostname": "punar-m3",
+            "capabilities_total": 3
+        });
+        let text = status(&style, &result).unwrap();
+        assert!(!text.contains("OVERALL"), "{text}");
+        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+    }
+
+    #[test]
+    fn policy_effective_renders_the_d014_table() {
+        let style = Style::plain();
+        let result = json!({
+            "computed_at": "2026-08-25T09:14:02Z",
+            "entries": [
+                {"path": "security.firewall", "effective_value": "enabled",
+                 "source": {"kind": "local_user_preference", "rank": 5,
+                            "policy_id": "personal-defaults",
+                            "name": "Personal preference"},
+                 "user_override_permitted": true,
+                 "compliance_state": "compliant"},
+                {"path": "time.timezone", "effective_value": "UTC",
+                 "source": {"kind": "os_secure_default", "rank": 6,
+                            "policy_id": "personal-defaults",
+                            "name": "OS default"},
+                 "user_override_permitted": true,
+                 "compliance_state": "compliant"}
+            ]
+        });
+        let text = policy_effective(&style, &result, "punar-m4").unwrap();
+        assert!(text.contains("P U N A R   ·   P O L I C Y"), "{text}");
+        // One row per path: value cell + `<source name> · <policy id>`.
+        assert!(text.contains("SECURITY.FIREWALL"), "{text}");
+        assert!(
+            text.contains("Personal preference · personal-defaults"),
+            "{text}"
+        );
+        assert!(text.contains("OS default · personal-defaults"), "{text}");
+        assert!(text.contains("COMPUTED 2026-08-25 09:14:02"), "{text}");
+        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+    }
+
+    #[test]
+    fn policy_explain_renders_the_spec_40_rows() {
+        let style = Style::plain();
+        let result = json!({
+            "effective_value": "enabled",
+            "source": {"kind": "local_user_preference", "rank": 5,
+                       "policy_id": "personal-defaults",
+                       "name": "Personal preference"},
+            "user_override_permitted": true,
+            "compliance_state": "compliant"
+        });
+        let text = policy_explain(&style, &result, "security.firewall").unwrap();
+        // The SPEC section 40 information set, one row each, path in the
+        // masthead context.
+        assert!(text.contains("SECURITY.FIREWALL"), "{text}");
+        assert!(text.contains("EFFECTIVE VALUE  ENABLED"), "{text}");
+        assert!(text.contains("SOURCE"), "{text}");
+        assert!(text.contains("Personal preference"), "{text}");
+        assert!(text.contains("POLICY"), "{text}");
+        assert!(text.contains("personal-defaults"), "{text}");
+        assert!(text.contains("USER OVERRIDE"), "{text}");
+        assert!(text.contains("Permitted · it is your device"), "{text}");
+        assert!(text.contains("COMPLIANCE       COMPLIANT"), "{text}");
+    }
+
+    #[test]
+    fn policy_explain_renders_a_pinned_value_honestly() {
+        // Renderable but unreachable before M5: a rank-<5 source wins and
+        // pins the value (engine/tests only until enrollment).
+        let style = Style::plain();
+        let result = json!({
+            "effective_value": "required",
+            "source": {"kind": "organization_baseline", "rank": 2,
+                       "policy_id": "eng-baseline-v12",
+                       "name": "Acme Engineering Baseline"},
+            "user_override_permitted": false,
+            "compliance_state": "compliant"
+        });
+        let text = policy_explain(&style, &result, "security.diskEncryption").unwrap();
+        assert!(
+            text.contains("Not permitted · a higher-precedence source pins this value"),
+            "{text}"
+        );
+        assert!(text.contains("eng-baseline-v12"), "{text}");
+    }
+
+    #[test]
+    fn reconcile_view_renders_m4_remediation_outcomes() {
+        let style = Style::plain();
+        let result = json!({
+            "reconciled_at": "2026-08-25T09:14:02Z",
+            "drift_count": 2,
+            "remediated_count": 1,
+            "compliance": {"overall": "non_compliant", "capabilities": [],
+                           "drift_remediated_total": 1},
+            "capabilities": [
+                {"capability": "security.firewall", "desired_state": "enabled",
+                 "current_state": "disabled", "drift": true, "verified": true,
+                 "classification": "auto_remediate", "remediation": "applied"},
+                {"capability": "system.hostname", "desired_state": "punar-m4",
+                 "current_state": "mallory", "drift": true, "verified": true,
+                 "classification": "auto_remediate", "remediation": "suppressed"},
+                {"capability": "time.timezone", "desired_state": "UTC",
+                 "current_state": "UTC", "drift": false, "verified": true,
+                 "classification": "auto_remediate", "remediation": "none"}
+            ]
+        });
+        let text = reconcile(&style, &result, "punar-m4").unwrap();
+        assert!(text.contains("REMEDIATED"), "{text}");
+        assert!(text.contains("SUPPRESSED"), "{text}");
+        assert!(text.contains("remediation applied"), "{text}");
+        assert!(
+            text.contains("DRIFT DETECTED · 2 OF 3 CAPABILITIES · 1 REMEDIATED"),
+            "{text}"
+        );
+        assert!(
+            text.contains("EVERY ATTEMPT LANDS IN THE LOCAL AUDIT LOG"),
+            "{text}"
+        );
+        // The M3 "reported only" wording must be gone from an M4 result.
+        assert!(!text.contains("REPORTED ONLY"), "{text}");
+        assert!(!text.contains("MILESTONE 3"), "{text}");
     }
 
     #[test]

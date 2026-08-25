@@ -15,9 +15,11 @@ Type=oneshot
 # (punar-m2-check.service, itself bounded at 25 min — started by
 # idle-ram.sh between sampling and export, milestone-2.md §7) + the
 # synchronous M3 exercise (punar-m3-check.service, bounded at 10 min —
-# milestone-3.md §8) + export, with generous headroom for TCG-emulated
+# milestone-3.md §8) + the synchronous M4 exercise (punar-m4-check.service,
+# bounded at 12 min; its drift demo waits on wall-clock timer firings —
+# milestone-4.md §10) + export, with generous headroom for TCG-emulated
 # CI runs.
-TimeoutStartSec=85min
+TimeoutStartSec=100min
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/lib/punar/idle-ram.sh

@@ -33,7 +33,19 @@ fn fixture_status() -> Value {
         "hostname": "punar-m3",
         "capabilities_total": 3,
         "last_reconcile": "2026-08-25T07:00:13Z",
-        "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42}
+        "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
+        // M4 (contract section 5.1): SPEC section 52 states in personal
+        // scope, always present since M4.
+        "compliance": {
+            "overall": "compliant",
+            "capabilities": [
+                {"capability": "security.firewall", "state": "compliant"},
+                {"capability": "system.hostname", "state": "compliant"},
+                {"capability": "time.timezone", "state": "compliant"}
+            ],
+            "drift_remediated_total": 2,
+            "last_remediation_at": "2026-08-25T09:14:02Z"
+        }
     })
 }
 
@@ -129,18 +141,88 @@ fn fixture_audit_events() -> Vec<Value> {
 }
 
 fn fixture_reconcile() -> Value {
+    // M4 shape (contract section 5.6): the M3 fields keep their meaning
+    // (`drift` is the pre-remediation observation) plus the additive
+    // classification/remediation fields and the compliance block.
     json!({
         "reconciled_at": "2026-08-25T07:41:03Z",
         "drift_count": 1,
+        "remediated_count": 1,
         "capabilities": [
             {"capability": "security.firewall", "desired_state": "enabled",
-             "current_state": "disabled", "drift": true, "verified": true},
+             "current_state": "disabled", "drift": true, "verified": true,
+             "classification": "auto_remediate", "remediation": "applied"},
             {"capability": "system.hostname", "desired_state": "punar-m3",
-             "current_state": "punar-m3", "drift": false, "verified": true},
+             "current_state": "punar-m3", "drift": false, "verified": true,
+             "classification": "auto_remediate", "remediation": "none"},
             {"capability": "time.timezone", "desired_state": "UTC",
-             "current_state": "UTC", "drift": false, "verified": true}
+             "current_state": "UTC", "drift": false, "verified": true,
+             "classification": "auto_remediate", "remediation": "none"}
+        ],
+        "compliance": {
+            "overall": "compliant",
+            "capabilities": [
+                {"capability": "security.firewall", "state": "compliant"},
+                {"capability": "system.hostname", "state": "compliant"},
+                {"capability": "time.timezone", "state": "compliant"}
+            ],
+            "drift_remediated_total": 1,
+            "last_remediation_at": "2026-08-25T07:41:03Z"
+        }
+    })
+}
+
+/// One `policy.effective` entry (contract section 5.7). Personal mode:
+/// only `local_user_preference` (rank 5) and `os_secure_default` (rank 6)
+/// sources exist, the policy id is always `personal-defaults`, and a user
+/// override is always permitted (winning rank >= 5).
+fn policy_entry(path: &str, value: &str, kind: &str, rank: u64, name: &str) -> Value {
+    json!({
+        "path": path,
+        "effective_value": value,
+        "source": {"kind": kind, "rank": rank,
+                   "policy_id": "personal-defaults", "name": name},
+        "user_override_permitted": true,
+        "compliance_state": "compliant"
+    })
+}
+
+fn fixture_policy_effective() -> Value {
+    json!({
+        "computed_at": "2026-08-25T09:14:02Z",
+        "entries": [
+            policy_entry(
+                "security.firewall",
+                "enabled",
+                "local_user_preference",
+                5,
+                "Personal preference",
+            ),
+            policy_entry(
+                "system.hostname",
+                "punar-m3",
+                "local_user_preference",
+                5,
+                "Personal preference",
+            ),
+            policy_entry("time.timezone", "UTC", "os_secure_default", 6, "OS default"),
         ]
     })
+}
+
+/// The `policy.explain` result for `path`: the matching effective entry
+/// without its `path` field (contract section 5.8), or `None` when the
+/// path is not in the effective document.
+fn fixture_policy_explain(path: &str) -> Option<Value> {
+    let effective = fixture_policy_effective();
+    let entry = effective["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == path)?;
+    let mut entry = entry.clone();
+    entry.as_object_mut().unwrap().remove("path");
+    Some(entry)
 }
 
 /// The ipc.md section 3.2 denial example — the section 73 voice the real
@@ -163,7 +245,7 @@ fn respond(request: &Value) -> Result<Value, Value> {
     let params = request.get("params");
 
     match method {
-        "status" | "capabilities.list" | "reconcile" => {
+        "status" | "capabilities.list" | "reconcile" | "policy.effective" => {
             assert!(params.is_none(), "{method} takes no params");
         }
         _ => {}
@@ -216,6 +298,23 @@ fn respond(request: &Value) -> Result<Value, Value> {
             Ok(json!({"events": events[skip..].to_vec()}))
         }
         "reconcile" => Ok(fixture_reconcile()),
+        "policy.effective" => Ok(fixture_policy_effective()),
+        "policy.explain" => {
+            let params = params.expect("policy.explain takes params");
+            let object = params.as_object().unwrap();
+            assert_eq!(object.len(), 1, "policy.explain takes only `path`");
+            let path = object["path"].as_str().expect("path must be a string");
+            fixture_policy_explain(path).ok_or_else(|| {
+                json!({
+                    "code": "not_found",
+                    "message": format!(
+                        "No capability path named {path} exists in the effective policy.\n\
+                         Next step: punarctl policy effective"
+                    ),
+                    "details": {"param": "path", "path": path}
+                })
+            })
+        }
         other => Err(json!({
             "code": "unknown_method",
             "message": format!(
@@ -334,6 +433,11 @@ fn status_human_output_matches_the_d014_snapshot() {
          DAEMON        READY       punard 0.1.0 · protocol v1 · started 2026-08-25 07:00:12\n\
          CAPABILITIES  3 TRACKED   registry local · last reconcile 2026-08-25 07:00:13\n\
          AUDIT         42 EVENTS   /var/log/punar/audit.jsonl · local only\n\
+         \n\
+         OVERALL       COMPLIANT   personal scope · drift remediated 2 · last 2026-08-25 09:14:02\n\
+         FIREWALL      COMPLIANT\n\
+         HOSTNAME      COMPLIANT\n\
+         TIMEZONE      COMPLIANT\n\
          NO ORGANIZATION IS ENROLLED · ENROLLING LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
@@ -517,47 +621,138 @@ fn audit_tail_human_view_holds_decisions_and_columns() {
 }
 
 #[test]
-fn reconcile_human_view_reports_drift_only() {
+fn reconcile_human_view_shows_the_m4_remediation() {
     let socket = start_mock();
     let output = run(&socket, &["reconcile"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("SECURITY.FIREWALL"));
-    assert!(text.contains("DRIFT DETECTED · 1 OF 3 CAPABILITIES · REPORTED ONLY"));
-    assert!(text.contains("MILESTONE 4"));
+    assert!(text.contains("SECURITY.FIREWALL"), "{text}");
+    assert!(text.contains("remediation applied"), "{text}");
+    assert!(
+        text.contains("✓ DRIFT REMEDIATED · 1 OF 3 CAPABILITIES · VERIFIED"),
+        "{text}"
+    );
+    assert!(
+        text.contains("EVERY ATTEMPT LANDS IN THE LOCAL AUDIT LOG"),
+        "{text}"
+    );
+    // The M3 "reported only" wording must be gone against an M4 daemon.
+    assert!(!text.contains("REPORTED ONLY"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
-// Policy honesty and remaining stubs
+// Policy verbs (M4 — contract sections 5.7/5.8, SPEC section 40)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn policy_verbs_answer_honestly_without_a_daemon() {
-    // Deliberately no mock: the honest Milestone 4 answer needs no IPC.
-    let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
+fn policy_effective_human_output_matches_the_d014_snapshot() {
+    let socket = start_mock();
+    let output = run(&socket, &["policy", "effective"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
 
-    let effective = run(&missing, &["policy", "effective"]);
-    assert!(effective.status.success());
-    let text = stdout(&effective);
-    assert!(text.contains("MILESTONE 4"), "{text}");
-    assert!(text.contains("PERSONAL DEFAULTS"), "{text}");
-
-    let explain = run(&missing, &["policy", "explain", "security.firewall"]);
-    assert!(explain.status.success());
-    let text = stdout(&explain);
-    assert!(text.contains("SECURITY.FIREWALL"));
-    assert!(text.contains("MILESTONE 4"));
-
-    let json_out = run(
-        &missing,
-        &["--json", "policy", "explain", "security.firewall"],
+    let context = format!("{} · Personal", local_hostname());
+    let expected = format!(
+        "{}\n{RULE}\n{}",
+        masthead_line("P U N A R   ·   P O L I C Y", &context),
+        "SECURITY.FIREWALL  ENABLED    Personal preference · personal-defaults\n\
+         SYSTEM.HOSTNAME    PUNAR-M3   Personal preference · personal-defaults\n\
+         TIME.TIMEZONE      UTC        OS default · personal-defaults\n\
+         COMPUTED 2026-08-25 09:14:02 · MERGED FROM OS DEFAULTS + YOUR PREFERENCES · NO ORGANIZATION IS ENROLLED\n"
     );
-    assert!(json_out.status.success());
-    let parsed: Value = serde_json::from_str(&stdout(&json_out)).unwrap();
-    assert_eq!(parsed["policy_loaded"], json!(false));
-    assert_eq!(parsed["available_in_milestone"], json!(4));
-    assert_eq!(parsed["capability"], json!("security.firewall"));
+    assert_eq!(stdout(&output), expected);
 }
+
+#[test]
+fn policy_explain_human_output_matches_the_spec_40_snapshot() {
+    let socket = start_mock();
+    let output = run(&socket, &["policy", "explain", "security.firewall"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    // The SPEC section 40 information set in the D-014 field-note grammar
+    // (milestone-4.md section 7): EFFECTIVE VALUE / SOURCE / POLICY /
+    // USER OVERRIDE / COMPLIANCE rows; source and policy names verbatim
+    // in the mixed-case description column.
+    let expected = format!(
+        "{}\n{RULE}\n{}",
+        masthead_line(
+            "P U N A R   ·   P O L I C Y   E X P L A I N",
+            "security.firewall"
+        ),
+        "EFFECTIVE VALUE  ENABLED\n\
+         SOURCE                       Personal preference\n\
+         POLICY                       personal-defaults\n\
+         USER OVERRIDE                Permitted · it is your device\n\
+         COMPLIANCE       COMPLIANT\n\
+         MERGED FROM OS DEFAULTS + YOUR PREFERENCES · NO ORGANIZATION IS ENROLLED\n"
+    );
+    assert_eq!(stdout(&output), expected);
+}
+
+#[test]
+fn policy_explain_renders_the_os_default_source() {
+    // Both source kinds must render (m4-check exercises both live):
+    // time.timezone is untouched by any preference, so the OS default
+    // (rank 6) wins.
+    let socket = start_mock();
+    let output = run(&socket, &["policy", "explain", "time.timezone"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("EFFECTIVE VALUE  UTC"), "{text}");
+    assert!(text.contains("OS default"), "{text}");
+    assert!(text.contains("personal-defaults"), "{text}");
+    assert!(text.contains("Permitted"), "{text}");
+}
+
+#[test]
+fn json_policy_effective_and_explain_round_trip_verbatim() {
+    let socket = start_mock();
+
+    let effective = run(&socket, &["--json", "policy", "effective"]);
+    assert!(effective.status.success());
+    let parsed: Value = serde_json::from_str(&stdout(&effective)).unwrap();
+    assert_eq!(parsed, fixture_policy_effective());
+
+    let explain = run(&socket, &["--json", "policy", "explain", "time.timezone"]);
+    assert!(explain.status.success());
+    let parsed: Value = serde_json::from_str(&stdout(&explain)).unwrap();
+    assert_eq!(parsed, fixture_policy_explain("time.timezone").unwrap());
+    // The winning-source fields keep their contract names verbatim.
+    assert_eq!(parsed["source"]["kind"], json!("os_secure_default"));
+    assert_eq!(parsed["source"]["rank"], json!(6));
+    assert_eq!(parsed["user_override_permitted"], json!(true));
+}
+
+#[test]
+fn policy_explain_unknown_path_exits_1_with_the_section_73_voice() {
+    let socket = start_mock();
+    let output = run(&socket, &["policy", "explain", "security.doesnotexist"]);
+    assert_eq!(output.status.code(), Some(1), "not_found must exit 1");
+    assert!(stdout(&output).is_empty());
+    let err = stderr(&output);
+    assert!(err.contains("security.doesnotexist"), "stderr: {err}");
+    assert!(err.contains("punarctl policy effective"), "stderr: {err}");
+    assert!(err.contains("Next step"), "stderr: {err}");
+    assert!(!err.contains("ENOENT"), "stderr must never be an errno");
+}
+
+#[test]
+fn policy_verbs_need_the_daemon_and_exit_5_without_it() {
+    // M4 retired the local M3 "no policy engine yet" answer: the effective
+    // document lives in punard, so an unreachable daemon is exit 5.
+    let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
+    for args in [
+        ["policy", "effective"].as_slice(),
+        ["policy", "explain", "security.firewall"].as_slice(),
+    ] {
+        let output = run(&missing, args);
+        assert_eq!(output.status.code(), Some(5), "{args:?}");
+        assert!(stderr(&output).contains("not reachable"), "{args:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remaining stubs
+// ---------------------------------------------------------------------------
 
 #[test]
 fn unimplemented_verbs_keep_their_milestone_stubs() {

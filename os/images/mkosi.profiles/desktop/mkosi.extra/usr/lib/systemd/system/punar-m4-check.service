@@ -1,0 +1,24 @@
+# M4 in-VM policy/reconcile exercise (milestone-4.md §10). Runs m4-check.sh
+# as ROOT — same decided pattern as punar-m3-check.service (no User=, no
+# sudo); unprivileged read paths inside the script use runuser -u punar.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m3-check.service and BEFORE the /run/punar artifact export, so the
+# timer-driven drift demo never touches the idle-RAM window and
+# m4-report.txt / m4-*.json ship in the existing export tar. Same
+# not-enabled pattern as punar-m2/m3-check — no .wants symlink, so the
+# mkosi preset-wipe lesson does not even come into play.
+
+[Unit]
+Description=Punar M4 policy/reconcile exercise (CI)
+
+[Service]
+Type=oneshot
+# Worst case is the drift demo's 375 s timer budget (3 × 120 s periods +
+# 15 s AccuracySec slack) plus per-assertion RPCs; generous headroom for
+# TCG-emulated CI runs (timer firings are wall-clock even under TCG).
+TimeoutStartSec=12min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m4-check.sh

@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 clap = { workspace = true }
 punar-common = { workspace = true }
+# M4: the SPEC section 39 precedence/merge engine (layered desired state).
+punar-policy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

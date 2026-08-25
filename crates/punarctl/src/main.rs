@@ -1,13 +1,15 @@
 //! `punarctl` — the Punar control CLI (SPEC section 11.2).
 //!
-//! Milestone 3: the daemon-backed verbs are real. `status`, `capabilities`
-//! (bare list, `get`, `set`), `audit tail`, and `reconcile` speak the typed
-//! NDJSON IPC contract (`docs/api/ipc.md`) to `punard` over its Unix socket
-//! and render in the Plate D-014 output grammar
+//! Milestones 3–4: the daemon-backed verbs are real. `status`,
+//! `capabilities` (bare list, `get`, `set`), `audit tail`, `reconcile`,
+//! and — since Milestone 4 — `policy effective` / `policy explain` speak
+//! the typed NDJSON IPC contract (`docs/api/ipc.md`) to `punard` over its
+//! Unix socket and render in the Plate D-014 output grammar
 //! (`docs/design/mockups/cli-grammar.html`) — or, with the global `--json`
 //! flag, print the IPC `result` object verbatim (capability-registry field
-//! names unchanged). `policy effective` / `policy explain` answer honestly
-//! that no policy engine is loaded until Milestone 4. Every other SPEC
+//! names unchanged). The policy verbs render the SPEC section 39 layered
+//! merge (contract sections 5.7/5.8) in the SPEC section 40 layout, and
+//! `status` renders the SPEC section 52 compliance block. Every other SPEC
 //! section 11.2 verb keeps a milestone-labeled stub.
 //!
 //! The CLI never elevates itself; the daemon is the authorization point
@@ -125,8 +127,8 @@ enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
-    /// Re-observe every capability and report drift (Milestone 3 reports
-    /// only; remediation arrives in Milestone 4).
+    /// Re-observe every capability, remediate drift per the effective
+    /// policy (SPEC section 42; Milestone 4), and report the outcome.
     Reconcile,
     /// Inspect update orchestration state.
     Update {
@@ -162,12 +164,13 @@ enum CapabilitiesCommand {
 
 #[derive(Subcommand)]
 enum PolicyCommand {
-    /// Show the effective merged policy.
+    /// Show the effective merged policy (SPEC section 39 layered merge).
     Effective,
-    /// Explain the effective value and winning source for one capability.
+    /// Explain the effective value, winning source, override permission,
+    /// and compliance for one capability path (SPEC section 40).
     Explain {
         /// Dotted capability path, like `security.firewall`.
-        capability: CapabilityId,
+        path: CapabilityId,
     },
 }
 
@@ -355,45 +358,23 @@ fn main() -> ExitCode {
             })
         }
         Command::Policy { command } => match command {
-            // Honest Milestone 3 answers: no policy engine is loaded until
-            // Milestone 4, and these verbs say so in the designed voice
-            // instead of pretending. Local-only — this truth does not need
-            // the daemon. The JSON spelling is punarctl's own (there is no
-            // policy.* IPC method yet).
+            // Milestone 4: the policy verbs are daemon-backed (contract
+            // sections 5.7/5.8) — the effective document is the SPEC
+            // section 39 layered merge computed by punard; the M3 "no
+            // policy engine yet" local answer is retired.
             PolicyCommand::Effective => {
-                if json {
-                    println!(
-                        "{}",
-                        json!({
-                            "policy_loaded": false,
-                            "available_in_milestone": 4,
-                            "mode": "personal",
-                            "policy_ids": ["personal-defaults"],
-                        })
-                    );
-                } else {
-                    print!("{}", views::policy_effective(&style, &local_hostname()));
-                }
-                ExitCode::SUCCESS
+                let hostname = local_hostname();
+                rpc(&client, json, "policy.effective", None, |v| {
+                    views::policy_effective(&style, v, &hostname)
+                })
             }
-            PolicyCommand::Explain { capability } => {
-                if json {
-                    println!(
-                        "{}",
-                        json!({
-                            "policy_loaded": false,
-                            "available_in_milestone": 4,
-                            "mode": "personal",
-                            "policy_ids": ["personal-defaults"],
-                            "capability": capability.as_str(),
-                            "user_override": "permitted",
-                        })
-                    );
-                } else {
-                    print!("{}", views::policy_explain(&style, capability.as_str()));
-                }
-                ExitCode::SUCCESS
-            }
+            PolicyCommand::Explain { path } => rpc(
+                &client,
+                json,
+                "policy.explain",
+                Some(json!({"path": path.as_str()})),
+                |v| views::policy_explain(&style, v, path.as_str()),
+            ),
         },
         Command::Debug { command } => match command {
             DebugCommand::Rpc { method } => match client.call(&method, None) {

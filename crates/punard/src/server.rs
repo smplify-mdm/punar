@@ -16,29 +16,52 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use std::collections::BTreeMap;
+
 use punar_common::audit::{
-    AuditActor, AuditOutcome, AuditWriter, RESOURCE_CAPABILITY_REGISTRY, count_events, tail,
+    AGENT_SESSION_NONE, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
+    RESOURCE_CAPABILITY_REGISTRY, count_events, next_event_id, tail,
 };
 use punar_common::ipc::{
-    AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams, ErrorCode,
-    IpcError, MAX_REQUEST_LINE_BYTES, Method, Mode, PROTOCOL_VERSION, ReconcileEntry,
-    ReconcileResult, Request, Response, SERVER_READ_TIMEOUT, StatusResult,
+    AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
+    CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
+    ErrorCode, IpcError, MAX_REQUEST_LINE_BYTES, Method, Mode, PROTOCOL_VERSION,
+    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
+    PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome, Request, Response,
+    SERVER_READ_TIMEOUT, StatusResult,
 };
 use punar_common::time::utc_now_rfc3339;
 use punar_common::{AuditEvent, Decision};
+use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
-use crate::state::{DesiredStore, load_or_create_device_id};
+use crate::policy::{
+    EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
+};
+use crate::state::{
+    MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
+    migrate_m3_store,
+};
 use crate::util::{lookup_gid, lookup_username};
+
+/// Loop protection (SPEC section 42 "avoid remediation loops";
+/// docs/development/milestone-4.md section 5): at most this many
+/// consecutive failed remediation attempts per capability, then the
+/// capability goes `non_compliant` and further attempts are suppressed
+/// until the effective value changes, a manual set succeeds, or the daemon
+/// restarts.
+pub const MAX_REMEDIATION_ATTEMPTS: u32 = 3;
 
 /// Daemon configuration. All paths are injectable so tests run against a
 /// tempdir; production values are the documented contract paths.
 pub struct DaemonConfig {
     /// [`punar_common::ipc::SOCKET_PATH`] in production.
     pub socket_path: PathBuf,
-    /// `/var/lib/punar` — holds `desired.json` and `device-id`.
+    /// `/var/lib/punar` — holds `device-id`, the layer stores
+    /// (`preferences.json`, `os-defaults.json`), the `policy.d/` drop
+    /// directory, and the `effective.json` debug copy.
     pub state_dir: PathBuf,
     /// [`punar_common::audit::AUDIT_LOG_PATH`] in production.
     pub audit_path: PathBuf,
@@ -72,12 +95,71 @@ impl DaemonConfig {
     }
 }
 
+/// Per-capability compliance bookkeeping (SPEC section 52, personal scope)
+/// plus the remediation loop-protection counters. In-memory only —
+/// recomputed from observation at every reconcile; counters reset on
+/// restart by design (docs/development/milestone-4.md section 5).
+#[derive(Default)]
+struct ComplianceTracker {
+    /// Capability id → last computed section 52 state. Populated by the
+    /// boot reconcile (which in production runs before the socket opens);
+    /// a capability never yet reconciled reads as `unknown`.
+    states: BTreeMap<String, ComplianceState>,
+    /// Capability id → consecutive failed remediation attempts.
+    fail_counts: BTreeMap<String, u32>,
+    /// Monotonic count of successful remediations since daemon start.
+    drift_remediated_total: u64,
+    /// RFC 3339 of the most recent successful remediation.
+    last_remediation_at: Option<String>,
+}
+
+impl ComplianceTracker {
+    fn state_of(&self, capability: &str) -> ComplianceState {
+        self.states
+            .get(capability)
+            .copied()
+            .unwrap_or(ComplianceState::Unknown)
+    }
+
+    fn block(&self, registry: &Registry) -> ComplianceBlock {
+        let capabilities: Vec<CapabilityCompliance> = registry
+            .iter()
+            .map(|cap| {
+                let meta = cap.descriptor();
+                let state = self.state_of(meta.capability.as_str());
+                CapabilityCompliance {
+                    capability: meta.capability,
+                    state,
+                }
+            })
+            .collect();
+        ComplianceBlock {
+            overall: ComplianceState::overall(capabilities.iter().map(|c| c.state)),
+            capabilities,
+            drift_remediated_total: self.drift_remediated_total,
+            last_remediation_at: self.last_remediation_at.clone(),
+        }
+    }
+}
+
 struct Inner {
     cfg: DaemonConfig,
     registry: Registry,
     audit: Mutex<AuditWriter>,
     audit_events: AtomicU64,
-    desired: DesiredStore,
+    /// Rank-6 layer: persisted first-observation seeds (compiled defaults
+    /// stay in the backends).
+    os_defaults: OsDefaultsStore,
+    /// Rank-5 layer: recorded user preferences.
+    preferences: PreferencesStore,
+    /// Ranks 1–4 (and stored-rank overrides): policy.d drops, loaded once
+    /// at startup (hot-reload arrives with M5 enrollment). Empty in the
+    /// shipped image (design language section 8).
+    org_layers: Vec<Layer>,
+    /// The merged effective document — in-memory truth, recomputed at
+    /// startup and on every `capabilities.set`.
+    effective: Mutex<EffectiveDocument>,
+    tracker: Mutex<ComplianceTracker>,
     device_id: String,
     started_at: String,
     last_reconcile: Mutex<Option<String>>,
@@ -98,9 +180,10 @@ pub struct DaemonHandle {
 }
 
 impl Daemon {
-    /// Build the daemon: device id, audit log, desired-state store with
-    /// first-boot seeding (firewall default `enabled` [os default];
-    /// everything else seeded from first observation).
+    /// Build the daemon: device id, audit log, one-shot M3-store migration
+    /// (docs/development/milestone-4.md section 3.3), layer stores with
+    /// first-boot OS-default seeding, policy.d load, and the initial
+    /// effective-document computation.
     pub fn new(cfg: DaemonConfig, registry: Registry) -> io::Result<Self> {
         std::fs::create_dir_all(&cfg.state_dir)?;
         if let Some(parent) = cfg.audit_path.parent() {
@@ -113,20 +196,60 @@ impl Daemon {
         if let Some(gid) = lookup_gid(&cfg.group_file, &cfg.group) {
             let _ = std::os::unix::fs::chown(&cfg.audit_path, Some(0), Some(gid));
         }
-        let audit_events = count_events(&cfg.audit_path)?;
-        let desired = DesiredStore::load(&cfg.state_dir.join("desired.json"))?;
+        let mut audit = audit;
+        let mut audit_events = count_events(&cfg.audit_path)?;
 
+        // Layer stores. Migration must run before regular seeding so the
+        // M3 values become the seeds (not a fresh observation).
+        let os_defaults = OsDefaultsStore::load(&cfg.state_dir.join("os-defaults.json"))?;
+        let preferences = PreferencesStore::load(&cfg.state_dir.join("preferences.json"))?;
+        if let Some(outcome) = migrate_m3_store(
+            &cfg.state_dir,
+            &registry,
+            &preferences,
+            &os_defaults,
+            &utc_now_rfc3339(),
+        )? {
+            log_migration(&outcome);
+            let event = migration_event(&device_id, &outcome);
+            match audit.append(&event) {
+                Ok(()) => audit_events += 1,
+                Err(e) => eprintln!("punard: FAILED to append state.migrate audit event: {e}"),
+            }
+        }
+
+        // First-boot OS-default seeding: capabilities without a compiled
+        // default get their first observation persisted so the default is
+        // stable across boots (milestone-4.md section 3.1).
         for cap in registry.iter() {
             let id = cap.descriptor().capability.to_string();
-            if desired.get(&id).is_some() {
+            if cap.default_desired().is_some() || os_defaults.get(&id).is_some() {
                 continue;
             }
             let seed = cap
-                .default_desired()
-                .or_else(|| cap.observe().ok())
-                .unwrap_or(Value::String("unknown".to_string()));
-            desired.seed(&id, seed)?;
+                .observe()
+                .unwrap_or_else(|_| Value::String("unknown".to_string()));
+            os_defaults.seed(&id, seed)?;
         }
+
+        // Org layers (empty directory in the shipped image; loader + tests
+        // run against fixtures). Load errors refuse start.
+        let loaded = load_policy_dir(&cfg.state_dir.join("policy.d"))?;
+        for unmapped in &loaded.unmapped {
+            eprintln!(
+                "punard: policy.d: no registered capability for {unmapped}; ignored \
+                 (its capability lands in a later milestone)"
+            );
+        }
+
+        let effective = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &loaded.layers,
+            utc_now_rfc3339(),
+        );
+        let _ = write_effective_debug_copy(&cfg.state_dir.join("effective.json"), &effective);
 
         Ok(Daemon {
             inner: Arc::new(Inner {
@@ -134,7 +257,11 @@ impl Daemon {
                 registry,
                 audit: Mutex::new(audit),
                 audit_events: AtomicU64::new(audit_events),
-                desired,
+                os_defaults,
+                preferences,
+                org_layers: loaded.layers,
+                effective: Mutex::new(effective),
+                tracker: Mutex::new(ComplianceTracker::default()),
                 device_id,
                 started_at: utc_now_rfc3339(),
                 last_reconcile: Mutex::new(None),
@@ -145,56 +272,17 @@ impl Daemon {
         })
     }
 
-    /// Boot-time reconcile (daemon-initiated: [`AuditActor::daemon`]).
-    /// Observes and verifies everything; the **one** boot-time apply is
-    /// `security.firewall` when its desired state is `enabled` and the table
-    /// is absent/deviant — the firewall default is a fixed os default.
-    /// Runtime `reconcile` requests never remediate in M3.
+    /// Boot-time reconcile (daemon-initiated: [`AuditActor::daemon`]) —
+    /// since M4 the same full section 42 chain as the `reconcile` method:
+    /// drift against the effective document is remediated per
+    /// classification (in practice the one boot-time apply is
+    /// `security.firewall`, whose compiled default is `enabled` while
+    /// hostname/timezone seeds equal their first observation). Guarantees
+    /// every capability has a section 52 state before the socket opens.
     pub fn boot_reconcile(&self) {
         let inner = &self.inner;
-        let actor = AuditActor::daemon();
-        for cap in inner.registry.iter() {
-            let meta = cap.descriptor();
-            if meta.capability.as_str() != crate::backends::firewall::CAPABILITY_ID {
-                continue;
-            }
-            let desired = inner
-                .desired
-                .get(meta.capability.as_str())
-                .unwrap_or(Value::String("enabled".to_string()));
-            if desired != json!("enabled") {
-                continue;
-            }
-            let current = cap.observe().ok();
-            if current.as_ref() == Some(&desired) {
-                continue;
-            }
-            let outcome = match cap.apply(&desired).and_then(|()| cap.verify(&desired)) {
-                Ok(true) => AuditOutcome::Success,
-                Ok(false) => AuditOutcome::VerifyFailed,
-                Err(e) => {
-                    eprintln!("punard: boot firewall apply failed: {e}");
-                    AuditOutcome::Failure
-                }
-            };
-            inner.log_audit(AuditEvent::capabilities_set(
-                &inner.device_id,
-                &actor,
-                &meta.capability,
-                Decision::Allow,
-                outcome,
-            ));
-        }
-
-        // Record the boot reconcile itself (observe + verify + drift report).
-        let report = inner.reconcile_report();
+        let report = inner.reconcile_and_remediate(&AuditActor::daemon());
         *inner.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
-        let outcome = if report.drift_count > 0 {
-            AuditOutcome::DriftDetected
-        } else {
-            AuditOutcome::Clean
-        };
-        inner.log_audit(AuditEvent::reconcile(&inner.device_id, &actor, outcome));
     }
 
     /// Bind the socket (fresh: stale files are unlinked), set permissions
@@ -405,6 +493,59 @@ fn handle_connection(inner: &Inner, mut stream: UnixStream) {
 }
 
 // ---------------------------------------------------------------------------
+// Migration audit plumbing (docs/development/milestone-4.md section 3.3)
+// ---------------------------------------------------------------------------
+
+fn log_migration(outcome: &MigrationOutcome) {
+    eprintln!(
+        "punard: migrated the M3 desired-state store: {} preference(s) carried, \
+         {} OS-default seed(s) recorded, {} value(s) equal to compiled defaults dropped, \
+         {} unknown id(s) left in desired.json.pre-m4",
+        outcome.migrated_preferences.len(),
+        outcome.seeded_defaults.len(),
+        outcome.dropped.len(),
+        outcome.ignored_unknown.len(),
+    );
+}
+
+/// The one-shot `state.migrate` audit event (docs/api/ipc.md section 6):
+/// daemon-initiated, `resource: "state_store"`, schema-conformant.
+fn migration_event(device_id: &str, _outcome: &MigrationOutcome) -> AuditEvent {
+    let actor = AuditActor::daemon();
+    AuditEvent {
+        event_id: next_event_id(),
+        timestamp: utc_now_rfc3339(),
+        device_id: device_id.to_string(),
+        user_id: Some(actor.user_id.clone()),
+        agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+        project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+        source: actor.source,
+        action: "state.migrate".to_string(),
+        resource: Some("state_store".to_string()),
+        decision: Decision::Allow,
+        policy_ids: vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()],
+        result: AuditOutcome::Success.as_str().to_string(),
+    }
+}
+
+fn wire_classification(classification: Classification) -> WireClassification {
+    match classification {
+        Classification::AutoRemediate => WireClassification::AutoRemediate,
+        Classification::AlertOnly => WireClassification::AlertOnly,
+        Classification::ApprovalRequired => WireClassification::ApprovalRequired,
+    }
+}
+
+fn source_ref(provenance: &Provenance) -> PolicySourceRef {
+    PolicySourceRef {
+        kind: provenance.kind.as_str().to_string(),
+        rank: provenance.rank,
+        policy_id: provenance.policy_id.clone(),
+        name: provenance.source_name.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Method handlers
 // ---------------------------------------------------------------------------
 
@@ -443,17 +584,42 @@ impl Inner {
     }
 
     /// Full descriptor for a capability: static meta + live observation +
-    /// recorded desired state.
+    /// the **effective** desired state from the layered merge (M4 —
+    /// registry `desired_state` fields render the effective value).
     fn describe(&self, cap: &dyn Capability) -> punar_common::CapabilityDescriptor {
         let meta = cap.descriptor();
         let current = cap
             .observe()
             .unwrap_or_else(|_| Value::String("unknown".to_string()));
         let desired = self
-            .desired
-            .get(meta.capability.as_str())
+            .effective_value_of(meta.capability.as_str())
             .unwrap_or_else(|| current.clone());
         meta.describe(current, desired)
+    }
+
+    /// The effective value for one capability path, if the document has an
+    /// opinion (it always does for registered capabilities — the OS-default
+    /// layer covers every one).
+    fn effective_value_of(&self, path: &str) -> Option<Value> {
+        self.effective
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|entry| entry.value.clone())
+    }
+
+    /// Recompute the effective document from the layers (startup +
+    /// every `capabilities.set`) and refresh the debug copy.
+    fn recompute_effective(&self) {
+        let doc = compute_effective(
+            &self.registry,
+            &self.os_defaults,
+            &self.preferences,
+            &self.org_layers,
+            utc_now_rfc3339(),
+        );
+        let _ = write_effective_debug_copy(&self.cfg.state_dir.join("effective.json"), &doc);
+        *self.effective.lock().unwrap() = doc;
     }
 
     /// Dispatch a typed request. The method table is closed at the type
@@ -472,6 +638,8 @@ impl Inner {
             Method::CapabilitiesSet(params) => self.handle_capabilities_set(peer, params),
             Method::AuditTail(params) => self.handle_audit_tail(params),
             Method::Reconcile => self.handle_reconcile(peer),
+            Method::PolicyEffective => Ok(to_value(self.handle_policy_effective())),
+            Method::PolicyExplain(params) => self.handle_policy_explain(params),
         }
     }
 
@@ -505,6 +673,11 @@ impl Inner {
                 path: self.cfg.audit_path.display().to_string(),
                 events: self.audit_events.load(Ordering::SeqCst),
             },
+            // M4: personal-scope section 52 compliance — always present
+            // since M4 (contract section 5.1). States are computed at
+            // reconcile time; the boot reconcile runs before the socket
+            // opens in production.
+            compliance: Some(self.tracker.lock().unwrap().block(&self.registry)),
         }
     }
 
@@ -528,9 +701,13 @@ impl Inner {
         Ok(json!({ "descriptor": self.describe(cap) }))
     }
 
-    /// The mutation pipeline (SPEC section 42, M3 subset): validate →
-    /// authorize → record desired → apply → verify → audit → respond.
-    /// Allow and deny, success and failure are all audited.
+    /// The mutation pipeline (SPEC section 42; contract section 5.4 M4
+    /// semantics): validate → authorize → **record UserPreference entry** →
+    /// recompute the effective document → apply the **effective** value →
+    /// verify → audit → respond. In personal mode nothing outranks a user
+    /// preference, so effective == requested and the result is
+    /// byte-identical to M3. Allow and deny, success and failure are all
+    /// audited; `policy_ids` cites the winning source.
     fn handle_capabilities_set(
         &self,
         peer: &Peer,
@@ -560,33 +737,66 @@ impl Inner {
             ));
         }
 
-        // Idempotence: already in the desired state → record + audit noop.
-        let already = cap
-            .observe()
-            .ok()
-            .is_some_and(|cur| cur == params.desired_state);
-        self.desired
-            .set(id, params.desired_state.clone())
-            .map_err(|e| self.internal(&format!("persisting desired state failed: {e}")))?;
-        if already {
-            self.log_audit(AuditEvent::capabilities_set(
+        // Record the request as a User Preference layer entry (rank 5) and
+        // recompute the merge. The preference is recorded even when a
+        // higher layer overrides it — it becomes effective the moment the
+        // override goes away (SPEC section 39).
+        self.preferences
+            .set(
+                id,
+                PreferenceEntry {
+                    value: params.desired_state.clone(),
+                    set_at: utc_now_rfc3339(),
+                    set_by: actor.user_id.clone(),
+                },
+            )
+            .map_err(|e| self.internal(&format!("persisting the preference failed: {e}")))?;
+        self.recompute_effective();
+
+        let (effective_value, winning_policy_id) = {
+            let doc = self.effective.lock().unwrap();
+            let entry = doc
+                .get(id)
+                .expect("registered capability has an effective entry");
+            (entry.value.clone(), entry.provenance.policy_id.clone())
+        };
+        let overridden = effective_value != params.desired_state;
+        let audited = |outcome: AuditOutcome| {
+            let mut event = AuditEvent::capabilities_set(
                 &self.device_id,
                 &actor,
                 &params.capability,
                 Decision::Allow,
-                AuditOutcome::Noop,
+                outcome,
+            );
+            event.policy_ids = vec![winning_policy_id.clone()];
+            event
+        };
+        // Optional M4 result fields — emitted only when a higher layer
+        // wins; personal-mode results stay byte-identical to M3.
+        let extend = |mut result: Value| {
+            if !overridden {
+                return result;
+            }
+            if let Some(map) = result.as_object_mut() {
+                map.insert("overridden".to_string(), json!(true));
+                map.insert("effective_state".to_string(), effective_value.clone());
+            }
+            result
+        };
+
+        // Idempotence: already in the effective state → audit noop.
+        let already = cap.observe().ok().is_some_and(|cur| cur == effective_value);
+        if already {
+            self.log_audit(audited(AuditOutcome::Noop));
+            self.mark_settled(id);
+            return Ok(extend(
+                json!({ "descriptor": self.describe(cap), "changed": false }),
             ));
-            return Ok(json!({ "descriptor": self.describe(cap), "changed": false }));
         }
 
-        if let Err(apply_err) = cap.apply(&params.desired_state) {
-            self.log_audit(AuditEvent::capabilities_set(
-                &self.device_id,
-                &actor,
-                &params.capability,
-                Decision::Allow,
-                AuditOutcome::Failure,
-            ));
+        if let Err(apply_err) = cap.apply(&effective_value) {
+            self.log_audit(audited(AuditOutcome::Failure));
             return Err(IpcError::with_details(
                 ErrorCode::ApplyFailed,
                 format!(
@@ -598,28 +808,19 @@ impl Inner {
             ));
         }
 
-        match cap.verify(&params.desired_state) {
+        match cap.verify(&effective_value) {
             Ok(true) => {
-                self.log_audit(AuditEvent::capabilities_set(
-                    &self.device_id,
-                    &actor,
-                    &params.capability,
-                    Decision::Allow,
-                    AuditOutcome::Success,
-                ));
-                Ok(json!({ "descriptor": self.describe(cap), "changed": true }))
+                self.log_audit(audited(AuditOutcome::Success));
+                self.mark_settled(id);
+                Ok(extend(
+                    json!({ "descriptor": self.describe(cap), "changed": true }),
+                ))
             }
             verify_outcome => {
                 let observed = cap
                     .observe()
                     .unwrap_or(Value::String("unknown".to_string()));
-                self.log_audit(AuditEvent::capabilities_set(
-                    &self.device_id,
-                    &actor,
-                    &params.capability,
-                    Decision::Allow,
-                    AuditOutcome::VerifyFailed,
-                ));
+                self.log_audit(audited(AuditOutcome::VerifyFailed));
                 let why = match verify_outcome {
                     Err(e) => format!("verification errored: {e}"),
                     _ => "the system did not reach the requested state".to_string(),
@@ -633,12 +834,23 @@ impl Inner {
                     ),
                     json!({
                         "capability": id,
-                        "expected": params.desired_state,
+                        "expected": effective_value,
                         "observed": observed,
                     }),
                 ))
             }
         }
+    }
+
+    /// A manual set reached (or confirmed) the effective state: the
+    /// capability is compliant, and the loop-protection counter resets —
+    /// one of the documented suppression exits (contract section 5.6).
+    fn mark_settled(&self, capability: &str) {
+        let mut tracker = self.tracker.lock().unwrap();
+        tracker
+            .states
+            .insert(capability.to_string(), ComplianceState::Compliant);
+        tracker.fail_counts.remove(capability);
     }
 
     fn handle_audit_tail(&self, params: &AuditTailParams) -> Result<Value, IpcError> {
@@ -655,9 +867,10 @@ impl Inner {
         Ok(json!({ "events": tail.events }))
     }
 
-    /// M3 reconcile: re-observe + re-verify, **report drift only** — no
-    /// remediation (that, plus the policy merge, is Milestone 4). Root-only
-    /// because M4 makes it applying and the authz surface must not loosen.
+    /// M4 reconcile (contract section 5.6): one synchronous pass of the
+    /// full SPEC section 42 chain — the semantic change M3 pre-announced by
+    /// making the method root-only ("M4 will make it applying, and the
+    /// authz surface must not loosen later").
     fn handle_reconcile(&self, peer: &Peer) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
         if authorize_mutation(peer) != Decision::Allow {
@@ -674,31 +887,50 @@ impl Inner {
             ));
         }
 
-        let report = self.reconcile_report();
+        let report = self.reconcile_and_remediate(&actor);
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
-        let outcome = if report.drift_count > 0 {
-            AuditOutcome::DriftDetected
-        } else {
-            AuditOutcome::Clean
-        };
-        self.log_audit(AuditEvent::reconcile(&self.device_id, &actor, outcome));
         Ok(to_value(report))
     }
 
-    /// Observe + verify every capability against the recorded desired
-    /// state; report drift. Shared by boot reconcile and the RPC.
-    fn reconcile_report(&self) -> ReconcileResult {
+    /// The SPEC section 42 chain, one synchronous pass (shared by boot
+    /// reconcile, the timer-driven `punarctl reconcile`, and manual calls):
+    /// observe → normalize (the backends' observers return canonical
+    /// values) → load (the layered merge, already computed) → diff →
+    /// policy (SPEC section 43 classify, data in the effective document) →
+    /// plan (skip loop-protected capabilities) → apply → verify → audit
+    /// (one event per remediation attempt + the M3 summary event) →
+    /// compliance (SPEC section 52, personal scope).
+    ///
+    /// M3 result fields keep their M3 meaning: `drift` / `drift_count`
+    /// describe the **pre-remediation** observation.
+    fn reconcile_and_remediate(&self, actor: &AuditActor) -> ReconcileResult {
+        let effective: BTreeMap<String, EffectiveEntry<Value>> =
+            self.effective.lock().unwrap().entries.clone();
         let mut entries: Vec<ReconcileEntry> = Vec::new();
         let mut drift_count: u64 = 0;
+        let mut remediated_count: u64 = 0;
+
         for cap in self.registry.iter() {
             let meta = cap.descriptor();
-            let current = cap
-                .observe()
+            let id = meta.capability.to_string();
+            let observation = cap.observe();
+            let current = observation
+                .as_ref()
+                .cloned()
                 .unwrap_or_else(|_| Value::String("unknown".to_string()));
-            let desired = self
-                .desired
-                .get(meta.capability.as_str())
+            let entry = effective.get(&id);
+            let desired = entry
+                .map(|e| e.value.clone())
                 .unwrap_or_else(|| current.clone());
+            let classification = entry
+                .map(|e| e.classification)
+                .unwrap_or(Classification::AutoRemediate);
+            let policy_id = entry
+                .map(|e| e.provenance.policy_id.clone())
+                .unwrap_or_else(|| punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string());
+            let exception_source = entry.is_some_and(|e| {
+                e.provenance.kind == punar_policy::SourceKind::TemporaryApprovedException
+            });
             // `verified` = the verification mechanism itself ran; a drifted
             // state still verifies as Ok(false).
             let verified = cap.verify(&desired).is_ok();
@@ -706,19 +938,243 @@ impl Inner {
             if drift {
                 drift_count += 1;
             }
+
+            let (remediation, state) = self.plan_and_remediate(
+                cap,
+                &id,
+                &desired,
+                drift,
+                observation.is_ok(),
+                classification,
+                exception_source,
+                &policy_id,
+                actor,
+                &mut remediated_count,
+            );
+            self.tracker.lock().unwrap().states.insert(id, state);
+
             entries.push(ReconcileEntry {
                 capability: meta.capability,
                 desired_state: desired,
                 current_state: current,
                 drift,
                 verified,
+                classification: Some(wire_classification(classification)),
+                remediation: Some(remediation),
             });
         }
+
+        // The unchanged M3 summary event (pre-remediation drift).
+        let outcome = if drift_count > 0 {
+            AuditOutcome::DriftDetected
+        } else {
+            AuditOutcome::Clean
+        };
+        self.log_audit(AuditEvent::reconcile(&self.device_id, actor, outcome));
+
+        let compliance = self.tracker.lock().unwrap().block(&self.registry);
         ReconcileResult {
             reconciled_at: utc_now_rfc3339(),
             drift_count,
             capabilities: entries,
+            remediated_count: Some(remediated_count),
+            compliance: Some(compliance),
         }
+    }
+
+    /// Steps 6–10 of the chain for one capability: plan (loop protection),
+    /// apply, verify, audit the attempt, and compute the SPEC section 52
+    /// state. Returns `(remediation, compliance state)`.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_and_remediate(
+        &self,
+        cap: &dyn Capability,
+        id: &str,
+        desired: &Value,
+        drift: bool,
+        observed_ok: bool,
+        classification: Classification,
+        exception_source: bool,
+        policy_id: &str,
+        actor: &AuditActor,
+        remediated_count: &mut u64,
+    ) -> (RemediationOutcome, ComplianceState) {
+        if !observed_ok {
+            // Observe failed: nothing trustworthy to diff against.
+            return (RemediationOutcome::None, ComplianceState::Unknown);
+        }
+        if !drift {
+            // Observed == effective is a successful verification of the
+            // effective state: the loop-protection counter resets (even a
+            // path won by an exception source is compliant while the
+            // observed state matches the effective value).
+            self.tracker.lock().unwrap().fail_counts.remove(id);
+            return (RemediationOutcome::None, ComplianceState::Compliant);
+        }
+        match classification {
+            // approval_required classifies as such but behaves as
+            // alert_only until M9 delivers approvals (contract section 5.6).
+            Classification::AlertOnly | Classification::ApprovalRequired => {
+                let state = if exception_source {
+                    ComplianceState::Exception
+                } else {
+                    ComplianceState::NonCompliant
+                };
+                (RemediationOutcome::AlertOnly, state)
+            }
+            Classification::AutoRemediate => {
+                let fail_count = self
+                    .tracker
+                    .lock()
+                    .unwrap()
+                    .fail_counts
+                    .get(id)
+                    .copied()
+                    .unwrap_or(0);
+                if fail_count >= MAX_REMEDIATION_ATTEMPTS {
+                    // Suppressed until the effective value changes, a
+                    // manual set succeeds, or the daemon restarts. Note:
+                    // flapping never trips this — every successful cycle
+                    // resets the counter; the audit trail's repeated
+                    // success events are the record of contested ownership.
+                    return (
+                        RemediationOutcome::Suppressed,
+                        ComplianceState::NonCompliant,
+                    );
+                }
+                let attempt = match cap.apply(desired) {
+                    Err(e) => {
+                        eprintln!("punard: remediation apply for {id} failed: {e}");
+                        Err(RemediationOutcome::ApplyFailed)
+                    }
+                    Ok(()) => match cap.verify(desired) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(RemediationOutcome::VerifyFailed),
+                        Err(e) => {
+                            eprintln!("punard: remediation verify for {id} errored: {e}");
+                            Err(RemediationOutcome::VerifyFailed)
+                        }
+                    },
+                };
+                match attempt {
+                    Ok(()) => {
+                        let now = utc_now_rfc3339();
+                        {
+                            let mut tracker = self.tracker.lock().unwrap();
+                            tracker.fail_counts.remove(id);
+                            tracker.drift_remediated_total += 1;
+                            tracker.last_remediation_at = Some(now);
+                        }
+                        *remediated_count += 1;
+                        self.log_audit(self.remediation_event(actor, id, policy_id, "success"));
+                        (RemediationOutcome::Applied, ComplianceState::Compliant)
+                    }
+                    Err(failure) => {
+                        let attempts = fail_count + 1;
+                        self.tracker
+                            .lock()
+                            .unwrap()
+                            .fail_counts
+                            .insert(id.to_string(), attempts);
+                        if attempts >= MAX_REMEDIATION_ATTEMPTS {
+                            // The exhausting attempt's audit event carries
+                            // the transition result (contract section 5.6:
+                            // one attempts_exhausted event, emitted on the
+                            // transition; the attempt kind is preserved in
+                            // the reconcile result's `remediation` field).
+                            self.log_audit(self.remediation_event(
+                                actor,
+                                id,
+                                policy_id,
+                                "attempts_exhausted",
+                            ));
+                            (failure, ComplianceState::NonCompliant)
+                        } else {
+                            let result = match failure {
+                                RemediationOutcome::ApplyFailed => "apply_failed",
+                                _ => "verify_failed",
+                            };
+                            self.log_audit(self.remediation_event(actor, id, policy_id, result));
+                            (failure, ComplianceState::Remediating)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One schema-conformant audit event per remediation attempt
+    /// (docs/api/ipc.md sections 5.6, 6).
+    fn remediation_event(
+        &self,
+        actor: &AuditActor,
+        capability: &str,
+        policy_id: &str,
+        result: &str,
+    ) -> AuditEvent {
+        AuditEvent {
+            event_id: next_event_id(),
+            timestamp: utc_now_rfc3339(),
+            device_id: self.device_id.clone(),
+            user_id: Some(actor.user_id.clone()),
+            agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+            project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+            source: actor.source,
+            action: "reconcile.remediate".to_string(),
+            resource: Some(capability.to_string()),
+            decision: Decision::Allow,
+            policy_ids: vec![policy_id.to_string()],
+            result: result.to_string(),
+        }
+    }
+
+    /// `policy.effective` (contract section 5.7): the merged document with
+    /// per-path provenance and compliance. Read, not audited.
+    fn handle_policy_effective(&self) -> PolicyEffectiveResult {
+        let doc = self.effective.lock().unwrap().clone();
+        let tracker = self.tracker.lock().unwrap();
+        let entries = doc
+            .entries
+            .iter()
+            .map(|(path, entry)| PolicyEffectiveEntry {
+                path: path.clone(),
+                effective_value: entry.value.clone(),
+                source: source_ref(&entry.provenance),
+                user_override_permitted: entry.user_override_permitted,
+                compliance_state: tracker.state_of(path),
+            })
+            .collect();
+        PolicyEffectiveResult {
+            computed_at: doc.computed_at,
+            entries,
+        }
+    }
+
+    /// `policy.explain` (contract section 5.8): one effective entry —
+    /// exactly the SPEC section 40 information set. Unknown path →
+    /// `not_found`.
+    fn handle_policy_explain(&self, params: &PolicyExplainParams) -> Result<Value, IpcError> {
+        let path = params.path.as_str();
+        let entry = self.effective.lock().unwrap().get(path).cloned();
+        let Some(entry) = entry else {
+            return Err(IpcError::with_details(
+                ErrorCode::NotFound,
+                format!(
+                    "No effective policy entry exists for {path:?} on this device.\n\
+                     Policy: personal defaults — the effective document covers the \
+                     registered capabilities.\n\
+                     Next step: `punarctl policy effective` lists every governed path."
+                ),
+                json!({ "param": "path", "path": path }),
+            ));
+        };
+        let result = PolicyExplainResult {
+            effective_value: entry.value.clone(),
+            source: source_ref(&entry.provenance),
+            user_override_permitted: entry.user_override_permitted,
+            compliance_state: self.tracker.lock().unwrap().state_of(path),
+        };
+        Ok(to_value(result))
     }
 
     fn internal(&self, detail: &str) -> IpcError {

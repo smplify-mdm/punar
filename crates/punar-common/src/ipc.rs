@@ -349,6 +349,16 @@ fn default_audit_tail_n() -> u64 {
     AUDIT_TAIL_DEFAULT
 }
 
+/// Params for `policy.explain` (M4, contract section 5.8). `path` is a
+/// capability path from the effective document; a syntactically invalid
+/// path already fails params parsing (`invalid_params`), a valid path not
+/// in the document is the server's `not_found`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyExplainParams {
+    pub path: CapabilityId,
+}
+
 impl Default for AuditTailParams {
     fn default() -> Self {
         AuditTailParams {
@@ -368,12 +378,16 @@ impl AuditTailParams {
 // The closed method table (contract section 5; SPEC sections 10, 60)
 // ---------------------------------------------------------------------------
 
-/// The complete, closed Milestone 3 method set.
+/// The complete, closed Milestone 3+4 method set.
 ///
 /// See the module docs for the section 60 guarantee. Summary: no variant
 /// carries anything executable, the enum is exhaustive-matched (adding a
 /// variant is a compile error until every table names it), and unknown
-/// method strings never become a `Method`.
+/// method strings never become a `Method`. The M4 additions
+/// (`policy.effective`, `policy.explain`) are **read** methods — there is
+/// no write-side `policy.*` method (contract section 8): the only policy
+/// mutations are `capabilities.set` and, from M5, the enrollment-managed
+/// `policy.d` drop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Method {
     /// `status` — daemon/device summary. Read; any connected peer.
@@ -383,24 +397,32 @@ pub enum Method {
     /// `capabilities.get` — one descriptor. Read.
     CapabilitiesGet(CapabilitiesGetParams),
     /// `capabilities.set` — mutate one capability. Root-only in M3; always
-    /// audited.
+    /// audited. Since M4 the request is recorded as a User Preference layer
+    /// entry and the **effective** value is applied (contract section 5.4).
     CapabilitiesSet(CapabilitiesSetParams),
     /// `audit.tail` — last `n` audit events through the daemon. Read.
     AuditTail(AuditTailParams),
-    /// `reconcile` — M3: re-observe, re-verify, **report** drift (no
-    /// remediation until M4). Root-only; always audited.
+    /// `reconcile` — M3 reported drift only; **since M4 it remediates per
+    /// policy** (the semantic change M3 pre-announced by making the method
+    /// root-only). Root-only; always audited.
     Reconcile,
+    /// `policy.effective` (M4) — the merged effective document. Read.
+    PolicyEffective,
+    /// `policy.explain` (M4) — one effective entry for a path. Read.
+    PolicyExplain(PolicyExplainParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 6] = [
+    pub const NAMES: [&'static str; 8] = [
         "status",
         "capabilities.list",
         "capabilities.get",
         "capabilities.set",
         "audit.tail",
         "reconcile",
+        "policy.effective",
+        "policy.explain",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -413,18 +435,23 @@ impl Method {
             Method::CapabilitiesSet(_) => "capabilities.set",
             Method::AuditTail(_) => "audit.tail",
             Method::Reconcile => "reconcile",
+            Method::PolicyEffective => "policy.effective",
+            Method::PolicyExplain(_) => "policy.explain",
         }
     }
 
-    /// Whether the M3 authorization rule (`personal-defaults`) restricts
-    /// this method to uid 0. Exhaustive on purpose: a new method must take
-    /// an explicit authorization stance to compile.
+    /// Whether the built-in authorization rule (`personal-defaults`)
+    /// restricts this method to uid 0. Exhaustive on purpose: a new method
+    /// must take an explicit authorization stance to compile. The M4
+    /// `policy.*` methods are reads, open to any connected peer.
     pub fn requires_root(&self) -> bool {
         match self {
             Method::Status
             | Method::CapabilitiesList
             | Method::CapabilitiesGet(_)
-            | Method::AuditTail(_) => false,
+            | Method::AuditTail(_)
+            | Method::PolicyEffective
+            | Method::PolicyExplain(_) => false,
             Method::CapabilitiesSet(_) | Method::Reconcile => true,
         }
     }
@@ -432,10 +459,14 @@ impl Method {
     /// The method's params as a wire value (`None` for no-params methods).
     pub fn params_value(&self) -> Option<Value> {
         let params = match self {
-            Method::Status | Method::CapabilitiesList | Method::Reconcile => return None,
+            Method::Status
+            | Method::CapabilitiesList
+            | Method::Reconcile
+            | Method::PolicyEffective => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
+            Method::PolicyExplain(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -463,6 +494,12 @@ impl Method {
                 None => Ok(Method::AuditTail(AuditTailParams::default())),
                 Some(value) => Self::parse_params(method, value).map(Method::AuditTail),
             },
+            "policy.effective" => {
+                Self::expect_no_params(method, params).map(|()| Method::PolicyEffective)
+            }
+            "policy.explain" => {
+                Self::parse_required_params(method, params).map(Method::PolicyExplain)
+            }
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -848,6 +885,161 @@ pub struct StatusResult {
     /// socket opens, so this is always present).
     pub last_reconcile: String,
     pub audit: AuditStatus,
+    /// M4: personal-scope compliance (SPEC section 52; contract section
+    /// 5.1). Optional per contract section 3.3 — always present since M4;
+    /// `Option` keeps M3-shaped payloads parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compliance: Option<ComplianceBlock>,
+}
+
+// ---------------------------------------------------------------------------
+// M4: compliance and policy result types (contract sections 5.1, 5.6–5.8)
+// ---------------------------------------------------------------------------
+
+/// SPEC section 52 compliance states, personal scope in M4 (the device
+/// measured against its own effective document).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplianceState {
+    Compliant,
+    Remediating,
+    NonCompliant,
+    Unknown,
+    Unsupported,
+    Exception,
+}
+
+impl ComplianceState {
+    /// The wire spelling (matches serde's snake_case rename).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ComplianceState::Compliant => "compliant",
+            ComplianceState::Remediating => "remediating",
+            ComplianceState::NonCompliant => "non_compliant",
+            ComplianceState::Unknown => "unknown",
+            ComplianceState::Unsupported => "unsupported",
+            ComplianceState::Exception => "exception",
+        }
+    }
+
+    /// Badness for the `overall` fold: `non_compliant > unknown >
+    /// remediating > exception > compliant` (contract section 5.1).
+    /// `unsupported` is excluded from `overall` (section 52's per-row
+    /// treatment) and reports the lowest severity here; [`Self::overall`]
+    /// skips it entirely.
+    fn severity(self) -> u8 {
+        match self {
+            ComplianceState::NonCompliant => 4,
+            ComplianceState::Unknown => 3,
+            ComplianceState::Remediating => 2,
+            ComplianceState::Exception => 1,
+            ComplianceState::Compliant | ComplianceState::Unsupported => 0,
+        }
+    }
+
+    /// The `overall` state: worst of the per-capability states, with
+    /// `unsupported` excluded. An empty iterator is `compliant` (nothing
+    /// measured, nothing violated — does not occur with a non-empty
+    /// registry).
+    pub fn overall(states: impl IntoIterator<Item = ComplianceState>) -> ComplianceState {
+        states
+            .into_iter()
+            .filter(|state| *state != ComplianceState::Unsupported)
+            .fold(ComplianceState::Compliant, |worst, state| {
+                if state.severity() > worst.severity() {
+                    state
+                } else {
+                    worst
+                }
+            })
+    }
+}
+
+/// One capability row of the [`ComplianceBlock`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityCompliance {
+    pub capability: CapabilityId,
+    pub state: ComplianceState,
+}
+
+/// The `compliance` block of `status` and `reconcile` results (contract
+/// sections 5.1, 5.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceBlock {
+    pub overall: ComplianceState,
+    pub capabilities: Vec<CapabilityCompliance>,
+    /// Monotonic in-memory counter of successful remediations since daemon
+    /// start — the observable the drift demo asserts on.
+    pub drift_remediated_total: u64,
+    /// RFC 3339; serialized as `null` until the first remediation.
+    #[serde(default)]
+    pub last_remediation_at: Option<String>,
+}
+
+/// SPEC section 43 drift classification as it appears in reconcile results
+/// (contract section 5.6). Personal mode classifies every capability
+/// `auto_remediate`; `approval_required` behaves as `alert_only` until M9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Classification {
+    AutoRemediate,
+    AlertOnly,
+    ApprovalRequired,
+}
+
+/// Per-capability remediation outcome in a reconcile result (contract
+/// section 5.6). `Suppressed` = loop protection engaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationOutcome {
+    Applied,
+    None,
+    ApplyFailed,
+    VerifyFailed,
+    AlertOnly,
+    Suppressed,
+}
+
+/// The `source` object of `policy.effective` / `policy.explain` entries
+/// (contract sections 5.7, 5.8). `kind` carries the `policy_source_kind`
+/// enum spelling of `schemas/policy/policy-source.json` (the engine type is
+/// `punar_policy::SourceKind`; the wire keeps the plain string).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicySourceRef {
+    pub kind: String,
+    /// Precedence rank, 1–6 ladder (lower wins).
+    pub rank: u32,
+    pub policy_id: String,
+    /// Display name: "Personal preference" / "OS default" in personal mode.
+    pub name: String,
+}
+
+/// One entry of the `policy.effective` result (contract section 5.7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyEffectiveEntry {
+    pub path: String,
+    pub effective_value: Value,
+    pub source: PolicySourceRef,
+    pub user_override_permitted: bool,
+    pub compliance_state: ComplianceState,
+}
+
+/// `policy.effective` result (contract section 5.7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyEffectiveResult {
+    /// RFC 3339, when the effective document was last recomputed.
+    pub computed_at: String,
+    pub entries: Vec<PolicyEffectiveEntry>,
+}
+
+/// `policy.explain` result (contract section 5.8): one effective entry
+/// without `path` — exactly the SPEC section 40 information set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyExplainResult {
+    pub effective_value: Value,
+    pub source: PolicySourceRef,
+    pub user_override_permitted: bool,
+    pub compliance_state: ComplianceState,
 }
 
 /// The `audit` sub-object of [`StatusResult`].
@@ -878,6 +1070,15 @@ pub struct CapabilitiesSetResult {
     /// `false` when the observed state already equaled the request
     /// (idempotent no-op — still audited, `result: "noop"`).
     pub changed: bool,
+    /// M4: present (and `true`) only when a higher-precedence source
+    /// outranks the recorded user preference, so the applied value is not
+    /// the requested one. **Never emitted in personal mode** — the personal
+    /// result stays byte-identical to M3 (contract section 5.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overridden: Option<bool>,
+    /// M4: the effective value that was applied when `overridden` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_state: Option<Value>,
 }
 
 /// `audit.tail` result (contract section 5.5). Events newest **last**.
@@ -886,15 +1087,24 @@ pub struct AuditTailResult {
     pub events: Vec<AuditEvent>,
 }
 
-/// `reconcile` result (contract section 5.6): M3 reports drift, never
-/// remediates (remediation + policy merge are M4).
+/// `reconcile` result (contract section 5.6). Every M3 field keeps its M3
+/// meaning — `drift` / `drift_count` describe the **pre-remediation**
+/// observation; the M4 fields (`classification`, `remediation`,
+/// `remediated_count`, `compliance`) are additive per contract section 3.3
+/// (`Option` so M3-shaped payloads still parse; always emitted since M4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReconcileResult {
     /// RFC 3339.
     pub reconciled_at: String,
-    /// Number of entries with `drift: true`.
+    /// Number of entries with `drift: true` (pre-remediation).
     pub drift_count: u64,
     pub capabilities: Vec<ReconcileEntry>,
+    /// M4: number of drifts successfully remediated in this pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediated_count: Option<u64>,
+    /// M4: post-pass compliance, same shape as the `status` block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compliance: Option<ComplianceBlock>,
 }
 
 /// One capability's drift report inside [`ReconcileResult`].
@@ -903,10 +1113,16 @@ pub struct ReconcileEntry {
     pub capability: CapabilityId,
     pub desired_state: Value,
     pub current_state: Value,
-    /// `current_state != desired_state`.
+    /// `current_state != desired_state` (pre-remediation observation).
     pub drift: bool,
     /// Whether the verification mechanism itself ran successfully.
     pub verified: bool,
+    /// M4: SPEC section 43 classification from the effective document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Classification>,
+    /// M4: what this pass did about the drift (contract section 5.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<RemediationOutcome>,
 }
 
 #[cfg(test)]
@@ -984,6 +1200,10 @@ mod tests {
             }),
             Method::AuditTail(AuditTailParams { n: 50 }),
             Method::Reconcile,
+            Method::PolicyEffective,
+            Method::PolicyExplain(PolicyExplainParams {
+                path: CapabilityId::new("security.firewall").unwrap(),
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -1357,6 +1577,7 @@ mod tests {
                 path: "/var/log/punar/audit.jsonl".into(),
                 events: 42,
             },
+            compliance: None,
         })
         .unwrap();
         value
@@ -1421,9 +1642,35 @@ mod tests {
         let set = CapabilitiesSetResult {
             descriptor,
             changed: true,
+            overridden: None,
+            effective_state: None,
         };
         let value = serde_json::to_value(&set).unwrap();
         assert_eq!(value["changed"], true);
+        // Personal mode (contract section 5.4): the result is byte-identical
+        // to M3 — the M4 override fields are omitted, not null.
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("overridden"));
+        assert!(!object.contains_key("effective_state"));
+        let back: CapabilitiesSetResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, set);
+    }
+
+    #[test]
+    fn overridden_set_result_carries_the_effective_state() {
+        let descriptor: CapabilityDescriptor = serde_json::from_str(include_str!(
+            "../../../schemas/capability/examples/security-firewall.json"
+        ))
+        .unwrap();
+        let set = CapabilitiesSetResult {
+            descriptor,
+            changed: false,
+            overridden: Some(true),
+            effective_state: Some(json!("enabled")),
+        };
+        let value = serde_json::to_value(&set).unwrap();
+        assert_eq!(value["overridden"], true);
+        assert_eq!(value["effective_state"], "enabled");
         let back: CapabilitiesSetResult = serde_json::from_value(value).unwrap();
         assert_eq!(back, set);
     }
@@ -1437,6 +1684,187 @@ mod tests {
             serde_json::to_string(&Mode::Personal).unwrap(),
             "\"personal\""
         );
+    }
+
+    // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------
+
+    #[test]
+    fn policy_effective_result_parses_the_contract_example() {
+        // docs/api/ipc.md section 5.7, verbatim.
+        let json = r#"{
+          "computed_at": "2026-08-25T09:14:02Z",
+          "entries": [
+            {"path": "security.firewall", "effective_value": "enabled",
+             "source": {"kind": "local_user_preference", "rank": 5,
+                        "policy_id": "personal-defaults",
+                        "name": "Personal preference"},
+             "user_override_permitted": true,
+             "compliance_state": "compliant"},
+            {"path": "time.timezone", "effective_value": "UTC",
+             "source": {"kind": "os_secure_default", "rank": 6,
+                        "policy_id": "personal-defaults",
+                        "name": "OS default"},
+             "user_override_permitted": true,
+             "compliance_state": "compliant"}
+          ]
+        }"#;
+        let result: PolicyEffectiveResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        let firewall = &result.entries[0];
+        assert_eq!(firewall.path, "security.firewall");
+        assert_eq!(firewall.source.kind, "local_user_preference");
+        assert_eq!(firewall.source.rank, 5);
+        assert!(firewall.user_override_permitted);
+        assert_eq!(firewall.compliance_state, ComplianceState::Compliant);
+        let back: PolicyEffectiveResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn policy_explain_result_parses_the_contract_example() {
+        // docs/api/ipc.md section 5.8, verbatim: one entry minus `path`.
+        let json = r#"{
+          "effective_value": "enabled",
+          "source": {"kind": "local_user_preference", "rank": 5,
+                     "policy_id": "personal-defaults",
+                     "name": "Personal preference"},
+          "user_override_permitted": true,
+          "compliance_state": "compliant"
+        }"#;
+        let result: PolicyExplainResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.effective_value, json!("enabled"));
+        assert_eq!(result.source.policy_id, "personal-defaults");
+        assert_eq!(result.source.name, "Personal preference");
+        let back: PolicyExplainResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn compliance_overall_is_the_worst_state_with_unsupported_excluded() {
+        use ComplianceState::*;
+        // Contract section 5.1: non_compliant > unknown > remediating >
+        // exception > compliant; unsupported never drives `overall`.
+        assert_eq!(ComplianceState::overall([Compliant, Compliant]), Compliant);
+        assert_eq!(ComplianceState::overall([Compliant, Exception]), Exception);
+        assert_eq!(
+            ComplianceState::overall([Exception, Remediating]),
+            Remediating
+        );
+        assert_eq!(ComplianceState::overall([Remediating, Unknown]), Unknown);
+        assert_eq!(
+            ComplianceState::overall([Unknown, NonCompliant, Compliant]),
+            NonCompliant
+        );
+        assert_eq!(
+            ComplianceState::overall([Unsupported, Compliant]),
+            Compliant
+        );
+        assert_eq!(ComplianceState::overall([]), Compliant);
+    }
+
+    #[test]
+    fn compliance_states_use_the_section_52_spellings() {
+        let expected = [
+            (ComplianceState::Compliant, "compliant"),
+            (ComplianceState::Remediating, "remediating"),
+            (ComplianceState::NonCompliant, "non_compliant"),
+            (ComplianceState::Unknown, "unknown"),
+            (ComplianceState::Unsupported, "unsupported"),
+            (ComplianceState::Exception, "exception"),
+        ];
+        for (state, wire) in expected {
+            assert_eq!(serde_json::to_string(&state).unwrap(), format!("{wire:?}"));
+            assert_eq!(state.as_str(), wire);
+            let back: ComplianceState = serde_json::from_str(&format!("{wire:?}")).unwrap();
+            assert_eq!(back, state);
+        }
+    }
+
+    #[test]
+    fn m4_reconcile_result_round_trips_and_m3_meaning_is_kept() {
+        let result = ReconcileResult {
+            reconciled_at: "2026-08-25T09:14:02Z".into(),
+            drift_count: 1,
+            capabilities: vec![ReconcileEntry {
+                capability: CapabilityId::new("security.firewall").unwrap(),
+                desired_state: json!("enabled"),
+                current_state: json!("disabled"),
+                drift: true,
+                verified: true,
+                classification: Some(Classification::AutoRemediate),
+                remediation: Some(RemediationOutcome::Applied),
+            }],
+            remediated_count: Some(1),
+            compliance: Some(ComplianceBlock {
+                overall: ComplianceState::Compliant,
+                capabilities: vec![CapabilityCompliance {
+                    capability: CapabilityId::new("security.firewall").unwrap(),
+                    state: ComplianceState::Compliant,
+                }],
+                drift_remediated_total: 3,
+                last_remediation_at: Some("2026-08-25T09:14:02Z".into()),
+            }),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        // Pre-remediation drift stays reported even though it was fixed.
+        assert_eq!(value["drift_count"], 1);
+        assert_eq!(value["capabilities"][0]["drift"], true);
+        assert_eq!(value["capabilities"][0]["classification"], "auto_remediate");
+        assert_eq!(value["capabilities"][0]["remediation"], "applied");
+        assert_eq!(value["remediated_count"], 1);
+        assert_eq!(value["compliance"]["overall"], "compliant");
+        let back: ReconcileResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn remediation_outcomes_use_the_contract_spellings() {
+        for (outcome, wire) in [
+            (RemediationOutcome::Applied, "\"applied\""),
+            (RemediationOutcome::None, "\"none\""),
+            (RemediationOutcome::ApplyFailed, "\"apply_failed\""),
+            (RemediationOutcome::VerifyFailed, "\"verify_failed\""),
+            (RemediationOutcome::AlertOnly, "\"alert_only\""),
+            (RemediationOutcome::Suppressed, "\"suppressed\""),
+        ] {
+            assert_eq!(serde_json::to_string(&outcome).unwrap(), wire);
+            let back: RemediationOutcome = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, outcome);
+        }
+    }
+
+    #[test]
+    fn policy_methods_are_reads_with_strict_params() {
+        // policy.effective takes no params.
+        let reject = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"policy.effective","params":{"path":"x.y"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+
+        // policy.explain requires a path.
+        let reject =
+            Request::parse_json_line(r#"{"v":1,"id":"1","method":"policy.explain"}"#).unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"policy.explain","params":{"path":"security.firewall"}}"#,
+        )
+        .unwrap();
+        match request.method {
+            Method::PolicyExplain(params) => {
+                assert_eq!(params.path.as_str(), "security.firewall");
+            }
+            other => panic!("wrong method: {other:?}"),
+        }
+
+        // There is no write-side policy method (contract section 8).
+        let reject = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"policy.set","params":{"path":"security.firewall"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::UnknownMethod);
     }
 
     #[test]

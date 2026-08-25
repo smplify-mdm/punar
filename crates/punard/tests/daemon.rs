@@ -4,11 +4,17 @@
 //! The registry is the scriptable `MockCapability`; peer identity uses the
 //! test-only `PeerSource::Fixed` hook (root vs non-root), plus one
 //! Linux-only test of the real `SO_PEERCRED` path.
+//!
+//! M4 note: `TestDaemon::start` runs the boot reconcile before the socket
+//! opens, mirroring `punard run` — SPEC section 52 states are guaranteed
+//! before any request is served, and the boot reconcile's audit summary
+//! event exists in every test's trail (tests count deltas, not absolutes,
+//! where that matters).
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -26,36 +32,54 @@ struct TestDaemon {
     mock: MockCapability,
 }
 
+fn test_dir(tag: &str) -> PathBuf {
+    let seq = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("punard-it-{tag}-{}-{seq}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_nss_files(dir: &Path) -> (PathBuf, PathBuf) {
+    // /etc/{group,passwd} substitutes so username resolution is
+    // deterministic regardless of the host.
+    let group_file = dir.join("group");
+    fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+    let passwd_file = dir.join("passwd");
+    fs::write(
+        &passwd_file,
+        "root:x:0:0::/root:/bin/bash\npunar:x:1000:1000::/home/punar:/bin/nologin\n",
+    )
+    .unwrap();
+    (group_file, passwd_file)
+}
+
 impl TestDaemon {
     fn start(peer: PeerSource) -> Self {
-        let seq = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("punard-it-{}-{seq}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        // /etc/{group,passwd} substitutes so username resolution is
-        // deterministic regardless of the host.
-        let group_file = dir.join("group");
-        fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
-        let passwd_file = dir.join("passwd");
-        fs::write(
-            &passwd_file,
-            "root:x:0:0::/root:/bin/bash\npunar:x:1000:1000::/home/punar:/bin/nologin\n",
-        )
-        .unwrap();
-
         let mock = MockCapability::new("mock.widget", json!("off"));
+        Self::start_with(peer, mock, |_| {})
+    }
+
+    /// Start a daemon around `mock`, after `prepare` has had a chance to
+    /// pre-populate the state directory (policy.d drops, an M3
+    /// desired.json, …). Runs the boot reconcile before the socket opens,
+    /// like `punard run`.
+    fn start_with(peer: PeerSource, mock: MockCapability, prepare: impl FnOnce(&Path)) -> Self {
+        let dir = test_dir("d");
+        let (group_file, passwd_file) = write_nss_files(&dir);
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        prepare(&state_dir);
+
         let registry = Registry::new(vec![Box::new(mock.clone())]);
         let cfg = DaemonConfig {
             group_file,
             passwd_file,
             peer_source: peer,
             io_timeout: Duration::from_secs(5),
-            ..DaemonConfig::new(
-                dir.join("punard.sock"),
-                dir.join("state"),
-                dir.join("audit.jsonl"),
-            )
+            ..DaemonConfig::new(dir.join("punard.sock"), state_dir, dir.join("audit.jsonl"))
         };
         let daemon = Daemon::new(cfg, registry).unwrap();
+        daemon.boot_reconcile();
         let handle = daemon.spawn().unwrap();
         TestDaemon {
             dir,
@@ -114,6 +138,10 @@ impl TestDaemon {
             Err(_) => Vec::new(),
         }
     }
+
+    fn state_path(&self, name: &str) -> PathBuf {
+        self.dir.join("state").join(name)
+    }
 }
 
 impl Drop for TestDaemon {
@@ -162,7 +190,7 @@ fn assert_schema_shaped(event: &Value) {
 }
 
 #[test]
-fn status_reports_personal_mode() {
+fn status_reports_personal_mode_with_compliance() {
     let td = TestDaemon::start_as_root();
     let resp = td.call("status", None);
     assert_eq!(resp["v"], 1);
@@ -177,6 +205,17 @@ fn status_reports_personal_mode() {
     // Design section 8: no org fields exist in personal mode.
     assert!(result.get("org").is_none());
     assert!(result.get("organization").is_none());
+
+    // M4: the SPEC section 52 personal-scope compliance block — the boot
+    // reconcile ran before the socket opened, so states exist.
+    let compliance = &result["compliance"];
+    assert_eq!(compliance["overall"], "compliant");
+    let caps = compliance["capabilities"].as_array().unwrap();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0]["capability"], "mock.widget");
+    assert_eq!(caps[0]["state"], "compliant");
+    assert_eq!(compliance["drift_remediated_total"], 0);
+    assert_eq!(compliance["last_remediation_at"], Value::Null);
 }
 
 #[test]
@@ -194,10 +233,12 @@ fn capabilities_list_returns_schema_shaped_descriptors() {
     assert_eq!(d["privilege_required"], "root");
     assert_eq!(d["approval_requirement"], "allow");
     assert_eq!(d["current_state"], "off");
+    // M4: desired_state renders the effective value (the OS-default seed).
+    assert_eq!(d["desired_state"], "off");
 }
 
 #[test]
-fn set_as_root_applies_verifies_and_audits() {
+fn set_as_root_applies_verifies_audits_and_records_the_preference() {
     let td = TestDaemon::start_as_root();
     let resp = td.call(
         "capabilities.set",
@@ -206,6 +247,10 @@ fn set_as_root_applies_verifies_and_audits() {
     assert!(resp.get("error").is_none(), "{resp}");
     assert_eq!(resp["result"]["changed"], true);
     assert_eq!(resp["result"]["descriptor"]["current_state"], "on");
+    // Personal mode: nothing outranks the preference — the result carries
+    // no override fields (byte-identical to M3, contract section 5.4).
+    assert!(resp["result"].get("overridden").is_none());
+    assert!(resp["result"].get("effective_state").is_none());
     assert_eq!(td.mock.state(), json!("on"));
     assert_eq!(td.mock.apply_calls(), 1);
 
@@ -220,12 +265,17 @@ fn set_as_root_applies_verifies_and_audits() {
     assert_eq!(ev["source"], "human");
     assert_eq!(ev["policy_ids"], json!(["personal-defaults"]));
 
-    // Desired state was recorded.
-    let desired: Value = serde_json::from_str(
-        &fs::read_to_string(td.dir.join("state").join("desired.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(desired["mock.widget"], "on");
+    // M4: the request was recorded as a User Preference layer entry; the
+    // M3 desired.json store no longer exists.
+    let preferences: Value =
+        serde_json::from_str(&fs::read_to_string(td.state_path("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(preferences["version"], 1);
+    assert_eq!(preferences["preferences"]["mock.widget"]["value"], "on");
+    assert_eq!(preferences["preferences"]["mock.widget"]["set_by"], "root");
+    assert!(!td.state_path("desired.json").exists());
+    // The OS-default seed store exists alongside.
+    assert!(td.state_path("os-defaults.json").exists());
 }
 
 #[test]
@@ -244,9 +294,10 @@ fn set_as_non_root_is_denied_audited_and_does_not_mutate() {
     assert_eq!(error["details"]["capability"], "mock.widget");
     assert_eq!(error["details"]["policy_ids"], json!(["personal-defaults"]));
 
-    // No mutation happened.
+    // No mutation happened — and no preference was recorded.
     assert_eq!(td.mock.state(), json!("off"));
     assert_eq!(td.mock.apply_calls(), 0);
+    assert!(!td.state_path("preferences.json").exists());
 
     // The denial is audited.
     let audit = td.audit_lines();
@@ -259,8 +310,9 @@ fn set_as_non_root_is_denied_audited_and_does_not_mutate() {
 }
 
 #[test]
-fn reads_are_open_to_non_root_peers() {
+fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     let td = TestDaemon::start_as_uid(1000);
+    let baseline = td.audit_lines().len(); // boot reconcile summary
     assert!(td.call("status", None).get("error").is_none());
     assert!(td.call("capabilities.list", None).get("error").is_none());
     assert!(
@@ -268,12 +320,22 @@ fn reads_are_open_to_non_root_peers() {
             .get("error")
             .is_none()
     );
-    // Reads are not audited in M3.
-    assert!(td.audit_lines().is_empty());
+    // M4: the policy read methods are open to any connected peer too.
+    assert!(td.call("policy.effective", None).get("error").is_none());
+    assert!(
+        td.call("policy.explain", Some(json!({ "path": "mock.widget" })))
+            .get("error")
+            .is_none()
+    );
+    // Reads are not audited.
+    assert_eq!(td.audit_lines().len(), baseline);
 }
 
+/// M4 semantics (contract section 5.6): reconcile now REMEDIATES drift —
+/// the deliberate behavior change M3 pre-announced by making the method
+/// root-only. This replaces the M3 test of report-only reconcile.
 #[test]
-fn reconcile_reports_drift_but_never_remediates() {
+fn reconcile_remediates_drift_and_audits_every_attempt() {
     let td = TestDaemon::start_as_root();
     // Set desired = "on" (audited apply), then simulate external drift.
     td.call(
@@ -285,29 +347,131 @@ fn reconcile_reports_drift_but_never_remediates() {
 
     let resp = td.call("reconcile", None);
     let result = &resp["result"];
+    // M3 fields keep their M3 meaning: pre-remediation observation.
     assert_eq!(result["drift_count"], 1);
     let entry = &result["capabilities"][0];
     assert_eq!(entry["capability"], "mock.widget");
     assert_eq!(entry["desired_state"], "on");
     assert_eq!(entry["current_state"], "tampered");
     assert_eq!(entry["drift"], true);
-    assert_eq!(entry["verified"], true);
+    // M4 additive fields: classification + what this pass did.
+    assert_eq!(entry["classification"], "auto_remediate");
+    assert_eq!(entry["remediation"], "applied");
+    assert_eq!(result["remediated_count"], 1);
+    assert_eq!(result["compliance"]["overall"], "compliant");
+    assert_eq!(result["compliance"]["drift_remediated_total"], 1);
+    assert!(result["compliance"]["last_remediation_at"].is_string());
 
-    // Report only: no apply happened, state untouched.
-    assert_eq!(td.mock.apply_calls(), applies_before);
-    assert_eq!(td.mock.state(), json!("tampered"));
+    // The drift was actually fixed.
+    assert_eq!(td.mock.apply_calls(), applies_before + 1);
+    assert_eq!(td.mock.state(), json!("on"));
 
-    let ev = td.audit_lines().pop().unwrap();
-    assert_schema_shaped(&ev);
-    assert_eq!(ev["action"], "reconcile");
-    assert_eq!(ev["resource"], "capability_registry");
-    assert_eq!(ev["result"], "drift_detected");
+    // Audit: one event per remediation attempt + the unchanged M3 summary.
+    let audit = td.audit_lines();
+    let summary = audit.last().unwrap();
+    assert_schema_shaped(summary);
+    assert_eq!(summary["action"], "reconcile");
+    assert_eq!(summary["resource"], "capability_registry");
+    assert_eq!(summary["result"], "drift_detected");
+    let remediate = &audit[audit.len() - 2];
+    assert_schema_shaped(remediate);
+    assert_eq!(remediate["action"], "reconcile.remediate");
+    assert_eq!(remediate["resource"], "mock.widget");
+    assert_eq!(remediate["decision"], "allow");
+    assert_eq!(remediate["result"], "success");
+    assert_eq!(remediate["policy_ids"], json!(["personal-defaults"]));
 
-    // Fix the drift; a second reconcile is clean.
-    td.mock.set_state(json!("on"));
+    // A second reconcile is clean and remediates nothing.
     let resp = td.call("reconcile", None);
     assert_eq!(resp["result"]["drift_count"], 0);
+    assert_eq!(resp["result"]["remediated_count"], 0);
+    assert_eq!(resp["result"]["capabilities"][0]["remediation"], "none");
     assert_eq!(td.audit_lines().pop().unwrap()["result"], "clean");
+
+    // status reflects the remediation counter (the drift-demo observable).
+    let status = td.call("status", None);
+    assert_eq!(status["result"]["compliance"]["drift_remediated_total"], 1);
+}
+
+/// Loop protection (contract section 5.6): 3 consecutive failed attempts →
+/// non_compliant + one attempts_exhausted audit event on the transition,
+/// then suppression until a manual set succeeds.
+#[test]
+fn remediation_loop_protection_engages_and_resets() {
+    let td = TestDaemon::start_as_root();
+    td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "mock.widget", "desired_state": "on" })),
+    );
+    td.mock.set_state(json!("tampered"));
+    td.mock.fail_next_applies(true);
+
+    // Attempts 1 and 2: apply fails, capability is remediating.
+    for attempt in 1..=2 {
+        let resp = td.call("reconcile", None);
+        let entry = &resp["result"]["capabilities"][0];
+        assert_eq!(entry["remediation"], "apply_failed", "attempt {attempt}");
+        assert_eq!(resp["result"]["remediated_count"], 0);
+        assert_eq!(resp["result"]["compliance"]["overall"], "remediating");
+        let audit = td.audit_lines();
+        let ev = &audit[audit.len() - 2];
+        assert_eq!(ev["action"], "reconcile.remediate");
+        assert_eq!(ev["result"], "apply_failed", "attempt {attempt}");
+    }
+
+    // Attempt 3: the transition — attempts_exhausted, non_compliant.
+    let resp = td.call("reconcile", None);
+    let entry = &resp["result"]["capabilities"][0];
+    assert_eq!(entry["remediation"], "apply_failed");
+    assert_eq!(resp["result"]["compliance"]["overall"], "non_compliant");
+    let audit = td.audit_lines();
+    let ev = &audit[audit.len() - 2];
+    assert_schema_shaped(ev);
+    assert_eq!(ev["action"], "reconcile.remediate");
+    assert_eq!(ev["result"], "attempts_exhausted");
+    let exhausted_events = audit
+        .iter()
+        .filter(|e| e["result"] == "attempts_exhausted")
+        .count();
+    assert_eq!(exhausted_events, 1, "one event, on the transition");
+
+    // Attempt 4: suppressed — no further apply, no new remediate event.
+    let applies = td.mock.apply_calls();
+    let events = td.audit_lines().len();
+    let resp = td.call("reconcile", None);
+    let entry = &resp["result"]["capabilities"][0];
+    assert_eq!(entry["remediation"], "suppressed");
+    assert_eq!(resp["result"]["compliance"]["overall"], "non_compliant");
+    assert_eq!(td.mock.apply_calls(), applies, "no apply while suppressed");
+    // Only the summary event was appended.
+    assert_eq!(td.audit_lines().len(), events + 1);
+    assert_eq!(
+        td.audit_lines().pop().unwrap()["action"],
+        "reconcile",
+        "suppressed pass audits only the summary"
+    );
+
+    // status shows the section 52 state.
+    let status = td.call("status", None);
+    assert_eq!(
+        status["result"]["compliance"]["capabilities"][0]["state"],
+        "non_compliant"
+    );
+
+    // A successful manual set clears the suppression…
+    td.mock.fail_next_applies(false);
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "mock.widget", "desired_state": "on" })),
+    );
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(td.mock.state(), json!("on"));
+    // …and the next drift is remediated again.
+    td.mock.set_state(json!("tampered"));
+    let resp = td.call("reconcile", None);
+    assert_eq!(resp["result"]["capabilities"][0]["remediation"], "applied");
+    assert_eq!(resp["result"]["compliance"]["overall"], "compliant");
+    assert_eq!(td.mock.state(), json!("on"));
 }
 
 #[test]
@@ -321,9 +485,202 @@ fn reconcile_is_root_only_and_denials_are_audited() {
     assert_eq!(ev["decision"], "deny");
 }
 
+// ---------------------------------------------------------------------------
+// M4: policy.effective / policy.explain (contract sections 5.7, 5.8)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn policy_effective_and_explain_cover_both_personal_source_kinds() {
+    let td = TestDaemon::start_as_root();
+
+    // Before any set: the OS-default (observation-seeded) layer wins.
+    let resp = td.call("policy.effective", None);
+    let result = &resp["result"];
+    assert!(result["computed_at"].is_string());
+    let entries = result["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["path"], "mock.widget");
+    assert_eq!(entry["effective_value"], "off");
+    assert_eq!(entry["source"]["kind"], "os_secure_default");
+    assert_eq!(entry["source"]["rank"], 6);
+    assert_eq!(entry["source"]["policy_id"], "personal-defaults");
+    assert_eq!(entry["source"]["name"], "OS default");
+    assert_eq!(entry["user_override_permitted"], true);
+    assert_eq!(entry["compliance_state"], "compliant");
+
+    // After a set: the User Preference layer wins.
+    td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "mock.widget", "desired_state": "on" })),
+    );
+    let resp = td.call("policy.explain", Some(json!({ "path": "mock.widget" })));
+    let result = &resp["result"];
+    assert_eq!(result["effective_value"], "on");
+    assert_eq!(result["source"]["kind"], "local_user_preference");
+    assert_eq!(result["source"]["rank"], 5);
+    assert_eq!(result["source"]["policy_id"], "personal-defaults");
+    assert_eq!(result["source"]["name"], "Personal preference");
+    assert_eq!(result["user_override_permitted"], true);
+    assert_eq!(result["compliance_state"], "compliant");
+    assert!(result.get("path").is_none(), "explain omits the path field");
+}
+
+#[test]
+fn policy_explain_unknown_path_is_not_found_in_section_73_voice() {
+    let td = TestDaemon::start_as_root();
+    let resp = td.call(
+        "policy.explain",
+        Some(json!({ "path": "not.a_capability" })),
+    );
+    let error = &resp["error"];
+    assert_eq!(error["code"], "not_found");
+    assert_eq!(error["details"]["param"], "path");
+    assert_eq!(error["details"]["path"], "not.a_capability");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("not.a_capability"), "{message}");
+    assert!(message.contains("Next step"), "{message}");
+    assert!(message.contains("punarctl policy effective"), "{message}");
+}
+
+#[test]
+fn no_write_side_policy_method_exists() {
+    // Contract section 8: the only policy mutations are capabilities.set
+    // and (M5) the enrollment-managed policy.d drop.
+    let td = TestDaemon::start_as_root();
+    for probe in ["policy.set", "policy.write", "policy.apply"] {
+        let resp = td.call(probe, Some(json!({ "path": "mock.widget" })));
+        assert_eq!(resp["error"]["code"], "unknown_method", "probe {probe}");
+    }
+}
+
+/// The Acme org fixtures through the whole daemon: an organization_baseline
+/// drop in policy.d outranks the user preference (SPEC sections 39, 40).
+/// Engine/tests only until M5 — the shipped image's policy.d is empty and
+/// nothing org renders in the VM (design language section 8).
+#[test]
+fn org_policy_drop_overrides_the_user_preference() {
+    let mut envelope: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/organizations/acme/policy-source-eng-baseline-v12.json"
+    ))
+    .unwrap();
+    let desired: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/organizations/acme/desired-state-eng-baseline-v12.json"
+    ))
+    .unwrap();
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .insert("policy".to_string(), desired);
+
+    let mock = MockCapability::new("security.firewall", json!("disabled"));
+    let td = TestDaemon::start_with(PeerSource::Fixed(Peer::root()), mock, move |state_dir| {
+        let policy_dir = state_dir.join("policy.d");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("eng-baseline-v12.json"),
+            serde_json::to_string(&envelope).unwrap(),
+        )
+        .unwrap();
+    });
+
+    // Boot reconcile already remediated toward the org value.
+    assert_eq!(td.mock.state(), json!("enabled"));
+    let boot_remediate = td
+        .audit_lines()
+        .into_iter()
+        .find(|e| e["action"] == "reconcile.remediate")
+        .expect("boot remediation audited");
+    assert_eq!(boot_remediate["policy_ids"], json!(["eng-baseline-v12"]));
+    assert_eq!(boot_remediate["user_id"], "punard");
+    assert_eq!(boot_remediate["source"], "service");
+
+    // Explain cites the org source and pins the value.
+    let resp = td.call(
+        "policy.explain",
+        Some(json!({ "path": "security.firewall" })),
+    );
+    let result = &resp["result"];
+    assert_eq!(result["effective_value"], "enabled");
+    assert_eq!(result["source"]["kind"], "organization_baseline");
+    assert_eq!(result["source"]["rank"], 2);
+    assert_eq!(result["source"]["policy_id"], "eng-baseline-v12");
+    assert_eq!(result["source"]["name"], "Acme Engineering Baseline");
+    assert_eq!(result["user_override_permitted"], false);
+
+    // A root set records the preference but the EFFECTIVE value stays the
+    // org's: the result says so via the optional override fields.
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "security.firewall", "desired_state": "disabled" })),
+    );
+    let result = &resp["result"];
+    assert_eq!(result["changed"], false, "already in the effective state");
+    assert_eq!(result["overridden"], true);
+    assert_eq!(result["effective_state"], "enabled");
+    assert_eq!(td.mock.state(), json!("enabled"), "org value stands");
+    let preferences: Value =
+        serde_json::from_str(&fs::read_to_string(td.state_path("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        preferences["preferences"]["security.firewall"]["value"], "disabled",
+        "the preference is still recorded (it wins the day the org rung lifts)"
+    );
+    // The set audit cites the winning policy.
+    let ev = td.audit_lines().pop().unwrap();
+    assert_eq!(ev["action"], "capabilities.set");
+    assert_eq!(ev["result"], "noop");
+    assert_eq!(ev["policy_ids"], json!(["eng-baseline-v12"]));
+}
+
+/// The one-shot M3 → M4 store migration through a real daemon start
+/// (docs/development/milestone-4.md section 3.3). Fresh installs — every
+/// CI image boot — skip this path entirely; it is host-test-only coverage.
+#[test]
+fn m3_desired_store_is_migrated_once_at_startup() {
+    let mock = MockCapability::with_default("mock.widget", json!("off"), json!("on"));
+    let td = TestDaemon::start_with(PeerSource::Fixed(Peer::root()), mock, |state_dir| {
+        // An M3 store whose recorded value differs from the compiled
+        // default: it can only have come from a root set → preference.
+        fs::write(state_dir.join("desired.json"), r#"{"mock.widget": "off"}"#).unwrap();
+    });
+
+    // The store was split and retired.
+    let preferences: Value =
+        serde_json::from_str(&fs::read_to_string(td.state_path("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(preferences["preferences"]["mock.widget"]["value"], "off");
+    assert_eq!(
+        preferences["preferences"]["mock.widget"]["set_by"],
+        "migrated"
+    );
+    assert!(!td.state_path("desired.json").exists());
+    assert!(td.state_path("desired.json.pre-m4").exists());
+
+    // The migration is audited.
+    let migrate = td
+        .audit_lines()
+        .into_iter()
+        .find(|e| e["action"] == "state.migrate")
+        .expect("state.migrate audited");
+    assert_schema_shaped(&migrate);
+    assert_eq!(migrate["resource"], "state_store");
+    assert_eq!(migrate["user_id"], "punard");
+    assert_eq!(migrate["source"], "service");
+    assert_eq!(migrate["result"], "success");
+
+    // The migrated preference governs: explain cites rank 5, and the boot
+    // reconcile already applied it (initial state "off" == preference).
+    let resp = td.call("policy.explain", Some(json!({ "path": "mock.widget" })));
+    assert_eq!(resp["result"]["effective_value"], "off");
+    assert_eq!(resp["result"]["source"]["kind"], "local_user_preference");
+    assert_eq!(td.mock.state(), json!("off"));
+}
+
 #[test]
 fn audit_tail_returns_newest_last_and_clamps() {
     let td = TestDaemon::start_as_root();
+    let baseline = td.audit_lines().len() as u64; // boot reconcile summary
     for state in ["a1", "a2", "a3"] {
         td.call(
             "capabilities.set",
@@ -339,9 +696,12 @@ fn audit_tail_returns_newest_last_and_clamps() {
     // n over the cap is clamped, not an error.
     let resp = td.call("audit.tail", Some(json!({ "n": 100000 })));
     assert!(resp.get("error").is_none());
-    // Default n.
+    // Default n covers the whole (small) trail.
     let resp = td.call("audit.tail", None);
-    assert_eq!(resp["result"]["events"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        resp["result"]["events"].as_array().unwrap().len() as u64,
+        baseline + 3
+    );
 }
 
 #[test]
@@ -356,6 +716,10 @@ fn set_is_idempotent_with_noop_audit() {
     let ev = td.audit_lines().pop().unwrap();
     assert_schema_shaped(&ev);
     assert_eq!(ev["result"], "noop");
+    // Even a noop set records the preference (rank 5 provenance from here
+    // on — the m4-check relies on this after m3-check's set).
+    let resp = td.call("policy.explain", Some(json!({ "path": "mock.widget" })));
+    assert_eq!(resp["result"]["source"]["kind"], "local_user_preference");
 }
 
 #[test]
@@ -473,6 +837,9 @@ fn unknown_params_are_rejected_strictly() {
 
     let resp = td.call("status", Some(json!({ "verbose": true })));
     assert_eq!(resp["error"]["code"], "invalid_params");
+
+    let resp = td.call("policy.effective", Some(json!({ "path": "mock.widget" })));
+    assert_eq!(resp["error"]["code"], "invalid_params");
 }
 
 #[test]
@@ -508,9 +875,7 @@ fn multiple_requests_on_one_connection_are_sequential() {
 
 #[test]
 fn device_id_is_stable_across_restarts() {
-    let seq = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("punard-devid-{}-{seq}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = test_dir("devid");
     let make = || {
         let mock = MockCapability::new("mock.widget", json!("off"));
         let cfg = DaemonConfig {

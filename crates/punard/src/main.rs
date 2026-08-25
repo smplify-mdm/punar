@@ -42,7 +42,8 @@ struct RunArgs {
     #[arg(long, default_value = punar_common::ipc::SOCKET_PATH)]
     socket: PathBuf,
 
-    /// State directory holding desired.json and device-id.
+    /// State directory holding device-id, the layer stores
+    /// (preferences.json, os-defaults.json), and policy.d.
     #[arg(long, default_value = "/var/lib/punar")]
     state_dir: PathBuf,
 

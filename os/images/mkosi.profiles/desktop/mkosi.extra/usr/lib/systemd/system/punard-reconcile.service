@@ -1,0 +1,21 @@
+# Punar scheduled reconcile (milestone-4.md §6): one full section-42 pass
+# (observe → … → apply → verify → audit → compliance), driven by
+# punard-reconcile.timer. Deliberately a plain root `punarctl` through the
+# normal socket — the timer REUSES the audited request surface instead of an
+# internal daemon thread (which would be an always-on wakeup source, invisible
+# to systemctl list-timers, and an unaudited trigger path). Honest limit
+# (ipc.md section 6): the daemon sees only peer credentials, so these runs
+# audit as user_id "root", source "human" — indistinguishable from an admin.
+#
+# No User= — reconcile is root-only (ipc.md 5.6). Not [Install]-enabled
+# itself; the .timer carries the vendor-wants symlink.
+
+[Unit]
+Description=Punar scheduled reconcile (drift remediation)
+After=punard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/punarctl --json reconcile
+StandardOutput=journal
+StandardError=journal

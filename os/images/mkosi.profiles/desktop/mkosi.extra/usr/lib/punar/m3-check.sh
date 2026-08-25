@@ -25,9 +25,12 @@
 #   6  denial (section-73 test): punar-user set -> exit 3, stderr carries
 #      "administrator" + "personal defaults", hostname unchanged, audit
 #      deny/denied/policy_ids [personal-defaults]
-#   7  drift: destroy table -> reconcile reports drift_count 1 (NO
-#      remediation in M3), set security.firewall enabled restores the table,
-#      second reconcile is clean
+#   7  drift (AMENDED under M4 — milestone-4.md §10.4): destroy table ->
+#      reconcile reports drift_count 1 (pre-remediation observation, the M3
+#      field meaning kept) AND remediates it itself (remediation "applied",
+#      table restored by the reconcile); the follow-up explicit set is kept
+#      as a now-noop (changed false) because it RECORDS the user-preference
+#      provenance m4-check asserts on; second reconcile is clean
 #   8  audit tail -n 20: every event has all 12 schema-required keys, evt_/
 #      agt_ prefixes, decision enum, RFC 3339 timestamp
 #   9  socket authz negative: nobody cannot even connect (0660 root:punar)
@@ -65,6 +68,13 @@ jq_check() {
         FAILED=1
     fi
 }
+
+# M4 timer determinism (milestone-4.md §10.1/§10.4): stop the drift-trigger
+# timer for the whole exercise so the step-7 reconcile below is the ONLY
+# actor on the firewall state. m4-check (which runs right after us) keeps it
+# stopped through its phase A and restarts it for the drift demo. Never
+# fatal: on a pre-M4 image the unit simply does not exist.
+systemctl stop punard-reconcile.timer >/dev/null 2>&1
 
 # --- 1. daemon up from boot --------------------------------------------------
 check_eq "punard.service active (vendor wants enablement)" active \
@@ -147,7 +157,10 @@ jq_check "audit event for denial (deny/denied/punar/personal-defaults)" \
     '.events | last | (.decision == "deny" and .result == "denied"
      and .user_id == "punar" and .policy_ids == ["personal-defaults"])'
 
-# --- 7. drift report (no remediation) + real firewall apply ------------------
+# --- 7. drift detection + remediation (M4 semantics — milestone-4.md §10.4) --
+# M3's reconcile reported only; since M4 the same call remediates per policy
+# (the semantic change M3 pre-announced by making reconcile root-only). The
+# timer is stopped (script top), so this reconcile is the only actor.
 nft destroy table inet punar-base >/dev/null 2>&1
 if "${CTL}" --json reconcile > "${RUN_DIR}/m3-reconcile-drift.json" 2>&1; then
     note "ok   reconcile exit 0 with table destroyed (root)"
@@ -155,28 +168,32 @@ else
     note "FAIL reconcile exit $? with table destroyed"
     FAILED=1
 fi
-jq_check "reconcile reports exactly the firewall drift" \
+jq_check "reconcile reports exactly the firewall drift (pre-remediation observation)" \
     "${RUN_DIR}/m3-reconcile-drift.json" \
     '.drift_count == 1 and ([.capabilities[] | select(.capability == "security.firewall"
         and .current_state == "disabled" and .drift == true)] | length == 1)'
+jq_check "reconcile remediated the drift itself (remediation applied, M4 chain)" \
+    "${RUN_DIR}/m3-reconcile-drift.json" \
+    '[.capabilities[] | select(.capability == "security.firewall"
+        and .remediation == "applied")] | length == 1'
 if nft -j list table inet punar-base >/dev/null 2>&1; then
-    note "FAIL reconcile remediated the table (M3 must report only; remediation is M4)"
-    FAILED=1
+    note "ok   nft table restored by the reconcile itself (apply+verify inside the chain)"
 else
-    note "ok   reconcile did not remediate (table still absent — report-only confirmed)"
+    note "FAIL nft table absent after reconcile (M4 must remediate auto_remediate drift)"
+    FAILED=1
 fi
-if "${CTL}" capabilities set security.firewall enabled >/dev/null 2>&1; then
+# Kept as a now-noop: the table is already back, so changed must be false —
+# but the set still RECORDS the user-preference layer entry that m4-check's
+# provenance assertions (local_user_preference, rank 5) depend on.
+if "${CTL}" --json capabilities set security.firewall enabled \
+        > "${RUN_DIR}/m3-set-firewall.json" 2>&1; then
     note "ok   capabilities set security.firewall enabled exit 0 (root)"
 else
-    note "FAIL capabilities set security.firewall enabled exit $?"
+    note "FAIL capabilities set security.firewall enabled exit $?: $(head -c 240 "${RUN_DIR}/m3-set-firewall.json")"
     FAILED=1
 fi
-if nft -j list table inet punar-base >/dev/null 2>&1; then
-    note "ok   nft table restored by the capability apply (real apply+verify)"
-else
-    note "FAIL nft table absent after set security.firewall enabled"
-    FAILED=1
-fi
+jq_check "noop set reports changed false (reconcile already restored the state)" \
+    "${RUN_DIR}/m3-set-firewall.json" '.changed == false'
 "${CTL}" --json reconcile > "${RUN_DIR}/m3-reconcile-clean.json" 2>/dev/null
 jq_check "second reconcile is clean (drift_count 0)" \
     "${RUN_DIR}/m3-reconcile-clean.json" '.drift_count == 0'

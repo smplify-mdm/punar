@@ -15,7 +15,12 @@ pipeline now produces two images from one config tree
   `punard`/`punarctl` compiled hermetically inside the builder container
   from the pinned snapshot's own Rust toolchain, plus nftables, the
   punar-base firewall ruleset, and the `punar-m3-check` in-VM exercise
-  ([milestone-3.md](milestone-3.md) §7–§9).
+  ([milestone-3.md](milestone-3.md) §7–§9). Milestone 4 adds the
+  `punard-reconcile.timer`/`.service` drift trigger (vendor-enabled via a
+  `multi-user.target.wants` symlink, 2-minute cadence), the reserved
+  `/var/lib/punar/policy.d` tmpfiles entry (empty in the image —
+  unmanaged-first), and the `punar-m4-check` in-VM exercise
+  ([milestone-4.md](milestone-4.md) §10–§11).
 
 Substrate per [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md):
 minimal Arch package payload, vendor-pinned snapshot channels, mkosi-built
@@ -189,6 +194,19 @@ Full decisions in [milestone-3.md](milestone-3.md) §7–§9 and
   shape, `nobody` connect rejection, `system.exec`/`shell.run` →
   `unknown_method`. Verdict `PUNAR_M3_OK`/`PUNAR_M3_FAIL` in
   `/run/punar/m3-report.txt`, gated host-side by `boot-test.sh`.
+  Amended under M4 (milestone-4.md §10.4): its reconcile step now expects
+  remediation, and it stops `punard-reconcile.timer` at its top for
+  determinism.
+- **M4 in-VM exercise:** `punar-m4-check.service` (root oneshot, not
+  enabled) runs `/usr/lib/punar/m4-check.sh`, started synchronously by
+  `idle-ram.sh` after the M3 exercise and before the export: timer
+  enablement, layer stores, `policy effective`/`explain` over both personal
+  source kinds, preference-layer set cycle, section 52 compliance in
+  `status`, the timer-driven firewall-drift demo (`nft destroy` → table
+  restored within 375 s + `reconcile.remediate` audit event), loop
+  protection untriggered, unknown-path voice, no write-side policy method.
+  Verdict `PUNAR_M4_OK`/`PUNAR_M4_FAIL` in `/run/punar/m4-report.txt`,
+  gated host-side by `boot-test.sh` (milestone-4.md §10).
 - **Services-RSS budget:** `idle-ram.sh` emits `PUNAR_SERVICES_RSS_MB`
   (summed PSS of the `punard.service` cgroup, PERFORMANCE_BUDGETS.md §2.3)
   right after the idle sampling window; `boot-test.sh` records it in

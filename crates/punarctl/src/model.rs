@@ -26,12 +26,35 @@ pub struct Status {
     pub last_reconcile: Option<String>,
     #[serde(default)]
     pub audit: Option<AuditFile>,
+    /// M4 addition (contract section 5.1) — optional so an M3-shaped
+    /// result still renders (contract 3.3 tolerance).
+    #[serde(default)]
+    pub compliance: Option<Compliance>,
 }
 
 #[derive(Deserialize)]
 pub struct AuditFile {
     pub path: String,
     pub events: u64,
+}
+
+/// The `status.compliance` block (contract section 5.1, M4): SPEC
+/// section 52 states in personal scope — the device measured against its
+/// own effective document.
+#[derive(Deserialize)]
+pub struct Compliance {
+    pub overall: String,
+    pub capabilities: Vec<ComplianceCapability>,
+    #[serde(default)]
+    pub drift_remediated_total: u64,
+    #[serde(default)]
+    pub last_remediation_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ComplianceCapability {
+    pub capability: String,
+    pub state: String,
 }
 
 /// `capabilities.list` result (contract section 5.2).
@@ -103,13 +126,17 @@ pub struct AuditEventView {
     pub result: String,
 }
 
-/// `reconcile` result (contract section 5.6).
+/// `reconcile` result (contract section 5.6). The M4 fields are optional
+/// so an M3-shaped result (report-only, no remediation) still renders —
+/// `remediated_count` present is the marker that the daemon remediates.
 #[derive(Deserialize)]
 pub struct Reconcile {
     #[serde(default)]
     pub reconciled_at: Option<String>,
     pub drift_count: u64,
     pub capabilities: Vec<ReconcileEntry>,
+    #[serde(default)]
+    pub remediated_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -120,10 +147,63 @@ pub struct ReconcileEntry {
     pub drift: bool,
     #[serde(default = "default_true")]
     pub verified: bool,
+    /// M4 (contract section 5.6): SPEC section 43 classification —
+    /// `auto_remediate | alert_only | approval_required`.
+    #[serde(default)]
+    pub classification: Option<String>,
+    /// M4 (contract section 5.6): `applied | none | apply_failed |
+    /// verify_failed | alert_only | suppressed`.
+    #[serde(default)]
+    pub remediation: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// `policy.effective` result (contract section 5.7, M4).
+#[derive(Deserialize)]
+pub struct PolicyEffective {
+    #[serde(default)]
+    pub computed_at: Option<String>,
+    pub entries: Vec<PolicyEntry>,
+}
+
+/// One effective-document entry: a path plus the section 40 information
+/// set (`policy.explain` returns the same body without the path).
+#[derive(Deserialize)]
+pub struct PolicyEntry {
+    pub path: String,
+    #[serde(flatten)]
+    pub explain: PolicyExplain,
+}
+
+/// `policy.explain` result (contract section 5.8, M4) — exactly the SPEC
+/// section 40 information set.
+#[derive(Deserialize)]
+pub struct PolicyExplain {
+    pub effective_value: Value,
+    pub source: PolicySource,
+    pub user_override_permitted: bool,
+    pub compliance_state: String,
+}
+
+/// The winning source: `kind`/`rank` are the `policy_source_kind` enum
+/// and precedence ranks of `schemas/policy/policy-source.json` (lower
+/// wins); `name` is the human spelling ("Personal preference" /
+/// "OS default" in personal mode).
+#[derive(Deserialize)]
+pub struct PolicySource {
+    /// Machine layer of the wire contract: the human views render `name`
+    /// and `policy_id` (spec 40 shows names, not enum values); `kind` and
+    /// `rank` are parsed so the client pins the contract shape (tests
+    /// assert them) and stay available to future renderers.
+    #[allow(dead_code)]
+    pub kind: String,
+    #[allow(dead_code)]
+    pub rank: u64,
+    pub policy_id: String,
+    pub name: String,
 }
 
 /// Display spelling of a capability state value: strings render bare
@@ -156,6 +236,79 @@ mod tests {
         assert_eq!(status.capabilities_total, 3);
         assert!(status.started_at.is_none());
         assert!(status.audit.is_none());
+        // An M3-shaped status (no compliance block) must still parse —
+        // contract section 3.3 tolerance.
+        assert!(status.compliance.is_none());
+    }
+
+    #[test]
+    fn status_parses_the_m4_compliance_block() {
+        let status: Status = serde_json::from_value(json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "personal",
+            "enrolled": false,
+            "hostname": "punar-m4",
+            "capabilities_total": 3,
+            "compliance": {
+                "overall": "compliant",
+                "capabilities": [
+                    {"capability": "security.firewall", "state": "compliant"},
+                    {"capability": "time.timezone", "state": "remediating"}
+                ],
+                "drift_remediated_total": 2,
+                "last_remediation_at": "2026-08-25T09:14:02Z"
+            }
+        }))
+        .unwrap();
+        let compliance = status.compliance.unwrap();
+        assert_eq!(compliance.overall, "compliant");
+        assert_eq!(compliance.capabilities.len(), 2);
+        assert_eq!(compliance.capabilities[1].state, "remediating");
+        assert_eq!(compliance.drift_remediated_total, 2);
+        assert_eq!(
+            compliance.last_remediation_at.as_deref(),
+            Some("2026-08-25T09:14:02Z")
+        );
+    }
+
+    #[test]
+    fn policy_effective_parses_the_contract_example_entry() {
+        let doc: PolicyEffective = serde_json::from_value(json!({
+            "computed_at": "2026-08-25T09:14:02Z",
+            "entries": [
+                {"path": "time.timezone", "effective_value": "UTC",
+                 "source": {"kind": "os_secure_default", "rank": 6,
+                            "policy_id": "personal-defaults",
+                            "name": "OS default"},
+                 "user_override_permitted": true,
+                 "compliance_state": "compliant"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(doc.entries.len(), 1);
+        let entry = &doc.entries[0];
+        assert_eq!(entry.path, "time.timezone");
+        assert_eq!(entry.explain.source.kind, "os_secure_default");
+        assert_eq!(entry.explain.source.rank, 6);
+        assert!(entry.explain.user_override_permitted);
+    }
+
+    #[test]
+    fn policy_explain_is_an_entry_without_the_path() {
+        let explain: PolicyExplain = serde_json::from_value(json!({
+            "effective_value": "enabled",
+            "source": {"kind": "local_user_preference", "rank": 5,
+                       "policy_id": "personal-defaults",
+                       "name": "Personal preference"},
+            "user_override_permitted": true,
+            "compliance_state": "compliant"
+        }))
+        .unwrap();
+        assert_eq!(state_str(&explain.effective_value), "enabled");
+        assert_eq!(explain.source.name, "Personal preference");
+        assert_eq!(explain.compliance_state, "compliant");
     }
 
     #[test]
@@ -191,6 +344,30 @@ mod tests {
         }))
         .unwrap();
         assert!(entry.verified);
+        // M3-shaped entry: no M4 remediation fields.
+        assert!(entry.classification.is_none());
+        assert!(entry.remediation.is_none());
+    }
+
+    #[test]
+    fn reconcile_parses_the_m4_remediation_fields() {
+        let report: Reconcile = serde_json::from_value(json!({
+            "reconciled_at": "2026-08-25T09:14:02Z",
+            "drift_count": 1,
+            "remediated_count": 1,
+            "compliance": {"overall": "compliant", "capabilities": [],
+                           "drift_remediated_total": 1},
+            "capabilities": [
+                {"capability": "security.firewall", "desired_state": "enabled",
+                 "current_state": "disabled", "drift": true, "verified": true,
+                 "classification": "auto_remediate", "remediation": "applied"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(report.remediated_count, Some(1));
+        let entry = &report.capabilities[0];
+        assert_eq!(entry.classification.as_deref(), Some("auto_remediate"));
+        assert_eq!(entry.remediation.as_deref(), Some("applied"));
     }
 
     #[test]
