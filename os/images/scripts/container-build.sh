@@ -79,7 +79,19 @@ stage_desktop_extra() {
 run_mkosi() {
     local image_id="$1"; shift
     echo "==> mkosi ${MODE} for ${image_id} (mirror: ${MIRROR})"
-    mkosi --force --mirror "${MIRROR}" "$@" "${MODE}"
+    # archive.archlinux.org rate-limits large pulls and pacman aborts on a
+    # 10s low-speed window; downloads resume from CacheDirectory across
+    # attempts, so a short retry loop makes throttling non-fatal.
+    local attempt
+    for attempt in 1 2 3; do
+        if mkosi --force --mirror "${MIRROR}" "$@" "${MODE}"; then
+            return 0
+        fi
+        echo "==> mkosi attempt ${attempt}/3 failed for ${image_id}" >&2
+        [ "${attempt}" -lt 3 ] && sleep 25
+    done
+    echo "==> mkosi failed after 3 attempts for ${image_id}" >&2
+    return 1
 }
 
 # convert_output <image-id>: raw -> compressed qcow2, delete the raw.

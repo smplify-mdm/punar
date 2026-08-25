@@ -109,6 +109,15 @@ jobs:
       # Pinned shellcheck container — same tool and version as local dev
       # (ubuntu's apt shellcheck 0.9.x drifts: SC2317 false-positives on
       # trap-invoked cleanup). Local/CI parity over distro convenience.
+      # Package cache for the pinned snapshot — one good run fills it, after
+      # which builds pull ~nothing from archive.archlinux.org (which throttles
+      # large pulls). Keyed on the snapshot pin: new pin = new cache.
+      - name: Cache mkosi package downloads
+        uses: actions/cache@v4
+        with:
+          path: os/images/cache
+          key: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
