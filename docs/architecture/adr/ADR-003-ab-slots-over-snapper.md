@@ -1,6 +1,6 @@
 # ADR-003 — A/B root slots as the rollback mechanism, not btrfs+snapper
 
-- Status: **Proposed** — awaiting ratification by Smplify
+- Status: **Accepted** — ratified by Smplify (Spurti Preetham Gurram), 2026-08-25
 - Date: 2026-08-25
 - Supersedes: the *MVP rollback mechanism* chosen in
   [ADR-001](ADR-001-distribution-substrate.md) (the substrate decision itself

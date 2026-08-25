@@ -64,7 +64,11 @@ enterprise rings) are per-ring snapshot promotions. Rollback for MVP is
 btrfs + snapper with bootable snapshots (openSUSE-style layout, deliberately
 engineered around the documented sharp edges); the A/B image path (SteamOS via
 RAUC/casync, arkdep via btrfs subvolume deployments) is the charted production
-upgrade. Secure Boot via sbctl-managed keys and signed UKIs (mkosi v26
+upgrade. **SUPERSEDED 2026-08-25 by [ADR-003](ADR-003-ab-slots-over-snapper.md)
+(Accepted): the A/B path is pulled forward into the MVP and snapper is demoted
+to a data-side convenience, because snapper cannot restore the ESP, cannot be
+reached when userspace does not come up, and offers no boot-menu snapshot
+selection under systemd-boot. The substrate decision below is unaffected.** Secure Boot via sbctl-managed keys and signed UKIs (mkosi v26
 `uki-signed` variants), vendor key enrollment owned by the installer.
 
 - For: smallest base footprint of the three (~150 MiB container base, ~2 GiB
