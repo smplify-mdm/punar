@@ -1,0 +1,30 @@
+# M6 in-VM developer-environment exercise (milestone-6.md §10). Runs
+# m6-check.sh as ROOT — same decided pattern as punar-m3/m4/m5-check.service
+# (no User=, no sudo); every punar-env and podman invocation inside the
+# script runs as punar via runuser with the session env (punar-env refuses
+# uid 0 by design — the environments are rootless).
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m5-check.service and BEFORE the /run/punar artifact export, so
+# m6-report.txt / m6-status.txt / m6-status.json / m6-podman-info.json /
+# m6-podman-ps.txt / m6-*.txt snapshots ship in the existing export tar.
+# Same not-enabled pattern as punar-m2/m3/m4/m5-check — no .wants symlink,
+# so the mkosi preset-wipe lesson does not even come into play.
+#
+# Containers exist only inside this window, which opens strictly after the
+# idle-RAM sampling closed — the punard-only RSS gate is structurally
+# untouched (milestone-6.md §9).
+
+[Unit]
+Description=Punar M6 developer-environment exercise (CI)
+
+[Service]
+Type=oneshot
+# The exercise itself is quick (podman load of a ~1.3 MB archive, one
+# container create, a handful of execs — seconds under KVM); 10 min is
+# generous headroom for TCG-emulated CI runs (milestone-6.md §9).
+TimeoutStartSec=10min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m6-check.sh

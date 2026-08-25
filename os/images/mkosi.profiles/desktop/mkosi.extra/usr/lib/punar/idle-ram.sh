@@ -114,6 +114,19 @@ systemctl start punar-m4-check.service \
 systemctl start punar-m5-check.service \
     || echo "punar: idle-ram: punar-m5-check.service failed to start" >&2
 
+# M6 exercise ordering hook (milestone-6.md §8/§10): start punar-m6-check
+# SYNCHRONOUSLY strictly AFTER the M5 exercise (which restored the
+# personal pre-state and the shipped reconcile timer) and strictly BEFORE
+# the export below, so m6-report.txt / m6-status.txt / m6-status.json /
+# m6-podman-info.json / m6-podman-ps.txt / m6-*.txt snapshots ship in the
+# same tar. The rootless podman containers it creates live only inside
+# this window — structurally outside the idle-RAM sampling (far above)
+# and the punard.service-cgroup RSS sample (punar-env is a user CLI, not
+# a service). Never fatal here: the verdict lives in m6-report.txt and
+# the host gate (tools/boot-test.sh) parses it.
+systemctl start punar-m6-check.service \
+    || echo "punar: idle-ram: punar-m6-check.service failed to start" >&2
+
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the
 # channel to a host file; CI decodes between the sentinels. Fallback if this

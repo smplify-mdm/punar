@@ -17,3 +17,7 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/shell/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/theme/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/
+# M6: the punar-env-base OCI archive + digest note, assembled from the pinned
+# snapshot's busybox by scripts/container-build.sh (stage_env_base_oci) on
+# every build — never commit (milestone-6.md §6.2).
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci/

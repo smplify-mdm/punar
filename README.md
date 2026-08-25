@@ -2,34 +2,29 @@
 
 > **Status: pre-alpha. Milestone 0 (Foundation evaluation) is done; Milestone 1
 > (Lightweight graphical workstation) has a green CI gate with one acceptance
-> item left; Milestone 2 (Native multitasking) is done — CI-proven; Milestone 3
-> (`punard` + `punarctl`) is done — CI-proven; Milestone 4 (Declarative
-> desired state) is implemented but its CI gate is red; Milestone 5 (Mock
-> Smplify enrollment) is implemented on disk, awaiting its first CI
-> run.** The last fully green CI run is
-> [32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305):
-> the `punar-desktop` image (Hyprland + punar-shell) builds, boots, and
-> passes the graphical gate plus the in-VM M2 multitasking and M3
-> control-plane exercises (`PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` +
-> `PUNAR_M3_OK`; idle RAM 1160 MB mean — under the 1.5 GB hard ceiling,
-> over the 1.0 GB target; `punard` services RSS 2 MB against a 100 MB
-> target). M1's keyboard-only human walkthrough is still pending. M4 — the
-> layered desired-state store, spec section 39 preference/policy merge,
-> remediating reconciliation, and `punarctl policy effective` / `policy
-> explain` — is committed; its first CI run
-> ([32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881))
-> failed on exactly one check-wiring assertion (timer enablement semantics)
-> while every other in-VM assertion, including the timer-driven
-> firewall-drift remediation demo, passed; the fix is pushed but its run
-> failed earlier on in-progress M5 code bundled into the same commit, so M4
-> still has no green run. M5 — an in-VM mock control plane, live
-> enroll/unenroll with the shell's org chrome flipping on real enrollment
-> state, spec-40 managed explain, category-level-only compliance and
-> inventory sync, offline survival — is implemented: the full tree,
-> including the in-VM m5-check exercise and its CI wiring, is on disk and
-> statically validated locally, but it is not yet pushed and nothing M5
-> has ever run in CI (the one run containing M5 code carried a
-> non-compiling mid-integration snapshot). See
+> item left; Milestones 2–5 (Native multitasking; `punard` + `punarctl`;
+> Declarative desired state; Mock Smplify enrollment) are done — CI-proven;
+> Milestone 6 (Developer environment manager) is implemented on disk,
+> uncommitted, awaiting its first CI run.** The last fully green CI run is
+> [32849448721](https://github.com/smplify-mdm/punar/actions/runs/32849448721)
+> (2026-08-25): the `punar-desktop` image (Hyprland + punar-shell) builds,
+> boots, and passes the graphical gate plus the in-VM M2 multitasking, M3
+> control-plane, M4 policy-merge/drift-remediation, and M5 mock-enrollment
+> exercises (`PUNAR_DESKTOP_OK` + `PUNAR_M2_OK` + `PUNAR_M3_OK` +
+> `PUNAR_M4_OK` + `PUNAR_M5_OK`; idle RAM 1156 MB mean — under the 1.5 GB
+> hard ceiling, over the 1.0 GB target; `punard` services RSS 2 MB against
+> a 100 MB target). M1's keyboard-only human walkthrough is still pending.
+> M6 — `punar-env`, the spec section 17 developer-environment CLI that
+> turns a project's `ProjectEnvironment` manifest (the Atlas fixture,
+> spec-verbatim) into a rootless Podman container with the project
+> bind-mounted at `/workspace`, offline-capable via a deterministic
+> in-image base image — is implemented: the full tree, including the in-VM
+> m6-check exercise and its CI wiring, is on disk and statically validated
+> locally, but it is uncommitted and nothing M6 has ever run in CI. The
+> manifest blocks M6 only *declares* — toolchain provisioning, service
+> containers, network zones, credential grants, AI agents — are parsed and
+> displayed with their enforcement milestones (M7/M9/M12), never claimed
+> as enforced. See
 > [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for what exists
 > versus what is proven.
 

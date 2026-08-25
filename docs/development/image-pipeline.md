@@ -1,4 +1,4 @@
-# Image pipeline (Milestones 0–5)
+# Image pipeline (Milestones 0–6)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now produces two images from one config tree
@@ -268,6 +268,70 @@ as built:
   `m5-received-*.jsonl` (never `devices.json`, which holds the
   server-side token record).
 
+## The M6 punar-env base image (Milestone 6)
+
+Full decisions in [milestone-6.md](milestone-6.md) §6. `punar-env up`
+(the M6 project-environment CLI) needs an OCI image to run, but the CI VM
+has no network (`-nic none`), so the image is built **during the OS image
+build** — where the pinned snapshot is reachable — and staged into the
+desktop image for `podman load -i` at first use. The build step is
+`stage_env_base_oci()` in `scripts/container-build.sh`, build mode only
+(summary mode skips it, exactly like the binary compile):
+
+- **One provenance.** The only input is the pinned ALA snapshot's
+  `busybox` package (`busybox-1.36.1-4-x86_64.pkg.tar.zst`, `extra` repo)
+  — filename + sha256 are recorded in the stage function and verified
+  against the snapshot's PGP-signed `extra.db` (recorded 2026-08-25); the
+  sha256 is re-checked on every build, cache hit or fresh download. The
+  download rides `os/images/cache` (the same CI cache entry as the pacman
+  and cargo caches). Rejected alternatives (skopeo from docker.io, alpine,
+  a pacman-bootstrapped chroot, nested `podman save`) are in
+  milestone-6.md §6.3 — each adds a second provenance, tens–hundreds of
+  MB, or nested container tooling under the arm64 emulation path.
+- **Minimal rootfs.** `/bin/busybox` (statically linked musl — asserted
+  at build time with `ldd`, which must report “not a dynamic executable”;
+  the documented contingency if a future snapshot changes this is adding
+  the snapshot glibc, milestone-6.md §6.2) plus symlinks for the applets
+  the M6 contract needs (`sh`, `sleep`, `cat`, `echo`, `ls`, `touch`,
+  `env`, `id`, `uname`), `/workspace` and `/tmp` mountpoints, and
+  `/etc/punar-env-base-release` (“`punar-env-base m6 <snapshot-date>`”)
+  — the marker m6-check reads back from *inside* the running container,
+  proving the staged archive is what ran.
+- **Hand-assembled, deterministic OCI archive.** No docker/podman nesting
+  in the builder: an **uncompressed** layer tar (gzip is avoided entirely
+  — it embeds timestamps) built with `--format=posix --sort=name
+  --numeric-owner --owner=0 --group=0 --mtime=@<snapshot-epoch>` and
+  pinned pax headers (GNU tar's default extended-header name embeds the
+  PID), sha256-addressed blobs, config/manifest/`index.json`/`oci-layout`
+  emitted via `printf` with fixed key order, config `created` clamped to
+  the snapshot date, and the ref annotation
+  `org.opencontainers.image.ref.name=localhost/punar-env-base:m6` that
+  `podman load` tags from. The result is **byte-identical across rebuilds
+  of the same snapshot pin** (verified: two rebuilds, identical sha256);
+  the build logs the archive sha256 for exactly that comparison.
+- **Staged + digest note.** `usr/share/punar/oci/punar-env-base.tar`
+  (mode **0644** — the rootless `punar` user must read it) in the desktop
+  extra tree, gitignored like the shell QML and fixtures, alongside
+  `punar-env-base.note.txt` recording ref, archive sha256/size, OCI
+  manifest/config/layer digests, and the input package pin — itself
+  deterministic (no build timestamp by design), and comparable against
+  `podman images --digests` in the VM.
+- **Size, bounded.** The archive is ~1.3 MB (measured 1,320,960 bytes for
+  snapshot 2026/08/20); the build **fails** if it exceeds 16 MiB — a
+  tripwire far below the ~80 MB milestone allowance, so accidental fat (a
+  glibc contingency, a stray layer) is caught at build time
+  (milestone-6.md §6.4).
+
+Verified at implementation (2026-08-25, inside the builder container):
+two rebuilds byte-identical; the snapshot's own podman 6.1.0 loads the
+archive (`Loaded image: localhost/punar-env-base:m6`) with the loaded
+manifest digest matching the staged note; the extracted rootfs executes
+under chroot (release marker readable, applets present, `/workspace`
+writable, `sh -c 'exit 42'` passes 42 through). `podman run` itself could
+not be exercised under the arm64-Mac emulation path (crun's memfd
+re-exec fails under Rosetta — a host-environment limit, per spec 1.22);
+the in-VM m6-check is the authoritative `podman run` proof.
+
 ## The boot smoke test
 
 `tools/boot-test.sh [image.qcow2]` (spec 74.3 "boot"):
@@ -359,7 +423,10 @@ What to expect, honestly:
 
 Edit `os/images/snapshot.env` (both the date and, when deliberately moving
 the builder base, the digest), and update `SourceDateEpoch` in
-`os/images/mkosi.conf` to the new snapshot date. One review-visible commit =
+`os/images/mkosi.conf` to the new snapshot date. Since M6, also re-verify
+the `busybox` filename + sha256 pin in `stage_env_base_oci()`
+(`os/images/scripts/container-build.sh`) against the new snapshot's
+`extra.db` — the punar-env-base archive is built from it. One review-visible commit =
 one channel move. This is the manual precursor of ADR-001's promoted channel
 snapshots.
 

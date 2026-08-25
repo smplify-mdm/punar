@@ -1,0 +1,37 @@
+# Punar project environment manifest (docs/product/SPEC_v0.2.md section 17).
+# Scaffolded by `punar-env init` — edit the values to describe your project.
+# Schema: schemas/project/project-environment.json (apiVersion punar.dev/v1alpha1).
+apiVersion: punar.dev/v1alpha1
+kind: ProjectEnvironment
+
+project:
+  name: my-project
+
+environment:
+  type: devcontainer
+
+toolchains:
+  node: "24"
+  rust: stable
+
+services:
+  - postgres
+
+ai:
+  agents:
+    - claude-code
+    - codex
+
+permissions:
+  filesystem:
+    project: read_write
+
+  network:
+    internet: allow
+    corp_dev: allow
+    corp_prod: deny
+
+  credentials:
+    github: allow
+    aws_dev: request
+    aws_prod: deny

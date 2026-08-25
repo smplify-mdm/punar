@@ -1,10 +1,11 @@
-# Punar CI — Milestones 0–5 (spec 76: M0 "reproducible build and VM boot",
+# Punar CI — Milestones 0–6 (spec 76: M0 "reproducible build and VM boot",
 # M1 "idle RAM measured" graphical acceptance, M2 multitasking exercise,
 # M3 daemon/typed-IPC/capability/audit exercise, M4 policy-merge/explain/
 # drift-remediation exercise, M5 mock-control-plane enrollment/policy/
-# compliance/inventory exercise; ADR-001, milestone-1.md §10,
-# milestone-2.md §7, milestone-3.md §8–§9, milestone-4.md §10,
-# milestone-5.md §10).
+# compliance/inventory exercise, M6 punar-env developer-environment
+# exercise; ADR-001, milestone-1.md §10, milestone-2.md §7,
+# milestone-3.md §8–§9, milestone-4.md §10, milestone-5.md §10,
+# milestone-6.md §10).
 #
 # Jobs:
 #   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
@@ -16,7 +17,7 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   desktop-test  M1+M2+M3 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#   desktop-test  M1–M6 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
 #                 in-guest canonical idle-RAM measurement + services-RSS
 #                 sample (punard.service cgroup, summed PSS), then the
 #                 in-guest M2 multitasking exercise (milestone-2.md §7 —
@@ -35,8 +36,15 @@
 #                 enroll -> managed -> offline -> unenroll journey with
 #                 category-only compliance/inventory asserted on the mock's
 #                 received side, captures the enrolled/personal bar
-#                 screenshots; verdict in m5-report.txt;
-#                 all four hard-gated in boot-test.sh), artifact export
+#                 screenshots; verdict in m5-report.txt) and the in-guest
+#                 M6 developer-environment exercise (milestone-6.md §10 —
+#                 punar-m6-check.service: punar-env as the punar user
+#                 against rootless podman — preloaded offline base image,
+#                 init idempotence, up with --network none + the
+#                 /workspace bind, shell exit-code passthrough, D-014
+#                 status with declared/enforcement labels verbatim, agent
+#                 stub honesty, destroy; verdict in m6-report.txt;
+#                 all five hard-gated in boot-test.sh), artifact export
 #                 (tools/boot-test.sh --mode desktop), then the
 #                 PERFORMANCE_BUDGETS.md gates
 #                 (tests/performance/check-budgets.sh: whole-system fail
@@ -163,7 +171,8 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m4-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m5-check.sh
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m5-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m6-check.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -233,23 +242,27 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-  # M1+M2+M3+M4+M5 graphical acceptance gate (milestone-1.md §7–§10,
+  # M1+M2+M3+M4+M5+M6 graphical acceptance gate (milestone-1.md §7–§10,
   # milestone-2.md §7, milestone-3.md §8, milestone-4.md §10,
-  # milestone-5.md §10). Boots the desktop image with -m 8192 -smp 4
+  # milestone-5.md §10, milestone-6.md §10). Boots the desktop image with
+  # -m 8192 -smp 4
   # -device virtio-vga + the punar.export virtio-serial channel, waits for
   # PUNAR_DESKTOP_OK, then for the in-guest canonical idle-RAM measurement
   # (10 min stabilize + 5 min window — PERFORMANCE_BUDGETS.md §2.1–2.2,
-  # ~16 min wall clock), then the guest runs the M2, M3, M4 and M5
+  # ~16 min wall clock), then the guest runs the M2, M3, M4, M5 and M6
   # exercises in order (each strictly AFTER sampling, so the idle numbers
   # stay clean; the M5 exercise starts/stops the never-enabled
-  # punar-mock-smplify dev/CI mock itself) and exports screenshots + RAM
+  # punar-mock-smplify dev/CI mock itself; the M6 exercise's rootless
+  # containers exist only inside its window) and exports screenshots + RAM
   # data + the reports; boot-test.sh hard-fails on any delivered
-  # PUNAR_M2/M3/M4/M5_FAIL verdict, and the RAM numbers gate against the
-  # budgets.
-  # ~80 min covers KVM boot + measurement + the four exercises (the M4
+  # PUNAR_M2/M3/M4/M5/M6_FAIL verdict, and the RAM numbers gate against
+  # the budgets.
+  # ~85 min covers KVM boot + measurement + the five exercises (the M4
   # drift demo waits on wall-clock timer firings, worst case 375 s; the M5
-  # exercise adds a few minutes of reconcile RPCs and bounded waits) +
-  # export; a TCG-degraded run (broken KVM) will exceed it — that failure
+  # exercise adds a few minutes of reconcile RPCs and bounded waits; the
+  # M6 exercise adds seconds under KVM — podman load of a ~1.3 MB archive,
+  # one container, a handful of execs) + export; a TCG-degraded run
+  # (broken KVM) will exceed it — that failure
   # mode is intentional surfacing; the RAM gate is warn-only under TCG, and
   # a MISSING report is warn (KVM) / info (TCG) — though a delivered FAIL
   # always fails.
@@ -258,13 +271,12 @@ jobs:
   # config baked into the image as the CI-checkable proxy (milestone-1.md §10,
   # keyboard-grammar.md walkthrough steps 16–23 for M2).
   desktop-test:
-    name: desktop-test (graphical gate + M2/M3/M4/M5 exercises + RAM budgets)
+    name: desktop-test (graphical gate + M2/M3/M4/M5/M6 exercises + RAM budgets)
     runs-on: ubuntu-24.04
-    # Raised from M4's 75: the in-guest M5 exercise (punar-m5-check.service,
-    # bounded at 15 min in-guest but a few minutes in practice — reconcile
-    # RPCs, two 10 s screenshot waits, two 15 s socket waits) runs between
-    # the M4 exercise and the export.
-    timeout-minutes: 80
+    # Raised from M5's 80: the in-guest M6 exercise (punar-m6-check.service,
+    # bounded at 10 min in-guest but seconds-to-minutes in practice) runs
+    # between the M5 exercise and the export.
+    timeout-minutes: 85
     needs: image
     steps:
       - uses: actions/checkout@v4
@@ -295,7 +307,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2/M3/M4/M5 exercises + export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2/M3/M4/M5/M6 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
@@ -323,7 +335,11 @@ jobs:
       # received-state copies (the category-only compliance/inventory
       # privacy evidence — milestone-5.md §6; never devices.json, which
       # holds the server-side token record).
-      - name: Upload RAM report, M2/M3/M4/M5 reports and measurement data
+      # m6-*.txt covers m6-report.txt, the D-014 status render and the
+      # podman-ps snapshot; m6-*.json are the status --json object and the
+      # podman info/inspect evidence (milestone-6.md §10 — no screenshots,
+      # this is a CLI milestone).
+      - name: Upload RAM report, M2/M3/M4/M5/M6 reports and measurement data
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -344,6 +360,9 @@ jobs:
             os/images/out/desktop-proof/m5-*.json
             os/images/out/desktop-proof/m5-*.jsonl
             os/images/out/desktop-proof/m5-*.txt
+            os/images/out/desktop-proof/m6-report.txt
+            os/images/out/desktop-proof/m6-*.json
+            os/images/out/desktop-proof/m6-*.txt
             os/images/out/desktop-proof/serial.log
           if-no-files-found: warn
           retention-days: 7

@@ -62,6 +62,15 @@
 #        recovery -> offline unenroll -> personal restore, plus the
 #        enrolled/personal bar screenshots — run after the M4 exercise,
 #        before the export).
+#     8. M6 verdict (milestone-6.md §10): same pattern for m6-report.txt
+#        (punar-m6-check.service — the punar-env developer-environment
+#        journey as the punar user against rootless podman: preloaded
+#        offline base image load, init idempotence + scaffold, up with
+#        --network none and the /workspace bind, shell exit-code
+#        passthrough, D-014 status render with the declared/enforcement
+#        labels verbatim, agent stub honesty, destroy — run after the M5
+#        exercise, before the export; no screenshots, m6-status.txt is
+#        the human evidence).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
@@ -78,6 +87,9 @@
 #     m5-report.txt, m5-*.json      M5 exercise verdict + enrollment/policy
 #                                   snapshots (+ m5-*.txt explains/stderr,
 #                                   m5-received-*.jsonl mock received-state)
+#     m6-report.txt, m6-*.txt       M6 exercise verdict + punar-env status
+#     m6-*.json                     render/JSON, podman info/inspect/ps
+#                                   snapshots (no screenshots — CLI milestone)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -85,7 +97,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2/M3/M4/M5_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -223,7 +235,9 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     # exercise (seconds), the M4 exercise — whose drift demo waits on
     # wall-clock timer firings, worst case 375 s even under KVM — and the
     # M5 enrollment exercise (reconcile RPCs plus two bounded 10 s
-    # screenshot waits, a few minutes) — all of which run before the guest
+    # screenshot waits, a few minutes) and the M6 punar-env exercise
+    # (podman load of a ~1.3 MB archive, one container create, a handful
+    # of execs — seconds under KVM) — all of which run before the guest
     # starts streaming the export.
     DEFAULT_EXPORT_TIMEOUT=1800
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
@@ -236,8 +250,9 @@ else
     # TCG: the in-guest M2 exercise before the export is the slow part
     # (window spawns, quickshell relaunch — bounded at 25 min in-guest),
     # plus the M3 exercise (bounded 10 min), the M4 drift demo (375 s
-    # wall clock — timer firings are wall-clock even under TCG) and the
-    # M5 enrollment exercise (bounded 15 min in-guest).
+    # wall clock — timer firings are wall-clock even under TCG), the
+    # M5 enrollment exercise (bounded 15 min in-guest) and the M6
+    # punar-env exercise (bounded 10 min in-guest, minutes in practice).
     DEFAULT_EXPORT_TIMEOUT=3600
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
@@ -394,6 +409,9 @@ run_desktop() {
           "${PROOF_DIR}"/m5-*.txt \
           "${PROOF_DIR}/punar-m5.png" \
           "${PROOF_DIR}/punar-m5-personal.png" \
+          "${PROOF_DIR}/m6-report.txt" \
+          "${PROOF_DIR}"/m6-*.json \
+          "${PROOF_DIR}"/m6-*.txt \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -513,10 +531,14 @@ run_desktop() {
             # managed explains, denial stderr) plus the mock control
             # plane's received-state copies (m5-received-*.jsonl — the
             # category-only compliance/inventory privacy evidence) for the
-            # phase-7 verdict.
+            # phase-7 verdict — and the M6 punar-env snapshots
+            # (m6-*.txt/.json: m6-report.txt, the D-014 status render +
+            # --json object, podman info/inspect/ps evidence) for the
+            # phase-8 verdict.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
                      "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
-                     "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt; do
+                     "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt \
+                     "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -689,6 +711,43 @@ run_desktop() {
         warn "desktop-test: no m5-report.txt in the export and no M5 verdict on serial — the M5 exercise did not run"
     else
         echo "==> M5 exercise: no report under TCG (informational only; emulated runs are not M5-gated)"
+    fi
+
+    # Phase 8: M6 exercise verdict (milestone-6.md §10) — same pattern as
+    # the M2–M5 gates. The guest wrote /run/punar/m6-report.txt
+    # (per-assertion ok/FAIL lines + a final PUNAR_M6_OK / PUNAR_M6_FAIL
+    # line) via punar-m6-check.service: rootless podman preflight, the
+    # Atlas fixture journey (init idempotence, up from the preloaded
+    # offline base with --network none and the /workspace bind, shell
+    # exit-code passthrough + host-side rootless write proof, the D-014
+    # status render with the fixture's declared values and enforcement
+    # labels verbatim, agent stub honesty, destroy with project files
+    # intact). Hard gate: a delivered FAIL — or a truncated report — fails
+    # this script. A MISSING report degrades: serial carries the echoed
+    # report as the fallback verdict; with no verdict anywhere it is a
+    # ::warning:: under KVM and info-only under TCG.
+    local m6_report="${PROOF_DIR}/m6-report.txt"
+    if [ -f "${m6_report}" ]; then
+        if grep -q 'PUNAR_M6_FAIL' "${m6_report}"; then
+            echo "error: M6 exercise reported PUNAR_M6_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m6_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M6_OK' "${m6_report}"; then
+            echo "==> M6 exercise: PUNAR_M6_OK ($(grep -c '^ok' "${m6_report}" || true) assertions passed)"
+        else
+            echo "error: m6-report.txt carries no PUNAR_M6_OK/PUNAR_M6_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m6_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M6_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M6 exercise reported PUNAR_M6_FAIL on the serial console (export did not deliver m6-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M6_OK' "${SERIAL_LOG}"; then
+        echo "==> M6 exercise: PUNAR_M6_OK (verdict from serial console; export did not deliver m6-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m6-report.txt in the export and no M6 verdict on serial — the M6 exercise did not run"
+    else
+        echo "==> M6 exercise: no report under TCG (informational only; emulated runs are not M6-gated)"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

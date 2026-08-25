@@ -8,6 +8,7 @@ resolver = "3"
 members = [
     "crates/punar-agentd",
     "crates/punar-common",
+    "crates/punar-env",
     "crates/punar-mock-smplify",
     "crates/punar-netd",
     "crates/punar-policy",
@@ -44,3 +45,12 @@ rustix = { version = "1", features = ["net"] }
 # standard safe wrapper (transitives: libc, signal-hook-registry — the unsafe
 # stays in the audited dependency, not in Punar crates).
 signal-hook = "0.3"
+# serde_norway (M6, docs/development/milestone-6.md section 4.2): YAML parsing
+# for the ProjectEnvironment manifest (SPEC section 17). Maintained
+# continuation of serde_yaml (archived by its author in March 2024), drop-in
+# serde API; the `unsafe` it inherits (the unsafe-libyaml translation) stays
+# in the audited dependency, not in Punar crates — the signal-hook/rustix
+# stance above. Advisory-checked at vendoring (no RUSTSEC entries for
+# serde_norway or unsafe-libyaml-norway as of 2026-08); documented fallback
+# per the M6 plan: pin the frozen serde_yaml 0.9.34+deprecated.
+serde_norway = "0.9"

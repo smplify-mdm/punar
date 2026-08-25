@@ -17,9 +17,13 @@ Type=oneshot
 # synchronous M3 exercise (punar-m3-check.service, bounded at 10 min —
 # milestone-3.md §8) + the synchronous M4 exercise (punar-m4-check.service,
 # bounded at 12 min; its drift demo waits on wall-clock timer firings —
-# milestone-4.md §10) + export, with generous headroom for TCG-emulated
-# CI runs.
-TimeoutStartSec=100min
+# milestone-4.md §10) + the synchronous M5 exercise
+# (punar-m5-check.service, bounded at 15 min — milestone-5.md §10) + the
+# synchronous M6 exercise (punar-m6-check.service, bounded at 10 min —
+# milestone-6.md §10) + export. Worst-case bounded phases sum to
+# 15 + 25 + 10 + 12 + 15 + 10 = 87 min; 110 min leaves the export and
+# TCG slop over 20 min of headroom.
+TimeoutStartSec=110min
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/lib/punar/idle-ram.sh
