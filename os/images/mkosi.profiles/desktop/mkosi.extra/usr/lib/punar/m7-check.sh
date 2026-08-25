@@ -408,8 +408,12 @@ grep_row "inspect: policy citation is the personal default" \
     "${RUN_DIR}/m7-inspect.txt" "POLICY · PERSONAL DEFAULTS"
 grep_row "inspect: ledger section is present and honest" \
     "${RUN_DIR}/m7-inspect.txt" "LEDGER · WHAT IT ACCESSED"
-grep_row "inspect: the ledger says it arrives in Milestone 8 (nothing is faked)" \
-    "${RUN_DIR}/m7-inspect.txt" "MILESTONE 8"
+# M8 replaced the dashed "MILESTONE 8" placeholder with the real ledger.
+# What stays true across both is the honesty rule: categories with no
+# producer yet must name the milestone that will fill them, never render
+# as an empty success (spec 1.22, 21.2). Assert THAT, not the placeholder.
+grep_row "inspect: unproduced ledger categories name their milestone (nothing is faked)" \
+    "${RUN_DIR}/m7-inspect.txt" "NOT YET OBSERVED"
 as_punar "${CTL}" --json agents inspect "${SID}" \
     > "${RUN_DIR}/m7-inspect.json" 2>/dev/null
 jq_check "inspect --json returns the session row verbatim" \
