@@ -1,9 +1,9 @@
 # punar-shell
 
-The Punar desktop shell for Milestones 1–2: a Quickshell (QML) top bar, the
-SUPER+Space command center overlay, and the SUPER+TAB project-workspace
-overview with named-workspace persistence, implementing the field-note
-design language.
+The Punar desktop shell: a Quickshell (QML) top bar (M1, with the M5
+enrollment chrome), the SUPER+Space command center overlay, and the
+SUPER+TAB project-workspace overview with named-workspace persistence
+(M2), implementing the field-note design language.
 
 - Design authority: [`docs/design/DESIGN_LANGUAGE.md`](../../docs/design/DESIGN_LANGUAGE.md)
   (binding) and the mockups — the command-center card is
@@ -21,9 +21,9 @@ design language.
 | --- | --- |
 | `shell.qml` | `ShellRoot` entrypoint; wires the ready marker; instantiates `WorkspaceState` |
 | `Theme/Theme.qml` | Singleton: token loader + typed design properties |
-| `Services/Status.qml` | Singleton: compliance/project context — **M1 stub**, M5 wires punard |
+| `Services/Status.qml` | Singleton: enrollment/compliance context — watches `/run/punar/status.json` (M5, ipc.md §9) |
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
-| `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME) |
+| `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `CommandCenter/CommandCenter.qml` | SUPER+Space overlay + `commandcenter` IPC handler |
 | `Overview/Overview.qml` | SUPER+TAB project-workspace overview + `overview` IPC handler (Plate D-007) |
 
@@ -130,6 +130,47 @@ overlay is a paper sheet over the 22% warm ink-wash scrim, holding a
   falling back to the number — live via the same socket2 events.
 - The `layoutPreset` value itself is applied at session start by
   `punar-layout.sh restore` (not by the shell); the shell only records it.
+
+## Enrollment chrome (M5)
+
+`Services/Status.qml` (the M1 stub, retired in M5) is the single source of
+enrollment/compliance display state, fed by punard's summary file
+`/run/punar/status.json` (side contract:
+[`docs/api/ipc.md`](../../docs/api/ipc.md) §9; design:
+milestone-5.md §8):
+
+```json
+{"v": 1, "enrolled": true, "org_name": "Acme Engineering",
+ "compliance_overall": "compliant", "ts": "2026-08-26T09:02:00Z"}
+```
+
+- **Event-driven, zero polling**: punard rewrites the file atomically
+  (tmp+rename) at startup and on every change of the summary tuple; the
+  singleton follows it with a `FileView` change watch (inotify — the same
+  primitive `WorkspaceState.qml` uses for the layout-preset cache). No
+  timers, no socket connection from the shell.
+- **Fail closed to personal** (DESIGN_LANGUAGE.md §8, unmanaged-first): a
+  missing or unparsable file — personal device, punard not running on a
+  dev machine, torn state — reads as `enrolled: false` and the bar is calm
+  paper. Org state is additive annotation; its absence is the default.
+- **Mapping**: `compliance_overall` → `state` (`compliant`→ok,
+  `non_compliant`→bad, anything else — `remediating`/`exception`/
+  `unknown`/future — →warn) and the §52 word `label`
+  (Compliant / Non-compliant / Remediating / Exception / Unknown). The
+  raw value is exposed as `complianceState`; `""` is the personal
+  sentinel, under which state/label keep the pre-M5 stub defaults so
+  unenrolled surfaces (the command-center masthead) render unchanged. An
+  enrolled device with a garbled overall shows UNKNOWN — never silently
+  green.
+- **Bar grammar when enrolled** (system-control mockup masthead,
+  compressed to bar scale): `ACME ENGINEERING · ● COMPLIANT · 14:02` —
+  one `MetaLabel` (org name) added before the existing dot + word, all
+  gated on `Status.enrolled`. Policy ids stay in `punarctl status`, not
+  the 30 px bar. The personal bar renders byte-identical to pre-M5: Row
+  positioners skip invisible items.
+- The file is **non-authoritative display data** in a user-owned
+  directory (ipc.md §9's honest placement note); anything root-trusted
+  stays on the punard socket.
 
 ## Command center data sources (M1 scope)
 

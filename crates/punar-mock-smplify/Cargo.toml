@@ -1,0 +1,20 @@
+[package]
+name = "punar-mock-smplify"
+description = "dev/CI mock — not a product component. In-VM mock Smplify control plane for Milestone 5 checks (SPEC section 76 M5; docs/development/milestone-5.md section 4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+punar-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Same justifications as punard's entries in the workspace table:
+# rustix = bind + chmod 0600 *before* listen() without unsafe (the root-only
+# admission the trust-boundary statement in milestone-5.md section 4.2 rests
+# on); signal-hook = safe SIGTERM handling so `systemctl stop` from m5-check
+# shuts the accept loop down cleanly.
+rustix = { workspace = true }
+signal-hook = { workspace = true }

@@ -30,6 +30,7 @@
 pub mod authz;
 pub mod backends;
 pub mod capability;
+pub mod enroll;
 pub mod policy;
 pub mod server;
 pub mod state;

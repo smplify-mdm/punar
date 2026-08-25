@@ -1,9 +1,11 @@
-# Punar local IPC — `punard` wire contract (v1, Milestones 3–4)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–5)
 
 Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
-**plus the Milestone 4 additions** — marked "M4" throughout; the protocol
-version stays `v: 1` per section 3.3 (new methods and optional result fields
-are additive). M4 design rationale: `docs/development/milestone-4.md`.
+**plus the Milestone 4 and Milestone 5 additions** — marked "M4"/"M5"
+throughout; the protocol version stays `v: 1` per section 3.3 (new methods
+and optional result fields are additive). M4 design rationale:
+`docs/development/milestone-4.md`; M5 (enrollment against the mock control
+plane): `docs/development/milestone-5.md`.
 Everything in this document is binding on `punard` (server) and `punarctl`
 (client). Spec authorities: section 10 (typed capability API only), section 11
 (`punard`/`punarctl` responsibilities), section 60 (hard safety constraints —
@@ -13,6 +15,9 @@ no generic root RPC), section 61 (local IPC security), section 73
 M3 runs **unmanaged-first personal mode** (design language section 8): there is
 no organization, no enrollment, no org policy source. Policy citations in this
 contract say `personal-defaults` / "os default" and nothing else.
+**(M5 amendment: enrollment exists — sections 5.9–5.11. An *unenrolled*
+device still behaves exactly per the paragraph above; org citations appear
+only while enrolled, and unenrolling restores them to absent.)**
 
 ---
 
@@ -76,6 +81,11 @@ each direction. No length prefixes, no binary framing.
   Client side: `punarctl` uses 5 s connect / 15 s response, and renders
   failure in section-73 voice ("The Punar daemon is not reachable…", next
   step: `systemctl status punard`).
+  **M5 amendment (one method):** `enroll.start` (section 5.9) is processed
+  under a **60 s** bound — its pipeline contains upstream calls plus a full
+  reconcile pass, which TCG runs make slow — and `punarctl` uses a 90 s
+  response timeout for the `enroll start`/`enroll stop` verbs. Every other
+  method keeps the 10 s/15 s bounds unchanged.
 - Responses are emitted as a single line; UTF-8; no ANSI, no pretty-printing.
 
 ## 3. Envelope
@@ -122,7 +132,10 @@ object, fields documented per code below.
   is exactly how M4 landed — `policy.effective` + `policy.explain` (sections
   5.7, 5.8), the `status.compliance` block (5.1), new optional
   `capabilities.set` / `reconcile` result fields (5.4, 5.6), all under
-  `v: 1`.
+  `v: 1`. **M5 note:** likewise — `enroll.start` / `enroll.status` /
+  `enroll.stop` (sections 5.9–5.11), the optional `status.org` field and
+  the documented `mode`/`enrolled` value changes (5.1), two additive error
+  codes (section 4), all under `v: 1`.
 - A server refusing `v` reports `unsupported_version` with
   `details.supported: [1]`.
 
@@ -139,8 +152,10 @@ object, fields documented per code below.
 | `apply_failed`        | Backend apply step failed (e.g. `nft` exited nonzero). Audited with `result: "failure"`. | `capability`, `stage` |
 | `verify_failed`       | Apply succeeded but post-apply verification did not observe the desired state (spec section 42 "Verify"). Audited with `result: "verify_failed"`. | `capability`, `expected`, `observed` |
 | `internal`            | Daemon bug or I/O error. Never contains secrets (Redacted by construction). | — |
+| `conflict` (M5)       | The request contradicts current enrollment state: `enroll.start` while already enrolled, `enroll.stop` while not enrolled. | `state` |
+| `upstream_unreachable` (M5) | The control plane did not answer (connect/call failure or timeout during `enroll.start`). Section-73 message names the stage and the next step; local state is untouched (enrollment is all-or-nothing). Sync failures **outside** `enroll.start` never surface as request errors — they queue per spec section 55 (milestone-5.md section 7). | `stage` |
 
-## 5. Methods (M3 surface + M4 additions — complete)
+## 5. Methods (M3 surface + M4/M5 additions — complete)
 
 The method set is closed. There is **no** exec, shell, script, or
 run-as-root method, by architecture (spec section 10 "Prohibited:
@@ -157,6 +172,9 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always |
 | `policy.effective` (M4) | any connected peer | no      | no      |
 | `policy.explain` (M4)   | any connected peer | no      | no      |
+| `enroll.start` (M5)     | **root only (uid 0)** | yes  | always  |
+| `enroll.status` (M5)    | any connected peer | no      | no      |
+| `enroll.stop` (M5)      | **root only (uid 0)** | yes  | always  |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -187,6 +205,19 @@ persisted `/var/lib/punar/device-id`, `0600`) — the first real slice of the
 spec 11.1 "device identity" responsibility. `mode` is `"personal"` until M5;
 no org fields exist in the result (design section 8: enrollment adds fields,
 never redraws).
+
+**M5 amendment — enrollment surfaces here, additively.** While enrolled:
+`enrolled` is `true`, `mode` is `"managed"` (the value change this contract
+announced above), and the result carries the optional field
+
+```json
+"org": {"id": "acme", "name": "Acme", "display_name": "Acme Engineering",
+         "domain": "acme.com"}
+```
+
+While unenrolled the M3 shape is byte-identical — `org` is absent, never
+`null` (enrollment adds fields, never redraws). The device token appears in
+no result of any method, ever (it is `Redacted` in memory; spec section 53).
 
 **M4 addition — `compliance` result field** (optional per 3.3; always
 present since M4). Spec section 52 states, **personal scope** (the device
@@ -270,6 +301,26 @@ effective value is applied, and the result additionally carries
 `"overridden": true` and `"effective_state": <value>` (optional fields per
 3.3; never emitted in personal mode). `audit.policy_ids` cites the winning
 source's policy id (`["personal-defaults"]` in personal mode — unchanged).
+
+**M5 semantics — the managed path is now reachable in a running system**
+(enrollment writes org layers into `policy.d`; milestone-5.md section 5.5).
+Two amendments, both additive:
+
+- **Denial citation on org-pinned paths.** A non-root `capabilities.set` is
+  still denied (exit 3) by the root-only rule *before* policy is consulted,
+  but when the target path is org-pinned (`user_override_permitted ==
+  false` in the effective document) the denial message and
+  `details.policy_ids` cite the **pinning source** in the section 73 voice
+  (e.g. "security.firewall is managed by Acme Engineering Baseline
+  (eng-baseline-v12). User override: not permitted. Next step: exceptions
+  require approval (Milestone 9).") instead of the M3 "personal defaults"
+  text, which would be a false citation on a managed device. Unpinned
+  paths keep the M3/M4 denial text byte-identical.
+- **Client rendering.** `punarctl` renders `overridden: true` as a neutral
+  verdict line ("Recorded, not applied · <capability> is managed by
+  <source name> (<policy id>) · effective: <state>"). The root caller's
+  exit code is `0` — the preference was recorded and outranked, not
+  forbidden (spec section 39); `--json` output was already complete in M4.
 
 ### 5.5 `audit.tail`
 
@@ -401,6 +452,90 @@ capability case; the section 73 message names the path and points at
 `punarctl policy effective`). `punarctl policy explain <path>` renders this
 in the spec 40 layout verbatim (milestone-4.md section 7).
 
+While enrolled, `source` cites the winning org layer verbatim from the
+merge (e.g. `{"kind": "organization_baseline", "rank": 2, "policy_id":
+"eng-baseline-v12", "name": "Acme Engineering Baseline"}` with
+`user_override_permitted: false`) — no M5 shape change; the M4 renderer
+already prints these fields, which is how the spec section 40 managed
+output becomes real without touching this method.
+
+### 5.9 `enroll.start` (M5)
+
+Params: `{"org_domain": "acme.com"}`. **Root only**, mutating, always
+audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
+the fetched policy ids in `policy_ids`). Processed under the 60 s bound
+(section 2).
+
+Pipeline (spec section 49 mapped to the mock control plane; design and the
+honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
+enrolled → `conflict`) → `org.discover` → `enroll.register` with the
+persistent `device_id` and a fresh in-memory bootstrap secret →
+store the returned device token (`/var/lib/punar/device-token`, `0600`,
+`Redacted` in memory) → `policy.fetch` → strict-parse each policy-source
+envelope (the M4 loader's validation) → write them to
+`/var/lib/punar/policy.d/` → recompute the section 39 merge → one full
+section 42 reconcile pass → first compliance + inventory report (failures
+queue per section 55; they do not fail enrollment) → persist
+`/var/lib/punar/enrollment.json` (`0600`) → rewrite the section 9 status
+file. All-or-nothing up through the policy.d write: any failure before
+that point removes everything this call created and returns
+`upstream_unreachable` / `invalid_params` with local state untouched.
+
+```json
+{"v":1,"id":"1","result":{
+  "enrolled": true,
+  "org": {"id": "acme", "name": "Acme", "display_name": "Acme Engineering",
+           "domain": "acme.com"},
+  "policy_ids": ["eng-baseline-v12"],
+  "attestation": "simulated",
+  "enrolled_at": "2026-08-26T09:00:00Z",
+  "first_sync": {"compliance": "success", "inventory": "success"}
+}}
+```
+
+`attestation` is the literal honesty label: the spec 49 attestation step is
+**simulated** by the mock and reported as such wherever enrollment state
+appears. Errors: `conflict`, `upstream_unreachable`, `invalid_params`
+(malformed domain / envelope failed the loader's validation), `denied`.
+
+### 5.10 `enroll.status` (M5)
+
+Params: none. Read-only, any connected peer, not audited.
+
+```json
+{"v":1,"id":"1","result":{
+  "enrolled": true,
+  "org": {"id": "acme", "name": "Acme", "display_name": "Acme Engineering",
+           "domain": "acme.com"},
+  "policy_ids": ["eng-baseline-v12"],
+  "enrolled_at": "2026-08-26T09:00:00Z",
+  "attestation": "simulated",
+  "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
+                 "pending": false}
+}}
+```
+
+Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
+`last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
+while a report is queued (bounded latest-wins queue, spec section 55;
+milestone-5.md section 7). The device token appears in no field.
+
+### 5.11 `enroll.stop` (M5)
+
+Params: none. **Root only**, mutating, always audited
+(`action: "enroll.stop"`, `resource: "enrollment"`). Guard: not enrolled →
+`conflict`. Removes exactly the policy.d files recorded at enrollment,
+deletes `enrollment.json` and the device token, recomputes the merge, runs
+one reconcile pass (recorded user preferences resurface as the winning
+layer per spec section 39), rewrites the section 9 status file. Result:
+`{"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"]}`.
+
+**Local-only (documented limit):** M5 has no unregister RPC; the mock
+control plane keeps its device record and received-report history.
+Unenrollment stops all future sync and restores local state; it does not
+(and could not honestly claim to) retract what the org already received.
+Works with the control plane unreachable — it touches only local files.
+
 ## 6. Audit contract (spec section 53)
 
 - File: `/var/log/punar/audit.jsonl` — one `AuditEvent` JSON object per line,
@@ -448,6 +583,17 @@ in the spec 40 layout verbatim (milestone-4.md section 7).
   Both action names match the schema's dotted-lowercase `action` pattern —
   no schema change. Read methods (including the new `policy.*`) remain
   unaudited.
+- **M5 additions to the audited set:** `enroll.start` and `enroll.stop`
+  (resource `"enrollment"`; allow and deny, success and failure; success
+  `policy_ids` cite the org policy ids), and `enroll.sync` (resource
+  `"control_plane"`) — emitted on **transitions only**: `result:
+  "unreachable"` once when the control plane stops answering, `result:
+  "success"` once on recovery. Per-retry events (one per 120 s timer pass
+  during an outage) are deliberately not emitted — they would encode no
+  new fact; the steady state is readable in `enroll.status.last_sync`.
+  `"unreachable"` joins the open `result` string set — no schema change.
+  The device token is `Redacted` by type: no audit event can contain it.
+  Read methods (`enroll.status`) remain unaudited.
 - **Honest attribution limit (M4):** reconcile runs triggered by
   `punard-reconcile.timer` arrive through `punarctl` as uid 0, so their
   events carry `user_id: "root"`, `source: "human"` — the daemon sees only
@@ -466,7 +612,9 @@ in the spec 40 layout verbatim (milestone-4.md section 7).
 - **Rotation: explicitly OUT of M3.** The file grows unbounded; acceptable
   for dev images at M3 event rates. Follow-up (target M5, with enrollment
   traffic): size-capped rotation in `punard` or logrotate. Documented here so
-  nobody mistakes absence for oversight.
+  nobody mistakes absence for oversight. **(M5: delivered — `punard`
+  rotates `audit.jsonl` → `audit.jsonl.1` at 8 MiB, one rotated file kept,
+  checked at write time. `audit.tail` reads the live file only.)**
 
 ## 7. Client behavior (`punarctl`)
 
@@ -488,23 +636,67 @@ in the spec 40 layout verbatim (milestone-4.md section 7).
   shows no org rows — personal compliance (device vs. its own effective
   document) is not an org row. Rendering contract:
   docs/development/milestone-4.md section 7.
+- **M5 verbs:** `punarctl enroll start <domain>` (over 5.9; renders org,
+  policy ids, and `Attestation  SIMULATED` — the honesty label is loud by
+  design; 90 s client timeout per section 2), `punarctl enroll status`
+  (over 5.10), `punarctl enroll stop` (over 5.11; "Personal state restored
+  · org layers removed"). `punarctl status` adds an
+  `Organization  <display name> · <policy id>` row while enrolled (absent
+  otherwise — org rows never render on a personal device). The 5.4 M5
+  amendments: the overridden-set verdict line and the org-citing denial.
+  Rendering contract: docs/development/milestone-5.md section 8.3.
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The
   server's method table is the enforcement point; this flag adds no server
   capability.
 
-## 8. Explicit non-goals of this contract (M3, amended M4)
+## 8. Explicit non-goals of this contract (M3, amended M4/M5)
 
 - No generic execution method of any kind (spec sections 10, 60) — permanent.
   There is also **no write-side `policy.*` method**: the only policy
-  mutations are `capabilities.set` (user preference) and, from M5, the
-  enrollment-managed `policy.d` drop.
+  mutations are `capabilities.set` (user preference) and, since M5, the
+  enrollment-managed `policy.d` drop (`enroll.start`/`enroll.stop` — which
+  write only whole fetched envelopes, never accept policy content as
+  params).
 - No TCP, no abstract-namespace sockets (path perms are the admission
-  mechanism), no SCM_RIGHTS fd passing.
+  mechanism), no SCM_RIGHTS fd passing. This holds for the M5 control-plane
+  *client* side too: `punard` speaks to the (mock) control plane over a
+  root-only UDS, and the mock itself has no TCP listener
+  (milestone-5.md section 4.2).
 - ~~No policy merge (`policy.*` arrives M4)~~ **(M4: landed — sections 5.7,
-  5.8)**; no enrollment (`M5`), no approvals or JIT elevation (`M9` —
-  `approval_required` classifications behave as alert-only until then), no
-  agent methods (`M7+`).
-- No event subscription/streaming; `audit.tail` is pull-only. Revisit when
-  the shell needs live updates (M5+).
+  5.8)**; ~~no enrollment (`M5`)~~ **(M5: landed — sections 5.9–5.11,
+  against the dev/CI-only mock control plane)**; no approvals or JIT
+  elevation (`M9` — `approval_required` classifications behave as
+  alert-only until then), no agent methods (`M7+`), no remote admin
+  queries (spec section 51 — `M10`; the mock reserves the `admin.*` names
+  and answers `unknown_method`).
+- No event subscription/streaming; `audit.tail` is pull-only. The M5 shell
+  wiring is a **file** the shell watches (section 9), deliberately not a
+  subscription surface. Revisit when a panel needs per-row live data (M6+).
+
+## 9. Side contract (M5): `/run/punar/status.json`
+
+Not IPC — a world-readable summary file `punard` writes so the shell can
+render enrollment/compliance chrome without a socket connection or polling
+(the shell watches it with a `FileView`; design: milestone-5.md section 8).
+
+- Written by `punard` at startup and whenever the tuple changes; atomic
+  tmp+rename within `/run/punar`; mode `0644 root:root`.
+- Content — **summary only**, exactly:
+
+  ```json
+  {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
+   "compliance_overall": "compliant", "ts": "2026-08-26T09:02:00Z"}
+  ```
+
+  (`org_name` is `null` and `enrolled` is `false` on a personal device.)
+  No per-capability rows, policy ids, device id, or hostname: the file is
+  world-readable in a user-owned directory and carries only what the bar
+  renders.
+- **Non-authoritative by design**: `/run/punar` is `0755 punar:punar` (M1
+  contract), so the session user can replace the file — acceptable because
+  it is display data consumed by that same user's own session; anything
+  root-trusted stays on the socket (the section 1.1 argument, inverted).
+  Consumers must fail closed: missing or unparsable file renders as
+  unenrolled calm paper.

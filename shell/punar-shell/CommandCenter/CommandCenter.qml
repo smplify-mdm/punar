@@ -289,7 +289,7 @@ Scope {
                             width: 5
                             height: 5
                             radius: 2.5
-                            color: Status.color // stub — M5 wires punard
+                            color: Status.color // live via status.json (M5)
                         }
                         Meta {
                             anchors.verticalCenter: parent.verticalCenter

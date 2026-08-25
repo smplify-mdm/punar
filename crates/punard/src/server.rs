@@ -25,18 +25,25 @@ use punar_common::audit::{
 use punar_common::ipc::{
     AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    ErrorCode, IpcError, MAX_REQUEST_LINE_BYTES, Method, Mode, PROTOCOL_VERSION,
-    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
-    PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome, Request, Response,
-    SERVER_READ_TIMEOUT, StatusResult,
+    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
+    FirstSync, IpcError, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
+    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
+    PolicyExplainResult, PolicySourceRef, ReconcileEntry, ReconcileResult, RemediationOutcome,
+    Request, Response, SERVER_READ_TIMEOUT, StatusResult,
 };
 use punar_common::time::utc_now_rfc3339;
-use punar_common::{AuditEvent, Decision};
+use punar_common::{AuditEvent, Decision, Redacted};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
+use crate::enroll::{
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
+    LastSyncRecord, OrgRecord, StatusSummary, UpstreamError, compliance_report_body,
+    inventory_body, load_device_token, load_enrollment, save_device_token, save_enrollment,
+    write_status_summary,
+};
 use crate::policy::{
     EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
 };
@@ -44,7 +51,7 @@ use crate::state::{
     MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
     migrate_m3_store,
 };
-use crate::util::{lookup_gid, lookup_username};
+use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
 
 /// Loop protection (SPEC section 42 "avoid remediation loops";
 /// docs/development/milestone-4.md section 5): at most this many
@@ -77,10 +84,26 @@ pub struct DaemonConfig {
     pub max_connections: usize,
     /// Socket read/write timeout per operation.
     pub io_timeout: Duration,
+    /// M5: control-plane endpoint (the dev/CI mock's root-only UDS in the
+    /// image; a temp socket in host tests). Compiled default
+    /// [`DEFAULT_CONTROL_PLANE_SOCKET`], overridable via
+    /// `PUNAR_CONTROL_PLANE_SOCKET` / `--control-plane-socket` (resolved
+    /// in `main.rs`).
+    pub control_plane_socket: PathBuf,
+    /// M5: the shell summary file (ipc.md section 9);
+    /// `/run/punar/status.json` in production, a state-dir file by
+    /// default so embedded/test daemons never write outside their
+    /// tempdir.
+    pub status_file: PathBuf,
+    /// M5 inventory source (injectable for tests).
+    pub os_release_path: PathBuf,
+    /// M5 inventory source (injectable for tests).
+    pub kernel_release_path: PathBuf,
 }
 
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
+        let status_file = state_dir.join("status.json");
         DaemonConfig {
             socket_path,
             state_dir,
@@ -91,6 +114,10 @@ impl DaemonConfig {
             peer_source: PeerSource::SoPeercred,
             max_connections: 16,
             io_timeout: SERVER_READ_TIMEOUT,
+            control_plane_socket: PathBuf::from(DEFAULT_CONTROL_PLANE_SOCKET),
+            status_file,
+            os_release_path: PathBuf::from("/etc/os-release"),
+            kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
         }
     }
 }
@@ -152,10 +179,13 @@ struct Inner {
     os_defaults: OsDefaultsStore,
     /// Rank-5 layer: recorded user preferences.
     preferences: PreferencesStore,
-    /// Ranks 1–4 (and stored-rank overrides): policy.d drops, loaded once
-    /// at startup (hot-reload arrives with M5 enrollment). Empty in the
-    /// shipped image (design language section 8).
-    org_layers: Vec<Layer>,
+    /// Ranks 1–4 (and stored-rank overrides): policy.d drops. Loaded at
+    /// startup; since M5 the **enrollment chain** reloads them live
+    /// (`enroll.start` writes + reloads, `enroll.stop` empties). A manual
+    /// root file-drop into policy.d still requires a daemon restart —
+    /// documented limit (milestone-5.md section 5.1): the authoritative
+    /// policy.d writer is the enrollment chain.
+    org_layers: Mutex<Vec<Layer>>,
     /// The merged effective document — in-memory truth, recomputed at
     /// startup and on every `capabilities.set`.
     effective: Mutex<EffectiveDocument>,
@@ -163,6 +193,23 @@ struct Inner {
     device_id: String,
     started_at: String,
     last_reconcile: Mutex<Option<String>>,
+    /// M5 enrollment state (mirrors `enrollment.json`); `None` = personal.
+    enrollment: Mutex<Option<Enrollment>>,
+    /// M5: the device token, [`Redacted`] the moment it exists in memory —
+    /// no formatter or serializer can print it (SPEC section 53).
+    device_token: Mutex<Option<Redacted<String>>>,
+    /// M5 offline queue (SPEC section 55): bounded latest-wins — two
+    /// booleans, not a spool. Compliance/inventory are state snapshots; a
+    /// missed intermediate report carries nothing the next snapshot does
+    /// not supersede.
+    pending_compliance: AtomicBool,
+    pending_inventory: AtomicBool,
+    /// Outcome of the most recent sync attempt, for `enroll.start`'s
+    /// `first_sync` result field.
+    last_sync_outcome: Mutex<Option<FirstSync>>,
+    /// The last tuple written to the ipc.md section 9 status file, so the
+    /// file is rewritten only when the summary actually changes.
+    status_written: Mutex<Option<StatusSummary>>,
     shutdown: AtomicBool,
     active: Mutex<usize>,
     slot_freed: Condvar,
@@ -251,7 +298,21 @@ impl Daemon {
         );
         let _ = write_effective_debug_copy(&cfg.state_dir.join("effective.json"), &effective);
 
-        Ok(Daemon {
+        // M5: enrollment persists as plain files (SPEC section 55 — no
+        // control-plane liveness involved). A corrupt store refuses start,
+        // same posture as the layer stores; a missing token on an enrolled
+        // device degrades to unreachable syncs, never to a silent
+        // unenroll.
+        let enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
+        let device_token = load_device_token(&cfg.state_dir.join("device-token"))?;
+        if enrollment.is_some() && device_token.is_none() {
+            eprintln!(
+                "punard: enrolled but the device token file is missing; \
+                 compliance/inventory sync will fail until re-enrollment"
+            );
+        }
+
+        let daemon = Daemon {
             inner: Arc::new(Inner {
                 cfg,
                 registry,
@@ -259,17 +320,27 @@ impl Daemon {
                 audit_events: AtomicU64::new(audit_events),
                 os_defaults,
                 preferences,
-                org_layers: loaded.layers,
+                org_layers: Mutex::new(loaded.layers),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
                 device_id,
                 started_at: utc_now_rfc3339(),
                 last_reconcile: Mutex::new(None),
+                enrollment: Mutex::new(enrollment),
+                device_token: Mutex::new(device_token),
+                pending_compliance: AtomicBool::new(false),
+                pending_inventory: AtomicBool::new(false),
+                last_sync_outcome: Mutex::new(None),
+                status_written: Mutex::new(None),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
                 slot_freed: Condvar::new(),
             }),
-        })
+        };
+        // First write of the ipc.md section 9 summary file (rewritten by
+        // the boot reconcile moments later with computed compliance).
+        daemon.inner.publish_status_summary();
+        Ok(daemon)
     }
 
     /// Boot-time reconcile (daemon-initiated: [`AuditActor::daemon`]) —
@@ -545,6 +616,32 @@ fn source_ref(provenance: &Provenance) -> PolicySourceRef {
     }
 }
 
+/// The wire `org` object for a persisted [`OrgRecord`].
+fn org_info(org: &OrgRecord) -> OrgInfo {
+    OrgInfo {
+        id: org.id.clone(),
+        name: org.name.clone(),
+        display_name: org.display_name.clone(),
+        domain: org.domain.clone(),
+    }
+}
+
+/// M5 domain-syntax gate for `enroll.start` (contract section 5.9): the
+/// value is data handed to `org.discover`, never anything executable, but
+/// an obviously-not-a-domain string earns `invalid_params` before any
+/// network hop.
+fn domain_syntax_ok(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 // ---------------------------------------------------------------------------
 // Method handlers
 // ---------------------------------------------------------------------------
@@ -608,16 +705,20 @@ impl Inner {
             .map(|entry| entry.value.clone())
     }
 
-    /// Recompute the effective document from the layers (startup +
-    /// every `capabilities.set`) and refresh the debug copy.
+    /// Recompute the effective document from the layers (startup, every
+    /// `capabilities.set`, and the M5 enrollment transitions) and refresh
+    /// the debug copy.
     fn recompute_effective(&self) {
-        let doc = compute_effective(
-            &self.registry,
-            &self.os_defaults,
-            &self.preferences,
-            &self.org_layers,
-            utc_now_rfc3339(),
-        );
+        let doc = {
+            let org_layers = self.org_layers.lock().unwrap();
+            compute_effective(
+                &self.registry,
+                &self.os_defaults,
+                &self.preferences,
+                &org_layers,
+                utc_now_rfc3339(),
+            )
+        };
         let _ = write_effective_debug_copy(&self.cfg.state_dir.join("effective.json"), &doc);
         *self.effective.lock().unwrap() = doc;
     }
@@ -640,6 +741,9 @@ impl Inner {
             Method::Reconcile => self.handle_reconcile(peer),
             Method::PolicyEffective => Ok(to_value(self.handle_policy_effective())),
             Method::PolicyExplain(params) => self.handle_policy_explain(params),
+            Method::EnrollStart(params) => self.handle_enroll_start(peer, params),
+            Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
+            Method::EnrollStop => self.handle_enroll_stop(peer),
         }
     }
 
@@ -659,13 +763,27 @@ impl Inner {
             .unwrap()
             .clone()
             .unwrap_or_else(|| self.started_at.clone());
+        // M5 (contract section 5.1): enrollment surfaces additively —
+        // `mode: managed`, `enrolled: true`, and the optional `org` object
+        // while enrolled; the personal shape stays byte-identical to M3.
+        let org: Option<OrgInfo> = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| org_info(&e.org));
+        let enrolled = org.is_some();
         StatusResult {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             started_at: self.started_at.clone(),
             device_id: self.device_id.clone(),
-            mode: Mode::Personal,
-            enrolled: false,
+            mode: if enrolled {
+                Mode::Managed
+            } else {
+                Mode::Personal
+            },
+            enrolled,
             hostname,
             capabilities_total: self.registry.len() as u64,
             last_reconcile,
@@ -678,6 +796,7 @@ impl Inner {
             // reconcile time; the boot reconcile runs before the socket
             // opens in production.
             compliance: Some(self.tracker.lock().unwrap().block(&self.registry)),
+            org,
         }
     }
 

@@ -95,6 +95,14 @@ pub const SERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Client (`punarctl`): whole-response timeout.
 pub const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// M5 (contract sections 2, 5.9): raised per-request processing bound for
+/// `enroll.start` — the pipeline contains a full reconcile pass and, on
+/// TCG, nft operations are slow.
+pub const ENROLL_START_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// M5 (contract sections 2, 7): raised client response timeout for
+/// `punarctl enroll start` only, covering [`ENROLL_START_PROCESS_TIMEOUT`]
+/// with margin.
+pub const ENROLL_START_CLIENT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// `punarctl` process exit codes (Plate D-014 section III; docs/api/ipc.md
 /// section 7).
@@ -149,11 +157,21 @@ pub enum ErrorCode {
     /// Daemon bug or I/O error. Never carries secrets ([`crate::Redacted`]
     /// by construction for any future secret-bearing type).
     Internal,
+    /// M5 (contract section 4): the request contradicts current enrollment
+    /// state — `enroll.start` while already enrolled, `enroll.stop` while
+    /// not enrolled. `details.state` names the current state.
+    Conflict,
+    /// M5 (contract section 4): the control plane did not answer during
+    /// `enroll.start` (connect/call failure or timeout). Local state is
+    /// untouched — enrollment is all-or-nothing. Sync failures outside
+    /// `enroll.start` never surface as request errors; they queue per SPEC
+    /// section 55. `details.stage` names the failing pipeline stage.
+    UpstreamUnreachable,
 }
 
 impl ErrorCode {
     /// All wire codes, in contract-table order.
-    pub const ALL: [ErrorCode; 9] = [
+    pub const ALL: [ErrorCode; 11] = [
         ErrorCode::MalformedRequest,
         ErrorCode::UnsupportedVersion,
         ErrorCode::UnknownMethod,
@@ -163,6 +181,8 @@ impl ErrorCode {
         ErrorCode::ApplyFailed,
         ErrorCode::VerifyFailed,
         ErrorCode::Internal,
+        ErrorCode::Conflict,
+        ErrorCode::UpstreamUnreachable,
     ];
 
     /// The wire spelling (snake_case).
@@ -177,6 +197,8 @@ impl ErrorCode {
             ErrorCode::ApplyFailed => "apply_failed",
             ErrorCode::VerifyFailed => "verify_failed",
             ErrorCode::Internal => "internal",
+            ErrorCode::Conflict => "conflict",
+            ErrorCode::UpstreamUnreachable => "upstream_unreachable",
         }
     }
 
@@ -266,6 +288,27 @@ impl IpcError {
                  Next step: re-run as root: {retry_command}"
             ),
             details,
+        )
+    }
+
+    /// The M5 denial for a non-root `capabilities.set` on an **org-pinned**
+    /// path (contract section 5.4): the root-only rule still refuses before
+    /// policy is consulted, but the citation names the pinning org source —
+    /// the M3 "personal defaults" text would be a false citation on a
+    /// managed path. Section 73 voice; exit code stays 3.
+    pub fn denied_org_pinned(capability: &str, source_name: &str, policy_id: &str) -> Self {
+        IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "{capability} is managed by {source_name} ({policy_id}).\n\
+                 User override: not permitted.\n\
+                 Next step: exceptions require approval (Milestone 9)."
+            ),
+            json!({
+                "decision": "deny",
+                "policy_ids": [policy_id],
+                "capability": capability,
+            }),
         )
     }
 }
@@ -359,6 +402,16 @@ pub struct PolicyExplainParams {
     pub path: CapabilityId,
 }
 
+/// Params for `enroll.start` (M5, contract section 5.9). The domain is
+/// **data** — validated for domain-name syntax by the daemon
+/// (`invalid_params` on failure), then handed to the control-plane
+/// `org.discover` call; never interpreted as anything executable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollStartParams {
+    pub org_domain: String,
+}
+
 impl Default for AuditTailParams {
     fn default() -> Self {
         AuditTailParams {
@@ -410,11 +463,20 @@ pub enum Method {
     PolicyEffective,
     /// `policy.explain` (M4) — one effective entry for a path. Read.
     PolicyExplain(PolicyExplainParams),
+    /// `enroll.start` (M5, contract section 5.9) — enroll against the
+    /// (mock) control plane. Root-only; always audited; all-or-nothing.
+    EnrollStart(EnrollStartParams),
+    /// `enroll.status` (M5, contract section 5.10) — enrollment state.
+    /// Read; never carries the device token.
+    EnrollStatus,
+    /// `enroll.stop` (M5, contract section 5.11) — local unenroll: remove
+    /// the org layers, restore personal state. Root-only; always audited.
+    EnrollStop,
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 11] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -423,6 +485,9 @@ impl Method {
         "reconcile",
         "policy.effective",
         "policy.explain",
+        "enroll.start",
+        "enroll.status",
+        "enroll.stop",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -437,6 +502,9 @@ impl Method {
             Method::Reconcile => "reconcile",
             Method::PolicyEffective => "policy.effective",
             Method::PolicyExplain(_) => "policy.explain",
+            Method::EnrollStart(_) => "enroll.start",
+            Method::EnrollStatus => "enroll.status",
+            Method::EnrollStop => "enroll.stop",
         }
     }
 
@@ -451,8 +519,12 @@ impl Method {
             | Method::CapabilitiesGet(_)
             | Method::AuditTail(_)
             | Method::PolicyEffective
-            | Method::PolicyExplain(_) => false,
+            | Method::PolicyExplain(_)
+            | Method::EnrollStatus => false,
             Method::CapabilitiesSet(_) | Method::Reconcile => true,
+            // M5 (contract section 5): enrollment mutations are root-only,
+            // exactly like `capabilities.set`.
+            Method::EnrollStart(_) | Method::EnrollStop => true,
         }
     }
 
@@ -462,11 +534,14 @@ impl Method {
             Method::Status
             | Method::CapabilitiesList
             | Method::Reconcile
-            | Method::PolicyEffective => return None,
+            | Method::PolicyEffective
+            | Method::EnrollStatus
+            | Method::EnrollStop => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
             Method::PolicyExplain(p) => serde_json::to_value(p),
+            Method::EnrollStart(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -500,6 +575,9 @@ impl Method {
             "policy.explain" => {
                 Self::parse_required_params(method, params).map(Method::PolicyExplain)
             }
+            "enroll.start" => Self::parse_required_params(method, params).map(Method::EnrollStart),
+            "enroll.status" => Self::expect_no_params(method, params).map(|()| Method::EnrollStatus),
+            "enroll.stop" => Self::expect_no_params(method, params).map(|()| Method::EnrollStop),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -859,12 +937,83 @@ impl Response {
 // Typed results (contract section 5; lenient deserialize per section 3.3)
 // ---------------------------------------------------------------------------
 
-/// Daemon mode. `personal` until enrollment lands (M5); design language
-/// section 8: enrollment adds fields/values, it never redraws the base.
+/// Daemon mode. `personal` on an unenrolled device; `managed` while
+/// enrolled (M5, contract section 5.1 — the value change the M3 contract
+/// pre-announced). Design language section 8: enrollment adds
+/// fields/values, it never redraws the base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Personal,
+    Managed,
+}
+
+/// The `org` object of `status` / `enroll.*` results (M5, contract
+/// sections 5.1, 5.9, 5.10). Absent — never `null` — on a personal device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrgInfo {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+    pub domain: String,
+}
+
+/// The `last_sync` object of `enroll.status` (M5, contract section 5.10).
+/// `result` ∈ `"success" | "unreachable" | null`; `pending` is true while
+/// a report is queued (bounded latest-wins queue, SPEC section 55).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastSync {
+    pub at: Option<String>,
+    pub result: Option<String>,
+    pub pending: bool,
+}
+
+/// `enroll.start` result (M5, contract section 5.9). `attestation` is the
+/// literal honesty label — the mock control plane answers `"simulated"`
+/// and the string travels with the data everywhere enrollment state
+/// appears. The device token appears in no result of any method, ever.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollStartResult {
+    pub enrolled: bool,
+    pub org: OrgInfo,
+    pub policy_ids: Vec<String>,
+    pub attestation: String,
+    pub enrolled_at: String,
+    pub first_sync: FirstSync,
+}
+
+/// The `first_sync` object of [`EnrollStartResult`]: per-report outcome of
+/// the sync attempted inside `enroll.start` (`"success"` /
+/// `"unreachable"` — failures queue per SPEC section 55, they do not fail
+/// enrollment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FirstSync {
+    pub compliance: String,
+    pub inventory: String,
+}
+
+/// `enroll.status` result (M5, contract section 5.10). Unenrolled:
+/// `{"enrolled": false}` with the org-shaped fields absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollStatusResult {
+    pub enrolled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<OrgInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<LastSync>,
+}
+
+/// `enroll.stop` result (M5, contract section 5.11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollStopResult {
+    pub enrolled: bool,
+    pub removed_policy_ids: Vec<String>,
 }
 
 /// `status` result (contract section 5.1).
@@ -890,6 +1039,11 @@ pub struct StatusResult {
     /// `Option` keeps M3-shaped payloads parseable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compliance: Option<ComplianceBlock>,
+    /// M5 (contract section 5.1): present while enrolled, absent — never
+    /// `null` — on a personal device (enrollment adds fields, never
+    /// redraws).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<OrgInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1297,8 @@ mod tests {
             "apply_failed",
             "verify_failed",
             "internal",
+            "conflict",
+            "upstream_unreachable",
         ];
         assert_eq!(ErrorCode::ALL.len(), expected.len());
         for (code, name) in ErrorCode::ALL.into_iter().zip(expected) {
@@ -1204,6 +1360,11 @@ mod tests {
             Method::PolicyExplain(PolicyExplainParams {
                 path: CapabilityId::new("security.firewall").unwrap(),
             }),
+            Method::EnrollStart(EnrollStartParams {
+                org_domain: "acme.com".to_string(),
+            }),
+            Method::EnrollStatus,
+            Method::EnrollStop,
         ];
         assert_eq!(
             methods.len(),
@@ -1234,9 +1395,14 @@ mod tests {
     }
 
     #[test]
-    fn only_set_and_reconcile_require_root() {
+    fn only_mutating_methods_require_root() {
+        // M3: set + reconcile. M5 adds the enrollment mutations; the read
+        // (`enroll.status`) stays open to any connected peer.
         for method in every_method() {
-            let expected = matches!(method.name(), "capabilities.set" | "reconcile");
+            let expected = matches!(
+                method.name(),
+                "capabilities.set" | "reconcile" | "enroll.start" | "enroll.stop"
+            );
             assert_eq!(method.requires_root(), expected, "{}", method.name());
         }
     }
@@ -1578,12 +1744,13 @@ mod tests {
                 events: 42,
             },
             compliance: None,
+            org: None,
         })
         .unwrap();
         value
             .as_object_mut()
             .unwrap()
-            .insert("org".to_string(), json!({"added": "in M5"}));
+            .insert("added_later".to_string(), json!({"added": "in M6+"}));
         let status: StatusResult = serde_json::from_value(value).unwrap();
         assert_eq!(status.mode, Mode::Personal);
     }
@@ -1676,14 +1843,176 @@ mod tests {
     }
 
     #[test]
-    fn mode_rejects_unknown_values_in_m3() {
-        // M5 will add enrollment alongside a client that understands it;
-        // daemon and CLI always ship in the same image.
-        assert!(serde_json::from_str::<Mode>("\"managed\"").is_err());
+    fn mode_spellings_are_the_contract_values() {
+        // M5: `managed` joined the set (contract section 5.1); daemon and
+        // CLI always ship in the same image, so the set stays closed.
         assert_eq!(
             serde_json::to_string(&Mode::Personal).unwrap(),
             "\"personal\""
         );
+        assert_eq!(serde_json::to_string(&Mode::Managed).unwrap(), "\"managed\"");
+        assert_eq!(
+            serde_json::from_str::<Mode>("\"managed\"").unwrap(),
+            Mode::Managed
+        );
+        assert!(serde_json::from_str::<Mode>("\"kiosk\"").is_err());
+    }
+
+    // -- M5 enrollment additions --------------------------------------------
+
+    #[test]
+    fn enroll_start_params_are_strict() {
+        let params: EnrollStartParams =
+            serde_json::from_value(json!({"org_domain": "acme.com"})).unwrap();
+        assert_eq!(params.org_domain, "acme.com");
+        assert!(
+            serde_json::from_value::<EnrollStartParams>(json!({
+                "org_domain": "acme.com", "extra": true
+            }))
+            .is_err(),
+            "unknown params are rejected (contract section 3.1)"
+        );
+        assert!(serde_json::from_value::<EnrollStartParams>(json!({})).is_err());
+    }
+
+    #[test]
+    fn enroll_status_and_stop_take_no_params() {
+        for method in ["enroll.status", "enroll.stop"] {
+            let reject = Request::parse_json_line(&format!(
+                r#"{{"v":1,"id":"e","method":"{method}","params":{{"x":1}}}}"#
+            ))
+            .unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{method}");
+        }
+    }
+
+    #[test]
+    fn enroll_start_result_parses_the_contract_example() {
+        let result: EnrollStartResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "org": {"id": "acme", "name": "Acme",
+                     "display_name": "Acme Engineering", "domain": "acme.com"},
+            "policy_ids": ["eng-baseline-v12"],
+            "attestation": "simulated",
+            "enrolled_at": "2026-08-26T09:00:00Z",
+            "first_sync": {"compliance": "success", "inventory": "success"}
+        }))
+        .unwrap();
+        assert!(result.enrolled);
+        assert_eq!(result.org.display_name, "Acme Engineering");
+        assert_eq!(result.policy_ids, ["eng-baseline-v12"]);
+        // The honesty label travels with the data (contract section 5.9).
+        assert_eq!(result.attestation, "simulated");
+        assert_eq!(result.first_sync.compliance, "success");
+    }
+
+    #[test]
+    fn unenrolled_status_result_omits_the_org_shaped_fields() {
+        // Contract section 5.10: `{"enrolled": false}`, fields absent —
+        // never `null`.
+        let result = EnrollStatusResult {
+            enrolled: false,
+            org: None,
+            policy_ids: None,
+            enrolled_at: None,
+            attestation: None,
+            last_sync: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            r#"{"enrolled":false}"#
+        );
+        let back: EnrollStatusResult = serde_json::from_str(r#"{"enrolled":false}"#).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn enrolled_status_result_round_trips_last_sync() {
+        let result: EnrollStatusResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "org": {"id": "acme", "name": "Acme",
+                     "display_name": "Acme Engineering", "domain": "acme.com"},
+            "policy_ids": ["eng-baseline-v12"],
+            "enrolled_at": "2026-08-26T09:00:00Z",
+            "attestation": "simulated",
+            "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
+                           "pending": false}
+        }))
+        .unwrap();
+        let sync = result.last_sync.as_ref().unwrap();
+        assert_eq!(sync.result.as_deref(), Some("success"));
+        assert!(!sync.pending);
+        assert_eq!(result.attestation.as_deref(), Some("simulated"));
+    }
+
+    #[test]
+    fn status_result_carries_the_optional_m5_org() {
+        // Enrollment adds fields, never redraws (contract section 5.1).
+        let personal = serde_json::to_value(StatusResult {
+            protocol_version: 1,
+            daemon_version: "0.1.0".into(),
+            started_at: "2026-08-25T07:00:12Z".into(),
+            device_id: "dev_9f3k2v8q1x".into(),
+            mode: Mode::Personal,
+            enrolled: false,
+            hostname: "punar".into(),
+            capabilities_total: 3,
+            last_reconcile: "2026-08-25T07:00:13Z".into(),
+            audit: AuditStatus {
+                path: "/var/log/punar/audit.jsonl".into(),
+                events: 1,
+            },
+            compliance: None,
+            org: None,
+        })
+        .unwrap();
+        assert!(
+            personal.get("org").is_none(),
+            "org must be absent, never null, on a personal device"
+        );
+
+        let managed: StatusResult = serde_json::from_value(json!({
+            "protocol_version": 1, "daemon_version": "0.1.0",
+            "started_at": "t", "device_id": "dev_1", "mode": "managed",
+            "enrolled": true, "hostname": "h", "capabilities_total": 3,
+            "last_reconcile": "t",
+            "audit": {"path": "p", "events": 0},
+            "org": {"id": "acme", "name": "Acme",
+                     "display_name": "Acme Engineering", "domain": "acme.com"}
+        }))
+        .unwrap();
+        assert_eq!(managed.mode, Mode::Managed);
+        assert_eq!(managed.org.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn org_pinned_denial_cites_the_pinning_source() {
+        // Contract section 5.4 M5 amendment: the m5-check greps for the
+        // source name, the policy id, and the section 73 next step.
+        let err = IpcError::denied_org_pinned(
+            "security.firewall",
+            "Acme Engineering Baseline",
+            "eng-baseline-v12",
+        );
+        assert_eq!(err.code, ErrorCode::Denied);
+        assert!(err.message.contains("Acme Engineering Baseline"));
+        assert!(err.message.contains("eng-baseline-v12"));
+        assert!(err.message.contains("not permitted"));
+        assert!(err.message.contains("Next step"));
+        assert!(
+            !err.message.contains("personal defaults"),
+            "the false M3 citation must be gone on managed paths"
+        );
+        let details = err.details.unwrap();
+        assert_eq!(details["policy_ids"], json!(["eng-baseline-v12"]));
+        assert_eq!(details["capability"], "security.firewall");
+    }
+
+    #[test]
+    fn enroll_timeout_bounds_cover_each_other() {
+        // Contract section 2: the 90 s client budget must cover the 60 s
+        // processing bound with margin.
+        assert!(ENROLL_START_CLIENT_TIMEOUT > ENROLL_START_PROCESS_TIMEOUT);
     }
 
     // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------

@@ -76,23 +76,33 @@ PanelWindow {
 
         // Center intentionally empty — calm.
 
-        // Right: compliance dot + word, then the clock (data is always mono
-        // tabular; Geist Mono is inherently tabular).
+        // Right: org name + compliance dot + word (enrolled only), then the
+        // clock (data is always mono tabular; Geist Mono is inherently
+        // tabular).
         Row {
             anchors.right: parent.right
             anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
             spacing: 6
 
-            // Unmanaged-first (§8): compliance chrome renders only when
-            // enrolled — a personal device's bar is just name + clock.
+            // Unmanaged-first (§8): org chrome renders only when enrolled —
+            // a personal device's bar stays name + clock, byte-identical to
+            // the pre-M5 bar (Row positioners skip invisible items).
+            // Enrolled grammar (M5; system-control mockup masthead
+            // compressed to bar scale — org name + state; policy ids stay
+            // in punarctl): ORG NAME · <dot> STATE-WORD · CLOCK.
+            MetaLabel {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: Status.enrolled
+                text: Status.orgName + " · "
+            }
             Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 5
                 height: 5
                 radius: 2.5
                 visible: Status.enrolled
-                color: Status.color // stub singleton — M5 wires real compliance
+                color: Status.color // live compliance via status.json (M5)
             }
             MetaLabel {
                 anchors.verticalCenter: parent.verticalCenter

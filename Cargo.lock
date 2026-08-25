@@ -179,6 +179,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "punar-mock-smplify"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "punar-common",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook",
+]
+
+[[package]]
 name = "punar-netd"
 version = "0.1.0"
 

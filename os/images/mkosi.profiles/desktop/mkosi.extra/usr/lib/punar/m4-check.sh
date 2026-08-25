@@ -24,7 +24,7 @@
 # set → OS-DEFAULT provenance (rank 6). Both source kinds get exercised.
 #
 # Assertions (milestone-4.md §10.2; machine checks via --json + jq):
-#   1  punard-reconcile.timer is-enabled (vendor wants symlink survived
+#   1  punard-reconcile.timer wired via vendor wants (symlink + Wants —
 #      mkosi's /etc preset wipe); is-active after the phase-B start
 #   2  layer stores exist 0600 root:root; M3 desired.json absent (fresh
 #      install — the migration path is host-cargo-test-only, §10.3)
@@ -91,8 +91,16 @@ jq_check() {
 systemctl stop "${TIMER}" >/dev/null 2>&1
 
 # --- 1a. timer vendored (enablement survived the mkosi /etc preset wipe) -----
-check_eq "${TIMER} is-enabled (vendor wants symlink)" enabled \
-    "$(systemctl is-enabled "${TIMER}" 2>/dev/null)"
+# Vendor-wants units report is-enabled=disabled (enablement state tracks
+# /etc only — the same semantics observed with greetd/punard). Assert the
+# wiring itself: the symlink exists AND multi-user.target Wants the timer.
+if [ -L "/usr/lib/systemd/system/multi-user.target.wants/${TIMER}" ] \
+    && systemctl show -p Wants multi-user.target 2>/dev/null | grep -q "${TIMER}"; then
+    note "ok   ${TIMER} wired via vendor wants (symlink + multi-user Wants)"
+else
+    note "FAIL ${TIMER} vendor wants wiring missing (symlink or Wants)"
+    FAILED=1
+fi
 
 # --- 2. layer stores (milestone-4.md §3.1) -----------------------------------
 check_eq "${STATE_DIR}/os-defaults.json owner mode" "root:root 600" \
