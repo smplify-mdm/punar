@@ -21,3 +21,4 @@ gets one row in the index below.
 | --- | --- | --- | --- |
 | [ADR-001](docs/architecture/adr/ADR-001-distribution-substrate.md) | Distribution Substrate | Accepted | 2026-08-24 |
 | [ADR-002](docs/architecture/adr/ADR-002-first-party-binaries.md) | Distribution of First-Party Binaries | Accepted | 2026-08-25 |
+| [ADR-003](docs/architecture/adr/ADR-003-ab-slots-over-snapper.md) | A/B root slots as the rollback mechanism (supersedes ADR-001's MVP snapper choice) | Proposed | 2026-08-25 |
