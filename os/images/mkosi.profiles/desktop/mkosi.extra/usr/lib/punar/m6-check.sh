@@ -30,6 +30,11 @@
 # surface plus the one grant M6 realizes (the /workspace bind mount).
 # Network zones, credentials and agent sessions are asserted as labeled
 # declarations (enforced M12/M9/M7), never as enforcement.
+# IMAGE TOOLING TRAP (CI run 32852810872): the punar-desktop image has NO
+# diffutils — `cmp` and `diff` do not exist. A bare `cmp -s a b` fails as
+# command-not-found and reads as a content mismatch. Compare files with
+# sha256sum (coreutils, always present). Do not reintroduce cmp/diff here.
+
 set -u
 
 RUN_DIR=/run/punar
@@ -114,14 +119,27 @@ else
     FAILED=1
 fi
 mkdir -p "${ATLAS}"
-cp "${FIXTURE_DIR}/project-environment.yaml" \
-   "${FIXTURE_DIR}/project-network-policy.json" "${ATLAS}/" 2>/dev/null
+# Copy errors are REPORTED, never swallowed (a silent cp failure cost a CI
+# cycle in run 32852810872: the manifest mismatch had no visible cause).
+if ! cp "${FIXTURE_DIR}/project-environment.yaml" \
+        "${FIXTURE_DIR}/project-network-policy.json" "${ATLAS}/" \
+        > "${RUN_DIR}/m6-fixture-cp.txt" 2>&1; then
+    note "FAIL fixture copy failed: $(head -c 200 "${RUN_DIR}/m6-fixture-cp.txt")"
+    FAILED=1
+fi
 chown -R punar:punar "${ATLAS}"
-if cmp -s "${FIXTURE_DIR}/project-environment.yaml" \
-        "${ATLAS}/project-environment.yaml"; then
-    note "ok   copied manifest byte-identical to the staged fixture"
+# Self-diagnosing comparison: on mismatch, print both digests and both
+# stat lines so the CI log names the cause without an image autopsy.
+FIXTURE_SHA="$(sha256sum "${FIXTURE_DIR}/project-environment.yaml" 2>&1 | cut -d" " -f1)"
+ATLAS_SHA="$(sha256sum "${ATLAS}/project-environment.yaml" 2>&1 | cut -d" " -f1)"
+if [ "${FIXTURE_SHA}" = "${ATLAS_SHA}" ]; then
+    note "ok   copied manifest byte-identical to the staged fixture = ${ATLAS_SHA}"
 else
-    note "FAIL copied manifest differs from the staged fixture"
+    note "FAIL copied manifest differs: staged=${FIXTURE_SHA} copy=${ATLAS_SHA}"
+    note "     staged: $(ls -l "${FIXTURE_DIR}/project-environment.yaml" 2>&1)"
+    note "     copy:   $(ls -l "${ATLAS}/project-environment.yaml" 2>&1)"
+    note "     staged head: $(head -c 120 "${FIXTURE_DIR}/project-environment.yaml" 2>&1 | tr "\n" "|")"
+    note "     copy   head: $(head -c 120 "${ATLAS}/project-environment.yaml" 2>&1 | tr "\n" "|")"
     FAILED=1
 fi
 
@@ -302,11 +320,11 @@ if as_punar podman container exists "${CONTAINER}" >/dev/null 2>&1; then
 else
     note "ok   container ${CONTAINER} gone after destroy"
 fi
-if cmp -s "${FIXTURE_DIR}/project-environment.yaml" \
-        "${ATLAS}/project-environment.yaml" && [ -f "${ATLAS}/.m6-write" ]; then
-    note "ok   project files intact after destroy (manifest byte-identical, .m6-write present)"
+POST_SHA="$(sha256sum "${ATLAS}/project-environment.yaml" 2>&1 | cut -d" " -f1)"
+if [ "${POST_SHA}" = "${ATLAS_SHA}" ] && [ -f "${ATLAS}/.m6-write" ]; then
+    note "ok   project files intact after destroy (manifest unchanged, .m6-write present)"
 else
-    note "FAIL destroy touched project files"
+    note "FAIL destroy touched project files: before=${ATLAS_SHA} after=${POST_SHA} write=$([ -f "${ATLAS}/.m6-write" ] && echo present || echo missing)"
     FAILED=1
 fi
 as_punar "${ENV_BIN}" -C "${ATLAS}" destroy \
