@@ -681,7 +681,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M2_OK' "${SERIAL_LOG}"; then
         echo "==> M2 exercise: PUNAR_M2_OK (verdict from serial console; export did not deliver m2-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m2-report.txt in the export and no M2 verdict on serial — the M2 exercise did not run"
+        echo "error: no m2-report.txt in the export and no M2 verdict on serial — the M2 exercise did not run" >&2
+        exit 1
     else
         echo "==> M2 exercise: no report under TCG (informational only; emulated runs are not M2-gated)"
     fi
@@ -715,7 +716,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M3_OK' "${SERIAL_LOG}"; then
         echo "==> M3 exercise: PUNAR_M3_OK (verdict from serial console; export did not deliver m3-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m3-report.txt in the export and no M3 verdict on serial — the M3 exercise did not run"
+        echo "error: no m3-report.txt in the export and no M3 verdict on serial — the M3 exercise did not run" >&2
+        exit 1
     else
         echo "==> M3 exercise: no report under TCG (informational only; emulated runs are not M3-gated)"
     fi
@@ -749,7 +751,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M4_OK' "${SERIAL_LOG}"; then
         echo "==> M4 exercise: PUNAR_M4_OK (verdict from serial console; export did not deliver m4-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m4-report.txt in the export and no M4 verdict on serial — the M4 exercise did not run"
+        echo "error: no m4-report.txt in the export and no M4 verdict on serial — the M4 exercise did not run" >&2
+        exit 1
     else
         echo "==> M4 exercise: no report under TCG (informational only; emulated runs are not M4-gated)"
     fi
@@ -785,7 +788,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M5_OK' "${SERIAL_LOG}"; then
         echo "==> M5 exercise: PUNAR_M5_OK (verdict from serial console; export did not deliver m5-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m5-report.txt in the export and no M5 verdict on serial — the M5 exercise did not run"
+        echo "error: no m5-report.txt in the export and no M5 verdict on serial — the M5 exercise did not run" >&2
+        exit 1
     else
         echo "==> M5 exercise: no report under TCG (informational only; emulated runs are not M5-gated)"
     fi
@@ -822,7 +826,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M6_OK' "${SERIAL_LOG}"; then
         echo "==> M6 exercise: PUNAR_M6_OK (verdict from serial console; export did not deliver m6-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m6-report.txt in the export and no M6 verdict on serial — the M6 exercise did not run"
+        echo "error: no m6-report.txt in the export and no M6 verdict on serial — the M6 exercise did not run" >&2
+        exit 1
     else
         echo "==> M6 exercise: no report under TCG (informational only; emulated runs are not M6-gated)"
     fi
@@ -861,7 +866,12 @@ run_desktop() {
     elif grep -aq 'PUNAR_M7_OK' "${SERIAL_LOG}"; then
         echo "==> M7 exercise: PUNAR_M7_OK (verdict from serial console; export did not deliver m7-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m7-report.txt in the export and no M7 verdict on serial — the M7 exercise did not run"
+        # HARD, not a warning (regression 2026-08-25): m8-check.sh shipped
+        # non-executable, its unit failed to start, no report was produced,
+        # and a green run claimed a milestone that never ran. A check that
+        # silently does not run is worse than one that fails.
+        echo "error: no m7-report.txt in the export and no M7 verdict on serial — the M7 exercise did not run" >&2
+        exit 1
     else
         echo "==> M7 exercise: no report under TCG (informational only; emulated runs are not M7-gated)"
     fi
@@ -901,7 +911,8 @@ run_desktop() {
     elif grep -aq 'PUNAR_M8_OK' "${SERIAL_LOG}"; then
         echo "==> M8 exercise: PUNAR_M8_OK (verdict from serial console; export did not deliver m8-report.txt)"
     elif [ "${ACCEL}" = "kvm" ]; then
-        warn "desktop-test: no m8-report.txt in the export and no M8 verdict on serial — the M8 exercise did not run"
+        echo "error: no m8-report.txt in the export and no M8 verdict on serial — the M8 exercise did not run" >&2
+        exit 1
     else
         echo "==> M8 exercise: no report under TCG (informational only; emulated runs are not M8-gated)"
     fi
