@@ -44,8 +44,9 @@
 #        (punar-m3-check.service — daemon/CLI/authz/audit/firewall
 #        exercise, run after the M2 exercise, before the export). Phase 2
 #        additionally captures PUNAR_SERVICES_RSS_MB=<n|absent> — the
-#        guest's summed-PSS reading of the punard.service cgroup at idle
-#        (PERFORMANCE_BUDGETS.md §2.3) — into ram-report.txt for
+#        guest's summed-PSS reading of the Punar service cgroups at idle
+#        (punard.service since M3, plus punar-agentd.service since M7 —
+#        PERFORMANCE_BUDGETS.md §2.3) — into ram-report.txt for
 #        check-budgets.sh (fail > 150 MB, warn > 100 MB; absent/missing
 #        fails even under TCG).
 #     6. M4 verdict (milestone-4.md §10): same pattern for m4-report.txt
@@ -71,6 +72,16 @@
 #        labels verbatim, agent stub honesty, destroy — run after the M5
 #        exercise, before the export; no screenshots, m6-status.txt is
 #        the human evidence).
+#     9. M7 verdict (milestone-7.md §12): same pattern for m7-report.txt
+#        (punar-m7-check.service — the AI agent registry journey: the
+#        punar-agentd daemon/socket preflight, a MOCK managed session
+#        launched through `punar-env agent claude-code` (the offline VM has
+#        no real agent binary), registry truth in registry.jsonl, scope
+#        cgroup attribution, `punarctl agents inspect`, a real innocuous
+#        process detected as UNKNOWN and SUSPECTED, /run/punar/agents.json,
+#        the AI-panel screenshot with both rows, end of life, the audit
+#        lifecycle lines and negative probes on the new socket — run after
+#        the M6 exercise, before the export).
 #   Host-side results land in <proof-dir> (default
 #   os/images/out/desktop-proof):
 #     punar-desktop-screenshot.png  grim capture — proof of real rendering
@@ -90,6 +101,12 @@
 #     m6-report.txt, m6-*.txt       M6 exercise verdict + punar-env status
 #     m6-*.json                     render/JSON, podman info/inspect/ps
 #                                   snapshots (no screenshots — CLI milestone)
+#     m7-report.txt, m7-*.txt       M7 exercise verdict + the agent launch
+#                                   block, inspect render and list render
+#     m7-*.json, m7-registry.jsonl  agents list/scan/agents.json snapshots and
+#                                   the schema-exact registry transition log
+#     punar-m7.png                  grim capture, AI panel with a managed row
+#                                   and an unknown row (M7, Plate D-005)
 #     serial.log                    full serial console log (also on failure)
 #   The budget VERDICT is not applied here: tests/performance/
 #   check-budgets.sh reads ram-report.txt and gates against
@@ -97,7 +114,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2/M3/M4/M5/M6/M7_FAIL fails here.
 #
 # KVM is used when /dev/kvm is present and accessible; otherwise the test
 # degrades to TCG software emulation with a visible warning (and a GitHub
@@ -116,9 +133,9 @@
 #                          fixed 10 min + 5 min measurement
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
-#                          — must also cover the in-guest M2 exercise,
-#                          which runs between the RAM result and the export
-#                          (default: 900 KVM, 2400 TCG)
+#                          — must also cover the in-guest M2..M7 exercises,
+#                          which run between the RAM result and the export
+#                          (default: 2400 KVM, 4500 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
 #                          (default: os/images/out/desktop-proof)
 #
@@ -237,9 +254,11 @@ if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     # M5 enrollment exercise (reconcile RPCs plus two bounded 10 s
     # screenshot waits, a few minutes) and the M6 punar-env exercise
     # (podman load of a ~1.3 MB archive, one container create, a handful
-    # of execs — seconds under KVM) — all of which run before the guest
-    # starts streaming the export.
-    DEFAULT_EXPORT_TIMEOUT=1800
+    # of execs — seconds under KVM) and the M7 agent-registry exercise
+    # (bounded 15 min in-guest: a 120 s registration wait, screenshot
+    # settles, a 60 s teardown wait — a minute or two under KVM) — all of
+    # which run before the guest starts streaming the export.
+    DEFAULT_EXPORT_TIMEOUT=2400
     echo "==> /dev/kvm present and accessible: using KVM acceleration"
 else
     ACCEL="tcg"
@@ -251,9 +270,11 @@ else
     # (window spawns, quickshell relaunch — bounded at 25 min in-guest),
     # plus the M3 exercise (bounded 10 min), the M4 drift demo (375 s
     # wall clock — timer firings are wall-clock even under TCG), the
-    # M5 enrollment exercise (bounded 15 min in-guest) and the M6
-    # punar-env exercise (bounded 10 min in-guest, minutes in practice).
-    DEFAULT_EXPORT_TIMEOUT=3600
+    # M5 enrollment exercise (bounded 15 min in-guest), the M6
+    # punar-env exercise (bounded 10 min in-guest, minutes in practice)
+    # and the M7 agent-registry exercise (bounded 15 min in-guest; the
+    # quickshell IPC round trips and grim are the slow parts under TCG).
+    DEFAULT_EXPORT_TIMEOUT=4500
     warn "/dev/kvm unavailable: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -412,6 +433,11 @@ run_desktop() {
           "${PROOF_DIR}/m6-report.txt" \
           "${PROOF_DIR}"/m6-*.json \
           "${PROOF_DIR}"/m6-*.txt \
+          "${PROOF_DIR}/m7-report.txt" \
+          "${PROOF_DIR}"/m7-*.json \
+          "${PROOF_DIR}"/m7-*.jsonl \
+          "${PROOF_DIR}"/m7-*.txt \
+          "${PROOF_DIR}/punar-m7.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -476,8 +502,9 @@ run_desktop() {
 
     # M3 services-RSS line (milestone-3.md §9): the guest emits
     # PUNAR_SERVICES_RSS_MB=<n|absent> immediately after the RAM result
-    # (summed PSS over the punard.service cgroup — PERFORMANCE_BUDGETS.md
-    # §2.3; the var name keeps RSS as the fixed consumer contract). Short
+    # (summed PSS over EVERY Punar service cgroup — punard.service and,
+    # since M7, punar-agentd.service — PERFORMANCE_BUDGETS.md §2.3; the var
+    # name keeps RSS as the fixed consumer contract). Short
     # wait only; if it never appears (pre-M3 guest image) record `missing`
     # — check-budgets.sh fails both `absent` and `missing`, even under TCG
     # (a dead daemon is not an emulation artifact).
@@ -486,7 +513,7 @@ run_desktop() {
     if wait_for_pattern "${SERIAL_LOG}" "${services_rss_regex}" 120 "services-RSS line (PUNAR_SERVICES_RSS_MB)"; then
         services_rss="$(grep -aoE "${services_rss_regex}" "${SERIAL_LOG}" | tail -n 1)"
         services_rss="${services_rss#PUNAR_SERVICES_RSS_MB=}"
-        echo "==> Services RSS from guest (summed PSS, punard.service cgroup): ${services_rss} MB"
+        echo "==> Services RSS from guest (summed PSS, punard + punar-agentd cgroups): ${services_rss} MB"
     else
         warn "desktop-test: no PUNAR_SERVICES_RSS_MB line after the RAM result (pre-M3 guest image?); recording 'missing'"
     fi
@@ -517,7 +544,8 @@ run_desktop() {
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
-                     m5-report.txt punar-m5.png punar-m5-personal.png; do
+                     m5-report.txt punar-m5.png punar-m5-personal.png \
+                     m7-report.txt punar-m7.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -534,11 +562,16 @@ run_desktop() {
             # phase-7 verdict — and the M6 punar-env snapshots
             # (m6-*.txt/.json: m6-report.txt, the D-014 status render +
             # --json object, podman info/inspect/ps evidence) for the
-            # phase-8 verdict.
+            # phase-8 verdict — and the M7 agent-registry snapshots
+            # (m7-*.txt/.json/.jsonl: m7-report.txt, the launch block, the
+            # inspect and list renders, agents list/scan/agents.json and the
+            # schema-exact registry transition log) for the phase-9 verdict.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
                      "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
                      "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt \
-                     "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt; do
+                     "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt \
+                     "${guest_dir}"/m7-*.json "${guest_dir}"/m7-*.jsonl \
+                     "${guest_dir}"/m7-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -561,9 +594,10 @@ run_desktop() {
         echo "# (MemTotal - MemAvailable; 10 min stabilize, 5 min window, 10 s cadence; mean+max)."
         echo "# PUNAR_DESKTOP_OK_HOST_SECS is host wall clock from qemu start to the marker —"
         echo "# an informational boot-to-desktop proxy (budgets §2.6), not a measured boot metric."
-        echo "# PUNAR_SERVICES_RSS_MB is the summed PSS (smaps_rollup) of the punard.service"
-        echo "# cgroup's pids at stabilized idle (PERFORMANCE_BUDGETS.md §2.3; the variable"
-        echo "# name keeps RSS as the fixed consumer contract, the value is summed PSS)."
+        echo "# PUNAR_SERVICES_RSS_MB is the summed PSS (smaps_rollup) of the pids in EVERY"
+        echo "# Punar service cgroup at stabilized idle — punard.service and, since M7,"
+        echo "# punar-agentd.service (PERFORMANCE_BUDGETS.md §2.3; the variable name keeps"
+        echo "# RSS as the fixed consumer contract, the value is summed PSS)."
         echo "PUNAR_RAM_MEAN_MB=${ram_mean}"
         echo "PUNAR_RAM_MAX_MB=${ram_max}"
         echo "PUNAR_SERVICES_RSS_MB=${services_rss}"
@@ -748,6 +782,45 @@ run_desktop() {
         warn "desktop-test: no m6-report.txt in the export and no M6 verdict on serial — the M6 exercise did not run"
     else
         echo "==> M6 exercise: no report under TCG (informational only; emulated runs are not M6-gated)"
+    fi
+
+    # Phase 9: M7 exercise verdict (milestone-7.md §12) — same pattern as
+    # the M2–M6 gates. The guest wrote /run/punar/m7-report.txt
+    # (per-assertion ok/FAIL lines + a final PUNAR_M7_OK / PUNAR_M7_FAIL
+    # line) via punar-m7-check.service: punar-agentd daemon/socket/tmpfiles
+    # preflight, a MOCK managed session through `punar-env agent claude-code`
+    # (the offline VM has no real agent binary — the stand-in labels itself),
+    # registry truth (list + the schema-exact registry.jsonl + the workspace
+    # touch), scope-cgroup attribution, the `punarctl agents inspect` detail
+    # with its PERSONAL DEFAULTS citation and MILESTONE 8 ledger line, a real
+    # innocuous process detected as UNKNOWN/SUSPECTED, agents.json, the AI
+    # panel screenshot, end of life, the audit lifecycle lines and negative
+    # probes on the new socket. Hard gate: a delivered FAIL — or a truncated
+    # report — fails this script. A MISSING report degrades: serial carries
+    # the echoed report as the fallback verdict; with no verdict anywhere it
+    # is a ::warning:: under KVM and info-only under TCG.
+    local m7_report="${PROOF_DIR}/m7-report.txt"
+    if [ -f "${m7_report}" ]; then
+        if grep -q 'PUNAR_M7_FAIL' "${m7_report}"; then
+            echo "error: M7 exercise reported PUNAR_M7_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m7_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M7_OK' "${m7_report}"; then
+            echo "==> M7 exercise: PUNAR_M7_OK ($(grep -c '^ok' "${m7_report}" || true) assertions passed)"
+        else
+            echo "error: m7-report.txt carries no PUNAR_M7_OK/PUNAR_M7_FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${m7_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M7_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M7 exercise reported PUNAR_M7_FAIL on the serial console (export did not deliver m7-report.txt)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M7_OK' "${SERIAL_LOG}"; then
+        echo "==> M7 exercise: PUNAR_M7_OK (verdict from serial console; export did not deliver m7-report.txt)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        warn "desktop-test: no m7-report.txt in the export and no M7 verdict on serial — the M7 exercise did not run"
+    else
+        echo "==> M7 exercise: no report under TCG (informational only; emulated runs are not M7-gated)"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

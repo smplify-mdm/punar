@@ -16,18 +16,28 @@
 //!   [`audit`] module's writer, tail reader, and builders.
 //! - [`ipc`] — the typed request/response envelope, closed method table, and
 //!   error codes (SPEC sections 10, 60, 61, 73; docs/api/ipc.md).
+//! - [`agent`] — the AI Agent Registry record (SPEC section 19.2;
+//!   `schemas/ai-agent/registry-record.json`), the closed `agents.*` method
+//!   table of the sibling `punar-agentd` socket, and the
+//!   `/run/punar/agents.json` summary shape (docs/api/ipc.md sections
+//!   10-11; Milestone 7).
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
 //!
 //! Dependency policy (budget + supply chain, PERFORMANCE_BUDGETS.md section
-//! 6.2): `serde`/`serde_json`/`thiserror` only. `serde_json` graduated from
-//! dev-dependency in M3 because the IPC envelope carries params/results and
-//! capability state values as structured JSON and the audit writer emits
-//! JSONL — no new crate enters the tree.
+//! 6.2): `serde`/`serde_json`/`thiserror`, plus `rustix` since M7.
+//! `serde_json` graduated from dev-dependency in M3 because the IPC
+//! envelope carries params/results and capability state values as
+//! structured JSON and the audit writer emits JSONL. `rustix` (already in
+//! the workspace tree for `punard`'s `SO_PEERCRED`, feature-gated, no new
+//! crate) buys the `flock` behind [`AuditWriter`]'s rotation lock: two
+//! daemons now append to one trail (docs/api/ipc.md section 10.4), and
+//! `flock` is not reachable from safe `std`.
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod audit;
 mod capability;
 mod decision;
@@ -37,6 +47,7 @@ mod principal;
 mod redacted;
 pub mod time;
 
+pub use agent::{AgentClassification, AgentStatus, RegistryRecord};
 pub use audit::{AuditEvent, AuditWriter};
 pub use capability::{CapabilityId, CapabilityIdError};
 pub use decision::Decision;

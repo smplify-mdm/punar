@@ -1,45 +1,60 @@
 # Milestone 2 — Native multitasking: capability check + integration plan
 
-Status: **implemented 2026-08-25; runtime acceptance pending the first
-desktop CI run that includes the M2 exercise.** The desktop gate itself is
-proven infrastructure: the M1-scope `desktop-test` job went green on
-2026-08-25 (run
+Status: **implemented 2026-08-25; runtime acceptance proven the same day
+by the first desktop CI run that includes the M2 exercise.** That run
+has happened:
+[32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021)
+(2026-08-25, commit `5e1f5cb`, KVM runner, fully green) executed
+`punar-m2-check` inside the booted `punar-desktop` VM and delivered
+**`PUNAR_M2_OK`** — the §7 assertion list passed at runtime, including
+state write/restore across a shell restart and the overview toggling
+over IPC. Idle RAM measured **mean 1157 MB / max 1162 MB**: under the
+1536 MB hard ceiling, over the 1024 MB target, recorded as a budget
+warning, with no new always-on processes. Evidence ships as artifacts —
+`punar-desktop-ram-report` (includes `m2-report.txt`) and
+`punar-desktop-screenshot` (includes `punar-m2.png`). The desktop gate
+itself was already proven infrastructure before that: the M1-scope
+`desktop-test` job went green on 2026-08-25 (run
 [32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681)
-— `PUNAR_DESKTOP_OK` after 18 s under KVM, idle RAM 1162 MB mean / 1168 MB
-max passing the budget gate with an over-target warning), but that run
-**predates the M2 wiring** — no CI run has executed `punar-m2-check` yet.
-The M2 workstreams (compositor config, shell/overview, layout
-script, state/crate, CI check) have all landed against the decisions fixed
-here: Hyprland grammar + `punar-layout.sh` (verified against the pinned
-0.56.2-1 binary via `--verify-config`), the overview + `WorkspaceState`
-shell surfaces (qmllint-clean; state behavior verified headlessly), the
-`punar-workspace` crate + JSON Schema (tests + schema validation green),
-and the in-VM CI exercise wiring (§7 — `/usr/lib/punar/m2-check.sh` +
-`punar-m2-check.service`, gated by `tools/boot-test.sh` phase 4 and the
-`desktop-test` CI job). Per spec 1.22: everything only CI can prove —
-runtime behavior of binds/presets/overview in the VM, state write/restore,
-the §7 assertions themselves — remains **unverified until a desktop CI run
-that includes the M2 exercise goes green** (§8). Spec basis:
-[SPEC_v0.2.md](../product/SPEC_v0.2.md) §76 Milestone 2 (tiling, stacking,
-floating, overview, layouts, scratchpads, named project workspaces), with
-§13 (window management), §14 (project workspaces), §15 (multi-monitor)
-as the core and §12.2–12.3 (command center, discoverability) as the
-delivery surfaces. Design is binding:
+— `PUNAR_DESKTOP_OK` after 18 s under KVM, idle RAM 1162 MB mean / 1168
+MB max passing the budget gate with an over-target warning), a run that
+**predates the M2 wiring**. The M2 workstreams (compositor config,
+shell/overview, layout script, state/crate, CI check) have all landed
+against the decisions fixed here: Hyprland grammar + `punar-layout.sh`
+(verified against the pinned 0.56.2-1 binary via `--verify-config`), the
+overview + `WorkspaceState` shell surfaces (qmllint-clean; state
+behavior verified headlessly), the `punar-workspace` crate + JSON Schema
+(tests + schema validation green), and the in-VM CI exercise wiring (§7
+— `/usr/lib/punar/m2-check.sh` + `punar-m2-check.service`, gated by
+`tools/boot-test.sh` phase 4 and the `desktop-test` CI job). Per spec
+1.22: everything only CI can prove — runtime behavior of
+binds/presets/overview in the VM, state write/restore, the §7 assertions
+themselves — is now **proven by run 32825539021** (§8). What CI cannot
+see stays open: fidelity of the presets and the overview to Plate D-007
+(human design review) and the keyboard-only human walkthrough. Spec
+basis: [SPEC_v0.2.md](../product/SPEC_v0.2.md) §76 Milestone 2 (tiling,
+stacking, floating, overview, layouts, scratchpads, named project
+workspaces), with §13 (window management), §14 (project workspaces), §15
+(multi-monitor) as the core and §12.2–12.3 (command center,
+discoverability) as the delivery surfaces. Design is binding:
 [DESIGN_LANGUAGE.md](../design/DESIGN_LANGUAGE.md) (incl. §8
 unmanaged-first — the M2 desktop is identical personal vs managed) and
 **Plate D-007** `docs/design/mockups/desktop-multitasking.html` (project
 grid, wireframe mini layouts, meta rows, type-to-search, arrow nav,
-selection = raised fill + 2 px ink rule, 300 ms `cubic-bezier(0.2,0,0,1)`
-motion only where it explains state).
+selection = raised fill + 2 px ink rule, 300 ms
+`cubic-bezier(0.2,0,0,1)` motion only where it explains state).
 [PERFORMANCE_BUDGETS.md](../../PERFORMANCE_BUDGETS.md) still binds: **no
 new daemons, no polling loops; the overview renders on demand.**
 
 Honesty (spec 1.22): §1 below is **verified** — method stated per row,
 against the exact pinned inputs (hyprland 0.56.2-1 from ALA 2026/08/20,
-quickshell 0.3.0-3). Everything after §1 is **decided plan**; runtime
-behavior in the VM is unverified until the M2 CI check (§7) runs. M1
-context (session chain, config paths, vendor-level `.wants/` rule for any
-new units) is in [milestone-1.md](milestone-1.md) and is not relitigated.
+quickshell 0.3.0-3). Everything after §1 was written as **decided plan**
+and is now the **as-built** design; its runtime behavior in the VM was
+unverified until the M2 CI check (§7) ran green in run 32825539021, and
+what remains unverified is only what CI cannot see — flagged per row in
+§8. M1 context (session chain, config paths, vendor-level `.wants/` rule
+for any new units) is in [milestone-1.md](milestone-1.md) and is not
+relitigated.
 
 ---
 
@@ -327,11 +342,11 @@ rename.
 | Claim | Status |
 | --- | --- |
 | §1 tables (dispatchers, keywords, JSON fields, QML API, FileView atomicity) | **verified 2026-08-25** — method §1 preamble; probe passed `--verify-config` on hyprland 0.56.2-1 with negative control |
-| Preset mapping renders the described shapes at runtime | **unverified — plan**; keyword validity verified, visual behavior proven by CI screenshot + human walkthrough |
-| Overview implements D-007 faithfully | **unverified — plan**; design review against the plate is part of shell-workstream acceptance |
-| State write/restore behavior in the VM | **unverified — plan**; §7 rows 10–11 are the arbiter |
-| No-polling / no-daemon budget compliance | **by construction** (event-driven shell, one-shot script); §7 row 12 is the runtime proof |
-| CI wiring (m2-check.sh, punar-m2-check.service, boot-test phase 4, ci.yml uploads) | **statically verified 2026-08-25** — shellcheck v0.11.0 (pinned container) clean on every touched script, actionlint clean on ci.yml, `PUNAR_BUILD_MODE=summary` staging + `mkosi summary` pass in the pinned builder; the exercise's runtime PASS is exactly what the first desktop CI run that includes it must prove |
+| Preset mapping renders the described shapes at runtime | **partly verified 2026-08-25** — run 32825539021: §7 rows 5–6 passed, each preset flipping `general:layout` and the workspace `tiledLayout` in the VM; the *visual* shape fidelity is still unverified and rests on screenshot review + human walkthrough |
+| Overview implements D-007 faithfully | **unverified — design review**; run 32825539021 proved the overview toggles over IPC and renders (§7 row 9; `punar-m2.png` in the `punar-desktop-screenshot` artifact), but fidelity to the plate is a human review and is part of shell-workstream acceptance |
+| State write/restore behavior in the VM | **verified 2026-08-25** — the arbiter has run: §7 rows 10–11 passed in run 32825539021 (schema-valid `workspaces.json` written; workspace 1 restored to `atlas` after a shell restart) |
+| No-polling / no-daemon budget compliance | **by construction** (event-driven shell, one-shot script) **and verified 2026-08-25** — §7 row 12 passed in run 32825539021: no new always-on processes, budgets green at idle RAM mean 1157 MB / max 1162 MB (under the 1536 MB ceiling, over the 1024 MB target — recorded warning) |
+| CI wiring (m2-check.sh, punar-m2-check.service, boot-test phase 4, ci.yml uploads) | **statically verified 2026-08-25** — shellcheck v0.11.0 (pinned container) clean on every touched script, actionlint clean on ci.yml, `PUNAR_BUILD_MODE=summary` staging + `mkosi summary` pass in the pinned builder; the exercise's runtime PASS — exactly what the first desktop CI run including it had to prove — was **delivered 2026-08-25** by run 32825539021 (commit `5e1f5cb`, KVM), which ran `punar-m2-check` in-VM and returned `PUNAR_M2_OK` |
 
 Sources: Hyprland `v0.56.2` source tag (files cited inline); quickshell
 `v0.3.0` source tag; hyprland 0.56.2-1 binary from ALA 2026/08/20 in the

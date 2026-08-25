@@ -698,107 +698,8 @@ impl Request {
     /// 5. `id` length → `malformed_request`
     /// 6. method table → `unknown_method`; params → `invalid_params`
     pub fn parse_json_line(line: &str) -> Result<Request, RequestReject> {
-        // 1. Length bound (bytes, excluding the terminator the caller strips).
-        if line.len() > MAX_REQUEST_LINE_BYTES {
-            return Err(RequestReject {
-                id: None,
-                error: IpcError::new(
-                    ErrorCode::MalformedRequest,
-                    format!(
-                        "The request line exceeds the {MAX_REQUEST_LINE_BYTES}-byte limit. \
-                         Next step: no Milestone 3 method needs a longer line; check the client."
-                    ),
-                ),
-            });
-        }
-
-        // 2. Generic JSON parse, so we can echo `id` even for envelopes that
-        // fail strict validation.
-        let value: Value = serde_json::from_str(line).map_err(|err| RequestReject {
-            id: None,
-            error: IpcError::new(
-                ErrorCode::MalformedRequest,
-                format!(
-                    "The request line is not valid JSON: {err}. Next step: send one \
-                     JSON object per line as documented in docs/api/ipc.md."
-                ),
-            ),
-        })?;
-        let Some(object) = value.as_object() else {
-            return Err(RequestReject {
-                id: None,
-                error: IpcError::new(
-                    ErrorCode::MalformedRequest,
-                    "The request line must be a JSON object envelope \
-                     {\"v\":1,\"id\":…,\"method\":…}. Next step: see docs/api/ipc.md."
-                        .to_string(),
-                ),
-            });
-        };
-        let echo_id = object
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| id_length_ok(id))
-            .map(str::to_string);
-        let reject = |error: IpcError| RequestReject {
-            id: echo_id.clone(),
-            error,
-        };
-
-        // 3. Version, before strict field checks (see doc comment).
-        match object.get("v") {
-            None => {
-                return Err(reject(IpcError::new(
-                    ErrorCode::MalformedRequest,
-                    "The envelope field \"v\" is required and must be the integer 1.".to_string(),
-                )));
-            }
-            Some(v) => match v.as_u64() {
-                Some(version) if version == PROTOCOL_VERSION => {}
-                Some(version) => {
-                    return Err(reject(IpcError::with_details(
-                        ErrorCode::UnsupportedVersion,
-                        format!(
-                            "This daemon speaks Punar IPC protocol version \
-                             {PROTOCOL_VERSION}; the request asked for version {version}. \
-                             Next step: use the punarctl that shipped with this image."
-                        ),
-                        json!({ "supported": [PROTOCOL_VERSION] }),
-                    )));
-                }
-                None => {
-                    return Err(reject(IpcError::new(
-                        ErrorCode::MalformedRequest,
-                        "The envelope field \"v\" must be the integer 1.".to_string(),
-                    )));
-                }
-            },
-        }
-
-        // 4. Strict typed envelope (rejects unknown/mistyped fields).
-        let envelope: RequestEnvelope = serde_json::from_value(value.clone()).map_err(|err| {
-            reject(IpcError::new(
-                ErrorCode::MalformedRequest,
-                format!(
-                    "The request envelope is invalid: {err}. Next step: the \
-                         envelope fields are exactly v, id, method, params \
-                         (docs/api/ipc.md)."
-                ),
-            ))
-        })?;
-
-        // 5. Id bounds.
-        if !id_length_ok(&envelope.id) {
-            return Err(reject(IpcError::new(
-                ErrorCode::MalformedRequest,
-                format!(
-                    "The envelope field \"id\" must be a string of \
-                     {REQUEST_ID_MIN_CHARS} to {REQUEST_ID_MAX_CHARS} characters."
-                ),
-            )));
-        }
-
-        // 6. Method table + typed params.
+        // 1.–5. shared envelope pipeline; 6. the punard method table.
+        let envelope = parse_envelope_line(line)?;
         let method = Method::from_wire(&envelope.method, envelope.params).map_err(|error| {
             RequestReject {
                 id: Some(envelope.id.clone()),
@@ -809,6 +710,182 @@ impl Request {
             id: envelope.id,
             method,
         })
+    }
+}
+
+/// Stages 1–5 of the request parse pipeline (length, JSON shape, version,
+/// strict envelope fields, id bounds) — everything up to, but not
+/// including, the method table. Extracted (M7, additively) because both
+/// daemons share the envelope contract while owning distinct closed method
+/// tables: `punard` finishes with [`Method::from_wire`], `punar-agentd`
+/// with [`crate::agent::AgentMethod::from_wire`] (docs/api/ipc.md
+/// section 10.1: "framing, envelope, versioning, timeouts … apply
+/// unchanged"). Behavior of each stage is exactly what
+/// [`Request::parse_json_line`] documented since M3.
+pub fn parse_envelope_line(line: &str) -> Result<RequestEnvelope, RequestReject> {
+    // 1. Length bound (bytes, excluding the terminator the caller strips).
+    if line.len() > MAX_REQUEST_LINE_BYTES {
+        return Err(RequestReject {
+            id: None,
+            error: IpcError::new(
+                ErrorCode::MalformedRequest,
+                format!(
+                    "The request line exceeds the {MAX_REQUEST_LINE_BYTES}-byte limit. \
+                         Next step: no Milestone 3 method needs a longer line; check the client."
+                ),
+            ),
+        });
+    }
+
+    // 2. Generic JSON parse, so we can echo `id` even for envelopes that
+    // fail strict validation.
+    let value: Value = serde_json::from_str(line).map_err(|err| RequestReject {
+        id: None,
+        error: IpcError::new(
+            ErrorCode::MalformedRequest,
+            format!(
+                "The request line is not valid JSON: {err}. Next step: send one \
+                     JSON object per line as documented in docs/api/ipc.md."
+            ),
+        ),
+    })?;
+    let Some(object) = value.as_object() else {
+        return Err(RequestReject {
+            id: None,
+            error: IpcError::new(
+                ErrorCode::MalformedRequest,
+                "The request line must be a JSON object envelope \
+                     {\"v\":1,\"id\":…,\"method\":…}. Next step: see docs/api/ipc.md."
+                    .to_string(),
+            ),
+        });
+    };
+    let echo_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id_length_ok(id))
+        .map(str::to_string);
+    let reject = |error: IpcError| RequestReject {
+        id: echo_id.clone(),
+        error,
+    };
+
+    // 3. Version, before strict field checks (see doc comment).
+    match object.get("v") {
+        None => {
+            return Err(reject(IpcError::new(
+                ErrorCode::MalformedRequest,
+                "The envelope field \"v\" is required and must be the integer 1.".to_string(),
+            )));
+        }
+        Some(v) => match v.as_u64() {
+            Some(version) if version == PROTOCOL_VERSION => {}
+            Some(version) => {
+                return Err(reject(IpcError::with_details(
+                    ErrorCode::UnsupportedVersion,
+                    format!(
+                        "This daemon speaks Punar IPC protocol version \
+                             {PROTOCOL_VERSION}; the request asked for version {version}. \
+                             Next step: use the punarctl that shipped with this image."
+                    ),
+                    json!({ "supported": [PROTOCOL_VERSION] }),
+                )));
+            }
+            None => {
+                return Err(reject(IpcError::new(
+                    ErrorCode::MalformedRequest,
+                    "The envelope field \"v\" must be the integer 1.".to_string(),
+                )));
+            }
+        },
+    }
+
+    // 4. Strict typed envelope (rejects unknown/mistyped fields).
+    let envelope: RequestEnvelope = serde_json::from_value(value.clone()).map_err(|err| {
+        reject(IpcError::new(
+            ErrorCode::MalformedRequest,
+            format!(
+                "The request envelope is invalid: {err}. Next step: the \
+                         envelope fields are exactly v, id, method, params \
+                         (docs/api/ipc.md)."
+            ),
+        ))
+    })?;
+
+    // 5. Id bounds.
+    if !id_length_ok(&envelope.id) {
+        return Err(reject(IpcError::new(
+            ErrorCode::MalformedRequest,
+            format!(
+                "The envelope field \"id\" must be a string of \
+                     {REQUEST_ID_MIN_CHARS} to {REQUEST_ID_MAX_CHARS} characters."
+            ),
+        )));
+    }
+
+    // 6. (the method table) belongs to the caller.
+    Ok(envelope)
+}
+
+// ---------------------------------------------------------------------------
+// Framing helper (docs/api/ipc.md section 2)
+// ---------------------------------------------------------------------------
+
+/// Outcome of one bounded line read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineRead {
+    /// A complete line, terminator stripped.
+    Line(String),
+    /// The line exceeded the caller's byte bound and was discarded; the
+    /// server answers `malformed_request` and closes (section 2).
+    TooLong,
+    /// Clean end of stream.
+    Eof,
+}
+
+/// Read one `\n`-terminated line of at most `max` bytes (terminator
+/// included), never buffering more than `max` bytes of an oversized line —
+/// the section 2 framing bound, which is what keeps per-connection memory
+/// constant regardless of what a peer sends.
+///
+/// Added in M7 so `punar-agentd` frames its socket exactly as `punard`
+/// does (docs/api/ipc.md section 10.1: "framing, envelope, versioning,
+/// timeouts … apply unchanged"). `punard` still carries its own private
+/// M3 copy of this loop, byte-for-byte identical; folding it onto this one
+/// is a mechanical follow-up that touches `punard` and so stays outside
+/// the M7 agentd change.
+pub fn read_line_bounded<R: std::io::Read>(
+    reader: &mut std::io::BufReader<R>,
+    max: usize,
+) -> std::io::Result<LineRead> {
+    use std::io::BufRead;
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(LineRead::Eof)
+            } else {
+                // Trailing data without newline: treat as a (final) line.
+                Ok(LineRead::Line(String::from_utf8_lossy(&line).into_owned()))
+            };
+        }
+        if let Some(pos) = available.iter().position(|b| *b == b'\n') {
+            if line.len() + pos + 1 > max {
+                reader.consume(pos + 1);
+                return Ok(LineRead::TooLong);
+            }
+            line.extend_from_slice(&available[..pos]);
+            reader.consume(pos + 1);
+            return Ok(LineRead::Line(String::from_utf8_lossy(&line).into_owned()));
+        }
+        let chunk = available.len();
+        if line.len() + chunk > max {
+            reader.consume(chunk);
+            return Ok(LineRead::TooLong);
+        }
+        line.extend_from_slice(available);
+        reader.consume(chunk);
     }
 }
 
@@ -2207,6 +2284,45 @@ mod tests {
         assert!(
             !SOCKET_PATH.starts_with("/run/punar/"),
             "the socket must not live in the punar-writable M1 artifact dir"
+        );
+    }
+
+    #[test]
+    fn bounded_line_reader_frames_lines_and_refuses_oversize() {
+        use std::io::BufReader;
+        let input = b"one\ntwo\n".to_vec();
+        let mut reader = BufReader::new(&input[..]);
+        assert_eq!(
+            read_line_bounded(&mut reader, MAX_REQUEST_LINE_BYTES).unwrap(),
+            LineRead::Line("one".into())
+        );
+        assert_eq!(
+            read_line_bounded(&mut reader, MAX_REQUEST_LINE_BYTES).unwrap(),
+            LineRead::Line("two".into())
+        );
+        assert_eq!(
+            read_line_bounded(&mut reader, MAX_REQUEST_LINE_BYTES).unwrap(),
+            LineRead::Eof
+        );
+
+        // Over the bound: discarded, and the next line still frames — the
+        // caller decides whether to close (section 2 says it does).
+        let oversize = format!("{}\nnext\n", "x".repeat(64));
+        let mut reader = BufReader::new(oversize.as_bytes());
+        assert_eq!(
+            read_line_bounded(&mut reader, 16).unwrap(),
+            LineRead::TooLong
+        );
+        assert_eq!(
+            read_line_bounded(&mut reader, 16).unwrap(),
+            LineRead::Line("next".into())
+        );
+
+        // Trailing data without a terminator is still a line.
+        let mut reader = BufReader::new(&b"tail"[..]);
+        assert_eq!(
+            read_line_bounded(&mut reader, 16).unwrap(),
+            LineRead::Line("tail".into())
         );
     }
 }

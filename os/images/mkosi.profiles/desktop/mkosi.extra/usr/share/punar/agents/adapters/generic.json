@@ -1,0 +1,16 @@
+{
+  "name": "generic-shell",
+  "adapter": "generic",
+  "launch": {
+    "method": "managed",
+    "command": "punar-env agent generic-shell"
+  },
+  "adapter_config": {
+    "command": ["/bin/sh"],
+    "signature": {
+      "comm": [],
+      "exe_glob": []
+    },
+    "mock_command": ["/usr/lib/punar/punar-mock-agent"]
+  }
+}

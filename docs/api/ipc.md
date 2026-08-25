@@ -1,4 +1,4 @@
-# Punar local IPC — `punard` wire contract (v1, Milestones 3–5)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11)
 
 Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
 **plus the Milestone 4 and Milestone 5 additions** — marked "M4"/"M5"
@@ -668,7 +668,10 @@ Works with the control plane unreachable — it touches only local files.
   5.8)**; ~~no enrollment (`M5`)~~ **(M5: landed — sections 5.9–5.11,
   against the dev/CI-only mock control plane)**; no approvals or JIT
   elevation (`M9` — `approval_required` classifications behave as
-  alert-only until then), no agent methods (`M7+`), no remote admin
+  alert-only until then), ~~no agent methods (`M7+`)~~ **(M7: landed —
+  but NOT here: `agents.*` lives on the separate `punar-agentd` socket,
+  section 10; `punard`'s own method table is unchanged and still
+  closed)**, no remote admin
   queries (spec section 51 — `M10`; the mock reserves the `admin.*` names
   and answers `unknown_method`).
 - No event subscription/streaming; `audit.tail` is pull-only. The M5 shell
@@ -700,3 +703,239 @@ render enrollment/compliance chrome without a socket connection or polling
   root-trusted stays on the socket (the section 1.1 argument, inverted).
   Consumers must fail closed: missing or unparsable file renders as
   unenrolled calm paper.
+
+## 10. Sibling contract (M7): `punar-agentd` socket — `agents.*`
+
+Status: **contract for the Milestone 7 implementation** (spec section 76
+Milestone 7; design rationale: `docs/development/milestone-7.md`).
+`punar-agentd` (spec section 11.3) is a **separate daemon with its own
+socket**; nothing in sections 1–9 changes for `punard`. Everything below
+is binding on `punar-agentd` (server) and its clients (`punar-env`,
+`punarctl`).
+
+### 10.1 Transport — identical mechanics, sibling socket
+
+- **Path:** `/run/punar-agentd/agentd.sock` (`SOCK_STREAM` UDS; no TCP).
+  Root-owned directory for the same impostor reason as section 1.1:
+
+  ```text
+  # usr/lib/tmpfiles.d/punar-agentd.conf   (desktop extra tree)
+  d /run/punar-agentd     0750 root punar -
+  d /var/lib/punar/agents 0700 root root  -
+  ```
+
+- Socket `0660 root:punar`, chown/chmod before `listen()`; admission is
+  the filesystem; `SO_PEERCRED` at accept is the authorization input —
+  all verbatim from section 1.2.
+- **Framing, envelope, versioning, timeouts:** sections 2 and 3 apply
+  unchanged (`v: 1`, NDJSON, 4096-byte lines, 10 s bounds; both daemons
+  share `punar-common::ipc`). **Error codes:** the section 4 table
+  applies; no new codes.
+
+### 10.2 Methods (the complete M7 surface — closed)
+
+There is no exec/shell/script method here either (spec sections 10, 60 —
+permanent). `agents.access` (spec section 11.2, ledger data) is
+**reserved for M8** and answers `unknown_method` until then, as do the
+`admin.*` names (M10).
+
+| Method | Peer may call | Mutating | Audited |
+|---|---|---|---|
+| `agents.list` | any connected | no (may trigger a scan) | no |
+| `agents.get` | any connected | no | no |
+| `agents.register` | group `punar` / root, peer-verified | yes | yes |
+| `agents.end` | session owner / root | yes | yes |
+| `agents.scan` | any connected | registry view only | transitions only |
+
+#### `agents.list`
+
+Params: none. Runs a detection pass first when the last pass is older
+than 30 s (milestone-7.md section 7.3 — on-demand freshness, no timers).
+Result:
+
+```json
+{"v":1,"id":"1","result":{
+  "scanned_at": "2026-08-27T10:00:02Z",
+  "sessions": [
+    {"session_id": "agt_4f21c09ab3e1", "agent": "claude-code",
+     "version": "mock", "process_id": 2143, "user": "punar",
+     "project": "atlas", "environment": "punar-env-atlas",
+     "status": "active", "classification": "managed",
+     "started_at": "2026-08-27T09:58:40Z"}
+  ],
+  "detections": [
+    {"session_id": "agt_d11e0aa7c402", "agent": "foo-agent",
+     "version": "unknown", "process_id": 2410, "user": "punar",
+     "project": "unknown", "environment": "host",
+     "status": "active", "classification": "unknown",
+     "started_at": "2026-08-27T09:59:55Z",
+     "suspected": true, "executable": "/home/punar/Downloads/foo-agent",
+     "signature_id": "downloads-foo-agent"}
+  ]
+}}
+```
+
+- `sessions[*]` entries are exactly the ten
+  `schemas/ai-agent/registry-record.json` fields — sessions from this
+  boot, `ended` included. `detections[*]` entries are the same ten
+  fields (sentinels per milestone-7.md section 4.4: version/project
+  `"unknown"`, environment `"host"`, synthesized `agt_` id) **plus**
+  the detection extras `suspected` (always `true` — spec section 23
+  honesty, the label is in the data), `executable`, `signature_id`.
+  Detections are point-in-time observations: memory + `agents.json`
+  only, never written to `registry.jsonl`.
+
+#### `agents.get`
+
+Params: `{"session_id": "agt_…"}`. Result: `{"session": {…}}` — one
+entry in the `agents.list` row shape, plus (for managed sessions)
+`"scope_unit"` (`punar-agent-<id>.scope`) and `"authority"` — the
+display-level authority summary captured at launch (decision words +
+enforcement labels + `policy_citation`; see 10.3). Unknown id →
+`not_found`.
+
+#### `agents.register`
+
+Called by the managed launch path (`punar-env agent <name>`) after the
+agent process is running in its scope. Params:
+
+```json
+{"session_id": "agt_4f21c09ab3e1", "agent": "claude-code",
+ "version": "mock", "process_id": 2143, "project": "atlas",
+ "environment": "punar-env-atlas",
+ "authority": {"policy_citation": "personal-defaults", "rows": [
+   {"zone": "filesystem.project", "decision": "read_write",
+    "enforcement": "declared · M9"},
+   {"zone": "network.internet", "decision": "allow",
+    "enforcement": "declared · M12"}
+ ]}}
+```
+
+Server-side verification (spec section 22 — attribution is checked,
+never trusted from params):
+
+1. peer `SO_PEERCRED` uid == owner uid of `/proc/<process_id>`
+   (root exempt); mismatch → `denied`, audited;
+2. `session_id` matches `^agt_[A-Za-z0-9]+$` and is unused →
+   else `invalid_params`;
+3. `/proc/<process_id>/cgroup` contains
+   `punar-agent-<session_id>.scope` → classification `managed`;
+   a known-adapter signature match outside such a scope → `observed`
+   (honest downgrade, reported in the result); neither →
+   `invalid_params`.
+
+`user` and `started_at` are stamped by the daemon (peer uid → username;
+never from params). `classification` is **computed**, never a param.
+Result: `{"session": {…}, "classification": "managed"}`. The
+schema-exact `active` record is appended to
+`/var/lib/punar/agents/registry.jsonl` (`0640 root:root`).
+
+#### `agents.end`
+
+Params: `{"session_id": "agt_…"}`. Allowed for the peer whose uid owns
+the session (or root); otherwise `denied`. Appends the `ended` record
+(the registry-record `status` enum widens additively to
+`["active","ended"]` — the widening the schema's own description
+pre-authorizes), removes the live entry. Unknown id → `not_found`.
+Sessions whose pid died without `agents.end` are reaped by the next
+scan pass with a synthesized `ended` record (audited as
+`agents.reap`).
+
+#### `agents.scan`
+
+Params: none. Forces one `/proc` pass now: known-adapter signatures
+(from `/usr/share/punar/agents/adapters/*.json`,
+`adapter_config.signature`) → `observed` when outside managed scopes;
+suspected patterns (`/usr/share/punar/agents/signatures/suspected.json`,
+e.g. `*/Downloads/foo-agent`) → `unknown`. Reaps dead managed pids,
+drops vanished detections. Result: the `agents.list` shape. Detection
+is **heuristic** — results carry `suspected: true` and every rendering
+says *suspected*, never certain (spec section 23). No continuous or
+timer-driven scanning exists in M7 (spec section 6.3; periodic
+detection is the Milestone 10 deliverable).
+
+### 10.3 Authority is display-level in M7
+
+The `authority` object is what the launcher showed the user (spec
+section 27 step 10): manifest-declared decisions with their enforcement
+milestone labels, plus `policy_citation` — `"personal-defaults"` on an
+unenrolled device, the org policy id (hero demo: `"eng-ai-v3"`) while
+enrolled, sourced from `/run/punar/status.json` (section 9). Nothing in
+M7 enforces these rows (M9/M12), and no surface may render them without
+their labels (spec section 1.22). It is stored in memory and
+`agents.json` only — `registry.jsonl` lines remain schema-exact.
+
+### 10.4 Audit additions (same file, shared writer)
+
+`punar-agentd` appends to `/var/log/punar/audit.jsonl` via
+`punar_common::AuditWriter`, which gains **flock-guarded rotation**
+(exclusive lock on `audit.jsonl.lock` around the size-check + rename)
+so the two daemons cannot race the 8 MiB rotation; single-line
+`O_APPEND` writes interleave atomically. Audited: `agents.register`
+(allow and deny; `agent_session_id` carries the **real** `agt_` id — the
+section 6 sentinel's purpose fulfilled for agent events), `agents.end`,
+`agents.reap`, and `agents.scan` **transitions only** (`result:
+"detected"` / `"cleared"` join the open result-string set — the
+enroll.sync precedent; per-pass no-change events are not emitted).
+Register/end are `source: "human"` (CLI-originated user action; the
+subject agent is named by `agent_session_id`); reap/scan are `source:
+"service"`, `user_id: "punar-agentd"`. The M3 follow-up about making
+agent fields schema-conditional is **closed as not planned**: it would
+change required-ness and break the "all 12 required fields" contract
+this document and existing events pin; `agt_none` remains the sentinel
+for non-agent events.
+
+### 10.5 Client behavior
+
+`punarctl` routes `agents.*` to the agentd socket (everything else stays
+on punard's). Verbs: `punarctl agents list` and `punarctl agents
+inspect <id>` (D-014 grammar, `--json` prints `result` verbatim, exit
+codes unchanged; rendering contract: milestone-7.md section 9).
+`punarctl agents access <id>` is not implemented until M8. For negative
+probes, `punarctl debug rpc` gains a hidden `--socket agentd` flag;
+`agents.*` names auto-route there.
+
+## 11. Side contract (M7): `/run/punar/agents.json`
+
+Not IPC — the AI-panel sibling of section 9's `status.json`:
+`punar-agentd` writes a world-readable summary so `punar-shell` renders
+the SUPER+A surface (Plate D-005) with an event-driven `FileView` — no
+socket client in the shell, no polling.
+
+- Written at agentd startup and on every change (register, end, reap,
+  detection diff); atomic tmp+rename within `/run/punar`; `0644`.
+- Content — **summary only**, exactly what the panel renders:
+
+  ```json
+  {"v": 1,
+   "scanned_at": "2026-08-27T10:00:02Z",
+   "policy_citation": "personal-defaults",
+   "counts": {"managed": 1, "observed": 0, "unknown": 1},
+   "sessions": [
+     {"session_id": "agt_4f21c09ab3e1", "agent": "claude-code",
+      "project": "atlas", "environment": "punar-env-atlas",
+      "classification": "managed", "status": "active",
+      "started_at": "2026-08-27T09:58:40Z",
+      "authority": {"policy_citation": "personal-defaults", "rows": ["…"]}}
+   ],
+   "detections": [
+     {"session_id": "agt_d11e0aa7c402", "agent": "foo-agent",
+      "classification": "unknown", "suspected": true,
+      "executable": "/home/punar/Downloads/foo-agent",
+      "observed_at": "2026-08-27T09:59:55Z"}
+   ],
+   "ts": "2026-08-27T10:00:02Z"}
+  ```
+
+  No pids beyond what the same user can read in `/proc` anyway — in
+  fact none at all; no cmdlines, no secrets, no ledger data (M8; the
+  panel's ledger section is a labeled dashed placeholder until then).
+- **Non-authoritative by design** — the section 9 caveat verbatim:
+  `/run/punar` is user-writable; this is display data for that user's
+  own session; anything trusted stays on the agentd socket. Consumers
+  fail closed: missing/unparsable file renders the calm empty panel.
+- Freshness: opening the panel `exec`s a detached one-shot
+  `punarctl agents list --json >/dev/null`, whose section 10.2
+  staleness rule triggers the scan; the rewrite (if anything changed)
+  reaches the shell through the FileView. One-shot on user action —
+  still no polling loop anywhere.

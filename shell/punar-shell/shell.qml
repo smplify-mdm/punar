@@ -1,15 +1,17 @@
-// punar-shell — Quickshell entrypoint (Milestones 1–2).
+// punar-shell — Quickshell entrypoint (Milestones 1–2, 7).
 //
-// Top bar + command center overlay + SUPER+TAB overview, implementing the
-// field-note designs:
+// Top bar + command center overlay + SUPER+TAB overview + SUPER+A AI
+// panel, implementing the field-note designs:
 //   docs/design/DESIGN_LANGUAGE.md (binding)
 //   docs/design/mockups/command-approval.html (Sect I — command center)
 //   docs/design/mockups/desktop-multitasking.html (Plate D-007 — overview)
+//   docs/design/mockups/ai-panel.html (Plate D-005 — AI panel)
 // All design values flow through the Theme singleton (punar-tokens.json).
 
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "AiPanel"
 import "Bar"
 import "CommandCenter"
 import "Overview"
@@ -32,6 +34,13 @@ ShellRoot {
     }
 
     Overview {
+    }
+
+    // SUPER+A — "AI on this device" (M7, Plate D-005). Renders from
+    // /run/punar/agents.json via the Agents singleton's FileView; on a
+    // machine where punar-agentd never wrote that file the panel opens
+    // to its calm empty state.
+    AiPanel {
     }
 
     // Ready marker (milestone-1.md §7 / survey decision 6): once the bar is

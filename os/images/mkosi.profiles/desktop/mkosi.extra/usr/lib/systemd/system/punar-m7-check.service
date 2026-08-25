@@ -1,0 +1,36 @@
+# M7 in-VM AI agent registry exercise (milestone-7.md §12). Runs
+# m7-check.sh as ROOT — same decided pattern as punar-m3/m4/m5/m6-check.service
+# (no User=, no sudo); every punar-env, punarctl, qs and grim invocation
+# inside the script runs as punar via runuser with the live session env,
+# because the managed session's attribution IS a `systemd-run --user --scope`
+# cgroup and that needs the user manager greetd's autologin started.
+#
+# Ordering is by explicit synchronous start, not target enablement:
+# idle-ram.sh starts this unit (blocking — Type=oneshot) strictly AFTER
+# punar-m6-check.service and BEFORE the /run/punar artifact export, so
+# m7-report.txt / m7-launch.txt / m7-inspect.txt / m7-agents-*.json /
+# m7-registry.jsonl / punar-m7.png ship in the existing export tar. Same
+# not-enabled pattern as punar-m2..m6-check — no .wants symlink, so the mkosi
+# preset-wipe lesson does not even come into play.
+#
+# The mock agent session and the detection fixture exist only inside this
+# window, which opens strictly after the idle-RAM sampling and the combined
+# services-PSS sample closed. The agent itself runs in its own
+# punar-agent-<id>.scope under the USER manager, so it is not in any service
+# cgroup and cannot perturb the M7 services-RSS gate either (milestone-7.md
+# §11).
+
+[Unit]
+Description=Punar M7 AI agent registry exercise (CI)
+
+[Service]
+Type=oneshot
+# The exercise is bounded by construction: a 120 s wait for the managed
+# session to register, ~12 s of screenshot settle, a 60 s wait for the
+# launcher to return after the scope stops, and a handful of RPCs. 15 min is
+# generous headroom for TCG-emulated CI runs, where quickshell IPC round
+# trips and grim are the slow parts.
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m7-check.sh

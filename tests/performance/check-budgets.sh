@@ -12,18 +12,25 @@
 #                                         decision, milestone-1.md §8)
 #
 # Since M3 it also gates the Punar services RAM (PERFORMANCE_BUDGETS.md
-# §1.2/§2.3; milestone-3.md §9) from the same report:
+# §1.2/§2.3; milestone-3.md §9) from the same report. The number is the
+# COMBINED services total, never per-daemon: spec 6.2 budgets the services
+# together, so as sibling daemons ship they are summed into the same value
+# and the thresholds do NOT move (punard since M3, punar-agentd since M7 —
+# milestone-7.md §11):
 #
 #   PUNAR_SERVICES_RSS_MB > 150 (MVP ceiling)  ::error::   -> exit 1
 #   PUNAR_SERVICES_RSS_MB > 100 (target)       ::warning:: -> exit 0
 #   absent / missing / non-numeric             ::error::   -> exit 1
-#                                              (punard must be alive at idle
-#                                              — EVEN under TCG: a dead
-#                                              daemon is not an emulation
-#                                              artifact)
+#                                              (EVERY Punar service must be
+#                                              alive at idle — EVEN under
+#                                              TCG: a dead daemon is not an
+#                                              emulation artifact, and one
+#                                              live sibling must not be able
+#                                              to mask another's absence)
 #
 # The variable name says RSS (fixed consumer contract); the value is the
-# summed PSS of the punard.service cgroup's pids (§2.3 canonical metric).
+# summed PSS of the pids in every Punar service cgroup (§2.3 canonical
+# metric — cgroup attribution, never process-name matching).
 #
 # TCG-emulated runs (PUNAR_RAM_ACCEL != kvm) NEVER fail the build on a
 # NUMERIC breach: the numbers are labeled "(VM, emulated)" and indicative
@@ -112,7 +119,7 @@ echo "    image:   ${IMAGE:-unknown}"
 echo "    mean:    ${MEAN_MB} MB"
 echo "    max:     ${MAX_MB} MB"
 echo "    target:  ${TARGET_MB} MB   hard ceiling: ${HARD_MB} MB (PERFORMANCE_BUDGETS.md §1.1)"
-echo "    services: ${SERVICES_MB:-missing} MB (summed PSS, punard.service cgroup — §1.2/§2.3:"
+echo "    services: ${SERVICES_MB:-missing} MB (summed PSS, punard + punar-agentd cgroups — §1.2/§2.3:"
 echo "              target ${SERVICES_TARGET_MB} MB, MVP ceiling ${SERVICES_HARD_MB} MB)"
 
 if [ "${MEAN_MB}" -gt "${HARD_MB}" ]; then
@@ -139,7 +146,7 @@ fi
 # TCG-downgrade rule as the whole-system gate above.
 case "${SERVICES_MB:-missing}" in
     ''|missing|absent)
-        annotate error "Punar services RSS is '${SERVICES_MB:-missing}' — punard.service was not running at stabilized idle (or the guest never emitted PUNAR_SERVICES_RSS_MB); a dead daemon is a gate failure even on emulated runs (milestone-3.md §9)"
+        annotate error "Punar services RSS is '${SERVICES_MB:-missing}' — a Punar service (punard.service or punar-agentd.service) was not running at stabilized idle, or the guest never emitted PUNAR_SERVICES_RSS_MB; a dead daemon is a gate failure even on emulated runs (milestone-3.md §9, milestone-7.md §11)"
         fail=1
         ;;
     *[!0-9]*)

@@ -54,9 +54,9 @@
     },
     "status": {
       "title": "Session status",
-      "description": "Lifecycle status of the session. Spec section 19.2 shows only 'active'; additional lifecycle values (e.g. for ended sessions) will be added additively to this enum when the spec defines them — widening an enum is a compatible change under the versioning rules.",
+      "description": "Lifecycle status of the session. Spec section 19.2 shows only 'active'; this enum widens additively as lifecycle values are defined — the compatible change this description reserved. Milestone 7 adds 'ended': the registry appends one record per lifecycle transition (active at registration, ended at session end or when a dead process is reaped), so both values appear in /var/lib/punar/agents/registry.jsonl.",
       "type": "string",
-      "enum": ["active"]
+      "enum": ["active", "ended"]
     },
     "classification": {
       "title": "Registry classification",

@@ -40,7 +40,12 @@ Deliverables (spec section 76, Milestone 0):
   together in run
   [32849448721](https://github.com/smplify-mdm/punar/actions/runs/32849448721)
   (2026-08-25, all five jobs green — `PUNAR_M4_OK` + `PUNAR_M5_OK`; see
-  M4/M5 below for the red runs on the road there).
+  M4/M5 below for the red runs on the road there). The M6 exercise phase
+  went green in run
+  [32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904)
+  (2026-08-25, all five jobs green — `PUNAR_M6_OK`; see M6 below). **No CI
+  run contains any M7 code**: the M7 tree is working-tree only (see M7
+  below).
 - [x] Repository — skeleton per spec section 67 (all section 67 directories
   and top-level documents exist; Cargo workspace members match the crates on
   disk).
@@ -170,8 +175,10 @@ summary`), and **runtime-proven** by run 32825539021:
   `stack`) via `/usr/lib/punar/punar-layout.sh`, cycled on
   SUPER+comma/period, restored on session start; `grid` deliberately not
   shipped (no native hyprland algorithm — milestone-2.md §1.3/§2).
-- [x] Scratchpads — assistant (SUPER+A) and notes (SUPER+N) specials
-  alongside M1's terminal (SUPER+T).
+- [x] Scratchpads — assistant and notes specials alongside M1's terminal
+  (SUPER+T). The assistant pad shipped on SUPER+A in M2 and moved to
+  SUPER+SHIFT+A in M7, when the AI panel took spec §25's own chord
+  (milestone-7.md §8).
 - [x] Named project workspaces — rename, `name:` navigation, names in bar
   and overview; persistence to `~/.local/state/punar/workspaces.json`
   (atomic, event-driven, restored on shell start); typed contract in the
@@ -538,11 +545,13 @@ Deliberately outside the runtime proof, unchanged: audit-rotation volume
 (host-unit-tested only — M5 event volumes are nowhere near the cap) and
 attestation (simulated and labeled, no IdP — the mock per spec 49).
 
-## Current milestone: M6 — Developer environment manager: implemented on disk; statically validated; uncommitted; no CI run
+## M6 — Developer environment manager: done (CI exercise green)
 
 Architecture plan, decisions, and as-built status:
 [`docs/development/milestone-6.md`](docs/development/milestone-6.md) (§14 is
-the verification status, reconciled to the as-built tree). M6 turns the
+the verification status, reconciled to the as-built tree; its "uncommitted
+and unpushed / no CI run" statements are dated 2026-08-25 and predate the
+push and the green run recorded here). M6 turns the
 section 17 environment boundary into a real container: a project directory
 with a `ProjectEnvironment` manifest becomes a running rootless Podman
 container with the project bind-mounted at `/workspace`, driven by a
@@ -556,13 +565,26 @@ daemon in M6, and there are no M6 schema deltas (the `ProjectEnvironment`
 schema and spec-17 example predate M6 in `schemas/project/`, committed with
 the contract layer at 45a6fb0).
 
-**The full M6 tree is working-tree only** (audited 2026-08-25 against HEAD
-408b51d): uncommitted and unpushed — the new `crates/punar-env/`,
-`m6-check.sh` + `punar-m6-check.service`,
-`docs/development/milestone-6.md`, and modifications to `ci.yml`,
-`Cargo.toml`/`Cargo.lock`, `container-build.sh`, `idle-ram.sh`,
-`punar-idle-ram.service`, `boot-test.sh`, `os/images/.gitignore`, and
-`image-pipeline.md`. **Nothing M6 has ever run in CI.**
+**The gate is green.** Run
+[32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904)
+(2026-08-25, KVM runner, commit 0ba4ea6, all five jobs green) delivered
+**`PUNAR_M6_OK` (56 assertions passed)** — the run that turned the claims
+below from "on disk" into "proven in-VM": the offline `podman load` →
+rootless `up` → `shell` → `status` → `destroy` journey, the Atlas
+fixture's byte-identity through it, and the M7-stub honesty check, all
+executed in the guest. Same run: idle RAM mean 1162 MB / max 1167 MB
+(pass with the standing over-target warning) and punard services RSS
+2 MB. The in-VM chain now stands at **209 assertions** (M2 33, M3 28,
+M4 29, M5 63, M6 56).
+
+The road there, for the record. The finished M6 tree landed as 90278f9;
+its first run,
+[32852810872](https://github.com/smplify-mdm/punar/actions/runs/32852810872)
+(2026-08-25), was red inside the VM on m6-check's fixture byte-identity
+assertions — the check invoked `diff`, which the `punar-desktop` image
+does not ship (no diffutils). A check-tool bug, not an
+environment-behavior bug. The amendment 0ba4ea6 (compare with `sha256sum`)
+took the gate green the same day.
 
 Deliverables (spec section 76, Milestone 6) — on disk vs proven:
 
@@ -587,7 +609,8 @@ Deliverables (spec section 76, Milestone 6) — on disk vs proven:
   On disk + host-tested (fmt/clippy/test green in the pinned `rust:1`
   container: argv table tests, verbatim round-trip, the §7 render
   snapshot, engine flows on a scripted podman mock, plus a live non-root
-  smoke against a fake podman); **no CI run**.
+  smoke against a fake podman); **and now proven in-VM** — run
+  32857914904, `PUNAR_M6_OK`.
 - [x] Podman/devcontainer — `environment.type: devcontainer` realized on
   the podman 6.1.0-1 + crun + netavark stack already in the desktop image
   since M1, rootless via the `punar` `100000:65536` subuid/subgid mapping.
@@ -601,7 +624,8 @@ Deliverables (spec section 76, Milestone 6) — on disk vs proven:
   byte-identical rebuilds, pinned-podman load with matching digests,
   chroot exec proof; `podman run` itself cannot be exercised under the
   arm64-Mac emulation path — the in-VM m6-check is the authoritative
-  proof, and it has not run. **No CI run.**
+  proof, **and it has now run**: run 32857914904 exercised the offline
+  load and the rootless container journey inside the guest.
 - [x] Atlas fixture — `fixtures/projects/atlas/` **predates M6**
   (committed with the contract layer, 45a6fb0; validated by
   `./tools/validate-schemas.sh` in every green CI run): the spec section
@@ -612,8 +636,8 @@ Deliverables (spec section 76, Milestone 6) — on disk vs proven:
   of the two contract files to `/usr/share/punar/fixtures/projects/atlas`
   so m6-check can copy them to `~punar/atlas` and assert byte-identity
   through the whole init/up/destroy journey. Fixture: committed +
-  CI-validated; the staging and everything consuming it: uncommitted,
-  **no CI run**.
+  CI-validated; the staging and everything consuming it: committed at
+  90278f9 and **proven in-VM** in run 32857914904.
 - [x] M6 CI exercise wiring — `m6-check.sh` (nine assertion groups, all
   env commands run as the `punar` user via `runuser`: rootless preflight,
   fixture byte-identity, init idempotence + scaffold validity, up with
@@ -627,9 +651,10 @@ Deliverables (spec section 76, Milestone 6) — on disk vs proven:
   and exports `m6-status.txt`/`m6-status.json` + podman snapshots (no
   screenshots — a CLI milestone; `m6-status.txt` is the human evidence);
   `ci.yml` shellchecks `m6-check.sh`, uploads the m6 artifacts, and
-  raises desktop-test to 85 min. Shellcheck v0.11.0 + actionlint clean;
-  **never executed anywhere** — the exercise only runs in-VM and no VM
-  run contains it.
+  raises desktop-test to 85 min. Shellcheck v0.11.0 + actionlint clean,
+  and **executed in-VM twice**: run 32852810872 to `PUNAR_M6_FAIL` (the
+  `diff` bug), run 32857914904 to `PUNAR_M6_OK` with all 56 assertions
+  passing. (M7 raises the same job to 95 min — see M7 below.)
 
 Static validation for the tree — recorded in milestone-6.md §14 (local,
 non-authoritative per spec 1.22): cargo fmt/clippy/`test --workspace`
@@ -638,18 +663,178 @@ touched script including `m6-check.sh`; actionlint clean;
 `PUNAR_BUILD_MODE=summary ./tools/build-image.sh all` exit 0 for both
 images; `./tools/validate-schemas.sh` green. Budgets are structurally
 unaffected by design — `punar-env` is a user CLI, not a service (outside
-the `PUNAR_SERVICES_RSS_MB` punard-cgroup sample), and its rootless
+the `PUNAR_SERVICES_RSS_MB` service-cgroup sample — punard alone at M6;
+punard + punar-agentd from M7), and its rootless
 containers exist only inside the m6-check window, after idle-RAM sampling
-— but that too is asserted, not proven, until the run. One tracked
+— and run 32857914904 bore that out: idle RAM 1162 MB mean and services
+RSS 2 MB, both unmoved by M6. One tracked
 deferral: the schemas-side copy of the crate's scaffold example
 (`schemas/project/examples/punar-env.scaffold.yaml`) ships with a separate
 schemas-owning change and has not landed; until it does, the crate's own
 unit test that the embedded scaffold parses cleanly is the guard.
 
-What remains: **nothing M6 is proven at runtime.** Every in-VM claim (all
-nine m6-check assertion groups, the offline `podman load`/run journey, the
-D-014 status render in the VM, the export additions, the 85-min job
-budget) awaits commit, push, and the first CI run containing the tree.
+What remains for M6: the one tracked deferral above
+(`schemas/project/examples/punar-env.scaffold.yaml`, still not landed as
+of this audit) and the by-decision deferrals recorded in milestone-6.md
+§13 — service containers and toolchain provisioning, both of which need
+network the CI VM does not have. The `punar-env agent` stub that M6
+shipped is no longer a stub: M7 implements it (below).
+
+## Current milestone: M7 — AI Agent Registry: implemented on disk; statically validated; uncommitted; no CI run
+
+Architecture, decisions, and as-built record:
+[`docs/development/milestone-7.md`](docs/development/milestone-7.md) (§14 is
+the verification status). Wire contract:
+[`docs/api/ipc.md`](docs/api/ipc.md) §10–§11 — a **sibling socket**, not a
+change to punard's `v: 1` surface: `punar-agentd` serves `agents.list`,
+`agents.get`, `agents.register`, `agents.end`, `agents.scan` on
+`/run/punar-agentd/agentd.sock`, plus the §11 side contract
+`/run/punar/agents.json` for the shell. M7 is where the AI-native thesis
+(spec sections 18–27) stops being schemas and becomes a running surface:
+an agent session launched *by* the OS gets an identity, a scope cgroup,
+a registry record, and a panel row; an agent the OS did not launch gets
+found by a heuristic that says **suspected**, never *certain*.
+
+**The full M7 tree is working-tree only** (audited 2026-08-25 against HEAD
+0ba4ea6): uncommitted and unpushed. New: `crates/punar-agentd/src/{main,
+server,registry,detect,adapters,proc,authz,summary,util,testsupport}.rs` +
+`tests/registry.rs`, `crates/punar-common/src/agent.rs`,
+`crates/punar-env/src/{session,adapter,authority,agentd}.rs`,
+`shell/punar-shell/AiPanel/AiPanel.qml` + `Services/Agents.qml`,
+`punar-agentd.service` (+ its vendor `.wants` symlink) and
+`tmpfiles.d/punar-agentd.conf`, `m7-check.sh` + `punar-m7-check.service`,
+`punar-mock-agent`, `foo-agent-fixture.sh`, the staged
+`usr/share/punar/agents/{adapters,signatures}` data, and
+`docs/development/milestone-7.md`. Modified: `ci.yml`, `docs/api/ipc.md`,
+`schemas/ai-agent/registry-record.json`, `PERFORMANCE_BUDGETS.md`,
+`tests/performance/check-budgets.sh`, `idle-ram.sh`, `boot-test.sh`,
+`container-build.sh`, the Hyprland bind files, `punarctl`, `punar-env`,
+`punar-common`, and the shell entrypoint. **Nothing M7 has ever run in
+CI**: the newest run,
+[32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904),
+is M6's green run at commit 0ba4ea6 and contains no M7 code.
+
+Deliverables (spec section 76, Milestone 7) — on disk vs proven:
+
+- [x] Managed sessions — `punar-env agent <name>` (M6's labeled stub) is
+  now the real spec section 27 launch: manifest `ai.agents` membership
+  check → adapter resolution → authority summary → `agents.register` on
+  the agentd socket → `systemd-run --user --scope` into
+  `punar-agent-<id>.scope` → the adapter command in the project directory
+  → `agents.end` on exit, with crash-honest reaping (`agents.reap`) for
+  sessions whose process died without an end. The session id is the
+  registry's, not the caller's claim. On disk + host-tested; **no CI
+  run** — the in-VM journey is m7-check groups 3, 5 and 10.
+- [x] Claude adapter — `adapters/claude-code.json`, staged as **data**
+  (`/usr/share/punar/agents/adapters/`), not code: launch command,
+  `version_command`, and the `comm`/`exe_glob` identity signature for
+  `claude`. The CI VM has no network and no real Claude Code binary, so
+  the exercise substitutes `/usr/lib/punar/punar-mock-agent` — a
+  self-labeling dev/CI stand-in ("PUNAR MOCK AGENT … performs no AI
+  work") gated behind `PUNAR_AGENT_MOCK=1`. Adapter definition validated
+  against `schemas/ai-agent/agent-definition.json` **in place** (the file
+  the image ships is the file the schema checked); the managed launch
+  itself: **no CI run**.
+- [x] Second/generic adapter — `adapters/generic.json`
+  (`generic-shell`, `/bin/sh`, empty signature — a generic adapter
+  identifies its sessions by the launch scope, not by what the binary
+  looks like), proving spec section 26's "adapters should be modular":
+  adding an agent is adding a JSON file, with zero Rust changes. Schema-
+  validated; **no CI run**.
+- [x] Agent identity + attribution (spec 22) — identity is *checked, not
+  claimed*: `SO_PEERCRED` at accept authorizes the register/end caller,
+  the registered pid's cgroup is read from the kernel and must name the
+  scope, and the executable identity is recorded from `/proc`. Records
+  append to `/var/lib/punar/agents/registry.jsonl` (0700 root:root —
+  a writable registry *is* attribution authority), conform to
+  `schemas/ai-agent/registry-record.json`, and carry one record per
+  lifecycle transition. The schema's `status` enum is widened
+  `["active"] → ["active", "ended"]` — the additive widening its own
+  description pre-authorized. Host-tested (27 unit + 8 integration
+  assertions in `punar-agentd`); the kernel-vs-record cgroup agreement:
+  **no CI run**.
+- [x] Classification (spec 19.1, 23) — the three shipped values
+  `managed` / `observed` / `unknown`, with `managed` *proven* by the
+  launch scope and `unknown` always rendered **SUSPECTED**. Detection is
+  a `/proc` walk against signatures shipped as data
+  (`signatures/suspected.json`), run **on demand** (`agents.scan`) — no
+  polling loop (spec 6.3), and continuous detection with alerts is M10 by
+  spec sectioning. The unknown-agent fixture gets a real, verifiably
+  innocuous process to find: `foo-agent-fixture.sh` installed as
+  `~punar/Downloads/foo-agent`, which prints what it is and blocks on a
+  signal. Detection was exercised end to end **on the host** (real
+  staged adapters + signatures, `UNKNOWN · SUSPECTED`,
+  `signature_id: downloads-foo-agent`); in the VM: **no CI run**.
+- [x] Local UI (spec 25, Plate D-005) — `SUPER + A` opens the AI panel
+  (`shell/punar-shell/AiPanel/AiPanel.qml`), reading
+  `/run/punar/agents.json` through the M6-era `Services/` FileView
+  pattern (`Agents.qml` — event-driven, no polling). Unmanaged-first per
+  DESIGN_LANGUAGE §8: authority cites `personal-defaults` on an
+  unenrolled device and the org policy id only when enrolled; every
+  authority row is labeled `declared · M9`/`declared · M12` (display
+  only in M7 — enforcement is M9/M12); the **ledger section renders as a
+  dashed, labeled Milestone-8 placeholder**, and `punarctl agents access`
+  is an explicit M8 stub. Terminal equivalent in D-014 grammar:
+  `punarctl agents list | inspect <id> | scan`. The one chord
+  reassignment — the assistant scratchpad moves `SUPER+A` →
+  `SUPER+SHIFT+A` — is recorded in
+  [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md).
+  `qmllint` clean and `Hyprland --verify-config` "config ok" (with a
+  non-vacuous negative control); the panel rendering with a managed row
+  and an unknown row on one screen: **no CI run**.
+- [x] M7 CI exercise wiring — `m7-check.sh` (twelve assertion groups:
+  daemon/socket/tmpfiles preflight, adapters-and-signatures-as-data,
+  the mock managed launch, registry truth, scope attribution, `punarctl
+  agents inspect`, shadow-AI detection against the real fixture process,
+  `agents.json`, the Plate D-005 panel screenshot, end of life, audit
+  lifecycle lines, and negative probes on the new socket; verdict
+  `PUNAR_M7_OK`/`PUNAR_M7_FAIL` in `m7-report.txt`) + the never-enabled
+  root oneshot `punar-m7-check.service`, started synchronously by
+  `idle-ram.sh` strictly after the M6 exercise and before export;
+  `boot-test.sh` phase 9 hard-gates the verdict and exports
+  `m7-report.txt`, `m7-*.txt/.json/.jsonl` and `punar-m7.png`; `ci.yml`
+  shellchecks the three new scripts, uploads the M7 artifacts, and raises
+  `desktop-test` to 95 min. Shellcheck v0.11.0 + actionlint clean;
+  **never executed anywhere** — the exercise only runs in-VM and no VM
+  run contains it.
+
+Budgets, honestly (the M7-specific hard lesson): `punar-agentd` is a
+**second resident service**, so the services-RSS gate now sums the
+`punard.service` *and* `punar-agentd.service` cgroups into the **same
+single** `PUNAR_SERVICES_RSS_MB` number, with the thresholds unmoved
+(target 100 MB, MVP ceiling 150 MB — spec 6.2 budgets the services
+total, not each daemon), and a unit whose cgroup is missing or empty
+makes the whole value `absent`, which `check-budgets.sh` fails even
+under TCG — one live daemon must never mask a dead sibling
+(`PERFORMANCE_BUDGETS.md` §2.3, `idle-ram.sh`). The combined number has
+**never been measured**: the last measurement, 2 MB in run 32857914904,
+is punard alone.
+
+Static validation for the tree — local and non-authoritative per spec
+1.22, re-run by this audit on 2026-08-25 against the working tree:
+`cargo test --workspace --locked` green in the pinned `rust:1` container
+(**458 assertions passed, 0 failed**, of which `punar-agentd` contributes
+36 and the M7 additions to `punar-common`/`punar-env`/`punarctl` the
+rest); `./tools/validate-schemas.sh` — 15 schemas metaschema-checked,
+125 documents validated, ALL PASS (including both staged adapter
+definitions, validated in place); `shellcheck v0.11.0` clean on
+`m7-check.sh`, `punar-mock-agent`, `foo-agent-fixture.sh`, `idle-ram.sh`,
+`boot-test.sh` and `check-budgets.sh`; `actionlint` clean on `ci.yml`.
+Recorded in milestone-7.md §14 and not re-run by this audit:
+`cargo fmt`/`clippy` clean, `PUNAR_BUILD_MODE=summary
+./tools/build-image.sh`, `qmllint` on all nine `.qml` files,
+`Hyprland --verify-config`, `systemd-analyze verify` +
+`systemd-tmpfiles --dry-run`, and the host-side detection run.
+
+What remains: **nothing M7 is proven at runtime.** Every in-VM claim
+(all twelve m7-check groups, the managed mock session and its scope
+cgroup, the registry transitions, the detection pass, the panel
+screenshot, the audit lines, the combined services-RSS number, the
+95-min job budget) awaits commit, push, and the first CI run containing
+the tree. Out of scope by spec sectioning, and tracked in milestone-7.md
+§13: the **AI Access Ledger** (spec 21) is M8 — M7 ships the registry
+only; authority **enforcement** is M9/M12; continuous shadow-AI
+detection with local alerts and remote queries is M10.
 
 ## Milestone table
 
@@ -666,11 +851,11 @@ exist and function, until sharper criteria are defined.
 | M3 — `punard` + `punarctl` | Daemon, typed IPC, capability registry, CLI, audit | Not specified in spec §76 | **Done** — [run 32828986305](https://github.com/smplify-mdm/punar/actions/runs/32828986305) (2026-08-25) fully green incl. the in-VM M3 exercise (`PUNAR_M3_OK`, 27 assertions); punard services RSS 2 MB (within the 100 MB target); idle RAM 1160 MB mean (pass w/ over-target warning) |
 | M4 — Declarative desired state | Schemas, preference/policy merge, reconciliation, explain, firewall-drift demo | Not specified in spec §76 | **Done** — [run 32849448721](https://github.com/smplify-mdm/punar/actions/runs/32849448721) (2026-08-25) fully green incl. the in-VM M4 exercise (`PUNAR_M4_OK`, 29 assertions, timer-driven drift-remediation demo); services RSS still 2 MB; road there: [run 32837156881](https://github.com/smplify-mdm/punar/actions/runs/32837156881) red on one check-wiring assertion, fix's [run 32839803185](https://github.com/smplify-mdm/punar/actions/runs/32839803185) red pre-VM on bundled M5 WIP |
 | M5 — Mock Smplify enrollment | Mock control plane, device enrollment, policy, compliance, inventory | Not specified in spec §76 | **Done** — [run 32849448721](https://github.com/smplify-mdm/punar/actions/runs/32849448721) (2026-08-25) fully green incl. the in-VM M5 exercise (`PUNAR_M5_OK`, 63 assertions — enroll → managed → offline → unenroll journey, category-only sync asserted on the mock's received side); idle RAM 1156 MB mean (pass w/ over-target warning); the finished tree's first run [32846674987](https://github.com/smplify-mdm/punar/actions/runs/32846674987) was red on exactly one case-sensitive verdict grep in m5-check |
-| M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | **Implemented on disk (current); uncommitted; no CI run** — full tree: the `punar-env` crate (section 17 command set, D-014 status with declared/enforcement labels, labeled M7 agent stub), the deterministic offline `punar-env-base` OCI archive + image staging, and m6-check + CI wiring; local static validation green (milestone-6.md §14); the Atlas fixture itself predates M6 (committed 45a6fb0, CI-validated); every runtime claim awaits the first CI run containing the tree |
-| M7 — AI Agent Registry | Managed sessions, Claude adapter, second/generic adapter, agent identity, classification, local UI | Not specified in spec §76 | Not started |
+| M6 — Developer environment manager | `punar-env`, Podman/devcontainer, Atlas fixture | Not specified in spec §76 | **Done** — [run 32857914904](https://github.com/smplify-mdm/punar/actions/runs/32857914904) (2026-08-25) fully green incl. the in-VM M6 exercise (`PUNAR_M6_OK`, 56 assertions — offline `podman load` → rootless `up`/`shell`/`status`/`destroy`, Atlas fixture byte-identical throughout); idle RAM 1162 MB mean (pass w/ over-target warning), services RSS 2 MB; the finished tree's first run [32852810872](https://github.com/smplify-mdm/punar/actions/runs/32852810872) was red on m6-check calling `diff`, which the image does not ship |
+| M7 — AI Agent Registry | Managed sessions, Claude adapter, second/generic adapter, agent identity, classification, local UI | Not specified in spec §76 | **Implemented on disk (current); uncommitted; no CI run** — `punar-agentd` (sibling socket, `agents.*`, schema-exact `registry.jsonl`), the real `punar-env agent` managed launch into a `punar-agent-<id>.scope`, two adapters shipped as data (claude-code + generic-shell), peer-cred/cgroup-checked identity, on-demand `managed`/`observed`/`unknown` classification, the `SUPER+A` AI panel (Plate D-005, dashed M8 ledger placeholder) and `punarctl agents`, plus m7-check + CI wiring; local static validation green (milestone-7.md §14); every runtime claim awaits the first CI run containing the tree |
 | M8 — AI Access Ledger | Resource summaries, process attribution, security events, local retention, privacy controls | Not specified in spec §76 | Not started |
 | M9 — Approval gates + secret broker | Local graphical approval, short-lived mock credentials, redaction tests | Not specified in spec §76 | Not started |
-| M10 — Shadow AI detection MVP | Known/observed/unknown classification, fixture unknown agent, local alert, Smplify remote query | Not specified in spec §76 | Not started |
+| M10 — Shadow AI detection MVP | Known/observed/unknown classification, fixture unknown agent, local alert, Smplify remote query | Not specified in spec §76 | Not started — M7 landed the §19.1 classification vocabulary, the unknown-agent fixture and an **on-demand** scan; M10 owns continuous detection, the local alert, and the Smplify remote query |
 | M11 — Browser/web-app integration | Current Chromium, native launcher integration, project/browser context prototype, web-app install flow | Not specified in spec §76 | Not started |
 | M12 — Network privacy prototype | Local network observability, project-route policy, relay abstraction, simulated or prototype private relay | Not specified in spec §76 | Not started |
 | M13 — Demo polish | First boot, enrollment, keyboard UX, AI panel, privacy panel, deterministic demo | Not specified in spec §76 | Not started |

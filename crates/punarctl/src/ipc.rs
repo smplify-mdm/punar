@@ -10,7 +10,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,15 @@ use serde_json::Value;
 
 /// Contract socket path (docs/api/ipc.md section 1).
 pub const DEFAULT_SOCKET: &str = "/run/punard/punard.sock";
+
+/// The sibling `punar-agentd` socket (contract section 10.1): `agents.*`
+/// lives there, everything else stays on punard's socket. One CLI, two
+/// daemons, one envelope.
+pub const AGENTD_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
+
+/// Method-name prefix that routes to [`AGENTD_SOCKET`] (contract section
+/// 10.5: `agents.*` names auto-route, even under `debug rpc`).
+pub const AGENTD_METHOD_PREFIX: &str = "agents.";
 
 /// The one protocol version this client speaks (contract section 3.3).
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -121,14 +130,22 @@ impl CallError {
     }
 }
 
-/// One-shot IPC client bound to a socket path.
+/// One-shot IPC client bound to a socket path and the daemon behind it
+/// (the daemon's unit name is what an unreachable error tells the operator
+/// to check).
 pub struct Client {
     pub socket: PathBuf,
+    service: &'static str,
 }
 
 impl Client {
-    pub fn new(socket: PathBuf) -> Self {
-        Client { socket }
+    /// The client for one daemon: `--socket` (path or daemon name) wins,
+    /// then the per-daemon environment override, then the contract path.
+    pub fn for_target(target: Target, flag: Option<&Path>) -> Self {
+        Client {
+            socket: resolve_socket(target, flag),
+            service: target.service(),
+        }
     }
 
     /// Send `method` (+ optional params) and return the raw `result` value.
@@ -174,18 +191,24 @@ impl Client {
             return Err(CallError::Unreachable {
                 path: self.socket.clone(),
                 why: "the daemon closed the connection without answering".to_string(),
-                next: CHECK_SERVICE.to_string(),
+                next: self.check_service(),
             });
         }
 
         interpret(&response_line, &id)
     }
 
+    /// "check the service: systemctl status <unit>" — the next step for
+    /// every unreachable-daemon failure, naming the daemon actually dialed.
+    fn check_service(&self) -> String {
+        format!("check the service: systemctl status {}", self.service)
+    }
+
     fn connect_error(&self, error: &io::Error) -> CallError {
         let (why, next) = match error.kind() {
             io::ErrorKind::NotFound => (
                 "the control socket does not exist — the daemon has not created it".to_string(),
-                CHECK_SERVICE.to_string(),
+                self.check_service(),
             ),
             io::ErrorKind::PermissionDenied => (
                 "permission denied — the control socket admits root and members of \
@@ -196,12 +219,9 @@ impl Client {
             io::ErrorKind::ConnectionRefused => (
                 "nothing is listening on the control socket — the daemon is not running"
                     .to_string(),
-                CHECK_SERVICE.to_string(),
+                self.check_service(),
             ),
-            _ => (
-                format!("connecting failed ({error})"),
-                CHECK_SERVICE.to_string(),
-            ),
+            _ => (format!("connecting failed ({error})"), self.check_service()),
         };
         CallError::Unreachable {
             path: self.socket.clone(),
@@ -225,12 +245,77 @@ impl Client {
         CallError::Unreachable {
             path: self.socket.clone(),
             why,
-            next: CHECK_SERVICE.to_string(),
+            next: self.check_service(),
         }
     }
 }
 
-const CHECK_SERVICE: &str = "check the service: systemctl status punard";
+/// Which daemon a call is addressed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Punard,
+    Agentd,
+}
+
+impl Target {
+    /// The daemon that owns `method` (contract section 10.5).
+    pub fn of_method(method: &str) -> Target {
+        if method.starts_with(AGENTD_METHOD_PREFIX) {
+            Target::Agentd
+        } else {
+            Target::Punard
+        }
+    }
+
+    fn default_socket(self) -> PathBuf {
+        match self {
+            Target::Punard => PathBuf::from(DEFAULT_SOCKET),
+            Target::Agentd => PathBuf::from(AGENTD_SOCKET),
+        }
+    }
+
+    fn socket_env(self) -> &'static str {
+        match self {
+            Target::Punard => "PUNARD_SOCKET",
+            Target::Agentd => "PUNAR_AGENTD_SOCKET",
+        }
+    }
+
+    /// The unit named in the "next step" of an unreachable-daemon error.
+    fn service(self) -> &'static str {
+        match self {
+            Target::Punard => "punard",
+            Target::Agentd => "punar-agentd",
+        }
+    }
+
+    fn socket_from_env_or_default(self) -> PathBuf {
+        std::env::var_os(self.socket_env())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.default_socket())
+    }
+}
+
+/// Resolve the socket for `target`: an explicit `--socket` wins, then the
+/// per-daemon environment override, then the contract default.
+///
+/// `--socket` also accepts the two daemon **names** rather than a path
+/// (`--socket agentd`), which is how the section 74.4 negative probes
+/// target the sibling socket without a second flag: a path with no
+/// separator that names a daemon is a name, not a path — no file can be
+/// addressed as a bare `agentd` anyway (a relative socket path needs at
+/// least `./`).
+pub fn resolve_socket(target: Target, flag: Option<&Path>) -> PathBuf {
+    match flag.and_then(|p| p.to_str()) {
+        Some("agentd") => Target::Agentd.socket_from_env_or_default(),
+        Some("punard") => Target::Punard.socket_from_env_or_default(),
+        _ => match flag {
+            Some(path) => path.to_path_buf(),
+            None => target.socket_from_env_or_default(),
+        },
+    }
+}
 
 /// Decode one response line against the envelope rules (contract
 /// section 3.2): `v` must be 1, exactly one of `result`/`error`, and a
@@ -366,7 +451,7 @@ mod tests {
 
     #[test]
     fn unreachable_message_is_voiced_not_an_errno() {
-        let client = Client::new(PathBuf::from("/run/punard/punard.sock"));
+        let client = Client::for_target(Target::Punard, None);
         let err = client.connect_error(&io::Error::from(io::ErrorKind::PermissionDenied));
         assert_eq!(err.exit_code(), EXIT_UNREACHABLE);
         let message = err.message();
@@ -374,5 +459,49 @@ mod tests {
         assert!(message.contains("group punar"));
         assert!(message.contains("Next step:"));
         assert!(!message.contains("EPERM"));
+    }
+
+    /// Routing (contract section 10.5): `agents.*` belongs to the sibling
+    /// daemon, every other method to punard — and the unreachable error
+    /// names the unit the operator should actually check.
+    #[test]
+    fn agents_methods_route_to_the_sibling_socket() {
+        assert_eq!(Target::of_method("agents.list"), Target::Agentd);
+        assert_eq!(Target::of_method("agents.bogus"), Target::Agentd);
+        assert_eq!(Target::of_method("status"), Target::Punard);
+        assert_eq!(Target::of_method("admin.query"), Target::Punard);
+
+        let agentd = Client::for_target(Target::Agentd, None);
+        assert_eq!(agentd.socket, PathBuf::from(AGENTD_SOCKET));
+        let message = agentd
+            .connect_error(&io::Error::from(io::ErrorKind::NotFound))
+            .message();
+        assert!(
+            message.contains("systemctl status punar-agentd"),
+            "{message}"
+        );
+        assert!(!message.contains("status punard\n"), "{message}");
+    }
+
+    /// `--socket agentd` is a daemon **name**, not a path: it is how the
+    /// section 74.4 negative probes reach the sibling socket.
+    #[test]
+    fn the_socket_flag_accepts_a_daemon_name_or_a_path() {
+        assert_eq!(
+            resolve_socket(Target::Punard, Some(Path::new("agentd"))),
+            PathBuf::from(AGENTD_SOCKET)
+        );
+        assert_eq!(
+            resolve_socket(Target::Agentd, Some(Path::new("punard"))),
+            PathBuf::from(DEFAULT_SOCKET)
+        );
+        assert_eq!(
+            resolve_socket(Target::Agentd, Some(Path::new("/tmp/x.sock"))),
+            PathBuf::from("/tmp/x.sock")
+        );
+        assert_eq!(
+            resolve_socket(Target::Agentd, None),
+            PathBuf::from(AGENTD_SOCKET)
+        );
     }
 }

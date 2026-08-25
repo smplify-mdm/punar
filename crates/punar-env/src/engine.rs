@@ -497,25 +497,6 @@ fn ensure_image(podman: &dyn Podman) -> Result<(), EnvError> {
     Ok(())
 }
 
-/// `punar-env agent <name>` — the labeled M7 stub: the membership check
-/// against `ai.agents` is real, the launch is not, and says so (SPEC 1.22).
-pub fn op_agent(m: &Manifest, name: &str) -> EnvError {
-    if m.ai.agents.iter().any(|a| a == name) {
-        EnvError::Runtime(format!(
-            "agent sessions arrive in Milestone 7 (AI Agent Registry); '{name}' is declared \
-             in this environment's manifest"
-        ))
-    } else {
-        EnvError::Runtime(format!(
-            "agent '{name}' is not declared in this environment's manifest.\n\
-             Declared agents: {}.\n\
-             Next step: add it to ai.agents, or use a declared agent — agent sessions \
-             themselves arrive in Milestone 7 (AI Agent Registry).",
-            m.ai.agents.join(" · ")
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,19 +678,6 @@ mod tests {
         let out = op_destroy(&mock, &atlas()).unwrap();
         assert_eq!(out.line, "nothing to destroy · punar-env-atlas");
         assert_eq!(out.json["result"], "nothing-to-destroy");
-    }
-
-    #[test]
-    fn agent_stub_is_honest_in_both_directions() {
-        let declared = op_agent(&atlas(), "claude-code");
-        assert!(declared.to_string().contains("Milestone 7"));
-        assert!(declared.to_string().contains("'claude-code' is declared"));
-        assert_eq!(declared.exit_code(), 1);
-
-        let undeclared = op_agent(&atlas(), "rogue-agent");
-        let msg = undeclared.to_string();
-        assert!(msg.contains("not declared"), "{msg}");
-        assert!(msg.contains("claude-code · codex"), "{msg}");
     }
 
     #[test]

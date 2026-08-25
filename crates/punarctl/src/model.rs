@@ -290,6 +290,78 @@ pub struct PolicySource {
     pub name: String,
 }
 
+// ---------------------------------------------------------------------------
+// M7 agent registry views (contract section 10.2 — the punar-agentd socket)
+// ---------------------------------------------------------------------------
+
+/// `agents.list` / `agents.scan` result (contract section 10.2).
+#[derive(Deserialize)]
+pub struct AgentsList {
+    pub scanned_at: String,
+    #[serde(default)]
+    pub sessions: Vec<AgentRow>,
+    /// Point-in-time detections — heuristic, never certain (SPEC section
+    /// 23). Every one carries `suspected: true` in the data itself.
+    #[serde(default)]
+    pub detections: Vec<AgentRow>,
+}
+
+/// `agents.get` result (contract section 10.2).
+#[derive(Deserialize)]
+pub struct AgentGet {
+    pub session: AgentRow,
+}
+
+/// One registry row: the ten `schemas/ai-agent/registry-record.json`
+/// fields plus the optional detection and managed-session extras. Tolerant
+/// like every other model here — `version`/`environment` default so a row
+/// still renders if a future daemon omits one.
+#[derive(Deserialize, Clone)]
+pub struct AgentRow {
+    pub session_id: String,
+    pub agent: String,
+    #[serde(default)]
+    pub version: String,
+    pub user: String,
+    pub project: String,
+    #[serde(default)]
+    pub environment: String,
+    pub status: String,
+    /// `managed` · `observed` · `unknown` (SPEC section 19.1).
+    pub classification: String,
+    pub started_at: String,
+    /// Always `true` on detections; absent on registered sessions.
+    #[serde(default)]
+    pub suspected: bool,
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub signature_id: Option<String>,
+    #[serde(default)]
+    pub scope_unit: Option<String>,
+    /// The display-level authority summary captured at launch (contract
+    /// section 10.3) — present for managed sessions in `agents.get`.
+    #[serde(default)]
+    pub authority: Option<AgentAuthority>,
+}
+
+/// The authority block: named policy source + the declared rows, each
+/// carrying the milestone that will enforce it (M7 enforces none).
+#[derive(Deserialize, Clone)]
+pub struct AgentAuthority {
+    pub policy_citation: String,
+    #[serde(default)]
+    pub rows: Vec<AgentAuthorityRow>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct AgentAuthorityRow {
+    pub zone: String,
+    pub decision: String,
+    #[serde(default)]
+    pub enforcement: String,
+}
+
 /// Display spelling of a capability state value: strings render bare
 /// (`enabled`), anything else as compact JSON.
 pub fn state_str(value: &Value) -> String {

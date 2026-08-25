@@ -153,7 +153,7 @@ milestone-2.md §6).
 SUPER + T                    Scratchpad terminal (special:term; foot with
                              app-id punar-scratch pre-spawned at session
                              start)
-SUPER + A                    Assistant scratchpad (special:assistant)
+SUPER + SHIFT + A            Assistant scratchpad (special:assistant)
 SUPER + N                    Notes scratchpad (special:notes)
 ```
 
@@ -164,6 +164,19 @@ pre-spawned in M2 — the shell/command center launches their clients, and
 the app-id rules (`punar-assistant`, `punar-notes`) park them. If a
 scratchpad's window is closed its special workspace closes with it;
 relaunch via SUPER+Space or `foot --app-id=punar-scratch`.
+
+### AI panel (spec §25, Plate D-005 · M7)
+
+```text
+SUPER + A                    AI on this device (punar-shell IPC target
+                             `aipanel`; ↑/↓ walk the agent rail, Escape
+                             closes)
+```
+
+`SUPER+A` is spec §25's own shortcut. M7 takes the chord for the AI panel
+and moves the M2 assistant scratchpad to `SUPER+SHIFT+A` (the pad has no
+pre-spawned client; the panel is the milestone's headline surface). Both
+binds on one chord is not an option — Hyprland fires every match.
 
 ### Project overview (spec §14.2, Plate D-007)
 
@@ -254,7 +267,7 @@ M2 additions (extends the list; per milestone-2.md §7):
 20. `SUPER+period` through the full preset cycle — the tiles re-lay-out
     balanced → columns → rows → focus → stack and wrap; `SUPER+comma`
     steps back.
-21. `SUPER+A`, `SUPER+N` — assistant and notes scratchpads toggle.
+21. `SUPER+SHIFT+A`, `SUPER+N` — assistant and notes scratchpads toggle.
 22. `SUPER+TAB` — overview opens; arrows move the selection,
     typing filters, Enter lands on the chosen workspace, Escape closes.
 23. Command center: rename workspace 1 to `atlas`; the name shows in bar

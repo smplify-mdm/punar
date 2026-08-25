@@ -8,10 +8,21 @@ publish.workspace = true
 
 [dependencies]
 clap = { workspace = true }
+# M7 (docs/development/milestone-7.md section 5): the managed launch path
+# speaks the punar-agentd `agents.*` wire contract, whose envelope, error
+# codes and typed params/results live in punar-common — the contract is
+# shared, never re-spelled here.
+punar-common = { workspace = true }
 # `process` on top of the workspace's `net`: geteuid for the refuse-root
 # preflight (docs/development/milestone-6.md section 3.1) without unsafe.
 rustix = { workspace = true, features = ["process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
+# signal-hook (M7): a managed session must deregister even when punar-env
+# itself is asked to stop — SIGTERM/SIGINT are forwarded to the agent scope
+# and the session is ended cleanly. sigaction is not reachable from safe std
+# or safe rustix; the unsafe stays in the audited dependency (the punard
+# precedent, workspace Cargo.toml).
+signal-hook = { workspace = true }
 thiserror = { workspace = true }

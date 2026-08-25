@@ -1,17 +1,41 @@
-//! `punar-agentd` — AI agent registry, identity, policy, attribution, and
-//! access-ledger service (SPEC section 11.3).
+//! `punar-agentd` — the AI Agent Registry service (SPEC section 11.3),
+//! Milestone 7 build: managed session registry, agent identity and
+//! classification (SPEC sections 18–19), process attribution (section 22),
+//! and heuristic shadow-AI detection (section 23).
 //!
-//! Future role: maintain the local AI Agent Registry (SPEC section 19 —
-//! which agents are installed and running, who started them, their project,
-//! managed/observed/unknown classification), enforce the AI authority model
-//! (SPEC section 20), attribute agent activity (SPEC section 22), and keep
-//! the privacy-preserving local AI Access Ledger (SPEC section 21).
+//! # Why a second daemon
 //!
-//! Milestone 0 status: intentionally empty. Managed sessions and agent
-//! identity arrive in Milestone 7; the Access Ledger in Milestone 8 (SPEC
-//! section 76). No stub logic is provided, so nothing here can be mistaken
-//! for a working implementation.
+//! `punard` is the privileged system control plane; the registry is a
+//! different concern with a different lifetime, a different socket, and a
+//! different audience (SPEC section 11.3 names it as its own service). The
+//! wire contract is the sibling section of the same document —
+//! `docs/api/ipc.md` section 10 — and it reuses `punar-common::ipc`
+//! envelope, framing, error codes, and timeouts verbatim: a second socket,
+//! not a second protocol. Design rationale: `docs/development/milestone-7.md`.
+//!
+//! # What this milestone does and does not claim
+//!
+//! - **Does**: register managed sessions launched through `punar-env`,
+//!   prove their `managed` classification from the launch scope's cgroup,
+//!   persist every lifecycle transition as a schema-exact registry record,
+//!   detect known agents running outside the managed runtime (`observed`)
+//!   and suspected agentic processes (`unknown`) on demand, and publish a
+//!   summary for the AI panel.
+//! - **Does not**: enforce anything. Authority rows are display-level and
+//!   carry their `declared · M9/M12` labels (SPEC section 1.22). There is
+//!   no Access Ledger here (Milestone 8), no continuous detection,
+//!   alerting, or response (Milestone 10), and detection is a heuristic
+//!   that says *suspected*, never certain (SPEC section 23).
 
 #![forbid(unsafe_code)]
 
-// Intentionally empty module tree until Milestone 7.
+pub mod adapters;
+pub mod authz;
+pub mod detect;
+pub mod proc;
+pub mod registry;
+pub mod server;
+pub mod summary;
+pub mod util;
+
+pub mod testsupport;

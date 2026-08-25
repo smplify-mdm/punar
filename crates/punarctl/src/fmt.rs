@@ -189,6 +189,24 @@ pub fn rows(style: &Style, rows: &[Row]) -> String {
     out
 }
 
+/// Section header: a muted uppercase label on the left with its question
+/// or citation right-aligned at [`WIDTH`] — the plate's `tsec` idiom
+/// (`Authority · what it may access` … `policy · personal defaults`).
+/// Used where a view stacks two registers that must never be confused
+/// (SPEC section 21: what it *may* access vs. what it *did*).
+pub fn section(style: &Style, left: &str, right: &str) -> String {
+    let left = left.to_uppercase();
+    let right = right.to_uppercase();
+    let used = left.chars().count() + right.chars().count();
+    let gap = if used + 2 > WIDTH { 2 } else { WIDTH - used };
+    format!(
+        "{}{}{}\n",
+        style.muted(&left),
+        " ".repeat(gap),
+        style.muted(&right)
+    )
+}
+
 /// Closing note: uppercase, muted — the plate's `tnote` idiom.
 pub fn note(style: &Style, text: &str) -> String {
     format!("{}\n", style.muted(&text.to_uppercase()))
@@ -270,11 +288,26 @@ mod tests {
     }
 
     #[test]
+    fn section_headers_right_align_their_citation() {
+        let style = Style::plain();
+        let out = section(
+            &style,
+            "Authority · what it may access",
+            "policy · personal defaults",
+        );
+        let line = out.lines().next().unwrap();
+        assert_eq!(line.chars().count(), WIDTH);
+        assert!(line.starts_with("AUTHORITY · WHAT IT MAY ACCESS"));
+        assert!(line.ends_with("POLICY · PERSONAL DEFAULTS"));
+    }
+
+    #[test]
     fn plain_style_emits_no_ansi() {
         let style = Style::plain();
         let everything = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             masthead(&style, "Status", "h · Personal"),
+            section(&style, "Authority", "policy"),
             rows(&style, &[Row::new("A", "Ok", Slot::Ok, "d")]),
             note(&style, "note"),
             verdict(&style, Slot::Bad, "denied"),

@@ -1,9 +1,19 @@
 [package]
 name = "punar-agentd"
-description = "AI agent registry, identity, policy, attribution, and access-ledger service (SPEC section 11.3) — Milestone 0 placeholder"
+description = "Punar AI Agent Registry daemon (SPEC sections 11.3, 18, 19, 22, 23) — Milestone 7: managed sessions, classification, heuristic detection"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap = { workspace = true }
+punar-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Justifications live at the workspace [workspace.dependencies] table:
+# rustix = SO_PEERCRED + pre-listen socket setup without unsafe (the punard
+# pattern, docs/api/ipc.md sections 1.2 and 10.1);
+# signal-hook = safe SIGTERM/SIGINT handling for graceful shutdown.
+rustix = { workspace = true }
+signal-hook = { workspace = true }

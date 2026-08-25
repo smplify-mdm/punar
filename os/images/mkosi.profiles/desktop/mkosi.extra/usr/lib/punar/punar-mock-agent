@@ -1,0 +1,39 @@
+#!/bin/sh
+# punar-mock-agent — the dev/CI stand-in for a managed AI agent session
+# (docs/development/milestone-7.md section 6).
+#
+# There is no real AI agent binary in the CI VM (it has no network), so
+# `punar-env agent <name>` substitutes this script for the adapter's real
+# command when PUNAR_AGENT_MOCK=1 is set. It is deliberately a script and
+# not a crate: no build surface, shellcheck-gated like every other Punar
+# script, and its entire behavior fits on one screen — the honesty
+# property wanted from a thing whose only job is to be obviously fake.
+#
+# Behavior: print the label, prove workspace access with one touch, then
+# block until signaled. The block is `wait` on a background sleep — a
+# blocking wait, never a polling loop (SPEC section 6.3).
+
+set -u
+
+LABEL="PUNAR MOCK AGENT — dev/CI stand-in for a managed AI agent session; performs no AI work"
+TOUCH_FILE=".punar-agent-touch"
+
+if [ "${1:-}" = "--version" ]; then
+    echo "punar-mock-agent 0.0-mock"
+    exit 0
+fi
+
+echo "$LABEL"
+echo "Working directory: $(pwd)"
+
+if touch "./$TOUCH_FILE" 2>/dev/null; then
+    echo "Workspace write: ./$TOUCH_FILE"
+else
+    echo "Workspace write: refused (./$TOUCH_FILE not writable)" >&2
+fi
+
+echo "Waiting for SIGTERM/SIGINT — end this session with: systemctl --user stop <scope>"
+
+trap 'exit 0' TERM INT
+sleep infinity &
+wait $!

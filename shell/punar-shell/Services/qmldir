@@ -1,2 +1,3 @@
+singleton Agents 1.0 Agents.qml
 singleton Status 1.0 Status.qml
 singleton WorkspaceState 1.0 WorkspaceState.qml

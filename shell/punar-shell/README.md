@@ -1,16 +1,19 @@
 # punar-shell
 
 The Punar desktop shell: a Quickshell (QML) top bar (M1, with the M5
-enrollment chrome), the SUPER+Space command center overlay, and the
+enrollment chrome), the SUPER+Space command center overlay, the
 SUPER+TAB project-workspace overview with named-workspace persistence
-(M2), implementing the field-note design language.
+(M2), and the SUPER+A AI panel (M7), implementing the field-note design
+language.
 
 - Design authority: [`docs/design/DESIGN_LANGUAGE.md`](../../docs/design/DESIGN_LANGUAGE.md)
   (binding) and the mockups — the command-center card is
   [`docs/design/mockups/command-approval.html`](../../docs/design/mockups/command-approval.html)
-  Sect I (M1), and the overview is
+  Sect I (M1), the overview is
   [`docs/design/mockups/desktop-multitasking.html`](../../docs/design/mockups/desktop-multitasking.html)
-  state 03 OVERVIEW / Plate D-007 (M2 acceptance reference).
+  state 03 OVERVIEW / Plate D-007 (M2 acceptance reference), and the AI
+  panel is [`docs/design/mockups/ai-panel.html`](../../docs/design/mockups/ai-panel.html)
+  / Plate D-005 (M7 acceptance reference).
 - Every design value flows through the `Theme` singleton, which loads
   [`shell/theme/punar-tokens.json`](../theme/punar-tokens.json) at runtime.
   No color is hardcoded outside `Theme/Theme.qml` (DESIGN_LANGUAGE.md §8).
@@ -23,9 +26,11 @@ SUPER+TAB project-workspace overview with named-workspace persistence
 | `Theme/Theme.qml` | Singleton: token loader + typed design properties |
 | `Services/Status.qml` | Singleton: enrollment/compliance context — watches `/run/punar/status.json` (M5, ipc.md §9) |
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
+| `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `CommandCenter/CommandCenter.qml` | SUPER+Space overlay + `commandcenter` IPC handler |
 | `Overview/Overview.qml` | SUPER+TAB project-workspace overview + `overview` IPC handler (Plate D-007) |
+| `AiPanel/AiPanel.qml` | SUPER+A AI panel + `aipanel` IPC handler (Plate D-005) |
 
 ## Running on a dev machine
 
@@ -47,6 +52,8 @@ Toggle the command center or the overview from another terminal:
 qs ipc call commandcenter toggle
 quickshell ipc call overview toggle    # SUPER+TAB binding; `qs` works too
 qs ipc call overview state             # prints "open" or "closed" (CI probe)
+qs ipc call aipanel toggle             # SUPER+A binding
+qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 ```
 
 ## Install layout (punar-desktop image)
@@ -172,6 +179,97 @@ milestone-5.md §8):
   directory (ipc.md §9's honest placement note); anything root-trusted
   stays on the punard socket.
 
+## AI panel — SUPER+A (M7, Plate D-005)
+
+`SUPER+A` → Hyprland runs
+`qs -p /usr/share/punar/shell ipc call aipanel toggle` (IpcHandler target
+`aipanel`, functions `toggle`/`open`/`close` plus the read-only `state`,
+which returns `open`/`closed` for the `m7-check` probe). The panel is a
+full paper surface over the 22% ink-wash scrim — spec §19 (registry),
+§20 (authority) and §21 (the ledger boundary) on one keyboard-first
+screen:
+
+- **Masthead**: `PUNAR · AI ON THIS DEVICE`, the mode line, and the
+  session counts. Unmanaged-first (DESIGN_LANGUAGE.md §8): the mode line
+  reads `PERSONAL` and the counts read `N SESSIONS · M UNKNOWN`; only
+  when `Status.enrolled` does the org name replace `PERSONAL` and the
+  counts read `N MANAGED`. The unknown count is the one place color
+  enters the masthead, and only while it is non-zero.
+- **Agent rail** — one row per registry session and per detection, with
+  `SESSIONS` / `UNKNOWN` section headers. Managed rows are calm with the
+  green presence dot; ended sessions take the grey dot; observed rows
+  stay quiet ink; unknown rows are the red voice — the only red on the
+  surface. Each row carries the D-005 register-01 fields (name, project,
+  session id, classification, status) across two meta lines, because a
+  real `agt_` id is twelve hex digits and truncating an identifier is
+  worse than a taller row.
+- **Detail pane** — the attribution chain as the masthead
+  (`AGT_… · USER · ENVIRONMENT · STARTED HH:MM`, spec §22/§47), then
+  `AUTHORITY · WHAT IT MAY ACCESS` with the §20 decision words as
+  tracked mono in their status colors (`ALLOWED` green, `DENIED` red,
+  `APPROVAL REQUIRED` amber, `READ` plain) over the raw policy zone, the
+  `POLICY · PERSONAL DEFAULTS` / `POLICY · ENG-AI-V3` citation in the
+  section tagline, and **every row's `declared · M9/M12` enforcement
+  label**. Nothing here is enforced in M7 and no row is drawn without
+  saying so (spec §1.22).
+- **Ledger** — `LEDGER · WHAT IT ACCESSED` is a **dashed** card reading
+  `NOT YET RECORDED · MILESTONE 8`. The May/Did split (§21) is
+  structural: two ruled sections, each with its question in the header.
+  Dashed means "not real yet" — the same honesty grammar the overview
+  uses for empty workspaces.
+- **Unknown detail** — the D-005 unknown card: `UNKNOWN AI ACTIVITY`,
+  the `UNMANAGED · SUSPECTED` pill, the executable path (printed in its
+  real case — the meta grammar uppercases labels, never evidence), the
+  matched signature id, and the §23 honesty card
+  (`DETECTION IS HEURISTIC — SUSPECTED, NOT CERTAIN`). No green anywhere
+  on this view. The mockup's `Inspect` / `Block network` /
+  `Register as managed` buttons are **not rendered**: those capabilities
+  arrive with M9/M10, and this release ships no dead buttons.
+- **Keys**: `↑`/`↓` (and `K`/`J`) move the rail selection, `Home`/`End`
+  jump, `Esc` closes. No mouse is required (spec §12); a scrim click
+  still dismisses.
+
+### Data — `/run/punar/agents.json` (M7, ipc.md §11)
+
+`Services/Agents.qml` is the single source of the panel's display state,
+fed by `punar-agentd`'s summary file — the AI-panel sibling of
+`status.json`:
+
+```json
+{"v": 1, "scanned_at": "…", "policy_citation": "personal-defaults",
+ "counts": {"managed": 1, "observed": 0, "unknown": 1},
+ "sessions": [{"session_id": "agt_…", "agent": "claude-code",
+   "project": "atlas", "environment": "punar-env-atlas",
+   "classification": "managed", "status": "active", "started_at": "…",
+   "authority": {"policy_citation": "…", "rows": [
+     {"zone": "filesystem.project", "decision": "read_write",
+      "enforcement": "declared · M9"}]}}],
+ "detections": [{"session_id": "agt_…", "agent": "foo-agent",
+   "classification": "unknown", "suspected": true,
+   "executable": "/home/punar/Downloads/foo-agent",
+   "signature_id": "downloads-foo-agent", "observed_at": "…"}],
+ "ts": "…"}
+```
+
+- **Event-driven, zero polling**: agentd rewrites the file atomically
+  (tmp+rename) at startup and on every registry change; the singleton
+  follows it with a `FileView` change watch (inotify — the `Status.qml`
+  pattern). No timers, no socket client in the shell. The masthead's
+  `SystemClock` is `enabled` only while the panel is open.
+- **Freshness on user action, not on a clock**: opening the panel
+  re-reads the file once and `execDetached`s a single
+  `punarctl agents list --json` (fixed argv — the shell never composes a
+  shell string), whose staleness rule (ipc.md §10.2) triggers agentd's
+  scan; the rewrite arrives through the FileView.
+- **Fail closed**: a missing or unparsable file renders the calm empty
+  panel — `NO AGENT SESSIONS`, `LAST SCAN · NEVER` — never an error
+  surface. Absent fields are simply not printed rather than guessed at;
+  an unrecognised decision value is printed verbatim.
+- The file is **non-authoritative display data** in a user-owned
+  directory (the §9 caveat verbatim); anything root-trusted stays on the
+  agentd socket. It carries no pids, no cmdlines, no secrets and no
+  ledger data.
+
 ## Command center data sources (M1 scope)
 
 1. Installed applications via Quickshell `DesktopEntries` — launched with
@@ -198,15 +296,18 @@ touch fails harmlessly.
 
 ## Linting
 
-All seven `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
-quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in the pinned
-builder base container; default import path — Quickshell ships qmldir +
-qmltypes under `/usr/lib/qt6/qml/Quickshell`, so no extra `-I` is needed):
+All nine `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
+quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in a container
+built on the pinned builder base with `qt6-declarative` + `quickshell`
+installed from the same snapshot; default import path — Quickshell ships
+qmldir + qmltypes under `/usr/lib/qt6/qml/Quickshell`, so no extra `-I` is
+needed; the binary lives at `/usr/lib/qt6/bin/qmllint`):
 
 ```sh
-qmllint shell.qml Bar/Bar.qml CommandCenter/CommandCenter.qml \
-        Overview/Overview.qml Theme/Theme.qml \
-        Services/Status.qml Services/WorkspaceState.qml   # from this directory
+qmllint shell.qml AiPanel/AiPanel.qml Bar/Bar.qml \
+        CommandCenter/CommandCenter.qml Overview/Overview.qml \
+        Theme/Theme.qml Services/Agents.qml Services/Status.qml \
+        Services/WorkspaceState.qml                       # from this directory
 ```
 
 [`.qmllint.ini`](.qmllint.ini) makes exactly one targeted downgrade —
@@ -215,6 +316,17 @@ qmllint shell.qml Bar/Bar.qml CommandCenter/CommandCenter.qml \
 window-proxy machinery at runtime, so the warning is unresolvable noise for
 any Quickshell shell). Every other category stays at its default; new
 warnings are fixed in code, never silenced.
+
+Beyond linting, the M7 panel was also exercised **headlessly on the
+maintainer's machine** as a local pre-flight: the same pinned container
+plus `sway` (headless wlroots backend — Quickshell needs wlr-layer-shell,
+which weston does not provide), `qs -p shell/punar-shell`, `wtype` for
+keys and `grim` for captures. That run is ad-hoc and non-authoritative
+per spec 1.22 — the in-VM `m7-check` remains the arbiter — but it did
+prove, against a fixture `agents.json`, that the shell loads with **no
+QML errors and no binding loops**, that `aipanel state/open/close/toggle`
+answer correctly, that `↑`/`↓` move the rail selection and `Esc` closes,
+and that deleting `agents.json` fails closed to the empty panel.
 
 ## Known deviations from the mockups (deliberate)
 
@@ -235,3 +347,17 @@ warnings are fixed in code, never silenced.
   claimed before it exists; the empty fourth-card "Temporary activity"
   plate (§14.4, drawn dashed in the mockup) is future scope and is not
   rendered.
+- AI panel (M7): the same drop-shadow omission. Rail rows print the
+  registry's `agent` value verbatim (`claude-code`) rather than the
+  mockup's prettified `Claude Code` — the identifier is what
+  `punarctl agents inspect` takes and what `registry.jsonl` stores, and
+  CLI/UI parity beats typography here. The mockup's live credential
+  countdown (`EXPIRES 41:32`) is not rendered: M7 issues no credentials,
+  so there is no clock to show; the same goes for the ledger's resource
+  summaries, security-event rows and admin-query card (all M8, replaced
+  by the one dashed placeholder) and the unknown card's observed-access
+  rows (no ledger data exists to fill them). The unknown card's action
+  buttons are omitted — those capabilities are M9/M10. The mockup's
+  device line (`ThinkPad X1 · dev_123 · Acme Engineering`) shows only the
+  mode/org part: the shell has no trustworthy device identity to print
+  yet, and inventing one would be the wrong kind of fidelity.

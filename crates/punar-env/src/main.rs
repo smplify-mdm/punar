@@ -13,16 +13,28 @@
 //! invoking user (uid 0 is refused), holds no state of its own, and
 //! drives the podman CLI with fixed argv — never a host shell string.
 //!
-//! Exit codes (Plate D-014): 0 success · 1 runtime/podman error · 2 usage
-//! (clap). `shell` passes the container command's exit code through
-//! verbatim; `agent` is the labeled Milestone 7 stub and exits 1.
+//! Milestone 7 makes `agent` real: `punar-env agent <name>` resolves the
+//! declared agent against a staged gateway adapter (SPEC section 26),
+//! mints the `agt_` session identity, launches the agent in a transient
+//! systemd scope named after it (SPEC section 22 attribution), registers
+//! the session with `punar-agentd`, and deregisters when it ends
+//! (docs/development/milestone-7.md section 5). Authority is displayed,
+//! never enforced, and every row says so (SPEC 1.22).
+//!
+//! Exit codes (Plate D-014): 0 success · 1 runtime/podman/registry error ·
+//! 2 usage (clap). `shell` and `agent` pass their child's exit code
+//! through verbatim.
 
 #![forbid(unsafe_code)]
 
+mod adapter;
+mod agentd;
+mod authority;
 mod engine;
 mod manifest;
 mod podman;
 mod render;
+mod session;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -76,9 +88,12 @@ enum Command {
     Status,
     /// Remove the environment container; project files are never touched.
     Destroy,
-    /// Launch an AI agent session in this environment (Milestone 7).
+    /// Launch a managed AI agent session for this project: a systemd
+    /// scope named for the session id, registered with the AI agent
+    /// registry, deregistered when the agent exits (Milestone 7).
     Agent {
-        /// Agent name; must be declared in the manifest's ai.agents list.
+        /// Agent name; must be declared in the manifest's ai.agents list
+        /// and have a staged gateway adapter.
         name: String,
     },
 }
@@ -150,9 +165,9 @@ fn run(cli: Cli) -> Result<u8, EnvError> {
             Ok(emit(&out, cli.json))
         }
         Command::Agent { name } => {
-            // The labeled M7 stub: the ai.agents membership check is real,
-            // the launch is not, and says so (SPEC 1.22). Always exits 1.
-            Err(engine::op_agent(&m, &name))
+            // The managed launch path (M7): the agent's own exit code is
+            // passed through verbatim, exactly like `shell`.
+            session::op_agent(&podman, &dir, &m, &name, cli.json)
         }
     }
 }
@@ -246,13 +261,15 @@ mod tests {
         }
     }
 
-    /// `--help` labels the agent stub with its milestone (SPEC 1.22).
+    /// `--help` names the milestone that owns managed agent sessions
+    /// (SPEC 1.22 — the surface always says where it stands).
     #[test]
-    fn help_labels_the_agent_stub_with_milestone_7() {
+    fn help_names_the_milestone_that_owns_agent_sessions() {
         use clap::CommandFactory;
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("Milestone 7"), "{help}");
+        assert!(help.contains("registry"), "{help}");
     }
 
     #[test]

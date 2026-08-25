@@ -13,3 +13,10 @@ serde = { workspace = true }
 # JSONL. Already in the workspace dependency set — no new supply chain.
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# M7 (docs/api/ipc.md section 10.4): flock behind AuditWriter's rotation
+# lock — punard and punar-agentd now append to the same trail, and the
+# size-check + rename must be serialized between processes. Already in the
+# workspace tree for punard's SO_PEERCRED; the `fs` feature adds no new
+# crate. `flock` is not reachable from safe std, and workspace crates are
+# #![forbid(unsafe_code)].
+rustix = { workspace = true }

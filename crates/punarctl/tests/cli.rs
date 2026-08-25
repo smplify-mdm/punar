@@ -852,7 +852,8 @@ fn unimplemented_verbs_keep_their_milestone_stubs() {
     let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
     for (args, expected) in [
         (vec!["compliance"], "Milestone 5"),
-        (vec!["agents", "list"], "Milestone 7"),
+        // `agents list` / `agents inspect` are real since M7 (below);
+        // `agents access` waits for the M8 Access Ledger.
         (vec!["agents", "access", "agt_1"], "Milestone 8"),
         (vec!["privacy", "connections"], "Milestone 12"),
         (vec!["relay", "status"], "Milestone 12"),
@@ -982,4 +983,342 @@ fn overridden_set_exits_0_with_the_recorded_not_applied_verdict() {
     assert_eq!(value["changed"], false);
     assert_eq!(value["overridden"], true);
     assert_eq!(value["effective_state"], "enabled");
+}
+
+// ---------------------------------------------------------------------------
+// M7 agent registry verbs (contract section 10 — the punar-agentd socket)
+// ---------------------------------------------------------------------------
+
+/// The `agents.list` example from docs/api/ipc.md section 10.2, verbatim.
+fn fixture_agents_list() -> Value {
+    json!({
+        "scanned_at": "2026-08-27T10:00:02Z",
+        "sessions": [
+            {"session_id": "agt_4f21c09ab3e1", "agent": "claude-code",
+             "version": "mock", "process_id": 2143, "user": "punar",
+             "project": "atlas", "environment": "punar-env-atlas",
+             "status": "active", "classification": "managed",
+             "started_at": "2026-08-27T09:58:40Z"}
+        ],
+        "detections": [
+            {"session_id": "agt_d11e0aa7c402", "agent": "foo-agent",
+             "version": "unknown", "process_id": 2410, "user": "punar",
+             "project": "unknown", "environment": "host",
+             "status": "active", "classification": "unknown",
+             "started_at": "2026-08-27T09:59:55Z",
+             "suspected": true, "executable": "/home/punar/Downloads/foo-agent",
+             "signature_id": "downloads-foo-agent"}
+        ]
+    })
+}
+
+/// The `agents.get` example (section 10.2): the row plus `scope_unit` and
+/// the display-level authority summary captured at launch (section 10.3).
+fn fixture_agent_get(session_id: &str) -> Option<Value> {
+    let list = fixture_agents_list();
+    let mut row = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(list["detections"].as_array().unwrap())
+        .find(|row| row["session_id"] == session_id)?
+        .clone();
+    if row["classification"] == "managed" {
+        row["scope_unit"] = json!(format!("punar-agent-{session_id}.scope"));
+        row["authority"] = json!({
+            "policy_citation": "personal-defaults",
+            "rows": [
+                {"zone": "filesystem.project", "decision": "read_write",
+                 "enforcement": "declared · M9"},
+                {"zone": "network.internet", "decision": "allow",
+                 "enforcement": "declared · M12"},
+                {"zone": "network.corp_prod", "decision": "deny",
+                 "enforcement": "declared · M12"},
+                {"zone": "credentials.aws_dev", "decision": "request",
+                 "enforcement": "declared · M9"}
+            ]
+        });
+    }
+    Some(json!({ "session": row }))
+}
+
+/// The mock `punar-agentd`: the same envelope, the closed M7 method table,
+/// and the reserved-name answers the contract prescribes (section 10.2).
+fn agents_respond(request: &Value) -> Result<Value, Value> {
+    assert_eq!(request["v"], json!(1), "client must send v: 1");
+    let method = request["method"].as_str().expect("method must be a string");
+    match method {
+        "agents.list" | "agents.scan" => {
+            assert!(
+                request.get("params").is_none(),
+                "no-param methods omit params entirely"
+            );
+            Ok(fixture_agents_list())
+        }
+        "agents.get" => {
+            let id = request["params"]["session_id"]
+                .as_str()
+                .expect("session_id param")
+                .to_string();
+            fixture_agent_get(&id).ok_or_else(|| {
+                json!({
+                    "code": "not_found",
+                    "message": format!(
+                        "No AI agent session {id} is known to the registry.\n\
+                         Next step: punarctl agents list"
+                    ),
+                    "details": {"param": "session_id", "session_id": id}
+                })
+            })
+        }
+        "agents.access" => Err(json!({
+            "code": "unknown_method",
+            "message": "The method \"agents.access\" is reserved for the Milestone 8 AI \
+                        Access Ledger (spec section 21) and is not implemented yet.",
+            "details": {"method": method, "reserved_for": "milestone-8"}
+        })),
+        other => Err(json!({
+            "code": "unknown_method",
+            "message": format!(
+                "The method \"{other}\" does not exist. The punar-agentd IPC method table \
+                 is closed and typed; there is no generic execution method, by design \
+                 (spec sections 10 and 60).\n\
+                 Next step: run `punarctl --help` for the supported commands."
+            ),
+            "details": {"method": other}
+        })),
+    }
+}
+
+/// Start the mock agent registry; the returned path goes in
+/// `PUNAR_AGENTD_SOCKET`.
+fn start_agentd_mock() -> PathBuf {
+    start_mock_with(agents_respond)
+}
+
+/// Run punarctl with **both** sockets pointed at mocks, so a mis-routed
+/// call fails loudly instead of silently hitting the other daemon.
+fn run_agents(agentd: &PathBuf, args: &[&str]) -> Output {
+    let punard = start_mock();
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", punard)
+        .env("PUNAR_AGENTD_SOCKET", agentd)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+#[test]
+fn agents_list_renders_the_registry_and_says_suspected() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains("P U N A R   ·   A I   A G E N T S"), "{text}");
+    assert!(text.contains(RULE), "{text}");
+    // The managed session and the detection share one row model.
+    let managed = text
+        .lines()
+        .find(|l| l.starts_with("AGT_4F21C09AB3E1"))
+        .unwrap_or_default();
+    assert!(managed.contains("claude-code"), "{text}");
+    assert!(managed.contains("atlas"), "{text}");
+    assert!(managed.contains("MANAGED"), "{text}");
+    assert!(managed.contains("ACTIVE"), "{text}");
+    assert!(managed.contains("2026-08-27 09:58:40"), "{text}");
+
+    // SPEC section 23: the unknown row never claims certainty.
+    let unknown = text
+        .lines()
+        .find(|l| l.starts_with("AGT_D11E0AA7C402"))
+        .unwrap_or_default();
+    assert!(unknown.contains("foo-agent"), "{text}");
+    assert!(unknown.contains("UNKNOWN · SUSPECTED"), "{text}");
+    assert!(
+        text.contains("DETECTION IS HEURISTIC — SUSPECTED, NOT CERTAIN"),
+        "{text}"
+    );
+    assert!(text.contains("MILESTONE 10"), "{text}");
+    assert!(text.contains("1 SESSION · 1 SUSPECTED"), "{text}");
+    // Unmanaged-first: no org chrome on a personal device.
+    assert!(!text.to_lowercase().contains("organization"), "{text}");
+}
+
+/// `agents scan` forces a pass now and renders the same view as `list`
+/// (hidden verb — the advertised surface stays list/inspect).
+#[test]
+fn agents_scan_forces_a_pass_and_renders_the_list_view() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "scan"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("P U N A R   ·   A I   A G E N T S"), "{text}");
+    assert!(text.contains("UNKNOWN · SUSPECTED"), "{text}");
+
+    let output = run_agents(&agentd, &["--json", "agents", "scan"]);
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_agents_list());
+}
+
+#[test]
+fn agents_inspect_renders_authority_then_the_ledger_placeholder() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "inspect", "agt_4f21c09ab3e1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    // Attribution masthead (SPEC section 22) — the D-005 identity line.
+    assert!(text.contains("P U N A R   ·   A G E N T"), "{text}");
+    assert!(
+        text.contains("AGT_4F21C09AB3E1 · MANAGED · ACTIVE"),
+        "{text}"
+    );
+    assert!(
+        text.contains("AGT_4F21C09AB3E1 · PUNAR · PUNAR-ENV-ATLAS · STARTED 2026-08-27 09:58:40"),
+        "{text}"
+    );
+    assert!(
+        text.contains("PUNAR-AGENT-AGT_4F21C09AB3E1.SCOPE") || text.contains("SCOPE"),
+        "{text}"
+    );
+
+    // Authority · what it may access, citing its named source.
+    assert!(text.contains("AUTHORITY · WHAT IT MAY ACCESS"), "{text}");
+    assert!(text.contains("POLICY · PERSONAL DEFAULTS"), "{text}");
+    assert!(text.contains("FILESYSTEM.PROJECT"), "{text}");
+    assert!(text.contains("READ_WRITE"), "{text}");
+    // Every authority row wears its enforcement milestone (SPEC 1.22).
+    for line in text
+        .lines()
+        .filter(|l| l.starts_with("NETWORK.") || l.starts_with("CREDENTIALS."))
+    {
+        assert!(line.contains("declared · M"), "{line}");
+    }
+    assert!(
+        text.contains("NOTHING HERE IS ENFORCED IN MILESTONE 7"),
+        "{text}"
+    );
+
+    // Ledger · what it accessed — named as the M8 work it is.
+    assert!(text.contains("LEDGER · WHAT IT ACCESSED"), "{text}");
+    assert!(text.contains("MILESTONE 8"), "{text}");
+}
+
+#[test]
+fn agents_inspect_renders_a_detection_as_suspected_with_no_authority() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "inspect", "agt_d11e0aa7c402"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("AGT_D11E0AA7C402 · UNKNOWN · SUSPECTED"),
+        "{text}"
+    );
+    assert!(text.contains("/home/punar/Downloads/foo-agent"), "{text}");
+    assert!(
+        text.contains("downloads-foo-agent · heuristic match"),
+        "{text}"
+    );
+    assert!(text.contains("IDENTITY · OBSERVED"), "{text}");
+    assert!(
+        text.contains("DETECTION IS HEURISTIC — SUSPECTED, NOT CERTAIN"),
+        "{text}"
+    );
+    // A detection was never launched through the runtime: it has no
+    // authority to show, and none is invented.
+    assert!(!text.contains("AUTHORITY · WHAT IT MAY ACCESS"), "{text}");
+    // No dead buttons in a terminal either: the D-005 unknown-view actions
+    // are M9/M10 capabilities and are not offered.
+    assert!(!text.to_uppercase().contains("BLOCK NETWORK"), "{text}");
+}
+
+#[test]
+fn agents_json_round_trips_the_result_verbatim() {
+    let agentd = start_agentd_mock();
+
+    let output = run_agents(&agentd, &["--json", "agents", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_agents_list());
+    // Registry field names are the schema's, unchanged by the CLI.
+    assert_eq!(value["sessions"][0]["classification"], "managed");
+    assert_eq!(value["detections"][0]["suspected"], true);
+
+    let output = run_agents(
+        &agentd,
+        &["--json", "agents", "inspect", "agt_4f21c09ab3e1"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(value, fixture_agent_get("agt_4f21c09ab3e1").unwrap());
+}
+
+#[test]
+fn agents_inspect_of_an_unknown_id_exits_1_with_the_section_73_voice() {
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["agents", "inspect", "agt_nosuchsession"]);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(text.contains("No AI agent session"), "{text}");
+    assert!(text.contains("Next step"), "{text}");
+}
+
+/// Routing (contract section 10.5): `agents.*` goes to the sibling socket,
+/// and an unreachable registry names *its* unit in the next step — never
+/// punard's.
+#[test]
+fn agents_verbs_reach_the_agentd_socket_and_name_it_when_it_is_missing() {
+    let punard = start_mock();
+    let missing = std::env::temp_dir().join("punarctl-no-agentd-here.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["agents", "list"])
+        .env("PUNARD_SOCKET", &punard)
+        .env("PUNAR_AGENTD_SOCKET", &missing)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("not reachable"), "{text}");
+    assert!(text.contains("systemctl status punar-agentd"), "{text}");
+}
+
+/// The SPEC section 74.4 negative probes on the new socket: an unknown
+/// `agents.*` name auto-routes there, and `--socket agentd` forces any
+/// other name to it. Both must answer `unknown_method`, never anything
+/// executable (SPEC sections 10, 60).
+#[test]
+fn debug_probes_on_the_agentd_socket_get_unknown_method() {
+    let agentd = start_agentd_mock();
+
+    let output = run_agents(&agentd, &["debug", "rpc", "agents.bogus"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not exist"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run_agents(
+        &agentd,
+        &["debug", "rpc", "admin.query", "--socket", "agentd"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not exist"),
+        "{}",
+        stderr(&output)
+    );
+
+    // agents.access is reserved for M8 and says so — on the daemon side
+    // and in the CLI stub alike.
+    let output = run_agents(&agentd, &["debug", "rpc", "agents.access"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Milestone 8"),
+        "{}",
+        stderr(&output)
+    );
 }

@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "_comment": [
+    "Suspected-AI heuristic patterns (SPEC section 23; milestone-7.md 7.1).",
+    "Read by punar-agentd; a match classifies a process as UNKNOWN and every",
+    "surface labels it SUSPECTED, never certain. Deliberately NOT a schema:",
+    "this is an internal heuristic input, versioned by review, and it is",
+    "kept small on purpose — a broad pattern set would trade false calm for",
+    "false accusations, and section 23 forbids claiming perfect detection.",
+    "exe_glob is matched against the executable path and against absolute",
+    "path arguments; '*' spans '/' so */Downloads/* patterns work.",
+    "Keys starting with '_' are ignored by the loader (serde) and exist so",
+    "the rationale ships next to the data it explains."
+  ],
+  "patterns": [
+    {
+      "id": "downloads-foo-agent",
+      "exe_glob": "*/Downloads/foo-agent",
+      "note": "The hero-demo shadow-AI fixture (spec sections 25 and 75 step 10; fixtures/agents/unknown-agent/foo-agent.json declares executable_path ~/Downloads/foo-agent). m7-check installs a real, innocuous sleeping script at that path so detection has something true to find."
+    },
+    {
+      "id": "downloads-agent-like",
+      "exe_glob": "*/Downloads/*-agent",
+      "note": "An agent-named executable run straight out of a Downloads directory — the generic shape of the fixture above. Suspected only: plenty of innocent programs are named this way, which is exactly why the classification is UNKNOWN and the word on every surface is 'suspected'."
+    }
+  ]
+}

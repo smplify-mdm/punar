@@ -1,0 +1,55 @@
+# Punar AI Agent Registry service (SPEC section 11.3; M7 —
+# docs/development/milestone-7.md §3). Serves the typed `agents.*` API on
+# /run/punar-agentd/agentd.sock (docs/api/ipc.md section 10), keeps the
+# session registry in /var/lib/punar/agents/registry.jsonl, and writes the
+# shell's summary file /run/punar/agents.json.
+#
+# A SEPARATE daemon from punard by decision (milestone-7.md §3): punard owns
+# root mutations of system state; this one only records and observes. It
+# never mutates system state and holds no capability methods, so punard's
+# section 60 hard-safety surface is unchanged by M7.
+#
+# Enablement is DECLARATIVE at the VENDOR level: the extra tree ships
+# usr/lib/systemd/system/multi-user.target.wants/punar-agentd.service. mkosi
+# applies Arch's presets (disable *) to /etc AFTER extra trees, so postinst
+# systemctl and /etc symlinks are preset-wiped — /usr/lib .wants only (the
+# twice-verified M1 lesson). `systemctl is-enabled` reports `disabled` for a
+# vendor-wants unit: m7-check asserts the SYMLINK plus `Wants=` in
+# `systemctl show multi-user.target`, never is-enabled (the M4 lesson).
+
+[Unit]
+Description=Punar AI agent registry (typed agents API)
+# /run/punar-agentd and /var/lib/punar/agents come from
+# tmpfiles.d/punar-agentd.conf; /run/punar and /var/log/punar from
+# tmpfiles.d/punar-desktop.conf and punard.conf. systemd-tmpfiles-setup
+# orders before basic.target, which every default-dependency service
+# (this one) starts after.
+# Ordering ONLY — no Wants/Requires: agentd reads punard's
+# /run/punar/status.json and /var/lib/punar/device-id when they exist and
+# degrades honestly (personal-defaults citation, dev_unknown device id)
+# when they do not. It never dials punard's socket.
+After=punard.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punar-agentd run
+Restart=on-failure
+# Hardening (milestone-7.md §3). Stricter than punard.service can be:
+# punard writes /etc (hostname, localtime), this daemon writes nothing
+# outside its own four directories, so ProtectSystem=strict costs nothing
+# and is honest about the blast radius.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# The complete writable set: the registry state dir, the shared audit log
+# (+ its rotation lock), the socket dir, and /run/punar for the atomic
+# tmp+rename of agents.json.
+ReadWritePaths=/var/lib/punar/agents /var/log/punar /run/punar-agentd /run/punar
+# Unix domain sockets only: the registry has no network surface at all
+# (detection reads /proc, adapters are files on disk). Deliberately NOT
+# ProtectProc=/ProcSubset= — reading every process's /proc entry IS the
+# detection pass (spec section 23).
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=journal
+StandardError=journal

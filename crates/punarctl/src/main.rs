@@ -9,8 +9,17 @@
 //! flag, print the IPC `result` object verbatim (capability-registry field
 //! names unchanged). The policy verbs render the SPEC section 39 layered
 //! merge (contract sections 5.7/5.8) in the SPEC section 40 layout, and
-//! `status` renders the SPEC section 52 compliance block. Every other SPEC
-//! section 11.2 verb keeps a milestone-labeled stub.
+//! `status` renders the SPEC section 52 compliance block.
+//!
+//! Milestone 7 adds `agents list` / `agents inspect <id>`, the AI Agent
+//! Registry surface (SPEC sections 19/20/22/23). Those verbs speak the
+//! same envelope to a **second** daemon — `punar-agentd` on its own socket
+//! (contract section 10) — and render Plate D-005's rail and detail in
+//! terminal grammar: classification words colored (managed calm, unknown
+//! in the red voice), authority rows carrying their enforcement
+//! milestone, detection always spelled *suspected*, and the Access Ledger
+//! named as the Milestone 8 work it still is. Every other SPEC section
+//! 11.2 verb keeps a milestone-labeled stub.
 //!
 //! The CLI never elevates itself; the daemon is the authorization point
 //! (`sudo punarctl …` is the M3 way to run mutating verbs), and a denial
@@ -37,7 +46,7 @@ use punar_common::CapabilityId;
 use serde_json::{Value, json};
 
 use crate::fmt::Style;
-use crate::ipc::{CallError, Client, DEFAULT_SOCKET};
+use crate::ipc::{CallError, Client, Target};
 
 /// A SPEC section 76 milestone that will make a stubbed command real.
 struct Milestone {
@@ -55,11 +64,6 @@ impl std::fmt::Display for Milestone {
 const M5_ENROLLMENT: Milestone = Milestone {
     number: 5,
     name: "mock Smplify enrollment",
-};
-/// Milestone 7 — AI Agent Registry.
-const M7_AGENT_REGISTRY: Milestone = Milestone {
-    number: 7,
-    name: "AI Agent Registry",
 };
 /// Milestone 8 — AI Access Ledger.
 const M8_ACCESS_LEDGER: Milestone = Milestone {
@@ -83,8 +87,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Path to the punard control socket
-    /// (default /run/punard/punard.sock; env PUNARD_SOCKET).
+    /// Path to the control socket, or the daemon name `punard` /
+    /// `agentd` (defaults: /run/punard/punard.sock, and
+    /// /run/punar-agentd/agentd.sock for the `agents.*` verbs; env
+    /// PUNARD_SOCKET / PUNAR_AGENTD_SOCKET).
     #[arg(long, global = true, value_name = "PATH")]
     socket: Option<PathBuf>,
 
@@ -114,7 +120,8 @@ enum Command {
         #[command(subcommand)]
         command: PolicyCommand,
     },
-    /// Inspect the AI Agent Registry and Access Ledger.
+    /// Inspect the AI Agent Registry (Milestone 7) and, from Milestone 8,
+    /// the AI Access Ledger. Routed to punar-agentd's socket.
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
@@ -183,9 +190,9 @@ enum PolicyCommand {
 
 #[derive(Subcommand)]
 enum AgentsCommand {
-    /// List registered AI agents.
+    /// List AI agent sessions and suspected AI activity.
     List,
-    /// Inspect one AI agent session.
+    /// Inspect one AI agent session or detection.
     Inspect {
         /// Agent session id, like `agt_123`.
         id: String,
@@ -195,6 +202,15 @@ enum AgentsCommand {
         /// Agent session id, like `agt_123`.
         id: String,
     },
+    /// Force one detection pass now and print the refreshed registry.
+    ///
+    /// Hidden on purpose: the advertised Milestone 7 surface is `list` and
+    /// `inspect` (milestone-7.md section 9), and `list` already refreshes
+    /// a stale view by itself (contract section 10.2). This verb exists so
+    /// the in-VM exercise — and anyone debugging detection — can ask for a
+    /// pass *now* without a raw `debug rpc`.
+    #[command(hide = true)]
+    Scan,
 }
 
 #[derive(Subcommand)]
@@ -254,17 +270,6 @@ enum EnrollCommand {
 fn stub(invocation: &str, milestone: &Milestone) -> ExitCode {
     eprintln!("punarctl {invocation}: not implemented until {milestone}");
     ExitCode::FAILURE
-}
-
-/// Socket path resolution: `--socket` flag, then `PUNARD_SOCKET`, then the
-/// contract default.
-fn resolve_socket(flag: Option<PathBuf>) -> PathBuf {
-    flag.or_else(|| {
-        std::env::var_os("PUNARD_SOCKET")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    })
-    .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET))
 }
 
 /// The masthead context hostname for verbs whose result carries none.
@@ -343,7 +348,11 @@ fn rpc(
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let style = Style::detect();
-    let client = Client::new(resolve_socket(cli.socket));
+    // Two daemons, one CLI: `agents.*` speaks to punar-agentd (contract
+    // section 10.5), everything else to punard. An explicit --socket wins
+    // for whichever verb it is passed to.
+    let socket = cli.socket.clone();
+    let client = Client::for_target(Target::Punard, socket.as_deref());
     let json = cli.json;
 
     match cli.command {
@@ -500,22 +509,50 @@ fn main() -> ExitCode {
             ),
         },
         Command::Debug { command } => match command {
-            DebugCommand::Rpc { method } => match client.call(&method, None) {
-                Ok(result) => {
-                    println!("{result}");
-                    ExitCode::SUCCESS
+            DebugCommand::Rpc { method } => {
+                // The probe follows the same routing as the real verbs, so
+                // a negative probe reaches the daemon that owns the name
+                // (contract section 10.5) — `--socket agentd` forces it.
+                let probe = Client::for_target(Target::of_method(&method), socket.as_deref());
+                match probe.call(&method, None) {
+                    Ok(result) => {
+                        println!("{result}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => fail(&error),
                 }
-                Err(error) => fail(&error),
-            },
+            }
         },
         Command::Compliance => stub("compliance", &M5_ENROLLMENT),
-        Command::Agents { command } => match command {
-            AgentsCommand::List => stub("agents list", &M7_AGENT_REGISTRY),
-            AgentsCommand::Inspect { id } => {
-                stub(&format!("agents inspect {id}"), &M7_AGENT_REGISTRY)
+        Command::Agents { command } => {
+            let agents = Client::for_target(Target::Agentd, socket.as_deref());
+            match command {
+                AgentsCommand::List => {
+                    let hostname = local_hostname();
+                    rpc(&agents, json, "agents.list", None, |v| {
+                        views::agents_list(&style, v, &hostname)
+                    })
+                }
+                AgentsCommand::Inspect { id } => rpc(
+                    &agents,
+                    json,
+                    "agents.get",
+                    Some(json!({ "session_id": id })),
+                    |v| views::agent_inspect(&style, v),
+                ),
+                AgentsCommand::Scan => {
+                    let hostname = local_hostname();
+                    rpc(&agents, json, "agents.scan", None, |v| {
+                        views::agents_list(&style, v, &hostname)
+                    })
+                }
+                // Reserved, not advertised as working: the data is the M8
+                // Access Ledger, and the daemon answers unknown_method.
+                AgentsCommand::Access { id } => {
+                    stub(&format!("agents access {id}"), &M8_ACCESS_LEDGER)
+                }
             }
-            AgentsCommand::Access { id } => stub(&format!("agents access {id}"), &M8_ACCESS_LEDGER),
-        },
+        }
         Command::Privacy { command } => match command {
             PrivacyCommand::Connections => stub("privacy connections", &M12_NETWORK_PRIVACY),
         },
@@ -565,6 +602,7 @@ mod tests {
             &["punarctl", "policy", "effective"],
             &["punarctl", "policy", "explain", "security.firewall"],
             &["punarctl", "agents", "list"],
+            &["punarctl", "agents", "scan"],
             &["punarctl", "agents", "inspect", "agt_123"],
             &["punarctl", "agents", "access", "agt_123"],
             &["punarctl", "privacy", "connections"],

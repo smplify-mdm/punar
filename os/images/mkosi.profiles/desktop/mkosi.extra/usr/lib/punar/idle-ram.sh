@@ -44,33 +44,48 @@ mean=$((sum / SAMPLE_COUNT))
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
 echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 
-# M3 services-RSS sample (milestone-3.md §9): taken right here — still at
-# stabilized idle, strictly BEFORE the M2/M3 exercises start below. Canonical
-# metric per PERFORMANCE_BUDGETS.md §2.3: summed PSS (/proc/<pid>/smaps_rollup
-# `Pss:` lines) over the pids of the punard.service cgroup — cgroup
-# attribution, never process-name matching. The env var name says RSS (fixed
-# consumer contract); the VALUE is summed PSS, stated wherever it is reported.
-# `absent` (cgroup missing or empty — punard dead) is a gated failure in
-# tests/performance/check-budgets.sh, even under TCG. The unit list grows as
-# sibling services ship (agentd M7, netd M12, ...).
-CGROUP_PROCS=/sys/fs/cgroup/system.slice/punard.service/cgroup.procs
+# Services-RSS sample (milestone-3.md §9, milestone-7.md §11): taken right
+# here — still at stabilized idle, strictly BEFORE the M2..M7 exercises start
+# below. Canonical metric per PERFORMANCE_BUDGETS.md §2.3: summed PSS
+# (/proc/<pid>/smaps_rollup `Pss:` lines) over the pids of EVERY Punar
+# first-party service cgroup — cgroup attribution, never process-name
+# matching. The env var name says RSS (fixed consumer contract); the VALUE is
+# summed PSS, stated wherever it is reported.
+#
+# M7 grows the unit list honestly: punar-agentd.service is a second resident
+# daemon, so it is summed into the SAME single number the budget is judged
+# against (spec 6.2 budgets the services total, not per-daemon; thresholds
+# unchanged — target 100 MB, MVP ceiling 150 MB). A unit whose cgroup is
+# missing or empty makes the whole value `absent` — a dead daemon is a gated
+# failure in tests/performance/check-budgets.sh, even under TCG, and that
+# must not be maskable by a live sibling. The list grows again as siblings
+# ship (netd M12, ...).
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service"
 services_rss=absent
-if [ -r "${CGROUP_PROCS}" ]; then
-    pss_kb=0
-    got=0
-    while IFS= read -r svc_pid; do
-        pid_pss="$(awk '/^Pss:/ {print $2}' "/proc/${svc_pid}/smaps_rollup" 2>/dev/null)"
-        if [ -n "${pid_pss}" ]; then
-            pss_kb=$((pss_kb + pid_pss))
-            got=1
-        fi
-    done < "${CGROUP_PROCS}"
-    if [ "${got}" -eq 1 ]; then
-        # Integer MB, rounded up.
-        services_rss=$(((pss_kb + 1023) / 1024))
+pss_kb=0
+all_units_ok=1
+for unit in ${PUNAR_SERVICE_UNITS}; do
+    unit_procs="/sys/fs/cgroup/system.slice/${unit}/cgroup.procs"
+    unit_got=0
+    if [ -r "${unit_procs}" ]; then
+        while IFS= read -r svc_pid; do
+            pid_pss="$(awk '/^Pss:/ {print $2}' "/proc/${svc_pid}/smaps_rollup" 2>/dev/null)"
+            if [ -n "${pid_pss}" ]; then
+                pss_kb=$((pss_kb + pid_pss))
+                unit_got=1
+            fi
+        done < "${unit_procs}"
     fi
+    if [ "${unit_got}" -eq 0 ]; then
+        echo "punar: idle-ram: no readable pids in the ${unit} cgroup — services RSS reported absent" >&2
+        all_units_ok=0
+    fi
+done
+if [ "${all_units_ok}" -eq 1 ]; then
+    # Integer MB, rounded up.
+    services_rss=$(((pss_kb + 1023) / 1024))
 fi
-echo "PUNAR_SERVICES_RSS_MB=${services_rss}"
+echo "PUNAR_SERVICES_RSS_MB=${services_rss} (summed PSS over: ${PUNAR_SERVICE_UNITS})"
 
 # M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
 # SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the
@@ -126,6 +141,21 @@ systemctl start punar-m5-check.service \
 # the host gate (tools/boot-test.sh) parses it.
 systemctl start punar-m6-check.service \
     || echo "punar: idle-ram: punar-m6-check.service failed to start" >&2
+
+# M7 exercise ordering hook (milestone-7.md §12): start punar-m7-check
+# SYNCHRONOUSLY strictly AFTER the M6 exercise (which destroyed its
+# container and left ~punar/atlas in place — the project the managed agent
+# session runs in) and strictly BEFORE the export below, so m7-report.txt /
+# m7-launch.txt / m7-inspect.txt / m7-agents-*.json / punar-m7.png ship in
+# the same tar. The mock agent session and the foo-agent detection fixture
+# live only inside this window — structurally after the idle-RAM sampling
+# and the services-RSS sample far above, so neither the RAM gate nor the
+# combined-cgroup PSS reading sees them (the agent runs in its own
+# punar-agent-<id>.scope under the user manager, not in a service cgroup).
+# Never fatal here: the verdict lives in m7-report.txt and the host gate
+# (tools/boot-test.sh) parses it.
+systemctl start punar-m7-check.service \
+    || echo "punar: idle-ram: punar-m7-check.service failed to start" >&2
 
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the

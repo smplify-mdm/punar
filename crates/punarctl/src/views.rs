@@ -741,6 +741,275 @@ pub fn enroll_stop(style: &Style, result: &Value, hostname: &str) -> Result<Stri
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// M7 agent registry views (contract section 10.2; Plate D-005 in terminal
+// grammar — the mockup's own Sect V names this parity)
+// ---------------------------------------------------------------------------
+
+/// The label a classification renders as. `unknown` never renders alone:
+/// detection is heuristic and the word `suspected` travels with it
+/// everywhere (SPEC section 23 — "Do not claim perfect detection").
+fn classification_label(row: &model::AgentRow) -> String {
+    match row.classification.as_str() {
+        "unknown" => "unknown · suspected".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Managed is calm green, unknown is the red voice, observed stays plain —
+/// the D-005 palette, in the terminal's three slots.
+fn classification_slot(classification: &str) -> Slot {
+    match classification {
+        "managed" => Slot::Ok,
+        "unknown" => Slot::Bad,
+        // `observed` and anything a newer daemon invents stay calm.
+        _ => Slot::Neutral,
+    }
+}
+
+/// Authority decision words (SPEC section 20 plus the manifest's
+/// filesystem grades): a grant reads green, a refusal red, a request
+/// amber.
+fn authority_slot(decision: &str) -> Slot {
+    match decision {
+        "allow" | "read_write" | "read" => Slot::Ok,
+        "deny" => Slot::Bad,
+        "request" | "approval_required" => Slot::Warn,
+        _ => Slot::Neutral,
+    }
+}
+
+/// The honest footer under every detection surface.
+const DETECTION_NOTE: &str = "Detection is heuristic — suspected, not certain · \
+                              scan on view · continuous detection arrives in Milestone 10";
+
+/// The Access Ledger placeholder. M7 ships the registry; the ledger (SPEC
+/// section 21) is Milestone 8, and the surface says so rather than
+/// rendering an empty section that could read as "accessed nothing".
+const LEDGER_NOTE: &str = "The AI Access Ledger (SPEC section 21) arrives in Milestone 8 · \
+                           what this agent accessed is not recorded yet";
+
+/// `punarctl agents list` — one row per session and per detection:
+/// `SESSION · AGENT · PROJECT · CLASS · STATUS · STARTED`. Unmanaged-first:
+/// no org chrome, ever.
+pub fn agents_list(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let list: model::AgentsList = parse(result)?;
+    let mut out = fmt::masthead(style, "AI Agents", &personal_context(hostname));
+
+    let rows: Vec<&model::AgentRow> = list.sessions.iter().chain(list.detections.iter()).collect();
+    if rows.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No agent sessions · no suspected AI activity observed",
+        ));
+        out.push_str(&fmt::note(style, DETECTION_NOTE));
+        return Ok(out);
+    }
+
+    let cells: Vec<[String; 6]> = rows
+        .iter()
+        .map(|row| {
+            [
+                row.session_id.to_uppercase(),
+                row.agent.clone(),
+                row.project.clone(),
+                classification_label(row).to_uppercase(),
+                row.status.to_uppercase(),
+                fmt::timestamp(&row.started_at),
+            ]
+        })
+        .collect();
+    let mut widths = [0usize; 6];
+    for cell_row in &cells {
+        for (w, cell) in widths.iter_mut().zip(cell_row) {
+            *w = (*w).max(cell.chars().count());
+        }
+    }
+    for (row, cell_row) in rows.iter().zip(&cells) {
+        let mut line = String::new();
+        for (i, (w, cell)) in widths.iter().zip(cell_row).enumerate() {
+            let padding = " ".repeat(w - cell.chars().count() + 2);
+            // Only the classification cell is colored — the one word that
+            // carries a verdict (D-014: color is spent on status words).
+            match i {
+                3 => line.push_str(&style.slot(classification_slot(&row.classification), cell)),
+                0 | 5 => line.push_str(&style.muted(cell)),
+                _ => line.push_str(cell),
+            }
+            line.push_str(&padding);
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+
+    let suspected = list.detections.len();
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "{} session{} · {suspected} suspected · scanned {}",
+            list.sessions.len(),
+            if list.sessions.len() == 1 { "" } else { "s" },
+            fmt::timestamp(&list.scanned_at),
+        ),
+    ));
+    out.push_str(&fmt::note(style, DETECTION_NOTE));
+    Ok(out)
+}
+
+/// `punarctl agents inspect <id>` — Plate D-005's detail pane in terminal
+/// grammar: the attribution masthead (SPEC section 22), then the authority
+/// register with its named policy source and per-row enforcement labels,
+/// then the ledger placeholder. A detection renders the unknown card
+/// instead: what was observed, said as *suspected*, with no authority
+/// block (there is none — it was never launched through the runtime) and
+/// no actions (those are M9/M10; no dead buttons on a terminal either).
+pub fn agent_inspect(style: &Style, result: &Value) -> Result<String, String> {
+    let got: model::AgentGet = parse(result)?;
+    let s = &got.session;
+    let context = format!(
+        "{} · {} · {}",
+        s.session_id,
+        classification_label(s),
+        s.status
+    );
+    let mut out = fmt::masthead(style, "Agent", &context);
+
+    // The attribution chain, one line, middle dots (SPEC sections 22/47).
+    let environment = if s.environment.is_empty() {
+        "host".to_string()
+    } else {
+        s.environment.clone()
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "{} · {} · {} · started {}",
+            s.session_id,
+            s.user,
+            environment,
+            fmt::timestamp(&s.started_at)
+        ),
+    ));
+
+    // A detection has no authority block to lead with, so its identity
+    // register opens the detail instead — and opens it as *observed*.
+    if s.suspected {
+        out.push_str(&fmt::section(
+            style,
+            "Identity · observed",
+            "best effort · SPEC section 23",
+        ));
+    }
+
+    let mut rows = vec![
+        Row::new("Agent", "", Slot::Neutral, &s.agent),
+        Row::new(
+            "Version",
+            "",
+            Slot::Neutral,
+            if s.version.is_empty() {
+                "unknown"
+            } else {
+                &s.version
+            },
+        ),
+        Row::new(
+            "Classification",
+            &classification_label(s),
+            classification_slot(&s.classification),
+            match s.classification.as_str() {
+                "managed" => "launched through the managed Punar runtime",
+                "observed" => "known AI agent running outside the managed runtime",
+                "unknown" => "uncertain identity — heuristic detection, not proof",
+                _ => "",
+            },
+        ),
+        Row::new("Project", "", Slot::Neutral, &s.project),
+    ];
+    if let Some(scope) = &s.scope_unit {
+        rows.push(Row::new(
+            "Scope",
+            "",
+            Slot::Neutral,
+            &format!("{scope} · attribution via cgroup"),
+        ));
+    }
+    if let Some(executable) = &s.executable {
+        rows.push(Row::new("Executable", "", Slot::Neutral, executable));
+    }
+    if let Some(signature) = &s.signature_id {
+        rows.push(Row::new(
+            "Signature",
+            "",
+            Slot::Neutral,
+            &format!("{signature} · heuristic match"),
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+
+    match &s.authority {
+        Some(authority) => {
+            out.push_str(&fmt::section(
+                style,
+                "Authority · what it may access",
+                &format!("policy · {}", policy_words(&authority.policy_citation)),
+            ));
+            let authority_rows: Vec<Row> = authority
+                .rows
+                .iter()
+                .map(|row| {
+                    Row::new(
+                        &row.zone,
+                        &row.decision,
+                        authority_slot(&row.decision),
+                        &row.enforcement,
+                    )
+                })
+                .collect();
+            if authority_rows.is_empty() {
+                out.push_str(&fmt::note(style, "No permissions were declared"));
+            } else {
+                out.push_str(&fmt::rows(style, &authority_rows));
+            }
+            out.push_str(&fmt::note(
+                style,
+                "Declared authority · nothing here is enforced in Milestone 7 \
+                 (credentials M9 · network M12)",
+            ));
+        }
+        None if s.suspected => out.push_str(&fmt::note(style, DETECTION_NOTE)),
+        None => {
+            out.push_str(&fmt::section(
+                style,
+                "Authority · what it may access",
+                "not recorded for this session",
+            ));
+            out.push_str(&fmt::note(
+                style,
+                "This session carries no authority summary — it was not launched through \
+                 punar-env",
+            ));
+        }
+    }
+
+    out.push_str(&fmt::section(
+        style,
+        "Ledger · what it accessed",
+        "arrives in Milestone 8",
+    ));
+    out.push_str(&fmt::note(style, LEDGER_NOTE));
+    Ok(out)
+}
+
+/// Human spelling of a policy citation: `personal-defaults` reads as the
+/// phrase it is; a policy id keeps its exact characters.
+fn policy_words(citation: &str) -> String {
+    match citation {
+        "personal-defaults" => "personal defaults".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

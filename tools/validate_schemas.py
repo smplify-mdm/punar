@@ -7,6 +7,10 @@ Checks, in order:
   2. Every example under schemas/**/examples/ validates against its schema.
   3. Every fixture under fixtures/**/ validates against its schema; files in an
      invalid/ directory must FAIL validation (and the harness fails if they pass).
+  4. Every staged runtime data file under the desktop image's
+     /usr/share/punar/agents tree (AI agent adapter definitions, M7) validates
+     against its schema -- the adapters are data the image ships, so the schema
+     guards them exactly like a fixture (docs/development/milestone-7.md 5.4).
 
 Refs (e.g. to schemas/common/defs.json) resolve from the local schemas/ tree via
 a referencing.Registry keyed by each schema's $id -- never over the network
@@ -38,6 +42,10 @@ from referencing import Registry, Resource
 REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "schemas"
 FIXTURES = REPO / "fixtures"
+# Staged runtime data shipped inside the desktop image (M7 adapters, signature
+# heuristics). Validated in place so the file the image ships is the file the
+# schema checked -- no copy to drift.
+STAGED_AGENTS = REPO / "os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents"
 
 # ---------------------------------------------------------------------------
 # MANIFEST: (glob over repo-relative posix path, schema repo-relative path).
@@ -87,6 +95,12 @@ MANIFEST: list[tuple[str, str | None]] = [
     # --- seed data: fixtures/policies/ (fixtures/README.md table) -----------
     ("fixtures/policies/ai-policy-*.yaml", "schemas/policy/ai-policy.json"),
     ("fixtures/policies/policy-source-*.json", "schemas/policy/policy-source.json"),
+    # --- staged runtime data: desktop image /usr/share/punar/agents (M7) ----
+    ("os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/adapters/*.json",
+     "schemas/ai-agent/agent-definition.json"),
+    # Detection heuristics are an internal input, versioned by review rather
+    # than by schema (milestone-7.md section 7.1) -- known file, no schema.
+    ("os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/signatures/*.json", None),
     # --- seed data: fixtures/projects/atlas/ (its README.md table) ----------
     ("fixtures/projects/atlas/project-environment.yaml", "schemas/project/project-environment.json"),
     ("fixtures/projects/atlas/project-network-policy.json", "schemas/network/project-network-policy.json"),
@@ -163,6 +177,7 @@ def main() -> int:
     doc_paths = sorted(
         [p for p in SCHEMAS.rglob("examples/*") if p.suffix in DOC_SUFFIXES]
         + [p for p in FIXTURES.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
+        + [p for p in STAGED_AGENTS.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
     )
     for dp in doc_paths:
         relpath = rel(dp)

@@ -450,6 +450,47 @@ pub struct AuditWriter {
     rotate_bytes: u64,
 }
 
+/// Advisory cross-process lock held for the duration of one rotation
+/// (docs/api/ipc.md section 10.4). Released when the file descriptor
+/// closes, so a crashed writer cannot wedge the trail.
+///
+/// Best-effort by design: if the lock file cannot be created or locked
+/// (a read-only `/var/log`, an exotic filesystem without `flock`), the
+/// rotation still proceeds — losing the two-writer guarantee is bad,
+/// refusing to audit is worse. `None` records that honestly instead of
+/// pretending a lock was taken.
+#[derive(Debug)]
+struct RotationLock(Option<File>);
+
+impl RotationLock {
+    fn acquire(path: &Path) -> RotationLock {
+        let mut options = OpenOptions::new();
+        options.create(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o640);
+        }
+        let Ok(file) = options.open(path) else {
+            return RotationLock(None);
+        };
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
+            Ok(()) => RotationLock(Some(file)),
+            Err(_) => RotationLock(None),
+        }
+    }
+}
+
+impl Drop for RotationLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.0.as_ref() {
+            // Closing the descriptor releases the lock too; the explicit
+            // unlock keeps the release ordering obvious.
+            let _ = rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock);
+        }
+    }
+}
+
 impl AuditWriter {
     /// Open (or create, mode `0640`) the audit log for appending.
     pub fn open(path: impl Into<PathBuf>) -> io::Result<AuditWriter> {
@@ -492,17 +533,46 @@ impl AuditWriter {
         PathBuf::from(os)
     }
 
+    /// The rotation lock file, `<name>.lock` (docs/api/ipc.md section
+    /// 10.4). It carries no data — only the `flock` that serializes the
+    /// size-check + rename + reopen sequence between writers.
+    fn lock_path(&self) -> PathBuf {
+        let mut os = self.path.clone().into_os_string();
+        os.push(".lock");
+        PathBuf::from(os)
+    }
+
     /// The ipc.md §6 size-capped rotation, checked at write time: once the
     /// live file has reached the threshold, rename it to `<name>.1`
     /// (replacing any previous rotated file — one is kept, older history
     /// is discarded) and start a fresh live file. The event that triggered
     /// the check lands in the fresh file, so no single write is split
     /// across files.
+    ///
+    /// M7 (docs/api/ipc.md section 10.4): two daemons — `punard` and
+    /// `punar-agentd` — now append to the same trail, so the rename is
+    /// taken under an exclusive `flock` on [`Self::lock_path`] and the
+    /// size is re-checked *under the lock*. Without it both writers could
+    /// rename concurrently and one would keep writing into a file that no
+    /// longer has a name (its events would be lost with the second
+    /// rotation). Appends themselves need no lock: each event is a single
+    /// `write(2)` of one short line to an `O_APPEND` descriptor.
+    ///
+    /// The live file is reopened whenever this function decides rotation
+    /// is due, including when the lock revealed that the *other* writer
+    /// already rotated — in that case our descriptor points at the renamed
+    /// file and must be replaced regardless.
     fn rotate_if_needed(&mut self) -> io::Result<()> {
         if self.file.metadata()?.len() < self.rotate_bytes {
             return Ok(());
         }
-        std::fs::rename(&self.path, self.rotated_path())?;
+        let _guard = RotationLock::acquire(&self.lock_path());
+        // Re-check under the lock: a peer writer may have rotated while we
+        // waited, in which case the live file is small (or absent) again.
+        let live_len = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if live_len >= self.rotate_bytes {
+            std::fs::rename(&self.path, self.rotated_path())?;
+        }
         self.file = Self::open_live(&self.path)?;
         Ok(())
     }
@@ -1007,6 +1077,78 @@ mod tests {
     }
 
     // -- rotation (ipc.md §6, delivered in M5) ------------------------------
+
+    /// docs/api/ipc.md section 10.4: `punard` and `punar-agentd` append to
+    /// one trail, so two `AuditWriter`s on the same path must not both
+    /// rename the live file. The lock makes the second writer re-check the
+    /// size under the lock, find a fresh file, and simply reopen — every
+    /// event stays reachable in the live + rotated pair.
+    #[test]
+    fn two_writers_share_one_rotation() {
+        let path = temp_log_path("two-writers");
+        let rotated = {
+            let mut os = path.clone().into_os_string();
+            os.push(".1");
+            PathBuf::from(os)
+        };
+        let lock = {
+            let mut os = path.clone().into_os_string();
+            os.push(".lock");
+            PathBuf::from(os)
+        };
+        for stale in [&path, &rotated, &lock] {
+            let _ = std::fs::remove_file(stale);
+        }
+
+        let mut punard = AuditWriter::open(&path).unwrap();
+        let mut agentd = AuditWriter::open(&path).unwrap();
+        punard.rotate_bytes = 600;
+        agentd.rotate_bytes = 600;
+
+        let line_len = {
+            let mut probe = serde_json::to_string(&golden_set_event()).unwrap();
+            probe.push('\n');
+            probe.len() as u64
+        };
+        let mut before = 0u64;
+        while before * line_len < 600 {
+            punard.append(&golden_set_event()).unwrap();
+            before += 1;
+        }
+        // Both writers now see an over-threshold live file. The first
+        // append rotates; the second must notice the fresh file rather
+        // than rotate again (which would discard the first rotation).
+        punard.append(&golden_set_event()).unwrap();
+        agentd.append(&golden_set_event()).unwrap();
+
+        assert!(rotated.exists(), "rotated file missing");
+        assert_eq!(
+            count_events(&rotated).unwrap(),
+            before,
+            "pre-rotation events kept"
+        );
+        assert_eq!(
+            count_events(&path).unwrap(),
+            2,
+            "both post-rotation events land in the live file"
+        );
+        // And the first writer keeps writing to the *live* file after the
+        // peer's rotation — its descriptor was replaced, not orphaned.
+        // (The threshold is raised first so this append is a plain append
+        // and not a third rotation; the live file is over 600 bytes by now.)
+        punard.rotate_bytes = 1_000_000;
+        punard.append(&golden_set_event()).unwrap();
+        assert_eq!(count_events(&path).unwrap(), 3);
+        assert_eq!(
+            count_events(&rotated).unwrap(),
+            before,
+            "the peer's re-check under the lock left the first rotation intact"
+        );
+
+        for stale in [&path, &rotated, &lock] {
+            let _ = std::fs::remove_file(stale);
+        }
+    }
 
     #[test]
     fn writer_rotates_at_the_threshold_keeping_one_file() {

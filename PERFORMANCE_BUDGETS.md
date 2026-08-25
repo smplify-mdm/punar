@@ -161,6 +161,14 @@ at the 10-minute mark, and the reported value is the mean over the window
   (`punard.service`, `punar-agentd.service`, ...). Membership is determined
   from the unit's cgroup (`/sys/fs/cgroup/.../cgroup.procs`), never by
   process-name matching.
+- Units summed **as of M7**: `punard.service` (M3) and `punar-agentd.service`
+  (M7). The in-guest sampler (`/usr/lib/punar/idle-ram.sh`) walks that list
+  and emits one combined `PUNAR_SERVICES_RSS_MB`; a unit whose cgroup is
+  missing or empty makes the whole value `absent`, which
+  `tests/performance/check-budgets.sh` fails even on emulated runs — one live
+  daemon must never be able to mask a dead sibling. The budget below is the
+  **combined** number and does not move as siblings ship: spec section 6.2
+  budgets the services total, not each daemon.
 - Cross-check metric: systemd cgroup accounting —
   `systemctl show -p MemoryCurrent <unit>` (i.e. cgroup v2
   `memory.current`), summed across the same units. This includes kernel-side
@@ -262,7 +270,7 @@ canonical methodology in section 2, with environment labels.
 |---|---|---|---|---|---|
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | not yet measured | — | — |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | not yet measured | — | — |
-| Punar services PSS (sum) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
+| Punar services PSS (sum: punard + punar-agentd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
 | Idle CPU, per Punar service | 2.4 | effectively 0% (< 0.5% of one core, interpretation) | not yet measured | — | — |
 | Idle disk writes, per Punar service | 2.5 | no sustained idle writers | not yet measured | — | — |

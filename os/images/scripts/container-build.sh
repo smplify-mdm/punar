@@ -137,21 +137,27 @@ stage_punar_binaries() {
     # punar-env is the M6 developer-environment manager (milestone-6.md §3)
     # — a user CLI, staged like punarctl; it drives the podman already in
     # the image and needs no unit of its own.
-    echo "==> Building punard + punarctl + punar-env + punar-mock-smplify (release, --locked; $(rustc --version))"
+    # punar-agentd is the M7 AI agent registry service (milestone-7.md §3,
+    # SPEC section 11.3) — a real always-on daemon like punard, enabled by
+    # the vendor-level wants symlink shipped in the extra tree; its socket
+    # and state directories come from tmpfiles.d/punar-agentd.conf.
+    echo "==> Building punard + punarctl + punar-env + punar-agentd + punar-mock-smplify (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
             CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
                 CARGO_TARGET_DIR="${cargo_target}" \
                 cargo build --release --locked \
-                    -p punard -p punarctl -p punar-env -p punar-mock-smplify
+                    -p punard -p punarctl -p punar-env -p punar-agentd \
+                    -p punar-mock-smplify
     )
 
-    echo "==> Staging punard + punarctl + punar-env + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
+    echo "==> Staging punard + punarctl + punar-env + punar-agentd + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
         "${cargo_target}/release/punarctl" \
         "${cargo_target}/release/punar-env" \
+        "${cargo_target}/release/punar-agentd" \
         "${cargo_target}/release/punar-mock-smplify" \
         "${extra}/usr/bin/"
 }
@@ -419,7 +425,7 @@ echo "==> Writing build metadata"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "note: unsigned development images; VM-only (no linux-firmware)"
-    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only) + M6 developer environments (punar-env + preloaded punar-env-base OCI archive + staged Atlas project fixture)"
+    echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only) + M6 developer environments (punar-env + preloaded punar-env-base OCI archive + staged Atlas project fixture) + M7 AI agent registry (punar-agentd daemon + vendored adapter/signature data + the punar-mock-agent and foo-agent dev/CI fixtures — the mock stands in for a real agent binary, which the offline VM cannot have)"
 } > out/build-info.txt
 
 # Bare filenames (no ./ prefix) — CI re-verifies with `sha256sum -c` against

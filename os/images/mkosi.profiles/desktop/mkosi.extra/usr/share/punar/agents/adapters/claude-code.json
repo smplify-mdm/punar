@@ -1,0 +1,17 @@
+{
+  "name": "claude-code",
+  "adapter": "claude_code",
+  "launch": {
+    "method": "managed",
+    "command": "punar-env agent claude-code"
+  },
+  "adapter_config": {
+    "command": ["claude"],
+    "version_command": ["claude", "--version"],
+    "signature": {
+      "comm": ["claude"],
+      "exe_glob": ["*/claude"]
+    },
+    "mock_command": ["/usr/lib/punar/punar-mock-agent"]
+  }
+}

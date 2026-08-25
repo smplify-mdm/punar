@@ -190,11 +190,20 @@ dependencies = [
 [[package]]
 name = "punar-agentd"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "punar-common",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook",
+]
 
 [[package]]
 name = "punar-common"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",
@@ -205,10 +214,12 @@ name = "punar-env"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "punar-common",
  "rustix",
  "serde",
  "serde_json",
  "serde_norway",
+ "signal-hook",
  "thiserror",
 ]
 
