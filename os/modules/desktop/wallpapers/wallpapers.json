@@ -1,0 +1,775 @@
+{
+  "schema": "punar.wallpapers/1",
+  "generated": "2026-08-26",
+  "note": "Licence record and shell input. Every entry is CC0; no attribution is legally required and creators are recorded anyway.",
+  "rule": "docs/design/wallpaper-collection.md",
+  "generated_default": {
+    "id": "plate-d015",
+    "file": "../../../../docs/design/assets/punar-wallpaper-{paper,panel}.svg",
+    "note": "The generated instrument plate remains the default field. These photographs are alternates, never the default."
+  },
+  "thresholds": {
+    "paper_worst_patch_min_L": 0.175,
+    "paper_mean_min_L": 0.3,
+    "panel_worst_patch_max_L": 0.1602,
+    "panel_mean_max_L": 0.0851,
+    "cstar_median_max": 14.0,
+    "cstar_p95_max": 33.7,
+    "field_uniformity_max_contrast": 3.0,
+    "hairline_min_contrast": 1.15,
+    "hairline_lost_max_fraction": 0.15,
+    "straight_line_max_contrast": 1.15
+  },
+  "wallpapers": [
+    {
+      "id": "chalk",
+      "name": "Chalk",
+      "file": "punar-field-chalk.jpg",
+      "mood": "paper",
+      "rationale": "Painted plaster, the flattest bright field in the set \u2014 the closest photographic relative of the #FAF9F6 token.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 1944895,
+      "sha256": "ecde66590c2282576cc6741c00ebfb4ea27dd2ba60e6e8400d4dffc1ad82f369",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "painted_plaster_wall",
+        "url": "https://polyhaven.com/a/painted_plaster_wall",
+        "api_url": "https://api.polyhaven.com/info/painted_plaster_wall",
+        "creators": {
+          "Amal Kumar": "All"
+        },
+        "source_max_resolution": [
+          16384,
+          16384
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 43648529
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "ink #000000",
+        "chroma": {
+          "cstar_median": 4.0,
+          "cstar_p95": 4.5,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.05,
+        "strongest_straight_line_contrast": 1.021,
+        "hairline_lost_fraction": 0.0,
+        "regions": {
+          "full": {
+            "meanL": 0.3722,
+            "contrast_mean": 8.44,
+            "worst_patch_L": 0.2799,
+            "contrast_worst_patch": 6.6,
+            "worst_pixel_L": 0.0219,
+            "contrast_worst_pixel": 1.44
+          },
+          "bar": {
+            "meanL": 0.3758,
+            "contrast_mean": 8.52,
+            "worst_patch_L": 0.3288,
+            "contrast_worst_patch": 7.58,
+            "worst_pixel_L": 0.11,
+            "contrast_worst_pixel": 3.2
+          },
+          "borders": {
+            "meanL": 0.3704,
+            "contrast_mean": 8.41,
+            "worst_patch_L": 0.2873,
+            "contrast_worst_patch": 6.75,
+            "worst_pixel_L": 0.0333,
+            "contrast_worst_pixel": 1.67
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "lime",
+      "name": "Lime",
+      "file": "punar-field-lime.jpg",
+      "mood": "paper",
+      "rationale": "Hand-floated lime render: a warm, slow, low-frequency swell with no edge anywhere in it.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 628588,
+      "sha256": "5bade995eb29e4add45947486e9d194c96de9d9fe1dd6ff07c6782df16ea1717",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "plastered_wall_02",
+        "url": "https://polyhaven.com/a/plastered_wall_02",
+        "api_url": "https://api.polyhaven.com/info/plastered_wall_02",
+        "creators": {
+          "Charlotte Baglioni": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 19744875
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "ink #000000",
+        "chroma": {
+          "cstar_median": 7.6,
+          "cstar_p95": 8.8,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.02,
+        "strongest_straight_line_contrast": 1.079,
+        "hairline_lost_fraction": 0.0,
+        "regions": {
+          "full": {
+            "meanL": 0.4466,
+            "contrast_mean": 9.93,
+            "worst_patch_L": 0.4201,
+            "contrast_worst_patch": 9.4,
+            "worst_pixel_L": 0.141,
+            "contrast_worst_pixel": 3.82
+          },
+          "bar": {
+            "meanL": 0.4488,
+            "contrast_mean": 9.98,
+            "worst_patch_L": 0.4352,
+            "contrast_worst_patch": 9.7,
+            "worst_pixel_L": 0.2633,
+            "contrast_worst_pixel": 6.27
+          },
+          "borders": {
+            "meanL": 0.4457,
+            "contrast_mean": 9.91,
+            "worst_patch_L": 0.4216,
+            "contrast_worst_patch": 9.43,
+            "worst_pixel_L": 0.2192,
+            "contrast_worst_pixel": 5.38
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "grit",
+      "name": "Grit",
+      "file": "punar-field-grit.jpg",
+      "mood": "paper",
+      "rationale": "Cast concrete at close range \u2014 the paper mood with a coarse grain, for anyone who finds Chalk too clean.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 2721331,
+      "sha256": "336a135206f638613c873cfba5e47146e90bda1e06a7d864236b9e18762fd3ea",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "rough_concrete",
+        "url": "https://polyhaven.com/a/rough_concrete",
+        "api_url": "https://api.polyhaven.com/info/rough_concrete",
+        "creators": {
+          "Dimitrios Savva": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 59013195
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "ink #000000",
+        "chroma": {
+          "cstar_median": 13.3,
+          "cstar_p95": 16.2,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.17,
+        "strongest_straight_line_contrast": 1.04,
+        "hairline_lost_fraction": 0.0647,
+        "regions": {
+          "full": {
+            "meanL": 0.4713,
+            "contrast_mean": 10.43,
+            "worst_patch_L": 0.2771,
+            "contrast_worst_patch": 6.54,
+            "worst_pixel_L": 0.0057,
+            "contrast_worst_pixel": 1.11
+          },
+          "bar": {
+            "meanL": 0.4807,
+            "contrast_mean": 10.61,
+            "worst_patch_L": 0.3427,
+            "contrast_worst_patch": 7.85,
+            "worst_pixel_L": 0.0097,
+            "contrast_worst_pixel": 1.19
+          },
+          "borders": {
+            "meanL": 0.4708,
+            "contrast_mean": 10.42,
+            "worst_patch_L": 0.3281,
+            "contrast_worst_patch": 7.56,
+            "worst_pixel_L": 0.0071,
+            "contrast_worst_pixel": 1.14
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "ballast",
+      "name": "Ballast",
+      "file": "punar-field-ballast.jpg",
+      "mood": "paper",
+      "rationale": "Pale aggregate: high-frequency texture that still holds a single luminance, the aerial-abstraction reading at ground level.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 2912343,
+      "sha256": "48a4a8ca1c880d7cec693c3bbbeac437787e4d434687be40775e2b9001b14b88",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "gravel_floor_02",
+        "url": "https://polyhaven.com/a/gravel_floor_02",
+        "api_url": "https://api.polyhaven.com/info/gravel_floor_02",
+        "creators": {
+          "Jenelle van Heerden": "Processing",
+          "Dimitrios Savva": "Photography"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 60446964
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "ink #000000",
+        "chroma": {
+          "cstar_median": 6.3,
+          "cstar_p95": 10.0,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.04,
+        "strongest_straight_line_contrast": 1.079,
+        "hairline_lost_fraction": 0.089,
+        "regions": {
+          "full": {
+            "meanL": 0.4082,
+            "contrast_mean": 9.16,
+            "worst_patch_L": 0.2753,
+            "contrast_worst_patch": 6.51,
+            "worst_pixel_L": 0.0272,
+            "contrast_worst_pixel": 1.54
+          },
+          "bar": {
+            "meanL": 0.4103,
+            "contrast_mean": 9.21,
+            "worst_patch_L": 0.323,
+            "contrast_worst_patch": 7.46,
+            "worst_pixel_L": 0.0334,
+            "contrast_worst_pixel": 1.67
+          },
+          "borders": {
+            "meanL": 0.406,
+            "contrast_mean": 9.12,
+            "worst_patch_L": 0.3045,
+            "contrast_worst_patch": 7.09,
+            "worst_pixel_L": 0.0317,
+            "contrast_worst_pixel": 1.63
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "tarmac",
+      "name": "Tarmac",
+      "file": "punar-field-tarmac.jpg",
+      "mood": "panel",
+      "rationale": "The most neutral surface measured anywhere in the pool \u2014 median C* 0.8, effectively a grey card with a grain.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 2178876,
+      "sha256": "a831e1a6bdcab1c91a136a7da07f8711c4ceae992df3e9c91ef5995fdccae594",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "clean_asphalt",
+        "url": "https://polyhaven.com/a/clean_asphalt",
+        "api_url": "https://api.polyhaven.com/info/clean_asphalt",
+        "creators": {
+          "Dimitrios Savva": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 48610662
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "panel-fg #F2F3F5",
+        "chroma": {
+          "cstar_median": 1.1,
+          "cstar_p95": 1.8,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.01,
+        "strongest_straight_line_contrast": 1.018,
+        "hairline_lost_fraction": 0.0045,
+        "regions": {
+          "full": {
+            "meanL": 0.0617,
+            "contrast_mean": 8.46,
+            "worst_patch_L": 0.0769,
+            "contrast_worst_patch": 7.45,
+            "worst_pixel_L": 0.5827,
+            "contrast_worst_pixel": 1.49
+          },
+          "bar": {
+            "meanL": 0.0614,
+            "contrast_mean": 8.49,
+            "worst_patch_L": 0.0666,
+            "contrast_worst_patch": 8.11,
+            "worst_pixel_L": 0.2539,
+            "contrast_worst_pixel": 3.11
+          },
+          "borders": {
+            "meanL": 0.0618,
+            "contrast_mean": 8.46,
+            "worst_patch_L": 0.0701,
+            "contrast_worst_patch": 7.88,
+            "worst_pixel_L": 0.5029,
+            "contrast_worst_pixel": 1.71
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "macadam",
+      "name": "Macadam",
+      "file": "punar-field-macadam.jpg",
+      "mood": "panel",
+      "rationale": "Coarse bound aggregate; the brightest of the panel set, which is why it holds the window hairline best.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 1654765,
+      "sha256": "85983a78d6764cccb591a9de283cc86ab26eebcfa7ea076a629f73600ba6d18d",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "asphalt_01",
+        "url": "https://polyhaven.com/a/asphalt_01",
+        "api_url": "https://api.polyhaven.com/info/asphalt_01",
+        "creators": {
+          "Dario Barresi": "Processing ",
+          "Charlotte Baglioni": "Photography"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 49924809
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "panel-fg #F2F3F5",
+        "chroma": {
+          "cstar_median": 7.3,
+          "cstar_p95": 8.7,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.07,
+        "strongest_straight_line_contrast": 1.034,
+        "hairline_lost_fraction": 0.0,
+        "regions": {
+          "full": {
+            "meanL": 0.0841,
+            "contrast_mean": 7.05,
+            "worst_patch_L": 0.1119,
+            "contrast_worst_patch": 5.84,
+            "worst_pixel_L": 0.6724,
+            "contrast_worst_pixel": 1.31
+          },
+          "bar": {
+            "meanL": 0.0849,
+            "contrast_mean": 7.01,
+            "worst_patch_L": 0.0958,
+            "contrast_worst_patch": 6.49,
+            "worst_pixel_L": 0.3261,
+            "contrast_worst_pixel": 2.51
+          },
+          "borders": {
+            "meanL": 0.0844,
+            "contrast_mean": 7.04,
+            "worst_patch_L": 0.0979,
+            "contrast_worst_patch": 6.39,
+            "worst_pixel_L": 0.4609,
+            "contrast_worst_pixel": 1.85
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "pitch",
+      "name": "Pitch",
+      "file": "punar-field-pitch.jpg",
+      "mood": "panel",
+      "rationale": "Tarred stone \u2014 the darkest field that still lets Punar draw a border on top of it.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 1595743,
+      "sha256": "ede3d69995ddfc49da4c28aefdbd01a4fbb8807a3fd5253946acae9d6a58c4f1",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "tarred_gravel",
+        "url": "https://polyhaven.com/a/tarred_gravel",
+        "api_url": "https://api.polyhaven.com/info/tarred_gravel",
+        "creators": {
+          "Dimitrios Savva": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 41644503
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "panel-fg #F2F3F5",
+        "chroma": {
+          "cstar_median": 4.2,
+          "cstar_p95": 6.2,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.03,
+        "strongest_straight_line_contrast": 1.077,
+        "hairline_lost_fraction": 0.0599,
+        "regions": {
+          "full": {
+            "meanL": 0.0475,
+            "contrast_mean": 9.69,
+            "worst_patch_L": 0.154,
+            "contrast_worst_patch": 4.64,
+            "worst_pixel_L": 0.6025,
+            "contrast_worst_pixel": 1.45
+          },
+          "bar": {
+            "meanL": 0.0484,
+            "contrast_mean": 9.62,
+            "worst_patch_L": 0.1202,
+            "contrast_worst_patch": 5.56,
+            "worst_pixel_L": 0.5692,
+            "contrast_worst_pixel": 1.53
+          },
+          "borders": {
+            "meanL": 0.0473,
+            "contrast_mean": 9.72,
+            "worst_patch_L": 0.0792,
+            "contrast_worst_patch": 7.32,
+            "worst_pixel_L": 0.3937,
+            "contrast_worst_pixel": 2.13
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "soot",
+      "name": "Soot",
+      "file": "punar-field-soot.jpg",
+      "mood": "panel",
+      "rationale": "Dark plaster, not asphalt: the panel mood with a rendered wall grain instead of a road one.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 1223191,
+      "sha256": "3aa28874d0065b26e961948c16a8495a3bf14fdaa2352bd9cf5817d413fcff3e",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "plastered_wall_05",
+        "url": "https://polyhaven.com/a/plastered_wall_05",
+        "api_url": "https://api.polyhaven.com/info/plastered_wall_05",
+        "creators": {
+          "Charlotte Baglioni": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 29451195
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "panel-fg #F2F3F5",
+        "chroma": {
+          "cstar_median": 3.2,
+          "cstar_p95": 3.4,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.0,
+        "strongest_straight_line_contrast": 1.011,
+        "hairline_lost_fraction": 0.0,
+        "regions": {
+          "full": {
+            "meanL": 0.0655,
+            "contrast_mean": 8.19,
+            "worst_patch_L": 0.0711,
+            "contrast_worst_patch": 7.81,
+            "worst_pixel_L": 0.6619,
+            "contrast_worst_pixel": 1.33
+          },
+          "bar": {
+            "meanL": 0.0652,
+            "contrast_mean": 8.21,
+            "worst_patch_L": 0.0684,
+            "contrast_worst_patch": 7.99,
+            "worst_pixel_L": 0.097,
+            "contrast_worst_pixel": 6.43
+          },
+          "borders": {
+            "meanL": 0.0655,
+            "contrast_mean": 8.19,
+            "worst_patch_L": 0.0705,
+            "contrast_worst_patch": 7.85,
+            "worst_pixel_L": 0.1791,
+            "contrast_worst_pixel": 4.13
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    },
+    {
+      "id": "flagstone",
+      "name": "Flagstone",
+      "file": "punar-field-flagstone.jpg",
+      "mood": "panel",
+      "rationale": "Dressed stone with visible joints \u2014 the one shipped field that has drawn lines in it, all of them quieter than a window border.",
+      "width": 3840,
+      "height": 2400,
+      "bytes": 1472672,
+      "sha256": "644953c96e34ea28948e3c21a888376b902fd7d7e2094a1cf741713bf0e4a35a",
+      "source": {
+        "site": "Poly Haven",
+        "asset_id": "square_floor",
+        "url": "https://polyhaven.com/a/square_floor",
+        "api_url": "https://api.polyhaven.com/info/square_floor",
+        "creators": {
+          "Rob Tuytel": "All"
+        },
+        "source_max_resolution": [
+          8192,
+          8192
+        ],
+        "source_file": "Diffuse 8k JPEG"
+      },
+      "licence": {
+        "name": "CC0 1.0 Universal (Public Domain Dedication)",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+        "source_policy_url": "https://polyhaven.com/license",
+        "attribution_required": false,
+        "redistribution_permitted": true,
+        "verified": "2026-08-26"
+      },
+      "processing": {
+        "tool": "Pillow 12.3.0 (Lanczos)",
+        "steps": [
+          "centre-crop 8192x8192 -> 8192x5120 (16:10, the Plate D-015 sheet)",
+          "Lanczos resample -> 3840x2400",
+          "JPEG quality 82, progressive, optimize, 4:2:0"
+        ],
+        "source_bytes": 19757807
+      },
+      "legibility": {
+        "method": "WCAG 2.x relative luminance, box-averaged over a 24 logical-px text window; identical maths to Plate D-015",
+        "text_token": "panel-fg #F2F3F5",
+        "chroma": {
+          "cstar_median": 2.0,
+          "cstar_p95": 7.7,
+          "cap": 14.0,
+          "p95_cap": 33.7
+        },
+        "field_uniformity_contrast": 1.05,
+        "strongest_straight_line_contrast": 1.091,
+        "hairline_lost_fraction": 0.0027,
+        "regions": {
+          "full": {
+            "meanL": 0.0635,
+            "contrast_mean": 8.33,
+            "worst_patch_L": 0.1288,
+            "contrast_worst_patch": 5.29,
+            "worst_pixel_L": 0.6435,
+            "contrast_worst_pixel": 1.36
+          },
+          "bar": {
+            "meanL": 0.0648,
+            "contrast_mean": 8.24,
+            "worst_patch_L": 0.0813,
+            "contrast_worst_patch": 7.2,
+            "worst_pixel_L": 0.2459,
+            "contrast_worst_pixel": 3.2
+          },
+          "borders": {
+            "meanL": 0.063,
+            "contrast_mean": 8.37,
+            "worst_patch_L": 0.1128,
+            "contrast_worst_patch": 5.81,
+            "worst_pixel_L": 0.313,
+            "contrast_worst_pixel": 2.6
+          }
+        },
+        "gates_failed": [],
+        "verdict": "PASS"
+      }
+    }
+  ],
+  "total_bytes": 16332404
+}
