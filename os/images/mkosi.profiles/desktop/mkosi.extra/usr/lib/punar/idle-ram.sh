@@ -130,6 +130,12 @@ if [ -s "${ram_procs}" ]; then
     awk -F'\t' '/^[0-9]/ {printf "#   %6.1f MB  %s\n", $1/1024, $3}' "${ram_procs}" | head -5
 fi
 
+# Wireless exercise, before the surfaces check: it runs as root, loads the
+# kernel's wireless simulator and leaves an extra interface behind, so it must
+# not land in the middle of a check that counts windows or measures latency.
+systemctl start punar-wifi-check.service \
+    || echo "punar: idle-ram: punar-wifi-check.service failed to start" >&2
+
 # Desktop-surfaces exercise, FIRST of the in-VM checks and strictly AFTER the
 # idle sampling window above. First on purpose: it is the only check that
 # leaves the session exactly as it found it (every surface closed, the browser

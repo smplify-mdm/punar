@@ -531,6 +531,8 @@ run_desktop() {
           "${PROOF_DIR}/ram-samples.txt" \
           "${PROOF_DIR}/ram-processes.txt" \
           "${PROOF_DIR}/meminfo" \
+          "${PROOF_DIR}/wifi-report.txt" \
+          "${PROOF_DIR}"/wifi-*.txt \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
           "${PROOF_DIR}"/surfaces-*.txt \
@@ -677,6 +679,7 @@ run_desktop() {
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
+                     wifi-report.txt wifi-link.txt wifi-devices.txt \
                      surfaces-report.txt surfaces-latency.txt \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
@@ -1152,6 +1155,36 @@ run_desktop() {
         exit 1
     else
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
+    fi
+
+    # Phase 12d: wireless verdict. A primary development machine is a laptop,
+    # and until iwd landed this image had no Wi-Fi path at all. The hardware is
+    # simulated (mac80211_hwsim) precisely so the shipped configuration is
+    # EXERCISED rather than reasoned about — the failure mode DHCP still has.
+    # A kernel without the simulator reports info and claims nothing.
+    local wifi_report="${PROOF_DIR}/wifi-report.txt"
+    if [ -f "${wifi_report}" ]; then
+        if grep -q 'PUNAR_WIFI_FAIL' "${wifi_report}"; then
+            echo "error: wireless exercise reported PUNAR_WIFI_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${wifi_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_WIFI_OK' "${wifi_report}"; then
+            echo "==> Wireless: PUNAR_WIFI_OK ($(grep -c '^ok' "${wifi_report}" || true) assertions passed)"
+            grep '^info' "${wifi_report}" >&2 || true
+        else
+            echo "error: wifi-report.txt carries no verdict (guest crashed mid-exercise?)" >&2
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_WIFI_FAIL' "${SERIAL_LOG}"; then
+        echo "error: wireless exercise reported PUNAR_WIFI_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_WIFI_OK' "${SERIAL_LOG}"; then
+        echo "==> Wireless: PUNAR_WIFI_OK (verdict from serial console)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        echo "error: no wifi-report.txt and no verdict on serial — the wireless exercise did not run" >&2
+        exit 1
+    else
+        echo "==> Wireless: no report under TCG (informational only)"
     fi
 
     # Phase 12c: desktop-surfaces verdict.

@@ -1,0 +1,29 @@
+# Punar wireless networking.
+#
+# Sorts after 50-punar-dhcp.network, which matches Type=ether, so the two never
+# contend: ethernet is 50, wireless is 60, and each names its own link type.
+#
+# Association is iwd's job (/etc/iwd/main.conf); everything below is addressing
+# only, and is deliberately IDENTICAL in posture to the wired file — a laptop
+# should not become more identifiable simply because it joined over Wi-Fi.
+
+[Match]
+Type=wlan
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+# Privacy-extension addresses (RFC 4941), preferred for outbound connections.
+# Without this a SLAAC address is derived from the interface identifier, which
+# would reintroduce over IPv6 exactly the durable per-device identifier that
+# AddressRandomization removes at layer 2 — the same tracking vector, one layer
+# up, on the interface that travels most.
+IPv6PrivacyExtensions=yes
+
+[DHCPv4]
+# The hostname is device identity. Announcing it to every DHCP server a laptop
+# ever touches is a tracking vector across networks, and a laptop touches many
+# more networks over Wi-Fi than over ethernet — so this matters MORE here than
+# it does on the wired path, not less.
+SendHostname=no
+UseDomains=yes

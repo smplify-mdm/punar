@@ -1,0 +1,23 @@
+# Punar wireless exercise (CI).
+#
+# ROOT, deliberately: loading mac80211_hwsim needs modprobe and iwctl needs a
+# D-Bus policy an unprivileged user does not hold. Run as punar this would have
+# failed to load the simulator, honestly reported "unavailable", and exercised
+# nothing — a false negative wearing an honest label, which is worse than no
+# check at all because it reads as coverage.
+#
+# Not enabled, no .wants symlink — idle-ram.sh starts it synchronously, so the
+# mkosi preset-wipe lesson does not arise.
+
+[Unit]
+Description=Punar wireless exercise — iwd + networkd against simulated hardware (CI)
+
+[Service]
+Type=oneshot
+# Bounded waits inside: 20 s for the simulated interface to appear, 20 s for
+# iwd to adopt it, 20 s for networkd to match it. Three minutes is headroom,
+# not an expectation.
+TimeoutStartSec=3min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/wifi-check.sh

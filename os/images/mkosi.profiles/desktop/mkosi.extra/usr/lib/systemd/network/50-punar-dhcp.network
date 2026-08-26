@@ -23,6 +23,11 @@ DHCP=ipv4
 # with no IPv6 this costs nothing, and on one with IPv6 it gets an address
 # without a second stateful client.
 IPv6AcceptRA=yes
+# RFC 4941 temporary addresses, preferred for outbound connections — the same
+# reasoning as SendHostname below, applied to the address itself: a SLAAC
+# address derived from the interface identifier is a durable per-device
+# identifier visible to every peer the machine talks to.
+IPv6PrivacyExtensions=yes
 
 [DHCPv4]
 # Punar does not tell the network its hostname. The hostname is device
