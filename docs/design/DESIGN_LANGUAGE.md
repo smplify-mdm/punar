@@ -271,6 +271,29 @@ compliance string, and empty must render as *nothing* — never fall through to
 the first arm of a switch. That exact defect is why the command centre read
 `● LOCAL · COMPLIANT`: `case "": case "compliant":` shared an arm.
 
+### 8.2 The machine adapts; the promises do not
+
+Punar is opinionated, and it is also expected to run on hardware from a
+workstation to a Raspberry Pi. Those pull against each other, and the rule that
+resolves them is in
+[`device-classes.md`](device-classes.md):
+
+> **Punar measures the machine and makes the call itself.** It never asks the
+> user to tune it, never silently degrades, and never trades a security or
+> privacy guarantee for a slower device. What scales with hardware is the
+> RICHNESS of the experience. What never scales is what Punar promises about it.
+
+For this design language specifically, two consequences bind:
+
+- **A decision taken on the user's behalf must be legible in the D-014 voice**,
+  and must state a CONSEQUENCE rather than a setting — "X11 applications will
+  not run on this device", not "XWayland: off". Adaptive behaviour that will
+  not explain itself is indistinguishable from a bug.
+- **No surface may render a knob for it.** A settings row offering to "reduce
+  effects" is Punar declining to have an opinion and billing the user for it.
+  The class is observed; a user preference outranks it through the layered
+  merge that already exists, not through a toggle invented for the occasion.
+
 ## 9. Non-negotiables
 
 1. UI code consumes tokens (`punar-tokens.*`) — never hardcoded values.
