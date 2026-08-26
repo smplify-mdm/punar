@@ -97,11 +97,27 @@ Maintained tracking documents (spec section 1, instruction 18):
 [PERFORMANCE_BUDGETS.md](PERFORMANCE_BUDGETS.md), and
 [docs/threat-model/THREAT_MODEL.md](docs/threat-model/THREAT_MODEL.md).
 
+## Trying it
+
+```bash
+./tools/punar-up.sh
+```
+
+Fetches the newest CI-built desktop image, verifies its checksum, boots it in
+QEMU and opens the viewer. The ten-minute walkthrough — which chords to press,
+in what order, and an explicit list of what is real, what is simulated and
+what is not built at all — is
+[`docs/development/testing-the-vm.md`](docs/development/testing-the-vm.md).
+
 ## Developing
 
 See [`docs/development/getting-started.md`](docs/development/getting-started.md).
 Short version: the maintainer host is macOS arm64; Rust builds and tests run in
 Docker, and x86_64 image builds are canonical in CI.
+
+Before touching `shell/**.qml`, run `./tools/qmllint.sh` — it lints against the
+image's own Qt and Quickshell, and it fails on any output because qmllint
+itself exits 0 while printing warnings.
 
 ## License
 
