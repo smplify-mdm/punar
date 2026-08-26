@@ -295,12 +295,41 @@ if wait_for 180 chromium_client; then
         FAILED=1
     fi
 
+    # THE MENUBAR TRACKS WHAT IS RUNNING. With a browser on screen and
+    # focused, the bar's left zone must name it. This is asserted as a
+    # relation between two independent readings of the live session — what
+    # Hyprland says is focused, and what the bar says it is naming — so it
+    # cannot pass by rendering a constant, and it fails if the bar stops
+    # following focus.
+    hyprctl dispatch focuswindow "class:^([Cc]hromium.*)$" >/dev/null 2>&1
+    bar_names_focus() {
+        hy="$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""' | tr '[:upper:]' '[:lower:]')"
+        br="$(ipc bar app | tr -d '[:space:]"' | tr '[:upper:]' '[:lower:]')"
+        [ -n "${hy}" ] && [ -n "${br}" ] && [ "${hy}" = "${br}" ]
+    }
+    if wait_for 20 bar_names_focus; then
+        note "ok   the menubar names the focused window ($(ipc bar app | tr -d '[:space:]\"'))"
+    else
+        note "FAIL menubar/focus disagree — hyprland says '$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""')', bar says '$(ipc bar app | tr -d '[:space:]\"')'"
+        FAILED=1
+    fi
+
     # Leave the session as we found it — later groups and the idle-RAM sample
     # must not inherit a browser.
     [ -n "${cpid}" ] && kill "${cpid}" 2>/dev/null
     no_chromium() { ! chromium_client; }
     if wait_for 60 no_chromium; then
         note "ok   chromium closed, session restored"
+        # The other half of the relation: with nothing focused the bar names
+        # nothing, so the left zone never leaves a stale application standing
+        # after its window is gone.
+        bar_empty() { [ -z "$(ipc bar app | tr -d '[:space:]\"')" ]; }
+        if wait_for 20 bar_empty; then
+            note "ok   the menubar names nothing once the window is gone"
+        else
+            note "FAIL the menubar still names '$(ipc bar app | tr -d '[:space:]\"')' after its window closed"
+            FAILED=1
+        fi
     else
         note "FAIL chromium still present after kill — later measurements are polluted"
         FAILED=1

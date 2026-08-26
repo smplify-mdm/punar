@@ -74,6 +74,32 @@ Scope {
     // numeric id as the name, which WorkspaceState.isNamed filters out.
     // Quickshell.Hyprland keeps this live via socket2 events (no polling);
     // renames land here the moment `renameworkspace` fires.
+    // WHAT IS RUNNING, in the sense a menubar can honestly answer: the class
+    // of the focused window. Class and not title on purpose — the class is the
+    // application's identity ("chromium", "foot") and is stable, while the
+    // title is the document and changes on every navigation, which would make
+    // the bar's left zone flicker and its width jitter on a monospace row.
+    //
+    // Quickshell.Hyprland keeps activeToplevel live from socket2 events, so
+    // this costs no timer and no hyprctl parse — the same event stream that
+    // already drives workspaceLabel below.
+    //
+    // Empty string when nothing is focused (an empty workspace), and the
+    // label binds `visible` to that: a bare desktop reads "PUNAR · 1" exactly
+    // as it did before, with no trailing separator left hanging.
+    readonly property string focusedApp: {
+        var top = Hyprland.activeToplevel;
+        if (!top)
+            return "";
+        var ipc = top.lastIpcObject;
+        if (!ipc || !ipc.class)
+            return "";
+        var cls = String(ipc.class).trim();
+        // A pathological class should not be allowed to push the clock off
+        // the right-hand edge; the cluster's slots are the bar's priority.
+        return cls.length > 24 ? cls.substring(0, 23) + "\u2026" : cls;
+    }
+
     readonly property string workspaceLabel: {
         var ws = Hyprland.focusedWorkspace;
         if (ws === null)
@@ -167,6 +193,14 @@ Scope {
         function state(): string {
             return cluster.focusIndex >= 0 ? "focused" : "idle";
         }
+        // What the left zone is currently naming. Exposed so a check can
+        // assert that the bar TRACKS the focused window rather than merely
+        // rendering something — surfaces-check.sh focuses a browser and reads
+        // this back. Returns the empty string when nothing is focused, which
+        // is exactly when the label hides itself.
+        function app(): string {
+            return root.focusedApp;
+        }
     }
 
     PanelWindow {
@@ -191,8 +225,10 @@ Scope {
         Item {
             anchors.fill: parent
 
-            // Left: PUNAR · <workspace> — brand strong in ink, context in
-            // ink-3. It answers WHERE AM I and nothing else ever lands here.
+            // Left: PUNAR · <workspace> · <app> — brand strong in ink,
+            // context in ink-3. It answers WHERE AM I, and since the focused
+            // application is half of that answer it lands here too. Nothing
+            // else ever does: status belongs to the cluster on the right.
             Row {
                 id: identity
 
@@ -208,6 +244,12 @@ Scope {
                 }
                 MetaLabel {
                     text: " · " + root.workspaceLabel
+                }
+                MetaLabel {
+                    text: " · " + root.focusedApp
+                    // An empty workspace has no focused window, and a
+                    // separator with nothing after it is worse than silence.
+                    visible: root.focusedApp !== ""
                 }
             }
 
