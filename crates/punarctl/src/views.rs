@@ -1528,11 +1528,24 @@ pub fn privacy_queries(style: &Style, result: &Value, hostname: &str) -> Result<
         .filter(|q| q.result_category == "refused")
         .count() as u64;
     let answered = total - refused;
+    // A device that has been UNENROLLED still holds the queries it answered
+    // while it was enrolled, and it must keep showing them — deleting the
+    // record on unenrollment would be the device quietly editing its own
+    // history. But a surface that renders that history with no statement of
+    // the CURRENT state reads as though an organization is still asking, which
+    // on a personal device is false. The scope is therefore named in the
+    // section context, and the note below explains that the list is a record
+    // rather than a live relationship.
+    let scope = if log.enrolled {
+        String::new()
+    } else {
+        "personal device · ".to_string()
+    };
     out.push_str(&fmt::section(
         style,
         "Who asked about this device",
         &format!(
-            "{} · {answered} answered · {refused} refused",
+            "{scope}{} · {answered} answered · {refused} refused",
             plural(total, "query", "queries")
         ),
     ));
@@ -1606,6 +1619,17 @@ pub fn privacy_queries(style: &Style, result: &Value, hostname: &str) -> Result<
             ));
         }
         out.push_str(&fmt::rows(style, &rows));
+    }
+
+    // Said once, after the rows, and only when the two facts actually
+    // disagree: there is history, and nobody is enrolled now.
+    if !log.enrolled && !log.queries.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No organization is enrolled · the queries above are a record of \
+             what was asked while this device was enrolled, kept because \
+             deleting it would be the device editing its own history",
+        ));
     }
 
     out.push('\n');

@@ -2088,6 +2088,54 @@ fn personal_queries_responder(request: &Value) -> Result<Value, Value> {
     agents_respond(request)
 }
 
+/// The M10 shape: a device that WAS enrolled, answered questions, and has
+/// since been unenrolled. The history is real and must stay; the relationship
+/// is over and must be said.
+fn unenrolled_with_history_responder(request: &Value) -> Result<Value, Value> {
+    if request["method"] == json!("queries.list") {
+        let mut list = fixture_queries_list();
+        list["enrolled"] = json!(false);
+        return Ok(list);
+    }
+    agents_respond(request)
+}
+
+#[test]
+fn privacy_queries_names_the_personal_scope_when_history_outlives_enrollment() {
+    let agentd = start_mock_with(unenrolled_with_history_responder);
+    let output = run_agents(&agentd, &["privacy", "queries"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    // The current state is named in the section context, beside the counts.
+    assert!(
+        text.contains("PERSONAL DEVICE · 3 QUERIES · 2 ANSWERED · 1 REFUSED"),
+        "{text}"
+    );
+    // And explained once, after the rows. fmt::note uppercases per the
+    // Plate D-014 grammar, so this reads case-insensitively like its
+    // neighbour above.
+    assert!(
+        text.to_lowercase().contains("no organization is enrolled"),
+        "{text}"
+    );
+    assert!(
+        text.to_lowercase()
+            .contains("record of what was asked while this device was enrolled"),
+        "{text}"
+    );
+
+    // The record itself is UNCHANGED — unenrolling does not edit history.
+    // Same three rows the enrolled fixture renders.
+    assert!(text.contains("SECOPS@ACME.COM"), "{text}");
+    assert!(text.contains("CIO@ACME.COM"), "{text}");
+    assert!(text.contains("refused · out of scope"), "{text}");
+
+    // Still no error voice and no upsell on a personal device.
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(!text.to_lowercase().contains("enroll to"), "{text}");
+}
+
 #[test]
 fn privacy_queries_on_a_personal_device_is_one_calm_line_and_exit_0() {
     let agentd = start_mock_with(personal_queries_responder);
