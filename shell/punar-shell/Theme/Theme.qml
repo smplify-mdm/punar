@@ -617,7 +617,31 @@ Singleton {
     // (both reactive) rather than read them once; the IPC `list` verb reports
     // `ready` for the same reason instead of pretending an empty first answer
     // is an empty set of themes.
-    readonly property bool catalogReady: root.catalogWanted && userThemeFiles.status !== FolderListModel.Loading && siteThemeFiles.status !== FolderListModel.Loading && shippedThemeFiles.status !== FolderListModel.Loading && devThemeFiles.status !== FolderListModel.Loading
+    //
+    // READINESS IS A FOLDER-IDENTITY LATCH, NOT A STATUS READ. This used to be
+    // `status !== Loading` on all four models, and that was GUARANTEED to
+    // answer true-with-nothing on the very first call — the in-VM exercise
+    // caught it reporting `{"ready":true,"themes":[]}` on a machine with seven
+    // theme documents installed, which means no theme was selectable while the
+    // desktop looked perfectly themed. Three Qt behaviours combine to produce
+    // it:
+    //   1. componentComplete() substitutes QDir::currentPath() for an empty
+    //      `folder`, so all four models scan the shell's working directory at
+    //      startup and settle at Ready with zero rows before anyone asks.
+    //   2. setFolder() never assigns `status` on its success path — it only
+    //      wakes the worker thread.
+    //   3. the only emitter of Loading runs ON that worker thread through a
+    //      queued connection, so it cannot arrive within the JS tick that
+    //      flipped catalogWanted.
+    // Result: inside ensureCatalog() every model still reports the STALE Ready
+    // from the working-directory scan, catalogReady is true, and the catalog is
+    // empty.
+    //
+    // `status` cannot be repaired either, because Null is ambiguous — it means
+    // both "this directory does not exist" and "a reset just started". The
+    // latch below instead asks the only question that matters: has this model
+    // established the contents of the folder it was ASKED for?
+    readonly property bool catalogReady: root.catalogWanted && userThemeFiles.settled && siteThemeFiles.settled && shippedThemeFiles.settled && devThemeFiles.settled
 
     function ensureCatalog(): void {
         root.catalogWanted = true;
@@ -626,31 +650,115 @@ Singleton {
 
     FolderListModel {
         id: userThemeFiles
-        folder: (root.catalogWanted && root.userThemeDir !== "") ? "file://" + root.userThemeDir : ""
+
+        // The folder this model has been ASKED to scan. `folder` itself may NOT
+        // appear in a binding: setFolder() changes it without emitting
+        // folderChanged, so anything bound to `folder` silently reads a stale
+        // value. Every reference below is id-qualified for the same reason.
+        readonly property string wantedFolder: (root.catalogWanted && root.userThemeDir !== "") ? "file://" + root.userThemeDir : ""
+        // The folder whose contents this model has actually established.
+        property string settledFolder: ""
+        readonly property bool settled: userThemeFiles.wantedFolder === "" || userThemeFiles.settledFolder === userThemeFiles.wantedFolder
+
+        folder: userThemeFiles.wantedFolder
         nameFilters: ["*.theme.json"]
         showDirs: false
         sortField: FolderListModel.Name
-        onCountChanged: root.rebuildCatalog()
+
+        // rebuildCatalog() runs BEFORE each latch assignment, so `catalog` is
+        // never behind `catalogReady`. String(folder) is read from the GETTER,
+        // which is what tells the two finishModelReset() call sites apart: the
+        // one that fires at the flip still returns the OLD folder (not settled),
+        // while the one for a directory that does not exist returns the NEW one
+        // (settled at once, correctly — no scan is ever queued for it).
+        onModelReset: {
+            root.rebuildCatalog();
+            userThemeFiles.settledFolder = String(userThemeFiles.folder);
+        }
+        onFolderChanged: {
+            root.rebuildCatalog();
+            userThemeFiles.settledFolder = String(userThemeFiles.folder);
+        }
+        onCountChanged: {
+            root.rebuildCatalog();
+            userThemeFiles.settledFolder = String(userThemeFiles.folder);
+        }
         onStatusChanged: root.rebuildCatalog()
     }
 
     FolderListModel {
         id: siteThemeFiles
-        folder: root.catalogWanted ? "file://" + root.siteThemeDir : ""
+
+        // The folder this model has been ASKED to scan. `folder` itself may NOT
+        // appear in a binding: setFolder() changes it without emitting
+        // folderChanged, so anything bound to `folder` silently reads a stale
+        // value. Every reference below is id-qualified for the same reason.
+        readonly property string wantedFolder: root.catalogWanted ? "file://" + root.siteThemeDir : ""
+        // The folder whose contents this model has actually established.
+        property string settledFolder: ""
+        readonly property bool settled: siteThemeFiles.wantedFolder === "" || siteThemeFiles.settledFolder === siteThemeFiles.wantedFolder
+
+        folder: siteThemeFiles.wantedFolder
         nameFilters: ["*.theme.json"]
         showDirs: false
         sortField: FolderListModel.Name
-        onCountChanged: root.rebuildCatalog()
+
+        // rebuildCatalog() runs BEFORE each latch assignment, so `catalog` is
+        // never behind `catalogReady`. String(folder) is read from the GETTER,
+        // which is what tells the two finishModelReset() call sites apart: the
+        // one that fires at the flip still returns the OLD folder (not settled),
+        // while the one for a directory that does not exist returns the NEW one
+        // (settled at once, correctly — no scan is ever queued for it).
+        onModelReset: {
+            root.rebuildCatalog();
+            siteThemeFiles.settledFolder = String(siteThemeFiles.folder);
+        }
+        onFolderChanged: {
+            root.rebuildCatalog();
+            siteThemeFiles.settledFolder = String(siteThemeFiles.folder);
+        }
+        onCountChanged: {
+            root.rebuildCatalog();
+            siteThemeFiles.settledFolder = String(siteThemeFiles.folder);
+        }
         onStatusChanged: root.rebuildCatalog()
     }
 
     FolderListModel {
         id: shippedThemeFiles
-        folder: root.catalogWanted ? "file://" + root.installedThemeDir : ""
+
+        // The folder this model has been ASKED to scan. `folder` itself may NOT
+        // appear in a binding: setFolder() changes it without emitting
+        // folderChanged, so anything bound to `folder` silently reads a stale
+        // value. Every reference below is id-qualified for the same reason.
+        readonly property string wantedFolder: root.catalogWanted ? "file://" + root.installedThemeDir : ""
+        // The folder whose contents this model has actually established.
+        property string settledFolder: ""
+        readonly property bool settled: shippedThemeFiles.wantedFolder === "" || shippedThemeFiles.settledFolder === shippedThemeFiles.wantedFolder
+
+        folder: shippedThemeFiles.wantedFolder
         nameFilters: ["*.theme.json"]
         showDirs: false
         sortField: FolderListModel.Name
-        onCountChanged: root.rebuildCatalog()
+
+        // rebuildCatalog() runs BEFORE each latch assignment, so `catalog` is
+        // never behind `catalogReady`. String(folder) is read from the GETTER,
+        // which is what tells the two finishModelReset() call sites apart: the
+        // one that fires at the flip still returns the OLD folder (not settled),
+        // while the one for a directory that does not exist returns the NEW one
+        // (settled at once, correctly — no scan is ever queued for it).
+        onModelReset: {
+            root.rebuildCatalog();
+            shippedThemeFiles.settledFolder = String(shippedThemeFiles.folder);
+        }
+        onFolderChanged: {
+            root.rebuildCatalog();
+            shippedThemeFiles.settledFolder = String(shippedThemeFiles.folder);
+        }
+        onCountChanged: {
+            root.rebuildCatalog();
+            shippedThemeFiles.settledFolder = String(shippedThemeFiles.folder);
+        }
         onStatusChanged: root.rebuildCatalog()
     }
 
@@ -658,11 +766,39 @@ Singleton {
     // the set and this model never opens a directory at all.
     FolderListModel {
         id: devThemeFiles
-        folder: (root.catalogWanted && shippedThemeFiles.count === 0) ? "file://" + root.devThemeDir : ""
+
+        // The folder this model has been ASKED to scan. `folder` itself may NOT
+        // appear in a binding: setFolder() changes it without emitting
+        // folderChanged, so anything bound to `folder` silently reads a stale
+        // value. Every reference below is id-qualified for the same reason.
+        readonly property string wantedFolder: (root.catalogWanted && shippedThemeFiles.count === 0) ? "file://" + root.devThemeDir : ""
+        // The folder whose contents this model has actually established.
+        property string settledFolder: ""
+        readonly property bool settled: devThemeFiles.wantedFolder === "" || devThemeFiles.settledFolder === devThemeFiles.wantedFolder
+
+        folder: devThemeFiles.wantedFolder
         nameFilters: ["*.theme.json"]
         showDirs: false
         sortField: FolderListModel.Name
-        onCountChanged: root.rebuildCatalog()
+
+        // rebuildCatalog() runs BEFORE each latch assignment, so `catalog` is
+        // never behind `catalogReady`. String(folder) is read from the GETTER,
+        // which is what tells the two finishModelReset() call sites apart: the
+        // one that fires at the flip still returns the OLD folder (not settled),
+        // while the one for a directory that does not exist returns the NEW one
+        // (settled at once, correctly — no scan is ever queued for it).
+        onModelReset: {
+            root.rebuildCatalog();
+            devThemeFiles.settledFolder = String(devThemeFiles.folder);
+        }
+        onFolderChanged: {
+            root.rebuildCatalog();
+            devThemeFiles.settledFolder = String(devThemeFiles.folder);
+        }
+        onCountChanged: {
+            root.rebuildCatalog();
+            devThemeFiles.settledFolder = String(devThemeFiles.folder);
+        }
         onStatusChanged: root.rebuildCatalog()
     }
 

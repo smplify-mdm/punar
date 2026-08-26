@@ -149,7 +149,10 @@ else
     note "info empty-desktop baseline unavailable (grim failed)"
 fi
 
-for t in commandcenter systemcontrol notifications shortcuts aipanel overview approval; do
+# `approval` is deliberately NOT in this list and is asserted conditionally in
+# group 2b: it is a GATE, not a panel, and "unconditionally-openable" is simply
+# false for it.
+for t in commandcenter systemcontrol notifications shortcuts aipanel overview; do
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
 
@@ -213,6 +216,93 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview ap
         FAILED=1
     fi
 done
+
+# --- group 2b: the approval gate needs a contract to draw --------------------
+# This overlay draws exactly one thing — punard's pending contract — and its own
+# control loop closes it the moment the queue empties:
+#     if (root.open && Approvals.pendingCount === 0) root.dismiss();
+# so with nothing pending, an `open` is answered by a close. That is the design,
+# not a defect. An overlay that stayed open would hold
+# WlrKeyboardFocus.Exclusive over a fullscreen scrim to draw a card with no
+# record behind it — head "Approval · none", the sentence "This requester wants
+# to set  to .", "Expires 0:00" — a fabricated contract on the one surface whose
+# entire job is to be unspoofable. Group 3's empty-shelf rule, one surface
+# stricter.
+#
+# Keyed on the QUEUE rather than on the surface's own state, because this
+# overlay exposes `pending` AND `selected` and the precondition can therefore be
+# asserted instead of assumed. `selected` is read because pending == 0 is not
+# the overlay's only guard: punard retains recently-resolved records so a
+# verdict stays readable, and a selected-but-resolved card is a legitimate open
+# with an empty queue.
+apending="$(ipc approval pending | tr -d '[:space:]"')"
+aselected="$(ipc approval selected | tr -d '[:space:]"')"
+check_eq "approval.state before open" "closed" "$(sstate approval)"
+case "${apending}" in
+    ''|*[!0-9]*)
+        note "FAIL approval.pending returned '${apending}' (expected a count) — the gate's own queue probe is broken"
+        FAILED=1
+        ;;
+    0)
+        if [ -n "${aselected}" ]; then
+            note "ok   approval queue empty but a resolved card is still selected ('${aselected}') — empty-gate invariant not applicable"
+        else
+            ipc approval open >/dev/null 2>&1
+            sleep 2
+            check_eq "approval.open with an empty queue stays closed (a gate with no contract is not drawn)" \
+                "closed" "$(sstate approval)"
+            # The load-bearing leg: a flag reading closed while punar-approval
+            # is mapped would be a fullscreen overlay holding the keyboard.
+            if wait_for 15 layer_gone punar-approval; then
+                note "ok   approval mapped no layer-shell surface with an empty queue"
+            else
+                note "FAIL approval reports closed but punar-approval is mapped — a fullscreen overlay is on screen with nothing pending"
+                FAILED=1
+            fi
+            check_eq "approval.open with an empty queue invents no contract (pending)" \
+                "0" "$(ipc approval pending | tr -d '[:space:]"')"
+            check_eq "approval.open with an empty queue invents no contract (selected)" \
+                "" "$(ipc approval selected | tr -d '[:space:]"')"
+            note "info no approval screenshot: a photograph of the bare desktop filed as surfaces-approval.png is misleading evidence"
+        fi
+        ;;
+    *)
+        ipc approval open >/dev/null 2>&1
+        if wait_for 15 t_open approval; then
+            note "ok   approval.open -> open (${apending} pending)"
+        else
+            note "FAIL approval.open did not reach state=open within 15s with ${apending} pending (got '$(sstate approval)')"
+            FAILED=1
+        fi
+        if wait_for 15 layer_mapped punar-approval; then
+            note "ok   approval mapped a layer-shell surface (punar-approval)"
+        else
+            note "FAIL approval reports open but the compositor has no punar-approval layer"
+            FAILED=1
+        fi
+        if grim /run/punar/surfaces-approval.png 2>/dev/null; then
+            note "info approval captured $(wc -c < /run/punar/surfaces-approval.png | tr -d ' ') bytes (baseline ${BASELINE_BYTES:-unknown})"
+        else
+            note "info approval screenshot unavailable (grim failed; not an assertion)"
+        fi
+        ipc approval close >/dev/null 2>&1
+        if wait_for 15 t_closed approval; then
+            note "ok   approval.close -> closed"
+        else
+            note "FAIL approval.close did not reach state=closed within 15s (got '$(sstate approval)')"
+            FAILED=1
+        fi
+        if wait_for 15 layer_gone punar-approval; then
+            note "ok   approval unmapped its layer-shell surface"
+        else
+            note "FAIL approval reports closed but punar-approval is still mapped"
+            FAILED=1
+        fi
+        # Dismissal is not denial: closing the gate must resolve nothing.
+        check_eq "approval.close resolved nothing: the queue is unchanged" \
+            "${apending}" "$(ipc approval pending | tr -d '[:space:]"')"
+        ;;
+esac
 
 # --- group 3: the alert stack refuses to render an empty shelf ---------------
 # alerts.open() hides itself when there are zero cards, by design. That is the

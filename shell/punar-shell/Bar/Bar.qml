@@ -80,21 +80,44 @@ Scope {
     // title is the document and changes on every navigation, which would make
     // the bar's left zone flicker and its width jitter on a monospace row.
     //
-    // Quickshell.Hyprland keeps activeToplevel live from socket2 events, so
-    // this costs no timer and no hyprctl parse — the same event stream that
-    // already drives workspaceLabel below.
+    // READ FROM THE WAYLAND FOREIGN-TOPLEVEL MANAGER, NOT FROM HYPRLAND'S IPC,
+    // and the difference is not stylistic. Quickshell's HyprlandToplevel
+    // exposes no class property at all; the class is reachable only through
+    // `lastIpcObject`, which is written ONLY by HyprlandIpc::refreshToplevels()
+    // — an explicit `j/clients` request that runs at shell init and on
+    // configreloaded, and nowhere else. A window opened after the shell starts
+    // is built by updateInitial(), which sets address, title and workspace and
+    // nothing more, so its lastIpcObject is never written and stays an empty
+    // map. In JS that is `{}`, which is truthy, so a `!ipc` guard sails past it
+    // and the class reads empty forever. The Overview escapes this only because
+    // it calls refreshToplevels() on every open; a bar has no "open" to hang a
+    // refresh on, and adding one on a timer is the polling spec §6.3 forbids.
+    //
+    // ToplevelManager pushes app_id and the activated state as wayland events —
+    // no refresh, no timer, and it is seeded at startup, which also fixes a
+    // second latent defect: Hyprland.activeToplevel is written only by
+    // activewindowv2/closewindow and is null after a shell restart until the
+    // user next changes focus.
+    //
+    // The two readings share one source: Hyprland sends the same class string
+    // as the foreign toplevel's app_id and as `hyprctl clients .class`, so the
+    // check's comparison is a relation between two views of one fact. One
+    // caveat, stated because it is not obvious: the wlr protocol sends app_id
+    // ONCE, at map — its onClass handler is dead code in 0.56.2 — so a window
+    // that renamed its class mid-life would keep its original name here while
+    // hyprctl followed. Nothing Punar ships does that, and the alternative
+    // (refresh-gated IPC) is stale in the far commoner case instead.
     //
     // Empty string when nothing is focused (an empty workspace), and the
     // label binds `visible` to that: a bare desktop reads "PUNAR · 1" exactly
     // as it did before, with no trailing separator left hanging.
     readonly property string focusedApp: {
-        var top = Hyprland.activeToplevel;
+        var top = ToplevelManager.activeToplevel;
         if (!top)
             return "";
-        var ipc = top.lastIpcObject;
-        if (!ipc || !ipc.class)
+        var cls = String(top.appId).trim();
+        if (cls === "")
             return "";
-        var cls = String(ipc.class).trim();
         // A pathological class should not be allowed to push the clock off
         // the right-hand edge; the cluster's slots are the bar's priority.
         return cls.length > 24 ? cls.substring(0, 23) + "\u2026" : cls;
