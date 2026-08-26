@@ -4,7 +4,20 @@ Tracks progress against the milestone plan in
 [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md) section 76. The spec
 is authoritative; this file only records status.
 
-Last updated: 2026-08-25.
+Last updated: 2026-08-26.
+
+## Architecture target expansion — required, not yet built
+
+The product owner has made ARM64 support and Raspberry Pi a requirement. The
+authoritative spec now treats x86_64 and ARM64 as first-class targets.
+
+Current implementation remains honestly **x86_64 only**: no ARM64 image has
+been built or booted, and no Raspberry Pi boot/rollback mechanism exists.
+[ADR-005](docs/architecture/adr/ADR-005-arm64-support.md) is amended and still
+**Proposed**: Debian pinned sid is the recommended common substrate, awaiting
+ratification. The Pi boot chain is explicitly outside that substrate decision
+because ADR-003's UEFI/UKI mechanism cannot simply be assumed on native Pi
+firmware.
 
 ## M0 — Foundation evaluation: done (acceptance met)
 

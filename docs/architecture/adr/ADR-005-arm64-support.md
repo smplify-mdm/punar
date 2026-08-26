@@ -1,6 +1,8 @@
 # ADR-005 — Supporting arm64, and what it costs ADR-001
 
-- Status: **Proposed, AMENDED after adversarial review** — 2026-08-26
+- Status: **Proposed, AMENDED after adversarial review** — 2026-08-26.
+  ARM64/Raspberry Pi support is an accepted product requirement; the Debian
+  pinned-sid substrate recommendation in this ADR still awaits ratification.
 - Amendment: §A records what the second review corrected, including an error of
   mine in the original evidence. Read §A before §Options; two of the original
   recommendations are struck.
@@ -116,6 +118,13 @@ misread mkosi guard — both survived into documents because they sounded right.
 ---
 
 ## Context
+
+**Owner direction, 2026-08-26:** Punar must run on ARM, with Raspberry Pi as a
+target, while pursuing bare-metal performance for engineers and enterprise
+trust. This closes the question of whether ARM64 belongs in the product. It
+does **not** silently ratify Debian pinned sid, nor does it resolve the Pi boot
+chain recorded below; those are implementation decisions with their own
+evidence and consequences.
 
 **Punar is x86_64 only.** `os/images/mkosi.conf` sets `Architecture=x86-64`.
 No arm64 image has ever been built, booted or tested.

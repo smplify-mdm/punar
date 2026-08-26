@@ -46,20 +46,22 @@ This is first because the instruments exist, the numbers are recorded, and the
 owner's two hardest rules (**least RAM possible**, **speed is table stakes**)
 collide here. `tests/performance/README.md` carries the full reasoning.
 
-### 2.1 Fix the latency instrument
-**Problem:** `surfaces-check.sh` times `open_ms`/`map_ms` by polling with
-`qs ipc call` and `hyprctl -j layers` — each poll spawns a process. A keypress
-spawns nothing. The recorded 112–240 ms therefore **overstates** what a person
-feels, and the overstatement is not constant.
+### 2.1 Corrected latency instrument — run it in KVM
+The replacement is implemented in this tree. It re-enters each configured
+`qs IPC` toggle through Hyprland, timestamps `show()` and the compositor's
+`openlayer` event inside the long-lived shell, and exposes the pair on the
+surface's existing read-only IPC target. No polling process runs inside
+`shell_map_ms`.
 
-**Do:** measure the path a person takes — dispatch the chord through Hyprland
-and time to `layer_mapped`, without a per-poll process spawn in the loop. One
-approach: have the shell timestamp `open()` and expose it on the existing
-read-only IPC probe, so the number comes from inside the process rather than
-from a poller outside it.
+**Correction to the old diagnosis:** a keypress does spawn `qs`; every surface
+bind is a Hyprland `exec` of that command. The product process belongs in the
+path. The defect was the checker's repeated `qs` and `hyprctl` polling, not a
+single process that only the checker used.
 
-**Done when:** `surfaces-latency.txt` records a figure whose instrument
-overhead is stated and bounded, and the report says which path it measured.
+**Done when:** the next KVM `surfaces-latency.txt` records
+`dispatch_ms`/`shell_map_ms`/`total_ms`, states the sub-2 ms internal clock
+uncertainty, records the checker-only Hyprland-client calibration, and the
+surface exercise remains green.
 
 **File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
@@ -85,10 +87,11 @@ while closed); lock (must never hesitate).
 `state()` cannot answer `"closed"` without instantiating the thing it is
 reporting on — which defeats the entire change and breaks 13 assertions.
 
-### 2.3 Attack `shortcuts` at 240 ms
-The slowest surface under KVM by 65 ms, and real. `Shortcuts/` is 1,313 lines
-across 4 files and builds its table from `hyprctl binds -j` — 72 binds. Suspect
-the table build. Measure before changing.
+### 2.3 Re-measure `shortcuts`; do not trust the historical 240 ms
+The polling-contaminated instrument reported it slowest by 65 ms.
+`Shortcuts/` is 1,313 lines across 4 files and builds its table from `hyprctl
+binds -j` — 72 binds. The table remains the first suspect, but the corrected
+KVM sample comes before any change.
 
 ---
 
@@ -144,10 +147,14 @@ safe on cheap hardware".
 
 ---
 
-## 5. arm64 / Raspberry Pi — after ratification
+## 5. arm64 / Raspberry Pi — required; substrate after ratification
 
 **`docs/architecture/adr/ADR-005-arm64-support.md` is Proposed and AMENDED.
 Read §A before anything.** It corrects two errors in its own first draft.
+
+The owner has now confirmed ARM64 and Raspberry Pi as product requirements.
+That removes "stay x86_64-only" from the options; it does not by itself ratify
+the Debian pinned-sid recommendation or resolve Pi boot/rollback.
 
 Decision as amended: **Debian, tracking pinned sid.** Not testing — testing is
 36 days behind on chromium and structurally blocked by a missing armhf build

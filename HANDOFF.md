@@ -247,19 +247,25 @@ tangible argument for ADR-005.
 > and its traps, plus the recipe for adding a new in-VM check. What follows is
 > the summary.
 
-### 7.1 Push the unpushed commits
-`git log --oneline origin/main..HEAD`. Gates pass; run them anyway.
+### 7.1 Handed-off commits pushed
+The eight commits formerly ahead of `origin/main` passed every local gate and
+were pushed on 2026-08-26. Check the resulting CI run before pushing again.
 
 ### 7.2 Fix the latency instrument, then use it
-`surfaces-check.sh` measures dispatch latency **including a process spawn**,
-which a keypress never incurs. Measure the path a person actually takes.
+The first `surfaces-check.sh` latency numbers included repeated polling
+processes. The replacement timestamps `show()` and Hyprland's `openlayer`
+event inside the long-lived shell. **Correction:** a physical keypress does
+spawn one `qs` process through the configured Hyprland `exec`; that is product
+cost and remains in the full path. The old claim that a keypress spawns nothing
+was false.
 
 Then settle the RAM/speed tension with data. Measure what each surface costs to
 **construct** (not dispatch) and to hold **resident**. Lazy-load every surface
 whose construction is imperceptible; keep eager only what measurement proves
-expensive, **with the number in the commit message**. `shortcuts` at 240 ms is
-the worst under KVM and is real. Full reasoning and the retraction that
-preceded it: `tests/performance/README.md`.
+expensive, **with the number in the commit message**. The historical
+`shortcuts` 240 ms sample is polling-contaminated; re-measure it before treating
+it as real. Full reasoning and the retraction that preceded it:
+`tests/performance/README.md`.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval
 and alerts must appear *unbidden*; notifications/toasts/OSD must receive events
@@ -294,8 +300,13 @@ the other two are code nobody has run.
   podman dependency. Wi-Fi landed but screen-share portals have not.
 - **M11 browser/web-apps · M12 network/relay** — designed, unbuilt.
 
-### 7.5 The open decision: ADR-005
+### 7.5 ARM64 is required; ADR-005's substrate choice remains open
 `docs/architecture/adr/ADR-005-arm64-support.md` — **Proposed, not Accepted.**
+
+The owner confirmed on 2026-08-26 that ARM64 and Raspberry Pi are product
+requirements. The open decision is no longer *whether* to support ARM; it is
+whether to accept this ADR's Debian pinned-sid substrate and how to implement
+the separate native Pi boot/rollback chain.
 
 Punar is x86_64 only. ADR-001 never evaluated arm64 — architecture is absent
 from its criteria, appearing only as a consequence of choosing x86_64 CI
@@ -459,5 +470,5 @@ tested, using `mac80211_hwsim` to simulate hardware.
 | `tests/performance/README.md` | every measured number, with reasoning |
 | `docs/design/DESIGN_LANGUAGE.md` | binding design language |
 | `docs/api/ipc.md` | the wire contract (additive, `v: 1`) |
-| `docs/architecture/adr/` | ADR-001 substrate · ADR-002 binaries · ADR-003 A/B slots · ADR-005 arm64 (Proposed) |
+| `docs/architecture/adr/` | ADR-001 substrate · ADR-002 binaries · ADR-003 A/B slots · ADR-005 required arm64 target / proposed substrate |
 | `docs/development/milestone-*.md` | per-milestone design + build record |

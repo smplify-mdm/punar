@@ -113,7 +113,8 @@ what is not built at all — is
 
 See [`docs/development/getting-started.md`](docs/development/getting-started.md).
 Short version: the maintainer host is macOS arm64; Rust builds and tests run in
-Docker, and x86_64 image builds are canonical in CI.
+Docker. x86_64 image builds are canonical in CI today; ARM64 and Raspberry Pi
+are required targets whose image and physical-hardware gates are not built yet.
 
 Before touching `shell/**.qml`, run `./tools/qmllint.sh` — it lints against the
 image's own Qt and Quickshell, and it fails on any output because qmllint

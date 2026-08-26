@@ -7,8 +7,11 @@
 **Product:** Punar  
 **Parent company / enterprise control plane:** Smplify  
 **Product category:** Lightweight, AI-native, privacy-first, enterprise-ready developer operating system  
-**Initial target:** x86_64 developer laptops and VMs with 8 GB–16 GB RAM  
-**Secondary target:** ARM64 and higher-end AI workstations after MVP stabilization  
+**Initial targets:** x86_64 developer laptops/workstations and ARM64
+Raspberry Pi-class devices, on bare metal and in VMs; 8 GB–16 GB developer
+machines
+
+**Secondary target:** higher-end AI workstations
 
 ---
 
@@ -41,6 +44,13 @@ The product thesis is:
 The hardware thesis is:
 
 > **Modern computing should not require wasteful hardware upgrades. Punar should make existing 8 GB and 16 GB enterprise laptops feel useful again.**
+
+The platform thesis is:
+
+> **Bare-metal performance is a product requirement, not a demo optimisation.
+> x86_64 and ARM64 are first-class architectures; Raspberry Pi-class devices
+> are a primary appliance and inference target, not an optional port after the
+> desktop is finished.**
 
 The AI thesis is:
 
@@ -83,7 +93,11 @@ Claude Code should:
 23. Keep external-vendor integrations behind interfaces.
 24. Avoid deep forks of upstream projects unless absolutely necessary.
 25. Prefer upstream compatibility for Chromium, Linux, Wayland, and container standards.
-26. The first success criterion is:
+26. Keep architecture-dependent code at the image and boot boundary; security,
+    privacy, policy and agent guarantees must remain architecture-neutral.
+27. Prove performance and hardware support on bare metal. VM-only evidence is
+    necessary for CI but insufficient for a hardware-support claim.
+28. The first success criterion is:
 
 > A developer can boot Punar on an 8–16 GB machine, use a polished keyboard-first graphical desktop, enroll into a mocked Smplify organization, open a project workspace, run an AI coding agent with scoped authority, observe that agent locally, perform approval-gated actions, and see policy enforcement and drift remediation.
 
@@ -188,7 +202,7 @@ Punar is not:
 
 # 5. Target Hardware
 
-## 5.1 Minimum target
+## 5.1 x86_64 developer baseline
 
 ```text
 CPU:       4-core x86_64
@@ -231,6 +245,22 @@ Punar may expose enhanced capabilities on:
 - AMD ROCm environments.
 
 But the core OS must not assume high-end AI-PC hardware.
+
+## 5.5 ARM64 and Raspberry Pi target
+
+ARM64 is a first-class product architecture. Raspberry Pi-class devices are
+the initial concrete target, primarily as appliances and AI-inference devices;
+a sufficiently capable ARM64 machine may also provide the developer profile.
+
+The minimum Pi generation, RAM threshold and desktop richness must be set from
+measurements on real hardware, not a model-name allowlist or an assumed board
+specification. The same privacy and security guarantees apply as on x86_64. If
+a board cannot uphold them, Punar does not claim support for that board.
+
+Raspberry Pi's native boot chain is not UEFI. ADR-003's A/B UKI mechanism
+therefore does not automatically apply: ARM64 package/image support and Pi
+boot/rollback are separate acceptance items, and neither may be labelled built
+until it boots and rolls back on physical hardware.
 
 ---
 

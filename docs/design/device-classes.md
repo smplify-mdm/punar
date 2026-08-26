@@ -87,6 +87,8 @@ that is the point of measuring rather than matching on model names.
 **Classification is observed, never asserted.** Reading `MemTotal`, core count,
 the presence of `/sys/class/power_supply/BAT*` and whether a display is
 connected is cheap, exact and needs no hardware database that would rot.
+Architecture and board model are deliberately absent from the classifier: the
+same measured machine shape produces the same class on x86_64 and ARM64.
 
 ## 4. The mechanism already exists
 
@@ -144,11 +146,17 @@ Two assertions matter more than the rest:
    assertion that stops "adaptive" quietly becoming "less safe on cheap
    hardware", and it is the one this document exists to protect.
 
+The forced-class VM exercise proves the branching logic, not hardware support.
+Before a class is claimed on an architecture, at least one bare-metal x86_64
+machine and one bare-metal ARM64 machine in that class must run the same
+security/privacy assertions and publish performance measurements. Raspberry Pi
+support is not established by an emulated `aarch64` boot alone.
+
 ## 7. Open, and not decided here
 
 - **The thresholds are placeholders.** 8 GB and 16 GB are plausible, not
   measured. They should be set from the measured cost of the desktop profile on
-  each target, once aarch64 hardware exists.
+  physical x86_64 and target ARM64 hardware.
 - **Whether `appliance` ships the shell at all**, or a smaller surface set, is
   a product decision that interacts with the mkosi profile split
   (`base` + `desktop` today). A third profile is the natural home.
