@@ -22,6 +22,8 @@
 //! `a_personal_device_fetches_nothing_and_connects_to_nothing` (section 11
 //! gate A). Everything else here would still pass on a design that listened.
 
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -500,14 +502,119 @@ impl Drop for Rig {
 // Law 1 — no inbound socket, port or listener for admin traffic
 // ---------------------------------------------------------------------------
 
+// Reading `/proc/net/tcp` (or its `/proc/self/net/tcp` alias) on its own
+// asserts nothing about *this* process: those tables list every socket in
+// the network **namespace**, so a test that scans them for a row in state
+// `0A` fails on any host that runs any listener — sshd on a GitHub runner
+// is port 0x16, and that is exactly how this test failed in CI while
+// passing in a container that happened to have none.
+//
+// The kernel does expose the process-scoped question, by inode: every
+// socket fd in `/proc/self/fd` readlinks to `socket:[<inode>]`, and the
+// tenth column of `/proc/net/{tcp,tcp6,udp,udp6}` — and the seventh of
+// `/proc/net/unix` — is that same inode. Intersecting the two is what
+// turns "some socket exists somewhere on this machine" into "this process
+// holds this socket".
+//
+// The daemon under test runs *in this process*: `Daemon::spawn` spawns
+// threads, not a child, so this process's fd table is the daemon's fd
+// table. It also holds the two in-test counterparties (the mock control
+// plane and the agentd stand-in), which makes the network half stricter
+// than the daemon alone, never weaker: neither of them may hold an inet
+// socket either.
+
+/// Every socket inode this process holds an fd for.
+#[cfg(target_os = "linux")]
+fn owned_socket_inodes() -> BTreeSet<u64> {
+    let entries = fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd must be readable — the whole assertion rests on it");
+    let mut inodes = BTreeSet::new();
+    for entry in entries {
+        // An fd may close while the directory is being walked (the readdir
+        // fd itself is in there); a vanished fd is not a socket we hold.
+        let Ok(entry) = entry else { continue };
+        let Ok(target) = fs::read_link(entry.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy().into_owned();
+        let inode = target
+            .strip_prefix("socket:[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|inode| inode.parse::<u64>().ok());
+        if let Some(inode) = inode {
+            inodes.insert(inode);
+        }
+    }
+    inodes
+}
+
+/// The rows of one `/proc/net/{tcp,tcp6,udp,udp6}` table that this process
+/// owns, as `(state, whole line)`. A missing table means the family is not
+/// compiled in, so this process can hold no socket of it.
+#[cfg(target_os = "linux")]
+fn owned_inet_rows(file: &str, owned: &BTreeSet<u64>) -> Vec<(String, String)> {
+    let Ok(text) = fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for line in text.lines().skip(1) {
+        // sl local rem st tx:rx tr:when retrnsmt uid timeout inode ...
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (Some(state), Some(inode)) = (fields.get(3), fields.get(9)) else {
+            continue;
+        };
+        if inode
+            .parse::<u64>()
+            .is_ok_and(|inode| owned.contains(&inode))
+        {
+            rows.push(((*state).to_string(), line.trim().to_string()));
+        }
+    }
+    rows
+}
+
+/// The paths of every **listening** Unix socket this process owns.
+#[cfg(target_os = "linux")]
+fn owned_listening_unix_paths(owned: &BTreeSet<u64>) -> Vec<String> {
+    let text = fs::read_to_string("/proc/net/unix")
+        .expect("/proc/net/unix must be readable — the whole assertion rests on it");
+    let mut paths = Vec::new();
+    for line in text.lines().skip(1) {
+        // Num RefCount Protocol Flags Type St Inode Path — and `Flags`
+        // carries __SO_ACCEPTCON (0x10000) exactly when the socket is
+        // listening, which is a sharper test than inferring it from `St`.
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (Some(flags), Some(inode)) = (fields.get(3), fields.get(6)) else {
+            continue;
+        };
+        if !u32::from_str_radix(flags, 16).is_ok_and(|flags| flags & 0x0001_0000 != 0) {
+            continue;
+        }
+        if !inode
+            .parse::<u64>()
+            .is_ok_and(|inode| owned.contains(&inode))
+        {
+            continue;
+        }
+        // A listening socket with no path would be a listener bound to an
+        // abstract or unlinked name — reported, not skipped, so that it
+        // fails the allow-list below instead of disappearing from it.
+        paths.push(fields.get(7).copied().unwrap_or("<unnamed>").to_string());
+    }
+    paths
+}
+
 /// The structural assertion behind milestone-10.md law 1.
 ///
 /// Two halves, because either alone is weak. **Source-structural:** the
 /// only listener punard constructs anywhere is its own local IPC socket,
 /// and no TCP type appears in the crate at all. **Runtime:** with the whole
-/// query path live and a query just answered, this process holds no TCP
-/// socket in `LISTEN` state, and the only listening Unix sockets it holds
-/// are the three tempdir sockets this test itself created.
+/// query path live and a query just answered, the process the daemon runs
+/// in owns no TCP socket in `LISTEN` state and no UDP socket at all, and
+/// the only listening Unix sockets it owns are the three tempdir sockets
+/// this test itself created — established by intersecting this process's
+/// own socket inodes with the `/proc/net` tables, because those tables are
+/// namespace-wide and say nothing about a process on their own.
 #[test]
 fn punard_opens_no_listening_socket_for_admin_traffic() {
     // --- half one: the code cannot grow one by accident ---
@@ -558,49 +665,92 @@ fn punard_opens_no_listening_socket_for_admin_traffic() {
     );
 
     // --- half two: and at runtime, with the query path live, none exists ---
-    let rig = rig("no-listener");
-    let device = rig.enroll();
-    let query_id = rig.cp.ask(CIO, &device, "inventory");
-    rig.reconcile();
-    assert_eq!(
-        rig.cp.query_result(CIO, &query_id)["status"],
-        "answered",
-        "the path is live for this assertion to mean anything"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let rig = rig("no-listener");
+        let device = rig.enroll();
+        let query_id = rig.cp.ask(CIO, &device, "inventory");
+        rig.reconcile();
+        assert_eq!(
+            rig.cp.query_result(CIO, &query_id)["status"],
+            "answered",
+            "the path is live for this assertion to mean anything"
+        );
 
-    if let Ok(tcp) = fs::read_to_string("/proc/self/net/tcp") {
-        // st == 0A is TCP_LISTEN.
-        for line in tcp.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            assert_ne!(
-                fields.get(3).copied(),
-                Some("0A"),
-                "a TCP listener exists in this process: {line}"
-            );
+        let owned = owned_socket_inodes();
+
+        // No inbound network surface. `0A` is TCP_LISTEN; UDP has no listen
+        // state, so *any* UDP socket counts — it is bound to a local port
+        // and can be sent to.
+        for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            for (state, line) in owned_inet_rows(file, &owned) {
+                assert_ne!(
+                    state, "0A",
+                    "this process owns a listening TCP socket ({file}): {line}"
+                );
+            }
         }
-    }
-    if let Ok(unix) = fs::read_to_string("/proc/self/net/unix") {
-        let ours = rig.dir.display().to_string();
-        for line in unix.lines().skip(1) {
-            // A listening UDS has st == 01 and a path in the last column.
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.get(5).copied() != Some("01") {
-                continue;
-            }
-            let Some(path) = fields.get(7) else { continue };
-            if !path.starts_with(&ours) {
-                continue;
-            }
+        for file in ["/proc/net/udp", "/proc/net/udp6"] {
+            let rows = owned_inet_rows(file, &owned);
             assert!(
-                path.ends_with("punard-0.sock")
-                    || path.ends_with("punard-2.sock")
-                    || path.contains("punard-")
-                    || path.ends_with("control-plane.sock")
-                    || path.ends_with("agentd.sock"),
-                "an unexpected listening socket exists in the rig: {path}"
+                rows.is_empty(),
+                "this process owns a UDP socket, which is bound and can be \
+                 sent to ({file}): {rows:?}"
             );
         }
+
+        // And the only listening sockets it owns are this rig's three Unix
+        // ones. Tests in this binary run in parallel, so other rigs' own
+        // tempdir sockets are legitimately present; nothing outside a rig
+        // tempdir is.
+        let ours = format!("{}/", rig.dir.display());
+        let rigs = format!("{}/punard-m10-", std::env::temp_dir().display());
+        let mut mine: Vec<String> = Vec::new();
+        for path in owned_listening_unix_paths(&owned) {
+            if path.starts_with(&ours) {
+                mine.push(path);
+            } else {
+                assert!(
+                    path.starts_with(&rigs),
+                    "this process owns a listening socket outside every test \
+                     rig — punard grew a listener: {path}"
+                );
+            }
+        }
+        mine.sort();
+        let names: Vec<&str> = mine
+            .iter()
+            .map(|path| path.rsplit('/').next().unwrap_or(path))
+            .collect();
+        // Exactly three, and exactly these three: the daemon's own IPC
+        // socket and the two in-test counterparties. This is also what
+        // keeps the assertions above from being vacuous — if the inode
+        // intersection found nothing, it would find none of these either.
+        assert_eq!(
+            names.len(),
+            3,
+            "this rig listens on exactly its three sockets: {mine:?}"
+        );
+        assert!(
+            names.contains(&"control-plane.sock"),
+            "the mock control plane's socket: {mine:?}"
+        );
+        assert!(
+            names.contains(&"agentd.sock"),
+            "the agentd stand-in's socket: {mine:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name.starts_with("punard-") && name.ends_with(".sock")),
+            "the daemon's one listening socket is its local IPC socket: {mine:?}"
+        );
     }
+    #[cfg(not(target_os = "linux"))]
+    eprintln!(
+        "note: the runtime half of law 1 reads /proc, so it is compiled only \
+         for Linux — Punar's only target, and what CI runs."
+    );
 }
 
 // ---------------------------------------------------------------------------

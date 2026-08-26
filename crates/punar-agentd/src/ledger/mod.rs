@@ -261,6 +261,10 @@ pub struct LedgerEngine {
     tail: AuditTail,
     store: LedgerStore,
     state: Mutex<State>,
+    /// Serializes [`LedgerEngine::drain_audit`] against itself — see the
+    /// comment there. Never held while anything else is acquired except
+    /// `state`, and always acquired first, so the pair has one order.
+    drain_gate: Mutex<()>,
     /// Group that may read the runtime view (`punar`), resolved once.
     runtime_gid: Option<u32>,
     /// Non-fatal load problems, printed once by the daemon at startup.
@@ -293,6 +297,7 @@ impl LedgerEngine {
                 active: BTreeMap::new(),
                 pending: VecDeque::new(),
             }),
+            drain_gate: Mutex::new(()),
             table,
             runtime_gid,
             warnings,
@@ -674,6 +679,20 @@ impl LedgerEngine {
     /// Drain only — the cheap path a ledger read takes when it does not
     /// need a fresh cgroup sample.
     pub fn drain_audit(&self, now: &str) -> bool {
+        // One drain at a time. Reading the tail position, reading the
+        // bytes after it and storing the new position are three steps,
+        // and the daemon runs this from two places at once: the inotify
+        // watch thread (woken by every audit append) and whatever
+        // connection thread is serving a scan or a ledger read. Without
+        // this gate both threads read the SAME start position, both
+        // ingest the same lines, and every `observe(.., 1, ..)` below
+        // lands twice — the ledger's counts, the one number section 21
+        // shows the user for "what it accessed", silently inflate. The
+        // big `state` lock cannot do this job: it is released across the
+        // file read by construction. Held for the whole function, so the
+        // position a drain publishes is the position the next drain
+        // starts from.
+        let _drain = self.drain_gate.lock().unwrap_or_else(|e| e.into_inner());
         let position = self.state.lock().unwrap().index.tail;
         let drained = self.tail.drain(position);
         if drained.references.is_empty() && drained.classes.is_empty() {
@@ -1405,6 +1424,72 @@ mod tests {
         //    the cap — and a second drain does not resurrect anything.
         assert!(!h.engine.drain_audit("2026-08-27T09:58:42Z"));
         assert!(h.engine.state.lock().unwrap().pending.is_empty());
+        let _ = std::fs::remove_dir_all(&h.dir);
+    }
+
+    /// A drain is not re-entrant, and the daemon really does run two at
+    /// once: the inotify watch thread fires on every audit append while a
+    /// connection thread is inside `agents.scan` or a ledger read. Reading
+    /// the tail position, reading the bytes after it and publishing the
+    /// new position have to be one indivisible step — otherwise both
+    /// threads start from the same offset, ingest the same lines, and the
+    /// counts the user is shown for *what it accessed* come out too high.
+    ///
+    /// The count here is exact, never "at least": inflation is the whole
+    /// defect. This is the unit-level guard for the CI flake in
+    /// `tests/ledger.rs`
+    /// (`an_issued_credential_fills_the_level_3_row_…`, which saw 3 where
+    /// it wanted 2 roughly one run in twenty).
+    #[test]
+    fn concurrent_drains_ingest_each_audit_line_exactly_once() {
+        let h = harness("ledger-concurrent-drain");
+        spawn(&h.proc_root, 2143, "punar-mock-agent");
+        let scope = fixture_cgroup_scope(&h.dir.join("cgroup"), SESSION, &[2143], Some(1));
+        h.engine
+            .begin_session(&facts(Some(scope)), "2026-08-27T09:58:40Z");
+
+        const ISSUED: u64 = 24;
+        let mut writer = AuditWriter::open(&h.audit).unwrap();
+        for n in 0..ISSUED {
+            let mut issued = audit_event(
+                &format!("evt_7{n:02}"),
+                SESSION,
+                "credential.request",
+                Decision::Allow,
+            );
+            issued.resource = Some("github".to_string());
+            writer.append(&issued).unwrap();
+        }
+
+        // Eight threads racing on one trail. Without a gate around the
+        // whole drain they overlap on the same start offset; with one,
+        // whichever loses simply finds nothing left.
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    h.engine.drain_audit("2026-08-27T09:59:13Z");
+                });
+            }
+        });
+
+        let record = h.engine.record_of(SESSION).unwrap();
+        let github = record
+            .entries
+            .iter()
+            .find(|e| {
+                e.category == ResourceCategory::CredentialClasses
+                    && e.resource_class.as_str() == "github"
+            })
+            .expect("the credential class the events named");
+        assert_eq!(
+            github.count, ISSUED,
+            "one count per audit line, however many drains raced"
+        );
+        assert_eq!(
+            record.security_events.len(),
+            ISSUED as usize,
+            "and one security event per line, not one per drain that saw it"
+        );
         let _ = std::fs::remove_dir_all(&h.dir);
     }
 

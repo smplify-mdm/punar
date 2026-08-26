@@ -54,6 +54,12 @@
 #     (M5 lesson).
 #   - vendor-level .wants units report `disabled` from is-enabled: assert the
 #     symlink plus Wants= (M4 lesson).
+#   - Since M10 the `agents.scan` audit event's `resource` is the composite
+#     `<agent>:<trigger>` (audit-event.json has no trigger field, and the M8
+#     Decision-0 law says a shipped schema does not grow one), and a 240 s
+#     timer runs passes of its own. Every scan-audit assertion here matches
+#     the agent name as a PREFIX and stays trigger-agnostic, so the timer
+#     owning a transition this script expected cannot fake a failure.
 
 set -u
 
@@ -437,7 +443,7 @@ else
     FAILED=1
 fi
 as_punar "${CTL}" --json agents scan > "${RUN_DIR}/m7-scan.json" 2>/dev/null
-check_true "punarctl agents scan exit code (a pass runs on demand — no timer)" "$?"
+check_true "punarctl agents scan exit code (an on-demand pass; since M10 a timer runs one too)" "$?"
 jq_check "the scan reports the fixture as UNKNOWN and SUSPECTED, never certain" \
     "${RUN_DIR}/m7-scan.json" \
     ".detections | any(.classification == \"unknown\" and .suspected == true
@@ -448,13 +454,48 @@ jq_check "the scan reports the fixture as UNKNOWN and SUSPECTED, never certain" 
 jq_check "the managed session is NOT re-reported as a detection (scope is attribution)" \
     "${RUN_DIR}/m7-scan.json" \
     ".detections | all(.session_id != \"${SID}\")"
+# The detection identity this pass reported IS the join key into the audit
+# trail: agentd puts it in the transition event's `agent_session_id`.
+# Group 11 asserts the transition for THIS detection, not merely that some
+# foo-agent line exists somewhere in the boot. The id is stable across
+# passes for the life of the process (milestone-10.md section 4.1), so it
+# still matches when the M10 scan TIMER — not this script — is the pass
+# that observes the transition.
+#
+# The fixture is started through runuser, whose ROOT parent also carries
+# the absolute fixture path in its argv and is therefore detected too. Both
+# rows are legitimate detections, but the one this exercise deliberately
+# created is the process running as punar, so prefer it and fall back to
+# any row rather than depending on the daemon's ordering.
+DETECTION_ID="$(jq -r "[.detections[] | select(.executable == \"${FOO_AGENT}\")]
+    | (map(select(.user == \"punar\")) + .)[0] | .session_id // empty" \
+    "${RUN_DIR}/m7-scan.json" 2>/dev/null)"
+if [ -n "${DETECTION_ID}" ]; then
+    note "ok   the scan minted a detection id for the fixture: ${DETECTION_ID}"
+else
+    note "FAIL the scan reported no detection id for ${FOO_AGENT}"
+    FAILED=1
+    # A sentinel that cannot match, so group 11 fails loudly rather than
+    # silently counting somebody else's rows.
+    DETECTION_ID="agt_none"
+fi
 as_punar "${CTL}" agents list > "${RUN_DIR}/m7-agents-list.txt" 2>&1
 grep_row "the list render says UNKNOWN · SUSPECTED" "${RUN_DIR}/m7-agents-list.txt" \
     "UNKNOWN · SUSPECTED"
 grep_row "the list render states the heuristic limit in words" \
     "${RUN_DIR}/m7-agents-list.txt" "SUSPECTED, NOT CERTAIN"
-grep_row "the list render names the milestone continuous detection arrives in" \
-    "${RUN_DIR}/m7-agents-list.txt" "MILESTONE 10"
+# M7 shipped detection with no trigger of its own and deferred continuous
+# detection to M10 by name, so this check pinned the words "MILESTONE 10".
+# M10 SHIPPED it (punar-agentd-scan.timer, 240 s), and the footer now
+# states the real cadence and the sampling hole instead of a deferral.
+# The INVARIANT M7 was protecting is not the deferral sentence: it is that
+# the render tells the user how detection actually happens, so nobody
+# assumes continuous coverage the product does not have (spec 1.22, 23 —
+# "do not claim perfect detection"). Assert THAT, in two halves.
+grep_re "the list render states how detection actually happens (a real periodic cadence)" \
+    "${RUN_DIR}/m7-agents-list.txt" 'continuous · every [0-9]+ min'
+grep_row "the list render still owns the sampling hole (short-lived processes are not seen)" \
+    "${RUN_DIR}/m7-agents-list.txt" "starts and exits inside one interval is not seen"
 
 # --- 8. /run/punar/agents.json (the shell's event-driven source) -------------
 cp "${AGENTS_JSON}" "${RUN_DIR}/m7-agents-file.json" 2>/dev/null
@@ -539,20 +580,33 @@ check_eq "audit: the register event is attributed to the human and the project" 
 check_eq "audit: exactly one agents.end for this session" 1 \
     "$(audit_count ".action == \"agents.end\" and .agent_session_id == \"${SID}\"
         and .result == \"success\"")"
-detected="$(audit_count '.action == "agents.scan" and .result == "detected"
-    and .resource == "foo-agent"')"
+# M7 matched `.resource == "foo-agent"` exactly. M10 made the scan audit
+# event's `resource` the composite `<agent>:<trigger>` — audit-event.json
+# has no field for a trigger and the M8 Decision-0 law forbids growing one,
+# so the trigger travels in `resource` (crates/punar-agentd/src/server.rs,
+# `audit_scan_transition`; milestone-10.md section 3.4). The bare equality
+# can therefore never match again. What M7 owns is unchanged: the detection
+# transition of THIS fixture was audited, in both directions. So match the
+# agent name as a PREFIX and bind the event to the detection id the scan
+# reported — deliberately WITHOUT pinning the trigger, because since M10
+# either this script's pass or the 240 s timer's pass may legitimately be
+# the one that observes the transition and emits it (m10-check group 3 is
+# where the trigger vocabulary itself is asserted).
+SCAN_OF_FIXTURE='(.resource | test("^foo-agent(:|$)"))'
+detected="$(audit_count "${SCAN_OF_FIXTURE} and .action == \"agents.scan\"
+    and .result == \"detected\" and .agent_session_id == \"${DETECTION_ID}\"")"
 if [ "${detected}" -ge 1 ]; then
-    note "ok   audit: the detection transition was recorded (${detected} detected event(s))"
+    note "ok   audit: the detection transition was recorded for ${DETECTION_ID} (${detected} detected event(s))"
 else
-    note "FAIL audit: no agents.scan detected event for foo-agent"
+    note "FAIL audit: no agents.scan detected event for foo-agent (${DETECTION_ID})"
     FAILED=1
 fi
-cleared="$(audit_count '.action == "agents.scan" and .result == "cleared"
-    and .resource == "foo-agent"')"
+cleared="$(audit_count "${SCAN_OF_FIXTURE} and .action == \"agents.scan\"
+    and .result == \"cleared\" and .agent_session_id == \"${DETECTION_ID}\"")"
 if [ "${cleared}" -ge 1 ]; then
-    note "ok   audit: the cleared transition was recorded (${cleared} cleared event(s))"
+    note "ok   audit: the cleared transition was recorded for ${DETECTION_ID} (${cleared} cleared event(s))"
 else
-    note "FAIL audit: no agents.scan cleared event for foo-agent"
+    note "FAIL audit: no agents.scan cleared event for foo-agent (${DETECTION_ID})"
     FAILED=1
 fi
 # Transitions only: a scan that changes nothing must not write a line.
