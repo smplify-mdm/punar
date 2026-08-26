@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "contrast",
+    "name": "High Contrast",
+    "intent": "Accessibility first: every text pair ≥ 7.5:1, pure black and white grounds.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "paper"
+  },
+  "color": {
+    "paper": {
+      "surface": "#FFFFFF",
+      "ink": "#000000",
+      "ink2": "#141414",
+      "ink3": "#303030",
+      "muted": "#F5F5F5",
+      "raise2": "#EAEAEA",
+      "border": "#B0B0B0",
+      "inputBorder": "#595959",
+      "status": {
+        "ok": "#0F5219",
+        "warn": "#5E3A00",
+        "bad": "#960014"
+      }
+    },
+    "panel": {
+      "surface": "#000000",
+      "fg": "#FFFFFF",
+      "ink2": "#D6D6D6",
+      "ink3": "#ABABAB",
+      "edge": "#6E6E6E",
+      "status": {
+        "ok": "#6BE86B",
+        "warn": "#FFC14D",
+        "bad": "#FF8F8F"
+      }
+    }
+  }
+}

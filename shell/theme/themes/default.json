@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/pointer.json",
+  "kind": "PunarThemePointer",
+  "active": "paper",
+  "mood": "default",
+  "validated": {
+    "at": "2026-08-26T00:00:00Z",
+    "grammar": "0.1.0",
+    "digest": "sha256:71aa4275b36131ad38c702314ecd79650e94e991041b7573b3d27cf3e93776ca",
+    "minText": 4.78,
+    "minNonText": 3.35
+  }
+}

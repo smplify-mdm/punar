@@ -81,7 +81,7 @@ Scope {
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
-        color: Theme.ink3
+        color: Theme.shellInk3
         textFormat: Text.PlainText
     }
 
@@ -91,7 +91,7 @@ Scope {
         id: pill
 
         property string text: ""
-        property color tone: Theme.ink3
+        property color tone: Theme.shellInk3
 
         implicitWidth: pillLabel.implicitWidth + 18
         implicitHeight: pillLabel.implicitHeight + 8
@@ -124,7 +124,7 @@ Scope {
         property string label: ""
         property string binding: ""
         property bool filled: false
-        property color tone: Theme.ink
+        property color tone: Theme.shellFg
         property bool enabledLook: true
 
         signal activated()
@@ -151,7 +151,7 @@ Scope {
                 font.weight: 600
                 font.letterSpacing: Theme.tracking(11, 0.1)
                 font.capitalization: Font.AllUppercase
-                color: button.filled ? Theme.actionFg : button.tone
+                color: button.filled ? Theme.shellActionFg : button.tone
                 textFormat: Text.PlainText
             }
             Rectangle {
@@ -161,7 +161,7 @@ Scope {
                 radius: 3
                 color: "transparent"
                 border.width: Theme.hairline
-                border.color: button.filled ? Theme.actionFg : button.tone
+                border.color: button.filled ? Theme.shellActionFg : button.tone
                 opacity: 0.7
 
                 Text {
@@ -172,7 +172,7 @@ Scope {
                     font.family: Theme.fontMono
                     font.pixelSize: 9
                     font.weight: 600
-                    color: button.filled ? Theme.actionFg : button.tone
+                    color: button.filled ? Theme.shellActionFg : button.tone
                     textFormat: Text.PlainText
                 }
             }
@@ -638,7 +638,7 @@ Scope {
         // Warm ink-wash scrim at 22% — the token curve, show/hide only.
         Rectangle {
             anchors.fill: parent
-            color: Theme.inkWash
+            color: Theme.shellScrim
             opacity: root.open ? 1 : 0
 
             Behavior on opacity {
@@ -667,9 +667,9 @@ Scope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.open ? Math.round((win.height - height) / 2)
                          : Math.round((win.height - height) / 2) + 10
-            color: Theme.paperSurface
+            color: Theme.shellSurface
             border.width: Theme.hairline
-            border.color: Theme.border
+            border.color: Theme.shellBorder
             radius: Theme.radius
             opacity: root.open ? 1 : 0
             // Soft drop shadow deliberately omitted (llvmpipe budget; the
@@ -749,7 +749,7 @@ Scope {
                         Meta {
                             anchors.verticalCenter: parent.verticalCenter
                             text: "Approval"
-                            color: Theme.ink
+                            color: Theme.shellFg
                         }
                         Meta {
                             anchors.verticalCenter: parent.verticalCenter
@@ -762,7 +762,7 @@ Scope {
                             anchors.verticalCenter: parent.verticalCenter
                             visible: Approvals.pendingCount > 1 && root.pendingIndex >= 0
                             text: "  " + (root.pendingIndex + 1) + " of " + Approvals.pendingCount
-                            color: Theme.inputBorder
+                            color: Theme.shellInputBorder
                         }
                     }
 
@@ -779,11 +779,11 @@ Scope {
                                 switch (root.field("risk")) {
                                 case "high":
                                 case "critical":
-                                    return Theme.statusBad;
+                                    return Theme.shellStatusBad;
                                 case "medium":
-                                    return Theme.statusWarn;
+                                    return Theme.shellStatusWarn;
                                 default:
-                                    return Theme.ink3;
+                                    return Theme.shellInk3;
                                 }
                             }
                         }
@@ -802,10 +802,10 @@ Scope {
                             }
                             color: {
                                 if (root.decided)
-                                    return Theme.ink3;
+                                    return Theme.shellInk3;
                                 if (root.lapsed)
-                                    return Theme.statusBad;
-                                return root.secondsLeft < 60 ? Theme.statusWarn : Theme.ink3;
+                                    return Theme.shellStatusBad;
+                                return root.secondsLeft < 60 ? Theme.shellStatusWarn : Theme.shellInk3;
                             }
                         }
                     }
@@ -820,7 +820,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: 2
-                    color: Theme.ink
+                    color: Theme.shellFg
                 }
 
                 Item {
@@ -850,7 +850,7 @@ Scope {
                     font.family: Theme.fontSans
                     font.pixelSize: 17
                     font.weight: 500
-                    color: Theme.ink
+                    color: Theme.shellFg
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
                 }
@@ -878,7 +878,7 @@ Scope {
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: Theme.hairline
-                        color: Theme.border
+                        color: Theme.shellBorder
                     }
 
                     Text {
@@ -892,7 +892,7 @@ Scope {
                         font.family: Theme.fontSans
                         font.pixelSize: 14
                         font.italic: true
-                        color: Theme.ink2
+                        color: Theme.shellInk2
                         wrapMode: Text.WordWrap
                         // Requester-authored text: plain, inert, no links.
                         textFormat: Text.PlainText
@@ -908,7 +908,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
                 }
 
                 Column {
@@ -932,7 +932,7 @@ Scope {
                             font.pixelSize: 9
                             font.weight: 600
                             font.letterSpacing: Theme.tracking(9, 0.1)
-                            color: Theme.ink
+                            color: Theme.shellFg
                             text: root.contractCall()
                         }
                     }
@@ -955,7 +955,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
                 }
 
                 Item {
@@ -977,7 +977,7 @@ Scope {
                         ActionButton {
                             label: "Deny"
                             binding: "D"
-                            tone: Theme.destructive
+                            tone: Theme.shellDestructive
                             enabledLook: root.actionable
                             onActivated: root.resolve("denied")
                         }
@@ -985,7 +985,7 @@ Scope {
                             label: "Approve"
                             binding: "A"
                             filled: true
-                            tone: Theme.actionBg
+                            tone: Theme.shellActionBg
                             enabledLook: root.actionable
                             onActivated: root.resolve("approved")
                         }
@@ -1010,7 +1010,7 @@ Scope {
                         font.weight: 600
                         font.letterSpacing: Theme.tracking(10, 0.12)
                         font.capitalization: Font.AllUppercase
-                        color: root.verdictGood() ? Theme.statusOk : Theme.statusBad
+                        color: root.verdictGood() ? Theme.shellStatusOk : Theme.shellStatusBad
                         elide: Text.ElideRight
                         textFormat: Text.PlainText
                     }
@@ -1020,7 +1020,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
                 }
 
                 Item {

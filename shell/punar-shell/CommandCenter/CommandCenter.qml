@@ -1,26 +1,56 @@
 pragma ComponentBehavior: Bound
 // CommandCenter — the SUPER+Space overlay, implementing the command-center
-// card of docs/design/mockups/command-approval.html (Sect I): centered
-// 560px paper card on a warm ink-wash scrim, masthead row, sans input,
-// glyph-tag result rows, selection = raise fill + 2px ink left rule,
+// card of docs/design/mockups/command-approval.html (Sect I, Plate D-003):
+// centered 560px paper card on a warm ink-wash scrim, masthead row, sans
+// input, glyph-tag result rows, selection = raise fill + 2px ink left rule,
 // footer meta row carrying the principle line.
 //
-// M1 data sources: installed .desktop applications (DesktopEntries) plus a
-// static table of punarctl action stubs. NO shell-string execution — every
-// launch is DesktopEntry.execute() or a fixed argv from ACTIONS below
-// (mockup register: "the command center never generates a shell string").
+// ── WHAT CHANGED IN THIS PASS ────────────────────────────────────────────
+// The M1 shell shipped this surface with a two-entry static table ("Open
+// terminal" and a "System Control · arrives M3" stub) and no project verb,
+// which left spec §75 step 3 ("Open Atlas") unperformable and Definition-
+// of-Done item 4 unmet (milestone-13.md §6.1 gap 1). The action table is
+// now REAL and it is DATA — see CommandCenter/Actions.qml for the taxonomy:
 //
-// M3 INTEGRATION POINT: ACTIONS below is replaced by rows from punard's
-// capability registry (spec §41) over typed IPC; each row then carries the
-// real typed capability it resolves to, and `meta` prints that contract.
+//   app       installed .desktop entries, ranked (Services/Apps.qml). The
+//             browser the image ships (chromium) is reachable by name, by
+//             its WebBrowser role, and from the empty overlay.
+//   project   `Open Atlas` switches to — or creates — the named project
+//             workspace through Hyprland's own typed dispatchers, and the
+//             rename is what persists it through WorkspaceState's M2
+//             contract (~/.local/state/punar/workspaces.json).
+//   surface   the other first-party surfaces, addressed BY IPC TARGET
+//             NAME (systemcontrol · notifications · shortcuts · aipanel ·
+//             overview). The wiring is one object literal per surface, not
+//             a branch, and a target this shell did not register renders
+//             dashed with its milestone instead of pretending.
+//   layout    the §13.5 presets, by name, through punar-layout.sh — the
+//             consumer punar-binds.conf already names in prose.
+//   explain   a §40 policy question, answered inline from
+//             `punarctl --json policy explain <path>`.
+//
+// ── THE LAW (spec §10, §12.2; D-003's register) ──────────────────────────
+// "The command center never generates a shell string." Every row prints
+// the typed capability or the concrete action it will invoke, in its right
+// meta column, BEFORE Enter. Plain language resolves to one of the five
+// kinds above and to nothing else — there is no free-text execution path
+// in this file, deliberately, mirroring ipc.md §8's permanent non-goal.
+//
+// ── BUDGET (PERFORMANCE_BUDGETS.md §5; spec §6.3) ────────────────────────
+// No timers except the 300 ms exit-animation one-shot this surface always
+// had. No polling. Three short-lived processes exist and every one is
+// user-initiated and at-most-once per session or per keystroke-committed
+// action: the IPC target probe (first open), the policy-path index (first
+// question typed), and one `punarctl policy explain` per question run.
 //
 // Toggled from Hyprland via Quickshell IPC:
-//   qs ipc call commandcenter toggle   (equivalently: quickshell ipc call …)
+//   qs -p /usr/share/punar/shell ipc call commandcenter toggle
 
 import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import "../Theme"
 import "../Services"
 
@@ -29,6 +59,14 @@ Scope {
 
     property bool open: false
     property bool windowVisible: false
+
+    // Non-empty while the §40 explain answer replaces the result list.
+    property string explainPath: ""
+
+    // One honest line under the results — why a row did nothing, or why a
+    // question has no answer on this device. Cleared by the next keystroke;
+    // never on a timer.
+    property string note: ""
 
     // Meta-row / label grammar (DESIGN_LANGUAGE.md §1): mono, tracked,
     // uppercase. Sizes follow the mockup CSS, rounded to whole px
@@ -39,23 +77,33 @@ Scope {
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
-        color: Theme.ink3
+        color: Theme.shellInk3
     }
 
-    function show() {
+    // The action taxonomy. A plain object — no window, no timer, no file
+    // of its own. (The application index is the `Apps` singleton from
+    // ../Services; it needs no instance.)
+    Actions {
+        id: actions
+    }
+
+    function show(): void {
         hideTimer.stop();
         root.windowVisible = true;
         root.open = true;
+        root.probeTargets();
     }
 
-    function dismiss() {
+    function dismiss(): void {
         if (!root.open)
             return;
         root.open = false;
+        root.explainPath = "";
+        root.note = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
 
-    function toggle() {
+    function toggle(): void {
         if (root.open)
             root.dismiss();
         else
@@ -63,7 +111,14 @@ Scope {
     }
 
     // SUPER+Space entry point. Hyprland binds:
-    //   bind = SUPER, Space, exec, qs ipc call commandcenter toggle
+    //   bindd = SUPER, Space, Open command center, exec, $commandCenter
+    //
+    // `query` / `run` / `state` are read-and-drive verbs for check scripts
+    // (milestone-13.md §6.1 gap 1's evidence line is that no check has ever
+    // opened this overlay). They do exactly what the keyboard does and
+    // nothing the keyboard cannot: `run` is Enter on the current selection,
+    // so this handler grants no capability the session did not already have
+    // by being able to open the surface at all.
     IpcHandler {
         target: "commandcenter"
 
@@ -76,6 +131,37 @@ Scope {
         function close(): void {
             root.dismiss();
         }
+        function state(): string {
+            if (!root.open)
+                return "closed";
+            return root.explainPath !== "" ? "explain" : "open";
+        }
+        // The §40 answer's own state: "none" or "<phase> · <path>", where
+        // phase is asking / answered / failed.
+        function explain(): string {
+            if (root.explainPath === "")
+                return "none";
+            return explainCard.phase + " · " + root.explainPath;
+        }
+        // Type into the field and report the top row's typed action, so a
+        // check can assert WHAT would run without running it.
+        function query(text: string): string {
+            root.show();
+            win.setQuery(text);
+            var top = win.results.length > 0 ? win.results[0] : null;
+            return top === null ? "no-match" : (top.kind + " · " + top.meta);
+        }
+        // Enter on the current selection.
+        function run(): string {
+            if (!root.open)
+                return "closed";
+            var item = list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null;
+            if (item === null)
+                return "no-match";
+            var label = item.kind + " · " + item.meta;
+            root.activate(item);
+            return label;
+        }
     }
 
     Timer {
@@ -84,83 +170,472 @@ Scope {
         onTriggered: root.windowVisible = false
     }
 
-    // ---- M1 static actions (fixed argv table — never a shell string) ----
-    // Glyph codes follow the mockup's two-letter mono grammar.
-    readonly property var staticActions: [
-        {
-            group: "Punar",
-            glyph: "TE",
-            name: "Open terminal",
-            meta: "OpenTerminal() · foot",
-            cap: true,
-            kind: "exec",
-            exec: ["foot"]
-        },
-        {
-            group: "Punar",
-            glyph: "SY",
-            name: "System Control",
-            meta: "SystemControl() · arrives M3",
-            cap: true,
-            kind: "stub"
+    // ---- IPC target probe -------------------------------------------------
+    //
+    // Which sibling surfaces exist in THIS shell is a fact, not an
+    // assumption: `qs ipc show` lists the registered IpcHandler targets.
+    // Run once, on the first open. If the listing cannot be produced — or
+    // does not contain this very surface's own target, which would mean the
+    // output was not understood — nothing is claimed and every surface row
+    // stays solid with `targetState() === "unknown"`. Refusing to guess in
+    // both directions is the §1.22 rule: a dashed row is a claim too.
+    Process {
+        id: probeProc
+        stdout: StdioCollector {
+            id: probeOut
+            waitForEnd: true
+            onStreamFinished: root.finishProbe()
         }
-    ]
-
-    function glyphFor(name: string): string {
-        var words = name.trim().split(/\s+/);
-        if (words.length >= 2 && words[0].length > 0 && words[1].length > 0) {
-            // String() gives the linter a concrete string type for the
-            // list elements (avoids a QJSPrimitiveValue false positive).
-            return String(words[0]).charAt(0).toUpperCase()
-                   + String(words[1]).charAt(0).toUpperCase();
-        }
-        return name.substring(0, 2).toUpperCase();
+        // Completion is read from `running` rather than `exited`, because
+        // the `exited` signal carries a QProcess::ExitStatus parameter whose
+        // C++ type has no QML registration — a handler for it does not
+        // compile cleanly (qmllint [signal-handler-parameters]). `running`
+        // going false is the same moment, and both finishers below are
+        // idempotent, so whichever of the two signals lands first wins.
+        onRunningChanged: if (!probeProc.running)
+            root.finishProbe()
     }
 
-    function buildResults(query: string, apps: var): var {
-        var q = query.trim().toLowerCase();
+    function probeTargets(): void {
+        if (actions.probed || probeProc.running)
+            return;
+        try {
+            probeProc.command = ["qs", "-p", actions.shellPath, "ipc", "show"];
+            probeProc.running = true;
+        } catch (e) {
+            console.warn("punar-shell: ipc target probe unavailable:", e);
+        }
+    }
+
+    function parseTargets(text: string): var {
         var out = [];
-        for (var i = 0; i < root.staticActions.length; i++) {
-            var a = root.staticActions[i];
-            if (q === "" || a.name.toLowerCase().indexOf(q) !== -1)
-                out.push(a);
-        }
-        var matched = [];
-        for (var j = 0; j < apps.length; j++) {
-            var e = apps[j]; // DesktopEntries pre-filters Hidden/NoDisplay
-            var hay = (e.name + " " + (e.genericName || "") + " "
-                       + (e.comment || "") + " "
-                       + (e.keywords ? e.keywords.join(" ") : "")).toLowerCase();
-            if (q === "" || hay.indexOf(q) !== -1)
-                matched.push(e);
-        }
-        matched.sort(function (a, b) {
-            return a.name.localeCompare(b.name);
-        });
-        for (var k = 0; k < matched.length; k++) {
-            var m = matched[k];
-            out.push({
-                group: "Applications",
-                glyph: root.glyphFor(m.name),
-                name: m.name,
-                meta: (m.genericName && m.genericName !== "") ? m.genericName : "Application",
-                cap: false,
-                kind: "app",
-                entry: m
-            });
+        var lines = String(text).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var raw = lines[i];
+            if (raw.trim() === "")
+                continue;
+            var labelled = raw.match(/^\s*target\s+([A-Za-z0-9_.-]+)/);
+            if (labelled) {
+                out.push(labelled[1]);
+                continue;
+            }
+            // A bare, unindented identifier line is the other shape a
+            // listing can take; indented lines are that target's functions.
+            if (!/^\s/.test(raw)) {
+                var bare = raw.match(/^([A-Za-z0-9_.-]+)\s*$/);
+                if (bare)
+                    out.push(bare[1]);
+            }
         }
         return out;
     }
 
-    function activate(item: var) {
+    function finishProbe(): void {
+        if (actions.probed)
+            return;
+        var found = root.parseTargets(probeOut.text);
+        // Anchor: this surface is definitely registered. If it is not in
+        // the parse, the parse is wrong and its absences mean nothing.
+        if (found.indexOf("commandcenter") === -1)
+            return;
+        actions.availableTargets = found;
+        actions.probed = true;
+    }
+
+    // ---- policy path index (spec §40) -------------------------------------
+    //
+    // The set of paths punard can explain comes from punard, once, the
+    // first time a question is typed. Until then the seeds in Actions.qml
+    // (the capability ids the daemon's backends register today) answer.
+    property bool policyPathsTried: false
+
+    Process {
+        id: pathsProc
+        stdout: StdioCollector {
+            id: pathsOut
+            waitForEnd: true
+            onStreamFinished: root.finishPaths()
+        }
+        onRunningChanged: if (!pathsProc.running)
+            root.finishPaths()
+    }
+
+    function refreshPolicyPaths(): void {
+        if (root.policyPathsTried || pathsProc.running)
+            return;
+        root.policyPathsTried = true;
+        try {
+            pathsProc.command = ["punarctl", "--json", "policy", "effective"];
+            pathsProc.running = true;
+        } catch (e) {
+            // No punarctl on a dev machine: the seeded paths still answer.
+            console.warn("punar-shell: policy path index unavailable:", e);
+        }
+    }
+
+    function finishPaths(): void {
+        var parsed = root.parseLastLine(pathsOut.text);
+        if (parsed === null || typeof parsed !== "object" || !Array.isArray(parsed.entries))
+            return;
+        var paths = [];
+        for (var i = 0; i < parsed.entries.length; i++) {
+            var entry = parsed.entries[i];
+            if (entry && typeof entry.path === "string")
+                paths.push(entry.path);
+        }
+        if (paths.length > 0)
+            actions.livePaths = paths;
+    }
+
+    // ---- policy explain (spec §40) ----------------------------------------
+
+    Process {
+        id: explainProc
+        stdout: StdioCollector {
+            id: explainOut
+            waitForEnd: true
+            onStreamFinished: root.finishExplain()
+        }
+        stderr: StdioCollector {
+            id: explainErr
+            waitForEnd: true
+            onStreamFinished: root.finishExplain()
+        }
+        onRunningChanged: if (!explainProc.running)
+            root.finishExplain()
+    }
+
+    // punarctl's `--json` contract is ONE JSON line on stdout (the IPC
+    // result verbatim). Parsing the last non-empty line — rather than the
+    // whole buffer — keeps a second question from tripping over the first
+    // answer if a collector is ever reused across runs.
+    function parseLastLine(text: string): var {
+        var lines = String(text).split("\n");
+        for (var i = lines.length - 1; i >= 0; i--) {
+            var line = lines[i].trim();
+            if (line === "")
+                continue;
+            try {
+                return JSON.parse(line);
+            } catch (e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    // Mirrors punarctl's `state_str` (crates/punarctl/src/model.rs): a JSON
+    // string renders bare, anything else renders as JSON. The two clients
+    // must not disagree about what a value looks like.
+    function valueString(value: var): string {
+        if (typeof value === "string")
+            return value;
+        try {
+            return JSON.stringify(value);
+        } catch (e) {
+            return "unknown";
+        }
+    }
+
+    function askExplain(path: string): void {
+        // One question at a time: a second Enter abandons the first answer
+        // rather than racing it.
+        if (explainProc.running)
+            explainProc.running = false;
+        root.explainPath = path;
+        explainCard.path = path;
+        explainCard.phase = "asking";
+        explainCard.failure = "";
+        explainCard.effective = "";
+        explainCard.sourceName = "";
+        explainCard.policyId = "";
+        explainCard.compliance = "";
+        explainCard.overridePermitted = false;
+        try {
+            explainProc.command = ["punarctl", "--json", "policy", "explain", path];
+            explainProc.running = true;
+        } catch (e) {
+            explainCard.failure = "punarctl is not available on this machine.";
+            explainCard.phase = "failed";
+        }
+    }
+
+    // Idempotent, and safe to call from any of the three completion
+    // signals. An answer never regresses to a failure; a failure recorded
+    // because the process ended before its stream did is upgraded the
+    // moment the parseable line arrives.
+    function finishExplain(): void {
+        if (root.explainPath === "" || explainCard.phase === "answered")
+            return;
+        var parsed = root.parseLastLine(explainOut.text);
+        if (parsed !== null && typeof parsed === "object" && parsed.source) {
+            explainCard.effective = root.valueString(parsed.effective_value);
+            explainCard.sourceName = typeof parsed.source.name === "string" ? parsed.source.name : "an unnamed source";
+            explainCard.policyId = typeof parsed.source.policy_id === "string" ? parsed.source.policy_id : "unknown";
+            explainCard.overridePermitted = parsed.user_override_permitted === true;
+            explainCard.compliance = typeof parsed.compliance_state === "string" ? parsed.compliance_state : "";
+            explainCard.phase = "answered";
+            return;
+        }
+        if (explainProc.running)
+            return; // the answer may still be on its way
+        var why = String(explainErr.text).split("\n")[0].trim();
+        explainCard.failure = why !== "" ? why : "punarctl returned no answer — punard may not be running on this machine.";
+        explainCard.phase = "failed";
+    }
+
+    // ---- row construction -------------------------------------------------
+
+    function titleCase(name: string): string {
+        var words = String(name).split(" ");
+        for (var i = 0; i < words.length; i++) {
+            if (words[i].length > 0)
+                words[i] = words[i].charAt(0).toUpperCase() + words[i].slice(1);
+        }
+        return words.join(" ");
+    }
+
+    function projectRow(name: string, group: string, existing: bool): var {
+        var id = actions.plannedWorkspaceId(name);
+        return {
+            "group": group,
+            "glyph": "PR",
+            "name": "Open " + root.titleCase(name),
+            "meta": "OpenProject(" + name + ") · " + (existing ? "Workspace " : "New workspace ") + id,
+            "cap": true,
+            "kind": "project",
+            "state": "shipped",
+            "arg": name
+        };
+    }
+
+    function appRow(entry: var, group: string): var {
+        return {
+            "group": group,
+            "glyph": Apps.glyphFor(entry.name),
+            "name": String(entry.name),
+            "meta": "Launch(" + Apps.bareId(entry) + ")",
+            "cap": false,
+            "kind": "app",
+            "state": "shipped",
+            "arg": "",
+            "entry": entry
+        };
+    }
+
+    // A role row names what the thing IS on this machine ("Open browser"
+    // → Chromium), so the browser is one keystroke away even from an empty
+    // field. Returns null when the machine has no such application, which
+    // is the honest answer and draws no row at all.
+    function roleRow(entry: var, glyph: string, label: string, group: string): var {
+        if (entry === null || entry === undefined)
+            return null;
+        return {
+            "group": group,
+            "glyph": glyph,
+            "name": label + " · " + String(entry.name),
+            "meta": "Launch(" + Apps.bareId(entry) + ")",
+            "cap": true,
+            "kind": "app",
+            "state": "shipped",
+            "arg": "",
+            "entry": entry
+        };
+    }
+
+    function surfaceRow(surface: var, group: string): var {
+        var state = actions.targetState(surface.target);
+        // An absent surface's tail is just its milestone: the dashed glyph
+        // already says "outside the current production claim"
+        // (DESIGN_LANGUAGE §7), and a short tail keeps the typed action —
+        // the half the law requires — from being elided away.
+        var tail = state === "absent" ? surface.milestone : surface.chord;
+        return {
+            "group": group,
+            "glyph": surface.glyph,
+            "name": String(surface.name),
+            "meta": "Surface(" + surface.target + ") · " + tail,
+            "cap": true,
+            "kind": "surface",
+            "state": state,
+            "arg": String(surface.target),
+            "milestone": String(surface.milestone)
+        };
+    }
+
+    function layoutRow(layout: var, group: string): var {
+        return {
+            "group": group,
+            "glyph": "LY",
+            "name": String(layout.name),
+            "meta": "SetLayout(" + layout.preset + ") · " + layout.note,
+            "cap": true,
+            "kind": "layout",
+            "state": "shipped",
+            "arg": String(layout.preset)
+        };
+    }
+
+    function policyRow(path: string, group: string): var {
+        return {
+            "group": group,
+            "glyph": "PO",
+            "name": "Explain " + path,
+            "meta": "PolicyExplain(" + path + ")",
+            "cap": true,
+            "kind": "explain",
+            "state": "shipped",
+            "arg": path
+        };
+    }
+
+    function matches(haystack: string, q: string): bool {
+        return q === "" || String(haystack).toLowerCase().indexOf(q) !== -1;
+    }
+
+    // Build the result rows for one query.
+    //
+    // `deps` carries the live models this result set depends on (the
+    // application index, the probe answer, the compositor's workspaces and
+    // the stored workspace names). It exists so the binding in `win`
+    // re-evaluates when any of them changes — the values are read through
+    // `apps` and `actions`, not from the array.
+    function buildResults(query: string, deps: var): var {
+        void deps;
+        var q = String(query).trim();
+        var lower = q.toLowerCase();
+        var out = [];
+        var i = 0;
+
+        if (q === "") {
+            // Empty state (mockup 01): what this device has, not a menu.
+            var known = actions.knownProjects();
+            for (i = 0; i < known.length && i < 4; i++)
+                out.push(root.projectRow(known[i].name, "Recent", true));
+            var browserRow = root.roleRow(Apps.browser, "BR", "Open browser", "Suggested");
+            if (browserRow !== null)
+                out.push(browserRow);
+            var termRow = root.roleRow(Apps.terminal, "TE", "Open terminal", "Suggested");
+            if (termRow !== null)
+                out.push(termRow);
+            for (i = 0; i < actions.surfaces.length; i++)
+                out.push(root.surfaceRow(actions.surfaces[i], "Suggested"));
+            return out;
+        }
+
+        // ---- role verbs, surfaces, layouts ----
+        //
+        // Named verbs rank above projects: "open browser" must reach the
+        // browser, not offer to create a workspace called `browser`.
+        var browserHit = root.roleRow(Apps.browser, "BR", "Open browser", "Actions");
+        if (browserHit !== null && (root.matches("open browser web internet", lower) || root.matches(String(Apps.browser.name), lower)))
+            out.push(browserHit);
+        var termHit = root.roleRow(Apps.terminal, "TE", "Open terminal", "Actions");
+        if (termHit !== null && (root.matches("open terminal shell console", lower) || root.matches(String(Apps.terminal.name), lower)))
+            out.push(termHit);
+
+        for (i = 0; i < actions.surfaces.length; i++) {
+            var surface = actions.surfaces[i];
+            if (root.matches(surface.name, lower) || root.matches(surface.keywords, lower) || root.matches(surface.target, lower))
+                out.push(root.surfaceRow(surface, "Actions"));
+        }
+
+        for (i = 0; i < actions.layouts.length; i++) {
+            var layout = actions.layouts[i];
+            if (root.matches(layout.name + " " + layout.note + " layout preset", lower))
+                out.push(root.layoutRow(layout, "Actions"));
+        }
+
+        var namedVerbs = out.length;
+
+        // ---- projects (spec §75 step 3) ----
+        var argument = actions.projectArgument(q);
+        var normalized = actions.normalizeProject(argument);
+        var projects = actions.knownProjects();
+        var exact = false;
+        for (i = 0; i < projects.length; i++) {
+            if (projects[i].name === normalized)
+                exact = true;
+            if (root.matches(projects[i].name, argument.toLowerCase()))
+                out.push(root.projectRow(projects[i].name, "Projects", true));
+        }
+        // "Open Atlas" on a device that has never had an Atlas workspace is
+        // the demo's own case: offer to create it, and say so in the meta.
+        // Two conditions, both deliberate: the reader must have used a
+        // project verb (a bare "chrom" is a search, not an intent to make a
+        // workspace), and no named verb may have answered already (typing
+        // "open terminal" means the terminal).
+        if (normalized !== "" && !exact && namedVerbs === 0 && actions.projectVerbUsed(q))
+            out.push(root.projectRow(normalized, "Projects", false));
+
+        // ---- applications ----
+        var matchedApps = Apps.search(lower, 8);
+        for (i = 0; i < matchedApps.length; i++)
+            out.push(root.appRow(matchedApps[i], "Applications"));
+
+        // ---- policy (spec §40) ----
+        var asked = actions.isQuestion(q) ? actions.questionPath(q) : "";
+        if (asked !== "")
+            out.push(root.policyRow(asked, "Policy"));
+        var table = actions.policyPaths;
+        for (i = 0; i < table.length; i++) {
+            var path = String(table[i].path);
+            if (path === asked)
+                continue;
+            if (root.matches(path + " " + table[i].keywords, lower))
+                out.push(root.policyRow(path, "Policy"));
+        }
+
+        return out;
+    }
+
+    // ---- activation -------------------------------------------------------
+
+    function activate(item: var): void {
         if (item === null || item === undefined)
             return;
-        if (item.kind === "app")
-            item.entry.execute(); // parsed Exec via Quickshell — no shell string
-        else if (item.kind === "exec")
-            Quickshell.execDetached(item.exec); // fixed argv table
-        // kind === "stub": placeholder until the M3 capability registry.
-        root.dismiss();
+        root.note = "";
+        switch (item.kind) {
+        case "app":
+            if (Apps.launch(item.entry))
+                root.dismiss();
+            else
+                root.note = "That application could not be launched";
+            return;
+        case "project":
+            if (actions.openProject(item.arg) >= 0)
+                root.dismiss();
+            else
+                root.note = "Not a valid project name · letters, digits, spaces, - and _";
+            return;
+        case "surface":
+            // A surface this shell did not register is named, not opened —
+            // the row already says so, and pressing Enter repeats it rather
+            // than silently doing nothing (spec §1.22).
+            if (item.state === "absent") {
+                root.note = item.name + " is not in this build · " + item.milestone;
+                return;
+            }
+            if (actions.openSurface(item.arg))
+                root.dismiss();
+            else
+                root.note = "Could not reach " + item.arg;
+            return;
+        case "layout":
+            if (actions.applyLayout(item.arg))
+                root.dismiss();
+            else
+                root.note = "Layout preset unavailable on this machine";
+            return;
+        case "explain":
+            // The answer replaces the list; the overlay stays open because
+            // an answer the reader cannot read is not an answer.
+            root.askExplain(item.arg);
+            return;
+        default:
+            root.note = "Unknown action kind · " + item.kind;
+            return;
+        }
     }
 
     PanelWindow {
@@ -179,8 +654,13 @@ Scope {
         color: "transparent"
         WlrLayershell.namespace: "punar-commandcenter"
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive
-                                               : WlrKeyboardFocus.None
+        WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+
+        function setQuery(text: string): void {
+            queryInput.text = text;
+            root.explainPath = "";
+            root.note = "";
+        }
 
         onVisibleChanged: {
             if (win.visible) {
@@ -189,8 +669,12 @@ Scope {
             }
         }
 
-        readonly property var results: root.buildResults(queryInput.text,
-                                                         DesktopEntries.applications.values)
+        // Live models this result set is derived from. Listed explicitly so
+        // the binding re-evaluates when any of them changes — the probe
+        // answering, an application appearing, a workspace being renamed.
+        readonly property var resultDeps: [Apps.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames]
+
+        readonly property var results: root.buildResults(queryInput.text, win.resultDeps)
         onResultsChanged: list.currentIndex = win.results.length > 0 ? 0 : -1
 
         // Warm ink-wash scrim at 22% (mockup .scrim) — motion is the 300ms
@@ -198,7 +682,7 @@ Scope {
         Rectangle {
             id: scrim
             anchors.fill: parent
-            color: Theme.inkWash
+            color: Theme.shellScrim
             opacity: root.open ? 1 : 0
 
             Behavior on opacity {
@@ -224,9 +708,9 @@ Scope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.open ? win.height * 0.11 : (win.height * 0.11) - 10
             height: cardColumn.implicitHeight
-            color: Theme.paperSurface
+            color: Theme.shellSurface
             border.width: Theme.hairline
-            border.color: Theme.border
+            border.color: Theme.shellBorder
             radius: Theme.radius
             clip: true
             opacity: root.open ? 1 : 0
@@ -271,7 +755,7 @@ Scope {
 
                         Meta {
                             text: "Punar"
-                            color: Theme.ink
+                            color: Theme.shellFg
                         }
                         Meta {
                             text: " · Command"
@@ -302,7 +786,7 @@ Scope {
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         height: Theme.hairline
-                        color: Theme.border
+                        color: Theme.shellBorder
                     }
                 }
 
@@ -321,27 +805,43 @@ Scope {
                         font.family: Theme.fontSans
                         font.pixelSize: 17 // mockup 16.5px
                         font.weight: 500
-                        color: Theme.ink
+                        color: Theme.shellFg
                         clip: true
+
+                        onTextChanged: {
+                            root.note = "";
+                            root.explainPath = "";
+                            // The set of explainable paths is fetched from
+                            // punard once, the first time a question is
+                            // actually asked — never on open, never on a
+                            // timer.
+                            if (actions.isQuestion(queryInput.text))
+                                root.refreshPolicyPaths();
+                        }
 
                         Keys.onPressed: function (event) {
                             switch (event.key) {
                             case Qt.Key_Escape:
-                                root.dismiss();
+                                // First Escape leaves the answer, second closes.
+                                if (root.explainPath !== "")
+                                    root.explainPath = "";
+                                else
+                                    root.dismiss();
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Down:
                                 list.incrementCurrentIndex();
+                                root.note = "";
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Up:
                                 list.decrementCurrentIndex();
+                                root.note = "";
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Return:
                             case Qt.Key_Enter:
-                                root.activate(list.currentIndex >= 0
-                                              ? win.results[list.currentIndex] : null);
+                                root.activate(list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null);
                                 event.accepted = true;
                                 break;
                             }
@@ -355,7 +855,7 @@ Scope {
                         font.family: Theme.fontSans
                         font.pixelSize: 17
                         font.weight: 400
-                        color: Theme.inputBorder
+                        color: Theme.shellInputBorder
                         elide: Text.ElideRight
                     }
                 }
@@ -364,14 +864,23 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
+                }
+
+                // The §40 answer takes the body when a question was run.
+                ExplainCard {
+                    id: explainCard
+                    width: parent.width
+                    height: root.explainPath !== "" ? implicitHeight : 0
+                    visible: root.explainPath !== ""
                 }
 
                 ListView {
                     id: list
 
                     width: parent.width
-                    height: Math.min(contentHeight, 300)
+                    height: root.explainPath !== "" ? 0 : Math.min(contentHeight, 300)
+                    visible: root.explainPath === ""
                     clip: true
                     interactive: contentHeight > height
                     keyNavigationWraps: false
@@ -401,14 +910,14 @@ Scope {
                     // Selection = raise fill + 2px ink left rule (mockup .row.sel;
                     // register 02: "no color spent").
                     highlight: Rectangle {
-                        color: Theme.muted
+                        color: Theme.shellMuted
 
                         Rectangle {
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
                             width: 2
-                            color: Theme.ink
+                            color: Theme.shellFg
                         }
                     }
 
@@ -419,6 +928,9 @@ Scope {
                         required property var modelData
 
                         readonly property bool sel: row.ListView.isCurrentItem
+                        // DESIGN_LANGUAGE §7: a dashed stroke marks a
+                        // mechanism outside the current production claim.
+                        readonly property bool unshipped: row.modelData.state === "absent"
 
                         width: list.width
                         height: 42
@@ -433,15 +945,38 @@ Scope {
 
                             // Glyph tag: two-letter mono code in a bordered
                             // square — icons stay out, the surface stays
-                            // monochrome (mockup register 02).
-                            Rectangle {
+                            // monochrome (mockup register 02). An unshipped
+                            // row's square is dashed instead of solid.
+                            Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 26
                                 height: 26
-                                radius: Theme.radiusTag
-                                color: Theme.paperSurface
-                                border.width: Theme.hairline
-                                border.color: row.sel ? Theme.ink : Theme.border
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    visible: !row.unshipped
+                                    radius: Theme.radiusTag
+                                    color: Theme.shellSurface
+                                    border.width: Theme.hairline
+                                    border.color: row.sel ? Theme.shellFg : Theme.shellBorder
+                                }
+
+                                Canvas {
+                                    anchors.fill: parent
+                                    visible: row.unshipped
+                                    onPaint: {
+                                        var ctx = getContext("2d");
+                                        ctx.clearRect(0, 0, width, height);
+                                        ctx.strokeStyle = String(Theme.shellInputBorder);
+                                        ctx.lineWidth = 1;
+                                        ctx.setLineDash([3, 3]);
+                                        ctx.beginPath();
+                                        ctx.roundedRect(0.5, 0.5, width - 1, height - 1, Theme.radiusTag, Theme.radiusTag);
+                                        ctx.stroke();
+                                    }
+                                    onVisibleChanged: if (visible)
+                                        requestPaint()
+                                }
 
                                 Text {
                                     anchors.centerIn: parent
@@ -450,7 +985,7 @@ Scope {
                                     font.pixelSize: 8
                                     font.weight: 600
                                     font.letterSpacing: Theme.tracking(8, 0.06)
-                                    color: row.sel ? Theme.ink : Theme.ink2
+                                    color: row.unshipped ? Theme.shellInk3 : (row.sel ? Theme.shellFg : Theme.shellInk2)
                                 }
                             }
 
@@ -461,22 +996,28 @@ Scope {
                                 font.family: Theme.fontSans
                                 font.pixelSize: 15 // mockup 14.5px
                                 font.weight: 500
-                                color: Theme.ink
+                                color: row.unshipped ? Theme.shellInk3 : Theme.shellFg
                                 elide: Text.ElideRight
                             }
                         }
 
-                        // Right meta: typed capability (ink-2) or app role (ink-3).
+                        // Right meta: the typed capability or the concrete
+                        // action this row will invoke — ALWAYS, for every
+                        // row (spec §10, §12.2; D-003 register 03).
                         Meta {
                             id: rowMeta
                             anchors.right: parent.right
                             anchors.rightMargin: 16
                             anchors.verticalCenter: parent.verticalCenter
+                            width: Math.min(implicitWidth, row.width * 0.56)
                             font.weight: 500
                             font.letterSpacing: Theme.tracking(9, 0.1)
                             horizontalAlignment: Text.AlignRight
+                            // Right-elide: the typed action leads the string
+                            // and must survive truncation (§10, §12.2).
+                            elide: Text.ElideRight
                             text: row.modelData.meta
-                            color: row.modelData.cap ? Theme.ink2 : Theme.ink3
+                            color: row.modelData.cap && !row.unshipped ? Theme.shellInk2 : Theme.shellInk3
                         }
 
                         MouseArea {
@@ -493,14 +1034,33 @@ Scope {
                 Item {
                     width: parent.width
                     height: 36
-                    visible: win.results.length === 0
+                    visible: root.explainPath === "" && win.results.length === 0
 
                     Meta {
                         anchors.left: parent.left
                         anchors.leftMargin: 16
                         anchors.verticalCenter: parent.verticalCenter
                         font.weight: 500
-                        text: "No matches"
+                        text: actions.isQuestion(queryInput.text) ? "No policy on this device answers that" : "No matches"
+                    }
+                }
+
+                // The honest note line: why the last Enter did what it did.
+                Item {
+                    width: parent.width
+                    height: root.note !== "" ? 28 : 0
+                    visible: root.note !== ""
+
+                    Meta {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 16
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        font.weight: 500
+                        font.letterSpacing: Theme.tracking(9, 0.1)
+                        elide: Text.ElideRight
+                        text: root.note
                     }
                 }
 
@@ -508,7 +1068,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
                 }
                 Item {
                     width: parent.width
@@ -521,7 +1081,7 @@ Scope {
                         font.pixelSize: 8
                         font.weight: 500
                         font.letterSpacing: Theme.tracking(8, 0.13)
-                        text: "↑↓ Navigate · ↵ Run · Esc Close"
+                        text: root.explainPath !== "" ? "Esc Back · Esc Esc Close" : "↑↓ Navigate · ↵ Run · Esc Close"
                     }
                     Meta {
                         anchors.right: parent.right

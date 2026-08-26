@@ -42,7 +42,7 @@ Scope {
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
-        color: Theme.ink3
+        color: Theme.shellInk3
     }
 
     // ---- live data (Quickshell.Hyprland — no hyprctl parsing) ----
@@ -218,7 +218,7 @@ Scope {
         // show/hide (§4: fluid, not decorative).
         Rectangle {
             anchors.fill: parent
-            color: Theme.inkWash
+            color: Theme.shellScrim
             opacity: root.open ? 1 : 0
 
             Behavior on opacity {
@@ -244,9 +244,9 @@ Scope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.open ? win.height * 0.1 : (win.height * 0.1) - 10
             height: sheetColumn.implicitHeight
-            color: Theme.paperSurface
+            color: Theme.shellSurface
             border.width: Theme.hairline
-            border.color: Theme.border
+            border.color: Theme.shellBorder
             radius: Theme.radius
             clip: true
             opacity: root.open ? 1 : 0
@@ -290,7 +290,7 @@ Scope {
 
                         Meta {
                             text: "Punar"
-                            color: Theme.ink
+                            color: Theme.shellFg
                         }
                         Meta {
                             text: " · Workspaces"
@@ -322,7 +322,7 @@ Scope {
                                 font.pixelSize: 11
                                 font.letterSpacing: Theme.tracking(11, 0.08)
                                 font.capitalization: Font.AllUppercase
-                                color: Theme.ink
+                                color: Theme.shellFg
                                 clip: true
                                 onTextChanged: root.query = text
 
@@ -400,7 +400,7 @@ Scope {
                                 font.pixelSize: 11
                                 font.letterSpacing: Theme.tracking(11, 0.08)
                                 font.capitalization: Font.AllUppercase
-                                color: Theme.inputBorder
+                                color: Theme.shellInputBorder
                             }
 
                             Rectangle {
@@ -408,7 +408,7 @@ Scope {
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
                                 height: Theme.hairline
-                                color: Theme.inputBorder
+                                color: Theme.shellInputBorder
                             }
                         }
 
@@ -424,7 +424,7 @@ Scope {
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         height: Theme.hairline
-                        color: Theme.border
+                        color: Theme.shellBorder
                     }
                 }
 
@@ -480,7 +480,7 @@ Scope {
                             anchors.fill: parent
                             anchors.margins: 7
                             radius: Theme.radius
-                            color: cell.sel ? Theme.muted : "transparent"
+                            color: cell.sel ? Theme.shellMuted : "transparent"
                             scale: cell.sel ? 1.02 : 1.0
 
                             Behavior on scale {
@@ -498,7 +498,7 @@ Scope {
                                 anchors.bottom: parent.bottom
                                 width: 2
                                 radius: 1
-                                color: Theme.ink
+                                color: Theme.shellFg
                                 visible: cell.sel
                             }
 
@@ -546,9 +546,9 @@ Scope {
                                     Rectangle {
                                         anchors.fill: parent
                                         visible: !mini.empty
-                                        color: Theme.muted
+                                        color: Theme.shellMuted
                                         border.width: Theme.hairline
-                                        border.color: Theme.border
+                                        border.color: Theme.shellBorder
                                         radius: Theme.radiusTag
                                         clip: true
 
@@ -572,11 +572,11 @@ Scope {
                                                 width: (mw.geo ? mw.geo.w : 0) * (mini.width - 2 * mini.pad)
                                                 height: (mw.geo ? mw.geo.h : 0) * (mini.height - 2 * mini.pad)
                                                 radius: 3
-                                                color: Theme.paperSurface
+                                                color: Theme.shellSurface
                                                 border.width: Theme.hairline
                                                 // A float must read as a float
                                                 // even in wireframe.
-                                                border.color: mw.floats ? Theme.inputBorder : Theme.border
+                                                border.color: mw.floats ? Theme.shellInputBorder : Theme.shellBorder
                                                 z: mw.floats ? 2 : 1
 
                                                 // Group slab tab notch
@@ -591,7 +591,7 @@ Scope {
                                                     width: Math.min(12, parent.width / 3)
                                                     height: 3
                                                     radius: 1
-                                                    color: Theme.inputBorder
+                                                    color: Theme.shellInputBorder
                                                 }
                                             }
                                         }
@@ -605,7 +605,7 @@ Scope {
                                         onPaint: {
                                             var ctx = getContext("2d");
                                             ctx.clearRect(0, 0, width, height);
-                                            ctx.strokeStyle = String(Theme.inputBorder);
+                                            ctx.strokeStyle = String(Theme.shellInputBorder);
                                             ctx.lineWidth = 1;
                                             ctx.setLineDash([4, 4]);
                                             ctx.beginPath();
@@ -645,7 +645,7 @@ Scope {
                                         visible: root.renamingId !== cell.ws.id
                                         font.pixelSize: 8
                                         font.letterSpacing: Theme.tracking(8, 0.12)
-                                        color: Theme.ink
+                                        color: Theme.shellFg
                                         elide: Text.ElideRight
                                         text: cell.named ? cell.ws.id + " · " + cell.ws.name
                                                          : String(cell.ws.id)
@@ -679,7 +679,7 @@ Scope {
                                             font.family: Theme.fontMono
                                             font.pixelSize: 10
                                             font.letterSpacing: Theme.tracking(10, 0.06)
-                                            color: Theme.ink
+                                            color: Theme.shellFg
                                             clip: true
                                             onTextChanged: invalid = false
 
@@ -704,8 +704,8 @@ Scope {
                                             anchors.right: parent.right
                                             anchors.bottom: parent.bottom
                                             height: Theme.hairline
-                                            color: renameInput.invalid ? Theme.statusBad
-                                                                       : Theme.inputBorder
+                                            color: renameInput.invalid ? Theme.shellStatusBad
+                                                                       : Theme.shellInputBorder
                                         }
                                     }
                                 }
@@ -765,7 +765,7 @@ Scope {
                 Rectangle {
                     width: parent.width
                     height: Theme.hairline
-                    color: Theme.border
+                    color: Theme.shellBorder
                 }
                 Item {
                     width: parent.width

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "oxide",
+    "name": "Oxide",
+    "intent": "Drafting linen: older paper, ink-brown panel, the archival mood.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "paper"
+  },
+  "color": {
+    "paper": {
+      "surface": "#F6F1E5",
+      "ink": "#17130C",
+      "ink2": "#3A3226",
+      "ink3": "#6B6153",
+      "muted": "#F0EADB",
+      "raise2": "#E8E0CD",
+      "border": "#DFD6C0",
+      "inputBorder": "#8E8474",
+      "status": {
+        "ok": "#3D6B1E",
+        "warn": "#8A5200",
+        "bad": "#A32222"
+      }
+    },
+    "panel": {
+      "surface": "#12100D",
+      "fg": "#F3EFE6",
+      "ink2": "#B0A895",
+      "ink3": "#847C6C",
+      "edge": "#2B2721",
+      "status": {
+        "ok": "#B4DC5A",
+        "warn": "#EFC183",
+        "bad": "#FF8A80"
+      }
+    }
+  }
+}

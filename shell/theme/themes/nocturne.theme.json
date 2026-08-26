@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "nocturne",
+    "name": "Nocturne",
+    "intent": "Blue-black night with cool inks — the low-light desk.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "panel"
+  },
+  "color": {
+    "paper": {
+      "surface": "#F4F6FA",
+      "ink": "#0A0E17",
+      "ink2": "#2E3542",
+      "ink3": "#5E6675",
+      "muted": "#EDF0F6",
+      "raise2": "#E3E8F1",
+      "border": "#D9DFEA",
+      "inputBorder": "#848B99",
+      "status": {
+        "ok": "#1F6B4A",
+        "warn": "#845600",
+        "bad": "#A31F3C"
+      }
+    },
+    "panel": {
+      "surface": "#070A10",
+      "fg": "#E8EDF5",
+      "ink2": "#A2ABBC",
+      "ink3": "#757F92",
+      "edge": "#1E2430",
+      "status": {
+        "ok": "#79E0B0",
+        "warn": "#EDC183",
+        "bad": "#FF8098"
+      }
+    }
+  }
+}

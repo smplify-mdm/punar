@@ -1,10 +1,19 @@
 # punar-shell
 
-The Punar desktop shell: a Quickshell (QML) top bar (M1, with the M5
-enrollment chrome), the SUPER+Space command center overlay, the
-SUPER+TAB project-workspace overview with named-workspace persistence
-(M2), the SUPER+A AI panel (M7), the M9 approval gate, and the M10
-shadow-AI alert region, implementing the field-note design language.
+The Punar desktop shell, in ONE process: the wallpaper, the top bar and
+its live status cluster, the SUPER+Space command center, the SUPER+TAB
+project overview, SUPER+S system control, the SUPER+A AI panel, the
+approval gate, the shadow-AI alert region, the freedesktop notification
+daemon with its toasts / centre / OSD, the SUPER+/ shortcut help, the
+session lock, and the theme system — all implementing the field-note
+design language.
+
+**The composed, human-readable status record — what each surface is, its
+IPC target, its chord, its data source, whether it is REAL or honestly
+unavailable, and what to press in the VM — lives in
+[`docs/development/desktop-surfaces.md`](../../docs/development/desktop-surfaces.md).**
+That page, not this one, is the one to hand somebody sitting in front of
+the machine.
 
 - Design authority: [`docs/design/DESIGN_LANGUAGE.md`](../../docs/design/DESIGN_LANGUAGE.md)
   (binding) and the mockups — the command-center card is
@@ -17,8 +26,18 @@ shadow-AI alert region, implementing the field-note design language.
   [`docs/design/mockups/notifications-osd.html`](../../docs/design/mockups/notifications-osd.html)
   Sect I / Plate D-009 (M10 acceptance reference).
 - Every design value flows through the `Theme` singleton, which loads
-  [`shell/theme/punar-tokens.json`](../theme/punar-tokens.json) at runtime.
-  No color is hardcoded outside `Theme/Theme.qml` (DESIGN_LANGUAGE.md §8).
+  [`shell/theme/punar-tokens.json`](../theme/punar-tokens.json) plus the
+  active theme document from [`shell/theme/themes/`](../theme/themes) at
+  runtime. No color is hardcoded outside `Theme/Theme.qml`
+  (DESIGN_LANGUAGE.md §9.1).
+- Shell surfaces consume the **mood-aware** token set (`Theme.shellFg`,
+  `shellSurface`, `shellInk2/3`, `shellBorder`, `shellStatus*`,
+  `shellAction*`, `shellScrim`, …), so a user who selects a panel-mood
+  theme gets a dark shell, not a dark desktop with light panels. The
+  literal `paperX` / `panelX` accessors still exist and are correct for a
+  surface that is pinned to one block by the §6 surface-assignment table —
+  which today is exactly one surface, `Notifications/Osd.qml`, because an
+  OSD overlay is a plate.
 
 ## Layout
 
@@ -38,6 +57,19 @@ shadow-AI alert region, implementing the field-note design language.
 | `AiPanel/AiPanel.qml` | SUPER+A AI panel + `aipanel` IPC handler (Plate D-005) |
 | `Approval/ApprovalOverlay.qml` | The M9 approval gate + `approval` IPC handler (Plate D-003 Sect II) |
 | `Alert/AlertStack.qml` | The M10 shadow-AI alert region + `alerts` IPC handler (Plate D-009 Sect I) |
+| `Theme/ThemeContrast.qml` | Singleton: the WCAG contrast gate (R1–R9) that refuses an illegible palette before a human sees it |
+| `Services/Apps.qml` | Singleton: desktop-entry lookup + browser-by-role resolution for the command center |
+| `Services/Notifications.qml` | Singleton: the freedesktop notification **daemon** (`org.freedesktop.Notifications`) + bus-owner probe |
+| `Wallpaper/Wallpaper.qml` | The desktop field, one background layer window per output (Plate D-015). Zero data inputs |
+| `Bar/StatusCluster.qml` · `StatusSlot.qml` · `SlotPopover.qml` | The live right-hand cluster, its slots and their popover (Plate D-016) |
+| `CommandCenter/Actions.qml` · `ExplainCard.qml` | The five-kind typed action taxonomy and the §40 policy-explain card (Plate D-003) |
+| `SystemControl/SystemControl.qml` | SUPER+S settings surface + `systemcontrol` IPC handler (Plate D-004) — holds every colour, decides nothing |
+| `SystemControl/ControlData.qml` | Everything that panel KNOWS: file watches, `punarctl` probes, the view model, the mutations — holds no colour |
+| `Notifications/ToastStack.qml` | Transient toasts + `toasts` IPC handler (Plate D-009 Sect II) |
+| `Notifications/NotificationCenter.qml` | SUPER+SHIFT+N record + `notifications` IPC handler |
+| `Notifications/Osd.qml` | Volume/brightness OSD + `osd` IPC handler — the one PANEL-voice surface |
+| `Shortcuts/Shortcuts.qml` · `BindTable.qml` · `BindRow.qml` · `ChordCap.qml` | SUPER+/ help, generated from `hyprctl binds -j` + `shortcuts` IPC handler (Plate D-017) |
+| `Lock/Lock.qml` · `LockSurface.qml` | The real `ext-session-lock-v1` lock, authenticated through PAM + `lock` IPC handler (Plates D-002 / D-012) |
 
 ## Running on a dev machine
 
@@ -71,7 +103,27 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 - Tokens: `/usr/share/punar/theme/punar-tokens.json` (primary path baked
   into `Theme.qml`).
 
-## Keyboard contract (M1 acceptance: no mouse required)
+## Keyboard contract (no mouse required — spec §12)
+
+Every chord below is bound in
+[`os/modules/desktop/hypr/punar-binds.conf`](../../os/modules/desktop/hypr/punar-binds.conf)
+in the **described** form, so `hyprctl binds -j` carries a human label and
+the SUPER+/ help surface renders the live table rather than a written copy
+of it. **If this list and the machine disagree, the machine is right.**
+
+| Chord | Surface |
+| --- | --- |
+| `SUPER + Space` | Command center |
+| `SUPER + Tab` | Project overview |
+| `SUPER + A` | AI panel |
+| `SUPER + S` | System control |
+| `SUPER + /` | Shortcut help |
+| `SUPER + SHIFT + N` | Notification centre (the plate asks for `SUPER+N`; the notes scratchpad has held it since M2) |
+| `SUPER + SHIFT + B` | Focus the bar's status cluster (the plate asks for `SUPER+B`; the browser has held it since M1) |
+| `SUPER + Escape` | Lock the session (`SUPER+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
+| media keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
+
+Two surfaces deliberately have **no chord at all** — see below.
 
 - `SUPER+Space` → Hyprland runs `qs ipc call commandcenter toggle`.
 - In the overlay: typing filters, `↑`/`↓` select (animated highlight),
@@ -464,18 +516,33 @@ answers a question **agentd structurally cannot**: whether a raise broke
 through quietly is shell-local by §5.6, and the daemon must never be told
 to trust the shell about its own root-owned file.
 
-## Command center data sources (M1 scope)
+## Command center action taxonomy
 
-1. Installed applications via Quickshell `DesktopEntries` — launched with
-   `DesktopEntry.execute()` (the parsed `Exec`, never a shell string).
-2. Static punarctl action stubs (fixed argv table in
-   `CommandCenter.qml`): "Open terminal" → `["foot"]` via
-   `Quickshell.execDetached`; "System Control" is a labeled placeholder.
+The two-entry static stub table is gone. Rows are produced from data in
+[`CommandCenter/Actions.qml`](CommandCenter/Actions.qml) in exactly FIVE
+kinds, each with one execution mechanism and **no sixth "run this string"
+escape hatch**. Every row prints its typed action, right-elided so the
+action half survives truncation.
 
-**M3 integration point:** the static table is replaced by rows from
-punard's capability registry (spec §41) over typed IPC; rows then print the
-real typed capability they resolve to. The shell never composes shell
-strings — that invariant survives M3.
+| Kind | Mechanism | Printed action |
+| --- | --- | --- |
+| `app` | `DesktopEntry.execute()` — the argv Quickshell parsed from `Exec`, never a shell string | `Launch(chromium)` |
+| `project` | Hyprland `workspace <id>` (+ `renameworkspace <id> <name>` when allocating) | `OpenProject(atlas) · Workspace 2` |
+| `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Super S` |
+| `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |
+| `explain` | `punarctl --json policy explain <path>` | `PolicyExplain(security.firewall)` |
+
+The browser is resolved **by role** — desktop-id list, then
+`DesktopEntries.heuristicLookup`, then the freedesktop
+`Categories=WebBrowser` sweep — so a machine with only Firefox resolves to
+Firefox and a machine with none draws no row. No argv is hardcoded.
+
+Surface availability is a fact rather than an assumption: one `qs ipc show`
+on first open lists the targets THIS shell registered, and the parse is
+anchored on `commandcenter` — if the surface cannot find its own target the
+parse is judged wrong and every row stays solid as "unknown" rather than
+falsely dashed. An absent target renders dashed with its milestone, and
+Enter on it states the absence instead of doing nothing.
 
 ## Ready marker
 
@@ -490,21 +557,32 @@ touch fails harmlessly.
 
 ## Linting
 
-All fourteen `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
+All **thirty-four** `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
 quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in a container
 built on the pinned builder base with `qt6-declarative` + `quickshell`
 installed from the same snapshot; default import path — Quickshell ships
 qmldir + qmltypes under `/usr/lib/qt6/qml/Quickshell`, so no extra `-I` is
 needed; the binary lives at `/usr/lib/qt6/bin/qmllint`):
 
+The file list stopped being worth maintaining by hand once the tree
+passed thirty files — enumerate it instead, from this directory, so a
+newly added surface can never be quietly left out of the check:
+
 ```sh
-qmllint shell.qml AiPanel/AiPanel.qml Alert/AlertStack.qml \
-        Approval/ApprovalOverlay.qml Bar/Bar.qml \
-        CommandCenter/CommandCenter.qml Overview/Overview.qml \
-        Theme/Theme.qml Services/Agents.qml Services/Alerts.qml \
-        Services/Approvals.qml Services/Ledger.qml Services/Status.qml \
-        Services/WorkspaceState.qml                       # from this directory
+find . -name '*.qml' -print0 | xargs -0 -n1 /usr/lib/qt6/bin/qmllint
 ```
+
+`qmllint` 6.11 picks up [`.qmllint.ini`](.qmllint.ini) from the working
+directory on its own — there is no `--config` flag to pass, and passing
+one fails with `Unknown option 'config'`.
+
+**A trap worth knowing before you write a new `Process` handler:**
+`onExited`'s `QProcess::ExitStatus` parameter has no QML registration, so
+any `onExited:` handler trips `[signal-handler-parameters]`. Read
+completion from the stdout stream, from `onRunningChanged`, or from a
+runtime `exited.connect(function (exitCode) { … })` instead — three
+surfaces in this tree hit it independently and all three work around it
+that way.
 
 [`.qmllint.ini`](.qmllint.ini) makes exactly one targeted downgrade —
 `UncreatableType=disable` — because Quickshell registers `PanelWindow` with

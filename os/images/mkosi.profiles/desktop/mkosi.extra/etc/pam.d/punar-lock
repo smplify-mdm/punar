@@ -1,0 +1,37 @@
+# punar-lock — the PAM stack the session lock authenticates against.
+#
+# Consumer: shell/punar-shell/Lock/Lock.qml, which probes for THIS FILE and
+# uses `punar-lock` when it exists, falling back to `login` when it does
+# not. The fallback works, but `login` is the console-login stack: it
+# carries pam_nologin and a session phase that has no business running for
+# a screen unlock. This file is the stack that says what a screen unlock
+# actually is — "prove you are the user who is already logged in", nothing
+# more.
+#
+# WHAT IS DELIBERATELY NOT HERE:
+#   - no `session` lines. Unlocking does not open a session; the session is
+#     already open. pam_systemd here would try to register a second one.
+#   - no `password` lines. This stack never changes a passphrase.
+#   - no pam_nologin. /etc/nologin is about arriving; the user is already
+#     here, and locking a machine you cannot then unlock is a trap.
+#
+# pam_faillock is included as Arch ships it in system-auth: it rate-limits
+# a passphrase-guessing attack against an unattended locked screen, which
+# is precisely the threat this surface exists for. `preauth` refuses while
+# the account is locked out, `authfail` counts a failure, `authsucc` clears
+# the counter.
+#
+# No `nullok`: the image gives the dev user a real password
+# (mkosi.postinst.chroot), and a lock that opens on an empty passphrase is
+# not a lock. No `try_first_pass` either — nothing runs before pam_unix
+# here, so there is no earlier token for it to try.
+#
+# pam_unix authenticates an UNPRIVILEGED process through the setuid
+# `unix_chkpwd` helper, so punar-shell needs no privilege of its own to run
+# this stack — the shell never reads a hash and never compares a string.
+
+auth      required  pam_faillock.so    preauth
+auth      [success=1 default=bad]  pam_unix.so
+auth      [default=die]  pam_faillock.so  authfail
+auth      required  pam_faillock.so    authsucc
+account   required  pam_unix.so

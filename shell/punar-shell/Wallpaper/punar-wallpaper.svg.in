@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Punar wallpaper TEMPLATE. Plate D-015 (docs/design/mockups/wallpaper.html)
+     Sect V.03 "Delivery — recommended", consuming the three-substitution
+     derivation of docs/design/theme-system.md §7.3.
+
+     THIS FILE IS NOT AN ASSET, IT IS A TEMPLATE. Its geometry is byte-identical
+     to docs/design/assets/punar-wallpaper-paper.svg — same viewBox, same dial at
+     (1152, 500) r 208, same 60-slot Morse rim, same overscanned flat field — and
+     the ONLY difference is that its three colours are placeholders. Substitution
+     is done at runtime by shell/punar-shell/Wallpaper/Wallpaper.qml, which is
+     why there is one template rather than two assets: paper and panel differ
+     only in those three values (theme-system.md §7.3), and a second copy of the
+     geometry would be a second place for the dial to drift to.
+
+     THE THREE SUBSTITUTIONS (theme-system.md §7.3, verbatim):
+
+       variant   __FIELD__        __HAIRLINE__                           __EMPHASIS__
+       paper     paper.surface    paper.muted                            paper.raise2
+       panel     panel.surface    mix(panel.surface, panel.edge, 0.42)   mix(panel.surface, panel.edge, 0.75)
+
+     The panel row is the shipped panel asset's own recipe: that file draws its
+     two tones as panel.edge at stroke-opacity .42 and .75 over the flat field,
+     and a flat opacity over a flat field IS an sRGB mix at that factor. It is
+     used in preference to theme-system.md §7.3's literal table (0.55 / full
+     edge) because §7.2 also binds the inactive window border to panel.edge, so
+     the literal reading makes the loudest wallpaper stroke tie the border it
+     must stay under — in all seven shipped themes. See the derivation block in
+     ../Theme/Theme.qml for the measured numbers.
+
+     A theme therefore cannot move the dial, change the rim, add a stroke or
+     introduce a fourth colour: everything except those three values is geometry,
+     and geometry is grammar (theme-system.md §2).
+
+     WHY THE MARKS STAY QUIETER THAN A WINDOW BORDER: validator rule R7
+     (theme-system.md §4.2) requires contrast(border, surface) to strictly exceed
+     both contrast(raise2, surface) and contrast(muted, surface), and no theme can
+     be selected until it passes. Plate D-015 Sect II states the rule; R7 enforces
+     it; this template is the asset it protects.
+
+     BUDGET — no raster, no gradient, no filter, no <text> (so it renders before
+     any font is loaded), no animation, no script.
+
+     preserveAspectRatio="xMidYMid meet" plus the overscanned field is what makes
+     letterboxing invisible on every aspect ratio; Wallpaper.qml additionally
+     rasterizes at the exactly-fitted 16:10 size so the composition can never be
+     stretched by a renderer that ignores the attribute. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"
+     viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet" role="img">
+  <title>Punar — instrument field</title>
+
+  <!-- 01 · FIELD. Overscanned so letterboxing is painted, not left to the clear colour. -->
+  <rect x="-6000" y="-4000" width="13600" height="9000" fill="__FIELD__"/>
+
+  <g fill="none" stroke="__HAIRLINE__" stroke-width="1">
+    <!-- 02 · CENTRE LINES. ISO chain pattern, bleeding off every edge. -->
+    <path stroke-dasharray="40 8 6 8" d="M-6000 500H7600M1152 -4000V5000"/>
+    <!-- 03 · CONCENTRIC HAIRLINES. Rim, then three inner steps. -->
+    <circle cx="1152" cy="500" r="208"/>
+    <circle cx="1152" cy="500" r="160"/>
+    <circle cx="1152" cy="500" r="108"/>
+    <circle cx="1152" cy="500" r="56"/>
+    <!-- 04 · RADIALS. Eight, offset 22.5° so they never sit on the centre lines. -->
+    <path stroke-dasharray="3 8" d="M1196.4 392.8L1228.5 315.2M1259.2 455.6L1336.8 423.5M1259.2 544.4L1336.8 576.5M1196.4 607.2L1228.5 684.8M1107.6 607.2L1075.5 684.8M1044.8 544.4L967.2 576.5M1044.8 455.6L967.2 423.5M1107.6 392.8L1075.5 315.2"/>
+    <!-- 05 · TICK RING, silence (46 of 60 slots). -->
+    <path d="M1172.9 301.1L1173.7 293.1M1213.8 309.8L1216.3 302.2M1252 326.8L1256 319.9M1285.8 351.4L1291.2 345.4M1300.6 366.2L1306.6 360.8M1313.8 382.4L1320.3 377.7M1334.7 418.7L1342 415.4M1347.6 458.4L1355.5 456.8M1352 500L1360 500M1350.9 520.9L1358.9 521.7M1347.6 541.6L1355.5 543.2M1334.7 581.3L1342 584.6M1313.8 617.6L1320.3 622.3M1300.6 633.8L1306.6 639.2M1285.8 648.6L1291.2 654.6M1252 673.2L1256 680.1M1213.8 690.2L1216.3 697.8M1193.6 695.6L1195.2 703.5M1172.9 698.9L1173.7 706.9M1131.1 698.9L1130.3 706.9M1090.2 690.2L1087.7 697.8M1052 673.2L1048 680.1M1034.4 661.8L1029.7 668.3M1018.2 648.6L1012.8 654.6M1003.4 633.8L997.4 639.2M990.2 617.6L983.7 622.3M978.8 600L971.9 604M969.3 581.3L962 584.6M961.8 561.8L954.2 564.3M956.4 541.6L948.5 543.2M953.1 520.9L945.1 521.7M952 500L944 500M953.1 479.1L945.1 478.3M956.4 458.4L948.5 456.8M961.8 438.2L954.2 435.7M969.3 418.7L962 415.4M978.8 400L971.9 396M990.2 382.4L983.7 377.7M1003.4 366.2L997.4 360.8M1018.2 351.4L1012.8 345.4M1034.4 338.2L1029.7 331.7M1052 326.8L1048 319.9M1070.7 317.3L1067.4 310M1090.2 309.8L1087.7 302.2M1110.4 304.4L1108.8 296.5M1131.1 301.1L1130.3 293.1"/>
+  </g>
+
+  <g fill="none" stroke="__EMPHASIS__" stroke-width="1.5">
+    <!-- 06 · TICK RING, Morse dots (8 slots). -->
+    <path d="M1152 308L1152 292M1264.9 344.7L1274.3 331.7M1318.3 404L1332.1 396M1334.6 440.7L1349.8 435.7M1318.3 596L1332.1 604M1264.9 655.3L1274.3 668.3M1152 692L1152 708M1073.9 675.4L1067.4 690"/>
+    <!-- 07 · TICK RING, Morse dashes (6 slots). -->
+    <path d="M1189 325.9L1195.2 296.5M1224.4 337.4L1236.6 310M1329 481.4L1358.9 478.3M1321.3 555L1349.8 564.3M1224.4 662.6L1236.6 690M1115 674.1L1108.8 703.5"/>
+  </g>
+
+  <!-- 08 · DATUM POINT. The origin of the construction. -->
+  <circle cx="1152" cy="500" r="4" fill="__EMPHASIS__"/>
+</svg>

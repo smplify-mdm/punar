@@ -137,7 +137,7 @@ Scope {
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.13)
         font.capitalization: Font.AllUppercase
-        color: Theme.ink3
+        color: Theme.shellInk3
         textFormat: Text.PlainText
     }
 
@@ -151,7 +151,7 @@ Scope {
         font.pixelSize: 9
         font.weight: 500
         font.letterSpacing: Theme.tracking(9, 0.1)
-        color: Theme.ink3
+        color: Theme.shellInk3
         textFormat: Text.PlainText
     }
 
@@ -161,7 +161,7 @@ Scope {
         id: pill
 
         property string text: ""
-        property color tone: Theme.ink3
+        property color tone: Theme.shellInk3
 
         implicitWidth: pillLabel.implicitWidth + 16
         implicitHeight: pillLabel.implicitHeight + 7
@@ -194,7 +194,7 @@ Scope {
         property string label: ""
         property string binding: ""
         property bool filled: false
-        property color tone: Theme.ink
+        property color tone: Theme.shellFg
 
         signal activated
 
@@ -219,7 +219,7 @@ Scope {
                 font.weight: 600
                 font.letterSpacing: Theme.tracking(9, 0.1)
                 font.capitalization: Font.AllUppercase
-                color: button.filled ? Theme.actionFg : button.tone
+                color: button.filled ? Theme.shellActionFg : button.tone
                 textFormat: Text.PlainText
             }
             Rectangle {
@@ -229,7 +229,7 @@ Scope {
                 radius: 3
                 color: "transparent"
                 border.width: Theme.hairline
-                border.color: button.filled ? Theme.actionFg : button.tone
+                border.color: button.filled ? Theme.shellActionFg : button.tone
                 opacity: 0.7
 
                 Text {
@@ -240,7 +240,7 @@ Scope {
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 600
-                    color: button.filled ? Theme.actionFg : button.tone
+                    color: button.filled ? Theme.shellActionFg : button.tone
                     textFormat: Text.PlainText
                 }
             }
@@ -603,10 +603,13 @@ Scope {
 
     // The only timer in this file, and it is not a clock: it keeps the
     // window alive for the 300 ms exit animation and then stops. There is
-    // no auto-dismiss timer anywhere on this surface — under DND because
-    // §5.5 forbids one, and otherwise because M10 ships no notification
-    // centre, so a card that vanished on its own would leave the user
-    // nowhere to read what they were told. It stays until [D].
+    // no auto-dismiss timer anywhere on this surface. Under DND because
+    // §5.5 forbids one; otherwise because a shadow-AI first sighting is a
+    // decision, not an interruption, and decisions are not on a clock.
+    // (The original reason — "M10 ships no notification centre" — has
+    // EXPIRED: the centre now ships. It does not change the conclusion,
+    // because the centre reads this same Alerts singleton and holds these
+    // rows STICKY for exactly the same reason. It stays until [D].)
     Timer {
         id: hideTimer
         interval: Theme.durStandard
@@ -737,7 +740,7 @@ Scope {
                         width: stack.width
                         implicitHeight: body.implicitHeight + 24
                         height: card.implicitHeight
-                        color: Theme.paperSurface
+                        color: Theme.shellSurface
                         radius: Theme.radius
                         // The red voice — the only red on this surface, as
                         // in D-005's unknown row. A focused card wears the
@@ -745,7 +748,7 @@ Scope {
                         // omitted deliberately (llvmpipe budget, the
                         // standing M1/M2 deviation).
                         border.width: card.hasFocus ? 2 : Theme.hairline
-                        border.color: Theme.statusBad
+                        border.color: Theme.shellStatusBad
 
                         MouseArea {
                             anchors.fill: parent
@@ -774,7 +777,7 @@ Scope {
                                 Meta {
                                     anchors.left: parent.left
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: Theme.statusBad
+                                    color: Theme.shellStatusBad
                                     text: root.metaLabel
                                 }
                                 Row {
@@ -798,11 +801,11 @@ Scope {
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: Status.enrolled
                                         text: "Managed"
-                                        tone: Theme.ink3
+                                        tone: Theme.shellInk3
                                     }
                                     Meta {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        color: Theme.statusBad
+                                        color: Theme.shellStatusBad
                                         text: root.metaTime(card.modelData)
                                     }
                                 }
@@ -817,7 +820,7 @@ Scope {
                             Rectangle {
                                 width: parent.width
                                 height: Theme.hairline
-                                color: Theme.ink
+                                color: Theme.shellFg
                             }
 
                             Item {
@@ -833,7 +836,7 @@ Scope {
                                 font.pixelSize: 13
                                 font.weight: 500
                                 lineHeight: 1.45
-                                color: Theme.ink
+                                color: Theme.shellFg
                                 wrapMode: Text.WordWrap
                                 textFormat: Text.PlainText
                             }
@@ -898,7 +901,7 @@ Scope {
                                         label: "Inspect"
                                         binding: "I"
                                         filled: true
-                                        tone: Theme.ink
+                                        tone: Theme.shellFg
                                         onActivated: {
                                             root.focusedId = card.alertId;
                                             root.inspect();
@@ -912,13 +915,13 @@ Scope {
                                         anchors.verticalCenter: parent.verticalCenter
                                         font.pixelSize: 8
                                         font.weight: 500
-                                        color: Theme.inputBorder
+                                        color: Theme.shellInputBorder
                                         text: "Super+A"
                                     }
                                     ActionButton {
                                         label: "Dismiss to record"
                                         binding: "D"
-                                        tone: Theme.ink3
+                                        tone: Theme.shellInk3
                                         onActivated: {
                                             root.focusedId = card.alertId;
                                             root.dismiss();
@@ -936,7 +939,7 @@ Scope {
                             Rectangle {
                                 width: parent.width
                                 height: Theme.hairline
-                                color: Theme.border
+                                color: Theme.shellBorder
                             }
 
                             Item {
@@ -963,7 +966,7 @@ Scope {
                                     anchors.left: parent.left
                                     anchors.verticalCenter: parent.verticalCenter
                                     font.pixelSize: 8
-                                    color: Theme.inputBorder
+                                    color: Theme.shellInputBorder
                                     text: root.footerRight
                                 }
                                 // The keyboard legend, printed beside the
@@ -973,7 +976,7 @@ Scope {
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
                                     font.pixelSize: 8
-                                    color: Theme.inputBorder
+                                    color: Theme.shellInputBorder
                                     visible: root.cards.length > 1 && card.hasFocus
                                     text: "↑↓ next · Esc keeps the card"
                                 }
@@ -993,7 +996,7 @@ Scope {
                     Data {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
-                        color: Theme.inputBorder
+                        color: Theme.shellInputBorder
                         text: root.overflow + " more suspected · punarctl agents alerts"
                     }
                 }

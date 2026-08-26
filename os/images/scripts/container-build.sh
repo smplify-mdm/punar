@@ -46,6 +46,7 @@ stage_desktop_extra() {
     local mod="${REPO_ROOT}/os/modules/desktop"
     local shell_src="${REPO_ROOT}/shell/punar-shell"
     local tokens="${REPO_ROOT}/shell/theme/punar-tokens.json"
+    local themes="${REPO_ROOT}/shell/theme/themes"
     local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
 
     echo "==> Verifying vendored font manifest"
@@ -61,6 +62,7 @@ stage_desktop_extra() {
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
+             "${extra}/usr/share/punar/theme/themes" \
              "${extra}/usr/share/punar/fixtures/acme" \
              "${extra}/usr/share/punar/fixtures/projects/atlas"
 
@@ -86,6 +88,18 @@ stage_desktop_extra() {
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
+    # Theme documents + the shipped pointer (docs/design/theme-system.md
+    # §3.2/§3.4). Theme.qml's resolution order is
+    #   ~/.config/punar/themes -> /etc/punar/themes ->
+    #   /usr/share/punar/theme/themes -> the repo dev dir
+    # so THIS is the path the image serves, and the pointer it falls back
+    # to is themes/default.json. Without this copy the shell resolves none
+    # of them and silently renders the built-in paper palette with no theme
+    # selectable — a surface that exists in the tree and not on the
+    # machine. Same staged-not-committed-twice rule as the QML beside it:
+    # shell/theme/themes stays the single source of truth (the contrast
+    # gate in Theme/ThemeContrast.qml runs against these exact bytes).
+    cp -R "${themes}/." "${extra}/usr/share/punar/theme/themes/"
     # M5: Acme organization fixtures for the dev/CI mock control plane
     # (milestone-5.md §4.4) — served VERBATIM by punar-mock-smplify from
     # /usr/share/punar/fixtures/acme. Same staged-not-committed-twice

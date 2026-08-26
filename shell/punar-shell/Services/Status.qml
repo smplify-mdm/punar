@@ -79,11 +79,11 @@ Singleton {
     readonly property color color: {
         switch (root.state) {
         case "warn":
-            return Theme.statusWarn;
+            return Theme.shellStatusWarn;
         case "bad":
-            return Theme.statusBad;
+            return Theme.shellStatusBad;
         default:
-            return Theme.statusOk;
+            return Theme.shellStatusOk;
         }
     }
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "ember",
+    "name": "Ember",
+    "intent": "Warm and low-blue-light: amber-tinted ink on near-black, for late sessions.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "panel"
+  },
+  "color": {
+    "paper": {
+      "surface": "#FBF4E9",
+      "ink": "#1A1208",
+      "ink2": "#3C3225",
+      "ink3": "#6E6250",
+      "muted": "#F5EDDF",
+      "raise2": "#EEE4D2",
+      "border": "#E5DAC5",
+      "inputBorder": "#918676",
+      "status": {
+        "ok": "#456B14",
+        "warn": "#8A5000",
+        "bad": "#A32418"
+      }
+    },
+    "panel": {
+      "surface": "#0E0A08",
+      "fg": "#F5EDE4",
+      "ink2": "#B7ABA0",
+      "ink3": "#8A7F74",
+      "edge": "#2B2320",
+      "status": {
+        "ok": "#B7D24A",
+        "warn": "#F0BE7C",
+        "bad": "#FF8A75"
+      }
+    }
+  }
+}

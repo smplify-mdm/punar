@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "graphite",
+    "name": "Graphite",
+    "intent": "The field palette with the warmth taken out — cool neutral greys.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "paper"
+  },
+  "color": {
+    "paper": {
+      "surface": "#F7F8F9",
+      "ink": "#0A0C0E",
+      "ink2": "#303439",
+      "ink3": "#61666D",
+      "muted": "#F0F2F4",
+      "raise2": "#E7EAEE",
+      "border": "#DEE2E6",
+      "inputBorder": "#868C93",
+      "status": {
+        "ok": "#1F6B3A",
+        "warn": "#8A5410",
+        "bad": "#A81D33"
+      }
+    },
+    "panel": {
+      "surface": "#0B0D10",
+      "fg": "#EFF1F4",
+      "ink2": "#A5ABB4",
+      "ink3": "#79808B",
+      "edge": "#23272E",
+      "status": {
+        "ok": "#7FE0A8",
+        "warn": "#F0C48A",
+        "bad": "#FF8095"
+      }
+    }
+  }
+}

@@ -99,7 +99,7 @@ Scope {
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
-        color: Theme.ink3
+        color: Theme.shellInk3
     }
 
     // Section header + right-hand tagline (mockup .sect): the question
@@ -127,7 +127,7 @@ Scope {
             font.pixelSize: 8
             font.weight: 500
             font.letterSpacing: Theme.tracking(8, 0.1)
-            color: Theme.inputBorder
+            color: Theme.shellInputBorder
             text: sect.tagline
         }
     }
@@ -153,7 +153,7 @@ Scope {
             anchors.top: parent.top
             height: Theme.hairline
             visible: arow.topRule
-            color: Theme.border
+            color: Theme.shellBorder
         }
 
         Column {
@@ -169,7 +169,7 @@ Scope {
                 font.family: Theme.fontSans
                 font.pixelSize: 13
                 font.weight: 500
-                color: Theme.ink
+                color: Theme.shellFg
                 elide: Text.ElideRight
             }
             Meta {
@@ -178,7 +178,7 @@ Scope {
                 font.pixelSize: 8
                 font.weight: 500
                 font.letterSpacing: Theme.tracking(8, 0.1)
-                color: Theme.inputBorder
+                color: Theme.shellInputBorder
                 text: arow.zone
                 elide: Text.ElideRight
             }
@@ -210,7 +210,7 @@ Scope {
                 font.weight: 500
                 font.letterSpacing: Theme.tracking(8, 0.1)
                 horizontalAlignment: Text.AlignRight
-                color: Theme.inputBorder
+                color: Theme.shellInputBorder
                 text: arow.enforcement
                 elide: Text.ElideRight
             }
@@ -224,7 +224,7 @@ Scope {
 
         property string label: ""
         property string value: ""
-        property color valueColor: Theme.ink3
+        property color valueColor: Theme.shellInk3
         property bool topRule: false
         // Case-sensitive data (a filesystem path) keeps its real case:
         // the meta grammar uppercases labels, never evidence.
@@ -238,7 +238,7 @@ Scope {
             anchors.top: parent.top
             height: Theme.hairline
             visible: frow.topRule
-            color: Theme.border
+            color: Theme.shellBorder
         }
 
         Text {
@@ -249,7 +249,7 @@ Scope {
             font.family: Theme.fontSans
             font.pixelSize: 13
             font.weight: 500
-            color: Theme.ink
+            color: Theme.shellFg
             elide: Text.ElideRight
         }
         Meta {
@@ -276,16 +276,16 @@ Scope {
         implicitWidth: pillText.implicitWidth + 18
         implicitHeight: 20
         radius: Theme.radiusTag
-        color: pill.loud ? "transparent" : Theme.muted
+        color: pill.loud ? "transparent" : Theme.shellMuted
         border.width: Theme.hairline
-        border.color: pill.loud ? Theme.statusBad : Theme.border
+        border.color: pill.loud ? Theme.shellStatusBad : Theme.shellBorder
 
         Meta {
             id: pillText
             anchors.centerIn: parent
             font.pixelSize: 9
             font.letterSpacing: Theme.tracking(9, 0.12)
-            color: pill.loud ? Theme.statusBad : Theme.ink2
+            color: pill.loud ? Theme.shellStatusBad : Theme.shellInk2
             text: pill.text
         }
     }
@@ -300,7 +300,7 @@ Scope {
         onPaint: {
             var ctx = getContext("2d");
             ctx.clearRect(0, 0, width, height);
-            ctx.strokeStyle = String(Theme.inputBorder);
+            ctx.strokeStyle = String(Theme.shellInputBorder);
             ctx.lineWidth = 1;
             ctx.setLineDash([4, 4]);
             ctx.beginPath();
@@ -335,7 +335,7 @@ Scope {
             anchors.top: parent.top
             height: Theme.hairline
             visible: !lrow.dashed
-            color: Theme.border
+            color: Theme.shellBorder
         }
         DashedRule {
             anchors.left: parent.left
@@ -352,7 +352,7 @@ Scope {
             font.family: Theme.fontSans
             font.pixelSize: 13
             font.weight: 500
-            color: lrow.dashed ? Theme.ink3 : Theme.ink
+            color: lrow.dashed ? Theme.shellInk3 : Theme.shellFg
             elide: Text.ElideRight
         }
 
@@ -367,7 +367,7 @@ Scope {
                 font.pixelSize: 10
                 font.letterSpacing: Theme.tracking(10, 0.11)
                 horizontalAlignment: Text.AlignRight
-                color: lrow.dashed ? Theme.inputBorder : Theme.ink2
+                color: lrow.dashed ? Theme.shellInputBorder : Theme.shellInk2
                 text: lrow.value
                 elide: Text.ElideRight
             }
@@ -378,7 +378,7 @@ Scope {
                 font.weight: 500
                 font.letterSpacing: Theme.tracking(8, 0.1)
                 horizontalAlignment: Text.AlignRight
-                color: Theme.inputBorder
+                color: Theme.shellInputBorder
                 text: lrow.note
                 elide: Text.ElideRight
             }
@@ -402,7 +402,7 @@ Scope {
             anchors.right: parent.right
             anchors.top: parent.top
             height: Theme.hairline
-            color: Theme.border
+            color: Theme.shellBorder
         }
 
         Rectangle {
@@ -413,7 +413,7 @@ Scope {
             width: 6
             height: 6
             radius: 3
-            color: Theme.statusBad
+            color: Theme.shellStatusBad
         }
         Meta {
             anchors.left: eventDot.right
@@ -423,7 +423,7 @@ Scope {
             font.pixelSize: 9
             font.weight: 500
             font.letterSpacing: Theme.tracking(9, 0.1)
-            color: Theme.statusBad
+            color: Theme.shellStatusBad
             text: erow.category + " · " + erow.detail
             elide: Text.ElideRight
         }
@@ -450,13 +450,13 @@ Scope {
     function toneColor(tone: string): color {
         switch (tone) {
         case "ok":
-            return Theme.statusOk;
+            return Theme.shellStatusOk;
         case "bad":
-            return Theme.statusBad;
+            return Theme.shellStatusBad;
         case "quiet":
-            return Theme.ink3;
+            return Theme.shellInk3;
         default:
-            return Theme.border;
+            return Theme.shellBorder;
         }
     }
 
@@ -489,14 +489,14 @@ Scope {
         switch (decision) {
         case "allow":
         case "read_write":
-            return Theme.statusOk;
+            return Theme.shellStatusOk;
         case "deny":
-            return Theme.statusBad;
+            return Theme.shellStatusBad;
         case "approval_required":
         case "request":
-            return Theme.statusWarn;
+            return Theme.shellStatusWarn;
         default:
-            return Theme.ink3; // read / none / unrecorded / unknown: no color spent
+            return Theme.shellInk3; // read / none / unrecorded / unknown: no color spent
         }
     }
 
@@ -1173,7 +1173,7 @@ Scope {
         // Warm ink-wash scrim at 22% — 300 ms token curve, show/hide only.
         Rectangle {
             anchors.fill: parent
-            color: Theme.inkWash
+            color: Theme.shellScrim
             opacity: root.open ? 1 : 0
 
             Behavior on opacity {
@@ -1200,9 +1200,9 @@ Scope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.open ? Math.round(win.height * 0.07)
                          : Math.round(win.height * 0.07) - 10
-            color: Theme.paperSurface
+            color: Theme.shellSurface
             border.width: Theme.hairline
-            border.color: Theme.border
+            border.color: Theme.shellBorder
             radius: Theme.radius
             clip: true
             opacity: root.open ? 1 : 0
@@ -1250,7 +1250,7 @@ Scope {
 
                         Meta {
                             text: "Punar"
-                            color: Theme.ink
+                            color: Theme.shellFg
                         }
                         Meta {
                             text: " · AI on this device"
@@ -1283,7 +1283,7 @@ Scope {
                         spacing: 0
 
                         Meta {
-                            color: Theme.ink
+                            color: Theme.shellFg
                             text: root.countsHead()
                         }
                         Meta {
@@ -1293,7 +1293,7 @@ Scope {
                         // only when there is some (§2 — a screen with no
                         // status to report contains no color).
                         Meta {
-                            color: Agents.unknownCount > 0 ? Theme.statusBad : Theme.ink3
+                            color: Agents.unknownCount > 0 ? Theme.shellStatusBad : Theme.shellInk3
                             text: Agents.unknownCount + " unknown"
                         }
                     }
@@ -1319,7 +1319,7 @@ Scope {
                 anchors.leftMargin: 20
                 anchors.rightMargin: 20
                 height: 2
-                color: Theme.ink
+                color: Theme.shellFg
             }
 
             // ---- body: agent rail | detail pane (mockup .scbody) ----
@@ -1410,7 +1410,7 @@ Scope {
                         anchors.bottomMargin: 5
                         font.pixelSize: 9
                         font.letterSpacing: Theme.tracking(9, 0.16)
-                        color: railSection.section === "Unknown" ? Theme.statusBad : Theme.ink3
+                        color: railSection.section === "Unknown" ? Theme.shellStatusBad : Theme.shellInk3
                         text: railSection.section
                     }
                 }
@@ -1418,7 +1418,7 @@ Scope {
                 // Selection = raise fill + 2 px ink left rule (the
                 // command-center grammar; no color spent on selection).
                 highlight: Rectangle {
-                    color: Theme.muted
+                    color: Theme.shellMuted
                     radius: 0
 
                     Rectangle {
@@ -1426,7 +1426,7 @@ Scope {
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: 2
-                        color: Theme.ink
+                        color: Theme.shellFg
                     }
                 }
 
@@ -1465,7 +1465,7 @@ Scope {
                                 font.family: Theme.fontSans
                                 font.pixelSize: 14 // mockup 13.5px
                                 font.weight: 500
-                                color: railRow.modelData.loud ? Theme.statusBad : Theme.ink
+                                color: railRow.modelData.loud ? Theme.shellStatusBad : Theme.shellFg
                                 elide: Text.ElideRight
                             }
                         }
@@ -1475,7 +1475,7 @@ Scope {
                             font.pixelSize: 8
                             font.weight: 500
                             font.letterSpacing: Theme.tracking(8, 0.11)
-                            color: railRow.modelData.loud ? Theme.statusBad : Theme.ink3
+                            color: railRow.modelData.loud ? Theme.shellStatusBad : Theme.shellInk3
                             text: railRow.modelData.sub
                             elide: Text.ElideRight
                         }
@@ -1485,7 +1485,7 @@ Scope {
                             font.pixelSize: 8
                             font.weight: 500
                             font.letterSpacing: Theme.tracking(8, 0.11)
-                            color: railRow.modelData.loud ? Theme.statusBad : Theme.ink3
+                            color: railRow.modelData.loud ? Theme.shellStatusBad : Theme.shellInk3
                             text: railRow.modelData.sub2
                             elide: Text.ElideRight
                         }
@@ -1518,7 +1518,7 @@ Scope {
                 anchors.top: mastRule.bottom
                 anchors.bottom: footRule.top
                 width: Theme.hairline
-                color: Theme.border
+                color: Theme.shellBorder
             }
 
             // ---- detail pane (mockup .pane) ----
@@ -1567,7 +1567,7 @@ Scope {
                                 font.family: Theme.fontSans
                                 font.pixelSize: 15
                                 font.weight: 400
-                                color: Theme.ink2
+                                color: Theme.shellInk2
                                 wrapMode: Text.WordWrap
                             }
                             Meta {
@@ -1575,7 +1575,7 @@ Scope {
                                 font.pixelSize: 8
                                 font.weight: 500
                                 font.letterSpacing: Theme.tracking(8, 0.1)
-                                color: Theme.inputBorder
+                                color: Theme.shellInputBorder
                                 text: "Managed sessions start with punar-env agent · unknown activity appears after a scan"
                                 wrapMode: Text.WordWrap
                             }
@@ -1598,7 +1598,7 @@ Scope {
                             font.family: Theme.fontSans
                             font.pixelSize: 19
                             font.weight: 500
-                            color: win.isDetection ? Theme.statusBad : Theme.ink
+                            color: win.isDetection ? Theme.shellStatusBad : Theme.shellFg
                             elide: Text.ElideRight
                         }
 
@@ -1626,7 +1626,7 @@ Scope {
                         font.pixelSize: 9
                         font.weight: 500
                         font.letterSpacing: Theme.tracking(9, 0.13)
-                        color: win.isDetection ? Theme.statusBad : Theme.ink3
+                        color: win.isDetection ? Theme.shellStatusBad : Theme.shellInk3
                         text: win.current === null ? ""
                             : (win.isDetection ? root.detectionSub(win.entry)
                                                : root.sessionSub(win.entry))
@@ -1673,7 +1673,7 @@ Scope {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             height: Theme.hairline
-                            color: Theme.border
+                            color: Theme.shellBorder
                         }
                         Meta {
                             anchors.left: parent.left
@@ -1711,7 +1711,7 @@ Scope {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             height: Theme.hairline
-                            color: Theme.border
+                            color: Theme.shellBorder
                         }
                         Column {
                             anchors.left: parent.left
@@ -1722,7 +1722,7 @@ Scope {
                             Meta {
                                 width: parent.width
                                 font.weight: 600
-                                color: Theme.ink
+                                color: Theme.shellFg
                                 text: "Purged by you · " + root.shortTime(win.ledgerPurgedAt)
                             }
                             Meta {
@@ -1730,7 +1730,7 @@ Scope {
                                 font.pixelSize: 8
                                 font.weight: 500
                                 font.letterSpacing: Theme.tracking(8, 0.1)
-                                color: Theme.inputBorder
+                                color: Theme.shellInputBorder
                                 text: "The audit trail is separate and was not deleted"
                                 wrapMode: Text.WordWrap
                             }
@@ -1769,7 +1769,7 @@ Scope {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             height: Theme.hairline
-                            color: Theme.border
+                            color: Theme.shellBorder
                         }
                         Meta {
                             anchors.left: parent.left
@@ -1815,7 +1815,7 @@ Scope {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             height: Theme.hairline
-                            color: Theme.border
+                            color: Theme.shellBorder
                         }
                         Column {
                             anchors.left: parent.left
@@ -1836,7 +1836,7 @@ Scope {
                                 font.pixelSize: 8
                                 font.weight: 500
                                 font.letterSpacing: Theme.tracking(8, 0.1)
-                                color: Theme.inputBorder
+                                color: Theme.shellInputBorder
                                 text: root.ledgerPendingEvents(win.ledgerView)
                                 visible: text !== ""
                                 elide: Text.ElideRight
@@ -1864,10 +1864,10 @@ Scope {
                             implicitHeight: privacyText.implicitHeight + 26
                             height: implicitHeight
                             radius: Theme.radius
-                            color: Theme.muted
+                            color: Theme.shellMuted
                             border.width: Theme.hairline
                             border.color: root.purgeArmedId === win.currentId
-                                ? Theme.statusBad : Theme.border
+                                ? Theme.shellStatusBad : Theme.shellBorder
 
                             Column {
                                 id: privacyText
@@ -1884,7 +1884,7 @@ Scope {
                                     font.pixelSize: 9
                                     font.weight: 600
                                     font.letterSpacing: Theme.tracking(9, 0.1)
-                                    color: Theme.ink
+                                    color: Theme.shellFg
                                     text: Status.enrolled
                                         ? "This ledger stays on this device · Admin queries are scoped, audited and visible here"
                                         : "This ledger stays on this device · No organization is enrolled"
@@ -1899,7 +1899,7 @@ Scope {
                                     font.pixelSize: 9
                                     font.weight: 600
                                     font.letterSpacing: Theme.tracking(9, 0.1)
-                                    color: Theme.statusBad
+                                    color: Theme.shellStatusBad
                                     text: "Press Shift+Del again to confirm · this deletes the local ledger for "
                                           + win.currentId + " · the audit trail is not deleted"
                                     wrapMode: Text.WordWrap
@@ -1937,18 +1937,31 @@ Scope {
                                     wrapMode: Text.WordWrap
                                 }
 
-                                // Enrolled only, and still honest: "none"
-                                // here is a statement about a path that
-                                // does not exist yet, not about a path
-                                // nobody used (milestone-8.md §10.5).
+                                // Enrolled only. THIS LINE WAS A LIE AS OF
+                                // M10 and is now a statement of where the
+                                // record is. It used to read "no remote
+                                // query path exists until Milestone 10";
+                                // M10 shipped that path (pull-based, on
+                                // the existing sync piggyback — ipc.md
+                                // §17–§18), so the sentence outlived its
+                                // truth. The panel cannot print the count
+                                // itself: the log is
+                                // /var/lib/punar/agents/queries.jsonl at
+                                // 0600 root, deliberately unreadable by a
+                                // user process, and `queries.list` is a
+                                // daemon method this surface does not
+                                // call. Naming the command the user can
+                                // run is the honest answer; inventing a
+                                // "None" this shell never read is not
+                                // (spec §1.22, §24.2 guarantee 8).
                                 Meta {
                                     width: parent.width
                                     visible: Status.enrolled
                                     font.pixelSize: 8
                                     font.weight: 500
                                     font.letterSpacing: Theme.tracking(8, 0.1)
-                                    color: Theme.inputBorder
-                                    text: "Last admin query · None — no remote query path exists until Milestone 10"
+                                    color: Theme.shellInputBorder
+                                    text: "Admin queries · this panel does not read the log · every question asked of this device: punarctl privacy queries"
                                     wrapMode: Text.WordWrap
                                 }
                                 // The never-record rules, on the surface
@@ -1958,7 +1971,7 @@ Scope {
                                     font.pixelSize: 8
                                     font.weight: 500
                                     font.letterSpacing: Theme.tracking(8, 0.1)
-                                    color: Theme.inputBorder
+                                    color: Theme.shellInputBorder
                                     text: "Never recorded · file paths inside your workspace · prompts · source code · secret values · individual file reads"
                                     wrapMode: Text.WordWrap
                                 }
@@ -1995,7 +2008,7 @@ Scope {
                         visible: win.isDetection
                         label: "Classification"
                         value: "Unknown · Suspected AI"
-                        valueColor: Theme.statusBad
+                        valueColor: Theme.shellStatusBad
                     }
                     FactRow {
                         width: parent.width
@@ -2032,9 +2045,9 @@ Scope {
                             implicitHeight: honestyText.implicitHeight + 26
                             height: implicitHeight
                             radius: Theme.radius
-                            color: Theme.muted
+                            color: Theme.shellMuted
                             border.width: Theme.hairline
-                            border.color: Theme.border
+                            border.color: Theme.shellBorder
 
                             Column {
                                 id: honestyText
@@ -2050,7 +2063,7 @@ Scope {
                                     font.pixelSize: 9
                                     font.weight: 600
                                     font.letterSpacing: Theme.tracking(9, 0.1)
-                                    color: Theme.ink
+                                    color: Theme.shellFg
                                     text: "Detection is heuristic — suspected, not certain"
                                     wrapMode: Text.WordWrap
                                 }
@@ -2093,7 +2106,7 @@ Scope {
                 anchors.leftMargin: 20
                 anchors.rightMargin: 20
                 height: Theme.hairline
-                color: Theme.border
+                color: Theme.shellBorder
             }
 
             Item {

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schemas.punar.dev/v1alpha1/theme/theme.json",
+  "kind": "PunarTheme",
+  "meta": {
+    "id": "panel",
+    "name": "Field Panel",
+    "intent": "The same palette with every shell surface on panel — the all-dark desk.",
+    "author": "punar",
+    "version": "1.0.0",
+    "grammar": "0.1.0",
+    "defaultMood": "panel"
+  },
+  "color": {
+    "paper": {
+      "surface": "#FAF9F6",
+      "ink": "#000000",
+      "ink2": "#333333",
+      "ink3": "#666666",
+      "muted": "#F4F2EC",
+      "raise2": "#EDEAE2",
+      "border": "#E6E4DE",
+      "inputBorder": "#8C8880",
+      "status": {
+        "ok": "#2E6B21",
+        "warn": "#8A5A00",
+        "bad": "#A31F2C"
+      }
+    },
+    "panel": {
+      "surface": "#08090A",
+      "fg": "#F2F3F5",
+      "ink2": "#A8ADB6",
+      "ink3": "#7B8290",
+      "edge": "#26282E",
+      "status": {
+        "ok": "#A3E047",
+        "warn": "#F2BE85",
+        "bad": "#FF7A7A"
+      }
+    }
+  }
+}
