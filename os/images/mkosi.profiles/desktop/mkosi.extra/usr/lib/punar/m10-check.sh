@@ -251,11 +251,57 @@ else
 fi
 check_eq "scan timer is active" \
     "active" "$(systemctl is-active "${SCAN_TIMER}" 2>&1)"
-timer_show="$(systemctl show "${SCAN_TIMER}" -p OnUnitActiveSecUSec -p AccuracyUSec -p NextElapseUSecMonotonic 2>/dev/null)"
+# The cadence. `systemctl show` has NO `OnUnitActiveSecUSec` property —
+# systemd exposes a timer's monotonic schedule as the composite
+# `TimersMonotonic` triples, and unknown property names are silently
+# omitted rather than reported. Grepping for one was therefore an
+# assertion that could never pass and never constrained anything: the
+# 240 s claim in milestone-10.md §3.2 went unverified for a whole
+# milestone while the line sat red.
+#
+# What §3.2 actually argues is a NUMBER and a RELATION: the pass runs
+# every 240 s, and 240 s is an exact multiple of the shipping reconcile
+# period, so `AccuracySec=30` lets systemd coalesce the two into one
+# wakeup and M10 adds no new wakeup INSTANT at all. Assert those — the
+# period in seconds from the unit systemd loaded, and the divisibility
+# relation against the reconcile period READ from its own unit rather
+# than assumed — so that re-tuning the reconcile period is caught (the
+# coalescing claim would stop being true and somebody must say so out
+# loud), and so that no assertion here depends on how systemctl chooses
+# to spell a duration.
+timer_show="$(systemctl show "${SCAN_TIMER}" -p TimersMonotonic -p AccuracyUSec -p NextElapseUSecMonotonic 2>/dev/null)"
 printf '%s\n' "${timer_show}" > "${RUN_DIR}/m10-timer.txt"
-grep_row "scan cadence is 240 s (twice the reconcile period, so systemd coalesces)" \
-    "${RUN_DIR}/m10-timer.txt" "OnUnitActiveSecUSec=4min"
-grep_row "scan accuracy is 30 s (the coalescing window)" \
+
+# timer_period <unit> — the effective `OnUnitActiveSec=` of a timer unit
+# in whole seconds, as systemd loaded it (drop-ins included; the last
+# assignment wins). Empty when it cannot be read or is not a plain
+# duration, which fails the caller loudly rather than quietly.
+timer_period() {
+    tp_raw="$(systemctl cat "$1" 2>/dev/null | sed -n 's/^OnUnitActiveSec=//p' | tail -n 1)"
+    case "${tp_raw}" in
+        *h)   tp_n="${tp_raw%h}";   tp_mul=3600 ;;
+        *min) tp_n="${tp_raw%min}"; tp_mul=60 ;;
+        *s)   tp_n="${tp_raw%s}";   tp_mul=1 ;;
+        *)    tp_n="${tp_raw}";     tp_mul=1 ;;
+    esac
+    case "${tp_n}" in
+        ''|*[!0-9]*) return 0 ;;
+        *) printf '%s\n' "$(( tp_n * tp_mul ))" ;;
+    esac
+}
+
+scan_period="$(timer_period "${SCAN_TIMER}")"
+reconcile_period="$(timer_period "${RECONCILE_TIMER}")"
+check_eq "scan cadence is 240 s (milestone-10.md section 3.2)" \
+    "240" "${scan_period:-unreadable}"
+if [ -n "${scan_period}" ] && [ -n "${reconcile_period}" ] && [ "${reconcile_period}" -gt 0 ] \
+    && [ "$(( scan_period % reconcile_period ))" -eq 0 ]; then
+    note "ok   ${scan_period}s is an exact multiple of the ${reconcile_period}s reconcile period, so systemd coalesces the two wakeups"
+else
+    note "FAIL scan cadence ${scan_period:-unreadable}s is not an exact multiple of the reconcile period ${reconcile_period:-unreadable}s — section 3.2's coalescing claim no longer holds and the unit or the claim must change"
+    FAILED=1
+fi
+grep_row "scan accuracy is 30 s (the coalescing window), as systemd parsed it" \
     "${RUN_DIR}/m10-timer.txt" "AccuracyUSec=30s"
 next_elapse="$(printf '%s\n' "${timer_show}" | sed -n 's/^NextElapseUSecMonotonic=//p')"
 if [ -n "${next_elapse}" ] && [ "${next_elapse}" != "0" ] && [ "${next_elapse}" != "infinity" ]; then
@@ -388,6 +434,35 @@ note "info time-to-first-sighting: ${waited}s (period 240s + accuracy 30s is the
 note "info detection id (new in this window): ${DETECTION_ID:-none}"
 
 # --- 4. exactly one alert per signature --------------------------------------
+# THE ANTI-NAG KEY IS THE SIGNATURE, NEVER THE DISPLAY NAME. This group
+# used to count rows whose `.agent` read `foo-agent` and demand exactly
+# one. That is a different assertion from the rule, and it is wrong:
+# `signature_id` is `sha256(exe_realpath ‖ owner_uid)` (milestone-10.md
+# section 4.2), so ONE fixture legitimately produces TWO signatures —
+# the punar process that runs the script, and the ROOT `runuser` parent
+# whose argv carries the same absolute path and which the M7 suspected
+# glob therefore also matches. m7-check section 7 records the same fact
+# in the same words ("both rows are legitimate detections"), and picks
+# the punar-owned one for exactly this reason. Two owners running what
+# looks like the same binary is two things seen, and one card each is
+# the rule WORKING — on a multi-user machine that distinction is the
+# whole point of putting the uid in the key.
+#
+# So assert the rule itself, in three parts, and never the row count of a
+# display name:
+#   1. every signature in the register has AT MOST ONE card (the anti-nag
+#      law, over the whole file rather than over one agent name);
+#   2. the signature this exercise deliberately created — the punar-owned
+#      one — has exactly one card, so the group cannot go vacuous;
+#   3. no card ever reads `cleared` beside a non-zero `live` count.
+# Part 3 is the structural sweep: a card that says the process went away
+# while it is running is the failure a reader of the shell would actually
+# suffer, and no count of rows can see it.
+ANTINAG_FOO='([.alerts[] | select(.agent == "foo-agent")] | length) >= 1
+   and ([.alerts[] | select(.agent == "foo-agent" and .owner == "punar")] | length) == 1
+   and ((.alerts | group_by(.signature_id) | map(length) | max) == 1)'
+NO_CONTRADICTION='[.alerts[] | select(.state == "cleared" and .live > 0)] | length == 0'
+
 if [ -f "${ALERTS_FILE}" ]; then
     note "ok   ${ALERTS_FILE} exists"
 else
@@ -400,8 +475,10 @@ cp "${ALERTS_FILE}" "${RUN_DIR}/m10-alerts.json" 2>/dev/null
 jq_check "alerts.json parses and carries the section 5.3 field list" \
     "${RUN_DIR}/m10-alerts.json" \
     '.v == 1 and (.alerts | type == "array") and (.alerts[0] | has("alert_id") and has("signature_id") and has("agent") and has("executable") and has("owner") and has("first_seen") and has("last_seen") and has("live") and has("detection_id") and has("signature") and has("policy_citation") and has("state"))'
-jq_check "exactly one alert for the foo-agent signature" "${RUN_DIR}/m10-alerts.json" \
-    '[.alerts[] | select(.agent == "foo-agent")] | length == 1'
+jq_check "at most one alert per signature, and the fixture's own signature has exactly one card" \
+    "${RUN_DIR}/m10-alerts.json" "${ANTINAG_FOO}"
+jq_check "no card reads 'cleared' beside a live process count" \
+    "${RUN_DIR}/m10-alerts.json" "${NO_CONTRADICTION}"
 jq_check "no pid, cmdline or cgroup path anywhere in the card data" \
     "${RUN_DIR}/m10-alerts.json" \
     '(tostring | test("process_id|cmdline|argv|cgroup")) | not'
@@ -411,20 +488,40 @@ jq_check "no pid, cmdline or cgroup path anywhere in the card data" \
 "${CTL}" agents scan --trigger manual >/dev/null 2>&1
 "${CTL}" agents scan --trigger manual >/dev/null 2>&1
 cp "${ALERTS_FILE}" "${RUN_DIR}/m10-alerts-after-scans.json" 2>/dev/null
-jq_check "still exactly one alert after two more passes (anti-nag: one card per signature)" \
-    "${RUN_DIR}/m10-alerts-after-scans.json" \
-    '[.alerts[] | select(.agent == "foo-agent")] | length == 1'
+jq_check "still at most one card per signature after two more passes (anti-nag)" \
+    "${RUN_DIR}/m10-alerts-after-scans.json" "${ANTINAG_FOO}"
 
 "${CTL}" --json debug rpc alerts.list --params '{"include_dismissed":true}' \
     > "${RUN_DIR}/m10-alerts-list.json" 2>/dev/null
 jq_check "alerts.list liveness: last_seen is at or after first_seen" \
     "${RUN_DIR}/m10-alerts-list.json" \
     '[.alerts[] | select(.agent == "foo-agent")][0] | .last_seen >= .first_seen'
-jq_check "the card is live while the process is" "${RUN_DIR}/m10-alerts-list.json" \
-    '[.alerts[] | select(.agent == "foo-agent")][0] | .state == "live" and .live >= 1'
+# The card the exercise created is LIVE, because its process is. A record
+# that keeps `cleared_at` and a quiet window while `live >= 1` is the
+# contradiction group 4's sweep exists for, seen from the socket.
+jq_check "the card is live while the process is, with no clear and no window still standing" \
+    "${RUN_DIR}/m10-alerts-list.json" \
+    '[.alerts[] | select(.agent == "foo-agent" and .owner == "punar")]
+     | length == 1
+       and (.[0] | .state == "live" and .live >= 1
+                   and (.cleared_at == null) and (.quiet_until == null))'
 
-raises="$(audit_count '.action == "agents.alert_raise" and (.resource | test("foo-agent"))')"
-check_eq "exactly one alert_raise audit event for the signature" "1" "${raises}"
+# ONE RAISE PER SIGNATURE — the audit half of the rule. The expected count
+# is not a literal: it is READ from the register as the number of distinct
+# foo-agent signatures it holds. A signature that raised twice pushes the
+# raise count above the signature count and fails here, and would also
+# fail the `group_by` sweep above; a fixture that stops producing the root
+# `runuser` signature moves both numbers together and stays green, which
+# is the difference between asserting the relation and asserting a
+# snapshot (checks-conventions.md occurrence 3b).
+foo_signatures="$(jq -r '[.alerts[] | select(.agent == "foo-agent") | .signature_id] | unique | length' \
+    "${RUN_DIR}/m10-alerts-list.json" 2>/dev/null)"
+raises="$(audit_count '.action == "agents.alert_raise" and (.resource | test("^foo-agent(:|$)"))')"
+check_eq "exactly one alert_raise audit event per foo-agent signature" \
+    "${foo_signatures:-unreadable}" "${raises}"
+FOO_ALERT="$(jq -r '[.alerts[] | select(.agent == "foo-agent" and .owner == "punar")][0].alert_id // empty' \
+    "${RUN_DIR}/m10-alerts-list.json" 2>/dev/null)"
+note "info the fixture's own card: ${FOO_ALERT:-none} (${foo_signatures:-?} distinct foo-agent signatures in the register)"
 
 # Clear it, then bring it back inside the 24 h quiet window: a
 # crash-looping agent must not produce one card per restart.
@@ -432,25 +529,53 @@ kill "${FOO_PID}" 2>/dev/null
 pkill -u punar -f "${FOO}" 2>/dev/null
 sleep 2
 "${CTL}" agents scan --trigger manual >/dev/null 2>&1
+cp "${ALERTS_FILE}" "${RUN_DIR}/m10-alerts-cleared.json" 2>/dev/null
+jq_check "the card clears when the process goes, and the file says so" \
+    "${RUN_DIR}/m10-alerts-cleared.json" \
+    '[.alerts[] | select(.agent == "foo-agent" and .owner == "punar")][0]
+     | .state == "cleared" and .live == 0'
 setsid runuser -u punar -- "${FOO}" >/dev/null 2>&1 &
 FOO_PID=$!
 sleep 2
 "${CTL}" agents scan --trigger manual >/dev/null 2>&1
 cp "${ALERTS_FILE}" "${RUN_DIR}/m10-alerts-after-restart.json" 2>/dev/null
-jq_check "still exactly one alert after clear + restart (the 24 h quiet window)" \
+jq_check "still at most one card per signature after clear + restart (the 24 h quiet window)" \
+    "${RUN_DIR}/m10-alerts-after-restart.json" "${ANTINAG_FOO}"
+# The file the SHELL reads must come back with it. A record that stays
+# `cleared` while the process runs freezes alerts.json at the clear, and
+# the alert region then renders a card claiming the process went away for
+# the rest of the boot.
+jq_check "the card the shell reads came back to live — the file is not frozen at the clear" \
     "${RUN_DIR}/m10-alerts-after-restart.json" \
-    '[.alerts[] | select(.agent == "foo-agent")] | length == 1'
-cleared="$(audit_count '.action == "agents.scan" and .result == "cleared" and (.resource | test("foo-agent"))')"
-redetected="$(audit_count '.action == "agents.scan" and .result == "detected" and (.resource | test("foo-agent"))')"
+    '[.alerts[] | select(.agent == "foo-agent" and .owner == "punar")][0]
+     | .state == "live" and .live >= 1'
+jq_check "no card reads 'cleared' beside a live process count after the restart" \
+    "${RUN_DIR}/m10-alerts-after-restart.json" "${NO_CONTRADICTION}"
+cleared="$(audit_count '.action == "agents.scan" and .result == "cleared" and (.resource | test("^foo-agent(:|$)"))')"
+redetected="$(audit_count '.action == "agents.scan" and .result == "detected" and (.resource | test("^foo-agent(:|$)"))')"
 if [ "${cleared}" -ge 1 ] && [ "${redetected}" -ge 2 ]; then
     note "ok   audit shows detected/cleared/detected transitions (${redetected} detected, ${cleared} cleared)"
 else
     note "FAIL expected at least 2 detected and 1 cleared transitions (got ${redetected}/${cleared})"
     FAILED=1
 fi
-raises_after="$(audit_count '.action == "agents.alert_raise" and (.resource | test("foo-agent"))')"
-check_eq "still exactly one alert_raise after the restart (no second card, no second toast)" \
-    "1" "${raises_after}"
+"${CTL}" --json debug rpc alerts.list --params '{"include_dismissed":true}' \
+    > "${RUN_DIR}/m10-alerts-list-after-restart.json" 2>/dev/null
+signatures_after="$(jq -r '[.alerts[] | select(.agent == "foo-agent") | .signature_id] | unique | length' \
+    "${RUN_DIR}/m10-alerts-list-after-restart.json" 2>/dev/null)"
+raises_after="$(audit_count '.action == "agents.alert_raise" and (.resource | test("^foo-agent(:|$)"))')"
+check_eq "still one alert_raise per signature after the restart (no second card, no second toast)" \
+    "${signatures_after:-unreadable}" "${raises_after}"
+check_eq "the restart introduced no new signature into the register" \
+    "${foo_signatures:-unreadable}" "${signatures_after:-unreadable}"
+# THE ANTI-NAG PROMISE IS THE ID. A record whose state walks
+# live -> cleared -> live under a NEW alert_id is a second card wearing
+# the first one's clothes: the shell would animate it in as new, and the
+# user would have been told twice about one thing. Assert the id itself.
+FOO_ALERT_AFTER="$(jq -r '[.alerts[] | select(.agent == "foo-agent" and .owner == "punar")][0].alert_id // empty' \
+    "${RUN_DIR}/m10-alerts-list-after-restart.json" 2>/dev/null)"
+check_eq "the card kept its alert_id across live -> cleared -> live" \
+    "${FOO_ALERT:-none}" "${FOO_ALERT_AFTER:-none}"
 
 # --- 5. the alert renders (the money shot) -----------------------------------
 "${CTL}" agents alerts --all > "${RUN_DIR}/m10-alerts-cli.txt" 2>&1
@@ -503,9 +628,14 @@ sleep 2
 "${CTL}" agents scan --trigger manual >/dev/null 2>&1
 sleep 2
 cp "${ALERTS_FILE}" "${RUN_DIR}/m10-alerts-dnd.json" 2>/dev/null
+# Scoped to the SIGNATURE for the reason group 4 states: the fixture is
+# started through `runuser`, so bar-agent is two signatures (punar and the
+# root parent), and one card each is the rule working. The breakthrough
+# being asserted is that a NEW signature raises at all while quiet is on.
 jq_check "the second signature raised a card even under do-not-disturb (the breakthrough)" \
     "${RUN_DIR}/m10-alerts-dnd.json" \
-    '[.alerts[] | select(.agent == "bar-agent")] | length == 1'
+    '([.alerts[] | select(.agent == "bar-agent" and .owner == "punar")] | length) == 1
+     and ((.alerts | group_by(.signature_id) | map(length) | max) == 1)'
 quiet_ids="$(shell_ipc alerts quiet | tr -d '\r\n' || true)"
 cards_dnd="$(shell_ipc alerts cards | tr -d '\r\n' || true)"
 note "info under DND: cards='${cards_dnd:-none}' quiet='${quiet_ids:-none}'"
@@ -534,7 +664,7 @@ shell_ipc alerts close >/dev/null 2>&1
 
 # Dismissal files a card; it never destroys it, and it never moves
 # suppression (there is none to move).
-BAR_ALERT="$(jq -r '[.alerts[] | select(.agent == "bar-agent")][0].alert_id' \
+BAR_ALERT="$(jq -r '[.alerts[] | select(.agent == "bar-agent" and .owner == "punar")][0].alert_id // empty' \
     "${RUN_DIR}/m10-alerts-dnd.json" 2>/dev/null)"
 if [ -n "${BAR_ALERT}" ] && [ "${BAR_ALERT}" != "null" ]; then
     "${CTL}" agents alerts dismiss "${BAR_ALERT}" > "${RUN_DIR}/m10-dismiss.txt" 2>&1

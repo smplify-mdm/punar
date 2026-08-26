@@ -14,6 +14,16 @@
 //!   inside the window updates the record silently; the first sighting
 //!   *after* it raises a fresh alert.
 //!
+//! **"Silently" is a statement about the card, not about the truth.** A
+//! sighting inside the window raises nothing and toasts nothing — the
+//! record keeps the `alert_id` and the `first_seen` it was raised with,
+//! which is the whole user-visible promise — but it does return to
+//! `live`, because a row reading `cleared` beside `live: 1` would tell
+//! the user a running process had gone away. One signature therefore has
+//! **at most one** alert record, whose state walks
+//! `live → cleared → live` under a **stable id**, and only a sighting
+//! after the window has run out mints a second record with a new one.
+//!
 //! Why a window at all: a cron-driven or crash-looping agent would
 //! otherwise produce one alert per restart, and the tenth alert teaches
 //! the user to ignore the first. Why 24 h and not forever: a binary that
@@ -29,8 +39,9 @@
 //! # The file is a change log; the socket is the authority
 //!
 //! `/run/punar-agentd/alerts.json` is written **only when the alert set
-//! changes** — a raise, a clear, a dismissal, or a fresh raise after the
-//! window expires. Counters and timestamps moving is not a set change, so
+//! changes** — a raise, a clear, a **return to live inside the quiet
+//! window**, a dismissal, or a fresh raise after the window expires.
+//! Counters and timestamps moving is not a set change, so
 //! a pass that finds the same processes still running writes **nothing**
 //! (spec 6.4; milestone-10.md decision 4). The consequence, stated
 //! because it looks like a bug otherwise: the file's `last_seen` means
@@ -281,8 +292,33 @@ impl AlertEngine {
                         continue;
                     }
                     let entry = &mut register.entries[index];
-                    // A silent update: counters and timestamps move, the
-                    // set does not, and nothing is written.
+                    // A sighting inside the quiet window. **Silently**
+                    // means no second card and no second toast: the
+                    // record keeps its `alert_id` and its `first_seen`,
+                    // and nothing is pushed to `raised`.
+                    //
+                    // It does **not** mean the record may keep saying
+                    // `cleared` while the thing is running. A row
+                    // reading `state: "cleared"` beside `live: 1` is
+                    // self-contradictory, and the shell renders whatever
+                    // the file says (section 5.3) — so the card the user
+                    // looks at would claim the process went away while
+                    // it is still there. The state therefore returns to
+                    // `live` **in place**, and that — unlike a counter
+                    // or a timestamp moving — is a change to the alert
+                    // *set*: without it the file is never rewritten and
+                    // the shell never learns the card came back.
+                    //
+                    // A **filed** card stays filed, for the same reason
+                    // the clear path leaves it alone: the user put it
+                    // away, and dismissal is not suppression to be
+                    // undone by a restart.
+                    if entry.row.state == AlertState::Cleared {
+                        entry.row.state = AlertState::Live;
+                        entry.cleared_at = None;
+                        entry.quiet_until = None;
+                        change.changed = true;
+                    }
                     entry.row.last_seen = now.to_string();
                     entry.row.live = *count;
                     entry.row.detection_id = observation.detection_id.clone();
@@ -573,12 +609,25 @@ mod tests {
         );
 
         // 5. It comes back inside the window — the crash-loop case. The
-        //    record updates; the user is not told again.
+        //    record updates; the user is not told again. It is the SAME
+        //    card: same id, same first_seen, and no raise. It does go
+        //    back to `live`, because the process is live — and that is a
+        //    set change, so the file is rewritten (a card reading
+        //    `cleared` beside `live: 1` is the lie this asserts against).
         let inside = engine.reconcile(&live, CITATION, "2026-08-26T09:00:00Z");
-        assert!(!inside.changed, "no second card inside the quiet window");
-        assert!(inside.raised.is_empty());
+        assert!(inside.raised.is_empty(), "no second card, ever");
+        assert!(
+            inside.changed,
+            "the card returning to live is a set change the shell must see"
+        );
         assert_eq!(engine.list(false).len(), 1);
-        assert_eq!(engine.list(false)[0].row.alert_id, alert_id);
+        let back = &engine.list(false)[0];
+        assert_eq!(back.row.alert_id, alert_id, "the id is the promise");
+        assert_eq!(back.row.first_seen, "2026-08-25T14:31:00Z");
+        assert_eq!(back.row.state, AlertState::Live);
+        assert_eq!(back.row.live, 1);
+        assert_eq!(back.cleared_at, None);
+        assert_eq!(back.quiet_until, None);
 
         // 6. It clears again — the window restarts from the new clear.
         engine.reconcile(&[], CITATION, "2026-08-26T09:30:00Z");
@@ -600,6 +649,134 @@ mod tests {
             2,
             "the old card is history, not deleted"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The property the whole anti-nag promise rests on, asserted on its
+    /// own so it cannot be lost inside a longer narrative: **one
+    /// signature, one record, one `alert_id`** across
+    /// `live → cleared → live`. Only a sighting after the window has run
+    /// out is allowed to mint a second record, and it must mint a new id.
+    ///
+    /// Regression for CI run 32933114578, where the re-detected record
+    /// kept the id (correct) but stayed `cleared` (wrong) and never
+    /// caused a write, so `/run/punar-agentd/alerts.json` froze at the
+    /// clear and the shell rendered a stale card for the rest of the boot.
+    #[test]
+    fn the_alert_id_is_stable_across_live_cleared_live() {
+        let (engine, dir) = engine("id-stability");
+        let first_run = [observation(SIG, "agt_000000000001")];
+        let second_run = [observation(SIG, "agt_000000000002")];
+
+        let raised = engine.reconcile(&first_run, CITATION, "2026-08-26T05:44:01Z");
+        assert_eq!(raised.raised.len(), 1);
+        let alert_id = raised.raised[0].alert_id.clone();
+
+        let cleared = engine.reconcile(&[], CITATION, "2026-08-26T05:44:18Z");
+        assert!(cleared.changed, "clearing is a set change");
+        assert!(cleared.raised.is_empty());
+        assert_eq!(engine.list(true)[0].row.state, AlertState::Cleared);
+
+        // The same binary, a different process, well inside the window.
+        let again = engine.reconcile(&second_run, CITATION, "2026-08-26T05:51:27Z");
+        assert!(
+            again.raised.is_empty(),
+            "a sighting inside the window never raises"
+        );
+        assert!(
+            again.changed,
+            "…but the card going back to live must reach the file"
+        );
+
+        let listed = engine.list(true);
+        assert_eq!(listed.len(), 1, "one signature is one record: {listed:?}");
+        assert_eq!(
+            listed[0].row.alert_id, alert_id,
+            "a stable id is what makes it the same card and not a second one"
+        );
+        assert_eq!(listed[0].row.first_seen, "2026-08-26T05:44:01Z");
+        assert_eq!(listed[0].row.state, AlertState::Live);
+        assert_eq!(listed[0].row.live, 1);
+        assert_eq!(listed[0].row.detection_id, "agt_000000000002");
+        assert_eq!(listed[0].cleared_at, None, "a live card has not cleared");
+        assert_eq!(listed[0].quiet_until, None, "no window runs while it lives");
+
+        // After the window: genuinely new information, a fresh record
+        // with a NEW id, and the old one kept as history.
+        engine.reconcile(&[], CITATION, "2026-08-26T06:00:00Z");
+        let fresh = engine.reconcile(&first_run, CITATION, "2026-08-27T06:00:00Z");
+        assert_eq!(fresh.raised.len(), 1);
+        assert_ne!(fresh.raised[0].alert_id, alert_id);
+        assert_eq!(engine.list(true).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The self-contradiction guard, over the **file the shell reads**:
+    /// no alert row may ever say `cleared` while carrying a non-zero
+    /// `live` count, and the written document must agree with the socket
+    /// once the caller has honoured `changed`.
+    #[test]
+    fn the_written_card_never_reads_cleared_beside_a_live_count() {
+        let (engine, dir) = engine("no-contradiction");
+        let live = [observation(SIG, "agt_000000000001")];
+
+        for (at, set) in [
+            ("2026-08-26T05:44:01Z", &live[..]),
+            ("2026-08-26T05:44:18Z", &[][..]),
+            ("2026-08-26T05:51:27Z", &live[..]),
+        ] {
+            let change = engine.reconcile(set, CITATION, at);
+            if change.changed {
+                engine.write(at);
+            }
+        }
+
+        let text = std::fs::read_to_string(engine.path()).unwrap();
+        let file: AlertsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            file.updated_at, "2026-08-26T05:51:27Z",
+            "the file must not freeze at the clear: {text}"
+        );
+        assert_eq!(file.alerts.len(), 1);
+        for row in &file.alerts {
+            assert!(
+                !(row.state == AlertState::Cleared && row.live > 0),
+                "a cleared card cannot have live processes: {row:?}"
+            );
+        }
+        assert_eq!(file.alerts[0].state, AlertState::Live);
+        assert_eq!(file.alerts[0].live, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A card the user put away stays away. Coming back inside the quiet
+    /// window updates the record but must not un-file it — dismissal is
+    /// not suppression, and a restart is not a reason to re-show a card
+    /// the user has already answered.
+    #[test]
+    fn a_filed_card_that_comes_back_inside_the_window_stays_filed() {
+        let (engine, dir) = engine("filed-return");
+        let live = [observation(SIG, "agt_000000000001")];
+        let raised = engine.reconcile(&live, CITATION, "2026-08-26T05:44:01Z");
+        let alert_id = raised.raised[0].alert_id.clone();
+        engine.dismiss(&alert_id, "2026-08-26T05:44:05Z").unwrap();
+        engine.reconcile(&[], CITATION, "2026-08-26T05:44:18Z");
+
+        let back = engine.reconcile(&live, CITATION, "2026-08-26T05:51:27Z");
+        assert!(back.raised.is_empty());
+        assert!(
+            !back.changed,
+            "a filed card coming back is not a set change"
+        );
+        assert!(
+            engine.list(false).is_empty(),
+            "it stays out of the live view"
+        );
+        let filed = engine.list(true);
+        assert_eq!(filed.len(), 1);
+        assert_eq!(filed[0].row.alert_id, alert_id);
+        assert_eq!(filed[0].row.state, AlertState::Dismissed);
+        assert_eq!(filed[0].row.live, 1, "the record still tracks the truth");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -751,12 +928,18 @@ mod tests {
             listed[0].quiet_until.as_deref(),
             Some("2026-08-26T15:00:00Z")
         );
-        // Inside the resumed window: quiet.
+        // Inside the resumed window: quiet — no card is raised. The
+        // resumed record still comes back to `live`, under the id it was
+        // resumed with, which is the point of resuming it at all.
+        let resumed_id = listed[0].row.alert_id.clone();
+        let inside = restarted.reconcile(&live, CITATION, "2026-08-26T09:00:00Z");
         assert!(
-            !restarted
-                .reconcile(&live, CITATION, "2026-08-26T09:00:00Z")
-                .changed
+            inside.raised.is_empty(),
+            "a resumed window still suppresses"
         );
+        assert_eq!(restarted.list(false).len(), 1);
+        assert_eq!(restarted.list(false)[0].row.alert_id, resumed_id);
+        assert_eq!(restarted.list(false)[0].row.state, AlertState::Live);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

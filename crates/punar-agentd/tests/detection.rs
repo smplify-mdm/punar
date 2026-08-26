@@ -464,6 +464,8 @@ fn one_alert_per_signature_across_restarts_of_the_same_binary() {
     assert_eq!(alerts["alerts"].as_array().unwrap().len(), 1);
     assert_eq!(alerts["quiet_window_secs"], 86_400);
     let alert = &alerts["alerts"][0];
+    let alert_id = alert["alert_id"].as_str().unwrap().to_string();
+    let first_seen = alert["first_seen"].as_str().unwrap().to_string();
     assert_eq!(alert["state"], "live");
     assert_eq!(alert["live"], 1);
     assert_eq!(alert["agent"], "foo-agent");
@@ -513,6 +515,29 @@ fn one_alert_per_signature_across_restarts_of_the_same_binary() {
         "the 24 h quiet window suppresses the second card: {alerts}"
     );
     assert_eq!(alerts["alerts"][0]["signature_id"], signature_id.as_str());
+    // The card is the SAME card — the id and the first sighting are the
+    // user-visible promise — and it reads `live`, because the process is
+    // live. A row saying `cleared` beside `live: 1` was the CI-32933114578
+    // regression: the register kept the id but never came back, so
+    // alerts.json froze at the clear and the shell showed a stale card.
+    let back = &alerts["alerts"][0];
+    assert_eq!(back["alert_id"], alert_id.as_str(), "{alerts}");
+    assert_eq!(back["first_seen"], first_seen.as_str(), "{alerts}");
+    assert_eq!(back["state"], "live", "{alerts}");
+    assert_eq!(back["live"], 1, "{alerts}");
+    assert!(
+        back.get("cleared_at").is_none_or(Value::is_null),
+        "{alerts}"
+    );
+    assert!(
+        back.get("quiet_until").is_none_or(Value::is_null),
+        "{alerts}"
+    );
+    // The file the shell actually reads must agree with the socket.
+    let file = daemon.alerts_file();
+    assert_eq!(file["alerts"][0]["alert_id"], alert_id.as_str(), "{file}");
+    assert_eq!(file["alerts"][0]["state"], "live", "{file}");
+    assert_eq!(file["alerts"][0]["live"], 1, "{file}");
 
     // Exactly one raise, ever — the audit half of the anti-nag rule.
     let raises: Vec<Value> = daemon
