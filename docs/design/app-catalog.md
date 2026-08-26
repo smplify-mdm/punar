@@ -61,7 +61,21 @@ section 60 (hard safety constraints), section 73 (denial voice), section 1.22
   schemas; do not extend them. A new domain gets a new schema file.
 
 **Sibling designs:** [`theme-system.md`](theme-system.md) ·
-[`execution-trust.md`](execution-trust.md). The combined budget arithmetic for
+[`execution-trust.md`](execution-trust.md) ·
+[`third-party-apps.md`](third-party-apps.md).
+
+> **[`third-party-apps.md`](third-party-apps.md) extends this document** with
+> the three things it leaves open: the **A/B survival rule for every install
+> route** (not just the Flatpak one — pacman by hand, AUR, `/usr/local`, a
+> downloaded binary), the **`punarctl app` command end to end** (verbs, exit
+> codes, D-014 output, Google Chrome as the worked example), and the **update
+> lifecycle** (`punar-app-refresh.timer`, the `application.updates` capability,
+> app rollback, and the seam with `punarctl update status`). It uses this
+> document's vocabulary unchanged and amends exactly two of its sentences —
+> §3.5's *"no background updater, ever"* and §6.3's trigger table — both
+> recorded in its §0.
+
+The combined budget arithmetic for
 all three — services RSS against spec 6.2, disk against ADR-003 — is in
 [`execution-trust.md`](execution-trust.md) §13.3. This document owns the only
 number in it large enough to argue about: ≤ 3 GB of Flatpak runtimes.
@@ -268,6 +282,14 @@ surprising decision in this document.
 > (section 6.2): it diffs the running slot against the image manifest and prints
 > *"3 packages in this slot are not in the image and will not survive the next
 > update."* One `pacman -Qm`-shaped diff, no daemon, no timer.
+>
+> **[`third-party-apps.md`](third-party-apps.md) §1 completes this** for every
+> route this table does not cover — a hand-run `pacman`, an AUR build, a binary
+> in `/usr/local` (which §1.7 there moves onto the shared partition), a binary
+> in `$HOME` — and turns `doctor`'s diff into a **pre-apply warning** shown
+> before an OS update reboots, a residue list that crosses the swap, and a
+> post-swap report. The rule it settles: *warn before, remember across, tell
+> after, reinstall never.*
 
 ### 1.5 Trust tiers — provenance and review only
 
@@ -571,6 +593,13 @@ not built, not stubbed, not mocked.
   parallel installation scopes is the confusion that makes Flatpak folklore.
 - **No background updater, ever.** Spec 6.3. Updates are a user act or a
   reconcile-classified act (section 6.3).
+  **Amended by [`third-party-apps.md`](third-party-apps.md) §0:** read as *no
+  **third-party** background updater, ever* — not Flatpak's own, not GNOME
+  Software's, not Google's. Punar adds exactly one low-frequency, typed,
+  audited, Punar-owned refresh path (`punar-app-refresh.timer`, daily), which
+  is a checker by default and an applier only for `securitySensitive` entries.
+  Read literally, the original sentence also refuses the only mechanism by
+  which an installed browser ever receives a CVE fix.
 - **No `flatpak override` as a user-facing feature in MVP.** Editing an app's
   permissions after install is a real capability and it belongs behind a typed
   capability with an audit event; designing it here would be designing it badly.
@@ -957,10 +986,24 @@ the Applications surface prints `Ships with the image · <snapshot date>` on
   expecting a portal interface an older slot lacks. `punarctl app doctor` reports
   it as an incompatibility rather than letting it present as a crash.
 
+> **The lifecycle this section sketches is specified in
+> [`third-party-apps.md`](third-party-apps.md) §4–§5:** the daily refresh timer
+> and its cadence argument, the `application.updates` capability
+> (`manual` / `notify` / **`security-auto`, the default** / `auto`), the
+> **widening rule** (an update that asks for more than the user consented to is
+> never applied automatically, under any policy value), failure and offline
+> behaviour, the honest limits of `punarctl app rollback`, and the rule that
+> keeps `punarctl update status` and `punarctl app status` from contradicting
+> each other about what "up to date" means.
+
 ### 6.3 What triggers an update — and what must not
 
 **No polling. Ever.** Spec 6.3, and the reason section 3.5 refuses a background
-updater outright. The complete set of triggers:
+updater outright. The set of triggers — **three here, four as amended by
+[`third-party-apps.md`](third-party-apps.md) §4.1**, which adds
+`punar-app-refresh.timer` (`OnCalendar=daily`, `Persistent=true`,
+`RandomizedDelaySec=4h`, one `Type=oneshot` transient process, no new resident
+service) and re-makes the §6.3 no-polling argument for it from scratch:
 
 | Trigger | What runs | Network? |
 |---|---|---|
