@@ -677,7 +677,7 @@ run_desktop() {
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
-                     surfaces-report.txt \
+                     surfaces-report.txt surfaces-latency.txt \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
                      surfaces-aipanel.png surfaces-overview.png \

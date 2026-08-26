@@ -141,6 +141,15 @@ note "ok   punar-shell IPC answering"
 # One empty-desktop frame kept as context for a human reading the artifacts.
 # The ASSERTION each surface is held to uses its own before/after pair taken
 # around that surface's open, not this one.
+{
+    echo "# Surface open latency, milliseconds, measured in the CI VM under KVM."
+    echo "# open_ms = request -> the shell's state() reports open (shell responsiveness)"
+    echo "# map_ms  = request -> the compositor has a mapped layer (what a person sees)"
+    echo "# Each poll spawns a process, so a few ms of spawn cost sits inside every"
+    echo "# figure: these are an UPPER BOUND on the surface's own cost."
+    printf '# surface\topen_ms\tmap_ms\n'
+} > /run/punar/surfaces-latency.txt
+
 BASELINE_BYTES=""
 if grim /run/punar/surfaces-baseline.png 2>/dev/null; then
     BASELINE_BYTES="$(wc -c < /run/punar/surfaces-baseline.png | tr -d ' ')"
@@ -154,19 +163,48 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
 
+    # HOW FAST DOES IT FEEL. Speed is table stakes for this desktop and the
+    # number was entirely unmeasured — the paint line below reports whole
+    # seconds because that is this script's poll granularity, not because
+    # anything took a second. Two spans are timed here with millisecond
+    # resolution, both from the moment the request leaves us:
+    #
+    #   open_ms   -> the shell's own state() flips. Shell responsiveness.
+    #   map_ms    -> the compositor has a mapped layer. What a person sees.
+    #
+    # INSTRUMENT OVERHEAD, STATED: each poll spawns `qs ipc call` or
+    # `hyprctl -j layers`, so a few milliseconds of process spawn are inside
+    # every number. These are therefore an UPPER BOUND on the surface's own
+    # cost, which is the honest direction for a latency figure to err in.
+    t_start_ns="$(date +%s%N)"
     ipc "${t}" open >/dev/null 2>&1
-    if wait_for 15 t_open "${t}"; then
-        note "ok   ${t}.open -> open"
+    open_ms=""
+    map_ms=""
+    spin=0
+    while [ "${spin}" -lt 1500 ]; do
+        if [ -z "${open_ms}" ] && [ "$(sstate "${t}")" = "open" ]; then
+            open_ms="$((($(date +%s%N) - t_start_ns) / 1000000))"
+        fi
+        if [ -n "${open_ms}" ] && layer_mapped "punar-${t}"; then
+            map_ms="$((($(date +%s%N) - t_start_ns) / 1000000))"
+            break
+        fi
+        spin=$((spin + 1))
+    done
+
+    if [ -n "${open_ms}" ]; then
+        note "ok   ${t}.open -> open in ${open_ms} ms"
     else
-        note "FAIL ${t}.open did not reach state=open within 15s (got '$(sstate "${t}")')"
+        note "FAIL ${t}.open did not reach state=open (got '$(sstate "${t}")')"
         FAILED=1
     fi
 
     # The surface must have a MAPPED WINDOW, not merely a flag set. state()
     # reads root.open; the window is bound to root.windowVisible. Asserting the
     # compositor's own layer list closes that gap.
-    if wait_for 15 layer_mapped "punar-${t}"; then
-        note "ok   ${t} mapped a layer-shell surface (punar-${t})"
+    if [ -n "${map_ms}" ]; then
+        note "ok   ${t} mapped a layer-shell surface (punar-${t}) in ${map_ms} ms"
+        printf '%s\t%s\t%s\n' "${t}" "${open_ms}" "${map_ms}" >> /run/punar/surfaces-latency.txt
     else
         note "FAIL ${t} reports open but the compositor has no punar-${t} layer — the flag is set and nothing is on screen"
         FAILED=1
