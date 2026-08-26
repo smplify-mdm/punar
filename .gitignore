@@ -16,3 +16,6 @@ os/images/out/
 *.swp
 *.swo
 *~
+
+# Demo VM working files (tools/punar-up.sh caches the image outside the repo)
+punar-vars.fd

@@ -11,11 +11,16 @@ honest limits of the whole project are
 ## 1. Start it
 
 ```bash
-/private/tmp/claude-501/-Users-spurtipreetham-Documents-smplify-punarOS/8db1c437-3b45-42b5-b7b3-395c9cf4c7c8/scratchpad/punar-up.sh
+./tools/punar-up.sh
 ```
 
-That fetches the newest CI-built image (~2 GB, cached), verifies its
-SHA256, boots it under QEMU, and opens TigerVNC on `127.0.0.1:5900`.
+That fetches the newest CI-built image (~2 GB, cached outside the repo under
+`$TMPDIR`), verifies its SHA256, boots it under QEMU, and opens TigerVNC on
+`127.0.0.1:5900`. Pass a run id to boot a specific build:
+`./tools/punar-up.sh 32945695360`.
+
+It needs `gh` (authenticated), `qemu` and TigerVNC — all already installed on
+this machine.
 
 **It boots straight to the desktop** — the dev image autologins as `punar`
 (`/etc/greetd/config.toml`, `initial_session`). If you are ever asked, the
