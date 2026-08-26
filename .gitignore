@@ -1,6 +1,13 @@
 # Rust
 target/
 **/*.rs.bk
+# Container-run cargo target dirs. `target/` alone did not cover these: an
+# ad-hoc `docker run -v "$PWD:/w"` build with a different CARGO_TARGET_DIR
+# writes here, and a `git add -A` then swept 27,945 files and ~9 GB of
+# incremental build output into the repository. Glob, not two literals, so the
+# next variant is caught before it is committed rather than after.
+target-*/
+**/target-*/
 
 # OS image build outputs
 os/images/out/
