@@ -1318,25 +1318,45 @@ Out of scope by spec sectioning: MCP servers and tools are **M11+**,
 network destinations and sensitive-zone observation **M12**, the
 unknown-agent ledger and the authorized administrator query **M10**.
 
-## Current milestone: M10 — Shadow AI detection MVP: committed and CI-run; 11 failing assertions down to 4; repairs pushed
+## M10 — Shadow AI detection MVP: **GREEN**, 135 assertions, first pass ever
 
-**Status as of 2026-08-26.** The row below was written before M10 had ever
-executed and said "uncommitted; no CI run". That is no longer true and is
-corrected here rather than left to mislead a reader the way a stale status
-line already misled this project once.
+**Run [32952547169](https://github.com/smplify-mdm/punar/actions/runs/32952547169)
+(2026-08-26) is green on all five jobs.** M0–M10 plus the live
+desktop-surfaces exercise:
 
-- [Run 32933114578](https://github.com/smplify-mdm/punar/actions/runs/32933114578)
-  was M10's first execution: `PUNAR_M10_FAIL`, **11 failing assertions**.
-- [Run 32941763915](https://github.com/smplify-mdm/punar/actions/runs/32941763915)
-  carried the reconcile fix: M2–M9 all green (**561 assertions**), M10 down to
-  **4 failures**. Every alert-count assertion passed.
-- The remaining four were diagnosed from that run's own exported artifacts and
-  **three of them were the check being wrong, not the product**: a personal
-  device that had been unenrolled kept its query history with no statement of
-  current state (a real surface defect, fixed); a purge assertion that landed
-  on a ROOT-owned detection and called the user-scope boundary a bug; and a
-  fleet count of "1" that assumed killing a process retires the evidence it
-  ran. Repairs are pushed and awaiting their run.
+| Exercise | Assertions |
+|---|---|
+| M2 · multitasking | 33 |
+| M3 · daemon + CLI | 28 |
+| M4 · desired state | 29 |
+| M5 · enrollment | 63 |
+| M6 · dev environments | 56 |
+| M7 · agent registry | 78 |
+| M8 · access ledger | 136 |
+| M9 · approvals + secrets | 138 |
+| **M10 · shadow-AI detection** | **135** |
+| **Desktop surfaces (live)** | **58** |
+| **Total** | **754** |
+
+Idle RAM 1277 MB mean (warn, target 1024, hard fail 1536); boot to desktop
+20 s; three daemons 7 MB PSS against a 100 MB target.
+
+**How M10 got here, recorded because the road matters more than the verdict.**
+Its first execution reported **11** failing assertions; the reconcile fix took
+it to **4**; diagnosis of those four found that **three were the check being
+wrong, not the product** — a purge assertion that landed on a root-owned
+detection and called a real security boundary a defect, a fleet count that
+assumed killing a process retires the evidence it ran, and a personal-mode
+string that could only ever render on an empty query log. The fourth was a
+genuine surface defect. The last failure after that was an ordering mistake of
+my own, caught by a vacuity guard that refused to let an assertion pass against
+an already-emptied store.
+
+**The live surfaces exercise failed on its first run, correctly**, and found
+two real product bugs no static check could see: no theme was selectable on a
+shipped machine (`theme list` returned an empty catalog with seven themes
+installed), and the menubar could never have named a window opened after shell
+start. Both fixed and green above.
 
 Design plan, build record and status:
 [`docs/development/milestone-10.md`](docs/development/milestone-10.md)
