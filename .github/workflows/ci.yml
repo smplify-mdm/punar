@@ -386,7 +386,7 @@ jobs:
       # proof files are the primary diagnostics. The screenshot is warn-only:
       # the guest deliberately continues without one (grim failure is itself
       # a signal), and boot-test already annotated its absence.
-      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register + M9 approval gate + M10 shadow-AI alert)
+      - name: Upload desktop screenshots (M1 idle + M2 overview + M5 enrolled/personal + M7 AI panel + M8 ledger register + M9 approval gate + M10 shadow-AI alert + every shell surface)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -400,6 +400,7 @@ jobs:
             os/images/out/desktop-proof/punar-m8.png
             os/images/out/desktop-proof/punar-m9.png
             os/images/out/desktop-proof/punar-m10.png
+            os/images/out/desktop-proof/surfaces-*.png
           if-no-files-found: warn
           retention-days: 7
 

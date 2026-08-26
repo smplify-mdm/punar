@@ -533,6 +533,7 @@ run_desktop() {
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
           "${PROOF_DIR}"/surfaces-*.txt \
+          "${PROOF_DIR}"/surfaces-*.png \
           "${PROOF_DIR}/m2-report.txt" \
           "${PROOF_DIR}"/m2-*.json \
           "${PROOF_DIR}/m3-report.txt" \
@@ -675,6 +676,10 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      surfaces-report.txt \
+                     surfaces-commandcenter.png surfaces-systemcontrol.png \
+                     surfaces-notifications.png surfaces-shortcuts.png \
+                     surfaces-aipanel.png surfaces-overview.png \
+                     surfaces-approval.png \
                      m5-report.txt punar-m5.png punar-m5-personal.png \
                      m7-report.txt punar-m7.png \
                      m8-report.txt punar-m8.png \

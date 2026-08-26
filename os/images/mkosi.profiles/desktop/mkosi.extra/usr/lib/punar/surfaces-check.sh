@@ -131,6 +131,19 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview ap
         FAILED=1
     fi
 
+    # A surface that reports open and draws nothing looks identical from here,
+    # and state() cannot tell the difference. grim is the cheapest evidence
+    # that pixels exist, and it gives a human something to look at without
+    # booting anything (the punar-m2.png precedent). A failed capture is not
+    # an assertion failure — grim has its own reasons to fail and the surface
+    # contract is what is being tested — but the file's SIZE is recorded, so
+    # a suspiciously tiny frame is visible in the report.
+    if grim "/run/punar/surfaces-${t}.png" 2>/dev/null; then
+        note "info ${t} captured ($(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ') bytes)"
+    else
+        note "info ${t} screenshot unavailable (grim failed; not an assertion)"
+    fi
+
     ipc "${t}" close >/dev/null 2>&1
     if wait_for 15 t_closed "${t}"; then
         note "ok   ${t}.close -> closed"
