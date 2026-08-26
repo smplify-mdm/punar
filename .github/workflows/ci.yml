@@ -206,6 +206,15 @@ jobs:
           key: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: mkosi-pkgs-${{ hashFiles('os/images/snapshot.env') }}-
 
+      # The shell is ~40 QML files and had NO automated lint anywhere in CI —
+      # it had only ever been run by hand. A QML defect does not fail the
+      # build (mkosi copies the files in verbatim); it appears at runtime as a
+      # surface that refuses to open, which surfaces-check.sh catches ~40
+      # minutes into a run. This catches it in about a minute, against the
+      # same Qt/Quickshell the image ships.
+      - name: Lint the shell QML (qmllint, pinned to the image's Qt/Quickshell)
+        run: ./tools/qmllint.sh
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
