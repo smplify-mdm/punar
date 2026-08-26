@@ -138,15 +138,13 @@ note "ok   punar-shell IPC answering"
 # The biconditional matters in both directions. Asserting only that open()
 # reports "open" would pass for a surface whose state() is hardcoded; asserting
 # the close leg too means the value has to actually track the surface.
-# The empty-desktop baseline every per-surface capture is measured against:
-# taken with nothing open, so a surface whose frame is no bigger than this one
-# is visibly suspicious in the report.
+# One empty-desktop frame kept as context for a human reading the artifacts.
+# The ASSERTION each surface is held to uses its own before/after pair taken
+# around that surface's open, not this one.
 BASELINE_BYTES=""
 if grim /run/punar/surfaces-baseline.png 2>/dev/null; then
     BASELINE_BYTES="$(wc -c < /run/punar/surfaces-baseline.png | tr -d ' ')"
-    note "info empty-desktop baseline captured (${BASELINE_BYTES} bytes)"
-else
-    note "info empty-desktop baseline unavailable (grim failed)"
+    note "info empty-desktop reference captured (${BASELINE_BYTES} bytes)"
 fi
 
 # `approval` is deliberately NOT in this list and is asserted conditionally in
@@ -181,18 +179,37 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     # an assertion failure — grim has its own reasons to fail and the surface
     # contract is what is being tested — but the file's SIZE is recorded, so
     # a suspiciously tiny frame is visible in the report.
-    if grim "/run/punar/surfaces-${t}.png" 2>/dev/null; then
-        shot_bytes="$(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ')"
-        # Compared against the empty-desktop baseline captured before this
-        # loop. A frame no larger than an empty desktop is the signature of a
-        # surface that mapped a window and painted nothing into it — stated as
-        # a size relation because the image ships no image tooling to diff
-        # pixels with, and labelled INFO because PNG size is a proxy, not
-        # proof. The layer assertion above is the load-bearing one.
-        if [ -n "${BASELINE_BYTES}" ] && [ "${shot_bytes}" -le "${BASELINE_BYTES}" ]; then
-            note "info ${t} captured ${shot_bytes} bytes — NOT larger than the empty-desktop baseline (${BASELINE_BYTES}); the frame may be blank"
+    # THE SURFACE MUST PAINT, not merely map. A mapped layer is not pixels:
+    # these panels declare `color: "transparent"` and animate their content in
+    # over the 300 ms token curve, so a capture taken the instant the layer
+    # appears composites to EXACTLY the bare desktop. The first green run
+    # proved it — four of six surfaces came back byte-identical to the
+    # empty-desktop baseline while every layer assertion passed.
+    #
+    # The baseline is retaken immediately before each surface rather than once
+    # per run, so the only thing that can differ between the two frames is this
+    # surface. (A minute rolling over in the clock would otherwise be enough to
+    # make an unpainted frame look painted.)
+    painted=""
+    if grim "/run/punar/surfaces-${t}-before.png" 2>/dev/null; then
+        before_sha="$(sha256sum "/run/punar/surfaces-${t}-before.png" | cut -d' ' -f1)"
+        pi=0
+        while [ "${pi}" -lt 15 ]; do
+            sleep 1
+            pi=$((pi + 1))
+            grim "/run/punar/surfaces-${t}.png" 2>/dev/null || break
+            after_sha="$(sha256sum "/run/punar/surfaces-${t}.png" | cut -d' ' -f1)"
+            if [ "${after_sha}" != "${before_sha}" ]; then
+                painted="yes"
+                break
+            fi
+        done
+        rm -f "/run/punar/surfaces-${t}-before.png"
+        if [ -n "${painted}" ]; then
+            note "ok   ${t} painted pixels ($(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ') bytes after ${pi}s, frame differs from the desktop behind it)"
         else
-            note "info ${t} captured ${shot_bytes} bytes (baseline ${BASELINE_BYTES:-unknown})"
+            note "FAIL ${t} mapped a layer but the screen never changed in 15s — the surface is on screen and blank"
+            FAILED=1
         fi
     else
         note "info ${t} screenshot unavailable (grim failed; not an assertion)"
@@ -280,8 +297,28 @@ case "${apending}" in
             note "FAIL approval reports open but the compositor has no punar-approval layer"
             FAILED=1
         fi
-        if grim /run/punar/surfaces-approval.png 2>/dev/null; then
-            note "info approval captured $(wc -c < /run/punar/surfaces-approval.png | tr -d ' ') bytes (baseline ${BASELINE_BYTES:-unknown})"
+        # Same paint assertion as the loop: a mapped layer is not pixels.
+        apainted=""
+        if grim /run/punar/surfaces-approval-before.png 2>/dev/null; then
+            abefore="$(sha256sum /run/punar/surfaces-approval-before.png | cut -d' ' -f1)"
+            api=0
+            while [ "${api}" -lt 15 ]; do
+                sleep 1
+                api=$((api + 1))
+                grim /run/punar/surfaces-approval.png 2>/dev/null || break
+                aafter="$(sha256sum /run/punar/surfaces-approval.png | cut -d' ' -f1)"
+                if [ "${aafter}" != "${abefore}" ]; then
+                    apainted="yes"
+                    break
+                fi
+            done
+            rm -f /run/punar/surfaces-approval-before.png
+            if [ -n "${apainted}" ]; then
+                note "ok   approval painted pixels ($(wc -c < /run/punar/surfaces-approval.png | tr -d ' ') bytes after ${api}s)"
+            else
+                note "FAIL approval mapped a layer but the screen never changed in 15s — a gate is on screen and blank"
+                FAILED=1
+            fi
         else
             note "info approval screenshot unavailable (grim failed; not an assertion)"
         fi

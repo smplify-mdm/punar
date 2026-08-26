@@ -534,6 +534,7 @@ run_desktop() {
           "${PROOF_DIR}"/surfaces-*.json \
           "${PROOF_DIR}"/surfaces-*.txt \
           "${PROOF_DIR}"/surfaces-*.png \
+          "${PROOF_DIR}/surfaces-baseline.png" \
           "${PROOF_DIR}/m2-report.txt" \
           "${PROOF_DIR}"/m2-*.json \
           "${PROOF_DIR}/m3-report.txt" \
