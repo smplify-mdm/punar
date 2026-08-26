@@ -189,6 +189,17 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
 
+    # Capture the actual desktop BEFORE the trigger. The timing path waits one
+    # second without polling so its measurement cannot be perturbed; taking
+    # this frame after that wait would capture an already-settled surface and
+    # then compare it with itself, falsely calling a static panel blank.
+    before_sha=""
+    if grim "/run/punar/surfaces-${t}-before.png" 2>/dev/null; then
+        before_sha="$(sha256sum "/run/punar/surfaces-${t}-before.png" | cut -d' ' -f1)"
+    else
+        note "info ${t} pre-open screenshot unavailable (grim failed; paint not asserted)"
+    fi
+
     # HOW FAST DOES IT FEEL.  Start before asking Hyprland to execute the
     # surface's configured command.  show() and the compositor's openlayer
     # event are timestamped inside punar-shell by SurfaceTiming, so the
@@ -278,8 +289,7 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     # surface. (A minute rolling over in the clock would otherwise be enough to
     # make an unpainted frame look painted.)
     painted=""
-    if grim "/run/punar/surfaces-${t}-before.png" 2>/dev/null; then
-        before_sha="$(sha256sum "/run/punar/surfaces-${t}-before.png" | cut -d' ' -f1)"
+    if [ -n "${before_sha}" ]; then
         pi=0
         while [ "${pi}" -lt 15 ]; do
             sleep 1
@@ -298,8 +308,6 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
             note "FAIL ${t} mapped a layer but the screen never changed in 15s — the surface is on screen and blank"
             FAILED=1
         fi
-    else
-        note "info ${t} screenshot unavailable (grim failed; not an assertion)"
     fi
 
     ipc "${t}" close >/dev/null 2>&1
