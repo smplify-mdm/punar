@@ -109,6 +109,25 @@ sstate() { ipc "$1" state | tr -d '[:space:]"'; }
 shell_alive() { ${SHELL_CMD} ipc call bar state >/dev/null 2>&1; }
 t_open()   { [ "$(sstate "$1")" = "open" ]; }
 t_closed() { [ "$(sstate "$1")" = "closed" ]; }
+
+# Whether the compositor has an actual mapped layer-shell surface with this
+# namespace. This is the EXACT signal that a surface really put a window on
+# screen, and it is independent of the shell's own state(): every surface
+# declares WlrLayershell.namespace ("punar-commandcenter" and so on) while its
+# window is bound to `visible: root.windowVisible`, a DIFFERENT property from
+# the `root.open` that state() reports. The gap between those two is real —
+# the first run of this exercise photographed the command centre as an empty
+# desktop while state() said "open", because grim fired after the flag flipped
+# and before the compositor had mapped and painted anything.
+#
+# jq walks the whole document rather than assuming the output/level nesting,
+# which differs by monitor count.
+layer_mapped() {
+    hyprctl -j layers 2>/dev/null \
+        | jq -e --arg ns "$1" '[.. | objects | select(has("namespace")) | .namespace] | index($ns) != null' \
+        >/dev/null 2>&1
+}
+layer_gone() { ! layer_mapped "$1"; }
 if ! wait_for 90 shell_alive; then
     note "FAIL punar-shell IPC not answering within 90s (no surface can be tested)"
     FAILED=1; finish
@@ -119,6 +138,17 @@ note "ok   punar-shell IPC answering"
 # The biconditional matters in both directions. Asserting only that open()
 # reports "open" would pass for a surface whose state() is hardcoded; asserting
 # the close leg too means the value has to actually track the surface.
+# The empty-desktop baseline every per-surface capture is measured against:
+# taken with nothing open, so a surface whose frame is no bigger than this one
+# is visibly suspicious in the report.
+BASELINE_BYTES=""
+if grim /run/punar/surfaces-baseline.png 2>/dev/null; then
+    BASELINE_BYTES="$(wc -c < /run/punar/surfaces-baseline.png | tr -d ' ')"
+    note "info empty-desktop baseline captured (${BASELINE_BYTES} bytes)"
+else
+    note "info empty-desktop baseline unavailable (grim failed)"
+fi
+
 for t in commandcenter systemcontrol notifications shortcuts aipanel overview approval; do
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
@@ -131,6 +161,16 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview ap
         FAILED=1
     fi
 
+    # The surface must have a MAPPED WINDOW, not merely a flag set. state()
+    # reads root.open; the window is bound to root.windowVisible. Asserting the
+    # compositor's own layer list closes that gap.
+    if wait_for 15 layer_mapped "punar-${t}"; then
+        note "ok   ${t} mapped a layer-shell surface (punar-${t})"
+    else
+        note "FAIL ${t} reports open but the compositor has no punar-${t} layer — the flag is set and nothing is on screen"
+        FAILED=1
+    fi
+
     # A surface that reports open and draws nothing looks identical from here,
     # and state() cannot tell the difference. grim is the cheapest evidence
     # that pixels exist, and it gives a human something to look at without
@@ -139,7 +179,18 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview ap
     # contract is what is being tested — but the file's SIZE is recorded, so
     # a suspiciously tiny frame is visible in the report.
     if grim "/run/punar/surfaces-${t}.png" 2>/dev/null; then
-        note "info ${t} captured ($(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ') bytes)"
+        shot_bytes="$(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ')"
+        # Compared against the empty-desktop baseline captured before this
+        # loop. A frame no larger than an empty desktop is the signature of a
+        # surface that mapped a window and painted nothing into it — stated as
+        # a size relation because the image ships no image tooling to diff
+        # pixels with, and labelled INFO because PNG size is a proxy, not
+        # proof. The layer assertion above is the load-bearing one.
+        if [ -n "${BASELINE_BYTES}" ] && [ "${shot_bytes}" -le "${BASELINE_BYTES}" ]; then
+            note "info ${t} captured ${shot_bytes} bytes — NOT larger than the empty-desktop baseline (${BASELINE_BYTES}); the frame may be blank"
+        else
+            note "info ${t} captured ${shot_bytes} bytes (baseline ${BASELINE_BYTES:-unknown})"
+        fi
     else
         note "info ${t} screenshot unavailable (grim failed; not an assertion)"
     fi
@@ -149,6 +200,16 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview ap
         note "ok   ${t}.close -> closed"
     else
         note "FAIL ${t}.close did not reach state=closed within 15s (got '$(sstate "${t}")')"
+        FAILED=1
+    fi
+
+    # And the window must actually go away. A surface that reports closed while
+    # its layer stays mapped is still taking the screen — and, for the overlays
+    # that request WlrKeyboardFocus.Exclusive, still holding the keyboard.
+    if wait_for 15 layer_gone "punar-${t}"; then
+        note "ok   ${t} unmapped its layer-shell surface"
+    else
+        note "FAIL ${t} reports closed but punar-${t} is still mapped"
         FAILED=1
     fi
 done
