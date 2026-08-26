@@ -156,9 +156,17 @@ published baselines. CI (x86_64, KVM) is canonical.
 
 ## Measured idle RAM over time, and what moved it
 
-Recorded because the target is a product claim and the number has drifted
-above it. Budget: **fail > 1536 MB, warn > 1024 MB** (`check-budgets.sh`),
-whole-system `MemTotal - MemAvailable`, KVM, 10 min stabilize + 5 min window.
+Recorded because the target is a product claim. Budget: **fail > 1536 MB,
+warn > 1024 MB** (`check-budgets.sh`), whole-system `MemTotal - MemAvailable`,
+KVM, 10 min stabilize + 5 min window.
+
+**Correction to an earlier version of this section**, which said the number had
+"drifted above" the target. It has not drifted above it — it has never been
+below it. The earliest measurement on record, M1 with a bar and a command
+centre and nothing else, is 1162 MB against a 1024 MB target. The 1024 figure
+has warned on every run this project has ever made, and describing the current
+number as a regression against it was wrong. What *is* a regression is the
+90 MB the thirteen surfaces added on top.
 
 | Run | Mean | Boot | What changed |
 |---|---|---|---|
@@ -189,3 +197,44 @@ an owner instead of drifting quietly.
 
 Three daemons still sum to **7 MB** PSS against a 100 MB target — the Rust
 side is not the problem and never has been.
+
+## Who actually holds it (run 32959913805, per-process PSS at stabilized idle)
+
+| Process | PSS | |
+|---|---:|---|
+| `qs` — punar-shell | **328.1 MB** | every surface, in one process |
+| `Hyprland` | 163.2 MB | compositor, including llvmpipe software rendering |
+| `Xwayland` | **42.6 MB** | X11 compatibility — see below |
+| `hyprpolkitagent` | 14.9 MB | polkit prompts |
+| `foot` | 10.5 MB | the terminal the exercise opened |
+| **sum of all processes** | **671 MB** | |
+| whole-system used | 1274 MB | |
+
+**Over half of the headline number is not process memory at all.** Per-process
+PSS sums to 671 MB against a reported 1274 MB; the remaining ~600 MB is kernel
+allocations, tmpfs and page cache that `MemAvailable` declines to count as
+available. Any plan to reach 1024 MB by trimming processes is working against
+53% of the figure, and that is worth knowing before anyone promises the target.
+
+**Two levers, now measured rather than guessed:**
+
+1. **The shell, 328 MB.** This confirms the lazy-load plan is aimed at the
+   right process — it was a hypothesis until this run. Five surfaces are
+   genuinely on-demand (command centre, System Control, shortcuts, overview,
+   AI panel) and could sit behind inactive `Loader`s. The other eight cannot:
+   the bar and wallpaper are always visible; approval and alerts must appear
+   *unbidden*; notifications, toasts and the OSD must receive events while
+   closed; and putting the lock screen behind a loader would add latency to
+   the one surface that must never hesitate.
+
+2. **Xwayland, 42.6 MB, with plausibly zero clients.** Chromium now runs native
+   Wayland (`--ozone-platform-hint=auto` in `/etc/chromium-flags.conf`), foot is
+   Wayland, and nothing else shipped is an X11 client. Hyprland starts XWayland
+   eagerly when `xwayland:enabled` is true.
+
+   **Deliberately not switched off.** It is a one-line config change for a
+   measured 3.3% of the total, and the cost is that no X11 application can ever
+   run — which contradicts shipping a rich third-party app catalogue, where
+   X11-only applications are still common. That is a product decision about
+   what Punar supports, not a memory optimisation, and it is recorded here with
+   its price rather than taken quietly.

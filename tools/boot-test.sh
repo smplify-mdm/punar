@@ -673,7 +673,7 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt meminfo m2-report.txt punar-m2.png \
+            for f in ram-samples.txt ram-processes.txt meminfo m2-report.txt punar-m2.png \
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
