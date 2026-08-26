@@ -372,7 +372,7 @@ downgrade enrollment**. The rules, in order of precedence:
 
 | Rule | Behaviour |
 |---|---|
-| **R1 — local first, always** | The local credential (`/etc/shadow`, or the record's `privileged.hashedPassword`) is the *only* thing that gates the keystroke. The IdP is never in the critical path of a session start. LUKS unlock happens before the network exists and the greeter starts before NetworkManager settles; a design that phones home to log in is a design that fails on a train |
+| **R1 — local first, always** | The local credential (`onboarding.md` §1.10's authenticator store — `/var/lib/punar/identity/shadow` served through `nss-systemd`, or the record's `privileged.hashedPassword`, or the `/etc` materialisation if spike V1 selects the fallback) is the *only* thing that gates the keystroke. The IdP is never in the critical path of a session start. LUKS unlock happens before the network exists and the greeter starts before NetworkManager settles; a design that phones home to log in is a design that fails on a train |
 | **R2 — freshness is a second, independent clock** | `lastIdpAuthAt` + `graceSeconds` (org policy; Punar default **14 days**, Punar ceiling **90 days**). Inside grace: sign in normally, no nag. Outside grace: **refuse, with §73 text** naming the policy, the last successful authentication, and the one action that fixes it ("connect this machine to a network") |
 | **R3 — refusal is never a lockout** | Outside grace, the recovery path is the LUKS recovery flow of §44.2 plus a documented `punarctl identity unbind` performed by a local administrator at the console. There is always a way back into your own machine, and it is written down before the feature ships |
 | **R4 — no silent downgrade** | A device that cannot reach its IdP is *enrolled and stale*, never *personal*. The bar chrome keeps saying so; the compliance category reports `stale`, not `compliant`, and the honest word appears on the surface |
@@ -525,7 +525,8 @@ local account `alice`, uid `U`, gid `G`, home `/home/alice` exists.
 6. **Seal the offline credential.** With a verified TPM: seal a key to the
    measured-boot policy and set `credential: "tpm-sealed"`. Without one (every
    VM, and every machine until user-blocked item 2 clears): keep the existing
-   `/etc/shadow` hash and leave `credential: "software"`, which renders
+   local authenticator (`onboarding.md` §1.10's store, wherever spike V1 puts
+   it) and leave `credential: "software"`, which renders
    `SOFTWARE ONLY` dashed on every surface that mentions it. **Note the ADR-003
    interaction:** an A/B slot swap changes what is measured, so a TPM-sealed
    identity credential must be re-sealed by the update flow in the same place
@@ -540,8 +541,12 @@ local account `alice`, uid `U`, gid `G`, home `/home/alice` exists.
    reports bound, uid unchanged, freshness fresh; one audit event
    `identity.bind` with the approval id and the reason.
 9. **Rollback — `punarctl identity unbind`.** Remove the PAM drop-in, stop the
-   socket, delete the record and any sealed key. `/etc/passwd`, `/etc/shadow`,
-   the uid, the gid and `/home/alice` are **byte-for-byte untouched**. The
+   socket, delete the record and any sealed key. The POSIX account as
+   `getent` resolves it, the local authenticator store, the uid, the gid and
+   `/home/alice` are **byte-for-byte untouched**. *(Stated by observable
+   behaviour rather than by filename, because `onboarding.md` §1.10 owns where
+   the account and its authenticator physically live and spike V1 has not yet
+   chosen between the two candidates.)* The
    account is local again and the user notices nothing but the loss of SSO.
 
 **The reverse direction (bound → local)** is step 9, and it is the same
@@ -797,7 +802,8 @@ none of it requires diffutils.
 
 1. **Inertness (§8)** — the five assertions, on an unenrolled image.
 2. **Bind/unbind identity** — capture `getent passwd alice`, `stat` of
-   `/home/alice`, and the `/etc/shadow` line hash before bind and after unbind;
+   `/home/alice`, and the sha256 of the local authenticator record before bind
+   and after unbind;
    assert equality with `cmp`-free shell comparison. This is the single most
    important test in the design.
 3. **Fixture issuer** — an in-image OIDC fixture, dev/CI-only, never enabled,

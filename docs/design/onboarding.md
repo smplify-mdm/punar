@@ -66,6 +66,8 @@ that no sentence below can be read as a description of the running system.
 | 11 | TPM-assisted unlock removing the second password prompt | **blocked** | `user-blocked.md` item 2 — needs physical hardware. §4.5 states the two-prompt reality instead of designing around it. |
 | 12 | A verified human identity at enrollment | **blocked** | `user-blocked.md` item 5. M5 enrolls a *device*. Stage 06 says so on the stage (§2.6), and §6 makes sure the local record can accept one later. |
 | 13 | Protection against a local attacker who has the user's password and the machine | `NEVER` | §8. JIT privilege narrows ambient authority; it does not defeat someone who is already you. |
+| 14 | The `self_service` capability flag and the fourth line in M9's human path (§1.6.1) | *dashed* | **New here, and it changes a shipped code path.** M9 §5.1's human path is three lines today and this proposes a fourth. Not accepted by `ipc.md` or `milestone-9.md`; §9 records it as open. |
+| 15 | A recovery path when `punard` itself will not start | *dashed*, **and it does not exist** | §1.6.2. Layer 2 (`punar-recover`) is unbuilt, and on a fresh install slot B is empty, so A/B rollback has no target either. §8 limit 10. |
 
 ---
 
@@ -390,8 +392,152 @@ to use it as the default would be the strangest possible outcome.
 
 `sudo` remains installed — it comes with the substrate and removing it would
 be a deep fork of the base package set for no benefit — but Punar authors no
-rule in `/etc/sudoers.d/`, grants `wheel` to nobody, and §7 assertion B-4
-proves both.
+rule in `/etc/sudoers.d/`, grants `wheel` to nobody, and §7 assertions B-6 and B-7
+prove both.
+
+**Two things this decision creates that §1.6 alone does not answer**, both
+found by walking a real first hour rather than by reasoning about the posture:
+the ceremony cost of routing *every* mutation through the grant path
+(**§1.6.1**), and the fact that locking root makes `punard` the only privilege
+path on the device, so a `punard` that will not start is a device with no
+local administrative authority at all (**§1.6.2**). Neither reverses §1.6.
+Both are conditions on shipping it.
+
+### 1.6.1 The first hour — and the self-service set that keeps JIT from becoming a prompt storm
+
+*(Added 2026-08-26 after a hard-nosed walk of a real first hour. §1.6's
+posture survives the walk; this section is what it costs and what it needs.)*
+
+§1.6 is correct about the **default state of the machine**. It is not, on its
+own, a complete answer, because M9's human path today is exactly three lines —
+
+```text
+uid == 0                              → allow
+live grant for (uid, capability)      → allow
+otherwise                             → deny
+```
+
+— and if *every* mutating operation a person performs in their first hour goes
+through that path, the ceremony is `request` → `resolve` → `set` → `expire`
+**per operation**. Walked concretely on a fresh personal device:
+
+| First-hour task | Under §1.6 alone | Verdict |
+|---|---|---|
+| **Install an application** | `apps.install` is already specified by `app-catalog.md` §14 as a **typed method open to any connected peer**, with only agent-attributed peers gating to approval. No grant, no ceremony. | **Fine already** — and it is the precedent this section generalises |
+| **Change the timezone** | `time.timezone` is a registry capability, so: request, self-resolve, set, expire. Three commands, two audit events and an approval card to change a clock. | **Prompt storm.** Unacceptable as a default |
+| **Change the keyboard layout** | `system.keymap` (dashed, M13 §5.3) — same shape, same three commands | **Prompt storm** |
+| **Join a Wi-Fi network** | **Undesigned.** No `network.*` capability exists, no polkit policy is authored, and `iwd`/NetworkManager are not in the image. Whatever ships must not land in the grant path: a person who cannot reach a network without an approval ceremony will route around Punar on day one | **Open, and load-bearing** |
+| **Set the hostname** | Onboarding itself does this **as root, from the OOBE surface, before the account can be used** — so the first-hour case is *changing* it later, which is genuinely rare and genuinely consequential | **Grant path is right** |
+| **Disable the firewall** | Grant path | **Grant path is right** |
+
+**The decision: the registry gains a `self_service` boolean, and the human
+path gains one line before the deny.**
+
+```text
+uid == 0                                        → allow
+live grant for (uid, capability)                → allow
+capability.self_service AND peer is in group    → allow, audited with
+  `punar` AND the device is unmanaged              details.self_service: true
+otherwise                                       → deny
+```
+
+Four properties make this a narrowing of the ceremony rather than a widening
+of authority:
+
+1. **It is a property of the capability, declared in the registry and shipped
+   inside the signed image** — not a runtime setting, not a user preference,
+   and not something the person at the keyboard can flip. Adding a capability
+   to the set is a release, reviewed like any other registry change.
+2. **The agent path is untouched.** Step 2 of M9 §5.1 still runs first, so an
+   agent-attributed peer calling a self-service capability still takes the AI
+   authority path and still gates to approval. `self_service` is a statement
+   about *humans at their own machine*, and §60 is unaffected.
+3. **Policy can revoke it, and never grant it.** An organisation's policy
+   layer may set `self_service: false` for any capability; it may not set it
+   `true` for one the image shipped as `false`. The merge is one-directional
+   on purpose — otherwise an org could quietly hand out standing authority
+   that the JIT design exists to refuse.
+4. **It is still audited, still typed, still one capability.** The audit event
+   carries `details.self_service: true` instead of `details.grant_id`, so the
+   trail distinguishes the two paths rather than blurring them.
+
+**The set that ships, and the rule that bounds it:** a capability is
+`self_service` only if it is (a) `risk: low`, (b) reversible by the same
+person through the same surface, and (c) something whose *absence* would be
+felt within the first hour of owning the machine.
+
+| Capability | `self_service` | Why |
+|---|---|---|
+| `time.timezone` | **yes** | Low risk, self-reversible, and you moved |
+| `system.keymap` *(dashed)* | **yes** | Same, and stronger: a wrong keymap is a device you cannot type on |
+| `system.hostname` | **no** | It is what the network sees; changing it is rare and consequential |
+| `security.firewall` | **no** | The exemplar of a capability that must cost something |
+| `identity.local-account` | **no** | It is the elevation seed (§1.7) |
+| `session.autologin` *(dashed, §5.4)* | **no** | It weakens authentication; §5.4 |
+| `apps.install` / `apps.remove` | n/a | Already a typed method, not a capability — `app-catalog.md` §14 |
+| Anything `risk: high` | **no**, structurally | The validator refuses `self_service: true` on a `high`-risk descriptor |
+
+**Networking is named as an open question rather than answered here**, because
+no network capability exists to answer it about. The constraint this document
+places on whoever designs it: *joining a network must not require an approval
+ceremony on a personal device* — either it is a `self_service` capability by
+the rule above, or it is a per-user operation that never reaches punard at
+all. Recorded in §9 as an open item.
+
+**What this does not change.** No account is in `wheel`. Root stays locked.
+There is no `sudo -i`, no wildcard grant, and no standing authority over any
+`high`-risk capability. The three properties §1.6 claimed — privilege is not
+ambient for anything consequential, every consequential change carries a named
+human and a reason, and a grant is one capability and never a shell — all
+survive verbatim. What changes is that the ceremony is spent where it buys
+something.
+
+### 1.6.2 The lockout that the JIT posture creates, and the recovery it therefore owes
+
+Walking the fourth leg of the first hour — *recovering when something breaks* —
+surfaces a failure mode §1.6 does not survive on its own, and it is worth
+stating as sharply as it deserves:
+
+> **Root is locked. No account is in `wheel`. Punar authors no sudoers rule.
+> Therefore `punard` is the *only* path to privilege on a Punar device — and
+> if `punard` does not start, the device has no local administrative authority
+> at all.**
+
+That is not hypothetical. `punard` is first-party code that ships in the root
+slot and is replaced wholesale by every update. A regression that keeps it
+from starting is an ordinary software defect with an extraordinary blast
+radius.
+
+Two mitigations exist on paper and exactly one of them works today:
+
+| Mitigation | Does it cover the case? |
+|---|---|
+| **A/B rollback (ADR-003)** — boot the other slot | **Yes, after the first update. No, on a fresh install**, where `installer.md` §10.2 assertion I17 requires slot B to be *zero-filled with no UKI*. A device whose very first boot cannot start `punard` has no slot to roll back to |
+| **§1.8 Layer 2** — the `punar-recover` boot entry | **It is the right answer and it does not exist.** `installer.md` §6.4 requirement 5 reserves the ESP room and declines to build the artefact, so §1.8 Layer 2 is *dashed* |
+| Layer 1 (the account recovery code) | **No.** It is redeemed *through punard*, at the greeter |
+| Layer 3 (reinstall) | Yes, at the cost of everything on the disk |
+
+**The consequence, and the recommendation this document makes to the
+programme:** on the MVP as currently designed, a `punard` that fails to start
+on a freshly installed device is recoverable only by reinstalling. That is a
+worse outcome than the dev image it replaces, where `RootPassword=punar` was a
+console away — which is a genuinely uncomfortable sentence and is exactly why
+it is written down rather than discovered.
+
+So: **§1.8 Layer 2 is not a nice-to-have, it is the mitigation the JIT posture
+owes.** This document upgrades it from *deferred* to *blocking for the first
+release that ships a locked root* — not blocking on the design, which is
+`installer.md`'s to build, but blocking on the claim. Until `punar-recover`
+exists, §8 carries limit 10 and every surface that says "Punar has no
+permanent administrator" must be able to answer *"then how do I get in when
+the daemon is broken?"* with something other than silence.
+
+The cheap interim, if the recovery UKI slips: the installer blesses slot B
+with the **same** image it wrote to slot A. It costs 8 GiB that are already
+allocated and nothing else, it makes the firmware's own boot menu a working
+recovery path from the first boot rather than the second, and it removes the
+"no rollback target on a fresh install" row above entirely. Recorded as a
+recommendation to `installer.md` §4.1, not a decision taken here.
 
 ### 1.7 The bootstrap rule
 
@@ -409,7 +555,7 @@ The full posture of the first account:
 
 | Property | Value | Reason |
 |---|---|---|
-| `uid` | first free ≥ 1000 (normally 1000) | Below 60000 — see §6.3 |
+| `uid` | **allocated once from a persistent on-disk map** (`/var/lib/punar/identity/uid-map.json`), lowest free ≥ 1000; normally 1000, and nothing may assume it | Below 60000 — see §6.3. Allocated-then-permanent, and **never derived** from the username, an email or a directory object id: `platform-sso.md` §6 rules 1 and 2, which this row exists to satisfy. Deriving a uid from a name is the one-way door that makes later directory binding irreversible |
 | primary group | `<username>` (per-user group) | Standard, and it makes `0700` homes and `umask 002` both safe |
 | supplementary groups | `punar`, `video`, `input` | `punar` = may ask (above). `video`/`input` are the direct-DRM safety net the dev image already grants; logind normally supplies them and they are belt-and-braces |
 | **not** in | `wheel`, `uucp`, `docker`, `storage` | `wheel` per §1.6. `uucp` was a dev-image debugging convenience and does not ship. The others are the classic "group that is silently root" set |
@@ -428,7 +574,7 @@ And the closing rule, which is what makes the whole thing safe to ship:
 This is the "last administrator" invariant every multi-user OS needs and most
 implement as a special case in a GUI. Here it lives in the capability's
 `validate`, which means the CLI, the shell and any future org policy all hit
-it, and the check proves it (assertion B-11).
+it, and the check proves it (assertion B-8).
 
 ### 1.8 Recovery — three layers, and an honest floor
 
@@ -446,7 +592,7 @@ the typed method `identity.recovery.redeem`, which performs exactly two
 fixed repairs: set a new password, and restore group `punar` membership. It
 is **single-use**; redeeming rotates it and the new code is shown once. It is
 rate-limited with a growing delay and every attempt is audited — and the
-audit event contains the *outcome*, never the code (assertion F-26).
+audit event contains the *outcome*, never the code (assertion F-2).
 
 Covers: forgotten password, a group membership broken by a bad edit, an
 account disabled by mistake. That is the overwhelming majority of real
@@ -469,6 +615,15 @@ This entry is a fourth UKI on the ESP. ADR-003 sizes the 1 GiB ESP for three
 (A, B, and the retained last-known-good) at ~360 MB used; a fourth is
 ~120 MB and fits, but **the ESP layout is `installer.md`'s to own** — §4.4
 records this as a requirement placed on it, not a decision taken here.
+
+*(Answered 2026-08-26: `installer.md` §6.4 requirement 5 reserves the room and
+declines to build the artefact, so **Layer 2 is dashed**. §1.6.2 argues that
+this is more serious than one missing recovery layer, because with root locked
+`punard` is the only privilege path on the device; `installer.md` §12.1 is
+that document's response and recommends blessing slot B with the same image as
+slot A so a fresh device has a rollback target from its first boot. That is an
+interim, not a substitute: it recovers a device whose **software** is broken,
+not one whose owner has forgotten a password, which is what Layer 2 is for.)*
 
 **Layer 3 — reinstall, stated rather than avoided.** With neither the account
 recovery code nor the disk secret, the data is unreachable. That is the
@@ -564,7 +719,7 @@ the rule demands: verified capability output whose desired value lives on
 the plan.
 
 Either way the observable property is identical, and it is the property the
-check tests (assertion E-25): **reset `/etc` to vendor content and the person
+check tests (assertion E-7): **reset `/etc` to vendor content and the person
 can still log in.**
 
 ### 1.11 The one new capability, and the typed methods beside it
@@ -836,7 +991,8 @@ the human arrives with a password.
 
 The answer file **cannot** set: `autologin` (does not exist, §5.4), any
 group beyond the §1.7 set, the recovery code (it is generated, never
-supplied), or `wheel`. An answer file that could hand out permanent admin
+supplied), `wheel`, or `self_service` on any capability (§1.6.1 — it is a
+property of the signed registry, not of a provisioning artifact). An answer file that could hand out permanent admin
 would be a permanent-admin feature with extra steps.
 
 ---
@@ -868,7 +1024,7 @@ one row, `Higher contrast · off`, which applies immediately and persists.
 Consequence to handle explicitly: if `contrast` was chosen at stage 01, stage
 07's two cards must **not** silently overwrite it. Stage 07 renders with
 neither card selected and a line reading *Higher contrast is on — keeping
-it*, and Enter changes nothing. Assertion D-18 tests exactly this, because it
+it*, and Enter changes nothing. Assertion D-3 tests exactly this, because it
 is the kind of interaction that works in the mockup and breaks in the build.
 
 **Mechanism:** `punarctl theme set <id>` — theme-system §6.2's sequence,
@@ -1107,8 +1263,8 @@ LUKS volume at every boot.
 
 The dev image keeps its autologin, in the `desktop` mkosi profile, where it
 already is. The line that matters is that the profile is a dev profile and
-the check proves the production path does not have it (assertions E-21,
-E-22).
+the check proves the production path does not have it (assertions E-3,
+E-4).
 
 *Dashed, for whoever needs it later:* `session.autologin` as a typed boolean
 capability, because it mutates an `/etc` file and because an organisation
@@ -1193,6 +1349,35 @@ migration of every file on the device.
 | The account record | **Unchanged in shape** | Reserved fields become populated |
 | uid, home, files, `accountId` | **Untouched** | This is the whole point |
 
+### 6.4a Two PSSO rules this document must state, not merely not violate
+
+`platform-sso.md` §6 places eleven rules on whatever creates the first
+account. Nine of them are decided above and can be read off §1.3, §1.7, §1.10,
+§1.11, §6.1 and §6.3. Two are rules about *everything else in the repository*
+rather than about the account model, so they are stated here explicitly and
+carry their own assertions rather than being satisfied by accident:
+
+- **Rule 9 — user preferences never enter the user record.** The account
+  record is org-facing: a bound device will hand it to a directory, and a
+  directory has no business knowing which theme somebody picked. Theme,
+  contrast, layout and app choices live in `~/.config` and
+  `~/.local/state` (§1.9's table already puts them there); the record carries
+  identity, POSIX facts and group membership and nothing else. Assertion
+  **A-8**.
+- **Rule 10 — nothing reads `/etc/passwd` directly.** Every enumeration —
+  product code, check scripts, fixtures, `mkosi.finalize`, the greeter
+  projection builder — goes through `getent passwd` / `getent group` /
+  `userdbctl`. This is not a style preference: on §1.10's chosen path the
+  account *is not in `/etc/passwd` at all*, so a direct reader sees a machine
+  with a missing user and fails in the least debuggable way available. It is
+  enforceable in CI today, offline, for free, and it is cheapest to enforce
+  before there is anything to migrate. Assertion **A-9**.
+
+The one place this document deliberately keeps a direct `/etc` read is the
+*negative* assertions — E-5 and E-6 grep `/etc/subuid` and `/etc` for the dev
+user precisely to prove that nothing Punar owns is there. Proving a file's
+absence is not enumerating accounts.
+
 ### 6.5 The seam with `platform-sso.md`
 
 This document owns: the local account record's schema, the reserved fields
@@ -1225,7 +1410,7 @@ Constraints it must respect, all of them already binding on this repo:
 - **No `diffutils`.** String comparison is `test "$a" = "$b"`; file
   comparison is `sha256sum` piped to `test`. No `diff`, no `cmp`.
 - **No polling.** The check waits on unit state and marker files, never in a
-  `sleep`-loop except where an expiry is being *proved* (assertion B-10,
+  `sleep`-loop except where an expiry is being *proved* (assertion B-5,
   which is M9's existing pattern).
 - **Deterministic and replayable.** Fixtures are fixed strings; `qs ipc call
   firstboot open` forces the layer without clearing the marker (M13 §5.6).
@@ -1245,6 +1430,8 @@ Constraints it must respect, all of them already binding on this repo:
 | A-5 | **Negative:** no artifact from this group contains `$y$`, the fixture password, or the recovery code | `oobe-redaction.txt` (counts only) |
 | A-6 | Idempotence: re-running with the marker present creates no second account — exactly one record file | — |
 | A-7 | Offline password policy: `identity.set_password` with `password` (blocklisted) → refused; with `alice2026` (contains the username) → refused; with a 9-character novel string → refused; with a 10-character novel string → accepted. All four with no network | `oobe-password-policy.txt` |
+| A-8 | **PSSO rule 9:** the account record contains no preference key — `grep -c` for `theme`, `contrast`, `wallpaper`, `layout` over the record → 0; the theme pointer is in `~alice/.config` and nowhere else | `oobe-record.json` |
+| A-9 | **PSSO rule 10:** no shipped script, unit or fixture reads `/etc/passwd` or `/etc/group` directly — a repository-wide grep for `/etc/passwd` outside the *negative* assertions of group E returns zero product hits, and every in-guest enumeration in this check uses `getent` or `userdbctl` | `oobe-getent.txt` |
 
 **B · The privilege posture, and that JIT works for the created account**
 
@@ -1259,6 +1446,9 @@ Constraints it must respect, all of them already binding on this repo:
 | B-7 | `getent group wheel` does not list alice; `/etc/sudoers.d/` contains no Punar-authored file (`ls -1 \| wc -l` → 0, or only vendor entries enumerated by name) | same |
 | B-8 | **Last-elevator invariant:** removing alice from `punar` while she is the only member → refused with a §73 message; `id -nG alice` unchanged afterwards | `oobe-last-elevator.txt` |
 | B-9 | An `oobe-answers.json` requesting `wheel` → the group is not granted, and the refusal is recorded | — |
+| B-10 | **The self-service path (§1.6.1):** as `alice`, `punarctl capabilities set time.timezone Europe/Berlin` succeeds **with no grant and no approval**; the audit event carries `details.self_service: true` and **no** `details.grant_id`. The same call for `system.hostname` still returns exit 3, and the same call for `security.firewall` still returns exit 3 | `oobe-self-service.txt` |
+| B-11 | **Self-service is not a widening:** an agent-attributed peer calling `capabilities set time.timezone` still takes the M9 AI path and gates to approval (exit 4), never the self-service line; and a descriptor with `risk: high` and `self_service: true` is **refused by the registry validator** at load | same |
+| B-12 | **Policy may revoke and never grant:** a policy layer setting `self_service: false` for `time.timezone` takes effect; a policy layer setting `self_service: true` for `security.firewall` is refused and named in `policy explain` | same |
 
 **C · The hostname was set through the capability**
 
@@ -1344,6 +1534,9 @@ Stated before anyone reads a green run as more than it is:
 | 07 | That the greeter is a security boundary against physical access | It is an authentication surface on top of disk encryption. The encryption is the boundary |
 | 08 | That accounts survive an update **today** | They will, by §1.9 and §1.10, on the A/B layout ADR-003 accepted and the installer has not yet built. Until then, assertion E-7 is a proxy |
 | 09 | That `sudo` has been removed | It ships with the substrate. Punar authors no rule for it and grants `wheel` to nobody, which is a different and provable statement |
+| 10 | That a device with a broken `punard` is recoverable without reinstalling | §1.6.2. Root is locked, nobody is in `wheel`, and every privilege path runs through `punard`. On a **freshly installed** device slot B is zero-filled (`installer.md` I17), so there is no rollback target either, and §1.8 Layer 2 does not exist. Until `punar-recover` ships, this is Layer 3 or nothing — and it is a **worse** recovery story than the dev image this document deletes |
+| 11 | That the self-service set (§1.6.1) is a security boundary | It is a **ceremony** decision, not an authority decision. It says which low-risk, self-reversible capabilities a human at their own unmanaged machine may set without an approval card. Someone who is already that uid could have obtained a grant anyway by self-resolving; what changes is how many keystrokes it took, and what the audit event is called |
+| 12 | That Punar has a network-configuration story | It does not. No `network.*` capability exists, no polkit policy is authored, and no Wi-Fi manager is in the image. §1.6.1 states the constraint the future design must respect and does not pretend to have designed it |
 
 ---
 
@@ -1371,6 +1564,23 @@ second; `identity.local-account` takes an array. But the greeter ships
 single-user (§5.3), and the questions a second account raises (who may create
 one, does the creator's grant extend to it, per-user theme and workspace
 isolation) are unanswered. Named, not designed.
+
+**Open — joining a network without a ceremony (§1.6.1).** No `network.*`
+capability exists, so this document cannot decide it; it can only bind whoever
+does. The rule: *on a personal device, joining a Wi-Fi network must not
+require an approval card.* Either the capability is `self_service` by
+§1.6.1's three-part test, or network selection is a per-user operation that
+never reaches punard. Anything else produces a device people route around on
+day one, and it is the single most likely place for the JIT posture to
+acquire a bad reputation it did not earn.
+
+**Open — the `self_service` registry field (§1.6.1).** It adds one boolean to
+`schemas/capability/capability-descriptor.json`, one line to M9 §5.1's human
+path, one `details` key to the audit event, and one validator rule (`risk:
+high` may never be `self_service: true`). None of that is designed in
+`ipc.md` or `milestone-9.md` yet, and both owners have to accept it. If they
+decline, §1.6.1's walk stands and the answer has to come from somewhere else —
+but the walk itself does not go away.
 
 **Open — password change UI.** `identity.set_password` exists; the surface
 that calls it after first boot belongs to System Control and is not designed
@@ -1416,3 +1626,12 @@ accepting requirement 5 of §4.4. If it does not, Layer 2 becomes dashed.
     fields.
 13. `user-blocked.md` unchanged — this document adds no new blocked item, and
     depends on items 2 and 5 only for claims it does not make.
+14. The `self_service` field accepted (or declined) by `ipc.md` and
+    `milestone-9.md`, with `risk: high` → `self_service: true` refused at
+    registry load, and assertions B-10 → B-12 wired. **If it is declined, §1.6
+    is not shippable as written** — the first-hour walk in §1.6.1 is the
+    evidence, not an opinion.
+15. `installer.md` §6.4 requirement 5 revisited against §1.6.2: either
+    `punar-recover` ships in the first release with a locked root, or the
+    installer blesses slot B with the same image it wrote to slot A so that a
+    fresh device has a rollback target from its first boot.

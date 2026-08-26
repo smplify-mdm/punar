@@ -43,6 +43,8 @@ says what would make it solid.
 | 11 | The installer→first-boot seam (`seed.json`, the accountless image) | *dashed* | Designed against `onboarding.md` §4.2–4.4 (§6.4). Solid when I29–I32 pass — and it is the one row whose failure mode is *silence on both sides*, which is why it gets four assertions. |
 | 12 | **`onboarding.md` §1.8 Layer 2 recovery** (a fourth UKI, `punar-recover`) | *dashed* | **Does not exist.** ESP room is reserved and the artefact is not built. Recorded here because onboarding §4.4 requirement 5 asked this document to decide, and this is the decision. |
 | 13 | **Bare-metal boot, USB boot, real firmware** | *dashed* | **NOT PROVEN AND NOT PROVABLE HERE.** QEMU + OVMF + virtio proves the software stack and nothing about hardware. |
+| 14 | **The ISO build steps against the pinned toolchain** (comma-composed profiles, `Format=uki`, the `xorriso` hybrid idiom, `libisoburn` in the snapshot) | *dashed* | **TO VERIFY, F1–F4 in §3.6.** The builder installs `mkosi` by name, not by version, so these are properties of the snapshot and not of this document. Each has a build-script fallback. |
+| 15 | **A recovery path when the freshly installed system does not come up** | *dashed*, **and absent** | §12.1. I17 requires slot B zero-filled, `punar-recover` is not built, and `onboarding.md` §1.6.2 shows that a locked root makes `punard` the only privilege path. This is the sharpest gap the three designs have between them, and §12.1 recommends the cheap half of the fix. |
 
 ---
 
@@ -95,7 +97,7 @@ under two designs that are already accepted.
 | 16 | **`linux-firmware` and both microcode sets ship in the image.** On an A/B system, *"install the driver afterwards"* does not exist — a consequence of ADR-003 that no other document has stated. §9.2. |
 | 17 | **MVP graphics support is integrated Intel/AMD only** — exactly what §5.1 says. No out-of-tree modules, no NVIDIA. Named, costed, deferred. §9.2. |
 | 18 | **A pre-flight hardware report classifies every device `FULL` / `PARTIAL` / `UNSUPPORTED` before commit** and travels to the installed system. Design language §7's coverage vocabulary, applied where it matters most: *silence is not support.* §9.3. |
-| 19 | **CI proves the install offline, end to end, with 36 named assertions** — including the two that unblock other designs: the ADR-003 layout (I08–I13) and five distinct mounts (I15). §10. |
+| 19 | **CI proves the install offline, end to end, with 40 named assertions** — including the two that unblock other designs: the ADR-003 layout (I08–I13) and five distinct mounts (I15). §10. |
 
 ---
 
@@ -270,6 +272,30 @@ For reference, Omarchy's ISO is self-reported "under 6 GB".
 
 ---
 
+### 3.6 What is unverified at the pin, named before it reads as settled
+
+Everything in §3 is designed against `os/images/snapshot.env`
+(`PUNAR_SNAPSHOT_DATE=2026/08/20`, builder base pinned by digest). The builder
+installs `mkosi` **by name, not by version**, so the toolchain's exact
+behaviour is a property of the snapshot rather than of this document. Four
+things are asserted above that a spike must confirm before the milestone is
+scheduled — they are cheap, and each one changes a build step if it is false:
+
+| # | Claim | Status |
+|---|---|---|
+| F1 | `mkosi --profile desktop,installer` composes **two** profiles. The repository passes a single profile today (`container-build.sh` line 452). mkosi renamed the option to a list form at some point in its 25.x line; the pinned version is whatever `pacman -S mkosi` resolved to in the 2026/08/20 snapshot | **TO VERIFY.** If it is single-valued, the fallback is one `mkosi.profiles/installer/` that includes the desktop content by `Include=` — a config change, not a design change |
+| F2 | `Format=uki` emits the installer UKI, and a second `mkosi` invocation emits the slot payload, from the same config tree | **TO VERIFY.** `Format=uki` is a documented mkosi output; that it composes with the profile split here is not |
+| F3 | The `xorriso -as mkisofs … -append_partition 2 … -e --interval:appended_partition_2:all::` idiom produces an image that boots as `-cdrom` **and** as a raw drive on OVMF | **TO VERIFY** — this is the exact form assertion I05 exists to prove, and it is the step with the least margin for a typo. The idiom is the one Arch's own `archiso` uses; that it is correct *here*, at this xorriso version, over these inputs, is what I05 asserts |
+| F4 | `libisoburn` is present in the 2026/08/20 snapshot and installs into the builder cleanly | **TO VERIFY.** Low risk; named because the builder's package list is a pin |
+
+None of these is load-bearing on the *design*: each has a fallback that is a
+build-script change. They are listed because "the same pinned mkosi pipeline"
+is a claim about a toolchain nobody in this repository has yet run in this
+shape, and §1.22 does not distinguish between overclaiming a security property
+and overclaiming a build step.
+
+---
+
 ## 4. Decision 2 — the partition layout
 
 > **This section is the reason the document exists. It implements ADR-003
@@ -376,6 +402,21 @@ Two ways to get there:
 **Chosen: one partition, three subvolumes.** It satisfies the constraint
 that motivated the question, and it declines to make a sizing decision that
 a 128 GB disk cannot afford to have made wrongly.
+
+**The rule that makes the subvolume answer *sound*, and that two partitions
+would not have needed:** a btrfs filesystem's **top level (subvolid 5) is
+never mounted**, by anything, ever. Every subvolume is reachable from the top
+level, so a single `mount /dev/mapper/punar-data /mnt` exposes `@home`,
+`@var` and `@var-tmp` under paths that a `FAN_MARK_MOUNT` on `/home` does not
+cover — which would quietly reintroduce the exact bypass this layout exists to
+close. Concretely: the vendor `/etc/fstab` above contains no subvol-less entry
+for the mapper device, no unit mounts one, and `install.apply`'s `format`
+phase mounts the top level only transiently to create the three subvolumes and
+unmounts it before the `write-slot-a` phase begins. Asserted by **I39**, and it
+is a constraint execution-trust's adopting milestone inherits rather than one
+it can choose. *(Two separate partitions would have had this property for
+free; it is the one real cost of the subvolume answer, and it is one line of
+`fstab` and one assertion.)*
 
 This also resolves, in the installer rather than in the adopting milestone,
 the open choice execution-trust §3.3 left:
@@ -595,7 +636,7 @@ this shape; the confirmation grammar below depends on the group count.)*
 
 | | |
 |---|---|
-| Shown | **On screen, once, in the installer's Recovery stage.** Large, monospace, in eight groups, with a QR rendering beside it for anyone who wants to photograph it. |
+| Shown | **On screen, once, at the recovery-key gate inside stage 07 — immediately after the `encrypt` phase enrolls it, and not before, because before that it does not exist (§6.5.2).** Large, monospace, in eight groups, with a QR rendering beside it for anyone who wants to photograph it. Stage 05 announces that this is coming; it does not show a key. |
 | Confirmed | The user must type back **two randomly chosen groups** before `Continue` enables. Not the whole key — that trains transcription errors into muscle memory rather than catching them. Two groups catches the "I did not write it down at all" failure, which is the failure that matters. |
 | Not shown again | Ever. There is no "show me my recovery key" surface, because a surface that can display it is a surface that can be made to display it. |
 | Not logged | **The file descriptor *is* stdout, and this needs saying precisely, because the obvious phrasing is self-defeating.** `systemd-cryptenroll --recovery-key` writes the key to its own stdout; a unit with `StandardOutput=null` would therefore discard the very thing the installer needs. So `punard` spawns `systemd-cryptenroll` directly with **stdout connected to a pipe it holds** — never a journal stream, never a terminal, never a file — reads the key, renders the QR itself, and closes the pipe. `StandardError` is discarded (`cryptenroll` renders its own QR to stderr when it sees a tty, and that rendering must not reach a log either). The key is returned to the installer surface on that descriptor, exactly as the passphrase arrives in the other direction. It is never in a `punard` result object, never in the audit event (which records `recovery_key.enrolled`, a fact, with no material), never in `/run/punar/install.json`, and never in a journal field. §44.2's *"no recovery material in logs"* is enforced by the key never being in a stream that reaches a log, not by redaction. |
@@ -688,9 +729,9 @@ Progress is read the way M5's status is read: `punard` writes
 | 02 | **Hardware** | Nothing. It **reports** (§9.3): every device classified `FULL` / `PARTIAL` / `UNSUPPORTED`, before commit. | Nothing yet; the report travels to the installed system. |
 | 03 | **Disk** | Which disk. Model, serial, size, and — loudly — what is currently on it. | Nothing. Selecting is not committing. |
 | 04 | **Encryption** | Passphrase ×2, or the explicit opt-out. | Nothing yet. |
-| 05 | **Recovery key** | Shows the disk recovery key; requires two groups typed back. Skipped entirely if 04 opted out. | Nothing yet. |
+| 05 | **Recovery key** | **Nothing yet — it explains what is coming.** A recovery key cannot exist before the LUKS volume does, so this stage states that one will be generated during the install and shown once, and that the install will pause until it has been written down. Skipped entirely if 04 opted out. | Nothing. |
 | 06 | **Confirm** | The whole plan, and the destructive confirmation (§6.3). | **Everything, from here.** |
-| 07 | **Install** | Nothing. Nine named phases with honest progress (§6.5). | The device. |
+| 07 | **Install** | **One thing, once:** the install pauses immediately after the `encrypt` phase to show the recovery key and take two groups typed back (§6.5.2). Otherwise nothing — nine named phases with honest progress (§6.5). | The device. |
 | 08 | **Done** | *"Remove the medium and restart."* One line pointing forward: *"When it starts, your machine will ask who you are."* | The install record and `seed.json`. |
 
 **Why only two questions.** Language, network, timezone, **the account**,
@@ -796,7 +837,7 @@ where each is answered:**
 | 2 | Create `/var` and `/home` per ADR-003, with `/var/lib/punar` present and `0700 root:root` before first boot | **§4.1, §4.3, §7.3** (`seed` phase). Proven by I15, I16, I30. |
 | 3 | Write `seed.json`, or write nothing | **Below.** Written at the `seed` phase; absent on a failed install, which is the "write nothing" case and is exactly why onboarding treats it as advisory. |
 | 4 | Own the disk secret and the disk recovery key entirely; display them at install time; first boot never shows, stores or asks for them | **§5.2, §5.3.** The recovery key never reaches a stream that a log or a state file can see, so first boot could not read it even if it tried. |
-| 5 | Reserve ESP room for the §1.8 **Layer-2 recovery entry** as a fourth UKI, or record that Layer 2 does not exist | **Both halves answered.** The room exists: the ESP is 1 GiB, ADR-003 sizes it for three UKIs at ≈ 360 MB used, and a fourth at ≈ 120 MB brings it to ≈ 480 MB — under half. **The artefact does not exist**: `punar-recover` is not built, no fourth UKI is produced, and this design does not build one. So `onboarding.md` §1.8 **Layer 2 is dashed**, and this document carries the matching line in §12. |
+| 5 | Reserve ESP room for the §1.8 **Layer-2 recovery entry** as a fourth UKI, or record that Layer 2 does not exist | **Both halves answered.** The room exists: the ESP is 1 GiB, ADR-003 sizes it for three UKIs at ≈ 360 MB used, and a fourth at ≈ 120 MB brings it to ≈ 480 MB — under half. **The artefact does not exist**: `punar-recover` is not built, no fourth UKI is produced, and this design does not build one. So `onboarding.md` §1.8 **Layer 2 is dashed**, and this document carries the matching line in §12. *(Revisited 2026-08-26 against `onboarding.md` §1.6.2, which shows the consequence is larger than "one recovery layer is missing": with root locked and nobody in `wheel`, a `punard` that will not start on a fresh install is unrecoverable. **§12.1 is this document's answer**, and it recommends blessing slot B as the cheap interim.)* |
 | 6 | Accept `oobe-answers.json` as a passthrough artefact it writes and never interprets | **Below.** Copied byte-for-byte; never parsed beyond a size cap. |
 
 **The seam, and what the installer writes.**
@@ -859,6 +900,7 @@ PUNAR · INSTALL                                          Stage 07 of 08
   ✓ partition     4 partitions · ADR-003 layout
   ✓ encrypt       LUKS2 · argon2id · recovery key enrolled
                   TPM-ASSISTED UNLOCK · SIMULATED · NOT ENROLLED
+  ✓ write it down the recovery key was shown and acknowledged (§6.5.2)
   ✓ format        btrfs · @var @home @var-tmp · vfat /efi
   ▸ write slot A  ███████████████░░░░░░░░  1.9 / 3.1 GB
                   reading from the medium, writing to root A, hashing as it goes
@@ -935,6 +977,61 @@ device carries any of the four literal PARTUUIDs, and it names that device.
 The target itself carrying them is the ordinary reinstall case and must not be
 refused — a rule worth writing down because the naive implementation of §4.2's
 sentence bricks reinstallation. Assertion I38.
+
+### 6.5.2 The recovery-key gate — an ordering correction
+
+*(Corrected 2026-08-26. An earlier draft of §6.2 displayed the disk recovery
+key at stage **05**, before the destructive confirmation at stage 06. That is
+not implementable: `systemd-cryptenroll --recovery-key` generates and enrolls
+a key **into an existing LUKS2 header**, and no LUKS2 header exists until the
+`encrypt` phase of stage 07. The draft screen showed a secret that had not
+been created. This subsection is the fix.)*
+
+Three ways out of the contradiction were available. The one chosen is the one
+that keeps systemd's primitive:
+
+| Option | Verdict |
+|---|---|
+| Generate 256 bits in `punard`, render modhex ourselves, enroll it as an ordinary keyslot passphrase | **Rejected.** It moves key generation and encoding into first-party code for a cosmetic ordering benefit, and it silently drops `cryptenroll`'s own recovery-key keyslot type — which is the thing that makes `cryptsetup luksDump` say *recovery* rather than *passphrase*, and the thing a future `systemd-cryptenroll --wipe-slot=recovery` would act on |
+| Show the key at the **Done** stage (08) | **Rejected.** By then the install has succeeded and the machine is finished; a person is already reaching for the power button. The moment a secret must be written down is not the moment the flow is over |
+| **Pause stage 07 immediately after `encrypt`** | **Chosen.** |
+
+**The gate.** When the `encrypt` phase completes, `install.apply` **blocks**
+before `format` and `/run/punar/install.json` gains
+`phase: "encrypt", awaiting: "recovery_key_ack"`. The surface renders the key —
+large, monospace, eight groups, QR beside it — and enables `Continue` only
+when two randomly chosen groups have been typed back. Acknowledgement is a
+second typed call, `install.recovery_ack {plan_token, groups}`; the same
+`plan_token`, so the acknowledgement is bound to the same object as the
+confirmation. Nothing before this point is destructive-in-the-new-sense
+(§6.5.1's table: at `encrypt` the old data is already gone, so the gate is not
+a last chance to back out — it is a last chance to *keep the key*), and
+nothing after it proceeds without it.
+
+**What the gate does when nobody answers.** It waits. There is no timeout and
+no default-continue: an installer that proceeds past an unacknowledged
+recovery key has produced a device whose owner cannot recover it, which is the
+exact outcome the key exists to prevent. `Esc` at this gate does not cancel
+the install — the disk is already repartitioned — it re-renders the key. The
+one escape is the unattended path, where `answers.json` carries
+`recovery_key_ack: "unattended"`, the key is written to the answer disk's own
+filesystem and **not** to the installed system, and the install record says
+`recovery_key_ack: unattended` so that a device provisioned this way is
+distinguishable forever from one a human acknowledged.
+
+**Consequence for §6.5's phase list:** `encrypt` is followed by a named
+waiting state rather than immediately by `format`, and the screen says so:
+
+```text
+  ✓ encrypt       LUKS2 · argon2id · recovery key enrolled
+  ▸ write it down  the install is paused here until you have
+
+    format        waiting
+```
+
+The **opt-out lane skips the gate entirely**, because there is no key. That is
+the second place `diskEncrypted` is load-bearing (§6.4), and it is asserted in
+both directions by I30.
 
 ### 6.6 No theme picker, and no app picker — in the installer
 
@@ -1059,7 +1156,12 @@ proposes; the owners of `ipc.md` and `schemas/` decide.
   with model, serial, size, current partition table and detected
   filesystems. Read-only. It excludes the medium the installer booted from,
   by device, because offering to erase the thing you are running from is a
-  bug with a UI.
+  bug with a UI — **and it excludes any device carrying a filesystem labelled
+  `PUNAR_ANSWERS`** for the same reason one level up: the unattended path's
+  answer disk is an input to the install, and an install that erases its own
+  answer file has destroyed the record of what it was told to do. In CI the
+  1 MiB answer disk would also fail the 33 GiB floor, but relying on a size
+  check to protect an input is relying on an accident.
 - **`install.plan`** takes the answers and returns the *entire* resulting
   layout — partition numbers, type GUIDs, literal UUIDs, byte offsets,
   sizes, filesystems, subvolumes, the payload digest — **plus the target's
@@ -1123,8 +1225,8 @@ specification.
 | encrypt | LUKS2 format + enroll | `systemd-repart` `Encrypt=key-file`, key on an FD; `systemd-cryptenroll --recovery-key` |
 | format | vfat + btrfs + subvolumes | `systemd-repart` `Format=` / `Subvolumes=` |
 | write-slot-a | stream payload → slot A | `repart` `CopyBlocks=`, or a bounded 4 MiB read/write loop in `punard` — the same loop `update.apply` uses |
-| re-read | digest slot A | read `payload.size_bytes` bytes, sha256, compare |
-| boot | ESP contents | `bootctl install --esp-path=…`; copy the slot UKI; write `loader.conf` |
+| re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.size_bytes` bytes, sha256, compare. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
+| boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the slot UKI; write `loader.conf`. **`--no-variables` is a decision, not a default** (§7.3.1) |
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log. **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
@@ -1132,6 +1234,36 @@ Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
 `bash -c`. Nothing read from the answer file ever becomes part of a command
 line.
+
+#### 7.3.1 Firmware boot entries — the one privileged write that is *outside* the disk
+
+`bootctl install` writes an EFI boot variable by default, so the installer
+would be mutating firmware NVRAM — the only thing it touches that is not the
+disk the user confirmed, and the only one a failed install cannot leave
+untouched.
+
+**Decision: `--no-variables`, plus the removable-media path.** The installer
+writes `EFI/BOOT/BOOTX64.EFI` on the target ESP and does **not** create or
+reorder a firmware boot entry. Reasons, in order:
+
+1. **The destructive confirmation is scoped to a disk.** A user typed a
+   serial. Reordering the machine's boot menu is a consequence they did not
+   confirm and — on a machine with another operating system on another disk —
+   is the one way a whole-disk installer can affect a disk it never wrote to.
+2. **NVRAM is the least reliable write on the machine.** Firmware that
+   silently drops, reorders or exhausts boot variables is common on exactly
+   the 2019–2022 §5.3 target classes, and a variable write that half-succeeds
+   is not restartable the way §6.5.1's disk states are.
+3. **The fallback path is universal.** Every UEFI implementation boots
+   `\EFI\BOOT\BOOTX64.EFI` from a disk in the boot order; that is how the
+   ISO itself boots.
+
+**The honest cost, stated:** on a machine with an existing OS whose firmware
+entry ranks above disk-order fallback, the user must choose the Punar disk
+from the firmware's own boot menu on first boot. Stage 08 says so in one line
+rather than leaving them at a screen that boots the old system. A future
+`--variables` mode is a Phase-2 option gated behind an explicit question, not
+a default. Recorded in §12.
 
 ---
 
@@ -1421,7 +1553,7 @@ The ISO is booted **twice** in step 4 — once as `-cdrom`, once as a raw
 
 ### 10.2 The assertions
 
-Gating unless marked. **36 assertions.**
+Gating unless marked. **40 assertions.**
 
 **Artefact (host-side, on the built ISO — no VM):**
 
@@ -1506,6 +1638,18 @@ untested — a seam is exactly where a property gets dropped by both sides.
 |---|---|
 | I36 | Four refusals, each leaving the target disk byte-identical (sha256 of its first 1 MiB before and after): (a) a 20 GiB disk is refused with the arithmetic in the message; (b) an `install.apply` whose `plan_token` does not match is refused `invalid_params`; (c) an answer file whose `confirm_destroy_disk` does not match the serial is refused; (d) `install.apply` from an agent-attributed peer is **denied by the M9 AI path**, with zero bytes written. **And:** the literal recovery key and the literal passphrase appear **zero times** in the live journal, the installed journal, `/var/log/**` and the audit log. |
 
+**The four assertions this document's own body cites and an earlier draft
+never listed** *(added 2026-08-26 — §6.5.1 and §7.2 referenced I37 and I38 in
+prose while the table stopped at I36, and two further properties the design
+depends on had no assertion at all)*:
+
+| # | Assertion |
+|---|---|
+| I37 | **The plan is bound to a disk, not to a device node.** `install.apply` re-reads the target's serial, WWN, `size_bytes` and `existing_gpt_sha256` immediately before the first write and refuses `invalid_params` on any mismatch. Exercised three ways, each leaving the disk byte-identical: (a) the target is swapped for a same-sized blank between `plan` and `apply`; (b) the existing partition table is altered between `plan` and `apply`; (c) the device node is re-enumerated onto different hardware. |
+| I38 | **Foreign-Punar refusal is scoped to *other* disks.** `install.plan` refuses, naming the device, when a **non-target** block device carries any of the four literal PARTUUIDs. `install.plan` **succeeds** when the **target itself** carries them — the ordinary reinstall case. Both directions, because the naive reading of §4.2 bricks reinstallation. |
+| I39 | **The btrfs top level is never mounted.** `findmnt --json` shows no mount of `/dev/mapper/punar-data` without a `subvol=` option; `/etc/fstab` contains no subvol-less entry for it; and `/proc/self/mountinfo` shows the three subvolume mounts with three distinct mount ids and three distinct `st_dev` values. **This is the assertion that makes execution-trust's mount marks sound** — a top-level mount would expose `@home` under a path that no `FAN_MARK_MOUNT` on `/home` covers. §4.3. |
+| I40 | **The recovery-key gate holds.** In the encrypted lane, an `install.apply` that never receives `install.recovery_ack` **does not proceed past `encrypt`**: after a bounded wait `/run/punar/install.json` still reads `awaiting: "recovery_key_ack"`, partition 4 carries a LUKS2 header, and slot A is still zero-filled. In the opt-out lane the gate does not appear and the install runs to completion. §6.5.2. |
+
 I36 is deliberately one assertion with parts, because the parts share a
 fixture and because "the disk was not touched" is the same check five times.
 
@@ -1559,6 +1703,33 @@ Then, in order, because each step is only testable after the one before:
 7. **The firmware and hardware-report content** (§9), which can land in
    parallel with 4–6 and is gated on nothing.
 
+### 11.1 What this does to the milestone programme
+
+The installer is not "M14". It is one small step that belongs **before** M11
+and one large body of work that belongs after M13, and pretending it is a
+single milestone is what makes it look like a six-to-ten-week wall.
+
+| Ships | Work | Where it goes |
+|---|---|---|
+| **Now, ahead of M11** | Step 1 — `repart.d/install/` + `mkosi.repart/`. The dev qcow2 becomes A/B-shaped with separate `/var`, `/home`, `/var/tmp` | **Insert into whatever milestone is open.** It is a config artefact and two assertions. It unblocks `execution-trust.md` V3 and `update-and-rollback.md` A1–A3, both of which are otherwise waiting on an installer that does not exist. Nothing else on this list has that property |
+| **Now, ahead of M11** | Step 2 — the profile split and `mkosi.finalize` A1–A9 | Same milestone. It is the only mechanism that stops the dev-convenience list from growing, and every week it waits the list is longer. It is also `onboarding.md` §4.4 requirement 1 turned into a build failure |
+| **With the update milestone** | Step 3 — the release triple from the ordinary build | Shared. Owned by whichever of update / installer lands first; neither should build it twice |
+| **After M13** | Steps 4–6 — `install.*` in `punard`, ISO assembly, `tools/install-test.sh`, then the QML surface | A milestone of its own. It depends on M13's OOBE layer existing (the installer surface is the same architecture) and on `onboarding.md`'s account model existing (I29–I32 span the seam) |
+| **Parallel, gated on nothing** | Step 7 — firmware and the hardware report | Any time |
+
+**The one ordering claim worth arguing:** the installer must land **after**
+onboarding's account stage, not before. An installer that ships first would
+produce an image with no login-capable account and no first boot to create
+one — an unusable device — so it would have to grow a temporary account, which
+is the dev convenience §8 exists to delete, reintroduced by sequencing. The
+seam assertions I29–I32 are the mechanical statement of that dependency.
+
+**And the one that changes an existing plan:** `DESIGN_LANGUAGE.md` §11
+previously ordered themes → catalog → execution trust. Step 1 above now goes
+in front of all three, because execution trust's own spike list has V3 as a
+hard prerequisite and step 1 is what makes V3 true. That is a one-line
+reordering, not a re-plan.
+
 Steps 1 and 2 are worth starting regardless of when the installer is
 scheduled. Competitive analysis puts the whole of this at 6–10 weeks and
 notes it *"must land after the ADR-003 A/B slot layout"* — with one
@@ -1611,6 +1782,44 @@ designs immediately.
 15. **The install has never been performed by a human**, and every judgement
     in §6 about what a person needs to see is a designer's judgement, not a
     finding.
+16. **No firmware boot entry is written** (§7.3.1), so on a machine with
+    another operating system the user picks Punar from the firmware boot menu
+    on first boot. A deliberate trade, and a real one.
+17. **A freshly installed device has no rollback target.** I17 requires slot B
+    zero-filled, so the A/B mechanism that answers *"the update broke it"* has
+    nothing to answer *"the **first** boot is broken"* with — and §9 Layer 2
+    of `onboarding.md` does not exist either. See §12.1.
+18. **The toolchain claims in §3 are unverified at the pin** (F1–F4, §3.6).
+19. **The `re-read` phase's page-cache defeat is unverified** — `O_DIRECT` on
+    the target block device is the design and the fallback is weaker (§7.3).
+
+### 12.1 The one limit that is a recommendation, not just a disclosure
+
+Limit 17 is the only entry in this list that this document can cheaply fix,
+and `onboarding.md` §1.6.2 makes the case from the other side: on a Punar
+device root is locked, nobody is in `wheel`, and `punard` is the only path to
+privilege — so a `punard` that will not start on a fresh device is
+unrecoverable except by reinstalling, which is a **worse** recovery story than
+the dev image with `RootPassword=punar` that this design deletes.
+
+Two answers exist and they are not exclusive:
+
+1. **Build `punar-recover` and its fourth UKI** (§6.4 requirement 5, currently
+   answered *"room reserved, artefact not built"*). This is the right answer
+   and it is a milestone's worth of work.
+2. **Bless slot B with the same image written to slot A**, at the `boot`
+   phase. The 8 GiB is already allocated and already zero-filled; writing it
+   costs one more pass of the same bounded copy loop and one more UKI on an
+   ESP sized for three. It makes the firmware's own boot menu a working
+   recovery path from the **first** boot rather than the second, and it
+   deletes limit 17 outright.
+
+Option 2 changes assertion **I17**, which currently requires slot B to be
+zero-filled with no UKI — so it is a decision with a test attached and cannot
+be taken quietly. This document **recommends option 2 for the MVP and option 1
+for the first release that ships to anyone outside this repository**, and
+records that the recommendation is not yet a decision: I17 stands as written
+until it is taken.
 
 ---
 
@@ -1662,7 +1871,7 @@ designs immediately.
     fails the build and a check that proves the device — **§8.** ✔
 11. Hardware is answered honestly, including the A/B consequence nobody had
     written down — **§9.** ✔
-12. 36 named, offline, gating assertions, and an explicit list of what they
+12. 40 named, offline, gating assertions, and an explicit list of what they
     cannot prove — **§10.** ✔
 
 ---

@@ -335,12 +335,49 @@ vocabulary.
   consented through the M9 approval engine. Its limits section is written with
   more care than its feature sections, per §7.
 
-**Recommended order, and the reason:** themes first (M13 — smallest surface,
-no daemon, no IPC method, no kernel primitive, and the one item on this list
-that improves the demo); the catalog second (its own workstream, because
+- [`installer.md`](installer.md) — **Installation.** A hybrid UEFI ISO built
+  by the existing pinned pipeline plus one `xorriso` step; the install *is* an
+  update apply, so there is no resolver, no mirror and no network. Owns
+  ADR-003's partition table literally — ESP, two 8 GiB root slots with fixed
+  distinct PARTUUIDs, and a LUKS2 remainder whose three btrfs subvolumes make
+  `/var`, `/home` and `/var/tmp` separate mounts, which is the hard
+  prerequisite `execution-trust.md` V3 names. LUKS2 by default for every
+  device; TPM designed for and deliberately **not** enrolled; the installer
+  creates **no user account at all**.
+- [`onboarding.md`](onboarding.md) — **First boot and the local account
+  model.** What a person *is* on a Punar device: a full name, a permanent
+  POSIX username, a password with a floor and no composition rules, and a
+  device name written through the `system.hostname` capability that already
+  ships. The first account is a **standard user who elevates just in time** —
+  no permanent local administrator, `wheel` granted to nobody, root locked —
+  with a bounded self-service set so the posture does not become a prompt
+  storm. Owns the greeter and the seam with the installer.
+- [`platform-sso.md`](platform-sso.md) — **Directory identity, Phase 2.**
+  Explicitly a trajectory: systemd JSON user records as the substrate, an
+  IdP-specific provider behind a typed interface, RFC 8628 device
+  authorization so no credential surface exists on the machine, and directory
+  groups imported as *entitlements to request* rather than standing grants.
+  Its §6 is the part that binds today — eleven rules on the local account
+  model, all of which `onboarding.md` now answers.
+
+**Recommended order, and the reason** *(revised 2026-08-26, because the
+installer changed the dependency graph)*: **the installer's partition layout
+first** — not the installer, the *layout*, landed into `mkosi.repart/` so the
+dev image becomes A/B-shaped. It is the smallest step on this list and it is
+the one that unblocks two accepted designs at once (`execution-trust.md` V3
+and `update-and-rollback.md` A1–A3), which no amount of work on the other
+entries does. Then themes (smallest surface, no daemon, no IPC method, no
+kernel primitive, and the one item on this list that improves the demo); then
+onboarding, because a real account is the premise the greeter and the whole
+dev-convenience removal rest on; then the catalog (its own workstream, because
 Flatpak is a substrate decision, not polish, and it defines the shared
-`trustTier` / `containment` vocabulary the third entry consumes); execution
-trust last, and only after a standalone `fanotify` spike in the CI VM has
-answered `execution-trust.md` §3.5 V2 and V3. None of the three adds a
-resident process, an enabled unit, or a timer; the combined budget arithmetic
-is in [`execution-trust.md`](execution-trust.md) §13.3.
+`trustTier` / `containment` vocabulary the next entry consumes); then execution
+trust, and only after a standalone `fanotify` spike in the CI VM has answered
+`execution-trust.md` §3.5 V2 — V3 having been answered by step one. `platform-sso.md`
+is Phase 2 and is not in this ordering at all; it appears here only so that its
+§6 constraints are read before the account model is built, not after.
+
+Of these six, only onboarding adds a resident surface (the greeter) and only
+the installer adds a build artefact; none adds a timer or a polling loop, and
+the combined budget arithmetic is in
+[`execution-trust.md`](execution-trust.md) §13.3.
