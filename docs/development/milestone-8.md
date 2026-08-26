@@ -722,6 +722,14 @@ silently missing.
 
 ## 12. In-VM exercise plan — `m8-check`
 
+Assertion style is governed by
+[checks-conventions.md](checks-conventions.md): assert the invariant that
+survives fulfilment, never the placeholder text. Three of this exercise's
+assertions were pinned to M8's own `not_yet_observed` snapshot and to the
+`MILESTONE 10` deferral sentence, and M10 correctly deleted both — the
+fourth, fifth and sixth occurrences of that class. They are now written as
+biconditionals over a probe of the running device.
+
 `/usr/lib/punar/m8-check.sh`, root oneshot (`punar-m8-check.service`,
 **never enabled** — the standing pattern), started synchronously by
 `idle-ram.sh` **after m7-check**; `set -u`, always exits 0; verdict lines

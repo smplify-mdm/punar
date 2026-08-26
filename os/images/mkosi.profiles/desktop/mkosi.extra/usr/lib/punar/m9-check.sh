@@ -828,10 +828,46 @@ jq_check "credential_classes and credential_request LEFT not_yet_observed (their
     '(.not_yet_observed | any(.category == "credential_classes") | not)
      and (.not_yet_observed | any(.category == "credential_request") | not)
      and (.not_yet_observed | any(.category == "policy_bypass_attempt") | not)'
-jq_check "mcp_servers is still named, re-milestoned honestly to M11+ rather than left promising M9" \
+# M9 re-milestoned this row M9+ -> M11+, because M9 shipped a credential
+# broker and not a tool gateway. Re-milestoning is the honest move, and a
+# check that pins the NUMBER makes the honest move break CI — which is what
+# this class of regression is (docs/development/checks-conventions.md). What
+# must hold is that the row is still there, still names A milestone, and
+# still says why. The number is the daemon's business, not this file's.
+# Whether the row belongs there at all is answered by THE DEVICE, not by a
+# milestone literal: if a tool/MCP gateway is installed, the row is a stale
+# promise and must be gone; if none is, the row must be present and honest.
+# Same probe as m8-check; extend the unit list when a gateway is named.
+if [ -f /usr/lib/systemd/system/punar-mcpd.service ] ||
+        [ -f /usr/lib/systemd/system/punar-toolgw.service ] ||
+        [ -f /usr/lib/systemd/system/punar-gateway.service ]; then
+    jq_check "a tool/MCP gateway is installed here, so mcp_servers must no longer claim it has no producer" \
+        "${RUN_DIR}/m9-access.json" \
+        '.not_yet_observed | any(.category == "mcp_servers") | not'
+else
+    jq_check "mcp_servers is still named, with a milestone and a reason (re-milestoning must not break this)" \
+        "${RUN_DIR}/m9-access.json" \
+        '.not_yet_observed | any(.category == "mcp_servers"
+                                 and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                                 and (.reason | length) > 0)'
+fi
+# And the rule the row above is only an instance of: every honesty row this
+# document carries is well-formed. This is the assertion that keeps working
+# when the mcp_servers row itself finally leaves the list.
+# shellcheck disable=SC2016  # $all/$produced/$pending/$cats/$observed/$root
+# and $vocab are JQ variables bound inside the filter; the single shell
+# expansion is deliberately spliced out of the quotes.
+jq_check "every not-yet-observed row names a real category, a milestone token and a reason" \
     "${RUN_DIR}/m9-access.json" \
-    '.not_yet_observed | any(.category == "mcp_servers" and .milestone == "M11+"
-                             and (.reason | length) > 0)'
+    '["credential_classes","directory_zones","mcp_servers","network_destinations",
+      "process_classes","repositories","denied_access","sensitive_resource_access",
+      "privilege_request","production_access","credential_request",
+      "policy_bypass_attempt","unknown_ai_execution"] as $vocab
+     | (.not_yet_observed // []) as $rows
+     | ([$rows[].category] - $vocab | length == 0)
+       and ($rows | all((.level == 3 or .level == 4)
+                        and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                        and ((.reason | length) > 0)))'
 jq_check "the Level-4 events include a credential_request AND the policy_bypass_attempt" \
     "${RUN_DIR}/m9-access.json" \
     '([.summary.security_events[].event_type] | index("credential_request")) != null

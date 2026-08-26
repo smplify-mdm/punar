@@ -155,6 +155,30 @@ audit_count() {
     jq -c "select($1)" "${AUDIT_LOG}" 2>/dev/null | wc -l | tr -d ' '
 }
 
+# --- the producer probe (docs/development/checks-conventions.md) -------------
+# "Does a mediation point for this category exist?" is answered by looking at
+# THIS DEVICE, never by a milestone literal in a check script. The same probe
+# m8-check uses, cut down to the two categories whose producer status can
+# still move for an unmanaged ledger. `repositories` and `credential_classes`
+# are deliberately NOT here: for a detection they are permanent limitations
+# (milestone `none`), not pending producers, so no unit will ever satisfy
+# them and a probe would be the wrong question.
+unit_installed() { [ -f "/usr/lib/systemd/system/$1" ]; }
+
+mediation_present() {
+    case "$1" in
+        # M12: punar-netd is the network mediation point. Absent today.
+        network_destinations) unit_installed punar-netd.service ;;
+        # M11+: no tool/MCP gateway is named yet; these are the candidate
+        # unit names, so the probe answers correctly the day one lands.
+        mcp_servers)
+            unit_installed punar-mcpd.service ||
+                unit_installed punar-toolgw.service ||
+                unit_installed punar-gateway.service ;;
+        *) return 1 ;;
+    esac
+}
+
 # audit_count_from <first-line> <jq select body> — matches in the audit
 # trail from line N onward, so a window can be asserted rather than the
 # whole boot.
@@ -549,12 +573,65 @@ if [ -n "${DETECTION_ID}" ] && [ "${DETECTION_ID}" != "null" ]; then
     jq_check "the Level-4 unknown_ai_execution reference is attached, with an evt_ id" \
         "${RUN_DIR}/m10-detection-summary.json" \
         '[.security_events[] | select(.event_type == "unknown_ai_execution" and (.event_id | test("^evt_")))] | length >= 1'
-    jq_check "repositories, network destinations, credential classes and MCP servers are EMPTY" \
-        "${RUN_DIR}/m10-detection-summary.json" \
-        '(.resources.repositories | length) == 0 and (.resources.network_destinations | length) == 0 and (.resources.credential_classes | length) == 0 and (.resources.mcp_servers | length) == 0'
-    jq_check "every empty category is named as NOT YET OBSERVED with an owning milestone" \
+    # The two PERMANENT limitations of an unmanaged ledger (section 6.3):
+    # nothing granted this process a workspace and /proc/<pid>/cwd is never
+    # read, and punar-secrets mediates managed sessions only. No milestone
+    # ships these, so they are pinned deliberately — including the `none`
+    # sentinel, because "permanently unobservable" and "arriving later" are
+    # exactly the two things a surface must not render alike.
+    jq_check "repositories and credential classes are EMPTY and named as PERMANENT limitations (milestone \"none\"), not as pending producers" \
         "${RUN_DIR}/m10-access.json" \
-        '[.not_yet_observed[] | select(.category == "network_destinations" or .category == "mcp_servers" or .category == "credential_classes" or .category == "repositories")] | length >= 4 and all(.[]; has("milestone"))'
+        '((.summary.resources.repositories | length) == 0)
+         and ((.summary.resources.credential_classes | length) == 0)
+         and ([.not_yet_observed[]
+               | select(.level == 3 and (.category == "repositories"
+                                         or .category == "credential_classes"))]
+              | (length == 2)
+                and all(.milestone == "none" and ((.reason | length) > 0)))'
+    # The two whose producer status can still move. The branch is chosen by
+    # the device, never by a milestone literal: today neither mediation point
+    # is installed, so each must be EMPTY and NAMED; the day one lands, this
+    # flips on its own to demanding the stale honesty row be deleted. That
+    # flip is precisely the edit M10 had to make by hand for
+    # `unknown_ai_execution`, and that no check caught.
+    for category in network_destinations mcp_servers; do
+        if mediation_present "${category}"; then
+            jq_check "${category}: its mediation point is installed here, so the honesty row must be gone" \
+                "${RUN_DIR}/m10-access.json" \
+                '.not_yet_observed | any(.category == "'"${category}"'") | not'
+        else
+            jq_check "${category}: no mediation point on this device, so the detection ledger shows NOTHING and names an owning milestone" \
+                "${RUN_DIR}/m10-access.json" \
+                '((.summary.resources["'"${category}"'"] // []) | length) == 0
+                 and (.not_yet_observed | any(.level == 3
+                        and .category == "'"${category}"'"
+                        and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                        and (.reason | length) > 0))'
+        fi
+    done
+    # And the rule the rows above are instances of, over the whole Level-3
+    # register: a category is named IF AND ONLY IF it is genuinely empty.
+    # Forward, this is spec 1.22 — an unlabelled empty array reads on a
+    # surface as "did not happen". Backward, it is the amendment that makes
+    # the rule survive fulfilment — a category that HAS data may not go on
+    # claiming nothing observes it. Neither direction mentions a milestone
+    # number, so no producer shipping can break it.
+    # shellcheck disable=SC2016  # $all/$root/$pending/$cats are JQ variables
+    # bound inside the filter, not shell expansions.
+    jq_check "the detection's Level-3 register: a category is named as not-yet-observed if and only if it is empty, and no row is bare" \
+        "${RUN_DIR}/m10-access.json" \
+        '["credential_classes","directory_zones","mcp_servers",
+          "network_destinations","process_classes","repositories"] as $all
+         | . as $root
+         | [($root.not_yet_observed // [])[] | select(.level == 3)] as $pending
+         | [$pending[].category] as $cats
+         | (($cats | unique | length) == ($cats | length))
+           and (($cats - $all) | length == 0)
+           and ($pending | all((.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                               and ((.reason | length) > 0)))
+           and ($all | all(. as $c
+                 | ((($root.summary.resources[$c] // []) | length) == 0)
+                   == (($cats | index($c)) != null)))'
     jq_check "retention is the detection window (7 days), not the managed 14" \
         "${RUN_DIR}/m10-access.json" '.retention.days == 7'
     jq_check "the ledger holds no cwd, no cmdline and no path under /home" \

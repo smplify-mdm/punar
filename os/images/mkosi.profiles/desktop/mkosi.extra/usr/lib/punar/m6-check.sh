@@ -74,6 +74,19 @@ jq_check() {
     fi
 }
 
+# grep_re <name> <file> <ERE that must match some line>
+# The shape-matching sibling of grep_row. punar-env's human output is NOT
+# uppercased (that is punarctl's fmt::verdict), so this stays case-sensitive
+# like grep_row below it.
+grep_re() {
+    if grep -qE "$3" "$2" 2>/dev/null; then
+        note "ok   $1"
+    else
+        note "FAIL $1 (no line matching: '$3')"
+        FAILED=1
+    fi
+}
+
 # grep_row <name> <file> <fixed string that must be present>
 grep_row() {
     if grep -qF "$3" "$2" 2>/dev/null; then
@@ -242,38 +255,69 @@ grep_row "status environment row (running)" "${RUN_DIR}/m6-status.txt" \
     "Environment   devcontainer · running · punar-env-atlas"
 grep_row "status workspace row (applied bind mount)" "${RUN_DIR}/m6-status.txt" \
     "Workspace     ${ATLAS} → /workspace · read_write (applied · bind mount)"
-grep_row "status network row (isolated, enforcement milestone)" \
+# The enforcement column's whole vocabulary, in one place. A row may say it is
+# applied, or enforced, or that it is a declaration whose enforcement is still
+# owed — and in that last case it must name the milestone that owes it. Every
+# permissions row below matches THIS, not a milestone number, so the day
+# punar-netd or the broker relabels a row, the edit is here and not in six
+# assertions (docs/development/checks-conventions.md).
+ENFORCE_RE='(applied( \(bind mount\))?|enforced|declared · (enforced( M[0-9]+)?|applied|not realized in M[0-9]+))'
+
+# Milestone-agnostic: the row must say the container is isolated AND state
+# where the declared zones stand — a milestone while enforcement is pending,
+# or plain "enforced" once punar-netd lands. Pinning "M12" here would fail
+# the day M12 ships, for a change that is correct.
+grep_re "status network row (isolated, and the enforcement status of the declared zones is stated)" \
     "${RUN_DIR}/m6-status.txt" \
-    "Network       isolated (M6) · declared zones enforced M12"
+    '^Network +isolated \(M[0-9]+\) · declared zones enforced( M[0-9]+)?$'
 grep_row "toolchains declared header" "${RUN_DIR}/m6-status.txt" \
     "TOOLCHAINS · DECLARED"
 grep_row "toolchain node 24 verbatim" "${RUN_DIR}/m6-status.txt" \
     "  node        24"
 grep_row "toolchain rust stable verbatim" "${RUN_DIR}/m6-status.txt" \
     "  rust        stable"
-grep_row "services declared-not-started header" "${RUN_DIR}/m6-status.txt" \
-    "SERVICES · DECLARED · not started in M6"
+grep_re "services declared-not-started header" "${RUN_DIR}/m6-status.txt" \
+    '^SERVICES · DECLARED · not started( in M[0-9]+)?$'
 grep_row "service postgres declared" "${RUN_DIR}/m6-status.txt" \
     "  postgres    declared"
-grep_row "ai agents declared header (sessions arrive M7)" \
-    "${RUN_DIR}/m6-status.txt" "AI AGENTS · DECLARED · sessions arrive M7"
+grep_re "ai agents declared header (declared, and the milestone that brings sessions is named)" \
+    "${RUN_DIR}/m6-status.txt" '^AI AGENTS · DECLARED · sessions arrive M[0-9]+$'
 grep_row "ai agents row verbatim" "${RUN_DIR}/m6-status.txt" \
     "  claude-code · codex"
-grep_row "permissions filesystem row (the one applied grant)" \
+grep_re "permissions filesystem row (the one applied grant)" \
     "${RUN_DIR}/m6-status.txt" \
-    "  filesystem  project      read_write   applied (bind mount)"
-grep_row "permissions network internet allow" "${RUN_DIR}/m6-status.txt" \
-    "  network     internet     allow        declared · enforced M12"
-grep_row "permissions network corp_dev allow" "${RUN_DIR}/m6-status.txt" \
-    "  network     corp_dev     allow        declared · enforced M12"
-grep_row "permissions network corp_prod deny" "${RUN_DIR}/m6-status.txt" \
-    "  network     corp_prod    deny         declared · enforced M12"
-grep_row "permissions credentials github allow" "${RUN_DIR}/m6-status.txt" \
-    "  credentials github       allow        declared · enforced M9"
-grep_row "permissions credentials aws_dev request" "${RUN_DIR}/m6-status.txt" \
-    "  credentials aws_dev      request      declared · enforced M9"
-grep_row "permissions credentials aws_prod deny" "${RUN_DIR}/m6-status.txt" \
-    "  credentials aws_prod     deny         declared · enforced M9"
+    "^ +filesystem +project +read_write +${ENFORCE_RE}$"
+grep_re "permissions network internet allow" "${RUN_DIR}/m6-status.txt" \
+    "^ +network +internet +allow +${ENFORCE_RE}$"
+grep_re "permissions network corp_dev allow" "${RUN_DIR}/m6-status.txt" \
+    "^ +network +corp_dev +allow +${ENFORCE_RE}$"
+grep_re "permissions network corp_prod deny" "${RUN_DIR}/m6-status.txt" \
+    "^ +network +corp_prod +deny +${ENFORCE_RE}$"
+grep_re "permissions credentials github allow" "${RUN_DIR}/m6-status.txt" \
+    "^ +credentials +github +allow +${ENFORCE_RE}$"
+grep_re "permissions credentials aws_dev request" "${RUN_DIR}/m6-status.txt" \
+    "^ +credentials +aws_dev +request +${ENFORCE_RE}$"
+grep_re "permissions credentials aws_prod deny" "${RUN_DIR}/m6-status.txt" \
+    "^ +credentials +aws_prod +deny +${ENFORCE_RE}$"
+# The rule the six rows above are only instances of, and the one that keeps
+# working when every one of those milestone labels changes: a row that says
+# `declared` must go on to say WHERE the declaration stands. A row ending at
+# the bare word `declared` is the honesty failure — it reads as a granted
+# permission on a surface (spec 1.22). This sweep is what makes a future
+# relabelling of the enforcement column a one-line edit above rather than a
+# CI failure whose cause has to be re-diagnosed.
+# Scoped to the PERMISSIONS grid on purpose: `  postgres    declared` under
+# SERVICES is not bare — its section header carries the status for the whole
+# block ("not started"). A permissions row has no such header to lean on.
+bare_declared="$(sed -n '/^PERMISSIONS/,/^$/p' "${RUN_DIR}/m6-status.txt" 2>/dev/null |
+    grep -E '^ +(filesystem|network|credentials) ' |
+    grep -cE 'declared[[:space:]]*$')"
+if [ "${bare_declared}" = "0" ]; then
+    note "ok   no permissions row renders as a bare 'declared' — every declaration states where its enforcement stands"
+else
+    note "FAIL ${bare_declared} permissions row(s) render as a bare 'declared' with no enforcement status: $(sed -n '/^PERMISSIONS/,/^$/p' "${RUN_DIR}/m6-status.txt" | grep -E '^ +(filesystem|network|credentials) ' | grep -E 'declared[[:space:]]*$' | head -c 200)"
+    FAILED=1
+fi
 if grep -qi 'organization' "${RUN_DIR}/m6-status.txt"; then
     note "FAIL status renders an organization row (unmanaged-first: never)"
     FAILED=1
@@ -287,8 +331,9 @@ jq_check "status --json: shape, state, workspace mode, enforcement labels presen
     "${RUN_DIR}/m6-status.json" \
     '.v == 1 and .project == "atlas" and .container == "punar-env-atlas"
      and .state == "running" and .workspace.mode == "read_write"
-     and .enforcement.network == "M12" and .enforcement.credentials == "M9"
-     and .enforcement.ai == "M7"'
+     and (.enforcement | keys | contains(["ai","credentials","network"]))
+     and (.enforcement | to_entries | all(((.value | type) == "string")
+            and (.value | test("^(M[0-9]+[+]?(/M[0-9]+[+]?)*|enforced|applied)$"))))'
 
 # --- 7. agent launch honesty -------------------------------------------------
 # M7 replaced the stub with a real launcher (milestone-7.md §5): without

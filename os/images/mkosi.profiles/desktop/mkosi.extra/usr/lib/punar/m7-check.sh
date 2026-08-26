@@ -327,18 +327,41 @@ grep_row "launch cites the scope as the attribution mechanism" "${LAUNCH_OUT}" \
     "${SCOPE} · attribution via cgroup"
 grep_row "authority block cites the personal policy (unmanaged-first)" \
     "${LAUNCH_OUT}" "AUTHORITY · WHAT IT MAY ACCESS · POLICY · PERSONAL DEFAULTS"
-grep_re "filesystem row is declared with its M9 enforcement label" \
-    "${LAUNCH_OUT}" '^ +filesystem +project +read_write +declared · M9'
-grep_re "network row is declared with its M12 enforcement label" \
-    "${LAUNCH_OUT}" '^ +network +[a-z_]+ +(allow|deny) +declared · M12'
-grep_re "credentials row is declared with its M9 enforcement label" \
-    "${LAUNCH_OUT}" '^ +credentials +[a-z_]+ +[a-z]+ +declared · M9'
-grep_row "network is declared, not enforced, and the line says so" "${LAUNCH_OUT}" \
-    "NETWORK · DECLARED · enforcement M12"
-grep_row "credentials broker is M9 and the line says so" "${LAUNCH_OUT}" \
-    "CREDENTIALS · DECLARED · M9 secret broker"
-grep_row "tool gateway is M9+ and the line says so" "${LAUNCH_OUT}" \
-    "TOOLS · M9+"
+# The enforcement column's whole vocabulary, in one place — the same
+# conversion as m6-check (docs/development/checks-conventions.md). What each
+# row must do is state WHERE its declaration stands: applied, enforced, or a
+# declaration that names the milestone still owed. Pinning M9/M12 here was a
+# future-milestone placeholder in a check script, and three of the six
+# recorded regressions of this class had exactly that shape.
+ENFORCE_RE='(applied( \(bind mount\))?|enforced|declared · (M[0-9]+[+]?|enforced( M[0-9]+)?|applied))'
+grep_re "filesystem row states where its declaration stands" \
+    "${LAUNCH_OUT}" "^ +filesystem +project +read_write +${ENFORCE_RE}$"
+grep_re "network row states where its declaration stands" \
+    "${LAUNCH_OUT}" "^ +network +[a-z_]+ +(allow|deny) +${ENFORCE_RE}$"
+grep_re "credentials row states where its declaration stands" \
+    "${LAUNCH_OUT}" "^ +credentials +[a-z_]+ +[a-z]+ +${ENFORCE_RE}$"
+# The three closing lines of the section-27 flow. Each must still name the
+# state of the step — declared with the milestone that owes it, or the fact
+# that the step is now real. The milestone NUMBER is not pinned: M9's
+# re-milestoning of the tool gateway (M9+ -> M11+ in the ledger) is precisely
+# the kind of honest correction that used to break a check.
+grep_re "network step names its state, and a milestone if enforcement is still owed" \
+    "${LAUNCH_OUT}" '^NETWORK · (DECLARED · enforcement M[0-9]+[+]?|ENFORCED)'
+grep_re "credentials step names its state, and a milestone if brokering is still owed" \
+    "${LAUNCH_OUT}" '^CREDENTIALS · (DECLARED · M[0-9]+[+]? secret broker|BROKERED)'
+grep_re "tool gateway names the milestone that owns it, or says it mediates now" \
+    "${LAUNCH_OUT}" '^TOOLS · (M[0-9]+[+]?|MEDIATED)'
+# The rule those rows are instances of: no authority row may render as a bare
+# `declared`. That reads as a granted permission on a surface (spec 1.22),
+# and it keeps holding when every label above is relabelled.
+bare_declared="$(grep -cE '^ +(filesystem|network|credentials) .*declared[[:space:]]*$' \
+    "${LAUNCH_OUT}" 2>/dev/null)"
+if [ "${bare_declared}" = "0" ]; then
+    note "ok   no authority row renders as a bare 'declared' — every declaration states where its enforcement stands"
+else
+    note "FAIL ${bare_declared} authority row(s) render as a bare 'declared': $(grep -E '^ +(filesystem|network|credentials) .*declared[[:space:]]*$' "${LAUNCH_OUT}" | head -c 200)"
+    FAILED=1
+fi
 if grep -qi 'organization' "${LAUNCH_OUT}" 2>/dev/null; then
     note "FAIL launch renders organization chrome on an unenrolled device (unmanaged-first: never)"
     FAILED=1
@@ -420,6 +443,26 @@ grep_row "inspect: ledger section is present and honest" \
 # as an empty success (spec 1.22, 21.2). Assert THAT, not the placeholder.
 grep_row "inspect: unproduced ledger categories name their milestone (nothing is faked)" \
     "${RUN_DIR}/m7-inspect.txt" "NOT YET OBSERVED"
+# Strengthened, and still placeholder-free: the milestone has to sit BESIDE
+# the words, in the value a reader's eye lands on — not merely somewhere
+# later in the reason prose. `tr` first, so there is no case trap (M5 lesson)
+# and no reliance on GNU sed's `I` flag.
+# shellcheck disable=SC2018,SC2019  # the ASCII fold is deliberate: these lines
+# carry UTF-8 separators, and `a-z`/`A-Z` folds only single-byte ASCII. The
+# `[:lower:]`/`[:upper:]` classes shellcheck suggests are locale-dependent,
+# and in a single-byte non-C locale they would map bytes >= 0x80 and corrupt
+# the very separators the greps below step over.
+bare_rows="$(tr 'a-z' 'A-Z' < "${RUN_DIR}/m7-inspect.txt" 2>/dev/null |
+    grep -F 'NOT YET OBSERVED' |
+    sed 's/^.*NOT YET OBSERVED//' |
+    cut -c1-60 |
+    grep -cv 'M[0-9]')"
+if [ "${bare_rows}" = "0" ]; then
+    note "ok   inspect: no not-yet-observed row renders bare — every one carries its milestone beside the words"
+else
+    note "FAIL inspect: ${bare_rows} not-yet-observed row(s) render BARE (no milestone beside the words)"
+    FAILED=1
+fi
 as_punar "${CTL}" --json agents inspect "${SID}" \
     > "${RUN_DIR}/m7-inspect.json" 2>/dev/null
 jq_check "inspect --json returns the session row verbatim" \

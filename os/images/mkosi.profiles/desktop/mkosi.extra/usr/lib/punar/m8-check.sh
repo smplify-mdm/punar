@@ -150,9 +150,89 @@ grep_row() {
     fi
 }
 
+# grep_re <name> <file> <ERE> — the same, for a SHAPE rather than a literal.
+# Case-insensitive because fmt::verdict uppercases rendered words (M5 lesson).
+grep_re() {
+    if grep -qiE "$3" "$2" 2>/dev/null; then
+        note "ok   $1"
+    else
+        note "FAIL $1 (no line matching: '$3')"
+        FAILED=1
+    fi
+}
+
 # audit_count <jq select body> — number of audit events matching.
 audit_count() {
     jq -c "select($1)" "${AUDIT_LOG}" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# --- the producer probe (docs/development/checks-conventions.md) -------------
+# "Does a mediation point for this category exist?" is answered by looking at
+# THIS DEVICE, never by a milestone literal in a check script. A check that
+# pins `.milestone == "M12"` dies the day M12 ships — that is five of the six
+# recorded regressions of this class. A check that looks for punar-netd keeps
+# telling the truth in both worlds, and flips, on its own, to demanding the
+# honesty row be REMOVED the moment the producer appears.
+#
+# Extend the case below when a producer ships under a name this list does not
+# know. The residual risk is stated honestly: a producer that ships under an
+# unknown name reads here as absent, and the stale honesty row would then
+# still pass. Nothing in a shell check can close that; the punar-common unit
+# tests that own `not_yet_observed()` are what do.
+unit_installed() { [ -f "/usr/lib/systemd/system/$1" ]; }
+
+producer_present() {
+    case "$1" in
+        # Sampled from the session scope cgroup by punar-agentd (source A).
+        process_classes) unit_installed "${AGENTD_UNIT}" ;;
+        # Derived from the punar-env workspace grant (source C).
+        directory_zones|repositories) [ -x "${ENV_BIN}" ] ;;
+        # M9: punar-secrets is the credential mediation point.
+        credential_classes|credential_request) unit_installed punar-secrets.service ;;
+        # M12: punar-netd is the network mediation point. Absent today.
+        # `sensitive_resource_access` rides the same probe because M12 owns
+        # the mediation that would observe a sensitive zone too. That is a
+        # PROXY, and a coarse one: if M12 lands punar-netd without zone
+        # mediation, this flips early and the group below fails loudly with
+        # the category named, which is a one-line fix here — the opposite of
+        # a stale row passing in silence.
+        network_destinations|production_access|sensitive_resource_access)
+            unit_installed punar-netd.service ;;
+        # M11+: no tool/MCP gateway is named yet; these are the candidate
+        # unit names, so the probe answers correctly the day one lands.
+        mcp_servers)
+            unit_installed punar-mcpd.service ||
+                unit_installed punar-toolgw.service ||
+                unit_installed punar-gateway.service ;;
+        # punard is the authorization and approval mediation point: an
+        # attributed deny, an allowed privilege window and a refused bypass
+        # all come out of it. Present since M3/M9, which is why none of the
+        # three may ever re-enter the pending list.
+        denied_access|privilege_request|policy_bypass_attempt)
+            unit_installed punard.service ;;
+        # M10 is what gave this category a producer: a detection now gets its
+        # own bounded ledger, and the periodic pass that finds one is this
+        # timer. Before M10 the timer did not exist and the honesty row was
+        # required; the day it appeared the row had to go. That flip is the
+        # entire argument for probing the device instead of pinning
+        # "MILESTONE 10" — this probe would have demanded the M10 edit by
+        # itself, in the run that shipped it.
+        unknown_ai_execution) unit_installed punar-agentd-scan.timer ;;
+        *) return 1 ;;
+    esac
+}
+
+# produced_json <category>... — JSON array of those with a live producer.
+produced_json() {
+    present=""
+    for category in "$@"; do
+        if producer_present "${category}"; then
+            present="${present}${category}
+"
+        fi
+    done
+    printf '%s' "${present}" |
+        jq -R -s -c 'split("\n") | map(select(length > 0))'
 }
 
 PUNAR_UID="$(id -u punar 2>/dev/null || echo 1000)"
@@ -344,34 +424,200 @@ jq_check "directory zones are the workspace ZONE only — never a path (spec 21.
 jq_check "the repository is the project NAME from the workspace grant (no git remote is read)" \
     "${RUN_DIR}/m8-access.json" \
     '.summary.resources.repositories == ["atlas"]'
-jq_check "the two producerless categories are EMPTY and each is named with its milestone" \
+# THE LEVEL-3 HONESTY BICONDITIONAL (spec 1.22).
+#
+# This replaces three generations of pinned text. M8 asserted the exact
+# milestone string per category; M9 had to re-milestone `mcp_servers`
+# M9+ -> M11+ and delete the `credential_classes` row; M10 gave
+# `unknown_ai_execution` a producer. Each time, a check that had pinned the
+# placeholder failed for a change that was CORRECT. So this asserts the rule
+# instead, against a producer set read off the device by `producer_present`:
+#
+#   labelled  <=>  no producer exists on this device       (both directions)
+#   labelled   =>  the resource array is empty             (no contradiction)
+#   labelled   =>  a milestone token, and a reason         (no bare deferral)
+#   labelled   =>  the category is one of the shipped six  (closed vocabulary)
+#
+# The forward direction is the M8 rule: an empty category with no mediation
+# point must SAY so, because on a surface an unlabelled empty array reads as
+# "did not happen". The reverse direction is the M9 amendment, and it is what
+# makes this survive fulfilment: the day punar-netd is installed, this
+# assertion stops accepting the `network_destinations` row and demands it be
+# deleted — which is exactly the change M10 had to make by hand for
+# `unknown_ai_execution`, and exactly the change no check caught.
+#
+# `milestone` is a token — `M12`, `M11+` — or the sentinel `none`, which
+# M10's unmanaged ledgers use for a limitation that is permanent rather than
+# pending. Prose ("arrives in a later milestone") is a bare deferral and
+# fails here.
+PRODUCED_L3="$(produced_json credential_classes directory_zones mcp_servers \
+    network_destinations process_classes repositories)"
+note "info level-3 producers installed on this device: ${PRODUCED_L3}"
+# shellcheck disable=SC2016  # $all/$produced/$pending/$cats/$observed/$root
+# and $vocab are JQ variables bound inside the filter; the single shell
+# expansion is deliberately spliced out of the quotes.
+jq_check "every Level-3 category is accounted for: labelled if and only if this device has no producer for it" \
     "${RUN_DIR}/m8-access.json" \
-    '(.summary.resources.network_destinations == [])
-     and (.summary.resources.mcp_servers == [])
-     and (.not_yet_observed | any(.level == 3 and .category == "network_destinations"
-            and .milestone == "M12" and (.reason | length) > 0))
-     and (.not_yet_observed | any(.level == 3 and .category == "mcp_servers"
-            and .milestone == "M11+" and (.reason | length) > 0))'
-# M9 amendment: credential_classes LEFT not_yet_observed because its producer
-# (punar-secrets) shipped. It is empty here for a different reason — THIS
-# session requested no credential — and that is a fact, not a gap. Asserting
-# the absence of the row is what keeps the honesty idiom honest in both
-# directions: a category with a producer must not go on claiming it has none.
-jq_check "credential_classes is empty because this session asked for none, and is NOT claimed as unobservable" \
+    '["credential_classes","directory_zones","mcp_servers",
+      "network_destinations","process_classes","repositories"] as $all
+     | '"${PRODUCED_L3}"' as $produced
+     | . as $root
+     | [($root.not_yet_observed // [])[] | select(.level == 3)] as $pending
+     | [$pending[].category] as $cats
+     | (($cats | unique | length) == ($cats | length))
+       and (($cats - $all) | length == 0)
+       and ($pending | all((.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                           and ((.reason | length) > 0)))
+       and ($all | all(. as $c
+             | (($root.summary.resources[$c] | length) == 0) as $empty
+             | (($cats | index($c)) != null) as $labelled
+             | (($produced | index($c)) != null) as $has
+             | ($labelled == ($has | not))
+               and (($labelled | not) or $empty)))'
+# The same rule again, one category at a time, so a failure names WHICH
+# category and WHICH direction broke rather than just "the rule". The branch
+# is chosen by the device probe, never by a milestone literal — the day a
+# producer is installed, this loop starts demanding the honesty row be gone,
+# which is the M9 credential_classes amendment and the M10
+# unknown_ai_execution amendment made automatic instead of manual.
+for category in credential_classes mcp_servers network_destinations; do
+    if producer_present "${category}"; then
+        jq_check "${category}: its mediation point is installed here, so an empty array is a FACT and the honesty row must be gone" \
+            "${RUN_DIR}/m8-access.json" \
+            '.not_yet_observed | any(.category == "'"${category}"'") | not'
+    else
+        jq_check "${category}: no mediation point on this device, so it is EMPTY and names an owning milestone" \
+            "${RUN_DIR}/m8-access.json" \
+            '((.summary.resources["'"${category}"'"] // []) | length) == 0
+             and (.not_yet_observed | any(.level == 3
+                    and .category == "'"${category}"'"
+                    and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                    and (.reason | length) > 0))'
+    fi
+done
+# Independent of any milestone: THIS session requests no credential, so its
+# credential_classes array is empty as a matter of fact. Kept separate from
+# the row rule above, because "empty because nothing happened" and "empty
+# because nothing can observe it" are the two things spec 1.22 forbids
+# rendering alike.
+jq_check "credential_classes is empty because this session asked for none" \
     "${RUN_DIR}/m8-access.json" \
-    '(.summary.resources.credential_classes == [])
-     and (.not_yet_observed | any(.category == "credential_classes") | not)'
-# Two Level-4 categories have producers in M8 (denied_access from any
-# attributed deny, privilege_request from an allowed mutation); the other
-# FIVE must each be named with a milestone. Seven accounted for, none
-# quietly absent (spec 1.22) — unknown_ai_execution included, because a
-# detection has no registered session to attach a ledger to until M10.
-# M9 amendment: credential_request and policy_bypass_attempt gained
-# producers, so three of the seven remain pending, not five.
-jq_check "the three Level-4 categories with no producer are named too (all seven accounted for)" \
+    '(.summary.resources.credential_classes // []) == []'
+# THE LEVEL-4 REGISTER — the same biconditional, over the same device probe.
+#
+# The failing assertion was
+#   [.not_yet_observed[] | select(.level == 4) | .category] | sort ==
+#     ["production_access","sensitive_resource_access","unknown_ai_execution"]
+# and it was a photograph of M8's pending set, not a rule. M10 gave
+# `unknown_ai_execution` a real producer — a detection now carries its own
+# bounded ledger — so the row correctly left the list and the photograph
+# stopped matching. The pinned set could only ever be right for one
+# milestone.
+#
+# What is asserted instead:
+#
+#   closed vocabulary   nothing outside the shipped seven, on either side
+#   no duplicates       one row per category
+#   disjointness        a category with an event in THIS ledger may not also
+#                       claim it has no producer
+#   no bare deferral    every pending row carries a milestone token + reason
+#   biconditional       pending IF AND ONLY IF this device has no producer
+#   monotone floor      denied_access, privilege_request and the two M9
+#                       categories may never re-enter the pending set — M8
+#                       and M9 produced them, and a producer that regressed
+#                       is not an honesty row, it is a bug
+#   non-vacuous         at least one category is actually observed here
+#
+# The biconditional is the half that survives fulfilment AND keeps the old
+# assertion's strength. Forward: an unproduced category may not go missing —
+# deleting the `production_access` row while punar-netd is still absent fails
+# here, exactly as it failed under the pinned set. Reverse: a produced
+# category may not go on claiming it has none — which is the M10 edit,
+# demanded automatically instead of discovered by a red CI run.
+PRODUCED_L4="$(produced_json denied_access sensitive_resource_access \
+    privilege_request production_access credential_request \
+    policy_bypass_attempt unknown_ai_execution)"
+note "info level-4 producers installed on this device: ${PRODUCED_L4}"
+# shellcheck disable=SC2016  # $all/$produced/$pending/$cats/$observed/$root
+# and $vocab are JQ variables bound inside the filter; the single shell
+# expansion is deliberately spliced out of the quotes.
+jq_check "every Level-4 category is accounted for: pending if and only if this device has no producer, never both, never bare" \
     "${RUN_DIR}/m8-access.json" \
-    '[.not_yet_observed[] | select(.level == 4) | .category] | sort ==
-     ["production_access","sensitive_resource_access","unknown_ai_execution"]'
+    '["denied_access","sensitive_resource_access","privilege_request",
+      "production_access","credential_request","policy_bypass_attempt",
+      "unknown_ai_execution"] as $all
+     | '"${PRODUCED_L4}"' as $produced
+     | . as $root
+     | [($root.not_yet_observed // [])[] | select(.level == 4)] as $pending
+     | [$pending[].category] as $cats
+     | ([($root.summary.security_events // [])[].event_type] | unique) as $observed
+     | (($cats | unique | length) == ($cats | length))
+       and (($cats - $all) | length == 0)
+       and (($observed - $all) | length == 0)
+       and (($observed | length) >= 1)
+       and (($cats - $observed) == $cats)
+       and ($pending | all((.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                           and ((.reason | length) > 0)))
+       and ($all | all(. as $c
+             | (($cats | index($c)) != null) == (($produced | index($c)) == null)))
+       and (($cats - ["production_access","sensitive_resource_access",
+                      "unknown_ai_execution","credential_request",
+                      "policy_bypass_attempt"]) | length == 0)'
+# The same rule again, one category at a time, so a failure names WHICH
+# category and WHICH direction broke. Only the categories whose producer
+# status can move are looped; denied_access and privilege_request are
+# produced by this very exercise and are covered by the monotone floor above.
+for category in credential_request policy_bypass_attempt production_access \
+        sensitive_resource_access unknown_ai_execution; do
+    if producer_present "${category}"; then
+        jq_check "${category}: its producer is installed here, so the honesty row must be gone" \
+            "${RUN_DIR}/m8-access.json" \
+            '[.not_yet_observed[] | select(.level == 4 and .category == "'"${category}"'")] | length == 0'
+    else
+        jq_check "${category}: no producer on this device, so it is NAMED with an owning milestone and a reason" \
+            "${RUN_DIR}/m8-access.json" \
+            '.not_yet_observed | any(.level == 4
+                    and .category == "'"${category}"'"
+                    and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
+                    and (.reason | length) > 0)'
+    fi
+done
+note "info the seven Level-4 categories are accounted for by a rule, not by a snapshot of the pending set. denied_access and privilege_request are produced HERE (groups 7 and 8). credential_request and policy_bypass_attempt are produced by punar-secrets and the approval refusal, and m9-check exercises both. unknown_ai_execution is produced by a detection's own bounded ledger, and m10-check exercises it. The branch above is chosen by which mediation unit is installed on this device, never by a milestone literal, so it flips on its own the day a producer lands. Residual risk, stated plainly: a producer that ships under a unit name producer_present does not know reads here as absent, and a stale honesty row would then still pass. No shell check can close that; the punar-common unit tests that own not_yet_observed() are what do."
+# The same rule, one layer up: the RENDERED surface. The jq assertions above
+# prove the document is honest; this proves the honesty survives rendering.
+# A row that reaches a human as a bare "Not yet observed" with no milestone
+# beside it is the failure mode spec 1.22 is about, and it is a rendering bug
+# the document-level checks cannot see.
+as_punar "${CTL}" agents access "${SID}" > "${RUN_DIR}/m8-access.txt" 2>&1
+check_true "punarctl agents access (human) as the session owner" "$?"
+grep_row "the rendered ledger names the Level-3 register" \
+    "${RUN_DIR}/m8-access.txt" "LEDGER · WHAT IT ACCESSED"
+grep_re "the rendered ledger names at least one not-yet-observed category WITH its milestone" \
+    "${RUN_DIR}/m8-access.txt" 'NOT YET OBSERVED.*M[0-9]+'
+# The milestone has to sit BESIDE the words, in the value the eye lands on —
+# not merely somewhere later in the reason prose, which is why this looks at
+# the 60 characters that follow the phrase rather than at the whole line.
+# `tr` first, so there is no case-sensitivity trap (M5 lesson) and no reliance
+# on GNU sed's `I` flag.
+# shellcheck disable=SC2018,SC2019  # the ASCII fold is deliberate: these lines
+# carry UTF-8 separators, and `a-z`/`A-Z` folds only single-byte ASCII. The
+# `[:lower:]`/`[:upper:]` classes shellcheck suggests are locale-dependent,
+# and in a single-byte non-C locale they would map bytes >= 0x80 and corrupt
+# the very separators the greps below step over.
+nyo_tails="$(tr 'a-z' 'A-Z' < "${RUN_DIR}/m8-access.txt" 2>/dev/null |
+    grep -F 'NOT YET OBSERVED' |
+    sed 's/^.*NOT YET OBSERVED//' |
+    cut -c1-60)"
+# `printf '%s'` and not '%s\n': with no not-yet-observed rows at all — the
+# world where every producer has shipped — the variable is empty and this
+# must count ZERO bare rows, not one empty one.
+bare_rows="$(printf '%s' "${nyo_tails}" | grep -cv 'M[0-9]')"
+if [ "${bare_rows}" = "0" ]; then
+    note "ok   no not-yet-observed row renders bare — every one carries its milestone beside the words"
+else
+    note "FAIL ${bare_rows} not-yet-observed row(s) render BARE (no milestone beside the words): $(printf '%s' "${nyo_tails}" | grep -v 'M[0-9]' | head -c 200)"
+    FAILED=1
+fi
 jq_check "every entry carries a real count, an ordered first/last seen, and a NAMED mediation point" \
     "${RUN_DIR}/m8-access.json" \
     '(.detail.entries | length) >= 1
@@ -535,22 +781,72 @@ grep_row "privacy ledger: gives the exact delete command" \
     "${RUN_DIR}/m8-privacy.txt" "PUNARCTL PRIVACY PURGE"
 grep_row "privacy ledger: says the audit trail is separate and survives a purge" \
     "${RUN_DIR}/m8-privacy.txt" "AUDIT TRAIL"
-grep_row "privacy ledger: states that no remote query path exists yet" \
-    "${RUN_DIR}/m8-privacy.txt" "MILESTONE 10"
+# THE REMOTE-QUERY ROW. M8 pinned the literal "MILESTONE 10" here, because
+# in M8 no remote-query path existed and the surface said so with the
+# milestone that would build it. M10 built it, the placeholder was correctly
+# replaced by the live line, and this assertion failed for a change that was
+# right. The invariant M8 was actually protecting is section 24.2's: the
+# privacy surface must always state WHAT CAN LEAVE THE DEVICE, whatever the
+# current truth is. So assert the row exists, is not blank, and says one of
+# the three honest things — the path does not exist yet and here is the
+# milestone that owns it; no organization is enrolled so there is no path at
+# all; or the path exists and here is the command that shows you every use of
+# it. A blank row, a missing row, or an unexplained value fails.
+grep_re "privacy ledger: the REMOTE QUERY row exists and is not blank" \
+    "${RUN_DIR}/m8-privacy.txt" '^REMOTE QUERY +[^[:space:]]'
+grep_re "privacy ledger: the REMOTE QUERY row states what can leave the device (a milestone, or no path, or the command that reads the record)" \
+    "${RUN_DIR}/m8-privacy.txt" \
+    '^REMOTE QUERY +.*(MILESTONE [0-9]+|NO REMOTE-QUERY PATH|PUNARCTL PRIVACY QUERIES)'
 as_punar "${CTL}" --json privacy ledger > "${RUN_DIR}/m8-privacy.json" 2>/dev/null
-jq_check "privacy ledger --json parses and names itself a COMPOSED local document" \
+# Same conversion in the machine surface. `available == false` was a pin on
+# M8's own answer; the durable property is that the block SELF-DESCRIBES:
+# when there is no path it says WHY — the milestone that will build one, or
+# the reason it could not be read — and when there is a path it names the
+# command that reads its log. Either way a consumer can tell "nothing can
+# leave" from "something can, here is how you audit it", which is the whole
+# point of the field. The unavailable branch accepts `milestone` OR `reason`
+# because both are shapes this codebase actually produces (main.rs
+# privacy_ledger_json fails closed to a `reason` when the daemon does not
+# answer); what it refuses is a bare `{"available": false}` — an unexplained
+# false is the silent middle spec 1.22 forbids.
+#
+# The available branch refuses the SAME silent middle wearing the opposite
+# mask: `available: true` with a null log and no reason would claim a path
+# exists while showing nothing and explaining nothing. The shipped code never
+# emits that — its no-answer branch always carries `read: false` and a
+# `reason` — so requiring a non-null log OR a reason costs nothing today and
+# closes the hole for good.
+jq_check "privacy ledger --json parses, names itself a COMPOSED local document, and self-describes the remote-query path" \
     "${RUN_DIR}/m8-privacy.json" \
-    '(.source | test("composed"))
+    '((.source // "") | test("composed"))
      and .local_only == true
-     and .remote_query.available == false
-     and .audit_trail_separate == true'
+     and .audit_trail_separate == true
+     and (((.storage_path // "") | length) > 0)
+     and ((.remote_query | type) == "object")
+     and ((.remote_query.available | type) == "boolean")
+     and (if .remote_query.available
+          then (.remote_query | has("log"))
+               and ((.remote_query.command // "") | test("privacy queries"))
+               and ((.remote_query.log != null)
+                    or (((.remote_query.reason // "") | length) > 0))
+          else ((.remote_query.milestone // "")
+                 | test("^M[0-9]+[+]?(/M[0-9]+[+]?)*$"))
+               or (((.remote_query.reason // "") | length) > 0)
+          end)'
 # The M12 verb users will type anyway: reserved honestly, never silently.
+# The milestone number is not pinned — re-milestoning is the honest move and
+# must not break this — and the shipped branch is accepted too, so the day
+# the verb becomes real this still passes for the right reason: it renders a
+# real view instead of refusing. What stays forbidden in both worlds is the
+# silent middle: exiting 0 with nothing, or refusing without naming when.
 probe_out="$(as_punar "${CTL}" privacy connections 2>&1)"
 rc=$?
-if [ "${rc}" -ne 0 ] && printf '%s' "${probe_out}" | grep -qi 'milestone 12'; then
-    note "ok   punarctl privacy connections names Milestone 12 and refuses (exit ${rc})"
+if [ "${rc}" -ne 0 ] && printf '%s' "${probe_out}" | grep -qiE 'milestone [0-9]+'; then
+    note "ok   punarctl privacy connections is reserved honestly: it refuses (exit ${rc}) and names the milestone that owns it"
+elif [ "${rc}" -eq 0 ] && printf '%s' "${probe_out}" | grep -qF 'P U N A R'; then
+    note "ok   punarctl privacy connections has shipped and renders a real view (exit 0, masthead present)"
 else
-    note "FAIL privacy connections (exit ${rc}): $(printf '%s' "${probe_out}" | head -c 200)"
+    note "FAIL privacy connections neither refuses with a milestone nor renders a view (exit ${rc}): $(printf '%s' "${probe_out}" | head -c 200)"
     FAILED=1
 fi
 
@@ -834,7 +1130,7 @@ fi
 
 # --- 17. stated gaps (spec 1.22) ---------------------------------------------
 note "info cross-user denial (user B may neither read nor purge user A's ledger) is NOT proven in-VM: this image has one interactive user and no tool to forge peer credentials, by design. It is proven by punar-agentd's host integration tests with the fixed-Peer harness (tests/ledger.rs), the same honest-gap pattern m7-check used for the peer-credential denial path."
-note "info network destinations and MCP servers are absent because no mediation point observes them yet — punar-netd is M12 and no tool/MCP gateway exists (re-milestoned M11+ in M9, because Milestone 9 shipped a credential broker and not a gateway). Group 6 requires each absence to be LABELLED, which is the assertion that keeps an empty array from reading as 'did not happen'. Credential classes are absent for a DIFFERENT reason since M9: the producer exists (punar-secrets) and this session simply asked for no credential — group 6 asserts that its honesty row is gone, and m9-check asserts the row fills in for a session that does use one."
+note "info group 6 does not assert WHICH categories are unobservable — it asserts the RULE, in both directions, against the mediation units actually installed on this device (the produced sets are printed above as info lines, so the report says which world it ran in). An empty array with no producer must be LABELLED, which is what keeps it from reading as 'did not happen'; an empty array WITH a producer must NOT be labelled, which is what stops a shipped milestone being quietly denied. Credential classes are the second case since M9: punar-secrets exists and this session simply asked for no credential, so its honesty row must be gone — m9-check asserts the row's contents fill in for a session that does use one. The milestone numbers themselves live in punar_common::ledger::not_yet_observed and in its unit tests; this file deliberately contains none."
 note "info process classes are sampled at scan points. A child that lives and dies between two passes is missed, and process_peak is peak CONCURRENT pids, never a spawn total. Spawn-accurate history would need exactly the broad tracing SPEC 1.14 forbids."
 
 # --- verdict -----------------------------------------------------------------
