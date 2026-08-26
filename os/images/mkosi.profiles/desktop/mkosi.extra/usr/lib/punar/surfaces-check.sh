@@ -141,13 +141,39 @@ note "ok   punar-shell IPC answering"
 # One empty-desktop frame kept as context for a human reading the artifacts.
 # The ASSERTION each surface is held to uses its own before/after pair taken
 # around that surface's open, not this one.
+# The real bindings are Hyprland `exec` actions whose command is the same
+# `qs ... ipc call <surface> toggle` used below.  Re-enter that path through
+# Hyprland rather than calling the surface directly.  The checker adds one
+# `hyprctl dispatch` client that a physical key does not; measure that control
+# round trip five times and record the largest observed cost instead of hiding
+# it in the surface number.
+dispatch_probe_max_ms=0
+dispatch_probe_i=0
+while [ "${dispatch_probe_i}" -lt 5 ]; do
+    dispatch_probe_start_ms="$(date +%s%3N)"
+    hyprctl dispatch exec true >/dev/null 2>&1
+    dispatch_probe_ms="$(($(date +%s%3N) - dispatch_probe_start_ms))"
+    if [ "${dispatch_probe_ms}" -gt "${dispatch_probe_max_ms}" ]; then
+        dispatch_probe_max_ms="${dispatch_probe_ms}"
+    fi
+    dispatch_probe_i=$((dispatch_probe_i + 1))
+done
+# Let the five no-op shells leave the scheduler before the first measurement.
+sleep 1
+
 {
-    echo "# Surface open latency, milliseconds, measured in the CI VM under KVM."
-    echo "# open_ms = request -> the shell's state() reports open (shell responsiveness)"
-    echo "# map_ms  = request -> the compositor has a mapped layer (what a person sees)"
-    echo "# Each poll spawns a process, so a few ms of spawn cost sits inside every"
-    echo "# figure: these are an UPPER BOUND on the surface's own cost."
-    printf '# surface\topen_ms\tmap_ms\n'
+    echo "# Surface-open latency in the CI VM under KVM, milliseconds."
+    echo "# Path: checker -> Hyprland exec -> configured qs IPC toggle -> show()"
+    echo "#       -> Hyprland openlayer -> Quickshell socket2 rawEvent."
+    echo "# dispatch_ms = checker starts Hyprland dispatch -> show() begins."
+    echo "# shell_map_ms = show() begins -> shell receives openlayer; both timestamps"
+    echo "#                come from Date.now() inside the long-lived shell."
+    echo "# total_ms = dispatch_ms + shell_map_ms."
+    echo "# No polling client or process runs inside shell_map_ms. Its clock"
+    echo "# quantization uncertainty is <2 ms (two 1 ms timestamps)."
+    echo "# dispatch_ms and total_ms include one checker-only hyprctl client."
+    echo "# Largest observed hyprctl dispatch round trip in 5 probes: ${dispatch_probe_max_ms} ms."
+    printf '# surface\tdispatch_ms\tshell_map_ms\ttotal_ms\n'
 } > /run/punar/surfaces-latency.txt
 
 BASELINE_BYTES=""
@@ -163,52 +189,75 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
 
-    # HOW FAST DOES IT FEEL. Speed is table stakes for this desktop and the
-    # number was entirely unmeasured — the paint line below reports whole
-    # seconds because that is this script's poll granularity, not because
-    # anything took a second. Two spans are timed here with millisecond
-    # resolution, both from the moment the request leaves us:
-    #
-    #   open_ms   -> the shell's own state() flips. Shell responsiveness.
-    #   map_ms    -> the compositor has a mapped layer. What a person sees.
-    #
-    # INSTRUMENT OVERHEAD, STATED: each poll spawns `qs ipc call` or
-    # `hyprctl -j layers`, so a few milliseconds of process spawn are inside
-    # every number. These are therefore an UPPER BOUND on the surface's own
-    # cost, which is the honest direction for a latency figure to err in.
-    t_start_ns="$(date +%s%N)"
-    ipc "${t}" open >/dev/null 2>&1
-    open_ms=""
-    map_ms=""
-    spin=0
-    while [ "${spin}" -lt 1500 ]; do
-        if [ -z "${open_ms}" ] && [ "$(sstate "${t}")" = "open" ]; then
-            open_ms="$((($(date +%s%N) - t_start_ns) / 1000000))"
-        fi
-        if [ -n "${open_ms}" ] && layer_mapped "punar-${t}"; then
-            map_ms="$((($(date +%s%N) - t_start_ns) / 1000000))"
-            break
-        fi
-        spin=$((spin + 1))
-    done
+    # HOW FAST DOES IT FEEL.  Start before asking Hyprland to execute the
+    # surface's configured command.  show() and the compositor's openlayer
+    # event are timestamped inside punar-shell by SurfaceTiming, so the
+    # checker does not poll — or spawn anything — inside the surface interval.
+    t_start_ms="$(date +%s%3N)"
+    hyprctl dispatch exec "${SHELL_CMD} ipc call ${t} toggle" >/dev/null 2>&1
 
-    if [ -n "${open_ms}" ]; then
-        note "ok   ${t}.open -> open in ${open_ms} ms"
+    # A healthy surface maps well inside this second.  Waiting once keeps the
+    # timing interval free of checker processes.  The slow-path waits below
+    # preserve the functional 15-second assertion, but no latency is inferred
+    # from those poll times: the shell's two event timestamps remain the only
+    # timing source.
+    sleep 1
+    state_after="$(sstate "${t}")"
+    if [ "${state_after}" = "open" ]; then
+        note "ok   ${t}.toggle through Hyprland -> open"
+    elif wait_for 14 t_open "${t}"; then
+        note "ok   ${t}.toggle through Hyprland -> open after the 1s measurement window"
     else
-        note "FAIL ${t}.open did not reach state=open (got '$(sstate "${t}")')"
+        note "FAIL ${t}.toggle through Hyprland did not reach state=open (got '${state_after}')"
         FAILED=1
     fi
 
     # The surface must have a MAPPED WINDOW, not merely a flag set. state()
     # reads root.open; the window is bound to root.windowVisible. Asserting the
     # compositor's own layer list closes that gap.
-    if [ -n "${map_ms}" ]; then
-        note "ok   ${t} mapped a layer-shell surface (punar-${t}) in ${map_ms} ms"
-        printf '%s\t%s\t%s\n' "${t}" "${open_ms}" "${map_ms}" >> /run/punar/surfaces-latency.txt
+    if layer_mapped "punar-${t}" || wait_for 14 layer_mapped "punar-${t}"; then
+        note "ok   ${t} mapped a layer-shell surface (punar-${t})"
     else
         note "FAIL ${t} reports open but the compositor has no punar-${t} layer — the flag is set and nothing is on screen"
         FAILED=1
     fi
+
+    timing="$(ipc "${t}" latency | tr -d '[:space:]\"')"
+    case "${timing}" in
+        *','*)
+            opened_at_ms="${timing%%,*}"
+            mapped_at_ms="${timing#*,}"
+            case "${opened_at_ms}" in
+                ''|*[!0-9]*) timestamps_valid=no ;;
+                *) timestamps_valid=yes ;;
+            esac
+            case "${mapped_at_ms}" in
+                ''|*[!0-9]*) timestamps_valid=no ;;
+            esac
+            case "${timestamps_valid}" in
+                no)
+                    note "FAIL ${t}.latency returned malformed timestamps '${timing}'"
+                    FAILED=1
+                    ;;
+                yes)
+                    dispatch_ms="$((opened_at_ms - t_start_ms))"
+                    shell_map_ms="$((mapped_at_ms - opened_at_ms))"
+                    total_ms="$((mapped_at_ms - t_start_ms))"
+                    if [ "${dispatch_ms}" -lt 0 ] || [ "${shell_map_ms}" -lt 0 ]; then
+                        note "FAIL ${t}.latency clocks ran backwards ('${timing}', trigger ${t_start_ms})"
+                        FAILED=1
+                    else
+                        note "ok   ${t} Hyprland-to-layer path ${total_ms} ms (${dispatch_ms} dispatch + ${shell_map_ms} shell-to-map)"
+                        printf '%s\t%s\t%s\t%s\n' "${t}" "${dispatch_ms}" "${shell_map_ms}" "${total_ms}" >> /run/punar/surfaces-latency.txt
+                    fi
+                    ;;
+            esac
+            ;;
+        *)
+            note "FAIL ${t}.latency has no internal openlayer sample (got '${timing}')"
+            FAILED=1
+            ;;
+    esac
 
     # A surface that reports open and draws nothing looks identical from here,
     # and state() cannot tell the difference. grim is the cheapest evidence

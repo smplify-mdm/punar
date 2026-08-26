@@ -246,19 +246,38 @@ neither is what a person feels minute to minute. **Opening a surface is.** That
 number did not exist: the surfaces exercise reported "painted pixels after 1s"
 and the 1 was its poll granularity, not a measurement.
 
-`surfaces-check.sh` now times two spans per surface at millisecond resolution,
-both from the moment the request leaves the checker, and writes
-`surfaces-latency.txt`:
+The first instrument reported 112–240 ms, but those numbers are not suitable
+for a lazy-load decision. It repeatedly spawned `qs ipc call` and `hyprctl -j
+layers` while the clock was running, so the checker competed with the surface
+and the amount of added work varied by sample.
+
+One premise in the follow-up diagnosis was also wrong: **a physical keypress
+does spawn `qs`**. Every relevant Hyprland bind is an `exec` of the same `qs
+ipc call <surface> toggle` command the checker uses. The process in that path
+is product cost; the repeated polling processes are instrument cost. They must
+not be confused.
+
+The replacement re-enters the configured command through Hyprland and writes
+three spans to `surfaces-latency.txt`:
 
 | Column | What it is |
 |---|---|
-| `open_ms` | request → the shell's `state()` reports open — **shell responsiveness** |
-| `map_ms` | request → the compositor has a mapped layer — **what a person sees** |
+| `dispatch_ms` | checker starts `hyprctl dispatch exec` → the surface's `show()` begins |
+| `shell_map_ms` | `show()` begins → Quickshell receives Hyprland's `openlayer` event |
+| `total_ms` | the two spans above added together |
 
-**The instrument is inside the number.** Each poll spawns `qs ipc call` or
-`hyprctl -j layers`, so a few milliseconds of process-spawn cost sit in every
-figure. These are an **upper bound** on the surface's own cost — the honest
-direction to err, because it can only make the desktop look slower than it is.
+`shell_map_ms` is the decision-quality number: both endpoints are `Date.now()`
+timestamps in the already-running shell. `SurfaceTiming.qml` listens to the
+Hyprland socket2 stream Quickshell already consumes, so **no poll, client or
+process runs inside that interval**. Its clock quantisation uncertainty is
+less than 2 ms (two timestamps with 1 ms resolution).
+
+`dispatch_ms` and `total_ms` intentionally retain one checker-only cost: the
+`hyprctl` client used to re-enter Hyprland. The report calibrates it at runtime
+with five `hyprctl dispatch exec true` probes and records the largest observed
+round trip. A physical chord omits that client, then follows the same Hyprland
+`exec` → `qs` → shell path. The report names the boundary instead of subtracting
+a noisy estimate.
 
 **No threshold is gated yet, on purpose.** There is no basis for one until the
 first numbers exist, and picking a limit before measuring is exactly how idle
@@ -283,7 +302,8 @@ trading one stated requirement for another. The two are only in conflict if
 first-open cost is perceptible, and **nobody has measured it**. So the order is:
 
 1. **Measure the construction cost per surface.** `surfaces-check.sh` now times
-   `open_ms` and `map_ms` (see above), but every surface is currently eager, so
+   `dispatch_ms` and `shell_map_ms` (see above), but every surface is currently
+   eager, so
    those numbers are *dispatch* latency, not *construction* latency. The
    measurement that decides this is what a surface costs to build the first
    time — and what it holds resident once built.
@@ -300,7 +320,7 @@ constrained device classes and speed wins on capable ones** — which is exactly
 what [`docs/design/device-classes.md`](../../docs/design/device-classes.md)
 exists to express, and is a better answer than one global setting.
 
-**Nothing here is implemented yet.** The measurement in step 1 is the next
-piece of work, and this note exists so the withdrawal above is not read as a
-settled decision.
-
+**The dispatch instrument is implemented; construction and resident-cost
+measurement are not.** Do not lazy-load from the historical 112–240 ms figures.
+The next CI artifact establishes the corrected eager baseline; then the
+measurement in step 1 is the next piece of work.

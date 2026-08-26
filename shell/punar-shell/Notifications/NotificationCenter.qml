@@ -470,6 +470,8 @@ Scope {
     // ---- surface ----
 
     function show(): void {
+        if (!root.open)
+            SurfaceTiming.begin("notifications");
         hideTimer.stop();
         // One-shot re-reads: they cover a register whose file did not exist
         // when the watch was armed (a daemon started after the shell). An
@@ -515,6 +517,9 @@ Scope {
         }
         function state(): string {
             return root.open ? "open" : "closed";
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("notifications");
         }
 
         // ---- read-only probes (the alerts/approval/aipanel precedent) ----

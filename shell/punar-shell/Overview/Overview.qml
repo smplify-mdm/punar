@@ -77,6 +77,8 @@ Scope {
     }
 
     function show() {
+        if (!root.open)
+            SurfaceTiming.begin("overview");
         // On-demand refresh — the one moment geometry is (re)fetched
         // (milestone-2.md §5; PERFORMANCE_BUDGETS.md: renders on demand).
         Hyprland.refreshWorkspaces();
@@ -118,6 +120,9 @@ Scope {
         // Read-only, for the m2-exercise CI check.
         function state(): string {
             return root.open ? "open" : "closed";
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("overview");
         }
     }
 

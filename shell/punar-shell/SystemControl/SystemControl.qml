@@ -529,6 +529,8 @@ Scope {
     // ---------------------------------------------------------------
 
     function show(): void {
+        if (!root.open)
+            SurfaceTiming.begin("systemcontrol");
         hideTimer.stop();
         root.windowVisible = true;
         root.open = true;
@@ -569,6 +571,9 @@ Scope {
         // Read-only, for CI probes (the `overview` / `aipanel` precedent).
         function state(): string {
             return root.open ? "open" : "closed";
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("systemcontrol");
         }
     }
 

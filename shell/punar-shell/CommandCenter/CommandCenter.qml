@@ -88,6 +88,8 @@ Scope {
     }
 
     function show(): void {
+        if (!root.open)
+            SurfaceTiming.begin("commandcenter");
         hideTimer.stop();
         root.windowVisible = true;
         root.open = true;
@@ -135,6 +137,11 @@ Scope {
             if (!root.open)
                 return "closed";
             return root.explainPath !== "" ? "explain" : "open";
+        }
+        // Read-only timing probe; both timestamps are recorded inside the
+        // long-lived shell, never by a polling client.
+        function latency(): string {
+            return SurfaceTiming.sample("commandcenter");
         }
         // The §40 answer's own state: "none" or "<phase> · <path>", where
         // phase is asking / answered / failed.

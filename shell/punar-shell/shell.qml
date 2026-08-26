@@ -59,7 +59,10 @@ ShellRoot {
     // restores stored workspace names via `renameworkspace` dispatches and
     // persists renames/preset changes to ~/.local/state/punar/workspaces.json
     // (milestone-2.md §6).
-    Component.onCompleted: WorkspaceState.init()
+    Component.onCompleted: {
+        WorkspaceState.init();
+        SurfaceTiming.init();
+    }
 
     // ── THE FIELD ────────────────────────────────────────────────────────
     // One background layer window per output (Plate D-015 Sect V.03). Zero

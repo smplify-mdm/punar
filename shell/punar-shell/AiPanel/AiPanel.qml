@@ -962,6 +962,8 @@ Scope {
     }
 
     function show(): void {
+        if (!root.open)
+            SurfaceTiming.begin("aipanel");
         hideTimer.stop();
         root.windowVisible = true;
         root.open = true;
@@ -1074,6 +1076,9 @@ Scope {
         // Read-only, for the m7-check CI probe (the `overview` precedent).
         function state(): string {
             return root.open ? "open" : "closed";
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("aipanel");
         }
     }
 

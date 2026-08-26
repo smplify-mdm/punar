@@ -64,6 +64,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import "../Services"
 import "../Theme"
 
 Scope {
@@ -90,6 +91,8 @@ Scope {
     }
 
     function show(): void {
+        if (!root.open)
+            SurfaceTiming.begin("shortcuts");
         // The one query per session, lazily, on first open.
         table.ensure();
         hideTimer.stop();
@@ -128,6 +131,9 @@ Scope {
         // Read-only probe (the `overview` / `aipanel` precedent).
         function state(): string {
             return root.open ? "open" : "closed";
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("shortcuts");
         }
         // The manual half of the invalidation policy: `configreloaded`
         // drops the cache on its own, and this is here for a human who
