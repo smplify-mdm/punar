@@ -984,6 +984,28 @@ grep_row "the personal-mode sentence explains the absence" \
     "${RUN_DIR}/m10-privacy-personal.txt" "personal device"
 
 # --- 11. the purge boundary --------------------------------------------------
+# Ownership is read BEFORE the purge, because the purge is precisely what removes
+# the punar-owned rows. Reading the index afterwards found only root-owned
+# detections and the vacuity guard below correctly refused to pass — the guard
+# working, and the ordering wrong.
+punar_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "punar") | .key) // ""' \
+    "${DETECTIONS_INDEX}" 2>/dev/null)"
+root_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "root") | .key) // ""' \
+    "${DETECTIONS_INDEX}" 2>/dev/null)"
+note "info purge scope probes (taken BEFORE the purge): punar-owned='${punar_det:-none}' root-owned='${root_det:-none}'"
+
+# Both rows must still be READABLE before the purge, or the assertions below
+# would be testing an already-empty store.
+if [ -n "${punar_det}" ]; then
+    "${CTL}" agents access "${punar_det}" > "${RUN_DIR}/m10-access-prepurge.txt" 2>&1
+    if grep -qi 'purged' "${RUN_DIR}/m10-access-prepurge.txt" 2>/dev/null; then
+        note "FAIL the punar-owned ledger already read as purged BEFORE the purge — the assertion below would be vacuous"
+        FAILED=1
+    else
+        note "ok   the punar-owned detection ledger is present before the purge"
+    fi
+fi
+
 queries_sha_before="$(sha256sum "${QUERIES}" 2>/dev/null | cut -d' ' -f1)"
 ledgers_before="$(find "${LEDGER_DIR}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
 runuser -u punar -- "${CTL}" privacy purge --all --yes > "${RUN_DIR}/m10-purge.txt" 2>&1
@@ -1015,12 +1037,6 @@ note "info ledger records on disk: ${ledgers_before} before the purge, ${ledgers
 #   1. a PUNAR-owned detection's ledger is gone after the user's own purge
 #   2. a ROOT-owned detection's ledger SURVIVES that same purge
 #   3. and a root purge then removes it, so completeness is not just claimed
-punar_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "punar") | .key) // ""' \
-    "${DETECTIONS_INDEX}" 2>/dev/null)"
-root_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "root") | .key) // ""' \
-    "${DETECTIONS_INDEX}" 2>/dev/null)"
-note "info purge scope probes: punar-owned='${punar_det:-none}' root-owned='${root_det:-none}'"
-
 ledger_gone() {
     "${CTL}" agents access "$1" > "$2" 2>&1
     lg_exit=$?

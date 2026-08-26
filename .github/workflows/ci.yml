@@ -473,6 +473,9 @@ jobs:
             os/images/out/desktop-proof/ram-report.txt
             os/images/out/desktop-proof/ram-samples.txt
             os/images/out/desktop-proof/meminfo
+            os/images/out/desktop-proof/surfaces-report.txt
+            os/images/out/desktop-proof/surfaces-*.json
+            os/images/out/desktop-proof/surfaces-*.txt
             os/images/out/desktop-proof/m2-report.txt
             os/images/out/desktop-proof/m2-*.json
             os/images/out/desktop-proof/m3-report.txt

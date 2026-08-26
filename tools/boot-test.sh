@@ -770,46 +770,6 @@ run_desktop() {
 
     preserve_serial_log
 
-    # Phase 3b: desktop-surfaces verdict. Runs FIRST in the guest and is
-    # gated first here for the same reason: it is the check that answers
-    # "can a person actually use this machine" — the thirteen shell surfaces
-    # open and close on a live session, the browser starts as a NATIVE
-    # Wayland client with /etc/chromium-flags.conf applied (read back from
-    # the process's own argv, not from the file), the system can open a link
-    # at all (xdg-open present, resolving to a desktop entry that exists),
-    # an UNENROLLED device carries no chromium managed policy, and the lock
-    # screen's PAM stack exists so locking is not a one-way door.
-    #
-    # Everything above it — qmllint, `hyprland --config ok` — is static. This
-    # is the only gate that fails when a surface parses perfectly and then
-    # refuses to open. Same hard-gate contract as M2-M10: a delivered FAIL or
-    # a truncated report fails this script; a missing report is fatal under
-    # KVM and informational under TCG.
-    local surfaces_report="${PROOF_DIR}/surfaces-report.txt"
-    if [ -f "${surfaces_report}" ]; then
-        if grep -q 'PUNAR_SURFACES_FAIL' "${surfaces_report}"; then
-            echo "error: desktop-surfaces exercise reported PUNAR_SURFACES_FAIL; failing assertions:" >&2
-            grep '^FAIL' "${surfaces_report}" >&2 || true
-            exit 1
-        elif grep -q 'PUNAR_SURFACES_OK' "${surfaces_report}"; then
-            echo "==> Desktop surfaces: PUNAR_SURFACES_OK ($(grep -c '^ok' "${surfaces_report}" || true) assertions passed)"
-        else
-            echo "error: surfaces-report.txt carries no PUNAR_SURFACES_OK/FAIL verdict (guest crashed mid-exercise?)" >&2
-            tail -n 20 "${surfaces_report}" >&2 || true
-            exit 1
-        fi
-    elif grep -aq 'PUNAR_SURFACES_FAIL' "${SERIAL_LOG}"; then
-        echo "error: desktop-surfaces exercise reported PUNAR_SURFACES_FAIL on the serial console (export did not deliver the report)" >&2
-        exit 1
-    elif grep -aq 'PUNAR_SURFACES_OK' "${SERIAL_LOG}"; then
-        echo "==> Desktop surfaces: PUNAR_SURFACES_OK (verdict from serial console; export did not deliver the report)"
-    elif [ "${ACCEL}" = "kvm" ]; then
-        echo "error: no surfaces-report.txt in the export and no verdict on serial — the desktop-surfaces exercise did not run" >&2
-        exit 1
-    else
-        echo "==> Desktop surfaces: no report under TCG (informational only; emulated runs are not surfaces-gated)"
-    fi
-
     # Phase 4: M2 exercise verdict (milestone-2.md §7). The guest wrote
     # /run/punar/m2-report.txt (per-assertion ok/FAIL lines + a final
     # PUNAR_M2_OK / PUNAR_M2_FAIL line) via punar-m2-check.service; it
@@ -1190,6 +1150,54 @@ run_desktop() {
         exit 1
     else
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
+    fi
+
+    # Phase 12c: desktop-surfaces verdict.
+    #
+    # It runs FIRST in the guest and is gated LAST here, and the split is
+    # deliberate. Gating it first meant a single surfaces failure exited the
+    # script before any M2..M10 verdict was parsed, so a run that lost one
+    # assertion reported nothing about the other 561 — the operator had to
+    # download artifacts to learn whether the milestones had passed. Every
+    # milestone verdict now prints before this gate is applied.
+    #
+    # It is the check that answers
+    # "can a person actually use this machine" — the thirteen shell surfaces
+    # open and close on a live session, the browser starts as a NATIVE
+    # Wayland client with /etc/chromium-flags.conf applied (read back from
+    # the process's own argv, not from the file), the system can open a link
+    # at all (xdg-open present, resolving to a desktop entry that exists),
+    # an UNENROLLED device carries no chromium managed policy, and the lock
+    # screen's PAM stack exists so locking is not a one-way door.
+    #
+    # Everything above it — qmllint, `hyprland --config ok` — is static. This
+    # is the only gate that fails when a surface parses perfectly and then
+    # refuses to open. Same hard-gate contract as M2-M10: a delivered FAIL or
+    # a truncated report fails this script; a missing report is fatal under
+    # KVM and informational under TCG.
+    local surfaces_report="${PROOF_DIR}/surfaces-report.txt"
+    if [ -f "${surfaces_report}" ]; then
+        if grep -q 'PUNAR_SURFACES_FAIL' "${surfaces_report}"; then
+            echo "error: desktop-surfaces exercise reported PUNAR_SURFACES_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${surfaces_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_SURFACES_OK' "${surfaces_report}"; then
+            echo "==> Desktop surfaces: PUNAR_SURFACES_OK ($(grep -c '^ok' "${surfaces_report}" || true) assertions passed)"
+        else
+            echo "error: surfaces-report.txt carries no PUNAR_SURFACES_OK/FAIL verdict (guest crashed mid-exercise?)" >&2
+            tail -n 20 "${surfaces_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_SURFACES_FAIL' "${SERIAL_LOG}"; then
+        echo "error: desktop-surfaces exercise reported PUNAR_SURFACES_FAIL on the serial console (export did not deliver the report)" >&2
+        exit 1
+    elif grep -aq 'PUNAR_SURFACES_OK' "${SERIAL_LOG}"; then
+        echo "==> Desktop surfaces: PUNAR_SURFACES_OK (verdict from serial console; export did not deliver the report)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        echo "error: no surfaces-report.txt in the export and no verdict on serial — the desktop-surfaces exercise did not run" >&2
+        exit 1
+    else
+        echo "==> Desktop surfaces: no report under TCG (informational only; emulated runs are not surfaces-gated)"
     fi
 
     # Phase 12b: the other half of the M10 unknown-agent-ledger assertion,
