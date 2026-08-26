@@ -55,6 +55,7 @@ stage_desktop_extra() {
     echo "==> Staging desktop configs/assets into ${extra}"
     # Only the STAGED subtrees are wiped: usr/share/punar/nftables (the
     # vendored punar-base.nft, M3) is versioned and must survive staging.
+    rm -f "${extra}/etc/chromium-flags.conf"
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
            "${extra}/usr/share/punar/theme" \
@@ -78,6 +79,16 @@ stage_desktop_extra() {
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"
+    # Chromium launch defaults + the system default-handler map.
+    # /etc/chromium-flags.conf is ADDITIVE with the user's own file (both are
+    # read, in order) — the opposite of foot.ini's first-found-wins rule, so
+    # this is a floor and not a cage. /etc/xdg/mimeapps.list is what makes
+    # xdg-open answer an http(s) URL at all; a user's ~/.config/mimeapps.list
+    # outranks it. Neither is enterprise policy: writing
+    # /etc/chromium/policies/managed/ would brand an UNENROLLED device
+    # "Managed by your organization" (DESIGN_LANGUAGE.md section 8).
+    cp "${mod}/chromium/chromium-flags.conf" "${extra}/etc/chromium-flags.conf"
+    cp "${mod}/chromium/mimeapps.list" "${extra}/etc/xdg/mimeapps.list"
     # fontconfig defaults (sorts before 60-latin so preferences win).
     cp "${mod}/fonts/50-punar-fonts.conf" "${extra}/etc/fonts/conf.d/"
     # Vendored fonts, OFL.txt alongside each family (license requirement).

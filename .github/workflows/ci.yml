@@ -214,6 +214,7 @@ jobs:
             tests/performance/check-budgets.sh \
             os/modules/desktop/hypr/punar-layout.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m4-check.sh \

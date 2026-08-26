@@ -12,6 +12,8 @@ CI diff them against the design tokens.
 | Module | File(s) | Install path in image |
 |---|---|---|
 | `foot/` | `foot.ini` | `/etc/xdg/foot/foot.ini` |
+| `chromium/` | `chromium-flags.conf` | `/etc/chromium-flags.conf` |
+| `chromium/` | `mimeapps.list` | `/etc/xdg/mimeapps.list` |
 | `fonts/` | `instrument-sans/*` (2 variable TTFs + OFL.txt) | `/usr/share/fonts/punar/instrument-sans/` |
 | `fonts/` | `geist-mono/*` (3 static TTFs + OFL.txt) | `/usr/share/fonts/punar/geist-mono/` |
 | `fonts/` | `50-punar-fonts.conf` | `/etc/fonts/conf.d/50-punar-fonts.conf` |
@@ -35,6 +37,61 @@ integration step must honor:
   path; `mkosi.extra` content overwrites it (intended).
 - A user-created `~/.config/foot/foot.ini` *replaces* (does not merge with)
   the system file — the Punar defaults are a complete standalone config.
+
+## Chromium (`chromium/`)
+
+Two files, and the reason they are worth reading together is that they have
+**opposite override semantics to `foot.ini` above** — the same shape of
+mistake in either direction produces a broken default.
+
+### `chromium-flags.conf` -> `/etc/chromium-flags.conf`
+
+Verified 2026-08-26 by reading the strings of the compiled `/usr/bin/chromium`
+launcher from chromium 151.0.7922.173-1 in the pinned snapshot, rather than
+from documentation:
+
+> Custom flags are read in order from the following files:
+> `/etc/chromium-flags.conf`, `$XDG_CONFIG_HOME/chromium-flags.conf`.
+> Arguments are split on whitespace and shell quoting rules apply but no
+> further parsing is performed. Lines starting with a hash symbol (#) are
+> skipped. Lines with unbalanced quotes are skipped as well.
+
+- **Both files are read, in order.** A user's `~/.config/chromium-flags.conf`
+  *adds to* these defaults. This is the opposite of foot's first-found-wins
+  rule: a user overriding one flag does not lose the rest, so Punar's defaults
+  are a floor and not a cage.
+- **An unbalanced quote makes a line vanish silently** — no warning, no error.
+  Every line in the file is therefore unquoted, and `surfaces-check.sh` asserts
+  the flags on the *running browser's argv* rather than asserting the file's
+  text, because a present, readable, well-formed-looking file can still apply
+  nothing.
+
+The `--ozone-platform-hint=auto` flag is why the file exists. It previously
+lived on the `SUPER+B` keybind, which meant exactly one launch path got a
+native Wayland browser while the application launcher, `xdg-open` and any
+future web-app launcher went through `chromium.desktop` and got XWayland.
+
+**No enterprise policy.** Chromium also reads `/etc/chromium/policies/managed/`.
+Punar does not write there on an unmanaged device: a managed policy makes the
+browser's own menu report "Managed by your organization" on a device that was
+never enrolled — the same defect class as the M5 `policy.d/ai` directory that
+was created on every device. DESIGN_LANGUAGE.md section 8. Managed policy is
+the correct mechanism once a device *is* enrolled, and Milestone 11 introduces
+it as an additive layer.
+
+### `mimeapps.list` -> `/etc/xdg/mimeapps.list`
+
+Nothing in the tree registered a handler for `http(s)`, so `xdg-open` — the
+call a notification action, a terminal URL activation or the command center's
+"open" verb makes — had nothing to open, and `xdg-utils` was not installed at
+all. A human could reach the browser through the keybind; the system could not.
+
+Resolution order is `$XDG_CONFIG_HOME/mimeapps.list`, then each
+`$XDG_CONFIG_DIRS` entry (default `/etc/xdg`), so a user's chosen default
+browser **outranks** this file. A dangling desktop id here fails *open* —
+`xdg-open` falls through rather than erroring, which looks identical to having
+no default — so the check asserts the resolved handler and the existence of
+`chromium.desktop` on the running system.
 
 ## Fonts (`fonts/`)
 

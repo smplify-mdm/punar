@@ -1,0 +1,33 @@
+# Punar desktop-surfaces in-VM exercise.
+#
+# Runs as User=punar — the punar-m2-check.service pattern, and required here
+# rather than merely convenient: every assertion is user-session scoped (the
+# shell's IPC socket, the Hyprland instance, the browser). A root run would
+# look for /run/user/0 and find no session at all.
+#
+# Not enabled, no .wants symlink — idle-ram.sh starts it synchronously
+# (Type=oneshot blocks) so the mkosi preset-wipe lesson does not arise.
+# Ordered BEFORE the m2..m10 milestone checks: this one leaves the session
+# exactly as it found it (every surface closed, the browser killed and its
+# disappearance asserted), while the milestone checks deliberately leave
+# fixtures behind.
+
+[Unit]
+Description=Punar desktop-surfaces exercise — 13 shell surfaces, browser, link handling (CI)
+
+[Service]
+Type=oneshot
+User=punar
+# Timeout math, stated rather than copied. Bounded waits inside the script:
+#    90 s  shell IPC to answer (first-boot QML compile on TCG is the slow leg)
+#   210 s  7 surfaces x (15 s open + 15 s close) worst case
+#   180 s  chromium first start — a cold profile creation under TCG, and the
+#          single largest wait in the script
+#    60 s  chromium teardown confirmation
+#   ~30 s  xdg-mime queries, PAM/policy stats, artifact writes
+# ~9-10 min worst case, essentially all of it TCG headroom: the KVM path
+# exits each wait on first success and finishes in well under two minutes.
+TimeoutStartSec=12min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/surfaces-check.sh

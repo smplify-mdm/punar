@@ -416,6 +416,71 @@ qs -p /usr/share/punar/shell ipc call theme reset
 
 ---
 
+### 2.12 Browser and link handling — SUPER + B, and every other path
+
+Chromium 151 from the pinned snapshot. **Not a fork, not an engine** —
+spec §30.1's "upstream-current Chromium plus a small, auditable Punar
+integration layer". What exists today is the smallest possible layer:
+two config files and a package.
+
+| Thing | Where | Note |
+|---|---|---|
+| Chord | `SUPER + B` → `$browser` | The bind carries **no flags** |
+| Launch flags | `/etc/chromium-flags.conf` | Read on **every** launch path |
+| Default handler | `/etc/xdg/mimeapps.list` | `http`, `https`, `text/html` |
+| `xdg-open` | `xdg-utils` package | Newly present |
+
+**Why the flags moved off the keybind.** `--ozone-platform-hint=auto`
+used to live on the `SUPER + B` line. That gave exactly *one* launch path
+a native Wayland browser: the chord. The application launcher, `xdg-open`,
+and any future web-app launcher all go through the packaged
+`chromium.desktop`, which never saw the flag and got **XWayland** — blurry
+under fractional scaling, wrong cursor size, no per-monitor DPI. One
+source of truth now; the chord is no longer privileged.
+
+**Why `xdg-utils` had to be added at all.** It was absent. `xdg-open` is
+the call an application makes to ask the system to open a URL — a
+notification action, a terminal URL activation, the command center's
+"open" verb. Nothing in the image provided it, and nothing registered a
+handler either. A **human** could reach a browser through the chord; the
+**system** could not reach one at all, and every such path failed with
+command-not-found.
+
+**Override semantics — the opposite of the terminal's.** Both
+`/etc/chromium-flags.conf` and `~/.config/chromium-flags.conf` are read,
+**in order**, so a user's own file *adds to* Punar's defaults. Compare
+`foot.ini`, where the first file found wins outright and a user config
+replaces the Punar theme wholesale. The same additive rule holds for
+`mimeapps.list`: a user's chosen default browser outranks
+`/etc/xdg/mimeapps.list` rather than fighting it.
+
+**A quiet failure mode worth knowing.** The chromium launcher skips any
+flags line with unbalanced quotes **silently** — no warning, no error, the
+flag simply never applies. This is why `surfaces-check.sh` asserts the
+flags on the running browser's own `/proc/<pid>/cmdline` rather than on the
+file's text: a present, readable, correct-looking file can apply nothing at
+all. A dangling desktop id in `mimeapps.list` fails the same way — `xdg-open`
+falls through rather than erroring, which is indistinguishable from having
+no default — so the resolved handler is asserted on the running machine too.
+
+**No enterprise policy, on purpose.** Chromium also reads
+`/etc/chromium/policies/managed/`. Punar writes nothing there on an
+unmanaged device: a managed policy makes the browser's own menu report
+*"Managed by your organization"* on a machine that was never enrolled —
+false, and the same defect class as the M5 `policy.d/ai` directory that
+was created on every device. DESIGN_LANGUAGE.md §8. Managed policy is the
+right mechanism once a device **is** enrolled, and Milestone 11 introduces
+it as an additive layer.
+
+**Honestly unavailable.** Everything else in §30–32: web-app install, the
+`PERSONAL / ACME WORK / ATLAS` context picker, per-project browser
+contexts, and browser-update separation from the OS. Milestone 11 is
+designed (`docs/development/milestone-11.md`) and unbuilt. The browser
+here is a browser, well-integrated at the launch and link layer, and
+nothing more is claimed.
+
+---
+
 ## 3. IPC targets, all thirteen
 
 Verified unique across the tree; `qs ipc show` is the authority.

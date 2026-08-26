@@ -1,0 +1,28 @@
+# Punar default application handlers — installed as /etc/xdg/mimeapps.list.
+#
+# WHY THIS FILE EXISTS. Without it nothing in Punar answered `xdg-open
+# https://...`, which is how one application asks the system to open a link:
+# the terminal's URL activation, a notification action, a chat client, the
+# command center's "open" verb. Chromium shipped in the image and was bound to
+# SUPER+B, so a human could reach a browser — but the SYSTEM could not, and
+# every path that was not the keybind failed silently.
+#
+# RESOLUTION ORDER (XDG mime-apps spec, and the reason this path is the right
+# one): handlers are read from $XDG_CONFIG_HOME/mimeapps.list first, then from
+# each $XDG_CONFIG_DIRS entry, which defaults to /etc/xdg. A user who sets
+# their own default browser therefore WINS over this file rather than fighting
+# it, which is the same additive rule as chromium-flags.conf beside it: Punar
+# states a default, the user states a preference, and the preference is not
+# something Punar has to be asked for permission to override.
+#
+# The desktop id below is the one the chromium package installs
+# (usr/share/applications/chromium.desktop, verified against the pinned
+# snapshot); a missing desktop id here fails OPEN — xdg-open falls through to
+# the next handler rather than erroring — so surfaces-check.sh asserts the
+# resolved handler on the running system instead of trusting this text.
+
+[Default Applications]
+x-scheme-handler/http=chromium.desktop
+x-scheme-handler/https=chromium.desktop
+text/html=chromium.desktop
+application/xhtml+xml=chromium.desktop

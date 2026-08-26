@@ -94,6 +94,17 @@ if [ "${all_units_ok}" -eq 1 ]; then
 fi
 echo "PUNAR_SERVICES_RSS_MB=${services_rss} (summed PSS over: ${PUNAR_SERVICE_UNITS})"
 
+# Desktop-surfaces exercise, FIRST of the in-VM checks and strictly AFTER the
+# idle sampling window above. First on purpose: it is the only check that
+# leaves the session exactly as it found it (every surface closed, the browser
+# killed and its absence asserted), so running it before the milestone checks
+# means it never inherits their fixtures and they never inherit its browser.
+# Same never-fatal contract as the milestone hooks — the verdict lives in
+# surfaces-report.txt and tools/boot-test.sh parses it; a missing report is
+# its own signal and is a HARD failure there (the m8 lesson).
+systemctl start punar-surfaces-check.service \
+    || echo "punar: idle-ram: punar-surfaces-check.service failed to start" >&2
+
 # M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
 # SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the
 # sampling window above — so the idle measurement is never polluted — and
