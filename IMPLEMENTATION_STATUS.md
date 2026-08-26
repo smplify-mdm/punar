@@ -1338,8 +1338,16 @@ desktop-surfaces exercise:
 | **Desktop surfaces (live)** | **58** |
 | **Total** | **754** |
 
-Idle RAM 1277 MB mean (warn, target 1024, hard fail 1536); boot to desktop
-20 s; three daemons 7 MB PSS against a 100 MB target.
+Idle RAM 1274 MB mean (warn, target 1024, hard fail 1536); boot to desktop
+18 s; three daemons 7 MB PSS against a 100 MB target.
+
+**On that RAM warning, stated precisely:** the 1024 MB target has **never** been
+met, including at M1 when the desktop was a bar and a command centre (1162 MB).
+Per-process PSS now attributes it — shell 328 MB, Hyprland 163 MB, Xwayland
+43 MB, summing to 671 MB against 1274 MB reported, so **over half the headline
+figure is kernel and page cache rather than process memory**. Details and the
+two available levers are in
+[`tests/performance/README.md`](tests/performance/README.md).
 
 **How M10 got here, recorded because the road matters more than the verdict.**
 Its first execution reported **11** failing assertions; the reconcile fix took
