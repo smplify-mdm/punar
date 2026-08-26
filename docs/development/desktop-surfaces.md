@@ -687,10 +687,40 @@ or D-Bus. The wallpaper has no timer at all.
 | **Chord collisions** | every `bind*` row reduced to `(modmask, key)` and counted | **72 binds, 0 duplicate chords** |
 | **IPC target collisions** | every `IpcHandler.target` in the tree | **13 targets, all unique** |
 | **Image config** | `PUNAR_BUILD_MODE=summary ./tools/build-image.sh all` | **exit 0**; `qt6-svg` present in the desktop profile's package list; themes staged to `usr/share/punar/theme/themes/` |
+| **qmllint, now in CI** | `./tools/qmllint.sh` — pinned container, the image's own Qt 6.11.2 / Quickshell 0.3.0 | **34 files, 0 warnings.** The gate fails on any output, because **qmllint exits 0 while printing warnings** — verified by injecting `Hyprland.thisPropertyDoesNotExist`, which it named while returning 0 |
+| **— negative control** | that same injected property | **correctly fails** (exit 1); on the restored tree, exit 0 |
+| **Live surfaces exercise** | `surfaces-check.sh` in the CI VM: every surface opened and closed over IPC, each layer confirmed in `hyprctl -j layers`, each frame captured | **found 3 real defects on its first run** (below) |
+
+### What the first live run found
+
+The exercise above is new, and its first execution in the CI VM (run
+[32945695360](https://github.com/smplify-mdm/punar/actions/runs/32945695360))
+**failed, correctly**, on three things no static check could see. Recorded
+here because "the gate found real defects on day one" is the only evidence
+that a gate is worth having.
+
+| Found | Where the defect was |
+|---|---|
+| `theme list` answered `{"ready":true,"themes":[]}` on a machine with **seven** themes installed | **product** — no theme was selectable while the desktop looked perfectly themed |
+| `bar app` returned `""` while Hyprland reported `chromium` focused | **product** — the menubar could never have named a window opened after shell start |
+| `approval.open` did not open | **the check** — a gate with nothing pending is *correct* to stay closed |
+
+A fourth was caught by the screenshots rather than an assertion: the command
+centre photographed as an empty desktop while its own `state()` said `open`.
+`state()` reads `root.open`; the window is bound to `root.windowVisible`, a
+different property that exists so a surface can stay mapped through its close
+animation. Between the flag flipping and the compositor mapping anything there
+is a real interval where "open" is true and the screen is bare. Every surface
+declares a `WlrLayershell.namespace`, so `hyprctl -j layers` now answers the
+question exactly — in both directions, because several of these overlays hold
+`WlrKeyboardFocus.Exclusive` and one that reports closed while still mapped is
+holding the keyboard.
 
 **What has NOT been verified, and must not be read as verified**
-(spec §1.22): no surface in this composed arrangement has been run in the
-real VM. Individual surfaces were exercised headlessly by their authors —
+(spec §1.22): the three fixes above are pushed and awaiting their own CI run;
+until it is green they are repairs believed correct, not repairs demonstrated
+correct. Beyond that: no surface in this composed arrangement had been run in
+the real VM before that run. Individual surfaces were exercised headlessly by their authors —
 sway/wlroots in a pinned container, driven over IPC, screenshotted with
 grim — which found and fixed real defects (a lazily-evaluated `rowCount`
 indexing off the end of a list; a 4.4 MB-per-switch leak in Qt's `data:`
