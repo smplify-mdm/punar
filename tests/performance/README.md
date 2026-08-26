@@ -264,14 +264,43 @@ direction to err, because it can only make the desktop look slower than it is.
 first numbers exist, and picking a limit before measuring is exactly how idle
 RAM ended up with a 1024 MB target that has never once been met.
 
-### The lazy-load plan is rejected, not deferred
+### The lazy-load plan: withdrawn, then reinstated — and why the withdrawal was wrong
 
-Earlier notes here scoped a `Loader`-per-surface change to recover ~90 MB. That
-is now **withdrawn**. Every surface is eagerly instantiated today, which is
-precisely why opening one has nothing left to build; putting the five on-demand
-surfaces behind inactive loaders would move construction cost onto the first
-keypress. That trades **felt** latency for **unfelt** memory, on a machine that
-idles with 6.7 GB free — and speed is table stakes for this desktop while
-1274 MB is not hurting anyone. The memory attribution above stands as a record;
-the remedy it proposed does not.
+This section previously **withdrew** the `Loader`-per-surface change on the
+grounds that 1274 MB is unfelt on a machine idling with 6.7 GB free, so moving
+construction cost onto the first keypress traded felt latency for unfelt memory.
+
+**That reasoning optimised for the wrong machine.** It reasoned about the
+developer's laptop rather than the product's targets: a Raspberry Pi appliance
+where 1274 MB is a majority of RAM, and where every megabyte the shell holds is
+a megabyte not holding model weights. The product owner's standing rule is now
+explicit — *always optimise for using the least RAM possible* — and the earlier
+call is retracted.
+
+**But it is not retracted by simply obeying the newer instruction.** Speed is
+also table stakes, and a reversal that makes the desktop feel worse would be
+trading one stated requirement for another. The two are only in conflict if
+first-open cost is perceptible, and **nobody has measured it**. So the order is:
+
+1. **Measure the construction cost per surface.** `surfaces-check.sh` now times
+   `open_ms` and `map_ms` (see above), but every surface is currently eager, so
+   those numbers are *dispatch* latency, not *construction* latency. The
+   measurement that decides this is what a surface costs to build the first
+   time — and what it holds resident once built.
+2. **Lazy-load every surface whose construction is imperceptible.** If building
+   the AI panel on first `SUPER + A` costs 40 ms, there is no trade at all:
+   the RAM is recovered and nothing is felt. Both rules are satisfied.
+3. **Keep eager only what measurement proves expensive**, and say so in the
+   commit with the number. "This surface stays resident because building it
+   costs 380 ms" is a defensible sentence; "surfaces are eager for speed" is
+   not, because it was never measured.
+
+Where the two rules genuinely collide on a given surface, **RAM wins on
+constrained device classes and speed wins on capable ones** — which is exactly
+what [`docs/design/device-classes.md`](../../docs/design/device-classes.md)
+exists to express, and is a better answer than one global setting.
+
+**Nothing here is implemented yet.** The measurement in step 1 is the next
+piece of work, and this note exists so the withdrawal above is not read as a
+settled decision.
 

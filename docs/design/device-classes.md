@@ -28,6 +28,14 @@ decides and what they are allowed to decide about**:
 > RICHNESS of the experience. What never scales is what Punar promises about
 > it.
 
+**And the baseline is frugal everywhere.** Device classes decide what a capable
+machine may *add*, never what a constrained one must *give up* from some
+comfortable default. The standing rule is to use the least RAM possible on
+every class — a workstation earns richer behaviour by measurement, it does not
+receive waste by default. Stated because the opposite reading is the natural
+one, and it is wrong: this is not "degrade gracefully on small hardware", it is
+"cost nothing anywhere, then spend where it is demonstrably affordable".
+
 Three consequences, each of which forecloses a tempting wrong turn:
 
 - **No settings panel of knobs.** "Enable animations", "preload panels",
