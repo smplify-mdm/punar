@@ -153,3 +153,39 @@ published baselines. CI (x86_64, KVM) is canonical.
   (§5.1 item 7 — for now, CI artifacts of each run are the history).
 - Baseline recording: `PERFORMANCE_BUDGETS.md` §4 must be updated from the
   first stable CI numbers (owned by that file, not this harness).
+
+## Measured idle RAM over time, and what moved it
+
+Recorded because the target is a product claim and the number has drifted
+above it. Budget: **fail > 1536 MB, warn > 1024 MB** (`check-budgets.sh`),
+whole-system `MemTotal - MemAvailable`, KVM, 10 min stabilize + 5 min window.
+
+| Run | Mean | Boot | What changed |
+|---|---|---|---|
+| [32804034681](https://github.com/smplify-mdm/punar/actions/runs/32804034681) | 1162 MB | 18 s | M1 baseline — bar + command centre only |
+| [32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695) | 1175 MB | — | M7 added a second daemon (+13 MB) |
+| [32941763915](https://github.com/smplify-mdm/punar/actions/runs/32941763915) | 1265 MB | 22 s | **the thirteen shell surfaces** |
+| [32945695360](https://github.com/smplify-mdm/punar/actions/runs/32945695360) | 1277 MB | 20 s | networkd + resolved + xdg-utils |
+
+**Attribution, measured rather than guessed.** The two runs above bracket the
+networking change exactly: everything else identical, `1265 → 1277`. Wired
+DHCP, systemd-resolved and xdg-utils together cost **12 MB**, and boot got
+*faster* (22 s → 20 s) because `systemd-networkd-wait-online` is deliberately
+not enabled.
+
+The real regression is the row above it: **the thirteen surfaces cost ~90 MB**
+(1175 → 1265). Every surface is a `Scope` instantiated at shell startup
+regardless of whether it is ever opened, so a user who never presses
+`SUPER + S` still pays for System Control's 1,518 lines of QML and
+ControlData's 1,621.
+
+**The obvious diet, not yet taken:** wrap each surface in a `Loader` that stays
+inactive until its first `open()`, keeping the `IpcHandler` outside the loader
+so `state()` can answer `"closed"` without instantiating anything. That is a
+change to all thirteen surfaces and it can break the surfaces exercise in ways
+static checks will not catch, so it wants its own pass and its own CI run
+rather than being folded into unrelated work. Recorded here so the number has
+an owner instead of drifting quietly.
+
+Three daemons still sum to **7 MB** PSS against a 100 MB target — the Rust
+side is not the problem and never has been.
