@@ -1318,7 +1318,25 @@ Out of scope by spec sectioning: MCP servers and tools are **M11+**,
 network destinations and sensitive-zone observation **M12**, the
 unknown-agent ledger and the authorized administrator query **M10**.
 
-## Current milestone: M10 — Shadow AI detection MVP: implemented on disk; statically validated; uncommitted; no CI run
+## Current milestone: M10 — Shadow AI detection MVP: committed and CI-run; 11 failing assertions down to 4; repairs pushed
+
+**Status as of 2026-08-26.** The row below was written before M10 had ever
+executed and said "uncommitted; no CI run". That is no longer true and is
+corrected here rather than left to mislead a reader the way a stale status
+line already misled this project once.
+
+- [Run 32933114578](https://github.com/smplify-mdm/punar/actions/runs/32933114578)
+  was M10's first execution: `PUNAR_M10_FAIL`, **11 failing assertions**.
+- [Run 32941763915](https://github.com/smplify-mdm/punar/actions/runs/32941763915)
+  carried the reconcile fix: M2–M9 all green (**561 assertions**), M10 down to
+  **4 failures**. Every alert-count assertion passed.
+- The remaining four were diagnosed from that run's own exported artifacts and
+  **three of them were the check being wrong, not the product**: a personal
+  device that had been unenrolled kept its query history with no statement of
+  current state (a real surface defect, fixed); a purge assertion that landed
+  on a ROOT-owned detection and called the user-scope boundary a bug; and a
+  fleet count of "1" that assumed killing a process retires the evidence it
+  ran. Repairs are pushed and awaiting their run.
 
 Design plan, build record and status:
 [`docs/development/milestone-10.md`](docs/development/milestone-10.md)
