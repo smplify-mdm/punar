@@ -103,11 +103,21 @@ Singleton {
         root.applyPending();
     }
 
-    // Missing/corrupt state file: fresh default — workspace 1 is "Punar".
+    // Missing/corrupt state file: fresh default — NO names at all.
+    //
+    // Workspace 1 used to be named "Punar", and the bar's left zone renders
+    // `Punar · <workspace> · <app>` — brand, then where you are, then what is
+    // running. So a fresh machine displayed "PUNAR · PUNAR", which reads as a
+    // rendering bug and tells the user nothing twice.
+    //
+    // A workspace NAME is a project concept (M2 named project workspaces). A
+    // machine with no projects has no name to show, and Bar.qml's
+    // workspaceLabel already falls back to the workspace id for exactly that
+    // case — so the honest fresh state is "PUNAR · 1", and naming it after the
+    // operating system was manufacturing a label that collided with the brand
+    // while implying the workspace was somehow about Punar.
     function freshDefault() {
-        root.pendingNames = {
-            1: "Punar"
-        };
+        root.pendingNames = ({});
         root.applyPending();
     }
 
