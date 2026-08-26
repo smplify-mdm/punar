@@ -1,0 +1,125 @@
+# Testing Punar in the VM
+
+**Who this is for:** someone sitting down in front of the machine wanting to
+drive the desktop and judge it. It is deliberately short. The exhaustive
+per-surface record is [`desktop-surfaces.md`](desktop-surfaces.md); the
+honest limits of the whole project are
+[`user-blocked.md`](user-blocked.md).
+
+---
+
+## 1. Start it
+
+```bash
+/private/tmp/claude-501/-Users-spurtipreetham-Documents-smplify-punarOS/8db1c437-3b45-42b5-b7b3-395c9cf4c7c8/scratchpad/punar-up.sh
+```
+
+That fetches the newest CI-built image (~2 GB, cached), verifies its
+SHA256, boots it under QEMU, and opens TigerVNC on `127.0.0.1:5900`.
+
+**It boots straight to the desktop** — the dev image autologins as `punar`
+(`/etc/greetd/config.toml`, `initial_session`). If you are ever asked, the
+dev password is `punar`.
+
+> **Be patient on the first boot.** Apple Silicon cannot hardware-virtualise
+> an x86_64 guest, so this is TCG emulation: minutes to the desktop, against
+> the 18 s the KVM CI path measures. That gap is the entire argument for the
+> aarch64 image in the "Try Punar" plan, and it is a property of your laptop,
+> not of Punar.
+
+If TigerVNC does not open by itself, open it and connect to `127.0.0.1:5900`.
+macOS Screen Sharing **will not work** — it requires Apple's auth extensions
+that QEMU's VNC server does not implement.
+
+---
+
+## 2. The ten-minute tour
+
+Everything is keyboard-first. `SUPER` is the modifier.
+
+| Do this | Chord | What you should see |
+|---|---|---|
+| **Start here** | `SUPER + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
+| Terminal | `SUPER + Return` | foot, Geist Mono, panel surface |
+| Browser | `SUPER + B` | Chromium, native Wayland |
+| Command centre | `SUPER + Space` | Type to search; it resolves to typed capabilities |
+| System control | `SUPER + S` | The settings surface |
+| Notification centre | `SUPER + SHIFT + N` | The centre; toasts appear on their own |
+| Project overview | `SUPER + Tab` | Workspaces as projects |
+| AI panel | `SUPER + A` | What AI has done on this device |
+| Close a window | `SUPER + Q` | |
+| Lock | `SUPER + Escape` | Password is `punar` |
+
+Layouts: `SUPER + ,` / `SUPER + .` cycle presets. `SUPER + 1..9` switch
+workspaces. `SUPER + T` is a scratchpad terminal.
+
+**Themes have no chord** — they are driven over IPC:
+
+```bash
+qs -p /usr/share/punar/shell ipc call theme list
+qs -p /usr/share/punar/shell ipc call theme show nocturne
+```
+
+Seven themes ship (`paper`, `panel`, `graphite`, `nocturne`, `oxide`,
+`ember`, `contrast`). Any surface can be driven the same way — `ipc show`
+lists all thirteen targets.
+
+---
+
+## 3. What is real, and what is not
+
+This is the part worth reading before forming a judgement.
+
+**Real, and exercised by CI on every push:**
+the compositor and all thirteen shell surfaces, the terminal, the browser
+(native Wayland, launched through the same flags on every path), link
+handling via `xdg-open`, the theme system, `punard` + `punarctl` and their
+typed capability API, declarative desired state and reconciliation, the
+mock-enrolment journey, the developer environment manager, the AI agent
+registry, the access ledger, approval gates, the secret broker, and
+shadow-AI detection. As of the most recent green run that is **561+
+assertions** across nine in-VM exercises plus a live desktop-surfaces
+exercise.
+
+**Real but simulated, and labelled so wherever it appears:** Secure Boot,
+TPM/measured boot, the Smplify control plane (a local mock), identity
+providers, and the private relay. Anything drawn with a dashed stroke in the
+design language is in this category by construction.
+
+**Not built at all:** the installer and onboarding, `punarctl app` and the
+third-party app catalogue (including the Google Chrome install command),
+execution trust / the Gatekeeper-class exec gate, web-app install and
+browser contexts (Milestone 11), and network policy and the relay
+(Milestone 12). Each of these is *designed* — see `docs/design/` — and
+none of it is claimed as working.
+
+**Networking is new and untested by CI.** The gate runs the VM with
+`-nic none`, so wired DHCP + resolved have never been exercised by a
+machine. The demo VM is launched *with* user-mode networking specifically so
+you are the first to try it. If the browser cannot load a page, that is the
+first thing to check:
+
+```bash
+networkctl status
+resolvectl status
+```
+
+---
+
+## 4. If something is wrong
+
+The surfaces are one process, so the fastest triage is:
+
+```bash
+systemctl --user status punar-shell    # or: pgrep -a qs
+journalctl --user -u punar-shell -n 50
+punarctl status
+punarctl audit tail
+```
+
+The in-VM exercise reports from the CI run live in `/run/punar/`
+(`surfaces-report.txt`, `m2-report.txt` … `m10-report.txt`). Each line is
+one assertion, and the last line is the verdict.
+
+**Nothing here needs to be preserved.** The VM boots with `-snapshot`, so
+every change is discarded on exit — experiment freely.
