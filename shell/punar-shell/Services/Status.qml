@@ -56,15 +56,24 @@ Singleton {
     }
 
     // Word shown next to the dot. Uppercased by the consuming label.
+    //
+    // "" IS NOT A STATE — it is the absence of a reading, which is what an
+    // UNENROLLED device reports (loadStatus above sets complianceState to ""
+    // when enrolled is false). It used to share a case arm with "compliant",
+    // so a device with no organization rendered the word "Compliant": the
+    // command centre's masthead read "LOCAL · COMPLIANT" on a machine that
+    // answers to nobody. DESIGN_LANGUAGE.md section 8.1. Empty now returns
+    // empty and the consumer decides what to draw, which is nothing.
     readonly property string label: {
         switch (root.complianceState) {
+        case "":
+            return "";
         case "non_compliant":
             return "Non-compliant";
         case "remediating":
             return "Remediating";
         case "exception":
             return "Exception";
-        case "":
         case "compliant":
             return "Compliant";
         default:
@@ -72,9 +81,45 @@ Singleton {
         }
     }
 
-    // Active project placeholder — the bar shows real workspace names
-    // (M2); this remains for the command-center masthead meta row.
-    readonly property string project: "Local"
+    // The DESIGN_LANGUAGE section 8.1 word table, as one function so the CLI
+    // and the shell cannot drift into two vocabularies. Personal words never
+    // presuppose an authority; the enrolled words are unchanged.
+    function stateLabel(s: string): string {
+        if (s === "")
+            return "";
+        if (root.enrolled)
+            return root.labelFor(s);
+        switch (s) {
+        case "compliant":
+            return "Matches";
+        case "non_compliant":
+            return "Drifted";
+        case "remediating":
+            return "Restoring";
+        default:
+            return root.labelFor(s);
+        }
+    }
+
+    // The row/section key that precedes the word.
+    readonly property string stateKey: root.enrolled ? "Compliance" : "Drift"
+
+    function labelFor(s: string): string {
+        switch (s) {
+        case "non_compliant":
+            return "Non-compliant";
+        case "remediating":
+            return "Remediating";
+        case "exception":
+            return "Exception";
+        case "compliant":
+            return "Compliant";
+        case "unsupported":
+            return "Unsupported";
+        default:
+            return "Unknown";
+        }
+    }
 
     readonly property color color: {
         switch (root.state) {

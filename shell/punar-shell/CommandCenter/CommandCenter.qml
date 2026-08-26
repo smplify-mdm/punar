@@ -762,11 +762,23 @@ Scope {
                         }
                     }
 
+                    // ORG CHROME, AND ONLY WHEN THERE IS AN ORG. This row read
+                    // "LOCAL · COMPLIANT" on every personal machine: "Local"
+                    // was a hardcoded placeholder and "Compliant" came from an
+                    // empty compliance string falling through a shared case
+                    // arm. Both halves were furniture implying an authority
+                    // that does not exist (DESIGN_LANGUAGE.md section 8.1), on
+                    // the surface a person opens most often.
+                    //
+                    // Enrollment ADDS this row; it does not restructure the
+                    // masthead, because the row is anchored right and the
+                    // title beside it does not move when it is absent.
                     Row {
                         anchors.right: parent.right
                         anchors.rightMargin: 16
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 5
+                        visible: Status.enrolled && Status.label !== ""
 
                         Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
@@ -777,7 +789,10 @@ Scope {
                         }
                         Meta {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: Status.project + " · " + Status.label
+                            // The organization's own name, not a placeholder:
+                            // if this row is drawn at all there IS an org, and
+                            // naming it is the honest thing to show.
+                            text: Status.orgName + " · " + Status.label
                         }
                     }
 

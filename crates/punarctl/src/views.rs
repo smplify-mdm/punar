@@ -66,24 +66,70 @@ fn compliance_label(capability: &str) -> &str {
     }
 }
 
+/// The DESIGN_LANGUAGE section 8.1 word table. ONE table, shared with the
+/// shell's `Services/Status.qml stateLabel()`, so the CLI and the GUI cannot
+/// drift into two vocabularies.
+///
+/// Compliance asserts conformance TO AN AUTHORITY. A device with no
+/// organization has none, so on a personal machine the word is either
+/// meaningless or it implies one that does not exist. The underlying primitive
+/// is unchanged and is a good one — the machine noticed something moved and
+/// put it back — so only the naming differs: on a personal device the
+/// capability MATCHES the effective document, or it has DRIFTED and is being
+/// RESTORED.
+///
+/// THE WIRE DOES NOT MOVE. `ComplianceState`, `schemas/common/defs.json` and
+/// `/run/punar/status.json` keep their spelling; the mapping is 1:1 and this
+/// renderer already knows `enrolled`, so a second wire vocabulary would carry
+/// no information while shipping two spellings of one value forever under
+/// `v: 1` — and would invalidate roughly fifteen in-VM assertions to say
+/// nothing new.
+fn state_word(state: &str, enrolled: bool) -> String {
+    if enrolled {
+        return state.to_string();
+    }
+    match state {
+        "compliant" => "matches".to_string(),
+        "non_compliant" => "drifted".to_string(),
+        "remediating" => "restoring".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The key that precedes the word, for the same reason.
+fn state_key(enrolled: bool) -> &'static str {
+    if enrolled { "Compliance" } else { "Drift" }
+}
+
 /// The SPEC section 52 block (Overall + per-capability rows), shared by
-/// `status`. Personal scope: the device vs. its own effective document.
-fn compliance_rows(c: &model::Compliance) -> Vec<Row> {
+/// `status`. On a personal device this is the device against its OWN effective
+/// document, and it is worded that way.
+fn compliance_rows(c: &model::Compliance, enrolled: bool) -> Vec<Row> {
+    // "drift remediated" is the honest phrase in both modes: it is what the
+    // reconcile loop actually did, and it names no authority.
     let remediation = match (c.drift_remediated_total, &c.last_remediation_at) {
-        (0, _) => "no drift remediated since daemon start".to_string(),
-        (n, Some(ts)) => format!("drift remediated {n} · last {}", fmt::timestamp(ts)),
-        (n, None) => format!("drift remediated {n}"),
+        (0, _) => "no drift put back since daemon start".to_string(),
+        (n, Some(ts)) => format!("drift put back {n} · last {}", fmt::timestamp(ts)),
+        (n, None) => format!("drift put back {n}"),
+    };
+    // "personal scope" was here unconditionally. It only means something if
+    // another scope exists that you are outside of — which is the feeling this
+    // whole pass removes.
+    let detail = if enrolled {
+        format!("organization scope · {remediation}")
+    } else {
+        remediation
     };
     let mut rows = vec![Row::new(
         "Overall",
-        &c.overall,
+        &state_word(&c.overall, enrolled),
         compliance_slot(&c.overall),
-        &format!("personal scope · {remediation}"),
+        &detail,
     )];
     for capability in &c.capabilities {
         rows.push(Row::new(
             compliance_label(&capability.capability),
-            &capability.state,
+            &state_word(&capability.state, enrolled),
             compliance_slot(&capability.state),
             "",
         ));
@@ -104,6 +150,54 @@ fn device_context(hostname: &str, enrolled: bool) -> String {
 /// `enroll.status` when the device is enrolled (the status result itself
 /// carries only the org identity) — empty when unenrolled or when the
 /// follow-up read failed; the row then falls back to the org domain.
+/// `punarctl compliance` — the SPEC section 11.2 verb, rendered over the block
+/// `status` already returns.
+///
+/// It used to be a stub that printed "not implemented until Milestone 5 (mock
+/// Smplify enrollment)" to stderr and exited non-zero. On a personal device
+/// that is a nag pointing at a product the person does not have, for a reading
+/// the daemon was already computing and already showing under `status`. The
+/// verb is a spec example (SPEC section 11.2) and a test asserts every section
+/// 11.2 example parses, so it is made real rather than deleted.
+pub fn compliance(style: &Style, result: &Value) -> Result<String, String> {
+    let s: model::Status = parse(result)?;
+    // device_context() is the existing helper that renders `<host> · Managed`
+    // or `<host> · Personal` — enrollment adds the word, never redraws.
+    let mut out = fmt::masthead(
+        style,
+        state_key(s.enrolled),
+        &device_context(&s.hostname, s.enrolled),
+    );
+
+    match &s.compliance {
+        Some(c) => {
+            out.push_str(&fmt::rows(style, &compliance_rows(c, s.enrolled)));
+            out.push_str(&fmt::note(
+                style,
+                if s.enrolled {
+                    "Each capability is measured against the effective policy · punarctl policy explain <capability>"
+                } else {
+                    // No authority is named, because there is none. What the
+                    // machine does for its owner is stated plainly instead.
+                    "Punar watches these settings and puts them back if something changes them · punarctl policy explain <capability>"
+                },
+            ));
+        }
+        None => {
+            out.push_str(&fmt::rows(
+                style,
+                &[Row::new(
+                    state_key(s.enrolled),
+                    "none",
+                    Slot::Neutral,
+                    "the daemon reported no reconcile state",
+                )],
+            ));
+        }
+    }
+    Ok(out)
+}
+
 pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Result<String, String> {
     let s: model::Status = parse(result)?;
     let mut out = fmt::masthead(style, "Status", &device_context(&s.hostname, s.enrolled));
@@ -172,7 +266,7 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
         // M4: the SPEC section 52 block, its own aligned block below the
         // daemon rows (the spec example draws it as a separate stanza).
         out.push('\n');
-        out.push_str(&fmt::rows(style, &compliance_rows(compliance)));
+        out.push_str(&fmt::rows(style, &compliance_rows(compliance, s.enrolled)));
     }
     if !s.enrolled {
         out.push_str(&fmt::note(
@@ -327,7 +421,15 @@ pub fn set(
     let outcome: model::CapabilitySet = parse(result)?;
     let d = &outcome.descriptor;
     let overridden = outcome.overridden == Some(true);
-    let context = if overridden {
+    // `overridden` means SOMETHING of higher precedence than your preference
+    // decided this — and on a personal device that something is NOT an
+    // organization: ranks 1-4 include non-org sources such as a temporary
+    // approved exception. Reading `overridden` as "managed" printed
+    // `<host> · Managed` and "is managed by organization policy" on a machine
+    // that has never enrolled. The pinning explain names the real decider when
+    // there is one; where it does not, we no longer invent one.
+    let managed = overridden && pinning.is_some();
+    let context = if managed {
         format!("{hostname} · Managed")
     } else {
         personal_context(hostname)
@@ -345,7 +447,13 @@ pub fn set(
                 "{} is managed by {} ({})",
                 d.capability, explain.source.name, explain.source.policy_id
             ),
-            None => format!("{} is managed by organization policy", d.capability),
+            // No pinning source to cite: say what is true — something ranked
+            // above your preference decided it — and name where to look,
+            // rather than asserting an organization.
+            None => format!(
+                "{} was decided above your preference · punarctl policy explain {}",
+                d.capability, d.capability
+            ),
         };
         out.push_str(&fmt::verdict(
             style,
@@ -682,6 +790,21 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         out.push_str(&fmt::note(
             style,
             "No organization is enrolled · nothing leaves this machine",
+        ));
+        // THE ONE POINTER, and it lives here on purpose. Requirement (3) is
+        // that enrolling into a Smplify instance is genuinely possible and
+        // findable; the constraint is that nobody may feel they SHOULD. This
+        // is the surface a person reaches only by asking about enrollment, so
+        // it is the one place where naming the command answers a question
+        // instead of interrupting. It appears on no other view, and there is
+        // deliberately no banner, no badge and no prompt anywhere else.
+        //
+        // SIMULATED, and labelled (spec 1.22): the endpoint this talks to is
+        // punar-mock-smplify. The real control plane does not exist yet —
+        // docs/development/user-blocked.md item 4.
+        out.push_str(&fmt::note(
+            style,
+            "To enroll: sudo punarctl enroll start <domain> · SIMULATED — the endpoint is a local mock, not a Smplify instance",
         ));
         return Ok(out);
     }
@@ -3307,11 +3430,18 @@ mod tests {
         });
         let text = status(&style, &result, &[]).unwrap();
         assert!(text.contains("OVERALL"), "{text}");
-        assert!(text.contains("NON_COMPLIANT"), "{text}");
+        // DESIGN_LANGUAGE section 8.1: this fixture is NOT enrolled, so the
+        // words may not presuppose an authority. The wire value is unchanged
+        // ("non_compliant" still crosses the socket); only the rendering moves.
+        assert!(text.contains("DRIFTED"), "{text}");
         assert!(
-            text.contains("personal scope · no drift remediated since daemon start"),
+            text.contains("no drift put back since daemon start"),
             "{text}"
         );
+        // The rule itself, asserted rather than a single replacement string:
+        // no compliance vocabulary and no scope-shaming on a personal device.
+        assert!(!text.contains("COMPLIANT"), "{text}");
+        assert!(!text.contains("PERSONAL SCOPE"), "{text}");
         // SPEC section 52 rows carry the friendly capability labels.
         assert!(text.contains("FIREWALL"), "{text}");
         assert!(text.contains("HOSTNAME"), "{text}");
@@ -3539,9 +3669,16 @@ mod tests {
         assert!(!text.contains("NO CHANGE ·"), "{text}");
         assert!(!text.contains("✓ APPLIED"), "{text}");
 
-        // Without the explain follow-up the override is still stated.
+        // Without the explain follow-up the override is still stated — but it
+        // no longer INVENTS an organization. `overridden` means something
+        // ranked above your preference decided this, and on a personal device
+        // that something may be a temporary approved exception rather than an
+        // org, so the old wording asserted a counterparty that need not exist.
         let text = set(&style, &result, "punar-m5", None).unwrap();
-        assert!(text.contains("IS MANAGED BY ORGANIZATION POLICY"), "{text}");
+        assert!(text.contains("WAS DECIDED ABOVE YOUR PREFERENCE"), "{text}");
+        assert!(!text.contains("ORGANIZATION POLICY"), "{text}");
+        // And the masthead does not call the device Managed without a source.
+        assert!(!text.contains("· MANAGED"), "{text}");
     }
 
     #[test]

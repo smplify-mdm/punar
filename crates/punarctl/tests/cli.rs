@@ -527,10 +527,10 @@ fn status_human_output_matches_the_d014_snapshot() {
          CAPABILITIES  3 TRACKED   registry local · last reconcile 2026-08-25 07:00:13\n\
          AUDIT         42 EVENTS   /var/log/punar/audit.jsonl · local only\n\
          \n\
-         OVERALL       COMPLIANT   personal scope · drift remediated 2 · last 2026-08-25 09:14:02\n\
-         FIREWALL      COMPLIANT\n\
-         HOSTNAME      COMPLIANT\n\
-         TIMEZONE      COMPLIANT\n\
+         OVERALL       MATCHES    drift put back 2 · last 2026-08-25 09:14:02\n\
+         FIREWALL      MATCHES\n\
+         HOSTNAME      MATCHES\n\
+         TIMEZONE      MATCHES\n\
          NO ORGANIZATION IS ENROLLED · ENROLLING LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
@@ -851,7 +851,6 @@ fn policy_verbs_need_the_daemon_and_exit_5_without_it() {
 fn unimplemented_verbs_keep_their_milestone_stubs() {
     let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
     for (args, expected) in [
-        (vec!["compliance"], "Milestone 5"),
         // `agents list` / `agents inspect` are real since M7 and
         // `agents access` / `privacy ledger` / `privacy purge` since M8
         // (below). `privacy connections` stays reserved — and says which

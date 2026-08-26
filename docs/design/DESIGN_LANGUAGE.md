@@ -229,6 +229,48 @@ device as the default state of every surface**:
 This is spec §3.2, §11, and Test A as a drawing rule: Punar must be worth
 choosing with Smplify nowhere in sight — and first-class when it is.
 
+### 8.1 The unenrolled device does not speak the enrolled device's vocabulary
+
+Section 8 says enrollment **adds** chrome and never restructures a surface. The
+corollary, ratified 2026-08-26 on the product owner's instruction, is the other
+direction:
+
+> **A device with no organization must never be described in words that
+> presuppose one.** Compliance asserts conformance *to an authority*. On a
+> personal device there is no authority, so the word is either meaningless or it
+> implies one that does not exist — and a person reading it is being told,
+> quietly, that something is missing from their machine.
+
+**Reconciliation and drift detection stay exactly as they are.** They are good
+OS primitives and the owner said so explicitly. A personal machine that notices
+its firewall was turned off and puts it back is keeping **its own promise to its
+owner**. What was wrong was calling that compliance.
+
+**One word table. Both renderers. No second vocabulary.**
+
+| wire value (unchanged) | enrolled | personal |
+|---|---|---|
+| `compliant` | Compliant | **Matches** |
+| `non_compliant` | Non-compliant | **Drifted** |
+| `remediating` | Remediating | **Restoring** |
+| `unknown` | Unknown | Unknown |
+| `unsupported` | Unsupported | Unsupported |
+| `exception` | Exception | Exception |
+
+The section key follows: **COMPLIANCE** when enrolled, **DRIFT** when not.
+
+**The wire does not move.** `ComplianceState`, `schemas/common/defs.json`, and
+`/run/punar/status.json` keep their spelling — the mapping is 1:1 and both
+renderers already hold `enrolled`, so a second wire vocabulary would carry no
+information while shipping two spellings of one value forever under `v: 1`. It
+would also invalidate roughly fifteen in-VM assertions to say nothing new. The
+translation happens where the words are drawn, and nowhere else.
+
+**"No reading" is not a state.** An unenrolled device reports an empty
+compliance string, and empty must render as *nothing* — never fall through to
+the first arm of a switch. That exact defect is why the command centre read
+`● LOCAL · COMPLIANT`: `case "": case "compliant":` shared an arm.
+
 ## 9. Non-negotiables
 
 1. UI code consumes tokens (`punar-tokens.*`) — never hardcoded values.

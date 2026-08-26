@@ -91,11 +91,6 @@ impl std::fmt::Display for Milestone {
     }
 }
 
-/// Milestone 5 — mock Smplify enrollment: policy, compliance, inventory.
-const M5_ENROLLMENT: Milestone = Milestone {
-    number: 5,
-    name: "mock Smplify enrollment",
-};
 /// Milestone 12 — network privacy prototype: observability, relay.
 const M12_NETWORK_PRIVACY: Milestone = Milestone {
     number: 12,
@@ -139,7 +134,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<CapabilitiesCommand>,
     },
-    /// Show compliance state against organization policy.
+    /// Show whether tracked settings still match, and what was put back.
     Compliance,
     /// Inspect effective policy.
     Policy {
@@ -1443,7 +1438,17 @@ fn main() -> ExitCode {
                 },
             }
         }
-        Command::Compliance => stub("compliance", &M5_ENROLLMENT),
+        // Real since 2026-08-26: it renders the block `status` already
+        // returns. It used to print "not implemented until Milestone 5 (mock
+        // Smplify enrollment)" to stderr and exit non-zero — a nag naming a
+        // product the person may never want, for a reading the daemon was
+        // already computing and already showing under `status`. The verb is a
+        // SPEC section 11.2 example and command_surface_parses asserts every
+        // section 11.2 example parses, so it is made real, not deleted.
+        Command::Compliance => match client.call("status", None) {
+            Ok(result) => render_or_json(json, &result, |v| views::compliance(&style, v)),
+            Err(error) => fail(&error),
+        },
         Command::Agents { command } => {
             let agents = Client::for_target(Target::Agentd, socket.as_deref());
             match command {
