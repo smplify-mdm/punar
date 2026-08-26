@@ -481,6 +481,51 @@ nothing more is claimed.
 
 ---
 
+### 2.13 Networking — not a surface, but the browser is useless without it
+
+The image shipped a browser, a firewall, and **no way to get an IP address**:
+no DHCP client was enabled and no `.network` file existed. A machine with a
+perfectly good NIC came up with no address, and the browser opened to a network
+error.
+
+**CI could not have caught this.** `tools/boot-test.sh` runs the VM with
+`-nic none` — the gate has no network by design, so the *absence* of networking
+was invisible to every check in the repo. It was found by asking what the
+browser would actually do on a real machine.
+
+| Piece | File / unit | Note |
+|---|---|---|
+| Address | `/usr/lib/systemd/network/50-punar-dhcp.network` | DHCPv4 + IPv6 RA, wired only |
+| Client | `systemd-networkd.service` + `.socket` | vendor `.wants`, not `/etc` |
+| DNS | `systemd-resolved.service` | `/etc/resolv.conf` → stub, via tmpfiles `L+` |
+
+Three decisions worth stating:
+
+- **`SendHostname=no`** — a deliberate deviation from systemd's default. The
+  hostname is device identity, and announcing it to every DHCP server a laptop
+  ever touches is a tracking vector across networks. This is the posture the
+  privacy panel claims, applied to the one place it silently leaks.
+- **`systemd-networkd-wait-online` is NOT enabled.** It blocks boot for up to
+  90 s waiting for an interface that may never come up. Punar's boot-time
+  budget is a product claim; nothing that can stall it by 90 s gets enabled.
+- **Wired only (`Type=ether`).** Wi-Fi needs an association step and a
+  credential store, neither of which exists. Matching it here would produce an
+  interface that is configured and permanently down — a worse lie than an
+  absent one.
+
+**This is not Milestone 12.** It is basic wired connectivity so the browser can
+load a page. The private relay (§33–34), network policy, per-project contexts
+and Wi-Fi remain unbuilt and unclaimed. The M3 firewall is unchanged and
+already permits this: `output accept`, `input drop` with `established,related`
+accepted, so replies to outbound connections return and nothing new is exposed.
+
+**Untested in CI, and it must not be read as verified** (spec §1.22). The gate
+has no NIC. This was reasoned from the firewall rules and systemd's documented
+behaviour, and it is exercised for the first time by a human in the demo VM,
+which is launched with user-mode networking precisely so it can be.
+
+---
+
 ## 3. IPC targets, all thirteen
 
 Verified unique across the tree; `qs ipc show` is the authority.

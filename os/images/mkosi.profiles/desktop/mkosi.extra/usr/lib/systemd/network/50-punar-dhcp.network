@@ -1,0 +1,34 @@
+# Punar default wired networking.
+#
+# WHY THIS EXISTS. The image shipped a browser, a firewall and no way to get an
+# IP address: no DHCP client was enabled and no .network file existed, so a
+# machine with a working NIC came up with no address and the browser opened to
+# a network error. CI never caught it because tools/boot-test.sh runs the VM
+# with `-nic none` — the gate has no network by design, so the absence of
+# networking was invisible to every check.
+#
+# Scope, stated plainly: this is basic wired connectivity — DHCPv4, IPv6 RA,
+# and nothing else. It is NOT Milestone 12. The private relay (§33-34), network
+# policy, per-project contexts and Wi-Fi are unbuilt and unclaimed.
+
+[Match]
+# Wired only. Wi-Fi needs an association step and a credential store, neither
+# of which exists yet; matching it here would produce an interface that is
+# configured and permanently down.
+Type=ether
+
+[Network]
+DHCP=ipv4
+# Accept router advertisements but do not request a DHCPv6 lease: on a network
+# with no IPv6 this costs nothing, and on one with IPv6 it gets an address
+# without a second stateful client.
+IPv6AcceptRA=yes
+
+[DHCPv4]
+# Punar does not tell the network its hostname. The hostname is device
+# identity, and broadcasting it to every DHCP server the machine ever touches
+# is a privacy leak for a laptop that moves between networks — exactly the
+# posture the privacy panel states. This is a deliberate deviation from
+# systemd's default (SendHostname=yes).
+SendHostname=no
+UseDomains=yes
