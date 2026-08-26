@@ -1157,6 +1157,32 @@ run_desktop() {
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
     fi
 
+    # Phase 12e: zram. Spec 282 ("Use zram ...") and 294 ("aggressive zram")
+    # mandate it and the image shipped NONE until 2026-08-26 — no swap of any
+    # kind, nothing reclaimable under pressure. zram-generator is a systemd
+    # generator that runs at early boot, so a malformed config or a missing
+    # module leaves the machine silently swapless, which is indistinguishable
+    # from a machine that never wanted swap. Asserted on the running guest.
+    local ram_report="${PROOF_DIR}/ram-report.txt"
+    if [ -f "${ram_report}" ] && grep -q '^PUNAR_ZRAM_PRESENT=' "${ram_report}"; then
+        local zpresent zactive zalgo zsize
+        zpresent="$(grep '^PUNAR_ZRAM_PRESENT=' "${ram_report}" | cut -d= -f2)"
+        zactive="$(grep '^PUNAR_ZRAM_SWAP_ACTIVE=' "${ram_report}" | cut -d= -f2)"
+        zalgo="$(grep '^PUNAR_ZRAM_ALGORITHM=' "${ram_report}" | cut -d= -f2 || true)"
+        zsize="$(grep '^PUNAR_ZRAM_DISKSIZE_MB=' "${ram_report}" | cut -d= -f2 || true)"
+        if [ "${zpresent}" != "yes" ]; then
+            echo "error: no /sys/block/zram0 on the guest — spec 282/294 zram did not materialise" >&2
+            exit 1
+        fi
+        if [ "${zactive}" != "yes" ]; then
+            echo "error: zram0 exists but is not an active swap device (/proc/swaps) — the generator ran and produced nothing usable" >&2
+            exit 1
+        fi
+        echo "==> zram: active, ${zsize:-?} MB at ${zalgo:-?}"
+    else
+        echo "==> zram: no facts in ram-report.txt (older guest image); not gated this run"
+    fi
+
     # Phase 12d: wireless verdict. A primary development machine is a laptop,
     # and until iwd landed this image had no Wi-Fi path at all. The hardware is
     # simulated (mac80211_hwsim) precisely so the shipped configuration is

@@ -109,6 +109,25 @@ echo "PUNAR_SERVICES_RSS_MB=${services_rss} (summed PSS over: ${PUNAR_SERVICE_UN
 #
 # Read-only, no new process beyond this loop, and it runs AFTER both samples
 # so it cannot perturb either.
+# ZRAM, ASSERTED ON THE RUNNING MACHINE. Spec 282/294 mandate it and the image
+# shipped none until now. A config file that is present but produced no device
+# is the failure this reports: zram-generator is a systemd GENERATOR, so it runs
+# at early boot and a malformed unit or a missing kernel module leaves the
+# machine silently swapless — which looks exactly like a machine that never
+# wanted swap. Reported as facts for the host gate to judge, not decided here.
+if [ -e /sys/block/zram0 ]; then
+    zram_disksize="$(cat /sys/block/zram0/disksize 2>/dev/null || echo 0)"
+    zram_algo="$(sed -n 's/.*\[\([a-z0-9]*\)\].*/\1/p' /sys/block/zram0/comp_algorithm 2>/dev/null | head -1)"
+    zram_active="$(awk 'NR>1 && $1 ~ /zram/ {print "yes"; exit}' /proc/swaps 2>/dev/null)"
+    echo "PUNAR_ZRAM_PRESENT=yes"
+    echo "PUNAR_ZRAM_DISKSIZE_MB=$((zram_disksize / 1024 / 1024))"
+    echo "PUNAR_ZRAM_ALGORITHM=${zram_algo:-unknown}"
+    echo "PUNAR_ZRAM_SWAP_ACTIVE=${zram_active:-no}"
+else
+    echo "PUNAR_ZRAM_PRESENT=no"
+    echo "PUNAR_ZRAM_SWAP_ACTIVE=no"
+fi
+
 ram_procs="${RUN_DIR:-/run/punar}/ram-processes.txt"
 {
     echo "# Per-process PSS at stabilized idle — the attribution for PUNAR_RAM_MEAN_MB."
