@@ -238,3 +238,40 @@ available. Any plan to reach 1024 MB by trimming processes is working against
    X11-only applications are still common. That is a product decision about
    what Punar supports, not a memory optimisation, and it is recorded here with
    its price rather than taken quietly.
+
+## Interaction latency — measured from 2026-08-26
+
+Idle RAM and boot time were the only performance figures this project had, and
+neither is what a person feels minute to minute. **Opening a surface is.** That
+number did not exist: the surfaces exercise reported "painted pixels after 1s"
+and the 1 was its poll granularity, not a measurement.
+
+`surfaces-check.sh` now times two spans per surface at millisecond resolution,
+both from the moment the request leaves the checker, and writes
+`surfaces-latency.txt`:
+
+| Column | What it is |
+|---|---|
+| `open_ms` | request → the shell's `state()` reports open — **shell responsiveness** |
+| `map_ms` | request → the compositor has a mapped layer — **what a person sees** |
+
+**The instrument is inside the number.** Each poll spawns `qs ipc call` or
+`hyprctl -j layers`, so a few milliseconds of process-spawn cost sit in every
+figure. These are an **upper bound** on the surface's own cost — the honest
+direction to err, because it can only make the desktop look slower than it is.
+
+**No threshold is gated yet, on purpose.** There is no basis for one until the
+first numbers exist, and picking a limit before measuring is exactly how idle
+RAM ended up with a 1024 MB target that has never once been met.
+
+### The lazy-load plan is rejected, not deferred
+
+Earlier notes here scoped a `Loader`-per-surface change to recover ~90 MB. That
+is now **withdrawn**. Every surface is eagerly instantiated today, which is
+precisely why opening one has nothing left to build; putting the five on-demand
+surfaces behind inactive loaders would move construction cost onto the first
+keypress. That trades **felt** latency for **unfelt** memory, on a machine that
+idles with 6.7 GB free — and speed is table stakes for this desktop while
+1274 MB is not hurting anyone. The memory attribution above stands as a record;
+the remedy it proposed does not.
+
