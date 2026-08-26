@@ -242,6 +242,11 @@ tangible argument for ADR-005.
 
 ## 7. Work queue, in priority order
 
+> **The executable version of this section is [`BUILD-QUEUE.md`](BUILD-QUEUE.md)**
+> — every task with its files, the pattern to follow, its acceptance criteria
+> and its traps, plus the recipe for adding a new in-VM check. What follows is
+> the summary.
+
 ### 7.1 Push the unpushed commits
 `git log --oneline origin/main..HEAD`. Gates pass; run them anyway.
 
