@@ -529,6 +529,7 @@ run_desktop() {
           "${PROOF_DIR}/punar-m2.png" \
           "${PROOF_DIR}/ram-report.txt" \
           "${PROOF_DIR}/ram-samples.txt" \
+          "${PROOF_DIR}/ram-processes.txt" \
           "${PROOF_DIR}/meminfo" \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \

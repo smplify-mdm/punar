@@ -94,6 +94,42 @@ if [ "${all_units_ok}" -eq 1 ]; then
 fi
 echo "PUNAR_SERVICES_RSS_MB=${services_rss} (summed PSS over: ${PUNAR_SERVICE_UNITS})"
 
+# WHO IS ACTUALLY HOLDING THE MEMORY. The whole-system idle figure has drifted
+# 115 MB above its target and the only attribution available was "the commit
+# that added thirteen surfaces" — true, but not actionable: that commit also
+# added wallpapers, a theme system and a notification daemon, and the shell,
+# the compositor and llvmpipe's software-rendering buffers are all in the same
+# anonymous total. Optimising against that is guesswork.
+#
+# So every process with a readable smaps_rollup is ranked by PSS at stabilized
+# idle, strictly inside the same window as the numbers above. PSS, not RSS,
+# because Qt and Mesa share a great deal and RSS would double-count it: the
+# PSS column sums to something meaningful, which is the property that makes it
+# worth measuring at all.
+#
+# Read-only, no new process beyond this loop, and it runs AFTER both samples
+# so it cannot perturb either.
+ram_procs="${RUN_DIR:-/run/punar}/ram-processes.txt"
+{
+    echo "# Per-process PSS at stabilized idle — the attribution for PUNAR_RAM_MEAN_MB."
+    echo "# PSS (proportional set size): shared pages divided among their sharers, so"
+    echo "# this column SUMS meaningfully. Sorted descending, kB."
+    for pid_dir in /proc/[0-9]*; do
+        pid="${pid_dir#/proc/}"
+        pss="$(awk '/^Pss:/ {print $2}' "${pid_dir}/smaps_rollup" 2>/dev/null)"
+        [ -n "${pss}" ] || continue
+        comm="$(tr -d '\0' < "${pid_dir}/comm" 2>/dev/null)"
+        [ -n "${comm}" ] || comm="?"
+        printf '%s\t%s\t%s\n' "${pss}" "${pid}" "${comm}"
+    done | sort -rn -k1,1
+} > "${ram_procs}" 2>/dev/null || true
+if [ -s "${ram_procs}" ]; then
+    total_pss="$(awk -F'\t' '/^[0-9]/ {t += $1} END {printf "%d", (t + 1023) / 1024}' "${ram_procs}")"
+    echo "PUNAR_RAM_PSS_TOTAL_MB=${total_pss} (sum of per-process PSS; see ram-processes.txt)"
+    echo "# top five by PSS:"
+    awk -F'\t' '/^[0-9]/ {printf "#   %6.1f MB  %s\n", $1/1024, $3}' "${ram_procs}" | head -5
+fi
+
 # Desktop-surfaces exercise, FIRST of the in-VM checks and strictly AFTER the
 # idle sampling window above. First on purpose: it is the only check that
 # leaves the session exactly as it found it (every surface closed, the browser
