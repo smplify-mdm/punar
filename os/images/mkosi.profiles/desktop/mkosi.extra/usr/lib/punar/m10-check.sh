@@ -999,16 +999,65 @@ note "info ledger records on disk: ${ledgers_before} before the purge, ${ledgers
 # also holds the index, and a device that had already purged would make a
 # count comparison vacuous. A purged ledger must render as *purged*, never
 # as "nothing recorded" (the M8 rule, which M10 inherits for detections).
-if [ -n "${DETECTION_ID}" ] && [ "${DETECTION_ID}" != "null" ]; then
-    "${CTL}" agents access "${DETECTION_ID}" > "${RUN_DIR}/m10-access-purged.txt" 2>&1
-    access_exit=$?
-    if [ "${access_exit}" -ne 0 ] \
-        || grep -qi 'purged' "${RUN_DIR}/m10-access-purged.txt" 2>/dev/null; then
-        note "ok   the detection's ledger is gone: the surface says purged, never 'nothing recorded'"
+#
+# WHOSE ledger, and why that turned out to be the whole question. The purge
+# above ran as PUNAR, and its own scope line says "every session you own
+# (root: every session on this device)". The fixture is launched through
+# runuser, which leaves a root-owned parent that is detected as its own
+# agent — so roughly half the foo-agent detections on this device belong to
+# ROOT, and DETECTION_ID above is whichever one the timer happened to produce
+# first. When it landed on a root-owned row this assertion failed, and it was
+# right to: a user may not purge another principal's records. That is a
+# security boundary, not a defect, and it had never been asserted.
+#
+# So both halves are asserted now, each against a row of KNOWN ownership read
+# from the index (this script runs as root and can read it):
+#   1. a PUNAR-owned detection's ledger is gone after the user's own purge
+#   2. a ROOT-owned detection's ledger SURVIVES that same purge
+#   3. and a root purge then removes it, so completeness is not just claimed
+punar_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "punar") | .key) // ""' \
+    "${DETECTIONS_INDEX}" 2>/dev/null)"
+root_det="$(jq -r 'first(.rows | to_entries[] | select(.value.user == "root") | .key) // ""' \
+    "${DETECTIONS_INDEX}" 2>/dev/null)"
+note "info purge scope probes: punar-owned='${punar_det:-none}' root-owned='${root_det:-none}'"
+
+ledger_gone() {
+    "${CTL}" agents access "$1" > "$2" 2>&1
+    lg_exit=$?
+    [ "${lg_exit}" -ne 0 ] || grep -qi 'purged' "$2" 2>/dev/null
+}
+
+if [ -n "${punar_det}" ]; then
+    if ledger_gone "${punar_det}" "${RUN_DIR}/m10-access-purged.txt"; then
+        note "ok   the user's own purge removed a punar-owned detection ledger: the surface says purged, never 'nothing recorded'"
     else
-        note "FAIL the detection ledger survived the purge: $(head -c 200 "${RUN_DIR}/m10-access-purged.txt")"
+        note "FAIL a punar-owned detection ledger survived the user's purge: $(head -c 200 "${RUN_DIR}/m10-access-purged.txt")"
         FAILED=1
     fi
+else
+    note "FAIL no punar-owned detection in the index — the purge assertion would be vacuous"
+    FAILED=1
+fi
+
+if [ -n "${root_det}" ]; then
+    if ledger_gone "${root_det}" "${RUN_DIR}/m10-access-root-kept.txt"; then
+        note "FAIL a ROOT-owned detection ledger was removed by a purge run as punar — the scope boundary leaks"
+        FAILED=1
+    else
+        note "ok   a root-owned detection ledger survived the user's purge (a user may not purge another principal's records)"
+    fi
+
+    # 3. and root's own purge is complete.
+    "${CTL}" privacy purge --all --yes > "${RUN_DIR}/m10-purge-root.txt" 2>&1
+    check_true "privacy purge --all --yes runs as root" "$?"
+    if ledger_gone "${root_det}" "${RUN_DIR}/m10-access-root-purged.txt"; then
+        note "ok   root's purge removed the root-owned detection ledger"
+    else
+        note "FAIL the root-owned ledger survived root's own purge: $(head -c 200 "${RUN_DIR}/m10-access-root-purged.txt")"
+        FAILED=1
+    fi
+else
+    note "info no root-owned detection in the index — the scope-boundary half is not applicable this run"
 fi
 surviving_exec="$(audit_count '.action == "agents.scan" and .result == "detected"')"
 if [ "${surviving_exec}" -ge 1 ]; then
@@ -1027,14 +1076,66 @@ fi
 
 # --- 12. fleet aggregation and its boundary ---------------------------------
 punar-mock-smplify --fleet > "${RUN_DIR}/m10-fleet.txt" 2>&1
-if grep -Eq '^Unknown +1' "${RUN_DIR}/m10-fleet.txt"; then
-    note "ok   the fleet view counts 1 unknown agent, from a device that actually answered"
+#
+# THIS USED TO ASSERT THE LITERAL NUMBER 1, and the number is not 1. The
+# reasoning behind it was that bar-agent is killed before the query groups, so
+# only foo-agent remains and the fleet counts one unmanaged thing. That is
+# false, and the falsehood is the interesting part: a detection is a RECORD
+# THAT AN UNKNOWN AGENT RAN, not a live process list. Killing the process does
+# not — and must not — retire the evidence that it executed, any more than
+# closing a door un-rings a doorbell. The device honestly reports both, plus
+# the extra root-owned rows the runuser fixture creates, so the true count is
+# a function of the harness rather than of the product.
+#
+# What is asserted instead is the property the number was standing in for, and
+# it is strictly stronger than a constant:
+#   - a device ANSWERED at inventory scope, so the cell is a number and not
+#     the em dash (that distinction is the whole point of FleetValue)
+#   - the count is at least the one unknown agent this exercise guarantees
+#   - and the aggregate is INTERNALLY CONSISTENT: the "N unmanaged agent" line
+#     and the Unknown row are two renders of the same aggregation and must
+#     agree, which no single hard-coded number could ever check
+fleet_unknown="$(grep -E '^Unknown +' "${RUN_DIR}/m10-fleet.txt" | awk '{print $2}')"
+fleet_unmanaged="$(grep -Eo '^[0-9]+ unmanaged agent' "${RUN_DIR}/m10-fleet.txt" | awk '{print $1}')"
+fleet_sigs="$(grep -Eo '[0-9]+ distinct signature' "${RUN_DIR}/m10-fleet.txt" | awk '{print $1}')"
+note "info fleet aggregate: unknown='${fleet_unknown:-}' unmanaged='${fleet_unmanaged:-}' signatures='${fleet_sigs:-}'"
+
+case "${fleet_unknown}" in
+    ''|*[!0-9]*)
+        note "FAIL the fleet Unknown cell is '${fleet_unknown}', not a number — no device answered at inventory scope, so nothing was aggregated"
+        FAILED=1
+        ;;
+    *)
+        if [ "${fleet_unknown}" -ge 1 ]; then
+            note "ok   the fleet counts ${fleet_unknown} unknown agent(s), from a device that actually answered"
+        else
+            note "FAIL the fleet counted 0 unknown agents while this exercise ran at least one"
+            FAILED=1
+        fi
+        ;;
+esac
+
+if [ -n "${fleet_unmanaged}" ] && [ "${fleet_unmanaged}" = "${fleet_unknown}" ]; then
+    note "ok   the shadow-AI panel and the Unknown row agree (${fleet_unmanaged})"
 else
-    note "FAIL the fleet view does not report Unknown 1"
+    note "FAIL the shadow-AI panel says '${fleet_unmanaged}' unmanaged while the Unknown row says '${fleet_unknown}' — two renders of one aggregation disagree"
     FAILED=1
 fi
-grep_row "the shadow-AI panel counts one unmanaged agent" \
-    "${RUN_DIR}/m10-fleet.txt" "1 unmanaged agent"
+
+case "${fleet_sigs}" in
+    ''|*[!0-9]*)
+        note "FAIL distinct-signature count is '${fleet_sigs}', not a number"
+        FAILED=1
+        ;;
+    *)
+        if [ "${fleet_sigs}" -ge 1 ] && [ "${fleet_sigs}" -le "${fleet_unknown}" ]; then
+            note "ok   distinct signatures (${fleet_sigs}) is between 1 and the agent count (${fleet_unknown})"
+        else
+            note "FAIL distinct signatures ${fleet_sigs} is outside 1..${fleet_unknown} — signatures cannot outnumber the agents that carry them"
+            FAILED=1
+        fi
+        ;;
+esac
 if grep -q '—' "${RUN_DIR}/m10-fleet.txt"; then
     note "ok   unanswered rows render an em dash"
 else
