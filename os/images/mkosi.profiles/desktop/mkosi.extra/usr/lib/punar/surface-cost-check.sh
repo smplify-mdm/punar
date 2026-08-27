@@ -23,6 +23,7 @@ PROBE_LOG=/run/punar/surface-probe.log
 IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
 SURFACES="commandcenter systemcontrol shortcuts aipanel overview"
 SAMPLES=3
+MIN_PROBE_PSS_KIB=16384
 FAILED=0
 
 mkdir -p /run/punar
@@ -117,9 +118,23 @@ probe_diagnostics() {
 
 # Identify the long-lived probe server without racing its short-lived `qs ipc`
 # clients, whose cmdlines carry the same -p path plus the words "ipc call".
+# Checking both comm and exe is deliberate: Hyprland normally launches through
+# `/bin/sh -c`, and that wrapper's cmdline also contains PROBE_PATH. Measuring
+# the wrapper produced plausible-looking ~600 KiB numbers instead of Quickshell.
 probe_pid() {
     for proc_dir in /proc/[0-9]*; do
         [ -r "${proc_dir}/cmdline" ] || continue
+        [ -r "${proc_dir}/comm" ] || continue
+        probe_comm="$(tr -d '\n' < "${proc_dir}/comm" 2>/dev/null)"
+        probe_exe="$(readlink "${proc_dir}/exe" 2>/dev/null || true)"
+        case "${probe_comm}" in
+            qs|quickshell) ;;
+            *) continue ;;
+        esac
+        case "${probe_exe}" in
+            */qs|*/quickshell) ;;
+            *) continue ;;
+        esac
         probe_cmdline="$(tr '\000' ' ' < "${proc_dir}/cmdline" 2>/dev/null)"
         case "${probe_cmdline}" in
             *"${PROBE_PATH}"*)
@@ -151,7 +166,7 @@ start_probe() {
     # Hyprland's exec path supplies the same session environment as the
     # production shell. Capture this measurement-only process's diagnostics;
     # ordinary successful reports remain data-only.
-    hyprctl dispatch exec "${PROBE_CMD} >>${PROBE_LOG} 2>&1" >/dev/null 2>&1
+    hyprctl dispatch exec "exec ${PROBE_CMD} >>${PROBE_LOG} 2>&1" >/dev/null 2>&1
     if ! wait_for 60 probe_ready; then
         return 1
     fi
@@ -209,6 +224,9 @@ for surface in ${SURFACES}; do
             FAILED=1
             finish
         fi
+        probe_identity_comm="$(tr -d '\n' < "/proc/${pid}/comm" 2>/dev/null)"
+        probe_identity_exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+        note "# ${surface} sample ${sample} probe_pid=${pid} comm=${probe_identity_comm} exe=${probe_identity_exe}"
 
         base_pss="$(median_pss_kib "${pid}")"
         case "${base_pss}" in
@@ -218,6 +236,12 @@ for surface in ${SURFACES}; do
                 finish
                 ;;
         esac
+        if [ "${base_pss}" -lt "${MIN_PROBE_PSS_KIB}" ]; then
+            note "FAIL ${surface} sample ${sample}: empty-probe PSS ${base_pss} KiB is below ${MIN_PROBE_PSS_KIB} KiB sanity floor"
+            probe_diagnostics
+            FAILED=1
+            finish
+        fi
         open_result="$(ipc surfaceprobe open "${surface}" | tr -d '[:space:]\"')"
         if [ "${open_result}" != "loading" ]; then
             note "FAIL ${surface} sample ${sample}: open returned '${open_result}'"

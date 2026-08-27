@@ -531,7 +531,7 @@ action half survives truncation.
 | `project` | Hyprland `workspace <id>` (+ `renameworkspace <id> <name>` when allocating) | `OpenProject(atlas) · Workspace 2` |
 | `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Super S` |
 | `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |
-| `wallpaper` | `WallpaperState.setWallpaper(<id>)` — finite installed catalog, atomic id preference | `SetWallpaper(signal-horizon)` |
+| `wallpaper` | `WallpaperState.setWallpaper(<id>)` — finite installed catalog, atomic id preference | `SetWallpaper(stillpoint)` |
 | `explain` | `punarctl --json policy explain <path>` | `PolicyExplain(security.firewall)` |
 
 The browser is resolved **by role** — desktop-id list, then

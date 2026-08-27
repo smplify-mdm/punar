@@ -11,7 +11,7 @@ backend reference.
 
 ## The whole experience
 
-First run is one calm card over Signal Horizon. There is no progress rail and no
+First run is one calm card over Stillpoint. There is no progress rail and no
 fake tour. The top bar says `WELCOME TO PUNAR` and offers a quiet keyboard
 layout control because entering a password with the wrong keymap is a lockout,
 not a preference. The card says:
@@ -43,7 +43,7 @@ type, network, timezone, organization, telemetry, AI, theme, wallpaper, or
 update question. Their defaults are already safe:
 
 - display name falls back to the username and can be edited later;
-- Signal Horizon and the Paper theme make the first desktop immediately coherent;
+- Stillpoint and the Paper theme make the first desktop immediately coherent;
 - telemetry and cloud sync do not exist;
 - the device starts personal and unenrolled;
 - network, timezone, enrollment, appearance, and accessibility remain

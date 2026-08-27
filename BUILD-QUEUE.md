@@ -20,7 +20,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
-| 3 | remain within idle budget | 1302 MB against a 1024 MB target **never once met** |
+| 3 | remain within idle budget | 1356 MB against a 1024 MB target **never once met** |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -32,9 +32,10 @@ unmanaged-first work in `HANDOFF.md` §3.3 is not cosmetic.
 ## 1. Immediately
 
 ### 1.1 Start from the verified head
-Commit `9f3cd43` and all preceding handed-off work are on `origin/main`.
-[Run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
-is green on all five jobs. **Never push while a CI run is in flight** — the
+Commit `2c47671` and all preceding handed-off work are on `origin/main`.
+[Run 33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
+is green on all seven jobs, including x86_64/ARM64 code contracts, the image,
+minimal boot, and full graphical desktop. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
 
 ---
@@ -80,6 +81,14 @@ what a surface costs to *build* versus to *hold*.
 3. Keep eager only what measurement proves expensive, **and put the number in
    the commit message**. *"This surface stays resident because building it
    costs 380 ms"* is defensible; *"surfaces are eager for speed"* is not.
+
+**Instrument audit (2026-08-26):** run 33041260498 produced credible
+construction/map timings but invalid 601–639 KiB probe PSS values. Hyprland's
+`/bin/sh -c` wrapper contained the probe path in its command line and was
+mistaken for Quickshell. The in-flight correction makes the shell `exec qs`,
+requires a `qs`/`quickshell` process name and executable identity, records that
+identity, and fails any empty probe below a 16 MiB sanity floor. Do not
+make a lazy-loading decision from the old resident deltas; rerun this gate.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); notifications, toasts, OSD (must receive events
@@ -191,7 +200,7 @@ mechanism. That needs its own ADR.
 ## 6. Product gaps, by value
 
 The desktop-field work is implemented: five typed
-choices, Signal Horizon as the original 3840×2400 default, exact asset hashes,
+choices, Stillpoint as the original 3840×2400 default, exact asset hashes,
 and no resident wallpaper process. It is not a substitute for the RAM work:
 only the active raster is decoded, and Field remains the constrained-machine
 vector choice. The new live contract is `docs/design/wallpapers.md`.

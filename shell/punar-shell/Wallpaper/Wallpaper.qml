@@ -15,7 +15,7 @@
 //
 // The background never accepts input or focus.  A person selects it through
 // the keyboard-first command center or the typed `wallpaper` IPC target.  The
-// default, Signal Horizon, uses generous negative space so application windows
+// default, Stillpoint, uses generous negative space so application windows
 // stay visually primary. Field follows Theme.wallpaper* and preserves
 // D-015's original 1600x1000 geometry.
 

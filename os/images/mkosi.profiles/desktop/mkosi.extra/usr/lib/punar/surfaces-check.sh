@@ -576,22 +576,22 @@ fi
 # on the inviting default, can switch to the vector fallback, and restores the
 # default through the same atomic preference path the command center uses.
 ipc wallpaper state > /run/punar/surfaces-wallpaper-state.json 2>/dev/null
-if jq -e '.active == "signal-horizon" and .writable == true' \
+if jq -e '.active == "stillpoint" and .writable == true' \
         /run/punar/surfaces-wallpaper-state.json >/dev/null 2>&1; then
-    note "ok   wallpaper starts on writable Signal Horizon default"
+    note "ok   wallpaper starts on writable Stillpoint default"
 else
-    note "FAIL wallpaper state is not the writable Signal Horizon default"
+    note "FAIL wallpaper state is not the writable Stillpoint default"
     FAILED=1
 fi
 
 ipc wallpaper list > /run/punar/surfaces-wallpapers.json 2>/dev/null
-if jq -e '.default == "signal-horizon"
+if jq -e '.default == "stillpoint"
         and (.wallpapers | length) == 5
-        and ([.wallpapers[].id] | sort) == (["daybreak", "earthrise", "field", "signal-horizon", "winterline"] | sort)' \
+        and ([.wallpapers[].id] | sort) == (["daybreak", "earthrise", "field", "stillpoint", "winterline"] | sort)' \
         /run/punar/surfaces-wallpapers.json >/dev/null 2>&1; then
     note "ok   wallpaper catalog exposes the five shipped choices"
 else
-    note "FAIL wallpaper catalog does not expose exactly daybreak/earthrise/field/signal-horizon/winterline"
+    note "FAIL wallpaper catalog does not expose exactly daybreak/earthrise/field/stillpoint/winterline"
     FAILED=1
 fi
 
@@ -613,7 +613,7 @@ wallpaper_asset() {
 wallpaper_asset daybreak 4aa5af32a22ead3930bab5b9b24e1a8c899ba13268e0e58acd94c96251905c18
 wallpaper_asset winterline 04aab01c53774d96d336ef0d15d235e10d9f1194ee7409615f7956615b5759f1
 wallpaper_asset earthrise f5a6fb900ec98de5acdcd817728fcadfba18a700949e9b474c9f58c71a4f182f
-wallpaper_asset signal-horizon e8cbaa1655582d442b760796819e966c1fa223cf77c2417e4ffb0c2d395ba5fa
+wallpaper_asset stillpoint 6313a086a8eddb5b8f113edc50b4d7c1656b433c0e7fdb3c7cd97d90d65439e0
 if [ -f /usr/share/punar/shell/Wallpaper/SOURCES.md ]; then
     note "ok   wallpaper source and licence manifest ships beside the assets"
 else
@@ -631,17 +631,17 @@ else
 fi
 
 ipc wallpaper reset > /run/punar/surfaces-wallpaper-reset.json 2>/dev/null
-if jq -e '.applied == true and .active == "signal-horizon" and .source == "shipped default"' \
+if jq -e '.applied == true and .active == "stillpoint" and .source == "shipped default"' \
         /run/punar/surfaces-wallpaper-reset.json >/dev/null 2>&1; then
-    note "ok   wallpaper.reset restores the shipped Signal Horizon default"
+    note "ok   wallpaper.reset restores the shipped Stillpoint default"
 else
-    note "FAIL wallpaper.reset did not restore the shipped Signal Horizon default"
+    note "FAIL wallpaper.reset did not restore the shipped Stillpoint default"
     FAILED=1
 fi
 
 wallpaper_row="$(ipc commandcenter query wallpaper | tr -d '\r\n\"')"
 check_eq "command center exposes wallpaper as a typed action" \
-    "wallpaper · SetWallpaper(signal-horizon) · current" "${wallpaper_row}"
+    "wallpaper · SetWallpaper(stillpoint) · current" "${wallpaper_row}"
 ipc commandcenter close >/dev/null 2>&1
 
 bar_state="$(ipc bar state | tr -d '[:space:]"')"

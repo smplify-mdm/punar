@@ -6,7 +6,7 @@
   "generated_default": {
     "id": "plate-d015",
     "file": "../../../../docs/design/assets/punar-wallpaper-{paper,panel}.svg",
-    "note": "Historical default before the owner-approved Signal Horizon catalog. The generated instrument plate remains available as the lean Field choice."
+    "note": "Historical default before the owner-approved Stillpoint catalog. The generated instrument plate remains available as the lean Field choice."
   },
   "thresholds": {
     "paper_worst_patch_min_L": 0.175,

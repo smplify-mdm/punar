@@ -66,7 +66,7 @@ Everything is keyboard-first. `SUPER` is the modifier.
 | Terminal | `SUPER + Return` | foot, Geist Mono, panel surface |
 | Browser | `SUPER + B` | Chromium, native Wayland |
 | Find and open an app | `SUPER + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
-| Choose a wallpaper | `SUPER + Space` | Type `wallpaper`; Signal Horizon, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
+| Choose a wallpaper | `SUPER + Space` | Type `wallpaper`; Stillpoint, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
 | System control | `SUPER + S` | The settings surface |
 | Notification centre | `SUPER + SHIFT + N` | The centre; toasts appear on their own |
 | Project overview | `SUPER + Tab` | Workspaces as projects |

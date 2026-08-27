@@ -1,4 +1,4 @@
-# Signal Horizon generation record
+# Stillpoint generation record
 
 **Tool:** OpenAI image generation  
 **Generated:** 2026-08-26  
@@ -10,30 +10,34 @@ and its deterministic transformation are recorded in `SOURCES.md`.
 ## Final prompt
 
 ```text
-Create a brand-new, original premium Linux desktop wallpaper for a developer-first operating system.
+Create a brand-new, original minimalist desktop wallpaper for Punar, a lean developer-first Linux operating system.
 
-ASSET / USE
-- Raster desktop wallpaper, landscape 16:10 composition intended for final delivery at 3840x2400.
-- It must remain elegant behind translucent panels, terminal windows, icons, and white text.
-- No UI mockup; create only the wallpaper.
+ASSET
+- Wallpaper only, landscape 16:10 composition for final delivery at 3840x2400.
+- Designed to sit quietly behind terminals, editors, translucent panels, icons, and white text.
+- No operating-system UI, device mockup, text, logo, or watermark.
 
-VISUAL DIRECTION
-- A forward-looking, inviting twilight landscape rendered as refined stylized digital concept art.
-- Deep indigo and midnight-violet terraced landforms frame a wide valley.
-- A single slender ribbon of warm coral-gold light emerges from the lower-left edge, traverses the valley in a few restrained geometric bends, and disappears toward a small luminous horizon slightly right of center. It should read as an abstract signal or route, not a highway.
-- The horizon glows softly in apricot and restrained magenta; the upper sky settles into calm blue-violet with large, clean negative space.
-- Add faint, sparse atmospheric contour layers and subtle haze for depth. No stars, no buildings, no people, no animals, no vehicles, no road signs.
-- Crisp graphic shapes blended with painterly atmospheric gradients; sophisticated editorial sci-fi landscape, clean and timeless rather than game art.
-- Keep the center-left and upper third visually quiet for desktop readability.
-- Darker corners and lower edge, controlled saturation, smooth tonal transitions, no crushed blacks.
-- Strong depth and an unmistakable sense of moving toward possibility.
+COMPOSITION
+- Extremely minimalist abstract atmospheric field, not a landscape illustration.
+- A deep midnight-indigo canvas with a very subtle vertical gradient into muted violet.
+- One large, softly feathered warm coral-to-apricot glow sits low and off-center toward the right, like distant possibility but not a literal sun.
+- Three broad, nearly flat overlapping planes rise gently from the lower edge. They are abstract matte shapes with simple asymmetric geometry, not mountains, hills, dunes, roads, waves, or recognizable terrain.
+- A single hairline-thin coral accent segment crosses only a short portion of one lower plane, angled slightly upward; it must read as a precise signal mark, not a path or horizon.
+- At least seventy percent of the frame is calm negative space.
+- Dark quiet upper-left and center-left areas for desktop icons and windows.
+- Corners slightly deeper in tone; transitions smooth and refined.
+- Restrained palette: midnight navy, indigo, aubergine, muted violet, one controlled coral/apricot accent.
+- Editorial modernism, elegant product-design sensibility, subtly tactile matte finish, low visual noise.
 
-ORIGINALITY / EXCLUSIONS
-- Original composition only. Do not reproduce any existing wallpaper, photograph, winding-road scene, recognizable location, branded aesthetic, or artist's signature style.
-- Do not include a conventional paved road, lane markings, mountains arranged like a known image, or a foreground animal.
-- No logo, wordmark, letters, numbers, watermark, text, border, frame, mock device, or interface elements.
-- Avoid neon cyberpunk city imagery, busy detail, lens flare, excessive bloom, noise, banding, posterization, or high-frequency texture.
+ORIGINALITY
+- Do not reproduce, imitate, or closely resemble any existing Linux wallpaper, artwork, photograph, branded visual identity, or artist style.
+- No winding road, highway, lane marking, valley, mountain range, sunset landscape, animal, tree, city, spacecraft, planet, architecture, or recognizable location.
+- No neon cyberpunk aesthetic, glowing grid, busy particles, stars, lens flare, excessive bloom, banding, noise, high-frequency detail, or decorative clutter.
+- No letters, numbers, symbols, logos, signatures, borders, frames, or interface components.
 
-OUTPUT QUALITY
-- High-resolution, polished desktop-wallpaper finish with clean edges and gradients, composed exactly for a 16:10 crop with all important detail safely inside the frame.
+QUALITY
+- Premium, timeless, welcoming, and calm.
+- Clean geometry and exceptionally smooth gradients.
+- Preserve the important composition within a centered 16:10 crop.
+- The finished result should feel unmistakably original and quiet enough for daily engineering work.
 ```

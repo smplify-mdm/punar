@@ -11,19 +11,22 @@ option instead of being discarded.
 
 ## Product decision
 
-Signal Horizon is the default: an original Punar work whose quiet violet sky,
-terraced forms, and coral signal path feel optimistic without competing with
-windows. Daybreak keeps the photographic alpine-twilight option; Winterline is
-a lighter, precise aerial composition; Earthrise is the dark, forward-looking
-option; Field is the original theme-derived vector and the constrained-machine
-choice.
+Stillpoint is the default: an original Punar work whose quiet indigo field,
+three abstract matte planes, and controlled coral accent feel warm without
+competing with windows. It contains no literal landscape, road, horizon, or
+recognizable place. Daybreak keeps the photographic alpine-twilight option;
+Winterline is a lighter, precise aerial composition; Earthrise is the dark,
+forward-looking option; Field is the original theme-derived vector and the
+constrained-machine choice.
 
-The owner pointed to Omarchy's current Tokyo Night default as a mood reference.
-Punar takes only the broad qualities—twilight warmth, violet depth, generous
-negative space, and a forward-leading gesture. Signal Horizon uses different
-terrain, an abstract signal instead of a road, a distinct composition, and no
-Omarchy image was supplied to the generation model. The inspected upstream
-reference is
+The owner pointed to Omarchy's current Tokyo Night default as a mood reference,
+then explicitly asked that Punar not look like a copy. Punar takes only the
+broad, non-expressive qualities: twilight warmth, violet depth, generous
+negative space, and quiet desktop legibility. Stillpoint removes the reference
+image's representational subject and composition entirely: it is an abstract
+field with no road, valley, mountains, horizon, or leading path. No Omarchy
+image was supplied to the generation model. The inspected upstream reference
+was
 [`themes/tokyo-night/backgrounds/0-winding-road.webp`](https://github.com/basecamp/omarchy/blob/quattro/themes/tokyo-night/backgrounds/0-winding-road.webp).
 
 Wallpaper selection does not enter first-run onboarding. A developer can press
@@ -37,12 +40,12 @@ qs -p /usr/share/punar/shell ipc call wallpaper reset
 ```
 
 The preference is one versioned id in `~/.config/punar/wallpaper.json`, written
-atomically. Missing, corrupt, or unknown state resolves to Signal Horizon; a
+atomically. Missing, corrupt, or unknown state resolves to Stillpoint; a
 future schema version is left untouched.
 
 ## Resource contract
 
-- Four 3840×2400 JPEGs add 8,501,172 bytes to the image payload.
+- Four 3840×2400 JPEGs add 8,266,325 bytes to the image payload.
 - Only the active asset is decoded. Choices that are not selected consume no
   resident memory and cause no file watches of their own.
 - The photo is decoded to the smallest 16:10 texture that covers the output:

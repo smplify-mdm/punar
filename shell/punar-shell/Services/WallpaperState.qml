@@ -13,12 +13,12 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    readonly property string defaultId: "signal-horizon"
+    readonly property string defaultId: "stillpoint"
     readonly property var catalog: [{
-        "id": "signal-horizon",
-        "name": "Signal Horizon",
-        "intent": "Luminous path · toward possibility",
-        "file": "signal-horizon.jpg",
+        "id": "stillpoint",
+        "name": "Stillpoint",
+        "intent": "Warm signal · calm focus",
+        "file": "stillpoint.jpg",
         "vector": false
     }, {
         "id": "daybreak",
@@ -58,9 +58,9 @@ Singleton {
 
     readonly property string activeId: root.validId(root.selectedId) ? root.selectedId : root.defaultId
     readonly property var active: root.descriptor(root.activeId)
-    readonly property string activeName: root.active === null ? "Signal Horizon" : String(root.active.name)
-    readonly property string activeIntent: root.active === null ? "Luminous path · toward possibility" : String(root.active.intent)
-    readonly property string activeFile: root.active === null ? "signal-horizon.jpg" : String(root.active.file)
+    readonly property string activeName: root.active === null ? "Stillpoint" : String(root.active.name)
+    readonly property string activeIntent: root.active === null ? "Warm signal · calm focus" : String(root.active.intent)
+    readonly property string activeFile: root.active === null ? "stillpoint.jpg" : String(root.active.file)
     readonly property bool activeIsVector: root.active !== null && root.active.vector === true
 
     function init(): void {

@@ -52,7 +52,7 @@ surface will say so.**
 | **Data source** | one installed asset selected by `~/.config/punar/wallpaper.json` |
 | **Status** | **REAL** |
 
-Signal Horizon, an original violet landscape with generous negative space, is
+Stillpoint, an original abstract indigo field with generous negative space, is
 the inviting default. Daybreak, Winterline, and Earthrise are alternate
 3840×2400 photographs; Field is the original theme-derived vector for a
 constrained machine. Only the selected file is decoded. The shell holds no
@@ -615,7 +615,7 @@ already runs, and the tools they shell out to (`wpctl`, `hyprctl`,
   renders the built-in fallback palette with nothing selectable.
 - The wallpaper template, source/licence manifest, and four 3840×2400 JPEGs
   ride along in the existing `cp -R shell/punar-shell/.` — no staging rule
-  change. The raster assets add 8,501,172 bytes to the image payload.
+  change. The raster assets add 8,266,325 bytes to the image payload.
 
 **New versioned file:** `mkosi.extra/etc/pam.d/punar-lock`.
 

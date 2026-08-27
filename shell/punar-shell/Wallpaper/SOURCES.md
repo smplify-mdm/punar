@@ -4,21 +4,22 @@ Punar distributes the four raster desktop fields below at 3840×2400. They are
 installed assets, never fetched at runtime. The original Field vector is a
 Punar project work and is covered by the repository licence.
 
-## Signal Horizon (`assets/signal-horizon.jpg`)
+## Stillpoint (`assets/stillpoint.jpg`)
 
 - Source: original image generated for Punar with OpenAI image generation on
   2026-08-26; no existing image was supplied to the model as a reference.
 - Exact tool and prompt: [`GENERATION.md`](GENERATION.md).
-- Direction: an original 16:10 developer-desktop field with a quiet indigo sky,
-  terraced landforms, and an abstract coral signal leading toward the horizon;
-  no text, logo, people, buildings, vehicles, or conventional road.
+- Direction: an original minimalist 16:10 developer-desktop field with deep
+  indigo negative space, one controlled coral glow, three abstract matte
+  planes, and a short precision accent; no literal landscape, road, horizon,
+  terrain, text, logo, or recognizable place.
 - Generation output: 1536×1024 PNG.
 - Changes: centred 1536×960 crop to 16:10; resampled to 3840×2400; metadata
   removed through a lossless WebP/PPM round trip; encoded as JPEG at quality 88.
 - Rights note: generated for the Punar project and distributed under the
   repository licence to the extent copyright or related rights exist; no claim
   is made that copyrightability is identical in every jurisdiction.
-- Distributed SHA-256: `e8cbaa1655582d442b760796819e966c1fa223cf77c2417e4ffb0c2d395ba5fa`
+- Distributed SHA-256: `6313a086a8eddb5b8f113edc50b4d7c1656b433c0e7fdb3c7cd97d90d65439e0`
 
 ## Daybreak (`assets/daybreak.jpg`)
 

@@ -32,8 +32,9 @@ are that machinery.
 
 ## 2. Current state
 
-**Green.** Run [33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
-on `9f3cd43`, all five jobs, **760 assertions** across ten in-VM exercises.
+**Green.** Run [33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
+on `2c47671`, all seven jobs, including x86_64/ARM64 code contracts, the image,
+minimal boot, the full graphical desktop, and all ten in-VM exercises.
 
 | Exercise | Assertions | What it proves |
 |---|---:|---|
@@ -48,14 +49,16 @@ on `9f3cd43`, all five jobs, **760 assertions** across ten in-VM exercises.
 | M10 shadow-AI | 135 | periodic detection, anti-nag alerts, remote query |
 | Desktop surfaces (live) | 64 | all 13 shell surfaces open/close/paint |
 
-**Latest measurement:** idle RAM **1302 MB mean / 1309 MB max** (target 1024 —
+**Latest measurement:** idle RAM **1356 MB mean / 1361 MB max** (target 1024 —
 never once met, not even at M1's 1162 MB), boot **20 s**, three daemons **7 MB**
-PSS. Earlier comparable runs measured 1265–1277 MB.
+PSS. Earlier comparable runs measured 1265–1302 MB.
 
-**Per-process attribution:** shell 329 MiB · Hyprland 163 MiB · Xwayland 43 MiB
-· hyprpolkitagent 15 MiB · foot 10 MiB. All processes sum to **672.8 MiB
-against 1302 MB whole-system used**; the remaining ~629 MB is kernel, tmpfs and
-page cache. The shell remains the largest actionable process cost.
+**Previous 1302 MB run's per-process attribution:** shell 329 MiB · Hyprland
+163 MiB · Xwayland 43 MiB · hyprpolkitagent 15 MiB · foot 10 MiB. All
+processes summed to **672.8 MiB against 1302 MB whole-system used**; the
+remaining ~629 MB was kernel, tmpfs and page cache. The shell remains the
+largest actionable process cost; the next valid isolated-surface report must
+decide what can be lazy-loaded.
 
 **Corrected eager surface latency (KVM).** `shell_map_ms` is measured wholly
 inside the long-lived shell, from `show()` to Hyprland's `openlayer`, with no
@@ -193,7 +196,7 @@ qs -p /usr/share/punar/shell ipc call <target> <verb>
 Fourteen targets: `bar commandcenter systemcontrol notifications toasts osd
 overview aipanel approval alerts shortcuts theme lock wallpaper`.
 
-`wallpaper` is a finite five-choice preference. Signal Horizon is the shipped
+`wallpaper` is a finite five-choice preference. Stillpoint is the shipped
 default; only the active 3840×2400 raster is decoded, and Field remains the
 theme-derived ultra-lean vector. Source/rights records and exact hashes ship
 beside the assets. No wallpaper daemon, scan, download, animation, or timer was
@@ -262,10 +265,10 @@ tangible argument for ADR-005.
 > the summary.
 
 ### 7.1 Handed-off commits pushed
-The eight commits formerly ahead of `origin/main` passed every local gate and
-were pushed on 2026-08-26. The latency/ARM follow-up commits are also pushed;
-[run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
-is green on all five jobs at `9f3cd43`.
+The handed-off work, latency/ARM follow-ups, and verified desktop-field work
+were pushed on 2026-08-26;
+[run 33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
+is green on all seven jobs at `2c47671`.
 
 ### 7.2 Fix the latency instrument, then use it
 The first `surfaces-check.sh` latency numbers included repeated polling
@@ -283,6 +286,13 @@ whose construction is imperceptible; keep eager only what measurement proves
 expensive, **with the number in the commit message**. Full reasoning and the
 retraction that preceded it:
 `tests/performance/README.md`.
+
+**Reject the resident values from run 33041260498.** Its 601–639 KiB baseline
+was `/bin/sh -c`, not Quickshell: the wrapper cmdline contained the probe path.
+The next-run instrument starts with `exec`, accepts only a process whose comm
+and executable identify `qs`/`quickshell`, prints that identity, and enforces
+a 16 MiB empty-probe floor. Its construction/map timings remain useful; its PSS and
+resident deltas do not.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval
 and alerts must appear *unbidden*; notifications/toasts/OSD must receive events

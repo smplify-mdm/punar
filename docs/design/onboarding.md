@@ -1017,7 +1017,7 @@ without reopening.
 The shell now has the finite catalog specified by `wallpapers.md`, but
 onboarding still does not offer a picker. Username, password, and device name
 are the three values required to make the machine usable; visual preference is
-not. Signal Horizon is the safe shipped default, the Command Center exposes all
+not. Stillpoint is the safe shipped default, the Command Center exposes all
 five choices after handoff, and the existing Field vector remains the
 theme-derived constrained-machine option. No wallpaper daemon was added.
 
