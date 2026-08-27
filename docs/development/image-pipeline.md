@@ -174,8 +174,13 @@ plus the graphical workstation. Full decisions in
   before Aquamarine starts: a virtual/fallback-only adapter gets
   `AQ_NO_MODIFIERS=1` + `LIBGL_ALWAYS_SOFTWARE=1`; any real DRM device wins
   and both forcing variables are cleared. The decision and driver names are
-  recorded under the private session runtime directory. It then
-  `exec Hyprland --config /etc/xdg/hypr/hyprland.conf`. The serial getty
+  recorded under the private session runtime directory. Software-rendered
+  guests also receive a private two-line runtime config which sources the
+  product config and disables compositor animations; real GPUs execute the
+  product config directly and retain its short spatial motion. This avoids
+  queueing transition frames behind QEMU's unaccelerated virtio framebuffer
+  without weakening bare-metal rendering. It then executes Hyprland with the
+  selected config. The serial getty
   autologin (ttyS0) remains as dev/CI fallback access. User `punar`
   (password `punar` — dev convenience, documented, not a secret) is created
   in the profile postinst with wheel/video/input/uucp groups and
@@ -200,10 +205,16 @@ plus the graphical workstation. Full decisions in
   between `PUNAR_EXPORT_BEGIN`/`PUNAR_EXPORT_END` sentinels (skipped
   gracefully when the VM lacks the channel).
 
-**Honesty (spec 1.22):** the virtio-vga + llvmpipe path and full desktop
+**Honesty (spec 1.22):** QEMU 11.1.0 on this Apple-Silicon host exposes
+`virtio-gpu-pci` but no virgl device or accelerated Cocoa backend. HVF makes
+guest CPU execution native-speed; presentation is still a software-rendered
+framebuffer, so local VM smoothness is not a bare-metal GPU measurement. The
+software path removes compositor transition work for responsiveness. The
+virtio-vga + llvmpipe path and full desktop
 behavior suite are runtime-gated in CI. Hardware selection has deterministic
 fake-sysfs coverage (no device, virtio, AMD, mixed virtio+Intel and
-simpledrm+VC4), while the VM's M2 exercise proves the live virtio branch.
+simpledrm+VC4), including the software-only motion overlay, while the VM's M2
+exercise proves the live virtio branch.
 No real GPU has run Punar yet, and `linux-firmware` remains absent, so this is
 not a bare-metal support claim. Config validation still includes `mkosi
 summary`, exact-version `Hyprland --verify-config`, foot checks and pinned

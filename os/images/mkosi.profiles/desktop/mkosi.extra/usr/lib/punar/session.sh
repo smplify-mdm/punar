@@ -38,7 +38,14 @@ fi
 # Documented fallback only, deliberately NOT set (milestone-1.md §6):
 # AQ_NO_KMS_REQUIREMENT=1 — virtio-vga provides a connector, so not needed.
 
-# Pin the system config explicitly (it is also on Hyprland's default search
-# path at /etc/xdg/hypr, but a stray user config must not change the dev
-# image's session semantics).
-exec Hyprland --config /etc/xdg/hypr/hyprland.conf
+# QEMU's Cocoa and VNC display backends expose an unaccelerated virtio GPU.
+# The CPU is hardware-virtualized on Apple Silicon, but every animated frame
+# is still rasterized by llvmpipe and copied to the host. Keep the product's
+# short spatial motion on real GPUs; on the proven software path, layer a
+# tiny runtime config over the same system config and disable compositor
+# animation. This changes no bare-metal behavior and makes local VM input
+# feel immediate instead of queueing frames behind a 300 ms transition. The
+# helper returns the product config unchanged on real GPUs.
+punar_select_hyprland_config
+
+exec Hyprland --config "${PUNAR_HYPRLAND_CONFIG}"

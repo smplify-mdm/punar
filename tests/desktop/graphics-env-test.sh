@@ -83,4 +83,49 @@ make_card "${TEST_ROOT}/pi" 1 vc4
 assert_probe "Pi VC4 wins over early simpledrm" \
     "hardware|simpledrm,vc4|unset|unset" "${TEST_ROOT}/pi"
 
+SOFTWARE_RUNTIME="${TEST_ROOT}/software-runtime"
+mkdir -m 0700 "${SOFTWARE_RUNTIME}"
+(
+    # shellcheck source=/dev/null
+    . "${HELPER}"
+    PUNAR_GRAPHICS_MODE=software
+    XDG_RUNTIME_DIR="${SOFTWARE_RUNTIME}"
+    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.conf
+    export PUNAR_GRAPHICS_MODE XDG_RUNTIME_DIR PUNAR_HYPRLAND_SYSTEM_CONFIG
+    punar_select_hyprland_config
+    [ "${PUNAR_HYPRLAND_CONFIG}" = \
+        "${SOFTWARE_RUNTIME}/punar-hyprland-software.conf" ]
+)
+EXPECTED_SOFTWARE_CONFIG='source = /test/product-hyprland.conf
+animations { enabled = false }'
+ACTUAL_SOFTWARE_CONFIG="$(cat "${SOFTWARE_RUNTIME}/punar-hyprland-software.conf")"
+[ "${ACTUAL_SOFTWARE_CONFIG}" = "${EXPECTED_SOFTWARE_CONFIG}" ] || {
+    printf 'FAIL software compositor overlay: got %s\n' \
+        "${ACTUAL_SOFTWARE_CONFIG}" >&2
+    exit 1
+}
+printf 'ok   software compositor overlay disables animation\n'
+
+HARDWARE_RUNTIME="${TEST_ROOT}/hardware-runtime"
+mkdir -m 0700 "${HARDWARE_RUNTIME}"
+HARDWARE_CONFIG="$(
+    # shellcheck source=/dev/null
+    . "${HELPER}"
+    PUNAR_GRAPHICS_MODE=hardware
+    XDG_RUNTIME_DIR="${HARDWARE_RUNTIME}"
+    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.conf
+    export PUNAR_GRAPHICS_MODE XDG_RUNTIME_DIR PUNAR_HYPRLAND_SYSTEM_CONFIG
+    punar_select_hyprland_config
+    printf '%s' "${PUNAR_HYPRLAND_CONFIG}"
+)"
+[ "${HARDWARE_CONFIG}" = /test/product-hyprland.conf ] || {
+    printf 'FAIL hardware compositor config: got %s\n' "${HARDWARE_CONFIG}" >&2
+    exit 1
+}
+[ ! -e "${HARDWARE_RUNTIME}/punar-hyprland-software.conf" ] || {
+    printf 'FAIL hardware path created a software compositor overlay\n' >&2
+    exit 1
+}
+printf 'ok   hardware compositor path keeps product motion\n'
+
 echo PUNAR_GRAPHICS_ENV_OK

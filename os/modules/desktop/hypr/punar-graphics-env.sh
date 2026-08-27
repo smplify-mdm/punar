@@ -67,3 +67,26 @@ punar_configure_graphics() {
     PUNAR_DRM_DRIVERS="${punar_drm_drivers}"
     export PUNAR_GRAPHICS_MODE PUNAR_DRM_DRIVERS
 }
+
+# Select the compositor config after punar_configure_graphics. Real GPUs use
+# the product config directly. An unaccelerated virtual adapter receives the
+# same config through one private runtime overlay that disables compositor
+# animation; this avoids asking llvmpipe to draw transition frames while
+# leaving bare-metal motion untouched.
+punar_select_hyprland_config() {
+    punar_system_config="${PUNAR_HYPRLAND_SYSTEM_CONFIG:-/etc/xdg/hypr/hyprland.conf}"
+    PUNAR_HYPRLAND_CONFIG="${punar_system_config}"
+
+    if [ "${PUNAR_GRAPHICS_MODE:-software}" = software ] \
+        && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+        && [ -d "${XDG_RUNTIME_DIR}" ]; then
+        PUNAR_HYPRLAND_CONFIG="${XDG_RUNTIME_DIR}/punar-hyprland-software.conf"
+        umask 077
+        {
+            printf 'source = %s\n' "${punar_system_config}"
+            printf '%s\n' 'animations { enabled = false }'
+        } > "${PUNAR_HYPRLAND_CONFIG}"
+    fi
+
+    export PUNAR_HYPRLAND_CONFIG
+}
