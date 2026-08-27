@@ -252,8 +252,12 @@ jobs:
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/demo-arm64-vm.sh \
+            tools/render-repart-definitions.sh \
+            tools/render-mkosi-repart.sh \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
+            tests/images/check-repart-layout.sh \
+            tests/images/repart-spike.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \

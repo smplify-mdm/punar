@@ -105,7 +105,7 @@ exec "${QEMU}" \
     -m "${PUNAR_VM_MEMORY_MB:-3072}" \
     -bios "${FIRMWARE}" \
     -drive "file=${IMAGE},if=virtio,format=qcow2,snapshot=on,cache=unsafe,aio=threads" \
-    -device virtio-gpu-pci,id=punar-gpu \
+    -device virtio-gpu-pci,id=punar-gpu,romfile= \
     -device qemu-xhci,id=punar-xhci \
     -device usb-kbd,id=punar-kbd \
     -device usb-tablet,id=punar-pointer \

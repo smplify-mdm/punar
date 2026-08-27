@@ -25,6 +25,18 @@ case "${IMAGES}" in
     *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, or all (got: ${IMAGES})" >&2; exit 2 ;;
 esac
 
+MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart-arm64.XXXXXX)"
+# UUIDv5(URL, https://punar.org/filesystem-device/PUNAR-DATA). See the shared
+# x86 build script: this stabilizes the device identity, not btrfs's separate
+# subvolume UUIDs. A production installer may provide a per-device value.
+BTRFS_DEVICE_UUID="ef4a2286-ac11-53c0-a40d-8d2bae7511cc"
+cleanup_repart() {
+    rm -rf "${MKOSI_REPART_DIR}"
+}
+trap cleanup_repart EXIT
+"${REPO_ROOT}/tools/render-mkosi-repart.sh" \
+    "${MKOSI_REPART_DIR}" "${IMAGES_DIR}/repart.d/install"
+
 stage_desktop_content() {
     echo "==> Staging shared architecture-neutral desktop content"
     PUNAR_IMAGES=desktop PUNAR_BUILD_MODE=stage \
@@ -186,6 +198,8 @@ run_mkosi() {
     mkosi --force \
         --snapshot "${PUNAR_DEBIAN_SNAPSHOT}" \
         --source-date-epoch "${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
+        --environment "SYSTEMD_REPART_MKFS_OPTIONS_BTRFS=--device-uuid=${BTRFS_DEVICE_UUID}" \
+        --repart-directory "${MKOSI_REPART_DIR}" \
         "$@" "${MODE}"
 }
 
@@ -197,6 +211,8 @@ convert_output() {
         echo "error: expected ${raw}" >&2
         exit 1
     }
+    echo "==> Verifying A/B layout and shared-state mounts in ${raw}"
+    "${REPO_ROOT}/tests/images/check-repart-layout.sh" "${raw}" arm64
     echo "==> Converting ${raw} -> ${qcow}"
     qemu-img convert -O qcow2 -c "${raw}" "${qcow}"
     rm -f "${raw}" "${IMAGES_DIR}/out/${image_id}"

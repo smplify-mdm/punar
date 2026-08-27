@@ -61,6 +61,18 @@ docker build \
     --file "${IMAGES_DIR}/builder/Containerfile" \
     "${IMAGES_DIR}/builder"
 
+if [ "${HOST_ARCH}" = "x86_64" ]; then
+    echo "==> Proving systemd-repart installer primitives (native x86_64)"
+    docker run --rm --privileged \
+        --platform linux/amd64 \
+        --volume "${REPO_ROOT}:/work" \
+        --workdir /work \
+        "${BUILDER_TAG}" \
+        ./tests/images/repart-spike.sh
+else
+    echo "warning: skipping x86_64 V-REPART under emulation; native x86_64 CI is authoritative" >&2
+fi
+
 echo "==> Running containerized mkosi (images: ${PUNAR_IMAGES}, mode: ${PUNAR_BUILD_MODE})"
 docker run --rm --privileged \
     --platform linux/amd64 \

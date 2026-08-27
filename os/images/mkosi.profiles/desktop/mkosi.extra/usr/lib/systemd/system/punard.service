@@ -20,6 +20,10 @@ Description=Punar control-plane daemon (typed capability API)
 Type=simple
 ExecStart=/usr/bin/punard run
 Restart=on-failure
+# The stabilized-idle gate reads this unit's cgroup counters on every kernel.
+# Do not rely on a parent slice or distribution default to enable controllers.
+CPUAccounting=yes
+IOAccounting=yes
 # Minimal hardening per milestone-3.md §3. Deliberately NOT ProtectSystem:
 # the system.hostname and time.timezone capabilities write /etc/hostname and
 # /etc/localtime (the full sandbox profile is later-milestone work).

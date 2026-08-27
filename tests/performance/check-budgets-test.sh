@@ -10,6 +10,17 @@ MISSING_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-missing.
 OFFLINE_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-offline.txt"
 NO_ZRAM_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-no-zram.txt"
 SHORT_WINDOW_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-short-window.txt"
+UNIT_DIR="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system"
+
+# cpu.stat/io.stat are not portable assumptions unless accounting is explicit
+# on each measured service. One architecture exposed the controllers through a
+# parent while another did not; pin the unit contract so that cannot regress.
+for service in punard.service punar-agentd.service punar-secrets.service; do
+    grep -qx 'CPUAccounting=yes' "${UNIT_DIR}/${service}" \
+        || { echo "FAIL: ${service} does not enable CPUAccounting" >&2; exit 1; }
+    grep -qx 'IOAccounting=yes' "${UNIT_DIR}/${service}" \
+        || { echo "FAIL: ${service} does not enable IOAccounting" >&2; exit 1; }
+done
 
 "${CHECKER}" "${PASS_REPORT}" >/dev/null 2>&1
 

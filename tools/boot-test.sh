@@ -491,7 +491,10 @@ if [ "${ARCH}" = "x86_64" ]; then
 else
     FIRMWARE_ARGS=(-bios "${AARCH64_FIRMWARE}")
     MACHINE="virt,accel=${ACCEL},highmem=on"
-    DESKTOP_DISPLAY_ARGS+=(-device virtio-gpu-pci)
+    # AArch64 UEFI initializes virtio-gpu directly; it does not need a legacy
+    # PCI option ROM. Some minimal QEMU packages omit efi-virtio.rom entirely,
+    # and the default lookup then aborts before firmware starts.
+    DESKTOP_DISPLAY_ARGS+=(-device "virtio-gpu-pci,romfile=")
 fi
 
 # Invoked indirectly via the EXIT trap below.
@@ -759,7 +762,11 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt ram-processes.txt runtime-report.txt meminfo m2-report.txt punar-m2.png \
+            for f in ram-samples.txt ram-processes.txt runtime-report.txt \
+                     idle-counters-start.txt idle-counters-end.txt \
+                     idle-system-cpu-start.txt idle-system-cpu-end.txt \
+                     idle-block-write-start.txt idle-block-write-end.txt \
+                     meminfo m2-report.txt punar-m2.png \
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \

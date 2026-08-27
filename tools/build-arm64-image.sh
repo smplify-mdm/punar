@@ -53,6 +53,14 @@ docker build \
     --file "${BUILDER_DIR}/Containerfile" \
     "${BUILDER_DIR}"
 
+echo "==> Proving systemd-repart installer primitives (native ARM64)"
+docker run --rm --privileged \
+    --platform linux/arm64 \
+    --volume "${REPO_ROOT}:/work" \
+    --workdir /work \
+    "${BUILDER_TAG}" \
+    ./tests/images/repart-spike.sh
+
 echo "==> Running native ARM64 mkosi (${PUNAR_BUILD_MODE})"
 docker run --rm --privileged \
     --platform linux/arm64 \

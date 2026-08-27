@@ -34,6 +34,9 @@ After=punard.service
 Type=simple
 ExecStart=/usr/bin/punar-agentd run
 Restart=on-failure
+# Required by the cross-architecture stabilized-idle CPU/write gate.
+CPUAccounting=yes
+IOAccounting=yes
 # Hardening (milestone-7.md §3). Stricter than punard.service can be:
 # punard writes /etc (hostname, localtime), this daemon writes nothing
 # outside its own four directories, so ProtectSystem=strict costs nothing

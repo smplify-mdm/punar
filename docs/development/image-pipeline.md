@@ -4,8 +4,9 @@ How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now produces two images from one config tree
 ([milestone-1.md](milestone-1.md) §3):
 
-- **punar-dev** — the minimal Milestone 0 image, unchanged (the
-  `PUNAR_BOOT_OK` boot gate stays cheap and regression-isolated).
+- **punar-dev** — the minimal Milestone 0 userspace on the production-shaped
+  four-partition foundation (the `PUNAR_BOOT_OK` gate stays cheap and
+  regression-isolated even though its disk now exercises A/B boundaries).
 - **punar-desktop** — the Milestone 1 graphical workstation: the base config
   plus the mkosi `desktop` profile (`os/images/mkosi.profiles/desktop/`)
   adding Hyprland, punar-shell (Quickshell), greetd autologin session, foot,
@@ -30,8 +31,9 @@ pipeline now produces two images from one config tree
 
 The shipping x86_64 substrate follows
 [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md): minimal Arch
-package payload, vendor-pinned snapshot channels, mkosi-built images, with an
-A/B image trajectory. [ADR-005](../architecture/adr/ADR-005-arm64-support.md)
+package payload, vendor-pinned snapshot channels and mkosi-built images. The
+ADR-003 A/B disk foundation is now present in directly built images; update
+write/bless/rollback remains a trajectory. [ADR-005](../architecture/adr/ADR-005-arm64-support.md)
 accepts Debian pinned sid as the common destination; the separate native
 ARM64 lane now produces both a minimal image and a complete generic-QEMU
 desktop. The desktop has crossed the M2–M10 exercises locally; its first
@@ -79,10 +81,13 @@ CI run is the arbiter.
 | `os/images/snapshot.env` | The input pins: ALA snapshot date + builder base image digest. Single source of truth. |
 | `os/images/builder/Containerfile` | Builder container: pinned Arch + mkosi 26 + UKI/filesystem tools + `rust` (1:1.97.1-1 from the same snapshot — compiles `punard`/`punarctl` for the desktop image; no rustup, single toolchain provenance, milestone-3.md §7). |
 | `os/images/mkosi.conf` | Base image definition: minimal Arch payload (`base`, `linux`), UEFI/systemd-boot, UKI, serial console, root autologin. Shared by both images. |
+| `os/images/repart.d/install/` | Canonical four-partition contract: fixed ESP and root-slot sizes/identities plus shared btrfs state. `install-encrypted/` is the production LUKS2 overlay; direct VM images deliberately use the plaintext base while exercising the same mount boundaries. |
 | `os/images/mkosi.extra/` | Files copied verbatim into every image; currently `punar-boot-marker.service` + its enablement symlink. |
 | `os/images/mkosi.profiles/desktop/` | The M1 `punar-desktop` profile: `mkosi.conf` (the verified §2.1 package additions), `mkosi.postinst.chroot` (dev user `punar` + subuid/subgid for rootless podman, `systemctl enable greetd`, `graphical.target`, fc-cache), and `mkosi.extra/` — the versioned parts (greetd `config.toml`, `/usr/lib/punar/{session.sh,desktop-ready.sh,idle-ram.sh}`, `punar-desktop-marker.path/.service`, `punar-idle-ram.service`, tmpfiles `/run/punar`) plus build-time-staged parts (gitignored; see next row). |
 | `os/modules/desktop/`, `shell/punar-shell/`, `shell/theme/` | Source of truth for Hyprland config (`/etc/xdg/hypr/`), foot config (`/etc/xdg/foot/foot.ini`), fontconfig defaults + vendored fonts (`/usr/share/fonts/punar/`), the punar-shell QML (`/usr/share/punar/shell/`) and design tokens (`/usr/share/punar/theme/punar-tokens.json`). `container-build.sh` re-verifies the font sha256 manifest and stages these into the desktop profile's `mkosi.extra/` on every build — nothing is committed twice. |
-| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop; since M5 also the Acme fixtures `fixtures/organizations/acme/*.json` → `usr/share/punar/fixtures/acme/`, same staged-not-committed-twice pattern as the shell QML), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl -p punar-mock-smplify` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
+| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop; since M5 also the Acme fixtures `fixtures/organizations/acme/*.json` → `usr/share/punar/fixtures/acme/`, same staged-not-committed-twice pattern as the shell QML), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl -p punar-mock-smplify` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), renders the ordinary-image repart set into `/run`, runs `mkosi build`, content-checks the raw A/B layout, then converts it to compressed qcow2 and writes checksums/build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
+| `tools/render-repart-definitions.sh`, `tools/render-mkosi-repart.sh` | Deterministically merge base + overlay definitions and derive mkosi population rules without duplicating partition identity/geometry. The explicit merge is required because pinned systemd 261.2 gives the first repeated `--definitions=` directory priority. |
+| `tests/images/repart-spike.sh`, `tests/images/check-repart-layout.sh` | V-REPART toolchain proof plus the raw-image content gate: exact GPT contract, root-A population and mutable-tree exclusion, empty root B, exactly three shared subvolumes, deterministic direct-image btrfs device identity, hardened mount options, and a UKI selecting literal slot A. |
 | `tools/build-image.sh` | Host-side wrapper: builds the builder container, runs the containerized build with the **repo root** mounted (the desktop staging needs `os/modules` + `shell/`). `tools/build-image.sh [dev|desktop|all]` (default `all`). Identical path in CI and locally. |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
 | `os/images/arm64/`, `os/images/builder-debian/` | Native ARM64 minimal + desktop lane: digest-pinned Debian base upgraded wholly from one immutable sid snapshot, AA64 systemd-boot disk definitions, Debian desktop/package/PAM adapters, native AArch64 Punar binaries, per-architecture offline OCI fixture, deterministic development credentials and disposable-cache exclusions. This proves generic UEFI/QEMU, not Raspberry Pi hardware. |
@@ -95,16 +100,23 @@ CI run is the arbiter.
    container (`--platform linux/amd64` always — a no-op on x86_64 CI, Rosetta
    emulation on the Mac). The builder's own pacman is pointed at the same ALA
    date snapshot, so the toolchain is input-pinned too.
-2. It runs `os/images/scripts/container-build.sh` inside that container
-   (`--privileged`: mkosi's sandbox and pacman need it in Docker), which runs
+2. It runs `os/images/scripts/container-build.sh` inside that container.
+   Before mkosi, the script derives a fresh definition set below `/run` from
+   the canonical installer definitions; slot A is populated from the staged
+   root and mutable `/var`/`home` content is seeded into shared subvolumes.
+3. The container runs privileged because mkosi's sandbox and package manager
+   need it in Docker, then executes
    `mkosi --force --mirror https://archive.archlinux.org/repos/<date> build`.
    mkosi installs `base` + `linux` with pacman, builds an initrd, assembles a
    UKI, installs systemd-boot into the ESP, and emits a GPT disk image via
    systemd-repart (offline; no loop devices).
-3. The raw image is converted to a compressed qcow2
+4. Before conversion, `tests/images/check-repart-layout.sh` mounts each raw
+   partition read-only and fails the build on a geometry, filesystem, mount,
+   subvolume, inactive-slot or UKI-selector mismatch.
+5. The raw image is converted to a compressed qcow2
    (`os/images/out/punar-dev-x86_64.qcow2`), plus `SHA256SUMS` and
    `build-info.txt` (snapshot date, mkosi/qemu-img versions, git SHA).
-4. With `PUNAR_IMAGES=all` (the default) or `desktop`, the desktop content is
+6. With `PUNAR_IMAGES=all` (the default) or `desktop`, the desktop content is
    staged (font manifest verified first; since M5 the Acme fixtures land in
    `usr/share/punar/fixtures/acme/`), `punard` + `punarctl` +
    `punar-mock-smplify` are compiled `--release --locked` with the builder's
@@ -119,11 +131,26 @@ CI run is the arbiter.
 
 Determinism posture (per ADR-001: input-pinned, not bit-for-bit): base image
 by digest, packages from a date snapshot, `SourceDateEpoch` clamped to the
-snapshot date, fixed repart `Seed` for stable partition UUIDs. This should
-make builds input-deterministic; **no two builds have been diffed yet**, so no
-reproducibility claim beyond input-pinning is made.
+snapshot date, fixed literal partition UUIDs, and a fixed UUIDv5 for the
+single direct-image btrfs device. Pinned systemd 261.2 passes the last value
+through its documented `SYSTEMD_REPART_MKFS_OPTIONS_BTRFS` hook.
 
-The image itself: UEFI-only, systemd, serial console on `ttyS0`
+**Two unchanged ARM64 A/B builds were compared on 2026-08-27 and did not
+match byte-for-byte.** `qemu-img compare` found the first differing byte
+inside `PUNAR-DATA`; the ESP and both root-slot regions before it were
+identical. Read-only inspection then isolated the remaining drift to the UUIDs
+that btrfs assigns independently to `@var`, `@home` and `@var-tmp`. The btrfs
+filesystem UUID and device UUID matched. `mkfs.btrfs` exposes a device-UUID
+input but no subvolume-UUID input, so Punar does not patch checksummed btrfs
+metadata after creation. The honest claim is **input-pinned with stable OS
+payload and partition identities, not bit-for-bit reproducible disk output**.
+Release promotion must continue to name and sign the exact built artifact.
+
+The image itself: UEFI-only, systemd, a 1 GiB ESP, populated 8 GiB root A,
+empty 8 GiB root B and a minimum 16 GiB shared btrfs partition whose three
+subvolumes mount at `/var`, `/home` and `/var/tmp`. The qcow2 stays sparse, so
+that 33 GiB virtual floor does not allocate 33 GiB on the host. The UKI selects
+root A by its literal PARTUUID. The image uses a serial console on `ttyS0`
 (`console=tty0 console=ttyS0`), root autologin on console gettys, root
 password `punar` (dev-image convenience, documented, not a secret),
 `punar-boot-marker.service` prints `PUNAR_BOOT_OK` plus

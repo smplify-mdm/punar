@@ -1,6 +1,6 @@
 # The Punar Installer — design
 
-**Status:** design plan · created 2026-08-26
+**Status:** design plan · partition-layout foundation implemented 2026-08-27
 **Spec authority:** §66 (installation), §65 (first-boot UX), §44.2 (disk
 encryption), §44.1 (boot), §49 (enrollment chain), §48 (JIT privilege),
 §5.1/§5.3 (target hardware), §12 (keyboard-first), §60 (hard safety
@@ -14,24 +14,27 @@ prerequisite), [`DESIGN_LANGUAGE.md`](DESIGN_LANGUAGE.md) §7/§8,
 Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 
 > **Punar has never booted on hardware, and nobody outside this repository
-> has ever installed it.** Everything below is a design. Its purpose is to
-> make the first real install possible, and to do it without inventing a
-> second privileged path around the one this project spent thirteen
-> milestones building.
+> has ever installed it.** The four-partition A/B layout below now builds and
+> boots in a generic ARM64 VM; the installer, encryption-on-the-built-image,
+> update swap and physical-device claims remain designs. The purpose here is
+> still to make the first real install possible without inventing a second
+> privileged path around the one this project spent thirteen milestones
+> building.
 
 ---
 
 ## 0. Claim register (spec §1.22 · design language §7)
 
 Solid lines are operating production paths. Dashed lines are mechanisms
-outside the current production claim. Nothing in this document has been
-built, so the register grades the *design's* claim strength, and every row
-says what would make it solid.
+outside the current production claim. The layout foundation is implemented;
+the installer is not. The register therefore distinguishes VM image evidence
+from an installation or production claim, and every row says what would make
+it solid.
 
 | # | Mechanism | Line | Standing |
 |---|---|---|---|
 | 01 | ISO built by the pinned mkosi pipeline, offline install, no network | *dashed* | Designed here. Solid when the `install-test` CI lane is green (§10). |
-| 02 | ADR-003 partition layout created on a device | *dashed* | Designed here (§4). Solid when I08–I13 pass. This is what unblocks execution-trust V3. |
+| 02 | ADR-003 partition layout created on a device | *dashed* | **Implemented and content-checked in the directly built ARM64 VM image**: I08–I11/I13's unencrypted-layout equivalents pass and the image boots. It is not an installed device and not encrypted. Solid only when the real installer lane passes I08–I13. This gives execution-trust V3 an artefact to target without claiming the installer exists. |
 | 03 | LUKS2 by default, passphrase unlock | *dashed* | Designed here (§5). Solid when I12 and I19 pass. |
 | 04 | **TPM-assisted unlock** | *dashed* | **SIMULATED and deliberately not enrolled.** User-blocked item 2. §5.4 argues why enrolling against a software TPM would be worse than not enrolling at all. |
 | 05 | **Secure Boot / signed UKI** | *dashed* | **SIMULATED.** User-blocked item 1. The installer's live-mode gate (§7.1) is only as strong as the signature over the UKI that carries it — stated, not hidden. |
@@ -50,19 +53,31 @@ says what would make it solid.
 
 ## 1. Today's truth, stated before anything is designed on top of it
 
-`os/images/mkosi.conf` emits `Format=disk` only. The dev image sets
+`os/images/mkosi.conf` still emits a directly bootable `Format=disk`, not an
+installer ISO. Its raw disk now uses the canonical four-partition definition
+set from §4.7: ESP, populated 8 GiB slot A, empty 8 GiB slot B and an
+unencrypted btrfs `PUNAR-DATA` partition with separate `/var`, `/home` and
+`/var/tmp` subvolume mounts. A content-aware build gate checks the GPT,
+filesystems, mounts, mutable-tree separation, empty slot B and the UKI's
+literal slot-A selector before conversion to qcow2. The ARM64 image has booted
+this layout under Apple HVF. This is layout evidence, not update/rollback or
+installer evidence.
+
+The dev image still sets
 `RootPassword=punar` and `Autologin=yes`; the desktop profile's
 `mkosi.postinst.chroot` creates a `punar` user with the password `punar`
 and puts it in `wheel`; `etc/greetd/config.toml` autologins that user into
 Hyprland. `linux-firmware` is deliberately excluded from both images.
-`cryptsetup` is not installed. There is one root filesystem, no `/home`
-mount, no `/var` mount, no ESP the user ever sees. `image-pipeline.md`
-records *"qcow2 only. No installer ISO yet."*
+`cryptsetup` is not installed in the target. The directly built VM layout is
+deliberately plaintext; the production encrypted overlay has been validated
+only by V-REPART. `image-pipeline.md` still correctly records *"qcow2 only.
+No installer ISO yet."*
 
 Two accepted designs are blocked on that:
 
-- **ADR-003** ratified A/B root slots. The partition table it specifies
-  exists in no image and on no device. Something has to create it.
+- **ADR-003** ratified A/B root slots. Its partition table now exists in the
+  directly built VM image, but no update has written the inactive slot, no
+  health gate has blessed it, and no installer has created it on a device.
 - **`execution-trust.md` §3.3** places `FAN_MARK_MOUNT` marks on
   user-writable mounts and states the prerequisite in its own words: on a
   single root filesystem, *"marking `/home` would mark `/`"*, which
@@ -500,35 +515,46 @@ argument for this layout.
 
 ### 4.7 The definitions, and the one source of truth
 
-`os/images/repart.d/install/`:
+`os/images/repart.d/install/` is now committed with these literal identities:
 
 ```text
 10-esp.conf        Type=esp        SizeMinBytes=1G  SizeMaxBytes=1G
-                   UUID=<esp literal>       Label=PUNAR-ESP   Format=vfat
-20-root-a.conf     Type=root-x86-64 SizeMinBytes=8G SizeMaxBytes=8G
-                   UUID=<slot A literal>    Label=PUNAR-ROOT-A
+                   UUID=8bb56554-b5f1-4058-90ac-8dc91a8e2bd4
+                   Label=PUNAR-ESP   Format=vfat
+20-root-a.conf     Type=root       SizeMinBytes=8G SizeMaxBytes=8G
+                   UUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea
+                   Label=PUNAR-ROOT-A
                    CopyBlocks=/run/punar/install/payload.raw
-30-root-b.conf     Type=root-x86-64 SizeMinBytes=8G SizeMaxBytes=8G
-                   UUID=<slot B literal>    Label=PUNAR-ROOT-B
+30-root-b.conf     Type=root       SizeMinBytes=8G SizeMaxBytes=8G
+                   UUID=2b1b91a9-cf2c-4e9c-a723-5ec997971662
+                   Label=PUNAR-ROOT-B   NoAuto=yes
 50-data.conf       Type=linux-generic  SizeMinBytes=16G  Weight=1000
-                   UUID=<data literal>      Label=PUNAR-DATA
-                   Format=btrfs  Subvolumes=@var,@home,@var-tmp
+                   UUID=21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9
+                   Label=PUNAR-DATA   Format=btrfs
+                   MakeDirectories=/@var /@home /@var-tmp
+                   Subvolumes=/@var /@home /@var-tmp
 ```
 
 and one overlay directory, `repart.d/install-encrypted/`, containing a
-single file `50-data.conf` that is the same file plus `Encrypt=key-file`.
-`systemd-repart --definitions=` is given both directories in order, so the
-encrypted variant shadows the plain one by filename. **Verification item
-V-REPART:** that `--definitions=` is repeatable with later-wins shadowing on
-the pinned systemd, and that `Subvolumes=` is supported there. If either is
-not, the fallback is to render the merged directory into `/run` from the
-same committed files at install time — still a fixed, validated set, still
-no arbitrary script, one more line of code. This is checked by the spike in
-§11 before the milestone is scheduled, not discovered during it.
+single complete `50-data.conf` with `Encrypt=key-file`. It intentionally does
+not set `EncryptKDF=minimal`; that shortcut belongs only to V-REPART's random
+disposable test key, never to a person's passphrase.
 
-The same files, minus `Encrypt=` and minus `CopyBlocks=`, generate
-`os/images/mkosi.repart/`, so **the dev qcow2 is built with the ADR-003
-layout too**. That is worth more than it looks: it means
+**V-REPART falsified the original merge assumption.** Pinned systemd 261.2
+accepts repeated `--definitions=`, but the **first** directory wins for a
+duplicate filename. `tools/render-repart-definitions.sh` therefore copies the
+base and overlays into a fresh directory below `/run` with explicit
+later-directory-wins semantics, and repart receives that one rendered set.
+The spike also found that `Subvolumes=` alone does not materialize the three
+subvolumes at this pin; their names must also appear in `MakeDirectories=`.
+Both corrections are now in the committed source rather than left as
+toolchain folklore.
+
+`tools/render-mkosi-repart.sh` derives the build-time definition set from the
+same files: it removes `CopyBlocks=`, populates slot A from mkosi's staged
+tree, seeds the shared subvolumes, and keeps mutable `/var` and `/home` out of
+the root slot. So **the dev qcow2 is built with the ADR-003 layout too**. That
+is worth more than it looks: it means
 `update-and-rollback.md`'s assertions A1–A3 have an artefact to run against
 before any installer exists, and it means every existing boot test starts
 exercising A/B mounts immediately.
@@ -1672,17 +1698,19 @@ fixture and because "the disk was not touched" is the same check five times.
 
 A spike first, because one experiment can invalidate the shape of §4.7:
 
-**V-REPART (before scheduling):** ~100 lines. Confirm on the pinned systemd
-that `systemd-repart --definitions=` is repeatable with later-wins
-shadowing, that `Subvolumes=` and `Encrypt=key-file` behave as designed, and
-that `CopyBlocks=` accepts a file descriptor or a path under `/run`. If any
-of these is false, the fallback (render the merged definition set into
-`/run` from committed inputs) is one function and this document does not
-change.
+**V-REPART — COMPLETE on native ARM64; native x86_64 is the cross-architecture
+CI authority.** `tests/images/repart-spike.sh` proved four properties against
+systemd 261.2: repeated directories are first-wins; the explicit renderer is
+later-wins; `MakeDirectories=` + `Subvolumes=` creates the three real btrfs
+subvolumes; `Encrypt=key-file` creates an openable LUKS2 filesystem; and
+`CopyBlocks=` from `/run` reproduces the exact payload digest. The fallback
+became the implementation because the original priority assumption was false.
 
 Then, in order, because each step is only testable after the one before:
 
-1. **The layout, in the image.** `repart.d/install/` + `mkosi.repart/` →
+1. **The layout, in the image — IMPLEMENTED, ARM64 BUILD + BOOT PROVEN
+   LOCALLY; CROSS-ARCH CI PENDING.** `repart.d/install/` + the rendered mkosi
+   definitions →
    the dev qcow2 becomes A/B-shaped with separate `/var`, `/home`,
    `/var/tmp`. **This alone unblocks `execution-trust.md` V3 and
    `update-and-rollback.md` A1–A3, before any installer exists.** It is the
@@ -1741,8 +1769,9 @@ designs immediately.
 
 ## 12. Honest limits
 
-1. **Nothing here has been built.** This is a design, and the register in
-   §0 grades it accordingly.
+1. **Only the layout foundation has been built.** No ISO, `install.*` method,
+   release triple, encrypted installed disk, profile split, recovery flow or
+   installer UI exists. The register in §0 grades each separately.
 2. **No bare-metal boot has ever occurred**, so the ISO's ability to start
    on a real machine is unknown in the strict sense.
 3. **Encryption by default costs a passphrase at every boot** until TPM
@@ -1773,12 +1802,15 @@ designs immediately.
    correct and plain and does not match the design language.
 11. **No NVIDIA, no per-model support**, and on an A/B system that cannot be
     fixed after the fact (§9.2).
-12. **The image size is unmeasured**, so the ISO size, the slot size and
-    ADR-003's revisit trigger all rest on an inference.
+12. **The ISO size is unmeasured.** The new sparse ARM64 minimal qcow2 is about
+    352 MiB allocated with a 33 GiB virtual layout, but that is not the future
+    installer ISO or full desktop payload, so the ISO and slot-size revisit
+    trigger still rest on an inference.
 13. **The live-mode gate is only as strong as the UKI signature**, which is
     simulated (§7.1).
-14. **`Subvolumes=` and repeatable `--definitions=` are unverified** at the
-    pin. V-REPART, §11.
+14. **V-REPART is proven only in the builder environment.** Its findings are
+    implemented (§4.7), but the encrypted production installer path does not
+    exist and no physical disk has been repartitioned.
 15. **The install has never been performed by a human**, and every judgement
     in §6 about what a person needs to see is a designer's judgement, not a
     finding.

@@ -43,6 +43,20 @@ case "${MODE}" in
     *) echo "error: PUNAR_BUILD_MODE must be build, summary, or stage (got: ${MODE})" >&2; exit 2 ;;
 esac
 
+MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart.XXXXXX)"
+# UUIDv5(URL, https://punar.org/filesystem-device/PUNAR-DATA). mkfs.btrfs
+# otherwise randomizes its single-device UUID even when repart supplies a
+# stable filesystem UUID. This stabilizes that identity only; btrfs still
+# generates per-subvolume UUIDs, so it is not a bit-reproducibility claim.
+# The value is a direct-image input, not a production-install rule.
+BTRFS_DEVICE_UUID="ef4a2286-ac11-53c0-a40d-8d2bae7511cc"
+cleanup_repart() {
+    rm -rf "${MKOSI_REPART_DIR}"
+}
+trap cleanup_repart EXIT
+"${REPO_ROOT}/tools/render-mkosi-repart.sh" \
+    "${MKOSI_REPART_DIR}" "${IMAGES_DIR}/repart.d/install"
+
 # Copy the desktop configuration/assets from their source-of-truth trees
 # into the desktop profile's mkosi.extra. These staged paths are gitignored
 # (os/images/.gitignore) — os/modules/desktop and shell/ stay the single
@@ -431,7 +445,11 @@ run_mkosi() {
     # attempts, so a short retry loop makes throttling non-fatal.
     local attempt
     for attempt in 1 2 3; do
-        if mkosi --force --mirror "${MIRROR}" "$@" "${MODE}"; then
+        if mkosi --force \
+            --mirror "${MIRROR}" \
+            --environment "SYSTEMD_REPART_MKFS_OPTIONS_BTRFS=--device-uuid=${BTRFS_DEVICE_UUID}" \
+            --repart-directory "${MKOSI_REPART_DIR}" \
+            "$@" "${MODE}"; then
             return 0
         fi
         echo "==> mkosi attempt ${attempt}/3 failed for ${image_id}" >&2
@@ -462,6 +480,9 @@ convert_output() {
         ls -la out/ >&2 || true
         exit 1
     fi
+
+    echo "==> Verifying A/B layout and shared-state mounts in ${raw}"
+    "${REPO_ROOT}/tests/images/check-repart-layout.sh" "${raw}" x86_64
 
     echo "==> Converting ${raw} -> ${qcow} (compressed qcow2)"
     qemu-img convert -O qcow2 -c "${raw}" "${qcow}"

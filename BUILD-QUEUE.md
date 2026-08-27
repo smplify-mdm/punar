@@ -19,7 +19,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 7 | launch browser / **web app** | browser yes; web-app install is M11, unbuilt |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
-| 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
+| 25 | demonstrate rollback/update mechanism | **NOT MET.** The four-partition A/B foundation is now implemented and ARM64-build/boot-proven locally; inactive-slot write, health-gated blessing and rollback are still unbuilt. |
 | 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
@@ -140,6 +140,14 @@ in each window) remain context because they include the journal, filesystem
 metadata and non-Punar services. Missing counters, connected-idle facts or live
 zram fail on every accelerator.
 
+The first x86 KVM run of that gate correctly failed: all three service cgroups
+were alive, but `cpu.stat`/`io.stat` were not exposed because the units had
+implicitly inherited controller enablement on ARM. `CPUAccounting=yes` and
+`IOAccounting=yes` are now explicit on `punard`, `punar-agentd` and
+`punar-secrets`, a host contract test pins all six lines, and raw start/end
+counter snapshots join the CI evidence. Native x86 confirmation is pending the
+next run; no x86 CPU/write result is claimed before it.
+
 ---
 
 ## 3. Unmanaged-first pass — complete and runtime-proven
@@ -221,10 +229,24 @@ detection exercises. The M2 graphics policy also recognizes Debian's live
 `virtio_pci` spelling and has fake-sysfs coverage for virtual, AMD, Intel and
 Raspberry Pi VC4 cases.
 
+The minimal ARM64 image now also carries the real four-partition foundation:
+1 GiB ESP, populated 8 GiB slot A, empty 8 GiB slot B and 16 GiB shared btrfs
+with isolated `/var`, `/home` and `/var/tmp`. A content-aware gate passed all
+five layout groups, and the result reached `PUNAR_BOOT_OK` in about six seconds
+under Apple HVF. Its corrected sparse qcow2 digest is
+`b3a9a5b97a501c0e7d92f8cb6c0bf01b2988f2909a11e01b1cfbc7c1df18c89c`.
+
+An unchanged-input comparison found the ESP and root-slot regions stable but
+the full qcow2 non-identical because btrfs assigns fresh UUIDs to the three
+subvolumes. The filesystem/device identities are fixed; subvolume UUIDs are
+not configurable at the pinned toolchain. Promotion therefore signs the exact
+artifact and makes no bit-for-bit reproducibility claim.
+
 **Scope boundary:** the architecture-aware canonical CI gate is wired but has
 not yet produced its first green run. These results prove QEMU's generic ARM
-`virt` platform, not Raspberry Pi firmware/peripherals, a real GPU, Secure
-Boot, A/B updates, an installer, or any physical ARM machine.
+`virt` platform and the *layout*, not Raspberry Pi firmware/peripherals, a real
+GPU, Secure Boot, an A/B update or rollback, an installer, or any physical ARM
+machine.
 
 **Next sequence:**
 
@@ -253,8 +275,10 @@ vector choice. The new live contract is `docs/design/wallpapers.md`.
 ### 6.1 Installer and onboarding
 `docs/design/installer.md`, `onboarding-flow.md`, and the backend notes in
 `onboarding.md`. **Nobody can install Punar on a real machine today** — the
-only path is booting a prebuilt image. Blocks all hardware testing, which
-blocks 9 of the `user-blocked.md` items.
+only path is booting a prebuilt image. The prebuilt image is now A/B-shaped,
+which removes the disk-layout prerequisite but does not make it an installer.
+The missing installer blocks hardware testing, which blocks 9 of the
+`user-blocked.md` items.
 
 The owner has now simplified the interaction contract. The required path is
 one account card with exactly three user-provided values: username, password,
