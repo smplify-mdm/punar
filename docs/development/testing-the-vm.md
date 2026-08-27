@@ -36,6 +36,15 @@ If TigerVNC does not open by itself, open it and connect to `127.0.0.1:5900`.
 macOS Screen Sharing **will not work** — it requires Apple's auth extensions
 that QEMU's VNC server does not implement.
 
+When you are finished, stop the disposable guest cleanly from another terminal:
+
+```bash
+./tools/punar-down.sh
+```
+
+The launcher refuses to collide with an already-running VM and points to this
+command; it never unlinks a live QEMU monitor or silently replaces your session.
+
 ---
 
 ## 2. The ten-minute tour
