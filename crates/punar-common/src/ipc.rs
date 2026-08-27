@@ -57,7 +57,7 @@ use crate::approval::{
     Requester, RequesterPeer,
 };
 use crate::audit::POLICY_PERSONAL_DEFAULTS;
-use crate::{AuditEvent, CapabilityDescriptor, CapabilityId, Risk};
+use crate::{AuditEvent, CapabilityDescriptor, CapabilityId, DeviceProfile, Risk};
 
 // ---------------------------------------------------------------------------
 // Contract constants (docs/api/ipc.md sections 1–2)
@@ -1463,6 +1463,11 @@ pub struct StatusResult {
     /// socket opens, so this is always present).
     pub last_reconcile: String,
     pub audit: AuditStatus,
+    /// Read-only hardware classification. Optional for compatibility with
+    /// pre-device-class v1 results; punard always publishes it once the
+    /// classifier exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceProfile>,
     /// M4: personal-scope compliance (SPEC section 52; contract section
     /// 5.1). Optional per contract section 3.3 — always present since M4;
     /// `Option` keeps M3-shaped payloads parseable.
@@ -2280,6 +2285,7 @@ mod tests {
                 path: "/var/log/punar/audit.jsonl".into(),
                 events: 42,
             },
+            device: None,
             compliance: None,
             org: None,
         })
@@ -2504,6 +2510,7 @@ mod tests {
                 path: "/var/log/punar/audit.jsonl".into(),
                 events: 1,
             },
+            device: None,
             compliance: None,
             org: None,
         })

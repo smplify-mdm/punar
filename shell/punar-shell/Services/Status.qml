@@ -42,6 +42,11 @@ Singleton {
     // (the command-center masthead) render exactly as before.
     property string complianceState: ""
 
+    // Read-only hardware class. Missing/invalid data chooses appliance — the
+    // least-resident experience — and never weakens a security/privacy rule.
+    property string deviceClass: "appliance"
+    property string deviceClassSource: "unknown"
+
     // "ok" | "warn" | "bad" — maps 1:1 to spec §52 decision states.
     readonly property string state: {
         switch (root.complianceState) {
@@ -137,6 +142,8 @@ Singleton {
         root.enrolled = false;
         root.orgName = "";
         root.complianceState = "";
+        root.deviceClass = "appliance";
+        root.deviceClassSource = "unknown";
     }
 
     function loadStatus(): void {
@@ -160,6 +167,11 @@ Singleton {
                && j.compliance_overall !== ""
                ? j.compliance_overall : "unknown")
             : "";
+        var deviceClass = typeof j.device_class === "string" ? j.device_class : "";
+        root.deviceClass = ["workstation", "laptop", "appliance"].indexOf(deviceClass) >= 0
+            ? deviceClass : "appliance";
+        root.deviceClassSource = j.device_class_source === "observed"
+            || j.device_class_source === "forced" ? j.device_class_source : "unknown";
     }
 
     FileView {

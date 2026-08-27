@@ -224,7 +224,12 @@ Params: none.
   "hostname": "punar-desktop",
   "capabilities_total": 3,
   "last_reconcile": "2026-08-25T07:00:13Z",
-  "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42}
+  "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
+  "device": {
+    "class": "laptop", "source": "observed",
+    "facts": {"memory_mib": 8192, "logical_cores": 4,
+              "battery_present": true, "display_connected": true}
+  }
 }}
 ```
 
@@ -273,6 +278,15 @@ remediations since daemon start (`last_remediation_at` is `null` until the
 first one). `overall` = worst of `non_compliant > unknown > remediating >
 exception > compliant`. Semantics and computation:
 docs/development/milestone-4.md section 5.
+
+**Device-class addition — `device` result field** (optional per 3.3; always
+present once the classifier ships). This is a read-only hardware observation,
+not a capability: no method can apply RAM, CPUs, a battery, or a display.
+`class` is the closed set `workstation | laptop | appliance`; `source` is
+`observed` in production and `forced` only through the typed CI seam. Optional
+boolean facts use `null` for an unreadable interface, distinct from measured
+absence. An incomplete observation chooses the conservative appliance path and
+keeps the unknown facts visible rather than silently inventing hardware.
 
 ### 5.2 `capabilities.list`
 
@@ -718,13 +732,16 @@ render enrollment/compliance chrome without a socket connection or polling
 
   ```json
   {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
-   "compliance_overall": "compliant", "ts": "2026-08-26T09:02:00Z"}
+   "compliance_overall": "compliant", "device_class": "laptop",
+   "device_class_source": "observed", "ts": "2026-08-26T09:02:00Z"}
   ```
 
   (`org_name` is `null` and `enrolled` is `false` on a personal device.)
-  No per-capability rows, policy ids, device id, or hostname: the file is
-  world-readable in a user-owned directory and carries only what the bar
-  renders.
+  No raw hardware facts, per-capability rows, policy ids, device id, or
+  hostname: the file is world-readable in a user-owned directory and carries
+  only what the shell renders or uses for its resident-cost decision. A
+  missing/unknown class fails to `appliance`, the least-resident experience;
+  it never changes a security or privacy guarantee.
 - **Non-authoritative by design**: `/run/punar` is `0755 punar:punar` (M1
   contract), so the session user can replace the file — acceptable because
   it is display data consumed by that same user's own session; anything

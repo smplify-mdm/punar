@@ -221,6 +221,27 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
     };
 
     let mut rows = vec![Row::new("Device", &s.mode, Slot::Neutral, &device_desc)];
+    if let Some(device) = &s.device {
+        let battery = match device.facts.battery_present {
+            Some(true) => "battery",
+            Some(false) => "no battery",
+            None => "battery unknown",
+        };
+        let display = match device.facts.display_connected {
+            Some(true) => "display",
+            Some(false) => "headless",
+            None => "display unknown",
+        };
+        rows.push(Row::new(
+            "Device class",
+            &device.class,
+            Slot::Neutral,
+            &format!(
+                "{} MiB RAM · {} logical cores · {battery} · {display} · {}",
+                device.facts.memory_mib, device.facts.logical_cores, device.source
+            ),
+        ));
+    }
     if let Some(org) = &s.org {
         // The M5 org row (ipc.md section 7): `Organization  <display
         // name> · <policy id>`; never rendered on a personal device.
@@ -3447,6 +3468,37 @@ mod tests {
         assert!(!lower.contains("org "));
         assert!(!lower.contains("acme"));
         assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+    }
+
+    #[test]
+    fn status_explains_the_observed_device_class() {
+        let style = Style::plain();
+        let result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "personal",
+            "enrolled": false,
+            "hostname": "punar-pi",
+            "capabilities_total": 3,
+            "device": {
+                "class": "appliance",
+                "source": "observed",
+                "facts": {
+                    "memory_mib": 4096,
+                    "logical_cores": 4,
+                    "battery_present": false,
+                    "display_connected": false
+                }
+            }
+        });
+        let text = status(&style, &result, &[]).unwrap();
+        assert!(text.contains("DEVICE CLASS"), "{text}");
+        assert!(text.contains("APPLIANCE"), "{text}");
+        assert!(
+            text.contains("4096 MiB RAM · 4 logical cores · no battery · headless · observed"),
+            "{text}"
+        );
     }
 
     #[test]

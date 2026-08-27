@@ -53,6 +53,7 @@ pub mod approvals;
 pub mod authz;
 pub mod backends;
 pub mod capability;
+pub mod device;
 pub mod enroll;
 pub mod policy;
 pub mod server;

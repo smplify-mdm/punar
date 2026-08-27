@@ -36,6 +36,8 @@
 #   9  socket authz negative: nobody cannot even connect (0660 root:punar)
 #   10 no-exec probe (section 60): debug rpc system.exec / shell.run ->
 #      unknown_method surfaced, nonzero exit
+#   11 device class is observed from Linux facts; the typed force seam
+#      exercises workstation/laptop/appliance and mutates no safety state
 set -u
 
 RUN_DIR=/run/punar
@@ -103,6 +105,40 @@ jq_check "status shape (protocol 1, personal, unenrolled, dev_ id, 3 capabilitie
     "${RUN_DIR}/m3-status.json" \
     '.protocol_version == 1 and .mode == "personal" and .enrolled == false
      and (.device_id | test("^dev_[A-Za-z0-9]+$")) and .capabilities_total == 3'
+jq_check "device class is observed from explicit Linux facts" \
+    "${RUN_DIR}/m3-status.json" \
+    '.device.source == "observed"
+     and (.device.class | IN("workstation", "laptop", "appliance"))
+     and .device.facts.memory_mib > 0
+     and .device.facts.logical_cores > 0
+     and (.device.facts.battery_present | type) == "boolean"
+     and (.device.facts.display_connected | type) == "boolean"'
+
+# The override is a diagnostic seam, not a setting and not a mutating daemon
+# method. Exercise every closed value in the running image and prove the calls
+# cannot change the live firewall or the installed privacy/authority floors.
+safety_before="$({ nft -j list table inet punar-base 2>/dev/null || true; cat \
+    /usr/share/punar/nftables/punar-base.nft \
+    /usr/share/punar/policy/ai-defaults.yaml \
+    /etc/systemd/network/*.network 2>/dev/null || true; } | sha256sum | awk '{print $1}')"
+for device_class in workstation laptop appliance; do
+    class_file="${RUN_DIR}/m3-device-${device_class}.json"
+    if punard classify-device --force "${device_class}" > "${class_file}" 2>/dev/null; then
+        jq_check "forced ${device_class} branch is typed and labelled" \
+            "${class_file}" \
+            ".class == \"${device_class}\" and .source == \"forced\"
+             and (.facts | keys | sort) == [\"battery_present\",\"display_connected\",\"logical_cores\",\"memory_mib\"]"
+    else
+        note "FAIL forced ${device_class} branch did not run"
+        FAILED=1
+    fi
+done
+safety_after="$({ nft -j list table inet punar-base 2>/dev/null || true; cat \
+    /usr/share/punar/nftables/punar-base.nft \
+    /usr/share/punar/policy/ai-defaults.yaml \
+    /etc/systemd/network/*.network 2>/dev/null || true; } | sha256sum | awk '{print $1}')"
+check_eq "all forced classes leave firewall/privacy/AI safety state byte-identical" \
+    "${safety_before}" "${safety_after}"
 
 # --- 4. read path as user punar + live nftables cross-check ------------------
 if runuser -u punar -- "${CTL}" --json capabilities \

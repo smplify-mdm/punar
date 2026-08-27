@@ -465,6 +465,8 @@ pub struct StatusSummary {
     pub enrolled: bool,
     pub org_name: Option<String>,
     pub compliance_overall: String,
+    pub device_class: String,
+    pub device_class_source: String,
     pub ts: String,
 }
 
@@ -652,6 +654,8 @@ mod tests {
                 enrolled: true,
                 org_name: Some("Acme Engineering".into()),
                 compliance_overall: "compliant".into(),
+                device_class: "laptop".into(),
+                device_class_source: "observed".into(),
                 ts: "2026-08-26T09:02:00Z".into(),
             },
         )
@@ -668,10 +672,19 @@ mod tests {
             .map(String::as_str)
             .collect();
         // Summary ONLY (ipc.md section 9): the world-readable file carries
-        // exactly what the bar renders (serde_json emits keys sorted).
+        // exactly what the shell renders or uses for its resident-cost
+        // choice (serde_json emits keys sorted).
         assert_eq!(
             keys,
-            ["compliance_overall", "enrolled", "org_name", "ts", "v"]
+            [
+                "compliance_overall",
+                "device_class",
+                "device_class_source",
+                "enrolled",
+                "org_name",
+                "ts",
+                "v"
+            ]
         );
         assert_eq!(raw["org_name"], "Acme Engineering");
         let _ = std::fs::remove_dir_all(&dir);

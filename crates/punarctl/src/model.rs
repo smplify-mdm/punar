@@ -26,6 +26,10 @@ pub struct Status {
     pub last_reconcile: Option<String>,
     #[serde(default)]
     pub audit: Option<AuditFile>,
+    /// Read-only device-class result. Optional so an older daemon still
+    /// renders under the v1 additive-field rule.
+    #[serde(default)]
+    pub device: Option<DeviceProfile>,
     /// M4 addition (contract section 5.1) — optional so an M3-shaped
     /// result still renders (contract 3.3 tolerance).
     #[serde(default)]
@@ -35,6 +39,21 @@ pub struct Status {
     /// redraws).
     #[serde(default)]
     pub org: Option<Org>,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceProfile {
+    pub class: String,
+    pub source: String,
+    pub facts: DeviceFacts,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceFacts {
+    pub memory_mib: u64,
+    pub logical_cores: u32,
+    pub battery_present: Option<bool>,
+    pub display_connected: Option<bool>,
 }
 
 /// The `org` object of `status` / `enroll.*` results (contract sections

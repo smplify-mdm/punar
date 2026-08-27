@@ -50,6 +50,7 @@ use serde_json::{Value, json};
 use crate::approvals::{self, ApprovalStore};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
+use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
     ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
     LastQueryRecord, LastSyncRecord, OrgRecord, StatusSummary, UpstreamError,
@@ -164,6 +165,11 @@ pub struct DaemonConfig {
     /// no listener for it, agentd never calls back, and the graph stays a
     /// DAG. Injectable for tests / overridable via `PUNAR_AGENTD_SOCKET`.
     pub agentd_socket: PathBuf,
+    /// Read-only hardware observation paths (procfs/sysfs in production,
+    /// ordinary files in tests).
+    pub device_sources: DeviceSources,
+    /// Typed CI seam. Production leaves this unset and reports `observed`.
+    pub device_class_override: Option<punar_common::DeviceClass>,
 }
 
 impl DaemonConfig {
@@ -189,6 +195,8 @@ impl DaemonConfig {
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
             agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
+            device_sources: DeviceSources::default(),
+            device_class_override: None,
         }
     }
 }
@@ -266,6 +274,8 @@ struct Inner {
     effective: Mutex<EffectiveDocument>,
     tracker: Mutex<ComplianceTracker>,
     device_id: String,
+    /// Read-only observed fact. Never enters the capability reconcile loop.
+    device_profile: punar_common::DeviceProfile,
     started_at: String,
     last_reconcile: Mutex<Option<String>>,
     /// M5 enrollment state (mirrors `enrollment.json`); `None` = personal.
@@ -321,6 +331,7 @@ impl Daemon {
             std::fs::create_dir_all(parent)?;
         }
         let device_id = load_or_create_device_id(&cfg.state_dir.join("device-id"))?;
+        let device_profile = observe_profile(&cfg.device_sources, cfg.device_class_override);
         let audit = AuditWriter::open(&cfg.audit_path)?;
         // Group ownership (root:punar) is the daemon's job, not the
         // writer's; meaningful only when running as root (tests are not).
@@ -419,6 +430,7 @@ impl Daemon {
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
                 device_id,
+                device_profile,
                 started_at: utc_now_rfc3339(),
                 last_reconcile: Mutex::new(None),
                 enrollment: Mutex::new(enrollment),
@@ -930,6 +942,7 @@ impl Inner {
                 path: self.cfg.audit_path.display().to_string(),
                 events: self.audit_events.load(Ordering::SeqCst),
             },
+            device: Some(self.device_profile.clone()),
             // M4: personal-scope section 52 compliance — always present
             // since M4 (contract section 5.1). States are computed at
             // reconcile time; the boot reconcile runs before the socket
@@ -2310,6 +2323,12 @@ impl Inner {
             enrolled,
             org_name,
             compliance_overall: overall,
+            device_class: self.device_profile.class.as_str().to_string(),
+            device_class_source: match self.device_profile.source {
+                punar_common::DeviceClassSource::Observed => "observed",
+                punar_common::DeviceClassSource::Forced => "forced",
+            }
+            .to_string(),
             ts: utc_now_rfc3339(),
         };
         let mut written = self.status_written.lock().unwrap();
@@ -2317,6 +2336,8 @@ impl Inner {
             w.enrolled == summary.enrolled
                 && w.org_name == summary.org_name
                 && w.compliance_overall == summary.compliance_overall
+                && w.device_class == summary.device_class
+                && w.device_class_source == summary.device_class_source
         });
         if unchanged {
             return;

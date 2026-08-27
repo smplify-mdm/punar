@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use punar_common::DeviceClass;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
 use punard::backends::timezone::TimezoneBackend;
@@ -38,8 +39,18 @@ struct Cli {
 enum Command {
     /// Run the daemon (started by punard.service as root).
     Run(RunArgs),
+    /// Print the read-only hardware profile and exit. `--force` is the typed
+    /// CI seam; it is always labelled in the result.
+    ClassifyDevice(ClassifyDeviceArgs),
     /// Validate punard configuration without starting the daemon (stub).
     CheckConfig,
+}
+
+#[derive(clap::Args)]
+struct ClassifyDeviceArgs {
+    /// Exercise one closed class without pretending it was observed.
+    #[arg(long, value_name = "CLASS")]
+    force: Option<DeviceClass>,
 }
 
 #[derive(clap::Args)]
@@ -106,6 +117,11 @@ struct RunArgs {
     /// user). Not a presence check — see `Inner::console_user`.
     #[arg(long, default_value_t = punard::server::DEFAULT_CONSOLE_UID)]
     console_uid: u32,
+
+    /// Test/CI seam for exercising all three closed device classes. The
+    /// production service never sets it; status labels forced results.
+    #[arg(long, value_name = "CLASS")]
+    device_class_override: Option<DeviceClass>,
 }
 
 fn build_registry(args: &RunArgs) -> Registry {
@@ -156,6 +172,7 @@ fn run(args: RunArgs) -> ExitCode {
         approvals_file: args.approvals_file,
         ai_defaults_file: args.ai_defaults_file,
         console_uid: args.console_uid,
+        device_class_override: args.device_class_override,
         ..cfg
     };
 
@@ -203,6 +220,17 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Run(args)) => run(args),
+        Some(Command::ClassifyDevice(args)) => {
+            let profile = punard::device::observe_profile(
+                &punard::device::DeviceSources::default(),
+                args.force,
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&profile).expect("device profile serializes")
+            );
+            ExitCode::SUCCESS
+        }
         Some(Command::CheckConfig) => {
             eprintln!(
                 "punard check-config: not implemented in Milestone 3; no configuration was validated"
