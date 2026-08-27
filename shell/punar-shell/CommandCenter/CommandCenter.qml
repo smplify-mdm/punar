@@ -58,6 +58,9 @@ Scope {
     id: root
 
     property bool open: false
+    // Loader contract used by the isolated cost probe and the eventual
+    // production lazy wrapper. Construction timing ends before show().
+    property bool openOnReady: false
     property bool windowVisible: false
 
     // Non-empty while the §40 explain answer replaces the result list.
@@ -94,6 +97,12 @@ Scope {
         root.windowVisible = true;
         root.open = true;
         root.probeTargets();
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("commandcenter");
+        if (root.openOnReady)
+            root.show();
     }
 
     function dismiss(): void {

@@ -32,6 +32,23 @@ Singleton {
     // response to an explicit IPC probe after the surface has mapped.
     property var openedAtMs: ({})
     property var mappedAtMs: ({})
+    property var constructionStartedAtMs: ({})
+    property var constructedAtMs: ({})
+
+    function beginConstruction(surface: string, startedAt: double): void {
+        root.constructionStartedAtMs[surface] = startedAt;
+        root.constructedAtMs[surface] = 0;
+    }
+
+    // Called by each lazy-load candidate at the END of its root
+    // Component.onCompleted handler. In the production eager shell there is
+    // no matching beginConstruction(), so this is an inert instrumentation
+    // hook rather than an always-running clock.
+    function constructed(surface: string): void {
+        if (typeof root.constructionStartedAtMs[surface] !== "number")
+            return;
+        root.constructedAtMs[surface] = Date.now();
+    }
 
     function begin(surface: string): void {
         root.openedAtMs[surface] = Date.now();
@@ -46,6 +63,19 @@ Singleton {
         if (typeof opened !== "number" || typeof mapped !== "number" || mapped <= 0)
             return "pending";
         return String(opened) + "," + String(mapped);
+    }
+
+    function constructionSample(surface: string): string {
+        var started = root.constructionStartedAtMs[surface];
+        var constructed = root.constructedAtMs[surface];
+        var opened = root.openedAtMs[surface];
+        var mapped = root.mappedAtMs[surface];
+        if (typeof started !== "number" || typeof constructed !== "number"
+                || typeof opened !== "number" || typeof mapped !== "number"
+                || constructed <= 0 || opened <= 0 || mapped <= 0)
+            return "pending";
+        return String(started) + "," + String(constructed) + ","
+            + String(opened) + "," + String(mapped);
     }
 
     Connections {

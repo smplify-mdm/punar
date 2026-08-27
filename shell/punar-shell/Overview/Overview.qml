@@ -29,6 +29,7 @@ Scope {
     id: root
 
     property bool open: false
+    property bool openOnReady: false
     property bool windowVisible: false
     property string query: ""
     // Workspace id being renamed inline, -1 when none.
@@ -87,6 +88,12 @@ Scope {
         root.renamingId = -1;
         root.windowVisible = true;
         root.open = true;
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("overview");
+        if (root.openOnReady)
+            root.show();
     }
 
     function dismiss() {

@@ -71,6 +71,7 @@ Scope {
     id: root
 
     property bool open: false
+    property bool openOnReady: false
     property bool windowVisible: false
     property string query: ""
     property int selected: 0
@@ -100,6 +101,12 @@ Scope {
         root.selected = 0;
         root.windowVisible = true;
         root.open = true;
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("shortcuts");
+        if (root.openOnReady)
+            root.show();
     }
 
     function dismiss(): void {

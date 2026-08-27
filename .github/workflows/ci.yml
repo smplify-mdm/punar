@@ -225,6 +225,7 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m4-check.sh \

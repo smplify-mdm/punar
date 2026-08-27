@@ -148,6 +148,10 @@
 #     punar-m5-personal.png         grim capture, restored personal bar (M5)
 #     ram-report.txt                key=value idle-RAM + services-RSS numbers
 #     ram-samples.txt, meminfo      raw guest measurement data
+#     surfaces-costs.txt            three isolated construction/first-map/PSS
+#                                   samples for each lazy-load candidate
+#     surfaces-report.txt           live production-shell surface verdict
+#     surfaces-latency.txt          eager show-to-openlayer measurements
 #     m2-report.txt, m2-*.json      M2 exercise verdict + hyprctl snapshots
 #     m3-report.txt, m3-*.json      M3 exercise verdict + punarctl/nft
 #                                   snapshots (+ m3-deny-stderr.txt)
@@ -680,7 +684,7 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
-                     surfaces-report.txt surfaces-latency.txt \
+                     surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
                      surfaces-aipanel.png surfaces-overview.png \
@@ -1211,6 +1215,37 @@ run_desktop() {
         exit 1
     else
         echo "==> Wireless: no report under TCG (informational only)"
+    fi
+
+    # Phase 12c.1: isolated surface construction/resident-cost verdict. The
+    # five lazy-load candidates run in fresh probe processes beside the real
+    # shell. Values are evidence, not thresholds; the hard gate is that all 15
+    # samples produced valid timestamps and PSS reads. Missing evidence fails
+    # under KVM, following the M8 silent-skip lesson.
+    local surface_costs="${PROOF_DIR}/surfaces-costs.txt"
+    if [ -f "${surface_costs}" ]; then
+        if grep -q 'PUNAR_SURFACE_COSTS_FAIL' "${surface_costs}"; then
+            echo "error: surface-cost exercise reported PUNAR_SURFACE_COSTS_FAIL; failures:" >&2
+            grep '^FAIL' "${surface_costs}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_SURFACE_COSTS_OK' "${surface_costs}"; then
+            echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (15 isolated samples)"
+            grep '^median ' "${surface_costs}" || true
+        else
+            echo "error: surfaces-costs.txt carries no PUNAR_SURFACE_COSTS_OK/FAIL verdict" >&2
+            tail -n 20 "${surface_costs}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_SURFACE_COSTS_FAIL' "${SERIAL_LOG}"; then
+        echo "error: surface-cost exercise reported PUNAR_SURFACE_COSTS_FAIL on serial" >&2
+        exit 1
+    elif grep -aq 'PUNAR_SURFACE_COSTS_OK' "${SERIAL_LOG}"; then
+        echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (verdict from serial)"
+    elif [ "${ACCEL}" = "kvm" ]; then
+        echo "error: no surfaces-costs.txt and no verdict on serial — the cost instrument did not run" >&2
+        exit 1
+    else
+        echo "==> Surface costs: no report under TCG (informational only)"
     fi
 
     # Phase 12c: desktop-surfaces verdict.

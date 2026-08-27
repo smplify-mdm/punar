@@ -72,6 +72,7 @@ Scope {
     id: root
 
     property bool open: false
+    property bool openOnReady: false
     property bool windowVisible: false
 
     // Session/detection id under the cursor. Kept across agents.json
@@ -981,6 +982,12 @@ Scope {
             console.warn("punar-shell: agents refresh unavailable:", e);
         }
         root.refreshLedger(root.selectedId);
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("aipanel");
+        if (root.openOnReady)
+            root.show();
     }
 
     // The M10 alert card's [I] Inspect action (milestone-10.md §5.1):

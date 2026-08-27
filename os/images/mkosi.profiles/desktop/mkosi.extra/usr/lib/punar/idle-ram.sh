@@ -155,6 +155,15 @@ fi
 systemctl start punar-wifi-check.service \
     || echo "punar: idle-ram: punar-wifi-check.service failed to start" >&2
 
+# Per-surface construction/resident-cost instrument. It runs after the
+# canonical idle window so fifteen fresh probe processes cannot pollute the
+# whole-system budget, and before the normal surface gate so the latter proves
+# the untouched production shell still works after the probes have exited.
+# The report is hard-gated host-side; this orchestration layer keeps going so a
+# failure still exports every diagnostic and every later milestone verdict.
+systemctl start punar-surface-cost-check.service \
+    || echo "punar: idle-ram: punar-surface-cost-check.service failed to start" >&2
+
 # Desktop-surfaces exercise, FIRST of the in-VM checks and strictly AFTER the
 # idle sampling window above. First on purpose: it is the only check that
 # leaves the session exactly as it found it (every surface closed, the browser

@@ -61,6 +61,7 @@ Scope {
     id: root
 
     property bool open: false
+    property bool openOnReady: false
     property bool windowVisible: false
 
     // Re-emitted from ControlData so the shell root may wire the AI
@@ -536,6 +537,12 @@ Scope {
         root.open = true;
         // Freshness on user action, not on a clock.
         ctl.refreshAll();
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("systemcontrol");
+        if (root.openOnReady)
+            root.show();
     }
 
     function dismiss(): void {

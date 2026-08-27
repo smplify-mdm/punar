@@ -1,0 +1,19 @@
+# Isolated per-surface construction and resident-memory instrument.
+#
+# Runs after canonical idle-RAM sampling and before the normal surface gate.
+# It starts separate Quickshell probe processes beside the production shell,
+# so it neither changes the shipping configuration nor restarts the desktop.
+
+[Unit]
+Description=Punar isolated shell-surface construction and PSS measurement (CI)
+
+[Service]
+Type=oneshot
+User=punar
+# 5 surfaces x 3 fresh processes. Each healthy KVM sample takes ~8 s; the
+# generous bound covers cold QML compilation and the 45 s openlayer failure
+# path without letting a broken probe hold the full desktop gate forever.
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/surface-cost-check.sh
