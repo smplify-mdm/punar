@@ -1,57 +1,239 @@
 #!/usr/bin/env bash
-# Runs inside the native Debian builder container. The ARM64 lane stays
-# independent from container-build.sh while the substrate migration is being
-# proven; sharing code before the package/boot adapters converge would hide
-# architecture-specific assumptions instead of removing them.
+# Runs inside the native Debian builder container. The minimal image remains
+# the CI default while the desktop lane crosses the same runtime gates as the
+# x86_64 image. Architecture-neutral desktop files are staged by the shared
+# helper path; compiled binaries and the offline OCI base stay ARM-local so a
+# stale x86_64 cache can never enter this image.
 set -euo pipefail
 
 ARM64_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="$(cd "${ARM64_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${IMAGES_DIR}/../.." && pwd)"
 cd "${ARM64_DIR}"
 
 # shellcheck source=/dev/null
 . "${ARM64_DIR}/snapshot.env"
 
 MODE="${PUNAR_BUILD_MODE:-build}"
+IMAGES="${PUNAR_ARM64_IMAGES:-minimal}"
 case "${MODE}" in
     build|summary) ;;
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${MODE})" >&2; exit 2 ;;
 esac
+case "${IMAGES}" in
+    minimal|desktop|all) ;;
+    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, or all (got: ${IMAGES})" >&2; exit 2 ;;
+esac
 
-echo "==> mkosi ${MODE}: native arm64, Debian sid snapshot ${PUNAR_DEBIAN_SNAPSHOT}"
-mkosi --force \
-    --snapshot "${PUNAR_DEBIAN_SNAPSHOT}" \
-    --source-date-epoch "${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
-    "${MODE}"
+stage_desktop_content() {
+    echo "==> Staging shared architecture-neutral desktop content"
+    PUNAR_IMAGES=desktop PUNAR_BUILD_MODE=stage \
+        "${IMAGES_DIR}/scripts/container-build.sh"
+}
 
-if [ "${MODE}" = "summary" ]; then
-    exit 0
-fi
+stage_punar_binaries() {
+    local extra="${ARM64_DIR}/mkosi.extra"
+    local cargo_target="${IMAGES_DIR}/cache/cargo-target-arm64"
 
-raw="${IMAGES_DIR}/out/punar-dev-arm64.raw"
-if [ ! -f "${raw}" ]; then
-    shopt -s nullglob
-    candidates=("${IMAGES_DIR}"/out/punar-dev-arm64*.raw)
-    shopt -u nullglob
-    if [ "${#candidates[@]}" -eq 1 ]; then
-        raw="${candidates[0]}"
-    else
-        echo "error: expected one punar-dev-arm64 raw disk, found ${#candidates[@]}" >&2
-        ls -la "${IMAGES_DIR}/out" >&2 || true
+    echo "==> Building native ARM64 Punar binaries (--release --locked; $(rustc --version))"
+    (
+        cd "${REPO_ROOT}"
+        CARGO_HOME="${IMAGES_DIR}/cache/cargo-arm64" \
+            CARGO_TARGET_DIR="${cargo_target}" \
+            cargo build --release --locked \
+                -p punard -p punarctl -p punar-env -p punar-agentd \
+                -p punar-secrets -p punar-mock-smplify
+    )
+
+    install -d "${extra}/usr/bin"
+    install -m 0755 \
+        "${cargo_target}/release/punard" \
+        "${cargo_target}/release/punarctl" \
+        "${cargo_target}/release/punar-env" \
+        "${cargo_target}/release/punar-agentd" \
+        "${cargo_target}/release/punar-secrets" \
+        "${cargo_target}/release/punar-mock-smplify" \
+        "${extra}/usr/bin/"
+
+    local binary
+    for binary in punard punarctl punar-env punar-agentd punar-secrets \
+        punar-mock-smplify; do
+        readelf -h "${extra}/usr/bin/${binary}" \
+            | grep -q 'Machine:.*AArch64' || {
+            echo "error: ${binary} is not an AArch64 binary" >&2
+            exit 1
+        }
+    done
+}
+
+# Assemble the M6 offline base from Debian's pinned static BusyBox. This is
+# the ARM equivalent of the Arch/x86_64 builder's hand-authored OCI archive:
+# no registry, no nested container engine, fixed metadata and a verified
+# package digest.
+stage_env_base_oci() {
+    local extra="${ARM64_DIR}/mkosi.extra"
+    local cache_dir="${IMAGES_DIR}/cache/debian-arm64-pkgs"
+    local pkg='busybox-static_1%3a1.38.0-3+b1_arm64.deb'
+    local pkg_version='1:1.38.0-3+b1'
+    local pkg_sha256='968d1aa8f579fa1ac59c26afa365454369e13cf29848e6400b50028fed0ffda0'
+    local ref='localhost/punar-env-base:m6'
+    local max_bytes=$((16 * 1024 * 1024))
+    local created='2026-08-20T00:00:00Z'
+
+    install -d "${cache_dir}"
+    if ! echo "${pkg_sha256}  ${cache_dir}/${pkg}" \
+        | sha256sum --quiet -c - >/dev/null 2>&1; then
+        echo "==> Fetching pinned ARM64 BusyBox from Debian snapshot ${PUNAR_DEBIAN_SNAPSHOT}"
+        apt-get update -qq
+        (
+            cd "${cache_dir}"
+            apt-get download "busybox-static=${pkg_version}"
+        )
+    fi
+    echo "${pkg_sha256}  ${cache_dir}/${pkg}" | sha256sum --quiet -c -
+
+    local work
+    work="$(mktemp -d /tmp/punar-env-base-arm64.XXXXXX)"
+    install -d "${work}/pkg" "${work}/rootfs/bin" "${work}/rootfs/etc" \
+        "${work}/rootfs/workspace" "${work}/rootfs/tmp"
+    dpkg-deb --extract "${cache_dir}/${pkg}" "${work}/pkg"
+    install -m 0755 "${work}/pkg/usr/bin/busybox" \
+        "${work}/rootfs/bin/busybox"
+
+    local applet
+    for applet in sh sleep cat echo ls touch env id uname; do
+        ln -s busybox "${work}/rootfs/bin/${applet}"
+    done
+    printf 'punar-env-base m6 %s\n' "${PUNAR_DEBIAN_SNAPSHOT}" \
+        > "${work}/rootfs/etc/punar-env-base-release"
+
+    local ldd_out
+    ldd_out="$(ldd "${work}/rootfs/bin/busybox" 2>&1 || true)"
+    grep -Eq 'not a dynamic executable|statically linked' <<< "${ldd_out}" || {
+        echo "error: pinned ARM64 BusyBox is not static (ldd: ${ldd_out})" >&2
         exit 1
+    }
+
+    chmod 0755 "${work}/rootfs" "${work}/rootfs/bin" \
+        "${work}/rootfs/etc" "${work}/rootfs/workspace"
+    chmod 1777 "${work}/rootfs/tmp"
+    chmod 0644 "${work}/rootfs/etc/punar-env-base-release"
+
+    local tar_flags=(
+        --format=posix
+        "--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime"
+        --sort=name
+        --numeric-owner --owner=0 --group=0
+        "--mtime=@${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}"
+    )
+    tar "${tar_flags[@]}" -C "${work}/rootfs" -cf "${work}/layer.tar" .
+
+    local layer_sha layer_size config_sha config_size manifest_sha manifest_size
+    layer_sha="$(sha256sum "${work}/layer.tar" | cut -d' ' -f1)"
+    layer_size="$(stat -c %s "${work}/layer.tar")"
+    printf '{"created":"%s","architecture":"arm64","os":"linux","config":{"Env":["PATH=/bin"],"Cmd":["/bin/sh"]},"rootfs":{"type":"layers","diff_ids":["sha256:%s"]}}' \
+        "${created}" "${layer_sha}" > "${work}/config.json"
+    config_sha="$(sha256sum "${work}/config.json" | cut -d' ' -f1)"
+    config_size="$(stat -c %s "${work}/config.json")"
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:%s","size":%s},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"sha256:%s","size":%s}]}' \
+        "${config_sha}" "${config_size}" "${layer_sha}" "${layer_size}" \
+        > "${work}/manifest.json"
+    manifest_sha="$(sha256sum "${work}/manifest.json" | cut -d' ' -f1)"
+    manifest_size="$(stat -c %s "${work}/manifest.json")"
+
+    local layout="${work}/layout"
+    install -d "${layout}/blobs/sha256"
+    cp "${work}/layer.tar" "${layout}/blobs/sha256/${layer_sha}"
+    cp "${work}/config.json" "${layout}/blobs/sha256/${config_sha}"
+    cp "${work}/manifest.json" "${layout}/blobs/sha256/${manifest_sha}"
+    printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":%s,"annotations":{"org.opencontainers.image.ref.name":"%s"}}]}' \
+        "${manifest_sha}" "${manifest_size}" "${ref}" > "${layout}/index.json"
+    printf '{"imageLayoutVersion":"1.0.0"}' > "${layout}/oci-layout"
+    chmod -R u=rwX,go=rX "${layout}"
+    tar "${tar_flags[@]}" -C "${layout}" -cf "${work}/punar-env-base.tar" .
+
+    local archive_sha archive_size
+    archive_sha="$(sha256sum "${work}/punar-env-base.tar" | cut -d' ' -f1)"
+    archive_size="$(stat -c %s "${work}/punar-env-base.tar")"
+    [ "${archive_size}" -le "${max_bytes}" ] || {
+        echo "error: ARM64 OCI archive exceeds ${max_bytes} bytes" >&2
+        exit 1
+    }
+
+    install -d "${extra}/usr/share/punar/oci"
+    install -m 0644 "${work}/punar-env-base.tar" \
+        "${extra}/usr/share/punar/oci/punar-env-base.tar"
+    {
+        echo "ref: ${ref}"
+        echo "architecture: arm64"
+        echo "snapshot: ${PUNAR_DEBIAN_SNAPSHOT}"
+        echo "archive-sha256: ${archive_sha}"
+        echo "archive-bytes: ${archive_size}"
+        echo "oci-manifest-digest: sha256:${manifest_sha}"
+        echo "config-digest: sha256:${config_sha}"
+        echo "layer-digest: sha256:${layer_sha} (uncompressed, so diff_id is identical)"
+        echo "input: ${pkg} sha256:${pkg_sha256} (Debian snapshot ${PUNAR_DEBIAN_SNAPSHOT})"
+        echo "built-by: arm64/container-build.sh stage_env_base_oci"
+    } > "${extra}/usr/share/punar/oci/punar-env-base.note.txt"
+    echo "==> ARM64 offline OCI base: ${archive_size} bytes, sha256 ${archive_sha}"
+    rm -rf "${work}"
+}
+
+run_mkosi() {
+    local image_id="$1"
+    shift
+    echo "==> mkosi ${MODE}: ${image_id}, native arm64, Debian snapshot ${PUNAR_DEBIAN_SNAPSHOT}"
+    mkosi --force \
+        --snapshot "${PUNAR_DEBIAN_SNAPSHOT}" \
+        --source-date-epoch "${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
+        "$@" "${MODE}"
+}
+
+convert_output() {
+    local image_id="$1"
+    local raw="${IMAGES_DIR}/out/${image_id}.raw"
+    local qcow="${IMAGES_DIR}/out/${image_id}.qcow2"
+    [ -f "${raw}" ] || {
+        echo "error: expected ${raw}" >&2
+        exit 1
+    }
+    echo "==> Converting ${raw} -> ${qcow}"
+    qemu-img convert -O qcow2 -c "${raw}" "${qcow}"
+    rm -f "${raw}" "${IMAGES_DIR}/out/${image_id}"
+}
+
+BUILT=()
+if [ "${IMAGES}" = "minimal" ] || [ "${IMAGES}" = "all" ]; then
+    run_mkosi punar-dev-arm64
+    if [ "${MODE}" = "build" ]; then
+        convert_output punar-dev-arm64
+        BUILT+=(punar-dev-arm64)
     fi
 fi
 
-qcow="${IMAGES_DIR}/out/punar-dev-arm64.qcow2"
-echo "==> Converting ${raw} -> ${qcow}"
-qemu-img convert -O qcow2 -c "${raw}" "${qcow}"
-rm -f "${raw}"
-# mkosi's convenience symlink points at the raw disk we intentionally replace
-# with the compressed qcow2. Do not leave a dangling artifact beside it.
-rm -f "${IMAGES_DIR}/out/punar-dev-arm64"
+if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+    stage_desktop_content
+    if [ "${MODE}" = "build" ]; then
+        stage_punar_binaries
+        stage_env_base_oci
+    fi
+    run_mkosi punar-desktop-arm64 \
+        --profile desktop \
+        --image-id punar-desktop-arm64 \
+        --hostname punar-desktop-arm64
+    if [ "${MODE}" = "build" ]; then
+        convert_output punar-desktop-arm64
+        BUILT+=(punar-desktop-arm64)
+    fi
+fi
+
+if [ "${MODE}" = "summary" ]; then
+    echo "==> Native ARM64 summary mode complete"
+    exit 0
+fi
 
 {
-    echo "image: punar-dev-arm64 (minimal native ARM64 migration lane)"
+    echo "images: ${BUILT[*]}"
     echo "substrate: Debian sid"
     echo "snapshot: ${PUNAR_DEBIAN_SNAPSHOT}"
     echo "architecture: arm64"
@@ -59,14 +241,14 @@ rm -f "${IMAGES_DIR}/out/punar-dev-arm64"
     echo "qemu-img: $(qemu-img --version | head -n 1)"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "scope: UEFI QEMU virt boot proof; not yet desktop, Pi, Secure Boot, or A/B"
+    echo "scope: generic UEFI/QEMU ARM64; Raspberry Pi firmware and peripherals remain a separate gate"
 } > "${IMAGES_DIR}/out/arm64-build-info.txt"
 
 (
     cd "${IMAGES_DIR}/out"
-    sha256sum punar-dev-arm64.qcow2 > SHA256SUMS.arm64
+    sha256sum -- "${BUILT[@]/%/.qcow2}" > SHA256SUMS.arm64
 )
 
-echo "==> Native ARM64 image complete"
-ls -lh "${qcow}" "${IMAGES_DIR}/out/arm64-build-info.txt" \
+echo "==> Native ARM64 image build complete"
+ls -lh "${IMAGES_DIR}/out/arm64-build-info.txt" \
     "${IMAGES_DIR}/out/SHA256SUMS.arm64"

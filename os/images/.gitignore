@@ -13,6 +13,7 @@ mkosi.profiles/desktop/mkosi.extra/etc/xdg/
 mkosi.profiles/desktop/mkosi.extra/etc/chromium-flags.conf
 mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-layout.sh
 mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-scratchpad.sh
+mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-graphics-env.sh
 mkosi.profiles/desktop/mkosi.extra/etc/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/shell/
@@ -34,3 +35,9 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/process-classes.json
 # §5.2, §6.1).
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/policy/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/secrets/
+
+# Native ARM64 product binaries and offline developer base are staged by the
+# ARM image adapter. They intentionally live in the architecture-local extra
+# tree so an ARM build can never pick up the x86_64 staging cache above.
+arm64/mkosi.extra/usr/bin/
+arm64/mkosi.extra/usr/share/punar/oci/

@@ -36,6 +36,21 @@ If TigerVNC does not open by itself, open it and connect to `127.0.0.1:5900`.
 macOS Screen Sharing **will not work** — it requires Apple's auth extensions
 that QEMU's VNC server does not implement.
 
+## Native ARM64 desktop on Apple Silicon
+
+The ARM64 desktop runs under hardware virtualization instead of the very slow
+x86-on-ARM translation path:
+
+```sh
+PUNAR_ARM64_IMAGES=desktop ./tools/build-arm64-image.sh
+./tools/demo-arm64-vm.sh
+```
+
+Connect TigerVNC to `127.0.0.1:5901`. The launcher uses a disposable disk
+snapshot, binds VNC and QMP to localhost, and gives its keyboard and pointer
+stable device IDs so automated press/release sequences cannot leave a virtual
+modifier latched. Set `PUNAR_VM_OFFLINE=1` when validating offline behavior.
+
 When you are finished, stop the disposable guest cleanly from another terminal:
 
 ```bash

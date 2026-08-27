@@ -1,0 +1,58 @@
+#!/bin/sh
+# Debian/ARM64 desktop post-install adapter. Development credentials only;
+# production onboarding replaces this account transactionally.
+set -eu
+
+groupadd --force punar
+
+# Unlike Arch's greetd package, Debian's package does not create the account
+# named by our shared default_session.  greetd validates every configured
+# session user before it starts the initial autologin session, so omitting
+# this adapter prevents Hyprland from being attempted at all.
+if ! getent group greeter >/dev/null 2>&1; then
+    groupadd --system greeter
+fi
+if ! getent passwd greeter >/dev/null 2>&1; then
+    useradd --system --gid greeter --home-dir /var/lib/greetd \
+        --no-create-home --shell /usr/sbin/nologin greeter
+fi
+install -d -m 0750 -o greeter -g greeter /var/lib/greetd
+
+supplementary=""
+for group in sudo video input dialout; do
+    if getent group "${group}" >/dev/null 2>&1; then
+        if [ -n "${supplementary}" ]; then
+            supplementary="${supplementary},${group}"
+        else
+            supplementary="${group}"
+        fi
+    fi
+done
+
+# Fixed dev-only SHA-512 crypt for password "punar". chpasswd would generate
+# a new salt on every build and make the disk, initrd credential and UKI drift.
+# Dollar signs below are literal crypt delimiters.
+# shellcheck disable=SC2016
+useradd --create-home --gid punar --groups "${supplementary}" \
+    --shell /bin/bash \
+    --password '$6$punar-arm64-dev$gWTgk1f0Vl76wHmu/qPIXM89H0xcFqIkBBj9DEPteme3zLnOiSlzdNK/fp4y4jowrT0WWdFFdhUFHC5.Ejxe3/' \
+    punar
+
+printf '%s\n' 'punar:100000:65536' > /etc/subuid
+printf '%s\n' 'punar:100000:65536' > /etc/subgid
+
+# Debian's Chromium wrapper reads /etc/chromium.d rather than Arch's
+# /etc/chromium-flags.conf directly. Keep the product defaults in one source
+# and adapt the launcher mechanism without writing enterprise policy.
+install -d -m 0755 /etc/chromium.d
+install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
+    /etc/chromium.d/punar-flags
+
+# Product services use the cross-distribution /usr/bin path exercised by the
+# Arch image. Debian packages nft as an administrator command under
+# /usr/sbin; keep one binary contract rather than carrying substrate branches
+# inside the privileged control plane.
+ln -sfn /usr/sbin/nft /usr/bin/nft
+
+fc-cache --system-only -f \
+    || echo "warning: fc-cache failed; runtime scan will cover it" >&2

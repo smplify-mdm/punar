@@ -13,9 +13,10 @@
 #
 # Env knobs:
 #   PUNAR_IMAGES     dev | desktop | all   (default: all)
-#   PUNAR_BUILD_MODE build | summary       (default: build; summary runs
-#                    staging + `mkosi summary` only — the cheap local
-#                    config-validation path, no image build)
+#   PUNAR_BUILD_MODE build | summary | stage (default: build; summary runs
+#                    staging + `mkosi summary`; stage refreshes only the
+#                    architecture-neutral desktop tree for the native ARM
+#                    adapter — neither mode builds an image)
 set -euo pipefail
 
 IMAGES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +36,11 @@ case "${IMAGES}" in
 esac
 case "${MODE}" in
     build|summary) ;;
-    *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${MODE})" >&2; exit 2 ;;
+    stage)
+        [ "${IMAGES}" = "desktop" ] \
+            || { echo "error: stage mode requires PUNAR_IMAGES=desktop" >&2; exit 2; }
+        ;;
+    *) echo "error: PUNAR_BUILD_MODE must be build, summary, or stage (got: ${MODE})" >&2; exit 2 ;;
 esac
 
 # Copy the desktop configuration/assets from their source-of-truth trees
@@ -70,14 +75,17 @@ stage_desktop_extra() {
     # Hyprland config (hyprlang files; install path per their headers).
     cp "${mod}"/hypr/*.conf "${extra}/etc/xdg/hypr/"
     # Session helpers: source of truth lives beside the Hyprland config.
-    # Both are staged (gitignored) into the otherwise-versioned
+    # All are staged (gitignored) into the otherwise-versioned
     # usr/lib/punar directory.
     rm -f "${extra}/usr/lib/punar/punar-layout.sh" \
-          "${extra}/usr/lib/punar/punar-scratchpad.sh"
+          "${extra}/usr/lib/punar/punar-scratchpad.sh" \
+          "${extra}/usr/lib/punar/punar-graphics-env.sh"
     install -m 0755 "${mod}/hypr/punar-layout.sh" \
         "${extra}/usr/lib/punar/punar-layout.sh"
     install -m 0755 "${mod}/hypr/punar-scratchpad.sh" \
         "${extra}/usr/lib/punar/punar-scratchpad.sh"
+    install -m 0755 "${mod}/hypr/punar-graphics-env.sh" \
+        "${extra}/usr/lib/punar/punar-graphics-env.sh"
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"
@@ -399,6 +407,7 @@ stage_env_base_oci() {
         "${extra}/usr/share/punar/oci/punar-env-base.tar"
     {
         echo "ref: ${ref}"
+        echo "snapshot: ${PUNAR_SNAPSHOT_DATE}"
         echo "archive-sha256: ${archive_sha}"
         echo "archive-bytes: ${archive_size}"
         echo "oci-manifest-digest: sha256:${manifest_sha}"
@@ -471,6 +480,10 @@ fi
 
 if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
     stage_desktop_extra
+    if [ "${MODE}" = "stage" ]; then
+        echo "==> Architecture-neutral desktop staging complete"
+        exit 0
+    fi
     if [ "${MODE}" = "build" ]; then
         stage_punar_binaries
         stage_env_base_oci

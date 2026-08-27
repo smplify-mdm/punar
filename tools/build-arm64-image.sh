@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the native ARM64 migration image with the digest- and snapshot-pinned
 # Debian toolchain. This path is intentionally separate from build-image.sh
-# until the complete desktop has crossed substrates and both architectures use
-# one package/boot abstraction.
+# until the x86_64 regression baseline also crosses to Debian and both
+# architectures use one package/boot abstraction.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,6 +13,7 @@ BUILDER_DIR="${REPO_ROOT}/os/images/builder-debian"
 . "${ARM64_DIR}/snapshot.env"
 
 PUNAR_BUILD_MODE="${PUNAR_BUILD_MODE:-build}"
+PUNAR_ARM64_IMAGES="${PUNAR_ARM64_IMAGES:-minimal}"
 BUILDER_TAG="punar-debian-builder:${PUNAR_DEBIAN_SNAPSHOT}-arm64"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -31,6 +32,10 @@ esac
 case "${PUNAR_BUILD_MODE}" in
     build|summary) ;;
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${PUNAR_BUILD_MODE})" >&2; exit 2 ;;
+esac
+case "${PUNAR_ARM64_IMAGES}" in
+    minimal|desktop|all) ;;
+    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, or all (got: ${PUNAR_ARM64_IMAGES})" >&2; exit 2 ;;
 esac
 
 GIT_SHA="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
@@ -52,6 +57,7 @@ docker run --rm --privileged \
     --volume "${REPO_ROOT}:/work" \
     --workdir /work/os/images/arm64 \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
+    --env "PUNAR_ARM64_IMAGES=${PUNAR_ARM64_IMAGES}" \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
     "${BUILDER_TAG}" \
     /work/os/images/arm64/container-build.sh

@@ -21,24 +21,33 @@
 The recommendation was accepted only after a native lane existed and removed
 the two largest unknowns in the proposal. On 2026-08-27:
 
-- `os/images/arm64/` built a real arm64 disk from Debian sid snapshot
-  `20260820T000000Z`; both the digest-pinned `debian:sid-slim` builder and its
-  apt toolchain consume that same snapshot before mkosi builds the target;
+- `os/images/arm64/` built real minimal and desktop ARM64 disks from Debian
+  sid snapshot `20260820T000000Z`; the digest-pinned `debian:stable-slim`
+  base is deliberately older than the snapshot, then its complete apt
+  toolchain and mkosi's target consume only that one timestamp;
 - mkosi 26 produced an AA64 systemd-boot image with Debian's native
   `7.1.8+deb14.1-arm64` kernel. `InitrdPackages=mount` expresses Debian's
   util-linux package split through mkosi's supported interface rather than
   mutating mkosi's installed resources;
-- two clean builds were byte-identical after removing a random development
+- two clean minimal-image builds were byte-identical after removing a random development
   password salt and disposable package cache/log files: SHA-256
   `bab2aba756c8a21d8ddf592fe225aa17d757b0dbed5681f8db4830ceb93802fd`;
 - QEMU's generic ARM `virt` platform booted that qcow2 natively through Apple
   HVF in 11 seconds and emitted
-  `PUNAR_BOOT_OK kernel=7.1.8+deb14.1-arm64` from multi-user userspace.
+  `PUNAR_BOOT_OK kernel=7.1.8+deb14.1-arm64` from multi-user userspace;
+- the complete 944 MiB ARM64 desktop image carries the shared shell and
+  services, Debian package/account/PAM and Chromium adapters, six verified
+  AArch64 Punar binaries, and a digest-verified ARM64 offline OCI base. A
+  fresh Apple-HVF run emitted the kernel marker in 7.997 seconds and
+  `PUNAR_DESKTOP_OK` in 12.091 seconds; the shipped M2–M10 services each
+  passed locally.
 
-This evidence accepts the substrate and generic UEFI ARM64 direction. It does
-**not** prove the desktop on arm64, Raspberry Pi firmware/peripherals, Secure
-Boot, A/B updates or any physical machine. Those remain separate runtime
-gates; ADR-006 owns the Pi-native boot selector.
+This evidence accepts the substrate and generic UEFI ARM64 desktop direction.
+The architecture-aware full CI sequence is wired but has not yet produced its
+first canonical green run. It does **not** prove Raspberry Pi
+firmware/peripherals, a real GPU, Secure Boot, A/B updates, an installer or any
+physical machine. Those remain separate runtime gates; ADR-006 owns the
+Pi-native boot selector.
 
 
 ## A. Amendment — what the second adversarial review corrected
@@ -157,9 +166,9 @@ evidence and consequences.
 At proposal time Punar was x86_64 only: `os/images/mkosi.conf` fixed
 `Architecture=x86-64`, and no arm64 image had been built or booted. The
 accepted implementation now has a byte-reproducible, boot-gated minimal ARM64
-lane. The complete graphical product remains x86_64-only until the desktop
-profile crosses and passes equivalent runtime gates; the minimal lane is not a
-desktop-support claim.
+lane plus a complete generic-QEMU desktop that passes its individual M2–M10
+runtime exercises locally. The first canonical native ARM CI sequence is
+pending, and the result is not a Raspberry Pi or bare-metal support claim.
 
 **ADR-001 did not weigh arm64 badly. It never weighed it at all.** Its criteria
 were reproducibility, package availability, maintenance burden, enterprise
@@ -282,7 +291,8 @@ The research behind the proposal lost two of its first three adversarial
 reviewers to API errors; the completed second review then found and corrected
 the mkosi/Arch-ARM interpretation recorded in §A. Acceptance therefore rests
 on both the corrected review and the native build/rebuild/boot evidence above,
-not on the first recommendation alone. No physical ARM machine has run Punar,
-and no arm64 desktop gate is green yet. Package freshness is governed by the
-pinned sid promotion channel and still needs the same ongoing browser-cadence
-measurement required on x86_64.
+not on the first recommendation alone. No physical ARM machine or real GPU has
+run Punar. The generic ARM desktop's M2–M10 services pass locally, but the
+single canonical CI sequence has not yet gone green. Package freshness is
+governed by the pinned sid promotion channel and still needs the same ongoing
+browser-cadence measurement required on x86_64.

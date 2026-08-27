@@ -1,9 +1,10 @@
-# Punar CI — Milestones 0–8 (spec 76: M0 "reproducible build and VM boot",
+# Punar CI — Milestones 0–10 (spec 76: M0 "reproducible build and VM boot",
 # M1 "idle RAM measured" graphical acceptance, M2 multitasking exercise,
 # M3 daemon/typed-IPC/capability/audit exercise, M4 policy-merge/explain/
 # drift-remediation exercise, M5 mock-control-plane enrollment/policy/
 # compliance/inventory exercise, M6 punar-env developer-environment
-# exercise, M7 AI agent registry exercise, M8 AI Access Ledger exercise;
+# exercise, M7 AI agent registry exercise, M8 AI Access Ledger exercise,
+# M9 approval/credentials/privilege, M10 shadow-AI detection;
 # ADR-001, milestone-1.md §10,
 # milestone-2.md §7, milestone-3.md §8–§9, milestone-4.md §10,
 # milestone-5.md §10, milestone-6.md §10, milestone-7.md §12,
@@ -20,10 +21,11 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   arm64-image   native Debian-snapshot image build on an ARM runner, then
-#                 AArch64 UEFI/QEMU boot smoke test with serial proof. This is
-#                 the minimal migration lane, not an arm64 desktop/Pi claim
-#   desktop-test  M1–M8 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
+#   arm64-image   native Debian-snapshot minimal + desktop builds on an ARM
+#                 runner, then AArch64 UEFI boot and the same graphical,
+#                 behavior, privacy and RAM gates as x86_64. This proves the
+#                 generic ARM64 VM target, not Raspberry Pi hardware.
+#   desktop-test  M1–M10 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
 #                 in-guest canonical idle-RAM measurement + services-RSS
 #                 sample (summed PSS over the punard.service and, since M7,
 #                 punar-agentd.service cgroups — one COMBINED number, the
@@ -107,13 +109,11 @@
 # image build should not float. Standard public-repo runners are 4 vCPU /
 # 16 GB RAM / 14 GB SSD and expose /dev/kvm (permission granted via the udev
 # rule below, the pattern used by systemd's mkosi CI and the Android
-# emulator ecosystem). x86_64 CI remains the canonical shipping image while
-# the complete desktop crosses to ADR-005's accepted Debian substrate.
-# Architecture-neutral Rust/contracts and the minimal native ARM64 image run
-# on `ubuntu-24.04-arm`; the graphical product remains x86_64-only until the
-# desktop profile passes its equivalent runtime gate. The maintainer's arm64
-# Mac still runs the shipping x86 desktop under emulation
-# (docs/development/image-pipeline.md).
+# emulator ecosystem). x86_64 remains the canonical shipping image while its
+# substrate is still Arch. Architecture-neutral Rust/contracts and both native
+# ARM64 images run on `ubuntu-24.04-arm`; the ARM desktop must pass the same
+# exported M2–M10 reports before it can merge. Raspberry Pi firmware, device
+# trees and real peripherals remain an explicit separate gate (ADR-006).
 
 name: ci
 
@@ -244,11 +244,14 @@ jobs:
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
+            tools/demo-arm64-vm.sh \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             tests/performance/check-budgets.sh \
             os/modules/desktop/hypr/punar-layout.sh \
             os/modules/desktop/hypr/punar-scratchpad.sh \
+            os/modules/desktop/hypr/punar-graphics-env.sh \
+            tests/desktop/graphics-env-test.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh \
@@ -265,6 +268,9 @@ jobs:
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/in-agent-scope.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mock-agent \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
+
+      - name: Test hardware-aware graphics selection
+        run: ./tests/desktop/graphics-env-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -335,25 +341,28 @@ jobs:
           sha256sum -c --ignore-missing SHA256SUMS
 
   arm64-image:
-    name: arm64-image (native build + AArch64 UEFI boot)
+    name: arm64-image (native build + desktop M2..M10 gate)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 135
     steps:
       - uses: actions/checkout@v4
 
-      # The target package cache is safe to reuse because mkosi reads the
-      # immutable snapshot timestamp from os/images/arm64/snapshot.env. The
-      # builder image itself is digest-pinned and redirects apt to that same
-      # snapshot before installing anything.
-      - name: Cache Debian ARM64 package snapshot
+      # Package, Cargo and offline-OCI inputs are safe to reuse: the runner is
+      # architecture-pinned, package URLs use the immutable snapshot, Cargo
+      # is locked, and each staged OCI input is digest-verified before use.
+      - name: Cache native ARM64 build inputs
         uses: actions/cache@v4
         with:
-          path: os/images/cache/debian-arm64
-          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf') }}
+          path: |
+            os/images/cache/debian-arm64
+            os/images/cache/debian-arm64-pkgs
+            os/images/cache/cargo-arm64
+            os/images/cache/cargo-target-arm64
+          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/**', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
           restore-keys: punar-arm64-debian-${{ runner.arch }}-
 
-      - name: Build native ARM64 migration image
-        run: ./tools/build-arm64-image.sh
+      - name: Build native ARM64 minimal + desktop images
+        run: PUNAR_ARM64_IMAGES=all ./tools/build-arm64-image.sh
 
       - name: Install AArch64 QEMU and UEFI firmware
         run: |
@@ -366,6 +375,7 @@ jobs:
           cd os/images/out
           sha256sum --check SHA256SUMS.arm64
           qemu-img info punar-dev-arm64.qcow2
+          qemu-img info punar-desktop-arm64.qcow2
 
       - name: Enable KVM access for the runner user
         run: |
@@ -378,28 +388,41 @@ jobs:
       - name: Boot native ARM64 image
         run: ./tools/boot-test-arm64.sh
 
-      - name: Upload ARM64 image and boot proof
+      - name: Native ARM64 desktop gate
+        run: |
+          PUNAR_QEMU_ARCH=arm64 ./tools/boot-test.sh --mode desktop \
+            os/images/out/punar-desktop-arm64.qcow2 \
+            os/images/out/arm64-desktop-proof
+
+      - name: Native ARM64 idle-RAM budget gate
+        run: |
+          ./tests/performance/check-budgets.sh \
+            os/images/out/arm64-desktop-proof/ram-report.txt
+
+      - name: Upload ARM64 images and runtime proof
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: punar-dev-arm64-image
+          name: punar-arm64-images
           path: |
             os/images/out/punar-dev-arm64.qcow2
+            os/images/out/punar-desktop-arm64.qcow2
             os/images/out/SHA256SUMS.arm64
             os/images/out/arm64-build-info.txt
             os/images/out/arm64-boot-proof/serial.log
-          if-no-files-found: error
+            os/images/out/arm64-desktop-proof/**
+          if-no-files-found: warn
           retention-days: 7
 
-  # M1..M8 graphical acceptance gate (milestone-1.md §7–§10,
+  # M1..M10 graphical acceptance gate (milestone-1.md §7–§10,
   # milestone-2.md §7, milestone-3.md §8, milestone-4.md §10,
   # milestone-5.md §10, milestone-6.md §10, milestone-7.md §12,
-  # milestone-8.md §12). Boots the desktop image with
+  # milestone-8.md §12, milestone-9.md §14, milestone-10.md §18). Boots the desktop image with
   # -m 8192 -smp 4
   # -device virtio-vga + the punar.export virtio-serial channel, waits for
   # PUNAR_DESKTOP_OK, then for the in-guest canonical idle-RAM measurement
   # (10 min stabilize + 5 min window — PERFORMANCE_BUDGETS.md §2.1–2.2,
-  # ~16 min wall clock), then the guest runs the M2..M8 exercises in order
+  # ~16 min wall clock), then the guest runs the M2..M10 exercises in order
   # (each strictly AFTER sampling, so the idle numbers
   # stay clean; the M5 exercise starts/stops the never-enabled
   # punar-mock-smplify dev/CI mock itself; the M6 exercise's rootless
@@ -407,9 +430,9 @@ jobs:
   # live in their own user-manager scopes, in no service cgroup) and
   # exports screenshots + RAM
   # data + the reports; boot-test.sh hard-fails on any delivered
-  # PUNAR_M2/M3/M4/M5/M6/M7/M8_FAIL verdict, and the RAM numbers gate
+  # PUNAR_M2/M3/M4/M5/M6/M7/M8/M9/M10_FAIL verdict, and the RAM numbers gate
   # against the budgets.
-  # ~105 min covers KVM boot + measurement + the seven exercises (the M4
+  # ~105 min covers KVM boot + measurement + the nine exercises (the M4
   # drift demo waits on wall-clock timer firings, worst case 375 s; the M5
   # exercise adds a few minutes of reconcile RPCs and bounded waits; the
   # M6 exercise adds seconds under KVM — podman load of a ~1.3 MB archive,
@@ -471,7 +494,7 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
-      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M9 exercises + export)
+      - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M10 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
       - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)

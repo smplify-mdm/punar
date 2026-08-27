@@ -163,7 +163,7 @@ proved the complete path on the image.
 
 ---
 
-## 5. arm64 / Raspberry Pi — substrate accepted; native minimal boot proven
+## 5. arm64 / Raspberry Pi — generic desktop proven locally; CI and Pi remain
 
 **ADR-005 is Accepted for implementation: Debian, tracking pinned sid.** Not
 testing — testing was measured 36 days behind on Chromium and structurally
@@ -175,27 +175,43 @@ watchdog and power-loss tests remain mandatory before a Pi support claim.
 **Do not start an Arch ARM mirror.** That instruction was struck; its urgency
 rested on an rsync capability never verified to exist.
 
-**Minimal lane now proven locally:** `os/images/arm64/` uses digest-pinned
-`debian:sid-slim`; the builder's apt and mkosi's target both consume snapshot
-`20260820T000000Z`. Two clean builds produced the identical qcow2 SHA-256
+**Generic native ARM64 lane now proven locally:** `os/images/arm64/` uses a
+digest-pinned `debian:stable-slim` base old enough to be satisfiable, then
+upgrades the complete builder and target from the single immutable sid
+snapshot `20260820T000000Z`. Two clean minimal builds produced the identical
+qcow2 SHA-256
 `bab2aba756c8a21d8ddf592fe225aa17d757b0dbed5681f8db4830ceb93802fd`.
-The 335 MiB qcow2 booted AA64 systemd-boot → Debian kernel
+The minimal image booted AA64 systemd-boot → Debian kernel
 `7.1.8+deb14.1-arm64` → real root → multi-user target in 11 seconds on Apple
-HVF. This proves generic UEFI ARM64 only — not the desktop, Pi or hardware.
+HVF.
+
+The same lane now builds a complete 944 MiB ARM64 desktop image: shared shell
+and service content, Debian package/account/PAM and Chromium adapters, six
+native AArch64 Rust binaries, and a digest-verified ARM64 offline OCI base.
+On a fresh 4-vCPU Apple-HVF VM the kernel marker arrived in **7.997 s** and the
+usable desktop marker in **12.091 s**. The shipped M2–M10 services have each
+passed locally, including the full app lifecycle, firewall, policy,
+enrollment, container, AI/privacy, approval and detection exercises. The M2
+graphics policy also recognizes Debian's live `virtio_pci` spelling and has
+fake-sysfs coverage for virtual, AMD, Intel and Raspberry Pi VC4 cases.
+
+**Scope boundary:** the architecture-aware canonical CI gate is wired but has
+not yet produced its first green run. These results prove QEMU's generic ARM
+`virt` platform, not Raspberry Pi firmware/peripherals, a real GPU, Secure
+Boot, A/B updates, an installer, or any physical ARM machine.
 
 **Next sequence:**
 
-1. Put the minimal native build and QEMU/aarch64 boot smoke test on the
-   `ubuntu-24.04-arm` CI runner.
-2. Port the desktop package names, Debian post-install/account/PAM adapters,
-   Chromium launcher flags, Rust binary build and per-architecture offline OCI
-   fixture. Keep the current x86_64 desktop as regression baseline meanwhile.
-3. Run the complete graphical/behavior/privacy gate natively on arm64. The
-   migration ends with one Debian substrate for both architectures; two
-   production substrates are not accepted.
-4. Generate the Pi two-boot/two-root/shared-data layout and software-test the
+1. Land the native ARM64 desktop lane and require its first complete
+   `ubuntu-24.04-arm` M2–M10 + RAM gate to pass. Keep the x86_64 desktop gate
+   green in the same change.
+2. Move x86_64 to the same pinned Debian substrate after the ARM lane is
+   canonical. The current Arch image remains the regression baseline until
+   that crossing is runtime-proven; two production substrates are not
+   accepted.
+3. Generate the Pi two-boot/two-root/shared-data layout and software-test the
    state machine, labelled as QEMU evidence.
-5. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
+4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
 ---

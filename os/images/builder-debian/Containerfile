@@ -36,6 +36,8 @@ RUN printf '%s\n' \
         erofs-utils \
         cpio \
         zstd \
+        cargo \
+        rustc \
         ca-certificates \
         debian-archive-keyring \
     && rm -rf /var/lib/apt/lists/*

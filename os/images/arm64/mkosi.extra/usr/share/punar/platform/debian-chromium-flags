@@ -1,0 +1,22 @@
+# Sourced by Debian's /usr/bin/chromium wrapper.
+# shellcheck shell=sh
+#
+# Arch reads /etc/chromium-flags.conf natively; Debian reads shell fragments
+# under /etc/chromium.d. Consume only complete non-comment lines as arguments.
+# Punar's shipped flags intentionally contain no whitespace or shell quoting.
+for punar_flags_file in \
+    /etc/chromium-flags.conf \
+    "${XDG_CONFIG_HOME:-${HOME}/.config}/chromium-flags.conf"
+do
+    [ -r "${punar_flags_file}" ] || continue
+    while IFS= read -r punar_chromium_flag || [ -n "${punar_chromium_flag}" ]; do
+        case "${punar_chromium_flag}" in
+            ''|'#'*) continue ;;
+            *[[:space:]]*)
+                echo "warning: ignoring Chromium flag with whitespace: ${punar_chromium_flag}" >&2
+                ;;
+            *) CHROMIUM_FLAGS="${CHROMIUM_FLAGS} ${punar_chromium_flag}" ;;
+        esac
+    done < "${punar_flags_file}"
+done
+unset punar_flags_file punar_chromium_flag

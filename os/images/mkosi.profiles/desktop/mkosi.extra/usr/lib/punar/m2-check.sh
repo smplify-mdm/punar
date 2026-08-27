@@ -123,6 +123,29 @@ done
 export WAYLAND_DISPLAY
 note "# instance=${HIS} wayland=${WAYLAND_DISPLAY:-none}"
 
+# The CI guest exposes only virtio-vga. Prove session startup chose the
+# software path here; fake-sysfs unit coverage separately proves real GPUs
+# clear both software-rendering variables.
+GRAPHICS_REPORT="${XDG_RUNTIME_DIR}/punar-graphics-mode"
+if [ -r "${GRAPHICS_REPORT}" ]; then
+    graphics_line="$(cat "${GRAPHICS_REPORT}")"
+    graphics_mode="$(printf '%s\n' "${graphics_line}" \
+        | sed -n 's/^mode=\([^ ]*\).*/\1/p')"
+    check_eq "virtio session graphics mode" "software" "${graphics_mode}"
+    case "${graphics_line}" in
+        *drivers=virtio_gpu*|*drivers=virtio_pci*|*drivers=virtio-pci*)
+            note "ok   virtio DRM driver recorded = ${graphics_line}"
+            ;;
+        *)
+            note "FAIL expected virtio DRM driver in '${graphics_line}'"
+            FAILED=1
+            ;;
+    esac
+else
+    note "FAIL graphics decision report missing at ${GRAPHICS_REPORT}"
+    FAILED=1
+fi
+
 hyprctl_alive() { hyprctl -j version | jq -e .tag; }
 if ! wait_for 60 hyprctl_alive; then
     note "FAIL hyprctl not responding on instance ${HIS}"
@@ -245,6 +268,25 @@ check_eq "activeworkspace after workspace name:Atlas" 1 \
 
 # --- 6. scratchpad special workspaces ----------------------------------------
 special_name() { hyprctl -j monitors 2>/dev/null | jq -r '.[0].specialWorkspace.name'; }
+special_is() { [ "$(special_name)" = "$1" ]; }
+
+# hyprctl normally returns synchronously, but the first IPC immediately after
+# a scratchpad client disconnect can briefly lose the compositor socket on a
+# loaded CI guest. A key binding dispatches in-process and does not have this
+# transport edge. Retry only a command that returned nonzero, then wait on the
+# observable monitor state instead of assuming a one-second sleep is proof.
+dispatch_special() {
+    ds_pad="$1"
+    ds_i=0
+    while [ "${ds_i}" -lt 10 ]; do
+        if hyprctl dispatch togglespecialworkspace "${ds_pad}" >/dev/null 2>&1; then
+            return 0
+        fi
+        ds_i=$((ds_i + 1))
+        sleep 0.2
+    done
+    return 1
+}
 
 # Resource contract: no hidden terminal window is billed to every session.
 # The warm foot server remains; the first summon creates exactly one client,
@@ -284,13 +326,26 @@ else
     FAILED=1
 fi
 
+# Let Hyprland finish the empty-special-workspace close transaction before
+# exercising the next IPC dispatch. Without this boundary the client is gone
+# while the compositor can still be finalising special:term.
+wait_for 5 special_is "" || true
+
 for pad in assistant notes; do
-    hyprctl dispatch togglespecialworkspace "${pad}" >/dev/null 2>&1
-    sleep 1
-    check_eq "special workspace shown (${pad})" "special:${pad}" "$(special_name)"
-    hyprctl dispatch togglespecialworkspace "${pad}" >/dev/null 2>&1
-    sleep 1
-    check_eq "special workspace hidden (${pad})" "" "$(special_name)"
+    if dispatch_special "${pad}" && wait_for 15 special_is "special:${pad}"; then
+        note "ok   special workspace shown (${pad}) = special:${pad}"
+    else
+        note "FAIL special workspace shown (${pad}) (got '$(special_name)')"
+        FAILED=1
+    fi
+    if special_is "special:${pad}"; then
+        if dispatch_special "${pad}" && wait_for 15 special_is ""; then
+            note "ok   special workspace hidden (${pad}) = "
+        else
+            note "FAIL special workspace hidden (${pad}) (got '$(special_name)')"
+            FAILED=1
+        fi
+    fi
 done
 
 # --- 7. overview (Plate D-007 surface; IPC contract milestone-2.md §5) -------

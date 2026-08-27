@@ -222,7 +222,13 @@ as_punar podman ps -a > "${RUN_DIR}/m6-podman-ps.txt" 2>&1
 # The release marker read from INSIDE the container must match the pin the
 # build recorded in the staged digest note — proof the staged archive is
 # what actually runs (milestone-6.md §6.2).
-snap_date="$(sed -n 's/^input: .* (ALA \(.*\), extra repo)$/\1/p' "${NOTE}" 2>/dev/null)"
+snap_date="$(sed -n 's/^snapshot: //p' "${NOTE}" 2>/dev/null | head -n 1)"
+# Compatibility with pre-multi-architecture M6 archives. New builders expose
+# the substrate-neutral snapshot field above; older x86 images only embedded
+# the Arch Linux Archive date in the input description.
+if [ -z "${snap_date}" ]; then
+    snap_date="$(sed -n 's/^input: .* (ALA \(.*\), extra repo)$/\1/p' "${NOTE}" 2>/dev/null)"
+fi
 as_punar "${ENV_BIN}" -C "${ATLAS}" shell -c 'cat /etc/punar-env-base-release' \
     > "${RUN_DIR}/m6-shell-release.txt" 2>&1
 check_eq "shell -c cat release marker exit code" 0 "$?"

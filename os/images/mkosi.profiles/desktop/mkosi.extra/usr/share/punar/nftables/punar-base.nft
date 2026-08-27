@@ -16,7 +16,9 @@ table inet punar-base {
     ct state invalid drop
     iif "lo" accept
     ip protocol icmp accept
-    meta l4proto ipv6-icmp accept
+    # IP protocol 58 is ICMPv6. Keep the numeric value here because protocol
+    # name databases differ between Arch and Debian-based ARM image builders.
+    meta l4proto 58 accept
   }
   chain forward { type filter hook forward priority filter; policy drop; }
   chain output  { type filter hook output  priority filter; policy accept; }

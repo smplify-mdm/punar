@@ -126,7 +126,8 @@ enrollment), `privilege_required: "root"`, `approval_requirement: "allow"`
       ct state invalid drop
       iif "lo" accept
       ip protocol icmp accept
-      meta l4proto ipv6-icmp accept
+      # IP protocol 58 is ICMPv6; the numeric form is portable across images.
+      meta l4proto 58 accept
     }
     chain forward { type filter hook forward priority filter; policy drop; }
     chain output  { type filter hook output  priority filter; policy accept; }
