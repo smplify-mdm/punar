@@ -300,10 +300,7 @@ pub fn capabilities(style: &Style, result: &Value, hostname: &str) -> Result<Str
         })
         .collect();
     out.push_str(&fmt::rows(style, &rows));
-    out.push_str(&fmt::note(
-        style,
-        "Observed live at request time · no organization is enrolled",
-    ));
+    out.push_str(&fmt::note(style, "Observed live at request time"));
     Ok(out)
 }
 
@@ -355,7 +352,7 @@ fn descriptor_rows(d: &model::Descriptor) -> Vec<Row> {
             "Managed by",
             &d.managed_by,
             Slot::Neutral,
-            "personal defaults · no organization is enrolled",
+            "personal defaults",
         ),
     ];
     if let Some(privilege) = &d.privilege_required {
@@ -626,8 +623,7 @@ pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String
 
 /// Shared closing note for the policy views: where the effective document
 /// comes from in personal mode (SPEC section 39 merge, no org sources).
-const POLICY_NOTE: &str =
-    "Merged from OS defaults + your preferences · no organization is enrolled";
+const POLICY_NOTE: &str = "Merged from OS defaults + your preferences";
 
 /// `punarctl policy effective` — D-014 table over contract section 5.7:
 /// one row per path, `security.firewall  enabled  Personal preference ·
@@ -3500,7 +3496,11 @@ mod tests {
         );
         assert!(text.contains("OS default · personal-defaults"), "{text}");
         assert!(text.contains("COMPUTED 2026-08-25 09:14:02"), "{text}");
-        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(
+            text.contains("MERGED FROM OS DEFAULTS + YOUR PREFERENCES"),
+            "{text}"
+        );
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
     }
 
     #[test]

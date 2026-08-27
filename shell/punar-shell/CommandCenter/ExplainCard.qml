@@ -4,7 +4,7 @@ pragma ComponentBehavior: Bound
 // D-003 Sect I state 04 ("Questions"): a question typed into the same
 // field that launches applications answers inline with the effective
 // value, its named source, whether the reader may change it, and the
-// compliance state — spec §40's information set, reached from spec
+// drift/compliance state — spec §40's information set, reached from spec
 // §12.2's one input.
 //
 // The content is NOT composed here. It is the verbatim result of
@@ -20,12 +20,13 @@ pragma ComponentBehavior: Bound
 //     ("every row prints the verb that changes it").
 //   - colour appears only when the answer carries a decision: an override
 //     the reader may not make is the amber approval-required voice, a
-//     non-compliant state is the red one. A compliant, user-owned value
-//     is pure monochrome (DESIGN_LANGUAGE §2).
+//     drifted/non-compliant state is the red one. A matching/compliant,
+//     user-owned value is pure monochrome (DESIGN_LANGUAGE §2 and §8.1).
 //   - a failed call says the call failed. It never renders a blank card
 //     that reads as "no restrictions".
 
 import QtQuick
+import "../Services"
 import "../Theme"
 
 Item {
@@ -51,6 +52,8 @@ Item {
     readonly property string askVerb: "punarctl policy explain " + root.path
 
     readonly property bool complianceIsPlain: root.compliance === "" || root.compliance === "compliant"
+    readonly property string stateWord: Status.stateLabel(root.compliance)
+    readonly property string stateKey: Status.stateKey
 
     readonly property color complianceColor: {
         switch (root.compliance) {
@@ -129,7 +132,8 @@ Item {
             text: "Policy · " + root.sourceName + " · " + root.policyId
         }
 
-        // Compliance, coloured only when it has something to report.
+        // The wire says compliance; the card speaks COMPLIANCE while
+        // enrolled and DRIFT on a personal device. Empty remains absence.
         Row {
             spacing: 6
             visible: root.phase === "answered" && root.compliance !== ""
@@ -145,7 +149,7 @@ Item {
             }
             Meta {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Compliance · " + root.compliance.split("_").join(" ")
+                text: root.stateKey + " · " + root.stateWord
                 color: root.complianceIsPlain ? Theme.shellInk3 : root.complianceColor
             }
         }

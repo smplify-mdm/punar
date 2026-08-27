@@ -10,7 +10,7 @@ pragma ComponentBehavior: Bound
 // THE PLATE'S CLAIM, KEPT: "A managed setting explains itself. It never
 // grays out." A control punard owns renders LIVE with a MANAGED pill and
 // an explain card naming the effective value, the winning source, whether
-// the user may override, and the compliance state — never a disabled
+// the user may override, and its drift/compliance state — never a disabled
 // switch. A control that cannot be changed *yet* renders read-only with
 // the reason and its milestone. Nothing on this surface is a dead switch.
 //
@@ -21,9 +21,10 @@ pragma ComponentBehavior: Bound
 // hairlines and owns the keyboard; it decides nothing.
 //
 // LAYOUT (D-004 .sc): masthead meta rows closed by the 2 px ink rule; body
-// split into the left TAXONOMY RAIL (a `/` search field over six sections,
-// selection as raise-fill plus a 2 px ink left rule, status dots only
-// where there is status) and the right DETAIL pane (title with the live
+// split into the left TAXONOMY RAIL (a `/` search field over five personal
+// sections, plus Organization only while enrolled; selection as raise-fill
+// plus a 2 px ink left rule, status dots only where there is status) and the
+// right DETAIL pane (title with the live
 // state toggle and ownership pill, tracked-mono subtitle, fact rows, list
 // rows, the §40 explain card, the dashed honesty panel, a §73 paragraph
 // and the keyed action row); footer meta row carrying the parity line.
@@ -386,6 +387,7 @@ Scope {
         property string source: ""
         property string policyId: ""
         property string override: ""
+        property string stateKey: ""
         property string compliance: ""
         property string complianceTone: ""
 
@@ -423,7 +425,7 @@ Scope {
                 v: explain.override
             }
             ExplainLine {
-                k: "Compliance"
+                k: explain.stateKey
                 v: explain.compliance
                 vColor: explain.complianceTone === "" ? Theme.shellFg : root.toneColor(explain.complianceTone)
             }
@@ -581,6 +583,15 @@ Scope {
         }
         function latency(): string {
             return SurfaceTiming.sample("systemcontrol");
+        }
+        // Read-only semantic probes for the live in-VM unmanaged-first gate.
+        // They expose the same view model this window renders; they do not
+        // create a second label table or mutate selection.
+        function rail(): string {
+            return JSON.stringify(ctl.railItems);
+        }
+        function model(id: string): string {
+            return JSON.stringify(ctl.buildView(id));
         }
     }
 
@@ -1266,6 +1277,7 @@ Scope {
                                 source: explainSlot.modelData.source
                                 policyId: explainSlot.modelData.policyId
                                 override: explainSlot.modelData.override
+                                stateKey: explainSlot.modelData.stateKey
                                 compliance: explainSlot.modelData.compliance
                                 complianceTone: explainSlot.modelData.tone
                             }

@@ -108,7 +108,7 @@ Scope {
         return (typeof v === "string" && v !== "") ? v : fallback;
     }
 
-    // The spec §52 state words → the §2 status voice, 1:1 and forever.
+    // The spec §52 wire states → the §2 status voice, 1:1 and forever.
     function complianceTone(state: string): string {
         switch (state) {
         case "compliant":
@@ -129,6 +129,16 @@ Scope {
             return "";
         var s = String(word).replace(/_/g, " ");
         return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+
+    // DESIGN_LANGUAGE §8.1: the wire never changes, only the word drawn.
+    // Status owns the one table shared across shell surfaces.
+    function stateLabel(state: string): string {
+        return Status.stateLabel(state);
+    }
+
+    function stateKey(): string {
+        return Status.stateKey;
     }
 
     // A capability state value is JSON by contract (the schema's
@@ -480,129 +490,79 @@ Scope {
     }
 
     // ---------------------------------------------------------------
-    // The §63 taxonomy — verbatim, in the spec's own order.
+    // The §63 taxonomy, in the spec's order when enrolled. On a personal
+    // device ORGANIZATION is absent: it is neither an empty prerequisite nor
+    // an enrollment advertisement. The useful local primitives that used to
+    // sit beneath it remain fully reachable under SECURITY — drift, effective
+    // policy and JIT privilege protect a personal machine too. Enrollment is
+    // deliberately discoverable from `punarctl enroll status`, the one place
+    // reached by somebody who explicitly asked about enrollment.
     // ---------------------------------------------------------------
 
-    readonly property var taxonomy: [
-        {
-            section: "System",
-            items: [
-                {
-                    id: "network",
-                    name: "Network"
-                },
-                {
-                    id: "bluetooth",
-                    name: "Bluetooth"
-                },
-                {
-                    id: "displays",
-                    name: "Displays"
-                },
-                {
-                    id: "audio",
-                    name: "Audio"
-                },
-                {
-                    id: "power",
-                    name: "Power"
-                }
-            ]
-        },
-        {
-            section: "Security",
-            items: [
-                {
-                    id: "device",
-                    name: "Device"
-                },
-                {
-                    id: "encryption",
-                    name: "Encryption"
-                },
-                {
-                    id: "secureboot",
-                    name: "Secure Boot"
-                },
-                {
-                    id: "firewall",
-                    name: "Firewall"
-                }
-            ]
-        },
-        {
-            section: "AI",
-            items: [
-                {
-                    id: "agents",
-                    name: "Agents"
-                },
-                {
-                    id: "aipermissions",
-                    name: "Permissions"
-                },
-                {
-                    id: "models",
-                    name: "Models"
-                },
-                {
-                    id: "mcp",
-                    name: "MCP"
-                }
-            ]
-        },
-        {
-            section: "Developer",
-            items: [
-                {
-                    id: "projects",
-                    name: "Projects"
-                },
-                {
-                    id: "containers",
-                    name: "Containers"
-                },
-                {
-                    id: "toolchains",
-                    name: "Toolchains"
-                }
-            ]
-        },
-        {
-            section: "Privacy",
-            items: [
-                {
-                    id: "connections",
-                    name: "Connections"
-                },
-                {
-                    id: "relay",
-                    name: "Relay"
-                }
-            ]
-        },
-        {
-            section: "Organization",
-            items: [
-                {
-                    id: "enrollment",
-                    name: "Enrollment"
-                },
-                {
-                    id: "compliance",
-                    name: "Compliance"
-                },
-                {
-                    id: "policies",
-                    name: "Policies"
-                },
-                {
-                    id: "privilege",
-                    name: "Privilege"
-                }
-            ]
+    readonly property var taxonomy: {
+        var securityItems = [
+            {id: "device", name: "Device"},
+            {id: "encryption", name: "Encryption"},
+            {id: "secureboot", name: "Secure Boot"},
+            {id: "firewall", name: "Firewall"}
+        ];
+        if (!Status.enrolled) {
+            securityItems.push({id: "compliance", name: "Drift"});
+            securityItems.push({id: "policies", name: "Policy"});
+            securityItems.push({id: "privilege", name: "Privilege"});
         }
-    ]
+
+        var sections = [
+            {
+                section: "System",
+                items: [
+                    {id: "network", name: "Network"},
+                    {id: "bluetooth", name: "Bluetooth"},
+                    {id: "displays", name: "Displays"},
+                    {id: "audio", name: "Audio"},
+                    {id: "power", name: "Power"}
+                ]
+            },
+            {section: "Security", items: securityItems},
+            {
+                section: "AI",
+                items: [
+                    {id: "agents", name: "Agents"},
+                    {id: "aipermissions", name: "Permissions"},
+                    {id: "models", name: "Models"},
+                    {id: "mcp", name: "MCP"}
+                ]
+            },
+            {
+                section: "Developer",
+                items: [
+                    {id: "projects", name: "Projects"},
+                    {id: "containers", name: "Containers"},
+                    {id: "toolchains", name: "Toolchains"}
+                ]
+            },
+            {
+                section: "Privacy",
+                items: [
+                    {id: "connections", name: "Connections"},
+                    {id: "relay", name: "Relay"}
+                ]
+            }
+        ];
+
+        if (Status.enrolled) {
+            sections.push({
+                section: "Organization",
+                items: [
+                    {id: "enrollment", name: "Enrollment"},
+                    {id: "compliance", name: "Compliance"},
+                    {id: "policies", name: "Policies"},
+                    {id: "privilege", name: "Privilege"}
+                ]
+            });
+        }
+        return sections;
+    }
 
     readonly property var railItems: {
         var out = [];
@@ -641,9 +601,8 @@ Scope {
             if (overall === "")
                 return "";
             var tone = data.complianceTone(overall);
-            // §8: a compliance pill is org chrome. On a personal device
-            // it is drawn only when there is an actual deviation to
-            // report — colour means a decision or a deviation, never
+            // §8: personal DRIFT is calm when the document matches. Colour
+            // appears only for an actual deviation/restoration, never as
             // ambient reassurance.
             if (!Status.enrolled && tone === "ok")
                 return "";
@@ -756,14 +715,16 @@ Scope {
         if (exp === null)
             return null;
         var src = data.obj(exp.source);
+        var rawState = data.str(exp, "compliance_state", "unknown");
         return {
             capability: path,
             effective: data.stateWord(exp.effective_value),
             source: data.str(src, "name", "Unknown source"),
             policyId: data.str(src, "policy_id", ""),
             override: exp.user_override_permitted === true ? "Permitted" : "Not permitted",
-            compliance: data.titleCase(data.str(exp, "compliance_state", "unknown")),
-            tone: data.complianceTone(data.str(exp, "compliance_state", ""))
+            stateKey: data.stateKey(),
+            compliance: data.stateLabel(rawState),
+            tone: data.complianceTone(rawState)
         };
     }
 
@@ -1442,6 +1403,8 @@ Scope {
     // ---- ORGANIZATION ----------------------------------------------
 
     function orgView(id: string): var {
+        if (id === "enrollment" && !Status.enrolled)
+            return null;
         if (id === "enrollment")
             return data.viewEnrollment();
         if (id === "compliance")
@@ -1454,24 +1417,8 @@ Scope {
     }
 
     function viewEnrollment(): var {
-        if (!Status.enrolled) {
-            return {
-                title: "Enrollment",
-                sub: "Organization · personal device",
-                kv: [
-                    {
-                        k: "Enrollment",
-                        v: "Not enrolled",
-                        mono: false
-                    },
-                    {
-                        k: "Policy source",
-                        v: "Personal defaults — your own settings decide"
-                    }
-                ],
-                note: "No organization is enrolled · nothing leaves this machine · enrolling later never applies retroactively.\n\nThat is a statement of fact, not an offer. Punar is an operating system first, and a personal device is its default state rather than an incomplete one. Enrollment stays deliberate and root-only for whoever wants it: punarctl enroll start <domain>."
-            };
-        }
+        if (!Status.enrolled)
+            return null;
         var org = data.obj(data.statusData === null ? null : data.statusData.org);
         return {
             title: "Enrollment",
@@ -1503,10 +1450,11 @@ Scope {
     function viewCompliance(): var {
         var s = data.statusData;
         var c = data.obj(s === null ? null : s.compliance);
+        var key = data.stateKey();
         if (c === null) {
             return {
-                title: "Compliance",
-                sub: "Organization · spec §52 states",
+                title: key,
+                sub: Status.enrolled ? "Organization · spec §52 states" : "Security · this device's effective document",
                 dashed: data.awaiting()
             };
         }
@@ -1519,17 +1467,17 @@ Scope {
                 continue;
             rows.push({
                 name: data.capabilityLabel(data.str(e, "capability", "—")),
-                meta: data.str(e, "capability", "—") + " · " + data.titleCase(data.str(e, "state", "unknown")),
+                meta: data.str(e, "capability", "—") + " · " + data.stateLabel(data.str(e, "state", "unknown")),
                 tone: data.complianceTone(data.str(e, "state", ""))
             });
         }
         var remediated = typeof c.drift_remediated_total === "number" ? c.drift_remediated_total : 0;
         var lastRemediation = data.shortTime(data.str(c, "last_remediation_at", ""));
         return {
-            title: "Compliance",
-            sub: "Organization · " + (Status.enrolled ? Status.orgName : "measured against this device's own effective document"),
+            title: key,
+            sub: Status.enrolled ? "Organization · " + Status.orgName : "Security · measured against this device's own effective document",
             pill: {
-                label: "Overall · " + data.titleCase(overall),
+                label: "Overall · " + data.stateLabel(overall),
                 dotTone: data.complianceTone(overall)
             },
             rows: rows,
@@ -1540,16 +1488,17 @@ Scope {
                     v: remediated === 0 ? "none since daemon start" : String(remediated) + (lastRemediation === "" ? "" : " · last " + lastRemediation)
                 }
             ],
-            note: "These are the capabilities this device actually measures. The plate also sketches Boot Integrity, Disk Encryption, Private Relay, OS Update and Enterprise Identity rows — none of them is measured here, so none of them is listed here. A compliance table that reports a state it did not observe is worse than a short one."
+            note: "These are the capabilities this device actually measures. The plate also sketches Boot Integrity, Disk Encryption, Private Relay, OS Update and Enterprise Identity rows — none of them is measured here, so none of them is listed here. A state table that reports a reading it did not observe is worse than a short one."
         };
     }
 
     function viewPolicies(): var {
         var entries = data.policyList;
+        var personal = !Status.enrolled;
         if (entries.length === 0) {
             return {
-                title: "Policies",
-                sub: "Organization · effective document",
+                title: personal ? "Policy" : "Policies",
+                sub: personal ? "Security · your effective document" : "Organization · effective document",
                 dashed: data.awaiting()
             };
         }
@@ -1566,8 +1515,8 @@ Scope {
             });
         }
         return {
-            title: "Policies",
-            sub: "Organization · effective merged document · " + rows.length + " governed paths",
+            title: personal ? "Policy" : "Policies",
+            sub: (personal ? "Security · your effective merged document · " : "Organization · effective merged document · ") + rows.length + " governed paths",
             rows: rows,
             note: "Each row is one winning source after the layered merge. Opening the capability's own section shows the same information as a §40 explain card — same data, same order, and the same order punarctl policy explain prints it in."
         };
@@ -1575,10 +1524,11 @@ Scope {
 
     function viewPrivilege(): var {
         var grants = data.grantList;
+        var scope = Status.enrolled ? "Organization" : "Security";
         if (grants.length === 0) {
             return {
                 title: "Privilege",
-                sub: "Organization · time-boxed elevation",
+                sub: scope + " · time-boxed elevation",
                 kv: [
                     {
                         k: "Grants held",
@@ -1612,7 +1562,7 @@ Scope {
         }
         return {
             title: "Privilege",
-            sub: "Organization · " + grants.length + (grants.length === 1 ? " grant held" : " grants held"),
+            sub: scope + " · " + grants.length + (grants.length === 1 ? " grant held" : " grants held"),
             rows: rows,
             actions: acts,
             note: "Privilege is never invisible and never permanent. The clock above is the grant's own, counted only while this window is open."

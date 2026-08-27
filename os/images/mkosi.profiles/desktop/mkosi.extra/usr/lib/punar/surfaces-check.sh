@@ -128,6 +128,19 @@ layer_mapped() {
         >/dev/null 2>&1
 }
 layer_gone() { ! layer_mapped "$1"; }
+
+systemcontrol_models_ready() {
+    ipc systemcontrol model compliance > /run/punar/surfaces-systemcontrol-drift.json 2>/dev/null
+    ipc systemcontrol model firewall > /run/punar/surfaces-systemcontrol-firewall.json 2>/dev/null
+    jq -e '.title == "Drift"
+        and (.sub | startswith("Security ·"))
+        and .pill.label == "Overall · Matches"' \
+        /run/punar/surfaces-systemcontrol-drift.json >/dev/null 2>&1 \
+        && jq -e '.explains | length > 0
+            and all(.[]; .stateKey == "Drift" and .compliance == "Matches")' \
+            /run/punar/surfaces-systemcontrol-firewall.json >/dev/null 2>&1
+}
+
 if ! wait_for 90 shell_alive; then
     note "FAIL punar-shell IPC not answering within 90s (no surface can be tested)"
     FAILED=1; finish
@@ -306,6 +319,34 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
             note "ok   ${t} painted pixels ($(wc -c < "/run/punar/surfaces-${t}.png" | tr -d ' ') bytes after ${pi}s, frame differs from the desktop behind it)"
         else
             note "FAIL ${t} mapped a layer but the screen never changed in 15s — the surface is on screen and blank"
+            FAILED=1
+        fi
+    fi
+
+    # DESIGN_LANGUAGE §8.1, proved on the running personal device rather than
+    # inferred from source: no Organization furniture or enrollment prompt;
+    # the useful primitives remain under Security, and both the summary and
+    # the real capability card translate the unchanged wire value to
+    # DRIFT/MATCHES.
+    if [ "${t}" = "systemcontrol" ]; then
+        ipc systemcontrol rail > /run/punar/surfaces-systemcontrol-rail.json 2>/dev/null
+        if jq -e '
+            (length > 0)
+            and (all(.[]; .section != "Organization" and .id != "enrollment"))
+            and (any(.[]; .id == "compliance" and .name == "Drift" and .section == "Security"))
+            and (any(.[]; .id == "policies" and .name == "Policy" and .section == "Security"))
+            and (any(.[]; .id == "privilege" and .section == "Security"))
+        ' /run/punar/surfaces-systemcontrol-rail.json >/dev/null 2>&1; then
+            note "ok   personal System Control has no Organization/enrollment rail; Drift, Policy and Privilege remain under Security"
+        else
+            note "FAIL personal System Control rail violates unmanaged-first placement"
+            FAILED=1
+        fi
+
+        if wait_for 30 systemcontrol_models_ready; then
+            note "ok   personal System Control renders DRIFT · MATCHES in both summary and §40 capability card"
+        else
+            note "FAIL personal System Control did not render DRIFT/MATCHES from its live compliance wire state"
             FAILED=1
         fi
     fi

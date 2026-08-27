@@ -553,7 +553,7 @@ fn capabilities_human_output_matches_the_d014_snapshot() {
         "SECURITY.FIREWALL  ENABLED    desired enabled · risk high · verify nftables · local\n\
          SYSTEM.HOSTNAME    PUNAR-M3   desired punar-m3 · risk low · verify kernel+file · local\n\
          TIME.TIMEZONE      UTC        desired UTC · risk low · verify symlink · local\n\
-         OBSERVED LIVE AT REQUEST TIME · NO ORGANIZATION IS ENROLLED\n"
+         OBSERVED LIVE AT REQUEST TIME\n"
     );
     assert_eq!(stdout(&output), expected);
 }
@@ -750,7 +750,7 @@ fn policy_effective_human_output_matches_the_d014_snapshot() {
         "SECURITY.FIREWALL  ENABLED    Personal preference · personal-defaults\n\
          SYSTEM.HOSTNAME    PUNAR-M3   Personal preference · personal-defaults\n\
          TIME.TIMEZONE      UTC        OS default · personal-defaults\n\
-         COMPUTED 2026-08-25 09:14:02 · MERGED FROM OS DEFAULTS + YOUR PREFERENCES · NO ORGANIZATION IS ENROLLED\n"
+         COMPUTED 2026-08-25 09:14:02 · MERGED FROM OS DEFAULTS + YOUR PREFERENCES\n"
     );
     assert_eq!(stdout(&output), expected);
 }
@@ -776,7 +776,7 @@ fn policy_explain_human_output_matches_the_spec_40_snapshot() {
          POLICY                       personal-defaults\n\
          USER OVERRIDE                Permitted · it is your device\n\
          COMPLIANCE       COMPLIANT\n\
-         MERGED FROM OS DEFAULTS + YOUR PREFERENCES · NO ORGANIZATION IS ENROLLED\n"
+         MERGED FROM OS DEFAULTS + YOUR PREFERENCES\n"
     );
     assert_eq!(stdout(&output), expected);
 }
