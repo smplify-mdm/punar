@@ -28,10 +28,31 @@ VARS="${RUN_DIR}/punar-vars.fd"
 QMP=/tmp/punar-qmp.sock
 VNC_PORT=5900
 
+# Never disturb an existing guest while attempting a second launch. In
+# particular, removing a live QMP socket first would strand the old process
+# and then make the new QEMU fail later on the occupied VNC port.
+if [ -S "$QMP" ]; then
+    QMP_STATUS=$(
+        { printf '%s\n' '{"execute":"qmp_capabilities"}' \
+            '{"execute":"query-status"}'; } \
+            | nc -U "$QMP" 2>/dev/null || true
+    )
+    case "$QMP_STATUS" in
+        *'"running": true'*)
+            echo "a Punar VM is already running; use ./tools/punar-down.sh first" >&2
+            exit 1
+            ;;
+        *) rm -f "$QMP" ;;
+    esac
+fi
+if nc -z 127.0.0.1 "$VNC_PORT" >/dev/null 2>&1; then
+    echo "VNC port ${VNC_PORT} is already in use; refusing to collide" >&2
+    exit 1
+fi
+
 # (3) pristine NVRAM every launch
 rm -f "$VARS"
 cp "$VARS_TEMPLATE" "$VARS"
-rm -f "$QMP"
 
 echo "==> booting $(basename "$IMAGE")"
 echo "    VNC  127.0.0.1:${VNC_PORT}   (display :0)"
