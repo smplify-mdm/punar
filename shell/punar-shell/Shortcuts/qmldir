@@ -1,0 +1,4 @@
+singleton BindTable 1.0 BindTable.qml
+Shortcuts 1.0 Shortcuts.qml
+BindRow 1.0 BindRow.qml
+ChordCap 1.0 ChordCap.qml

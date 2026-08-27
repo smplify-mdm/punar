@@ -705,7 +705,7 @@ Three deliberate refusals in the visual behaviour:
 
 ### 6.4 The command-center action
 
-`SUPER+Space` → type `theme` → the picker is a normal command-center result
+`PUNAR+Space` → type `theme` → the picker is a normal command-center result
 set, not a special panel:
 
 ```text
@@ -762,7 +762,7 @@ goes through the gate.
 
 ### 6.5 The keyboard path
 
-**No new global chord.** `SUPER` chords are a scarce, curated resource
+**No new global chord.** `PUNAR` chords are a scarce, curated resource
 (`docs/development/keyboard-grammar.md`) and a palette switch has not earned
 one; the command center is the universal path and is one keystroke away
 already. Within the picker: `↑`/`↓` move, `M` toggles the previewed mood, `⏎`

@@ -8,7 +8,7 @@ as first-class principals), 19/19.1/19.2 (registry, the three
 classifications, the example record), 20 (authority model — decision
 values), 22 (attribution — cgroups, session IDs, systemd scope,
 executable identity), 23 (shadow AI — "Do not claim perfect detection"),
-25 (Local AI UX — `SUPER + A`, the panel layouts), 26 (AI Agent Gateway —
+25 (Local AI UX — `PUNAR + A`, the panel layouts), 26 (AI Agent Gateway —
 initial adapters, "Adapters should be modular"), 27 (AI Session Launch —
 the ten-step flow), 61 (local IPC security), 1.22 (honesty).
 
@@ -27,7 +27,7 @@ idle-ram ordering, vendor-wants lesson, budgets discipline),
 `schemas/ai-agent/registry-record.json` + `agent-definition.json`
 (SHIPPED — records conform exactly), `fixtures/agents/` (claude-code
 definition, unknown-agent foo-agent metadata),
-`docs/design/mockups/ai-panel.html` (Plate D-005 — the SUPER+A surface),
+`docs/design/mockups/ai-panel.html` (Plate D-005 — the PUNAR+A surface),
 DESIGN_LANGUAGE §8 (unmanaged-first).
 
 M7 is the milestone where the AI-native thesis (sections 18–27) becomes
@@ -51,7 +51,7 @@ on a new root-owned socket (§4, ipc.md §10); the managed launch path —
 `punar-env agent <name>` goes from labeled stub to real (§5); adapters as
 data under `/usr/share/punar/agents/adapters/` (§5.4); the dev/CI mock
 agent (§6); on-demand heuristic detection with the foo-agent fixture
-signature (§7); the SUPER+A AI panel in `punar-shell` fed by
+signature (§7); the PUNAR+A AI panel in `punar-shell` fed by
 `/run/punar/agents.json` (§8); `punarctl agents list|inspect` (§9); audit
 events with **real** `agt_` session ids (§10); `m7-check` + boot-test
 phase 9 + CI artifacts incl. the `punar-m7.png` money shot (§12); the RSS
@@ -77,7 +77,7 @@ beyond the scope cgroup (M8, with the ledger's process classes).
 | 5 | **Adapters as data**: `/usr/share/punar/agents/adapters/claude-code.json` + `generic.json`, both valid against `agent-definition.json`; command, version probe, detection signature, and the CI mock override live in `adapter_config` (the schema's sanctioned free-form extension point). §5.4. |
 | 6 | **Mock agent**: `/usr/lib/punar/punar-mock-agent` — a small POSIX **shell script** (not a crate), loudly labeled dev/CI stand-in; touches its workspace, then blocks on `wait` until signaled. Chosen over a bin crate: zero build surface, shellcheck-gated, trivially auditable. §6. |
 | 7 | **Detection**: `agents.scan` walks `/proc` once (comm/exe/cmdline) against adapter signatures (known agent outside a managed scope → `observed`) and the suspected-signature set incl. `*/Downloads/foo-agent` (→ `unknown`). Runs on demand and lazily on `agents.list` when the last pass is > 30 s old. **No timer, no punard nudge, no continuous polling** (spec 6.3) — periodic detection is M10's deliverable by name. Every surface says *suspected*, never certain (spec 23). §7. |
-| 8 | **Shell**: full-surface `AiPanel` (Plate D-005), `IpcHandler` target `aipanel`, bound to SUPER+A in `punar-binds.conf`; data via a new world-readable summary file `/run/punar/agents.json` that agentd writes atomically on change (the status.json pattern — event-driven FileView, no polling, no shell socket client). Ledger section renders `LEDGER · MILESTONE 8` dashed placeholder. §8. |
+| 8 | **Shell**: full-surface `AiPanel` (Plate D-005), `IpcHandler` target `aipanel`, bound to PUNAR+A in `punar-binds.conf`; data via a new world-readable summary file `/run/punar/agents.json` that agentd writes atomically on change (the status.json pattern — event-driven FileView, no polling, no shell socket client). Ledger section renders `LEDGER · MILESTONE 8` dashed placeholder. §8. |
 | 9 | **CLI**: `punarctl agents list` / `agents inspect <id>` (D-014 grammar, `--json`); `punarctl` routes `agents.*` to the agentd socket. `agents access` reserved for M8 (`unknown_method` today, said honestly). §9. |
 | 10 | **Audit**: agentd appends to the **same** `/var/log/punar/audit.jsonl` through `punar_common::AuditWriter`, which gains flock-guarded rotation so two writers cannot race the 8 MiB rename. Agent lifecycle events carry **real** `agt_` ids. The deferred conditional-fields schema cleanup is **not** delivered (not trivial — it would break the "all 12 required fields" contract that events, tests, and docs pin); `agt_none` stays the documented sentinel for non-agent events. §10. |
 | 11 | **Budgets**: idle-ram.sh sums PSS over **both** `punard.service` and `punar-agentd.service` cgroups into `PUNAR_SERVICES_RSS_MB` (the comment in that file already promises "the unit list grows as sibling services ship (agentd M7…)"); check-budgets prose updated to say combined. Target stays < 100 MB combined (spec 6.2, PERFORMANCE_BUDGETS §1.2). §11. |
@@ -455,7 +455,7 @@ the panel's detection footer (`scan on view · continuous detection
 arrives with M10`) and here. A punard→agentd nudge would add an IPC
 edge between daemons for a capability the milestone does not claim.
 
-## 8. Shell — the SUPER+A AI panel (spec 25, Plate D-005)
+## 8. Shell — the PUNAR+A AI panel (spec 25, Plate D-005)
 
 ### 8.1 Surface
 
@@ -472,8 +472,8 @@ CommandCenter/Overview:
   contract variable in `hyprland.conf` —
   `qs -p /usr/share/punar/shell ipc call aipanel toggle`, the same
   one-variable pattern `$commandCenter` and `$overview` use. Spec 25's
-  `SUPER + A` was already taken by the M2 **assistant scratchpad**, which
-  moves to `SUPER+SHIFT+A`: two binds on one chord is not an option
+  `PUNAR + A` was already taken by the M2 **assistant scratchpad**, which
+  moves to `PUNAR+SHIFT+A`: two binds on one chord is not an option
   (Hyprland fires every match), the pad is an empty special workspace
   with nothing pre-spawned, and the panel is the milestone's headline
   surface. `docs/development/keyboard-grammar.md` carries the new table.
@@ -778,8 +778,8 @@ in-VM run remains the arbiter.
   new unit, tmpfiles snippet, adapter/signature data and fixture script.
 - `Hyprland --verify-config` → **"config ok"** on hyprland **0.56.2-1**
   from the ALA 2026/08/20 snapshot, in a container built on the pinned
-  builder-base digest, for the edited config tree (the `SUPER+A` AI-panel
-  bind and the scratchpad move to `SUPER+SHIFT+A`). Non-vacuous: a
+  builder-base digest, for the edited config tree (the `PUNAR+A` AI-panel
+  bind and the scratchpad move to `PUNAR+SHIFT+A`). Non-vacuous: a
   negative control (`exec` misspelled `execc` on that very bind) is
   rejected with a per-file per-line error.
 - `qmllint` 6.11.2 (pinned container, `/usr/lib/qt6/bin/qmllint`): all
@@ -809,7 +809,7 @@ in-VM run remains the arbiter.
   been measured; `PERFORMANCE_BUDGETS.md`'s table still reads "not yet
   measured". The claim here is only that the sampler now sums both
   cgroups and reports `absent` if either is missing.
-- The `SUPER+A` bind is proven to *parse*, not to *behave*: `exec` binds
+- The `PUNAR+A` bind is proven to *parse*, not to *behave*: `exec` binds
   are only syntax-checked by `--verify-config`, and the panel's IPC
   target is proven at runtime by m7-check group 9, not at parse.
 - The `desktop-test` job has never run at its new 95-minute budget, and

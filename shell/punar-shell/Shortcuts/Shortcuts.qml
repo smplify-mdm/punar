@@ -2,7 +2,7 @@ pragma ComponentBehavior: Bound
 // Shortcuts — the persistent shortcut help surface (Plate D-017,
 // docs/design/mockups/shortcuts.html; Sect II·04, Sect III, Sect V·01).
 //
-// Spec §12.3 asks for two things — hold SUPER and see the chords, press
+// Spec §12.3 asks for two things — hold PUNAR and see the chords, press
 // `?` and read them all — and then states the requirement plainly: do not
 // make people memorise dozens of undocumented shortcuts. Punar ships
 // seventy-two described binds — a number this comment is not the source
@@ -13,7 +13,7 @@ pragma ComponentBehavior: Bound
 // WHAT SHIPS HERE, AND WHAT DOES NOT — stated up front, because D-017
 // Sect V·03 marked the hold overlay TO VERIFY and this is the answer:
 //
-//   SHIPS · the persistent help surface. Opened with SUPER + / from
+//   SHIPS · the persistent help surface. Opened with PUNAR + / from
 //   anywhere, and with `?` from the bar's focused status cluster — which
 //   is the ONE other surface that implements that key today (see
 //   Bar/StatusCluster.qml `Qt.Key_Question`). The full-screen sheets bind
@@ -23,7 +23,7 @@ pragma ComponentBehavior: Bound
 //   All rows, every layer, every mode, on paper, generated from the
 //   compositor's own binding table.
 //
-//   DOES NOT SHIP · the transient HOLD-SUPER overlay. Hyprland 0.56.2
+//   DOES NOT SHIP · the transient HOLD-PUNAR overlay. Hyprland 0.56.2
 //   emits no "modifier held" event, and of the three candidates D-017
 //   named, the one flag that exists (`bindo`, the `o` long-press flag —
 //   src/config/legacy/ConfigManager.cpp handleBind case 'o') fires after
@@ -39,7 +39,7 @@ pragma ComponentBehavior: Bound
 //   would let the shell own the 400 ms itself — looks correct on paper
 //   and has been observed by NOBODY on this compositor, and it needs a
 //   bind on the bare SUPER_L keysym in the production config underneath
-//   fifty-eight chords built on SUPER. §7 is explicit that implementation
+//   fifty-eight chords built on PUNAR. §7 is explicit that implementation
 //   alone does not earn a solid line, so the overlay stays a compositor
 //   task with a written-down recipe, and half of a discoverability
 //   requirement met honestly beats a hold overlay that works on three
@@ -51,7 +51,7 @@ pragma ComponentBehavior: Bound
 // itself — a second execution path alongside the compositor's own — and
 // it would teach the wrong lesson, because the key the user pressed was
 // not the chord they came to learn. The surface that RUNS things by name
-// is one chord away: the command center, SUPER+Space.
+// is one chord away: the command center, PUNAR+Space.
 //
 // NOTHING ORG-SPECIFIC (Sect III·06): no section, no row and no footer
 // here knows whether the machine is enrolled. The keyboard grammar is the
@@ -62,20 +62,19 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import "." as Local
 import "../Services"
 import "../Theme"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     property bool openOnReady: false
     property bool windowVisible: false
     property string query: ""
     property int selected: 0
+    property bool unloadAfterReload: false
 
     // Meta-row / label grammar (DESIGN_LANGUAGE.md §1) — the same
     // component grammar as Bar, CommandCenter and Overview.
@@ -88,15 +87,25 @@ Scope {
         color: Theme.shellInk3
     }
 
-    Local.BindTable {
-        id: table
+    // The visual tree is disposable, but the tiny live-bind cache is not:
+    // this singleton preserves the one-query-per-session contract across
+    // panel opens while allowing the measured 100+ MiB window to unload.
+    Connections {
+        target: Local.BindTable
+
+        function onLoadedChanged() {
+            if (Local.BindTable.loaded && root.unloadAfterReload) {
+                root.unloadAfterReload = false;
+                root.unloadRequested();
+            }
+        }
     }
 
     function show(): void {
         if (!root.open)
             SurfaceTiming.begin("shortcuts");
         // The one query per session, lazily, on first open.
-        table.ensure();
+        Local.BindTable.ensure();
         hideTimer.stop();
         root.query = "";
         root.selected = 0;
@@ -124,48 +133,32 @@ Scope {
             root.show();
     }
 
-    IpcHandler {
-        target: "shortcuts"
+    function ipcState(): string {
+        return root.open ? "open" : "closed";
+    }
 
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.dismiss();
-        }
-        // Read-only probe (the `overview` / `aipanel` precedent).
-        function state(): string {
-            return root.open ? "open" : "closed";
-        }
-        function latency(): string {
-            return SurfaceTiming.sample("shortcuts");
-        }
-        // The manual half of the invalidation policy: `configreloaded`
-        // drops the cache on its own, and this is here for a human who
-        // wants to force it.
-        function reload(): string {
-            table.invalidate();
-            table.ensure();
-            return "reloading";
-        }
-        // The acceptance line of D-017 Sect V·07, answerable from CI:
-        // rename a description in the config, reload, and see the count
-        // and the label change without touching QML.
-        function rows(): string {
-            return String(table.rowCount);
-        }
-        function undescribed(): string {
-            return String(table.undescribed);
-        }
+    function ipcReload(): string {
+        root.unloadAfterReload = !root.open;
+        Local.BindTable.invalidate();
+        Local.BindTable.ensure();
+        return "reloading";
+    }
+
+    function ipcRows(): string {
+        return String(Local.BindTable.rowCount);
+    }
+
+    function ipcUndescribed(): string {
+        return String(Local.BindTable.undescribed);
     }
 
     Timer {
         id: hideTimer
         interval: Theme.durStandard
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     // ---- layout (Sect II·06) ----------------------------------------
@@ -204,19 +197,19 @@ Scope {
         }
 
         var globals = [];
-        for (i = 0; i < table.rows.length; i++) {
-            if (root.matches(table.rows[i], q))
-                globals.push(table.rows[i]);
+        for (i = 0; i < Local.BindTable.rows.length; i++) {
+            if (root.matches(Local.BindTable.rows[i], q))
+                globals.push(Local.BindTable.rows[i]);
         }
         var inMode = [];
-        for (i = 0; i < table.modeRows.length; i++) {
-            if (root.matches(table.modeRows[i], q))
-                inMode.push(table.modeRows[i]);
+        for (i = 0; i < Local.BindTable.modeRows.length; i++) {
+            if (root.matches(Local.BindTable.modeRows[i], q))
+                inMode.push(Local.BindTable.modeRows[i]);
         }
 
         var modeBlock = inMode.length === 0 ? null : {
             "kind": "mode",
-            "title": table.modeName === "" ? "Mode" : "Mode · " + table.modeName,
+            "title": Local.BindTable.modeName === "" ? "Mode" : "Mode · " + Local.BindTable.modeName,
             "subtitle": "bare keys · both exits shown",
             "rows": inMode
         };
@@ -224,8 +217,8 @@ Scope {
 
         // Section order is fixed in the shell; row order inside a section
         // is the config's.
-        for (var s = 0; s < table.sectionOrder.length; s++) {
-            var name = table.sectionOrder[s];
+        for (var s = 0; s < Local.BindTable.sectionOrder.length; s++) {
+            var name = Local.BindTable.sectionOrder[s];
             var bucket = [];
             for (i = 0; i < globals.length; i++) {
                 if (globals[i].section === name)
@@ -262,7 +255,7 @@ Scope {
                     rows.push({
                         "chord": row.chord,
                         "label": row.label,
-                        "mods": row.submap === "" ? table.modNames(row.modmask) : [],
+                        "mods": row.submap === "" ? Local.BindTable.modNames(row.modmask) : [],
                         "keyText": row.keyText,
                         "isMode": row.isMode,
                         "repeat": row.repeat,
@@ -413,7 +406,7 @@ Scope {
                 anchors.top: parent.top
                 anchors.topMargin: 16
                 font.weight: 500
-                text: "Super + / · Esc closes"
+                text: "Punar key · Windows / Meta · Esc closes"
             }
 
             Rectangle {
@@ -661,7 +654,7 @@ Scope {
                 Meta {
                     width: parent.width
                     color: Theme.shellFg
-                    text: table.problem !== "" ? "No binding table" : "No match"
+                    text: Local.BindTable.problem !== "" ? "No binding table" : "No match"
                 }
                 Text {
                     width: parent.width
@@ -669,7 +662,7 @@ Scope {
                     font.family: Theme.fontSans
                     font.pixelSize: 15
                     color: Theme.shellInk2
-                    text: table.problem !== "" ? table.problem
+                    text: Local.BindTable.problem !== "" ? Local.BindTable.problem
                         : "Nothing in the binding table matches this."
                 }
             }
@@ -710,11 +703,11 @@ Scope {
                     // and they are drawn in ink rather than in red: a
                     // keyboard reference has no status to report, so this
                     // surface spends no status colour at all (Sect IV·06).
-                    color: (table.undescribed > 0 || table.unmapped > 0) ? Theme.shellFg : Theme.shellInk3
+                    color: (Local.BindTable.undescribed > 0 || Local.BindTable.unmapped > 0) ? Theme.shellFg : Theme.shellInk3
                     text: root.query.trim() === ""
-                        ? table.rawCount + " binds · " + table.rowCount + " rows · "
-                          + table.undescribed + " undescribed · " + table.unmapped + " unmapped"
-                        : win.page.shown + " of " + table.rowCount + " rows · query "
+                        ? Local.BindTable.rawCount + " binds · " + Local.BindTable.rowCount + " rows · "
+                          + Local.BindTable.undescribed + " undescribed · " + Local.BindTable.unmapped + " unmapped"
+                        : win.page.shown + " of " + Local.BindTable.rowCount + " rows · query "
                           + "\"" + root.query.trim() + "\""
                 }
 

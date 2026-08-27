@@ -1,3 +1,4 @@
+pragma Singleton
 pragma ComponentBehavior: Bound
 // BindTable — the shortcut reference's ONLY data source (Plate D-017,
 // docs/design/mockups/shortcuts.html Sect I and Sect V·05).
@@ -8,7 +9,7 @@ pragma ComponentBehavior: Bound
 // compositor is currently dispatching from. A hardcoded list is a second
 // source of truth, and a second source of truth is a promise to be wrong
 // later: the day someone moves the assistant scratchpad to
-// SUPER+SHIFT+A (M7 did exactly that), a hand list keeps confidently
+// PUNAR+SHIFT+A (M7 did exactly that), a hand list keeps confidently
 // printing the old chord to a user who then presses it and gets nothing.
 //
 // NO DESCRIPTION · NO ROW (Sect I·03). A bind whose description is empty
@@ -36,10 +37,11 @@ pragma ComponentBehavior: Bound
 // force it. At rest the whole feature costs one cached array.
 
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
 
-Item {
+Singleton {
     id: table
 
     // ---- cache state -------------------------------------------------
@@ -164,12 +166,12 @@ Item {
     }
 
     // Decoded against the standard modifier bits and rendered in ONE
-    // canonical order — SUPER, CTRL, SHIFT, ALT — never in bitmask order,
+    // canonical order — PUNAR, CTRL, SHIFT, ALT — never in bitmask order,
     // so two chords with the same modifiers always read identically.
     function modNames(mask: int): var {
         var out = [];
         if (mask & 64)
-            out.push("Super");
+            out.push("Punar");
         if (mask & 4)
             out.push("Ctrl");
         if (mask & 1)

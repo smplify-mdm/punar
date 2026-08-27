@@ -15,7 +15,7 @@
 # `general:layout` live-refreshes (REFRESH_LAYOUTS, verified milestone-2.md
 # §1.3), so windows re-tile immediately.
 #
-# Consumers: the compositor binds (SUPER+comma/period → prev/next), the
+# Consumers: the compositor binds (PUNAR+comma/period → prev/next), the
 # command center (exec, by preset name), session start (exec-once restore),
 # CI (m2-exercise.sh). Presets are GLOBAL in M2; grid is not shipped
 # (0.56.2 has no native grid algorithm — milestone-2.md §2).

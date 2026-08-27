@@ -167,7 +167,7 @@
     </div>
     <hr class="rule">
     <h1>Ten windows should cost the same thought as one.</h1>
-    <p class="deck">The desktop is the instrument you live in: windows land where the grammar says, the bar names the workspace instead of decorating it, and SUPER&nbsp;+&nbsp;TAB reads projects, not numbered desktops. This is a personal machine — the managed desktop is pixel-identical.</p>
+    <p class="deck">The desktop is the instrument you live in: windows land where the grammar says, the bar names the workspace instead of decorating it, and PUNAR&nbsp;+&nbsp;TAB reads projects, not numbered desktops. This is a personal machine — the managed desktop is pixel-identical.</p>
   </header>
 
   <section>
@@ -177,7 +177,7 @@
       <button class="statebtn" id="sb-resize" data-state="resize" role="tab" aria-selected="false">02 · Resize</button>
       <button class="statebtn" id="sb-overview" data-state="overview" role="tab" aria-selected="false">03 · Overview</button>
       <button class="statebtn" id="sb-scratchpad" data-state="scratchpad" role="tab" aria-selected="false">04 · Scratchpad</button>
-      <span class="demohint">Click frame · R / Tab / T stand in for Super-chords</span>
+      <span class="demohint">Click frame · R / Tab / T stand in for Punar-chords</span>
     </div>
 
     <div class="frame" id="frame" tabindex="0" aria-label="Interactive tiling desktop demo">
@@ -256,7 +256,7 @@
           </div>
 
           <div class="scratch" id="scratch" aria-label="Scratchpad terminal">
-            <div class="wbar">Scratchpad · Terminal · Super + T</div>
+            <div class="wbar">Scratchpad · Terminal · Punar + T</div>
             <div class="wbody">
               <div class="tline"><span class="tp">alice@punar ~ %</span> punarctl ledger tail</div>
               <div class="tline"><span class="tout">evt_50x · agt_123 · secrets.read · allowed</span></div>
@@ -266,7 +266,7 @@
         </div>
         <div class="dfoot">
           <span>H/J/K/L Focus · R Resize · Tab Overview · T Scratchpad · Esc Back</span>
-          <span>Stand-ins for the §13.3 Super-chords</span>
+          <span>Stand-ins for the §13.3 Punar-chords</span>
         </div>
       </div>
     </div>
@@ -276,9 +276,9 @@
     <h2>Sect I · Window-grammar register</h2>
     <p class="assertion">Four window modes, one chord family — the grammar is the interface, not the chrome.</p>
     <div class="reg"><span class="no">01</span><span class="what">The table</span>
-      <p>The §13.3 table verbatim: <span class="specref">SUPER+H/J/K/L</span> focus, <span class="specref">+SHIFT</span> moves, <span class="specref">R</span> resize, <span class="specref">F</span> fullscreen, <span class="specref">TAB</span> overview, <span class="specref">1..9</span> workspaces, <span class="specref">SPACE</span> command center. Bindings may evolve; the family does not. <span class="specref">spec §13.3</span></p></div>
+      <p>The §13.3 table verbatim: <span class="specref">PUNAR+H/J/K/L</span> focus, <span class="specref">+SHIFT</span> moves, <span class="specref">R</span> resize, <span class="specref">F</span> fullscreen, <span class="specref">TAB</span> overview, <span class="specref">1..9</span> workspaces, <span class="specref">SPACE</span> command center. Bindings may evolve; the family does not. <span class="specref">spec §13.3</span></p></div>
     <div class="reg"><span class="no">02</span><span class="what">Modes</span>
-      <p>Tile, stack/tab group, float, fullscreen. This plate draws tile and one justified float — the scratchpad. Stacks and the layout chooser (<span class="specref">SUPER+L</span>, §13.5 presets) are specified in words and dashed until drawn. <span class="specref">spec §13.2</span></p></div>
+      <p>Tile, stack/tab group, float, fullscreen. This plate draws tile and one justified float — the scratchpad. Stacks and the layout chooser (<span class="specref">PUNAR+L</span>, §13.5 presets) are specified in words and dashed until drawn. <span class="specref">spec §13.2</span></p></div>
     <div class="reg"><span class="no">03</span><span class="what">Active border</span>
       <p>Windows carry no buttons and no title furniture — a hairline, a tracked mono label, and the ink border on exactly one window: the focused one. Gaps 8, radius 10, the tokens everywhere else uses. <span class="specref">spec §12</span></p></div>
     <div class="reg"><span class="no">04</span><span class="what">Motion</span>
@@ -287,7 +287,7 @@
 
   <section>
     <h2>Sect II · Overview register</h2>
-    <p class="assertion">SUPER + TAB reads projects, not numbered desktops.</p>
+    <p class="assertion">PUNAR + TAB reads projects, not numbered desktops.</p>
     <div class="reg"><span class="no">01</span><span class="what">Project cards</span>
       <p>Atlas, Punar, Personal — named contexts carrying windows, agents, containers, and environment. The card wireframes the real layout; the meta row states window count and agent presence in registry vocabulary (<span class="specref">agt_123 · active</span>). <span class="specref">spec §14 · §14.1</span></p></div>
     <div class="reg"><span class="no">02</span><span class="what">Keyboard nav</span>
@@ -304,7 +304,7 @@
     <div class="reg"><span class="no">01</span><span class="what">Scratchpads</span>
       <p>Terminal, AI assistant, and notes drop over the tiling on a chord and leave on the same chord — the one float the grammar owes you. It lands on the panel surface with the panel shadow rule bent once: a floating window may cast, a tiled one may not. <span class="specref">spec §13.6</span></p></div>
     <div class="reg"><span class="no">02</span><span class="what">Multi-monitor</span>
-      <p>Remembered layouts, no off-screen lost windows, <span class="specref">SUPER+SHIFT+RIGHT</span> across displays, collapse and restore on dock events — required, unbuilt, and therefore a dashed row here, not a second frame. <span class="specref">spec §15</span></p></div>
+      <p>Remembered layouts, no off-screen lost windows, <span class="specref">PUNAR+SHIFT+RIGHT</span> across displays, collapse and restore on dock events — required, unbuilt, and therefore a dashed row here, not a second frame. <span class="specref">spec §15</span></p></div>
     <div class="reg"><span class="no">03</span><span class="what">Personal = managed</span>
       <p>This plate has no Personal/Managed toggle because the desktop is identical in both: enrollment annotates panels and mastheads elsewhere, and buys no different tiling, overview, or grammar. Nothing at this altitude is org chrome. <span class="specref">spec §3.2 · design language §8</span></p></div>
   </section>

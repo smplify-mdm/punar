@@ -28,7 +28,7 @@ pragma ComponentBehavior: Bound
 // keyboard — spec 1.22 applied to a keycap: an unfocused toast shows the
 // same actions as real, clickable buttons, without claiming a key that
 // would not fire. The guaranteed keyboard path is the centre
-// (`SUPER+SHIFT+N`), whose footer prints every key it owns.
+// (`PUNAR+SHIFT+N`), whose footer prints every key it owns.
 //
 // DISMISS FILES, IT NEVER DESTROYS (D-009 Sect I register 03). Dismissing
 // a toast — by key, by click, or by its dwell timer running out — removes
@@ -716,7 +716,7 @@ Scope {
                                     font.pixelSize: 8
                                     color: Theme.shellInputBorder
                                     visible: !card.hasFocus
-                                    text: "Super+Shift+N"
+                                    text: "Punar+Shift+N"
                                 }
                             }
                         }
@@ -738,7 +738,7 @@ Scope {
                         color: Theme.shellInputBorder
                         visible: Notifications.count > root.shownKeys.length
                         text: (Notifications.count - root.shownKeys.length)
-                              + " waiting in the centre · Super+Shift+N"
+                              + " waiting in the centre · Punar+Shift+N"
                     }
                 }
             }

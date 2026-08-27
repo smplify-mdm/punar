@@ -44,7 +44,7 @@ is named inline.
 | Terminal: foot | **in** | lightweight native Wayland terminal; keyboard-first |
 | Browser: chromium (upstream, unpatched) | **in** | spec §48: upstream Chromium + thin integration; launch/window integration only in M1 |
 | Git, Neovim, Podman (+crun, netavark, aardvark-dns) | **in** | spec §76 M1 deliverables; CLI tools, no UI work needed |
-| Keyboard grammar (SUPER-based binds, no-mouse operation) | **in** | M1 acceptance criterion |
+| Keyboard grammar (PUNAR-based binds, no-mouse operation) | **in** | M1 acceptance criterion |
 | pipewire + wireplumber + pipewire-pulse (socket-activated) | **in** | minimal audio so chromium doesn't stall; no pulseaudio per budgets |
 | Fonts: Instrument Sans + Geist Mono (vendored) + Noto fallback | **in** | design language is binding; see §5 |
 | `punar-desktop` mkosi profile | **in** | see §3 |
@@ -159,8 +159,8 @@ manager beyond greetd; no uwsm; the real QML greeter is deferred (§1).
    Quickshell's default XDG search, so `-p` is load-bearing),
    `exec-once = hyprpolkitagent`,
    `exec-once = /usr/lib/punar/desktop-ready.sh` (§7), plus the keyboard
-   grammar binds (SUPER+Return foot, SUPER+Space command center, SUPER+B
-   chromium, SUPER+arrows/HJKL focus, etc. — exact grammar owned by the
+   grammar binds (PUNAR+Return foot, PUNAR+Space command center, PUNAR+B
+   chromium, PUNAR+arrows/HJKL focus, etc. — exact grammar owned by the
    shell workstream, but it lives in this config).
 6. Seat/session management: systemd-logind via greetd's PAM session;
    Hyprland's libseat uses the logind backend. The seatd daemon is never

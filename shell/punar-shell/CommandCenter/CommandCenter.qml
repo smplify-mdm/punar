@@ -1,5 +1,5 @@
 pragma ComponentBehavior: Bound
-// CommandCenter — the SUPER+Space overlay, implementing the command-center
+// CommandCenter — the PUNAR+Space overlay, implementing the command-center
 // card of docs/design/mockups/command-approval.html (Sect I, Plate D-003):
 // centered 560px paper card on a warm ink-wash scrim, masthead row, sans
 // input, glyph-tag result rows, selection = raise fill + 2px ink left rule,
@@ -57,10 +57,9 @@ import "." as Local
 import "../Theme"
 import "../Services"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     // Loader contract used by the isolated cost probe and the eventual
     // production lazy wrapper. Construction timing ends before show().
     property bool openOnReady: false
@@ -124,69 +123,46 @@ Scope {
             root.show();
     }
 
-    // SUPER+Space entry point. Hyprland binds:
-    //   bindd = SUPER, Space, Open command center, exec, $commandCenter
-    //
-    // `query` / `run` / `state` are read-and-drive verbs for check scripts
-    // (milestone-13.md §6.1 gap 1's evidence line is that no check has ever
-    // opened this overlay). They do exactly what the keyboard does and
-    // nothing the keyboard cannot: `run` is Enter on the current selection,
-    // so this handler grants no capability the session did not already have
-    // by being able to open the surface at all.
-    IpcHandler {
-        target: "commandcenter"
+    // Public methods used by shell.qml's always-resident IPC proxy and by
+    // surface-probe.qml. Keeping the target outside this object means asking
+    // for `state` does not instantiate the surface it is measuring.
+    function ipcState(): string {
+        if (!root.open)
+            return "closed";
+        return root.explainPath !== "" ? "explain" : "open";
+    }
 
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.dismiss();
-        }
-        function state(): string {
-            if (!root.open)
-                return "closed";
-            return root.explainPath !== "" ? "explain" : "open";
-        }
-        // Read-only timing probe; both timestamps are recorded inside the
-        // long-lived shell, never by a polling client.
-        function latency(): string {
-            return SurfaceTiming.sample("commandcenter");
-        }
-        // The §40 answer's own state: "none" or "<phase> · <path>", where
-        // phase is asking / answered / failed.
-        function explain(): string {
-            if (root.explainPath === "")
-                return "none";
-            return explainCard.phase + " · " + root.explainPath;
-        }
-        // Type into the field and report the top row's typed action, so a
-        // check can assert WHAT would run without running it.
-        function query(text: string): string {
-            root.show();
-            win.setQuery(text);
-            var top = win.results.length > 0 ? win.results[0] : null;
-            return top === null ? "no-match" : (top.kind + " · " + top.meta);
-        }
-        // Enter on the current selection.
-        function run(): string {
-            if (!root.open)
-                return "closed";
-            var item = list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null;
-            if (item === null)
-                return "no-match";
-            var label = item.kind + " · " + item.meta;
-            root.activate(item);
-            return label;
-        }
+    function ipcExplain(): string {
+        if (root.explainPath === "")
+            return "none";
+        return explainCard.phase + " · " + root.explainPath;
+    }
+
+    function ipcQuery(text: string): string {
+        root.show();
+        win.setQuery(text);
+        var top = win.results.length > 0 ? win.results[0] : null;
+        return top === null ? "no-match" : (top.kind + " · " + top.meta);
+    }
+
+    function ipcRun(): string {
+        if (!root.open)
+            return "closed";
+        var item = list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null;
+        if (item === null)
+            return "no-match";
+        var label = item.kind + " · " + item.meta;
+        root.activate(item);
+        return label;
     }
 
     Timer {
         id: hideTimer
         interval: Theme.durStandard
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     // ---- IPC target probe -------------------------------------------------

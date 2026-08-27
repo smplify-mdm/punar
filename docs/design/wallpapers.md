@@ -30,7 +30,7 @@ was
 [`themes/tokyo-night/backgrounds/0-winding-road.webp`](https://github.com/basecamp/omarchy/blob/quattro/themes/tokyo-night/backgrounds/0-winding-road.webp).
 
 Wallpaper selection does not enter first-run onboarding. A developer can press
-`SUPER+Space`, type `wallpaper`, inspect the explicit `SetWallpaper(<id>)`
+`PUNAR+Space`, type `wallpaper`, inspect the explicit `SetWallpaper(<id>)`
 actions, and press Enter. The same contract is available to scripts:
 
 ```bash

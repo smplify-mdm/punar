@@ -220,7 +220,7 @@ FocusScope {
                 + (Alerts.activeCount > 0 ? "\n/run/punar-agentd/alerts.json · "
                    + Alerts.activeCount + " raised" : "")
                 + "\ndetected, not guaranteed — spec §23",
-            "action": "↵ Open AI panel · Super + A",
+            "action": "↵ Open AI panel · Punar + A",
             "target": "aipanel"
         },
         {
@@ -338,7 +338,7 @@ FocusScope {
         return cluster.slotCount > 0 ? 0 : -1;
     }
 
-    // Returns false when there is nothing to report — SUPER+SHIFT+B on a
+    // Returns false when there is nothing to report — PUNAR+SHIFT+B on a
     // calm bar does nothing at all rather than grabbing the keyboard for
     // an empty row.
     function focusCluster(): bool {

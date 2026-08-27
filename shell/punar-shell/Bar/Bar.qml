@@ -35,7 +35,7 @@
 // in the cluster with System Control as its destination. The original
 // reason for the deviation — that System Control was not shipped — has
 // EXPIRED: System Control now ships as the `systemcontrol` IpcHandler
-// target on SUPER+S, and its Organization branch is the door this
+// target on PUNAR+S, and its Organization branch is the door this
 // annotation would open. The deviation nonetheless stands, on the other
 // half of the argument: design language §8 says enrollment is additive
 // chrome that "must never restructure a screen, only annotate it", and
@@ -190,17 +190,17 @@ Scope {
         color: Theme.shellInk3
     }
 
-    // THE CHORD (D-016 Sect III·01). SUPER+SHIFT+B focuses the status
+    // THE CHORD (D-016 Sect III·01). PUNAR+SHIFT+B focuses the status
     // cluster; focus lands on the leftmost slot unless something is warn
     // or bad, in which case it lands on the highest-severity slot. On a
     // calm bar there is nothing to focus and the call says so instead of
     // grabbing the keyboard for an empty row.
     //
-    // DEVIATION, STATED: the plate writes SUPER+B. SUPER+B has opened the
+    // DEVIATION, STATED: the plate writes PUNAR+B. PUNAR+B has opened the
     // browser since M1 (`bindd = $mod, B, Open browser, …`) and two binds
     // on one chord is not an option — Hyprland fires both. Rather than
     // silently take a working chord away from the user, the cluster takes
-    // SUPER+SHIFT+B, keeps the B-for-bar mnemonic, and the shortcut help
+    // PUNAR+SHIFT+B, keeps the B-for-bar mnemonic, and the shortcut help
     // surface prints whichever chord the config actually carries, so this
     // deviation cannot drift into a lie.
     IpcHandler {

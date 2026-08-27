@@ -11,7 +11,7 @@ pragma ComponentBehavior: Bound
 // THE SLIVER, AND ONLY THE SLIVER (milestone-10.md §5.6). There is no
 // notification code in this shell: no toast stack for anything else, no
 // notification centre, no freedesktop notification daemon, no persistent
-// do-not-disturb toggle and no `Super+N`. D-009 draws all three states;
+// do-not-disturb toggle and no `Punar+N`. D-009 draws all three states;
 // M13 owns them. This file builds the one region M10's deliverable names
 // and nothing beside it.
 //
@@ -62,7 +62,7 @@ pragma ComponentBehavior: Bound
 //
 // KEYBOARD-FIRST (spec 12.1 — notifications are a required keyboard-
 // operable area; 12.3 — the binding is printed on the control):
-//   I  Inspect  → the SUPER+A AI panel, focused on this detection
+//   I  Inspect  → the PUNAR+A AI panel, focused on this detection
 //   D  Dismiss  → files the card to the record; it is never destroyed
 //   ↑ ↓ / k j   → walk a multi-card stack
 //   Esc         → hands the keyboard back. It ignores NOTHING silently:
@@ -107,7 +107,7 @@ Scope {
     property var presentedIds: ({})
     property var quietIds: ({})
 
-    // The [I] Inspect action. Wired in shell.qml to the SUPER+A panel so
+    // The [I] Inspect action. Wired in shell.qml to the PUNAR+A panel so
     // this surface does not reach into another one directly (and so a
     // shell without an AI panel simply has nothing connected).
     signal inspectRequested(string detectionId)
@@ -455,7 +455,7 @@ Scope {
 
     // ---- actions ----
 
-    // [I] Inspect — the SUPER+A surface (Plate D-005), focused on this
+    // [I] Inspect — the PUNAR+A surface (Plate D-005), focused on this
     // detection. `detection_id` is the running-process identity
     // (milestone-10.md §4.1) and is exactly the id the AI panel's rail
     // keys its detection rows by, so the panel opens ON the row rather
@@ -907,7 +907,7 @@ Scope {
                                             root.inspect();
                                         }
                                     }
-                                    // The SUPER+A surface is where Inspect
+                                    // The PUNAR+A surface is where Inspect
                                     // lands; naming the global binding
                                     // means the reader can get back to it
                                     // without this card (§5.1).
@@ -916,7 +916,7 @@ Scope {
                                         font.pixelSize: 8
                                         font.weight: 500
                                         color: Theme.shellInputBorder
-                                        text: "Super+A"
+                                        text: "Punar+A"
                                     }
                                     ActionButton {
                                         label: "Dismiss to record"

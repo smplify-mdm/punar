@@ -534,7 +534,7 @@ Scope {
         }
     }
 
-    // SUPER-less entry point: the gate opens itself. This handler exists
+    // PUNAR-less entry point: the gate opens itself. This handler exists
     // for Hyprland binds and for the m9-check probe:
     //   qs -p /usr/share/punar/shell ipc call approval open
     IpcHandler {

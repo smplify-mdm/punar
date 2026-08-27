@@ -858,12 +858,12 @@ language §2 (a screen with no decision to report has no colour):
 
 Two surfaces already exist and both are keyboard-first:
 
-- **`SUPER+Space` — the command center** is the search and install path, per
+- **`PUNAR+Space` — the command center** is the search and install path, per
   spec 12.2, which names `> install Firefox` as a worked example. Typing ranks
   catalog entries alongside everything else it ranks; selecting one opens the
   card in section 4.7. This is the fast path and the one most people will ever
   use.
-- **`SUPER+S` → Applications** is the browse path. It is the section 63 taxonomy
+- **`PUNAR+S` → Applications** is the browse path. It is the section 63 taxonomy
   rail item Plate D-010 already draws as `02 · Applications`. This design adds a
   browse view to that panel; it does not add a screen to the OS.
 

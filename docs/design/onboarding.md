@@ -1518,22 +1518,38 @@ Stated before anyone reads a green run as more than it is:
 
 ## 9. Open questions and verification spikes
 
-**V1 — `nss-systemd` shadow resolution (§1.10).** Confirm on the pinned
-substrate that `pam_unix` authenticates a user defined **only** as a
-`userdbd` JSON record in `/run/userdb/`, using the record's `privileged`
-section, with no `/etc/shadow` entry. Confirm the ordering: records available
-before `systemd-user-sessions` and before `greetd`. **If this fails, §1.10's
-fallback ships** — a `/etc` materialisation that is itself capability output.
-This is the one spike that can change the shape of the design rather than its
-details.
+**V1 — `nss-systemd` shadow resolution (§1.10): mechanism verified
+2026-08-26; boot ordering remains an implementation gate.** On the pinned
+systemd 261.2 / PAM 1.7.2 / libxcrypt 4.5.2 substrate, a test account existed
+only as `/run/userdb/punarv1.user` (`0644`) plus the separate
+`punarv1.user-privileged` (`0600`) and numeric-UID symlinks. `getent passwd`,
+`getent group`, and root's `getent shadow` resolved it through `nss-systemd`;
+neither `/etc/passwd` nor `/etc/shadow` contained the account. Starting from
+uid 65534, `su`/`pam_unix` accepted the correct password, entered uid/gid
+61111, and rejected a wrong password. The same unprivileged process could
+resolve the public passwd row but could neither read the privileged companion
+nor obtain a shadow row. This follows systemd's documented split-file contract:
+the public `.user` record must not contain `privileged`, while the root-only
+`.user-privileged` contains that section exclusively.
+
+The preferred `/var` → `/run/userdb` design therefore survives the mechanism
+spike; the `/etc` fallback is not selected. The implementation must still prove
+that its materializer completes before `systemd-user-sessions` and `greetd` in
+the booted production image. Until that ordering assertion passes, V1 is not
+fully closed.
 
 **V2 — greetd + QML front-end PAM conversation.** Confirm greetd's PAM
 conversation drives a Quickshell client cleanly, including the failure and
 retry states D-002 specifies in words.
 
-**V3 — yescrypt parameters.** Confirm the substrate's `ENCRYPT_METHOD` and
-cost parameters, and record the measured hash time on the §5.1 minimum target
-— a login that takes two seconds on an 8 GB laptop is a product defect.
+**V3 — yescrypt parameters: algorithm verified 2026-08-26; target-hardware
+timing remains open.** The pinned substrate declares `ENCRYPT_METHOD YESCRYPT`.
+Five random-password `chpasswd -c YESCRYPT` samples produced `$y$j9T$` hashes
+and averaged 122 ms in the local amd64 container. That is a plumbing result,
+not a hardware claim: the container ran through the development machine's
+amd64 translation layer. Record the same distribution on the §5.1 minimum
+x86_64 target and Raspberry Pi before choosing or overriding the inherited
+cost — a login that takes two seconds on an 8 GB laptop is a product defect.
 
 **Open — multi-user.** This design creates one account and does not forbid a
 second; `identity.local-account` takes an array. But the greeter ships

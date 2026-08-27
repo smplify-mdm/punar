@@ -619,7 +619,9 @@ fn refusal_message(requested: &str, grant: &OrgGrant, unknown: UnknownScope) -> 
             );
         }
         (_, false) => {
-            out.push_str("This device answers no remote queries: no organization is enrolled.\n");
+            out.push_str(
+                "This device answers no remote queries: personal mode has no remote-query path.\n",
+            );
         }
     }
     match unknown {
@@ -1005,7 +1007,8 @@ mod tests {
             let auth = authorize(scope.as_str(), &none);
             assert_eq!(auth.decision, AuthorizationDecision::Deny);
             assert!(
-                auth.message.contains("no organization is enrolled"),
+                auth.message
+                    .contains("personal mode has no remote-query path"),
                 "{}",
                 auth.message
             );

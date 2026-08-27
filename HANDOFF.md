@@ -32,8 +32,8 @@ are that machinery.
 
 ## 2. Current state
 
-**Green.** Run [33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
-on `2c47671`, all seven jobs, including x86_64/ARM64 code contracts, the image,
+**Green.** Run [33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
+on `879486f`, all seven jobs, including x86_64/ARM64 code contracts, the image,
 minimal boot, the full graphical desktop, and all ten in-VM exercises.
 
 | Exercise | Assertions | What it proves |
@@ -49,7 +49,7 @@ minimal boot, the full graphical desktop, and all ten in-VM exercises.
 | M10 shadow-AI | 135 | periodic detection, anti-nag alerts, remote query |
 | Desktop surfaces (live) | 64 | all 13 shell surfaces open/close/paint |
 
-**Latest measurement:** idle RAM **1356 MB mean / 1361 MB max** (target 1024 —
+**Latest measurement:** idle RAM **1345 MB mean / 1348 MB max** (target 1024 —
 never once met, not even at M1's 1162 MB), boot **20 s**, three daemons **7 MB**
 PSS. Earlier comparable runs measured 1265–1302 MB.
 
@@ -60,18 +60,21 @@ remaining ~629 MB was kernel, tmpfs and page cache. The shell remains the
 largest actionable process cost; the next valid isolated-surface report must
 decide what can be lazy-loaded.
 
-**Corrected eager surface latency (KVM).** `shell_map_ms` is measured wholly
-inside the long-lived shell, from `show()` to Hyprland's `openlayer`, with no
-polling process in the interval and `<2 ms` clock uncertainty:
+**Measured isolated surface cost (KVM).** Run 33044217553 verified the probe
+identity as the real `qs` executable on every sample. Medians are resident
+delta KiB · construction ms · first map ms:
 
 ```
-overview 67ms  notifications 69ms  aipanel 73ms
-commandcenter 87ms  systemcontrol 116ms  shortcuts 186ms
+commandcenter 106982 · 41 · 128    systemcontrol 123032 · 59 · 148
+shortcuts     117500 · 31 · 156    aipanel       111801 · 55 · 127
+overview      121299 · 35 · 106
 ```
 
-Full checker-to-map totals were 106–226 ms. Those totals include one
-checker-only `hyprctl` client (12 ms largest calibrated round trip); a physical
-chord still includes Hyprland's configured `exec` → `qs` → shell path.
+The isolated deltas share Qt/Quickshell code and are not additive. Since every
+construction median is 31–59 ms, the working tree unloads all five panels after
+close while hoisting their IPC contracts. The shortcuts bind table remains a
+tiny singleton, preserving one `hyprctl binds -j` query per session. This
+lazy-loading change is locally linted/runtime-tested but still awaits image CI.
 
 ---
 
@@ -102,11 +105,20 @@ made and defended.
 5. **Never claim a simulated thing is real** (spec §1.22). **Never weaken an
    assertion to make it pass.** Both have been violated and caught in this
    repo; see §11.
-6. **Enrollment must be possible and findable, but never pushed.** Exactly one
+6. **Governed rolling has two clocks.** The host moves only as a complete,
+   signed A/B release on `stable`, `dev`, or opt-in `edge`; compilers, SDKs,
+   AI runtimes, and services move per project through `punar-env`. Never use a
+   partial host upgrade to satisfy a project toolchain request. See
+   `docs/development/update-and-rollback.md` §0 Law 8 and §5.1.
+7. **Enrollment must be possible and findable, but never pushed.** Exactly one
    pointer exists, on `punarctl enroll status`'s unenrolled branch — the
    surface a person reaches *by asking about enrollment*. No banners anywhere.
-7. Nothing is published or announced. History rewrites and force pushes were
+8. Nothing is published or announced. History rewrites and force pushes were
    sanctioned on that basis; that will stop being true.
+9. **The primary modifier is the Punar key.** User-facing caps say `Punar` and
+   written chords say `PUNAR + …`; the hardware definition is Windows / Meta.
+   Hyprland's raw modifier token may exist in config and implementation notes,
+   never as product vocabulary.
 
 ---
 
@@ -132,7 +144,7 @@ shell/punar-shell/        Quickshell/QML — 19,885 lines, ONE Arch mention (a c
   AiPanel          2,157  what AI has done on this device
   Theme            1,873  theme system + contrast validator
   Services         1,810  Status, Approvals, Alerts, Apps, WorkspaceState…
-  CommandCenter    1,717  SUPER+Space, natural language → typed capabilities
+  CommandCenter    1,717  PUNAR+Space, natural language → typed capabilities
   Bar              1,380  menubar: identity, status cluster, clock
   Shortcuts        1,313  help overlay, generated from `hyprctl binds -j`
   Approval         1,052  the M9 gate
@@ -267,32 +279,18 @@ tangible argument for ADR-005.
 ### 7.1 Handed-off commits pushed
 The handed-off work, latency/ARM follow-ups, and verified desktop-field work
 were pushed on 2026-08-26;
-[run 33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
-is green on all seven jobs at `2c47671`.
+[run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
+is green on all seven jobs at `879486f`.
 
-### 7.2 Fix the latency instrument, then use it
-The first `surfaces-check.sh` latency numbers included repeated polling
-processes. The replacement timestamps `show()` and Hyprland's `openlayer`
-event inside the long-lived shell. **Correction:** a physical keypress does
-spawn one `qs` process through the configured Hyprland `exec`; that is product
-cost and remains in the full path. The old claim that a keypress spawns nothing
-was false. The corrected KVM baseline is now recorded in §2: `shortcuts` is
-slowest at 186 ms shell-to-map, but that is still eager-render latency rather
-than construction cost.
-
-Then settle the RAM/speed tension with data. Measure what each surface costs to
-**construct** (not dispatch) and to hold **resident**. Lazy-load every surface
-whose construction is imperceptible; keep eager only what measurement proves
-expensive, **with the number in the commit message**. Full reasoning and the
-retraction that preceded it:
-`tests/performance/README.md`.
-
-**Reject the resident values from run 33041260498.** Its 601–639 KiB baseline
-was `/bin/sh -c`, not Quickshell: the wrapper cmdline contained the probe path.
-The next-run instrument starts with `exec`, accepts only a process whose comm
-and executable identify `qs`/`quickshell`, prints that identity, and enforces
-a 16 MiB empty-probe floor. Its construction/map timings remain useful; its PSS and
-resident deltas do not.
+### 7.2 Measured lazy-loading — local implementation, image CI next
+The corrected probe in run 33044217553 identified the real `qs` executable and
+measured all five candidate panels. Construction medians are 31–59 ms and
+isolated retained deltas are 106982–123032 KiB. The working tree therefore
+lazy-loads command center, System Control, shortcuts, AI panel and overview;
+each is destroyed after its exit animation. IPC handlers remain resident and
+the shortcuts binding cache is hoisted so reopening does not re-query Hyprland.
+Pinned `qmllint` and a headless live lifecycle exercise are green. The next
+required evidence is the full image/desktop CI run and its idle-RAM result.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval
 and alerts must appear *unbidden*; notifications/toasts/OSD must receive events

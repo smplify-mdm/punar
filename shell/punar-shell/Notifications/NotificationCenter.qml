@@ -1,5 +1,5 @@
 pragma ComponentBehavior: Bound
-// NotificationCenter — the SUPER+SHIFT+N surface, implementing
+// NotificationCenter — the PUNAR+SHIFT+N surface, implementing
 // docs/design/mockups/notifications-osd.html Sect II (Plate D-009, the
 // acceptance reference): a paper card on the warm ink-wash scrim holding
 // the ledger of interruptions, grouped by who spoke, walked with j/k,
@@ -502,7 +502,7 @@ Scope {
             root.show();
     }
 
-    // SUPER+SHIFT+N entry point (os/modules/desktop/hypr/punar-binds.conf).
+    // PUNAR+SHIFT+N entry point (os/modules/desktop/hypr/punar-binds.conf).
     IpcHandler {
         target: "notifications"
 
@@ -755,7 +755,7 @@ Scope {
                             anchors.right: parent.right
                             anchors.rightMargin: 16
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Super+Shift+N"
+                            text: "Punar+Shift+N"
                         }
                     }
 

@@ -185,7 +185,7 @@ not enabled.
 The real regression is the row above it: **the thirteen surfaces cost ~90 MB**
 (1175 → 1265). Every surface is a `Scope` instantiated at shell startup
 regardless of whether it is ever opened, so a user who never presses
-`SUPER + S` still pays for System Control's 1,518 lines of QML and
+`PUNAR + S` still pays for System Control's 1,518 lines of QML and
 ControlData's 1,621.
 
 **The obvious diet, not yet taken:** wrap each surface in a `Loader` that stays
@@ -327,7 +327,7 @@ first-open cost is perceptible, and **nobody has measured it**. So the order is:
    measurement that decides this is what a surface costs to build the first
    time — and what it holds resident once built.
 2. **Lazy-load every surface whose construction is imperceptible.** If building
-   the AI panel on first `SUPER + A` costs 40 ms, there is no trade at all:
+   the AI panel on first `PUNAR + A` costs 40 ms, there is no trade at all:
    the RAM is recovered and nothing is felt. Both rules are satisfied.
 3. **Keep eager only what measurement proves expensive**, and say so in the
    commit with the number. "This surface stays resident because building it

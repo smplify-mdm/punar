@@ -552,6 +552,12 @@ The terminal is not the only way to control the system. A non-terminal user shou
 
 Every first-party graphical workflow MUST be fully operable without a mouse. Mouse and touchpad remain supported.
 
+The primary desktop modifier is called the **Punar key**. Chords write it as
+`PUNAR`; on PC keyboards it is the Windows-logo / Meta key. On Apple
+keyboards connected through a VM client, it is the key the client maps to the
+guest Meta position (normally Command). Compositor-specific names are an
+implementation detail and MUST NOT appear in user-facing Punar surfaces.
+
 ## 12.1 Required keyboard-operable areas
 
 At minimum:
@@ -593,7 +599,7 @@ At minimum:
 Target:
 
 ```text
-SUPER + Space
+PUNAR + Space
 ```
 
 Supports apps, system settings, projects, AI agents, developer actions, enterprise actions, privacy, search, and natural-language intent where safe.
@@ -615,7 +621,7 @@ Natural language must resolve to typed capabilities. Never generate and blindly 
 
 Potential interactions:
 
-- holding `SUPER` shows a shortcut overlay;
+- holding `PUNAR` shows a shortcut overlay;
 - `?` opens shortcut help;
 - command center exposes actions by search.
 
@@ -645,14 +651,14 @@ Support:
 Initial target shortcuts:
 
 ```text
-SUPER + H/J/K/L              Focus
-SUPER + SHIFT + H/J/K/L      Move window
-SUPER + R                    Resize mode
-SUPER + F                    Focus/fullscreen
-SUPER + L                    Layout chooser
-SUPER + TAB                  Workspace overview
-SUPER + 1..9                 Workspace/project shortcut
-SUPER + Space                Universal command center
+PUNAR + H/J/K/L              Focus
+PUNAR + SHIFT + H/J/K/L      Move window
+PUNAR + R                    Resize mode
+PUNAR + F                    Focus/fullscreen
+PUNAR + L                    Layout chooser
+PUNAR + TAB                  Workspace overview
+PUNAR + 1..9                 Workspace/project shortcut
+PUNAR + Space                Universal command center
 ```
 
 Exact bindings may evolve.
@@ -713,7 +719,7 @@ A project may include:
 
 ## 14.2 Overview
 
-`SUPER + TAB` should provide a graphical overview of project contexts.
+`PUNAR + TAB` should provide a graphical overview of project contexts.
 
 Keyboard navigation:
 
@@ -747,7 +753,7 @@ Requirements:
 Example:
 
 ```text
-SUPER + SHIFT + RIGHT
+PUNAR + SHIFT + RIGHT
 ```
 
 moves focused window to the right display.
@@ -1123,7 +1129,7 @@ Principle:
 Potential shortcut:
 
 ```text
-SUPER + A
+PUNAR + A
 ```
 
 Example:
@@ -2163,7 +2169,7 @@ Enterprise policy may control extensions, allowed web apps, browser contexts, ce
 Potential shortcut:
 
 ```text
-SUPER + S
+PUNAR + S
 ```
 
 System Control should expose:
@@ -2638,7 +2644,7 @@ Disable firewall outside supported UI. Punar detects and remediates.
 
 ## Step 12 — Multitasking
 
-Use `SUPER + TAB`. Switch between Atlas, Punar, and Browser. Layouts restore fluidly.
+Use `PUNAR + TAB`. Switch between Atlas, Punar, and Browser. Layouts restore fluidly.
 
 ## Step 13 — Browser/web app
 

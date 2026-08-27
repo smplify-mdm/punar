@@ -1,8 +1,8 @@
 // Punar surface-cost probe.
 //
 // This is a SECOND Quickshell configuration used only by the in-VM
-// performance exercise.  The shipping shell keeps its current eager
-// behaviour while this process starts empty, loads exactly one of the five
+// performance exercise. The shipping shell now uses the measured lazy
+// wrappers while this process starts empty, loads exactly one of the five
 // user-invoked candidate surfaces, opens it once, and reports four timestamps.
 // A fresh process per sample keeps type caches and allocator history from one
 // surface out of the next surface's number.
@@ -22,6 +22,7 @@ ShellRoot {
     property string selectedSurface: ""
     property double startedAtMs: 0
     property string problem: ""
+    readonly property DeferredSurfaceBase selected: surfaceLoader.item as DeferredSurfaceBase
 
     // The production shell has already instantiated these singletons through
     // its always-resident bar, wallpaper, approval and alert surfaces before
@@ -59,11 +60,9 @@ ShellRoot {
 
         root.selectedSurface = surface;
         root.problem = "";
-        // Loading the real surface also registers its own IpcHandler. Do not
-        // mutate Quickshell's IPC target registry while this handler is still
-        // serializing its reply: that made the first `open` call complete
-        // without a payload even though `state` had just answered. Queue the
-        // construction for the next event-loop turn instead.
+        // Return the IPC acknowledgement before doing synchronous QML
+        // construction. This keeps the benchmark control path independent of
+        // the object-tree work whose duration it is about to measure.
         Qt.callLater(root.loadSelectedSurface);
         return "loading";
     }
@@ -91,6 +90,19 @@ ShellRoot {
         if (root.selectedSurface === "")
             return "pending";
         return SurfaceTiming.constructionSample(root.selectedSurface);
+    }
+
+    function closeSelectedSurface(): string {
+        if (root.selected === null)
+            return "absent";
+        root.selected.dismiss();
+        return "closing";
+    }
+
+    function selectedSurfaceState(): string {
+        if (root.selected === null)
+            return "absent";
+        return root.selected.ipcState();
     }
 
     Component.onCompleted: {
@@ -139,6 +151,14 @@ ShellRoot {
 
         function timing(): string {
             return root.timing();
+        }
+
+        function close(): string {
+            return root.closeSelectedSurface();
+        }
+
+        function surfaceState(): string {
+            return root.selectedSurfaceState();
         }
     }
 }

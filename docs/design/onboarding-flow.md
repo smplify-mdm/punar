@@ -117,8 +117,8 @@ the daemon response and visible receipt until Enter Desktop.
 
 The first-run component is loaded only while the completion marker is absent
 and is destroyed before the desktop handoff. It adds no resident post-login
-surface, daemon, polling loop, network request, or periodic timer. Signal
-Horizon is already the desktop texture; onboarding adds a card, not a second full-screen
+surface, daemon, polling loop, network request, or periodic timer. Stillpoint
+is already the desktop texture; onboarding adds a card, not a second full-screen
 image decode.
 
 ## Definition of done

@@ -670,7 +670,7 @@ silently missing.
 
 1. **You can always see what this device recorded about your agent
    sessions** — `punarctl privacy ledger`, `punarctl agents access
-   <id>`, and the SUPER+A panel, all rendering the same record.
+   <id>`, and the PUNAR+A panel, all rendering the same record.
 2. **You can always delete it** — `punarctl privacy purge` or `Shift+Del`
    in the panel. Purge of your own sessions is **allowed
    unconditionally** for the owning user in M8: no policy, org or

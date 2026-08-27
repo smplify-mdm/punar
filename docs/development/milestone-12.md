@@ -99,7 +99,7 @@ container network derived from policy (§6); the connection view from
 rate-limited deny logs (§7); `network_destinations` and
 `production_access` becoming observed in the M8 ledger (§8); the relay
 abstraction with a simulated dual-hop model (§9); the D-006 privacy panel
-(`SUPER+P`) and `punarctl privacy connections` / `relay status` /
+(`PUNAR+P`) and `punarctl privacy connections` / `relay status` /
 `network policy|zones|explain` (§10); the proposed IPC/audit/data
 contracts (§11); `m12-check` + boot-test phase + `punar-m12.png` (§13);
 the stale-assertion sweep the honesty law requires (§14); the services
@@ -147,7 +147,7 @@ join); SNI, DNS or payload inspection **in any milestone, ever** (§7.5).
 | 18 | **`network_destinations` fills through a new root-only `ledger.network` method on the agentd socket** — not through the audit stream, because that would write destination hosts into a record the user cannot delete (Law 4). M8's "no ledger code changes" promise is **honestly corrected** here: one method, one evidence value, one `classify()` arm. No new concepts, no schema change, no new privacy surface. §8. |
 | 19 | **Level 3 records destinations *reached*; denials are Level 4.** A refused connection did not reach anything, so it is a `production_access` / `denied_access` event reference, not a resource. Destination identifiers are host names when zone data supplied one, else the IPv4 literal, else the **zone name** (the shipped schema forbids `:`, so IPv6 literals are unrepresentable — stated, not worked around). §8.2. |
 | 20 | **Unmanaged-first: punard's zero-connection row is an observation, not a claim.** In personal mode punard makes no connections and the panel proves it by enumerating punard's cgroup sockets and finding none — it does **not** claim punard is incapable of network access, because when enrolled it is the control-plane client. `punar-netd`'s own zero row *is* structural (decision 8), and the two are labeled differently. §10.3. |
-| 21 | **M12 ships the graphical privacy panel, revising M8 §13's deferral to M13.** M8 deferred it because M8 had no network data; M12 is the milestone that produces the data D-006 renders. M13 keeps demo polish. Bound to `SUPER+P` (free as of the M10 grammar; if a concurrent milestone has claimed it, implementation takes the next free chord and records it in `keyboard-grammar.md`). §10. |
+| 21 | **M12 ships the graphical privacy panel, revising M8 §13's deferral to M13.** M8 deferred it because M8 had no network data; M12 is the milestone that produces the data D-006 renders. M13 keeps demo polish. Bound to `PUNAR+P` (free as of the M10 grammar; if a concurrent milestone has claimed it, implementation takes the next free chord and records it in `keyboard-grammar.md`). §10. |
 | 22 | **`m12-check`**, root oneshot chained after `m11-check`, boot-test **phase 14**, `punar-m12.png`. The offline enforcement proof is a **three-way probe**: allow-path connect succeeds, deny-path connect fails fast, and the **identical** deny-path connect from **outside** the scope as the same user **succeeds** — which is the only assertion that proves the rule is per-cgroup rather than global. §13. |
 
 ---
@@ -886,7 +886,7 @@ the text label; the dashed stroke is verified by eye against
 
 ### 10.1 The privacy panel — Plate D-006 (decision 21)
 
-`SUPER+P` → `punar-shell` `PrivacyPanel` (IPC target `privacypanel`), the
+`PUNAR+P` → `punar-shell` `PrivacyPanel` (IPC target `privacypanel`), the
 full-surface D-006 layout:
 
 ```text
@@ -1412,7 +1412,7 @@ reason that has nothing to do with M11.
   `ARCHITECTURE_DECISIONS.md`** — the third/fourth daemon, the RSS row,
   and an ADR for the table-partition rule (decision 2) and the
   cgroup-vs-netns enforcement choice (decision 3 / §5.5).
-- **`docs/development/keyboard-grammar.md`** — `SUPER+P` (verified free
+- **`docs/development/keyboard-grammar.md`** — `PUNAR+P` (verified free
   against the M9/M10/M11 grammars as of this writing).
 
 **Rule for the implementation workflow:** a stale assertion is not

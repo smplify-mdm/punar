@@ -1066,7 +1066,7 @@ fn gate_b_holds_even_when_gate_a_is_bypassed() {
         answer["refusal_message"]
             .as_str()
             .unwrap()
-            .contains("no organization is enrolled"),
+            .contains("personal mode has no remote-query path"),
         "{answer}"
     );
 }

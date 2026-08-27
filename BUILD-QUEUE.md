@@ -20,20 +20,31 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
-| 3 | remain within idle budget | 1356 MB against a 1024 MB target **never once met** |
+| 3 | remain within idle budget | 1345 MB against a 1024 MB target; measured lazy-loading work awaits image CI |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
 would an engineer still choose Punar?"* The answer must be yes. That is why the
 unmanaged-first work in `HANDOFF.md` §3.3 is not cosmetic.
 
+The update product is now three-channel governed rolling: `stable` (default),
+`dev`, and opt-in `edge`. All three are complete signed A/B images with the
+same verification and rollback path; only promotion cadence and soak differ.
+Project toolchain freshness belongs to `punar-env`, never a partial host
+upgrade. The mechanism is still unbuilt, so this is a binding implementation
+rule rather than a shipped claim.
+
+The primary modifier's product name is the **Punar key** (`PUNAR + …` in
+written chords, `Punar` on caps). The raw Hyprland modifier name is internal
+configuration syntax and must not leak back into the shell or user guides.
+
 ---
 
 ## 1. Immediately
 
 ### 1.1 Start from the verified head
-Commit `2c47671` and all preceding handed-off work are on `origin/main`.
-[Run 33041260498](https://github.com/smplify-mdm/punar/actions/runs/33041260498)
+Commit `879486f` and all preceding handed-off work are on `origin/main`.
+[Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
 is green on all seven jobs, including x86_64/ARM64 code contracts, the image,
 minimal boot, and full graphical desktop. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
@@ -68,27 +79,22 @@ command centre 87 · System Control 116 · shortcuts 186. Full-path totals were
 
 **File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
-### 2.2 Measure construction cost, then lazy-load by the rule
-**Problem:** every surface is instantiated at shell startup. The shell holds
-**328 MB** — the largest single consumer on the machine. Nobody has measured
-what a surface costs to *build* versus to *hold*.
+### 2.2 Measured lazy-loading — implemented, image CI pending
+[Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
+fixed probe identity and measured the real `qs` executable on every sample.
+Median isolated cost (`resident delta KiB · construct ms · first map ms`):
 
-**Do, in this order:**
-1. Measure per-surface **construction** time and **resident** cost.
-2. Lazy-load every surface whose construction is imperceptible. If building the
-   AI panel on first `SUPER+A` costs 40 ms, there is no trade — the RAM comes
-   back and nothing is felt.
-3. Keep eager only what measurement proves expensive, **and put the number in
-   the commit message**. *"This surface stays resident because building it
-   costs 380 ms"* is defensible; *"surfaces are eager for speed"* is not.
+```
+commandcenter 106982 · 41 · 128    systemcontrol 123032 · 59 · 148
+shortcuts     117500 · 31 · 156    aipanel       111801 · 55 · 127
+overview      121299 · 35 · 106
+```
 
-**Instrument audit (2026-08-26):** run 33041260498 produced credible
-construction/map timings but invalid 601–639 KiB probe PSS values. Hyprland's
-`/bin/sh -c` wrapper contained the probe path in its command line and was
-mistaken for Quickshell. The in-flight correction makes the shell `exec qs`,
-requires a `qs`/`quickshell` process name and executable identity, records that
-identity, and fails any empty probe below a 16 MiB sanity floor. Do not
-make a lazy-loading decision from the old resident deltas; rerun this gate.
+Those isolated deltas share Qt/Quickshell code and **must not be summed**.
+Every construction median is 31–59 ms, so the working tree lazy-loads all
+five user-invoked surfaces and destroys each after its 300 ms close animation.
+Their `IpcHandler`s stay resident in `shell.qml`: `state()` answers `closed`
+and `residency()` answers `unloaded` without constructing the panel.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); notifications, toasts, OSD (must receive events
@@ -98,12 +104,12 @@ while closed); lock (must never hesitate).
 `state()` cannot answer `"closed"` without instantiating the thing it is
 reporting on — which defeats the entire change and breaks 13 assertions.
 
-### 2.3 `shortcuts` is the first construction-cost suspect
-The corrected instrument confirms it is slowest: **186 ms shell-to-map**, 70 ms
-behind System Control and 99 ms behind Command Centre. This is eager-render
-latency, not construction cost. `Shortcuts/` is 1,313 lines across 4 files and
-builds its table from `hyprctl binds -j` — 72 binds. Instrument first-open
-construction before changing it; do not infer a cause from the number alone.
+### 2.3 Preserve the shortcuts cache while unloading its window — implemented
+The shortcut visual tree constructs in **31 ms**; its larger 156 ms first-map
+path is compositor/render latency, not a reason to hold roughly 115 MiB. The
+`hyprctl binds -j` cache is now a tiny singleton, so the window unloads but the
+one-query-per-session contract survives every reopen. `configreloaded` and an
+explicit `shortcuts reload` remain the only invalidation paths.
 
 ---
 
@@ -120,7 +126,9 @@ spelling and translation happens at render):
   Compliance, Policies). On a never-enrolled device this is empty furniture
   implying you should fill it — but it is also where someone would *go* to
   enroll. **Resolve that tension deliberately; do not just delete it.**
-- The remaining bare `· no organization is enrolled` tails in `views.rs`.
+- The remaining bare `· no organization is enrolled` tails in `views.rs`
+  are converted to positive personal-device language in the working tree;
+  the next full run must prove them.
 - `ExplainCard.qml`.
 
 **Rule:** personal words never presuppose an authority. `compliant → matches`,

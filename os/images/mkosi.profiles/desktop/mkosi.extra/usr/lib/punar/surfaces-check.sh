@@ -105,10 +105,12 @@ note "# instance=${HIS} wayland=${WAYLAND_DISPLAY:-none} uid=$(id -u) user=$(id 
 # --- group 1: the shell answers at all ---------------------------------------
 ipc() { ${SHELL_CMD} ipc call "$@" 2>/dev/null; }
 sstate() { ipc "$1" state | tr -d '[:space:]"'; }
+sresidency() { ipc "$1" residency | tr -d '[:space:]"'; }
 
 shell_alive() { ${SHELL_CMD} ipc call bar state >/dev/null 2>&1; }
 t_open()   { [ "$(sstate "$1")" = "open" ]; }
 t_closed() { [ "$(sstate "$1")" = "closed" ]; }
+t_unloaded() { [ "$(sresidency "$1")" = "unloaded" ]; }
 
 # Whether the compositor has an actual mapped layer-shell surface with this
 # namespace. This is the EXACT signal that a surface really put a window on
@@ -201,6 +203,9 @@ fi
 for t in commandcenter systemcontrol notifications shortcuts aipanel overview; do
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
+    if [ "${t}" != "notifications" ]; then
+        check_eq "${t}.residency before open" "unloaded" "$(sresidency "${t}")"
+    fi
 
     # Capture the actual desktop BEFORE the trigger. The timing path waits one
     # second without polling so its measurement cannot be perturbed; taking
@@ -234,6 +239,9 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     else
         note "FAIL ${t}.toggle through Hyprland did not reach state=open (got '${state_after}')"
         FAILED=1
+    fi
+    if [ "${t}" != "notifications" ]; then
+        check_eq "${t}.residency while open" "resident" "$(sresidency "${t}")"
     fi
 
     # The surface must have a MAPPED WINDOW, not merely a flag set. state()
@@ -367,6 +375,14 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     else
         note "FAIL ${t} reports closed but punar-${t} is still mapped"
         FAILED=1
+    fi
+    if [ "${t}" != "notifications" ]; then
+        if wait_for 15 t_unloaded "${t}"; then
+            note "ok   ${t} released its object tree after close"
+        else
+            note "FAIL ${t} closed but remained $(sresidency "${t}")"
+            FAILED=1
+        fi
     fi
 done
 

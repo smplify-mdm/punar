@@ -952,7 +952,7 @@ probes, `punarctl debug rpc` gains a hidden `--socket agentd` flag;
 
 Not IPC — the AI-panel sibling of section 9's `status.json`:
 `punar-agentd` writes a world-readable summary so `punar-shell` renders
-the SUPER+A surface (Plate D-005) with an event-driven `FileView` — no
+the PUNAR+A surface (Plate D-005) with an event-driven `FileView` — no
 socket client in the shell, no polling.
 
 - Written at agentd startup and on every change (register, end, reap,

@@ -40,10 +40,9 @@ Singleton {
         root.constructedAtMs[surface] = 0;
     }
 
-    // Called by each lazy-load candidate at the END of its root
-    // Component.onCompleted handler. In the production eager shell there is
-    // no matching beginConstruction(), so this is an inert instrumentation
-    // hook rather than an always-running clock.
+    // Called by each lazy-loaded candidate at the END of its root
+    // Component.onCompleted handler. The production wrapper and the isolated
+    // probe both call beginConstruction() immediately before creating it.
     function constructed(surface: string): void {
         if (typeof root.constructionStartedAtMs[surface] !== "number")
             return;

@@ -137,20 +137,20 @@ Deliverables (spec section 76, Milestone 1):
   [`docs/design/DESIGN_LANGUAGE.md`](docs/design/DESIGN_LANGUAGE.md).
   **Runtime-proven** (`PUNAR_DESKTOP_OK` requires quickshell up).
 - [x] Command center — `CommandCenter/CommandCenter.qml` overlay on
-  SUPER+Space (Hyprland → quickshell IPC), implementing the
+  PUNAR+Space (Hyprland → quickshell IPC), implementing the
   `docs/design/mockups/command-approval.html` design. The shell that loads
   it runs in-VM; the overlay's interactive behavior and design fidelity
   remain human-verified (keyboard walkthrough below).
 - [x] Terminal — foot 1.27.0-2 + `os/modules/desktop/foot/foot.ini`
-  (SUPER+Return; scratchpad on SUPER+T). In-image; interactive use is part
+  (PUNAR+Return; scratchpad on PUNAR+T). In-image; interactive use is part
   of the human walkthrough.
 - [x] Browser — chromium 151.0.7922.169-1, upstream and unpatched
-  (spec section 48), launched via SUPER+B; deeper integration is M11.
+  (spec section 48), launched via PUNAR+B; deeper integration is M11.
 - [x] Git — git 2.55.0-1 in the `punar-desktop` package set.
 - [x] Editor — neovim 0.12.4-1 in the `punar-desktop` package set.
 - [x] Podman — podman 6.1.0-1 + crun, netavark, aardvark-dns; rootless
   setup (subuid/subgid, dev user) in the profile postinst.
-- [x] Keyboard navigation — SUPER-leader grammar in
+- [x] Keyboard navigation — PUNAR-leader grammar in
   `os/modules/desktop/hypr/punar-binds.conf`, documented in
   [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md);
   config verified against the pinned hyprland; the config demonstrably
@@ -205,23 +205,23 @@ summary`), and **runtime-proven** by run 32825539021:
 
 - [x] Tiling — four tiled algorithms (dwindle/scrolling/master/monocle)
   driven per preset.
-- [x] Stacking — tab/stack group grammar (SUPER+G / SUPER+SHIFT+G /
-  SUPER+[ ] / SUPER+CTRL+HJKL) in
+- [x] Stacking — tab/stack group grammar (PUNAR+G / PUNAR+SHIFT+G /
+  PUNAR+[ ] / PUNAR+CTRL+HJKL) in
   `os/modules/desktop/hypr/punar-binds.conf`; `stack` (monocle) preset.
-- [x] Floating — pin (SUPER+SHIFT+V), center (SUPER+C), float-aware
+- [x] Floating — pin (PUNAR+SHIFT+V), center (PUNAR+C), float-aware
   move/resize.
-- [x] Overview — SUPER+TAB project-workspace overview
+- [x] Overview — PUNAR+TAB project-workspace overview
   (`shell/punar-shell/Overview/Overview.qml`, Plate D-007), event-driven,
   toggled via Quickshell IPC; rendered in-VM (`punar-m2.png`). Design
   fidelity remains human-reviewed against the plate — CI proves behavior,
   not aesthetics.
 - [x] Layouts — five presets (`balanced`, `columns`, `rows`, `focus`,
   `stack`) via `/usr/lib/punar/punar-layout.sh`, cycled on
-  SUPER+comma/period, restored on session start; `grid` deliberately not
+  PUNAR+comma/period, restored on session start; `grid` deliberately not
   shipped (no native hyprland algorithm — milestone-2.md §1.3/§2).
 - [x] Scratchpads — assistant and notes specials alongside M1's terminal
-  (SUPER+T). The assistant pad shipped on SUPER+A in M2 and moved to
-  SUPER+SHIFT+A in M7, when the AI panel took spec §25's own chord
+  (PUNAR+T). The assistant pad shipped on PUNAR+A in M2 and moved to
+  PUNAR+SHIFT+A in M7, when the AI panel took spec §25's own chord
   (milestone-7.md §8).
 - [x] Named project workspaces — rename, `name:` navigation, names in bar
   and overview; persistence to `~/.local/state/punar/workspaces.json`
@@ -833,7 +833,7 @@ Deliverables (spec section 76, Milestone 7) — on disk **and** proven:
   `~punar/Downloads/foo-agent`, which prints what it is and blocks on a
   signal. **Runtime-proven in the VM** (m7-check group 7 — the fixture
   process found and rendered `UNKNOWN · SUSPECTED`).
-- [x] Local UI (spec 25, Plate D-005) — `SUPER + A` opens the AI panel
+- [x] Local UI (spec 25, Plate D-005) — `PUNAR + A` opens the AI panel
   (`shell/punar-shell/AiPanel/AiPanel.qml`), reading
   `/run/punar/agents.json` through the M6-era `Services/` FileView
   pattern (`Agents.qml` — event-driven, no polling). Unmanaged-first per
@@ -843,7 +843,7 @@ Deliverables (spec section 76, Milestone 7) — on disk **and** proven:
   only in M7 — enforcement is M9/M12). **Runtime-proven**: m7-check
   group 9 captured `punar-m7.png` with a managed row and an unknown row
   on one screen. The one chord reassignment — the assistant scratchpad
-  moves `SUPER+A` → `SUPER+SHIFT+A` — is recorded in
+  moves `PUNAR+A` → `PUNAR+SHIFT+A` — is recorded in
   [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md).
   What M7 shipped as *labeled absence* — the dashed
   `LEDGER · MILESTONE 8` placeholder and `agents.access` reserved as

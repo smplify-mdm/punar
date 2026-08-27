@@ -1,5 +1,5 @@
 pragma ComponentBehavior: Bound
-// SystemControl — the SUPER+S full-surface settings panel, implementing
+// SystemControl — the PUNAR+S full-surface settings panel, implementing
 // docs/design/mockups/system-control.html (Plate D-004, the acceptance
 // reference) and spec §63: one keyboard-first paper sheet for the whole
 // machine, with the §63 taxonomy verbatim in the rail (System, Security,
@@ -53,21 +53,19 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import "." as Local
 import "../Theme"
 import "../Services"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     property bool openOnReady: false
     property bool windowVisible: false
 
     // Re-emitted from ControlData so the shell root may wire the AI
-    // section straight to the SUPER+A panel (the AlertStack precedent).
+    // section straight to the PUNAR+A panel (the AlertStack precedent).
     signal aiPanelRequested
 
     // Everything this surface knows. It holds no colour and draws
@@ -564,42 +562,25 @@ Scope {
             root.show();
     }
 
-    // SUPER+S entry point. Hyprland bind:
-    //   bindd = $mod, S, System control, exec, qs -p /usr/share/punar/shell ipc call systemcontrol toggle
-    IpcHandler {
-        target: "systemcontrol"
+    function ipcState(): string {
+        return root.open ? "open" : "closed";
+    }
 
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.dismiss();
-        }
-        // Read-only, for CI probes (the `overview` / `aipanel` precedent).
-        function state(): string {
-            return root.open ? "open" : "closed";
-        }
-        function latency(): string {
-            return SurfaceTiming.sample("systemcontrol");
-        }
-        // Read-only semantic probes for the live in-VM unmanaged-first gate.
-        // They expose the same view model this window renders; they do not
-        // create a second label table or mutate selection.
-        function rail(): string {
-            return JSON.stringify(ctl.railItems);
-        }
-        function model(id: string): string {
-            return JSON.stringify(ctl.buildView(id));
-        }
+    function ipcRail(): string {
+        return JSON.stringify(ctl.railItems);
+    }
+
+    function ipcModel(id: string): string {
+        return JSON.stringify(ctl.buildView(id));
     }
 
     Timer {
         id: hideTimer
         interval: Theme.durStandard
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     // The one clock on this surface. It exists because a §48 grant has

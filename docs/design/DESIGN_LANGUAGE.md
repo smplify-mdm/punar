@@ -307,6 +307,9 @@ For this design language specifically, two consequences bind:
    ratio was computed, and is replaced by the measured floors in
    [`theme-system.md`](theme-system.md) §4.2–§4.4, which bind every palette
    rather than only this one).
+6. The primary modifier is the **Punar key**, rendered `Punar` on key caps and
+   `PUNAR` in written chords. Compositor vocabulary is implementation-only;
+   first-party surfaces define the hardware mapping as Windows / Meta.
 
 ## 10. Reference mockups
 
@@ -315,13 +318,13 @@ For this design language specifically, two consequences bind:
   surface; debut of the action color). Interactive; the register sections
   are the M1 acceptance reference.
 - [`mockups/command-approval.html`](mockups/command-approval.html) — command
-  center (SUPER+Space; intent resolves to visible typed capabilities; inline
+  center (PUNAR+Space; intent resolves to visible typed capabilities; inline
   policy explain) and the approval overlay (identity chain, live expiry
   countdown, contract block, action-color pair).
 - [`mockups/system-control.html`](mockups/system-control.html) — System
-  Control (SUPER+S; §63 taxonomy rail, managed controls that explain
+  Control (PUNAR+S; §63 taxonomy rail, managed controls that explain
   themselves per §73/§40, simulated/undrawn states labeled honestly).
-- [`mockups/ai-panel.html`](mockups/ai-panel.html) — AI panel (SUPER+A; §19
+- [`mockups/ai-panel.html`](mockups/ai-panel.html) — AI panel (PUNAR+A; §19
   registry, §20 authority vs §21 ledger on one screen, §25 unknown-AI view,
   Personal/Managed toggle demonstrating enrollment-as-additive-chrome).
 - [`mockups/privacy-panel.html`](mockups/privacy-panel.html) — Privacy panel
@@ -348,7 +351,7 @@ For this design language specifically, two consequences bind:
 - [`mockups/projects-dev.html`](mockups/projects-dev.html) — Projects and
   development (§14 workspace detail: windows, §17 environment lifecycle, AI
   sessions, §36 network table with named policy source, short-lived
-  credential countdown; SUPER+1..9 switcher strip; §14.4 activity dashed).
+  credential countdown; PUNAR+1..9 switcher strip; §14.4 activity dashed).
 - [`mockups/identity-elevation.html`](mockups/identity-elevation.html) —
   Identity and elevation (§48 reason-required JIT privilege with countdown
   chip and early revoke, §29 broker issuance/deny cards with never-logged
@@ -371,7 +374,7 @@ For this design language specifically, two consequences bind:
 - [`mockups/menubar.html`](mockups/menubar.html) — Menubar (§5 masthead grown
   into a bar: identity left, centre reserved for modality only, a fixed
   lifecycle-ordered status cluster that severity never reorders; the four-part
-  slot rule, §2 colour only for a decision or deviation, SUPER+B landing on the
+  slot rule, §2 colour only for a decision or deviation, PUNAR+B landing on the
   highest-severity slot; §8 personal calm as the default and org chrome as one
   appended slot, every element traced to its file and milestone with
   approvals, credentials and environments dashed).

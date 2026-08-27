@@ -211,7 +211,7 @@
       <button class="statebtn" id="sb-attention" data-state="attention" role="tab" aria-selected="false">03 · Attention</button>
       <button class="statebtn" id="sb-managed" data-state="managed" role="tab" aria-selected="false">04 · Managed</button>
       <button class="statebtn" id="sb-popover" data-state="popover" role="tab" aria-selected="false">05 · Popover</button>
-      <span class="demohint">B stands in for Super + B · ← → · ↵ · Esc</span>
+      <span class="demohint">B stands in for Punar + B · ← → · ↵ · Esc</span>
     </div>
 
     <div class="frame" id="frame" tabindex="0" aria-label="Interactive menubar demo">
@@ -339,13 +339,13 @@
     <h2>Sect III · Doorway register</h2>
     <p class="assertion">The keyboard is the primary path into the bar, because the bar's most urgent item must not also be its most expensive to reach.</p>
     <div class="reg"><span class="no">01</span><span class="what">The chord</span>
-      <p><span class="specref">SUPER + B</span> focuses the status cluster. Focus lands on the leftmost slot — unless something is warn or bad, in which case it lands on the highest-severity slot, because if the bar is shouting you almost certainly pressed the key because of it. <span class="specref">← →</span> (and <span class="specref">H L</span>) walk the visible slots without wrapping, so the ends are felt. <span class="specref">↵</span> opens the owning surface. <span class="specref">ESC</span> releases focus back to the window that had it. <span class="specref">spec §12.1 · §13.3</span></p></div>
+      <p><span class="specref">PUNAR + B</span> focuses the status cluster. Focus lands on the leftmost slot — unless something is warn or bad, in which case it lands on the highest-severity slot, because if the bar is shouting you almost certainly pressed the key because of it. <span class="specref">← →</span> (and <span class="specref">H L</span>) walk the visible slots without wrapping, so the ends are felt. <span class="specref">↵</span> opens the owning surface. <span class="specref">ESC</span> releases focus back to the window that had it. <span class="specref">spec §12.1 · §13.3</span></p></div>
     <div class="reg"><span class="no">02</span><span class="what">Why not a tray</span>
-      <p>On a full-screen tiling desktop a mouse-only tray costs a pointer trip of the entire display height into a 30px target, and it prices information by how alarming it is — exactly backwards. The chord costs the same two keystrokes whatever the bar is showing, composes with the rest of the SUPER family, and satisfies the requirement that every first-party workflow be keyboard-operable. The mouse still works: click focuses a slot and opens its popover, a second click or <span class="specref">↵</span> opens the surface. <span class="specref">spec §3.3 · §12.1 · §12.3</span></p></div>
+      <p>On a full-screen tiling desktop a mouse-only tray costs a pointer trip of the entire display height into a 30px target, and it prices information by how alarming it is — exactly backwards. The chord costs the same two keystrokes whatever the bar is showing, composes with the rest of the PUNAR family, and satisfies the requirement that every first-party workflow be keyboard-operable. The mouse still works: click focuses a slot and opens its popover, a second click or <span class="specref">↵</span> opens the surface. <span class="specref">spec §3.3 · §12.1 · §12.3</span></p></div>
     <div class="reg"><span class="no">03</span><span class="what">Every slot is a door</span>
-      <p>Agents → AI panel (<span class="specref">SUPER+A</span>). Approvals → the approval overlay. Credentials → the AI panel's authority view. Environments → the project workspace detail. Org and compliance → System Control. Workspace → the overview (<span class="specref">SUPER+TAB</span>). The destinations already own their own chords; the bar's model is the discovery path, not the only one. A slot with no destination is a slot that should not exist &mdash; which is the scope of the claim above the fold: it binds the cluster. Identity and the clock are not slots and open nothing, and that is why neither of them is ever allowed to carry status. <span class="specref">spec §12.2 · §63 · §14.2</span></p></div>
+      <p>Agents → AI panel (<span class="specref">PUNAR+A</span>). Approvals → the approval overlay. Credentials → the AI panel's authority view. Environments → the project workspace detail. Org and compliance → System Control. Workspace → the overview (<span class="specref">PUNAR+TAB</span>). The destinations already own their own chords; the bar's model is the discovery path, not the only one. A slot with no destination is a slot that should not exist &mdash; which is the scope of the claim above the fold: it binds the cluster. Identity and the clock are not slots and open nothing, and that is why neither of them is ever allowed to carry status. <span class="specref">spec §12.2 · §63 · §14.2</span></p></div>
     <div class="reg"><span class="no">04</span><span class="what">Popover anatomy</span>
-      <p>Focus and hover both open it; it is 268px wide, anchored to the slot's right edge, clamped inside the display, and never covers the clock. Five parts, in order: a tracked mono <strong>title</strong> with the count; a hairline; at most <strong>three rows</strong> of detail in registry vocabulary, with "and N more" beyond that — it never scrolls, because the bar summarises and the owning surface details; a <strong>source line</strong> naming the file and its freshness (<span class="specref">/run/punar/agents.json · scanned 10:00:02</span>) so the OS shows its evidence; and one <strong>action line</strong> — <span class="specref">↵ Open AI panel · Super + A</span>. No other buttons. Nothing in a popover is destructive, and nothing in a popover is the only way to reach something. <span class="specref">spec §40 · §73</span></p></div>
+      <p>Focus and hover both open it; it is 268px wide, anchored to the slot's right edge, clamped inside the display, and never covers the clock. Five parts, in order: a tracked mono <strong>title</strong> with the count; a hairline; at most <strong>three rows</strong> of detail in registry vocabulary, with "and N more" beyond that — it never scrolls, because the bar summarises and the owning surface details; a <strong>source line</strong> naming the file and its freshness (<span class="specref">/run/punar/agents.json · scanned 10:00:02</span>) so the OS shows its evidence; and one <strong>action line</strong> — <span class="specref">↵ Open AI panel · Punar + A</span>. No other buttons. Nothing in a popover is destructive, and nothing in a popover is the only way to reach something. <span class="specref">spec §40 · §73</span></p></div>
     <div class="reg"><span class="no">05</span><span class="what">Focus is not theft</span>
       <p>The bar takes keyboard focus only while the cluster is focused, and gives it back on <span class="specref">ESC</span> or on any click outside. At rest the layer surface requests no keyboard focus at all, so typing into an editor can never fall into the bar. The focus ring is a 2px ink ring drawn <em>inset</em> — a 30px bar has no room for a 2px offset — and carries no colour dependence. <span class="specref">design language §9.4 · spec §12</span></p></div>
   </section>
@@ -387,7 +387,7 @@
     <div class="reg"><span class="no">04</span><span class="what">New singletons</span>
       <p><span class="specref">Services/Approvals.qml</span> and <span class="specref">Services/Envs.qml</span>, both copies of the <span class="specref">Status.qml</span> shape: a <span class="specref">FileView</span> with <span class="specref">watchChanges: true</span>, <span class="specref">onFileChanged: reload()</span>, a defensive <span class="specref">JSON.parse</span> in a try, and a <span class="specref">resetEmpty()</span> fail-closed path so a missing file renders <em>no slot</em> rather than an error. Registered in <span class="specref">Services/qmldir</span>. <span class="specref">Agents</span> and <span class="specref">Status</span> need no changes at all. <span class="specref">ipc.md §9 · §11</span></p></div>
     <div class="reg"><span class="no">05</span><span class="what">Focus and popover</span>
-      <p>A Hyprland global bind <span class="specref">SUPER, B</span> dispatches to the shell, which calls <span class="specref">cluster.forceActiveFocus()</span> and raises <span class="specref">WlrLayershell.keyboardFocus</span> from <span class="specref">none</span> to <span class="specref">exclusive</span> for the duration — the bar must never hold keyboard focus at rest. The popover is a separate <span class="specref">PopupWindow</span> on the overlay layer, <span class="specref">visible: cluster.focusedSlot !== null</span>, positioned from the slot's mapped x. <span class="specref">spec §12.1</span></p></div>
+      <p>A Hyprland global bind <span class="specref">PUNAR, B</span> dispatches to the shell, which calls <span class="specref">cluster.forceActiveFocus()</span> and raises <span class="specref">WlrLayershell.keyboardFocus</span> from <span class="specref">none</span> to <span class="specref">exclusive</span> for the duration — the bar must never hold keyboard focus at rest. The popover is a separate <span class="specref">PopupWindow</span> on the overlay layer, <span class="specref">visible: cluster.focusedSlot !== null</span>, positioned from the slot's mapped x. <span class="specref">spec §12.1</span></p></div>
     <div class="reg"><span class="no">06</span><span class="what">States not drawn</span>
       <p>The modality chip in the centre zone is specified here and drawn in D-007, not repeated. Battery, network and audio slots are specified in words (Sect IV·09) and will be drawn when M11 wires them. Multi-monitor bar duplication and per-monitor workspace labels follow spec §15 and are not claimed by this plate. All dashed, none solid.</p></div>
   </section>
@@ -440,7 +440,7 @@
             '<span class="bad">agt_d11e</span> foo-agent · <span class="bad">unknown · suspected</span><br>' +
             '~/Downloads/foo-agent · seen 09:59:55',
       source: '/run/punar/agents.json · scanned 10:00:02<br>detected, not guaranteed — spec §23',
-      action: '↵ Open AI panel · Super + A'
+      action: '↵ Open AI panel · Punar + A'
     },
     env: {
       title: 'Environments · <b>1 running</b>',
@@ -452,7 +452,7 @@
       title: 'Credentials · <b>1 live grant</b>',
       rows: '<b>aws-dev</b> · project atlas · agt_4f21<br>expires 09:07 · <span class="warn">41m left</span>',
       source: 'proposed grants[] beside approvals.json · M9<br>ttl only — never the token',
-      action: '↵ Open authority view · Super + A'
+      action: '↵ Open authority view · Punar + A'
     },
     approvals: {
       title: 'Approvals · <b>1 pending</b>',
@@ -465,7 +465,7 @@
       title: 'Organization · <b>Acme Engineering</b>',
       rows: 'compliance · <span class="ok">compliant</span><br>last summary 09:02:00<br>enrolled 26 Aug 2026',
       source: '/run/punar/status.json · M5<br>absent file reads as personal — fail closed',
-      action: '↵ Open System Control · Super + S'
+      action: '↵ Open System Control · Punar + S'
     }
   };
   var TERM = {
@@ -480,11 +480,11 @@
               'agt_4f21 · claude-code · active · atlas   agt_d11e · unknown · suspected']
   };
   var STUB = {
-    agents: ['AI Panel', 'Super + A · registry, authority, ledger · Esc returns focus'],
+    agents: ['AI Panel', 'Punar + A · registry, authority, ledger · Esc returns focus'],
     env: ['Project workspace', 'Atlas · environments and windows · Esc returns focus'],
     creds: ['AI Panel · Authority', 'Short-lived grants and their TTLs · Esc returns focus'],
     approvals: ['Approval overlay', 'apr_123 · approve or deny · Esc returns focus'],
-    org: ['System Control', 'Super + S · compliance detail · Esc returns focus']
+    org: ['System Control', 'Punar + S · compliance detail · Esc returns focus']
   };
 
   var state = 'calm';

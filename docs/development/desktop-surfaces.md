@@ -32,7 +32,7 @@ qs -p /usr/share/punar/shell ipc call <target> <verb>
 
 Hyprland reaches the same targets through the `$…` variables in
 `/etc/xdg/hypr/hyprland.conf`, so a chord and a script call are the same
-call. The help surface (`SUPER + /`) is generated from
+call. The help surface (`PUNAR + /`) is generated from
 `hyprctl binds -j` — the live table, not a written copy — so **if this
 document and the machine disagree, the machine is right and the help
 surface will say so.**
@@ -62,7 +62,7 @@ versioned preference.
 
 **Try it:** log in. It is the first thing you see. Then run
 `qs -p /usr/share/punar/shell ipc call wallpaper set earthrise`, or press
-`SUPER+Space` and type `wallpaper`. The source, creator, licence,
+`PUNAR+Space` and type `wallpaper`. The source, creator, licence,
 transformation, and distributed hash of every raster asset ship in
 `Wallpaper/SOURCES.md`.
 
@@ -73,7 +73,7 @@ transformation, and distributed hash of every raster asset ship in
 | | |
 |---|---|
 | **Plate** | D-016 · `mockups/menubar.html` (+ D-012 for the elevated chip) |
-| **Chord** | `SUPER + SHIFT + B` focuses the status cluster |
+| **Chord** | `PUNAR + SHIFT + B` focuses the status cluster |
 | **IPC** | `bar` — `focus` / `release` / `state` |
 | **Files** | `Bar/Bar.qml`, `Bar/StatusCluster.qml`, `Bar/StatusSlot.qml`, `Bar/SlotPopover.qml` |
 | **Status** | **REAL**, with two slots honestly absent |
@@ -101,25 +101,25 @@ would require running `podman` on a timer, which is exactly the polling
 loop spec §6.3 prohibits.
 
 **Deviation, stated:** D-016 puts ORG in the cluster with System Control
-as its destination. System Control now ships (`SUPER + S`), so the
+as its destination. System Control now ships (`PUNAR + S`), so the
 original reason for keeping ORG an annotation has expired — but design
 language §8 says enrollment is additive chrome that "must never
 restructure a screen", and promoting ORG to a focusable slot restructures
 the right-hand zone the moment a device enrols. It stays an annotation;
 the door is reached by its own chord.
 
-**Try it:** `SUPER + SHIFT + B` on a calm machine answers `empty` and does
+**Try it:** `PUNAR + SHIFT + B` on a calm machine answers `empty` and does
 not take the keyboard. Write a fixture into `/run/punar/agents.json` and
 it lands on the highest-severity slot.
 
 ---
 
-### 2.3 Command center — SUPER + Space
+### 2.3 Command center — PUNAR + Space
 
 | | |
 |---|---|
 | **Plate** | D-003 Sect I · `mockups/command-approval.html` |
-| **Chord** | `SUPER + Space` |
+| **Chord** | `PUNAR + Space` |
 | **IPC** | `commandcenter` — `toggle` / `open` / `close` / `state` / `query` / `run` / `explain` |
 | **Files** | `CommandCenter/CommandCenter.qml`, `CommandCenter/Actions.qml`, `CommandCenter/ExplainCard.qml` |
 | **Status** | **REAL** |
@@ -131,7 +131,7 @@ execution mechanism and no "run this string" escape hatch:
 |---|---|---|
 | `app` | `DesktopEntry.execute()` | `Launch(chromium)` |
 | `project` | `workspace <id>` + `renameworkspace <id> <name>` | `OpenProject(atlas) · Workspace 2` |
-| `surface` | `qs ipc call <target> open` | `Surface(systemcontrol) · Super S` |
+| `surface` | `qs ipc call <target> open` | `Surface(systemcontrol) · Punar S` |
 | `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |
 | `explain` | `punarctl --json policy explain <path>` | `PolicyExplain(security.firewall)` |
 
@@ -145,30 +145,30 @@ A surface whose IPC target is not registered in *this* shell renders
 proof rather than a claim: before this pass most targets were dashed;
 with the shell composed they resolve and open.
 
-**Try it:** `SUPER + Space`, type `browser` → Enter. Type `Open Atlas` →
+**Try it:** `PUNAR + Space`, type `browser` → Enter. Type `Open Atlas` →
 Enter, then `hyprctl -j workspaces` and look for the name. Type
 `why is the firewall on?` → Enter for the §40 explain card.
 
 ---
 
-### 2.4 Project overview — SUPER + Tab
+### 2.4 Project overview — PUNAR + Tab
 
 | | |
 |---|---|
 | **Plate** | D-007 · `mockups/desktop-multitasking.html` |
-| **Chord** | `SUPER + Tab` |
+| **Chord** | `PUNAR + Tab` |
 | **IPC** | `overview` — `toggle` / `open` / `close` / `state` |
 | **Data source** | live Hyprland workspaces (socket2) + `~/.local/state/punar/workspaces.json` |
 | **Status** | **REAL** |
 
 ---
 
-### 2.5 System Control — SUPER + S
+### 2.5 System Control — PUNAR + S
 
 | | |
 |---|---|
 | **Plate** | D-004 · `mockups/system-control.html` · spec §63 |
-| **Chord** | `SUPER + S` |
+| **Chord** | `PUNAR + S` |
 | **IPC** | `systemcontrol` — `toggle` / `open` / `close` / `state` |
 | **Files** | `SystemControl/SystemControl.qml` (all the colour), `SystemControl/ControlData.qml` (all the knowledge) |
 | **Status** | **REAL for 15 views, honestly unavailable for 8** |
@@ -209,7 +209,7 @@ verbatim with its exit code:
 - `[S]` `punarctl capabilities set <path> <state>` — offered **only** while a live §48 grant covers the capability, because that is the only case a non-root session may write one. No grant → `[E]` is offered instead of a switch that would be refused.
 - `[R]` `punarctl privilege revoke <grant_id>`.
 
-**Try it:** `SUPER + S`, `/` then `firewall`, then `E` to request an
+**Try it:** `PUNAR + S`, `/` then `firewall`, then `E` to request an
 exception with a reason — and watch the approval gate open itself.
 
 ---
@@ -219,7 +219,7 @@ exception with a reason — and watch the approval gate open itself.
 | | |
 |---|---|
 | **Plate** | D-009 · `mockups/notifications-osd.html` |
-| **Chords** | `SUPER + SHIFT + N` (centre) · `XF86Audio{Raise,Lower}Volume`, `XF86AudioMute` (OSD) |
+| **Chords** | `PUNAR + SHIFT + N` (centre) · `XF86Audio{Raise,Lower}Volume`, `XF86AudioMute` (OSD) |
 | **IPC** | `notifications` · `toasts` · `osd` |
 | **Files** | `Services/Notifications.qml` (the daemon), `Notifications/{ToastStack,NotificationCenter,Osd}.qml` |
 | **Status** | **REAL** — Punar had no notification daemon at all before this |
@@ -273,7 +273,7 @@ ships — which is also why **no brightness key is bound** (spec §1.22).
 
 **Try it:**
 ```sh
-notify-send "Deploy finished" "atlas · 4m 12s"      # a toast, then SUPER+SHIFT+N
+notify-send "Deploy finished" "atlas · 4m 12s"      # a toast, then PUNAR+SHIFT+N
 qs -p /usr/share/punar/shell ipc call notifications dnd toggle
 qs -p /usr/share/punar/shell ipc call notifications owner   # punar | foreign | unverified
 qs -p /usr/share/punar/shell ipc call osd brightness 60      # the dashed row
@@ -301,27 +301,27 @@ it *asks*, and the shell root hands the detection to the AI panel.
 
 ---
 
-### 2.8 AI panel — SUPER + A
+### 2.8 AI panel — PUNAR + A
 
 | | |
 |---|---|
 | **Plate** | D-005 · `mockups/ai-panel.html` · spec §25 |
-| **Chord** | `SUPER + A` |
+| **Chord** | `PUNAR + A` |
 | **IPC** | `aipanel` — `toggle` / `open` / `close` / `state` |
 | **Data source** | `/run/punar/agents.json` |
 | **Status** | **REAL**, with the §21 ledger's unobserved boundary dashed |
 
 ---
 
-### 2.9 Shortcut help — SUPER + /
+### 2.9 Shortcut help — PUNAR + /
 
 | | |
 |---|---|
 | **Plate** | D-017 |
-| **Chord** | `SUPER + /` |
+| **Chord** | `PUNAR + /` |
 | **IPC** | `shortcuts` — `toggle` / `open` / `close` / `state` / `reload` / `rows` / `undescribed` |
 | **Data source** | `hyprctl binds -j` — **and nothing else** |
-| **Status** | **REAL** (the SUPER-hold overlay is **NOT shipped** — see below) |
+| **Status** | **REAL** (the PUNAR-hold overlay is **NOT shipped** — see below) |
 
 Generated from the live bind table, queried once per session on first
 open, cached, and invalidated only by Hyprland's `configreloaded` on
@@ -339,7 +339,7 @@ calls. Two entries were added so no row lands in the `OTHER` bucket:
 media-key binds. `OTHER` is the loud failure for a row nobody classified,
 and it should stay empty precisely so it means something when it is not.
 
-**The SUPER-hold overlay of D-017 is not shipped**, and the reason is
+**The PUNAR-hold overlay of D-017 is not shipped**, and the reason is
 written into the file header after reading the Hyprland v0.56.2 tag:
 `bindr` on `SUPER_L` is real but `shadowKeybinds()` swallows the release
 after a chord (D-017's own stranded-overlay failure); `bindo` long-press
@@ -350,12 +350,12 @@ a compositor task with the recipe recorded.
 
 ---
 
-### 2.10 Lock — SUPER + Escape
+### 2.10 Lock — PUNAR + Escape
 
 | | |
 |---|---|
 | **Plates** | D-002 (grammar) · D-012 Sect III (surface) |
-| **Chord** | `SUPER + Escape` |
+| **Chord** | `PUNAR + Escape` |
 | **IPC** | `lock` — `lock` / `state` — and **deliberately no `unlock`** |
 | **Files** | `Lock/Lock.qml`, `Lock/LockSurface.qml`, `/etc/pam.d/punar-lock` |
 | **Status** | **REAL — it actually locks** |
@@ -376,14 +376,14 @@ and never compares a string. The stack is `/etc/pam.d/punar-lock`
 **There is no IPC `unlock` verb**, and that is the point: an unlock verb
 would make the session socket a complete bypass of the passphrase.
 
-**Chord deviation, stated:** every desktop uses `SUPER + L`, and all three
+**Chord deviation, stated:** every desktop uses `PUNAR + L`, and all three
 `L` chords are already load-bearing in the §13.3 directional grammar
 (focus-right, move-right, move-into-group-right). Taking a working
 directional key from every window operation to win a familiar chord is the
-worse trade. `SUPER + Escape` is free and carries its own meaning here:
+worse trade. `PUNAR + Escape` is free and carries its own meaning here:
 Escape is the key that leaves.
 
-**Try it:** `SUPER + Escape`, then type the dev password (`punar`). A
+**Try it:** `PUNAR + Escape`, then type the dev password (`punar`). A
 wrong passphrase leaves it locked and the field clears.
 
 ---
@@ -418,7 +418,7 @@ qs -p /usr/share/punar/shell ipc call theme reset
 
 ---
 
-### 2.12 Browser and link handling — SUPER + B, and every other path
+### 2.12 Browser and link handling — PUNAR + B, and every other path
 
 Chromium 151 from the pinned snapshot. **Not a fork, not an engine** —
 spec §30.1's "upstream-current Chromium plus a small, auditable Punar
@@ -427,13 +427,13 @@ two config files and a package.
 
 | Thing | Where | Note |
 |---|---|---|
-| Chord | `SUPER + B` → `$browser` | The bind carries **no flags** |
+| Chord | `PUNAR + B` → `$browser` | The bind carries **no flags** |
 | Launch flags | `/etc/chromium-flags.conf` | Read on **every** launch path |
 | Default handler | `/etc/xdg/mimeapps.list` | `http`, `https`, `text/html` |
 | `xdg-open` | `xdg-utils` package | Newly present |
 
 **Why the flags moved off the keybind.** `--ozone-platform-hint=auto`
-used to live on the `SUPER + B` line. That gave exactly *one* launch path
+used to live on the `PUNAR + B` line. That gave exactly *one* launch path
 a native Wayland browser: the chord. The application launcher, `xdg-open`,
 and any future web-app launcher all go through the packaged
 `chromium.desktop`, which never saw the flag and got **XWayland** — blurry
@@ -559,11 +559,11 @@ help surface can render it with no second source of truth.
 
 | Chord | Description | Runs |
 |---|---|---|
-| `SUPER + S` | System control | `$shell ipc call systemcontrol toggle` |
-| `SUPER + SHIFT + N` | Notification centre | `$shell ipc call notifications toggle` |
-| `SUPER + /` | Shortcut help | `$shell ipc call shortcuts toggle` |
-| `SUPER + SHIFT + B` | Focus status cluster | `$shell ipc call bar focus` |
-| `SUPER + Escape` | Lock session | `$lock` |
+| `PUNAR + S` | System control | `$shell ipc call systemcontrol toggle` |
+| `PUNAR + SHIFT + N` | Notification centre | `$shell ipc call notifications toggle` |
+| `PUNAR + /` | Shortcut help | `$shell ipc call shortcuts toggle` |
+| `PUNAR + SHIFT + B` | Focus status cluster | `$shell ipc call bar focus` |
+| `PUNAR + Escape` | Lock session | `$lock` |
 | `XF86AudioRaiseVolume` | Volume up | `wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+` |
 | `XF86AudioLowerVolume` | Volume down | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-` |
 | `XF86AudioMute` | Toggle mute | `wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle` |
@@ -574,12 +574,12 @@ fire *both*, so this is never a free choice):
 
 | Plate wanted | Already bound to | Shipped as |
 |---|---|---|
-| `SUPER + N` (notification centre) | notes scratchpad, M2 | `SUPER + SHIFT + N` |
-| `SUPER + B` (status cluster) | browser, M1 | `SUPER + SHIFT + B` |
-| `SUPER + L` (lock) | focus-right, M1 | `SUPER + Escape` |
+| `PUNAR + N` (notification centre) | notes scratchpad, M2 | `PUNAR + SHIFT + N` |
+| `PUNAR + B` (status cluster) | browser, M1 | `PUNAR + SHIFT + B` |
+| `PUNAR + L` (lock) | focus-right, M1 | `PUNAR + Escape` |
 
-The M7 precedent (`SUPER + A` taken back from the assistant scratchpad,
-which moved to `SUPER + SHIFT + A`) is the way to give a plate its own
+The M7 precedent (`PUNAR + A` taken back from the assistant scratchpad,
+which moved to `PUNAR + SHIFT + A`) is the way to give a plate its own
 chord back; each is a one-line reassignment for whoever owns that call,
 not a side effect of adding a surface. Whatever this file carries is what
 the help surface prints, so a deviation can never quietly become a lie.
@@ -635,34 +635,28 @@ idle-RAM number.** `PUNAR_RAM_MEAN_MB` is `MemTotal - MemAvailable` across
 the whole VM, so every megabyte the shell gained shows up there. Gates:
 **warn above 1024 MB, fail above 1536 MB.**
 
-Expectation, built up from what each surface actually holds:
+Run 33044217553 measured each user-invoked candidate in a fresh Quickshell
+process and verified every sample as `comm=qs exe=/usr/bin/quickshell`:
 
-| Addition | Expected resident cost |
-|---|---|
-| Wallpaper texture | **the dominant term** — only the active image is decoded; a covering 16:10 RGBA8888 texture is ~8.8 MiB at 1920×1080 and ~35.2 MiB at 3840×2160, plus one full-screen layer surface |
-| System Control | ~4–6 MB; no detail view is instantiated until selected, and the layer surface exists only while open |
-| Notifications | low single-digit MB — D-Bus service registration plus the retained records; no image decode path, no cache, no history file |
-| Lock | ~0 until locked (it holds a `WlSessionLock` with **zero surfaces** while unlocked) |
-| Shortcut help | one `Item` + one idle `Process` until first open; ~55 cached row objects after |
-| Bar cluster | no watch, no timer and no window at rest |
-| Themes | one parsed palette; the catalog is built on demand |
+| Candidate | Median retained delta | Construction | First map |
+|---|---:|---:|---:|
+| Command center | 106982 KiB | 41 ms | 128 ms |
+| System Control | 123032 KiB | 59 ms | 148 ms |
+| Shortcut help | 117500 KiB | 31 ms | 156 ms |
+| AI panel | 111801 KiB | 55 ms | 127 ms |
+| Overview | 121299 KiB | 35 ms | 106 ms |
 
-**We are not quoting a measured figure, because we do not have an honest
-one.** The only numbers available locally come from an emulated
-`linux/amd64` container under llvmpipe, where a bare `ShellRoot` alone
-measures 95 MB and an *empty* full-screen background layer window measures
-327 MB — a software-rasteriser artefact, not a VM prediction. Quoting it
-would be worse than quoting nothing.
+These are isolated deltas over a shared baseline and are **not additive**.
+Every panel is therefore lazy-loaded and destroyed after its close animation;
+the 31–59 ms construction costs are below the point where permanent residency
+is defensible. Their IPC proxies remain in the shell, and CI asserts
+`unloaded → resident → unloaded`. Shortcut rows stay in a tiny singleton so
+the visual tree can disappear without repeating `hyprctl binds -j`.
 
-**How the next CI run measures it, with no new instrumentation:** the
-desktop boot test already runs `punar-idle-ram.sh` — ten minutes of
-stabilisation with no input, then thirty samples at 10 s — and prints
-`PUNAR_RAM_MEAN_MB` / `PUNAR_RAM_MAX_MB`, which `tools/boot-test.sh` gates.
-The previous run's mean is the baseline; **the delta this pass costs is
-exactly the difference, and it either fits under 1024 MB or it does not.**
-There is no third answer and no place to hide: the wallpaper is a
-full-screen texture that exists from login, so if anything moves the
-number, that is what moved it.
+The post-lazy-load whole-system idle result still needs the next graphical
+image run. The gate remains unchanged: `punar-idle-ram.sh` stabilises for ten
+minutes, takes thirty samples at 10 s, and reports `PUNAR_RAM_MEAN_MB` /
+`PUNAR_RAM_MAX_MB`; the current green-image baseline is 1345/1348 MB.
 
 **Idle CPU is unchanged (spec §6.3).** No surface polls. The complete list
 of timers on a logged-in, idle, personal machine is: **one** `SystemClock`

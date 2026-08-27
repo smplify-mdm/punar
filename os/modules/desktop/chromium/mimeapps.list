@@ -4,7 +4,7 @@
 # https://...`, which is how one application asks the system to open a link:
 # the terminal's URL activation, a notification action, a chat client, the
 # command center's "open" verb. Chromium shipped in the image and was bound to
-# SUPER+B, so a human could reach a browser — but the SYSTEM could not, and
+# PUNAR+B, so a human could reach a browser — but the SYSTEM could not, and
 # every path that was not the keybind failed silently.
 #
 # RESOLUTION ORDER (XDG mime-apps spec, and the reason this path is the right

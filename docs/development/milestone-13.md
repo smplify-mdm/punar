@@ -100,7 +100,7 @@ carrying for eight milestones.
 | Definition-of-Done audit | The §3 traceability matrix, all 26 items, one owner and one named piece of evidence each, refreshed at implementation time from the run that proves it | — |
 | Deterministic demo | `punar-demo-check.sh` (14 beats, in-VM, 14 screenshots) **and** the human runbook (§6 of this document → extracted to `docs/development/demo-runbook.md` by the implementation) | A recorded video; a presenter deck |
 | First boot | A seven-stage OOBE layer in `punar-shell` (Plate D-008), typed side effects only, no shell commands, no terminal (§5) | Account creation, real Wi-Fi credentials, locale generation, the D-002 greeter — §5.4 |
-| Graphical system control | Plate D-004 navigator chrome + the **SECURITY** and **ORGANIZATION** sections, read-only, `SUPER+S` (§7.2) | The SYSTEM / DEVELOPER sections' setters — Phase 2 |
+| Graphical system control | Plate D-004 navigator chrome + the **SECURITY** and **ORGANIZATION** sections, read-only, `PUNAR+S` (§7.2) | The SYSTEM / DEVELOPER sections' setters — Phase 2 |
 | Keyboard UX | The bind-table assertion, the shortcut overlay (spec 12.3, ranked last), the executed human walkthrough | Remapping UI; per-app bindings |
 | AI panel | Nothing new — M7/M8/M10 own it; M13 reviews fidelity against D-005 and fixes only what the review finds | A second AI surface |
 | Privacy panel | Nothing new — M12 owns it (its decision 21); M13 reviews fidelity against D-006 | — |
@@ -126,7 +126,7 @@ carrying for eight milestones.
 | 9 | **The btrfs change lands first in the milestone order**, because it is the one change that can break every existing check, and the fallback is written before it starts: if it destabilizes the image, M13 ships the honest `update status` and item 25 is recorded **NOT MET** — never quietly relabeled (§8.4). |
 | 10 | **M13 does not build a notification daemon**, and re-points M10's and M11's deferrals accordingly. `org.freedesktop.Notifications` is an API with a queue, actions and a security model; shipping one as final-milestone polish is how you ship a bad one. M13 ships one denial toast for beat 8 (§6.2). |
 | 11 | **The D-013 web-app titlebar masthead is refused permanently**, not deferred. M11's own analysis says it requires patching Chromium or painting over its window; spec 1.24 forbids the first and §3.4 of M11 rejects the second. It leaves the repo as *not planned*, not as *M13 polish* (§6.2). |
-| 12 | **`SUPER+S` is claimed for System Control** (spec 63's own suggested chord; verified free against the M1/M2/M7/M9/M10/M11/M12 grammars as of this writing). **`SUPER+N` is not claimed** — it is M2's notes scratchpad, and M10 §17's `Super+N` notification-centre note is a collision that M13 records rather than resolves, because M13 declines the notification centre (§10.5). |
+| 12 | **`PUNAR+S` is claimed for System Control** (spec 63's own suggested chord; verified free against the M1/M2/M7/M9/M10/M11/M12 grammars as of this writing). **`PUNAR+N` is not claimed** — it is M2's notes scratchpad, and M10 §17's `Punar+N` notification-centre note is a collision that M13 records rather than resolves, because M13 declines the notification centre (§10.5). |
 | 13 | **System Control is read-only in M13.** Every row prints the exact `punarctl` verb that changes it (the D-006/D-014 precedent). A second write path to state that already has a typed one is the duplication spec 10 exists to prevent, and a read-only navigator is what beats 2 and 11 actually need. |
 | 14 | **The RAM diet begins with a measurement, not a cut.** `punar-ram-breakdown.txt` — per-cgroup, per-process PSS at stabilized idle — is produced and published *before* any package or service is touched, and every cut is landed with a before/after by the canonical method (§7.3). |
 | 15 | **Idle CPU and idle disk-write gates are added.** Definition-of-Done item 3 says *"idle resource budget"*, and spec 6 defines four of them. Two have never been measured, by anyone, in any run (§7.4). |
@@ -165,10 +165,10 @@ memory.
 | 1 | boot Punar | M0 | `tools/boot-test.sh` phase 1, `PUNAR_BOOT_OK` on the serial console — run 32788238871 | **PROVEN IN CI** | Nothing. Bare-metal boot is Phase 2 (spec 66). |
 | 2 | reach graphical keyboard-first desktop | M1 | `PUNAR_DESKTOP_OK` (greetd → Hyprland → quickshell chain, 18 s) + a real rendered frame in `punar-desktop-screenshot` — run 32804034681 | **PROVEN IN CI** † | The adjective *keyboard-first* is carried entirely by item 5, which is not met. This row proves *graphical*, not *keyboard-first*. |
 | 3 | remain within defined idle resource budget | M1 + **M13** | `idle-ram.sh` → `PUNAR_RAM_MEAN_MB` / `PUNAR_SERVICES_RSS_MB`, gated by `tests/performance/check-budgets.sh` — mean 1156–1175 MB across runs 32804034681…32868450695; services 4 MB | **NOT MET** | (a) Idle RAM is **131–151 MB over the 1.0 GB target** in every run ever taken (under the 1.5 GB ceiling, recorded as a standing warning). (b) **Idle CPU has never been measured** — spec 6.3 defines a budget and no gate exists. (c) **Idle disk-write throughput has never been measured** — spec 6.4, same. (d) Every number is from an emulated x86_64 VM on an arm64 host and is labeled indicative, not a hardware claim. §7.3, §7.4. |
-| 4 | use universal command center | M1 + **M13** | `CommandCenter.qml` ships and loads (it is inside `PUNAR_DESKTOP_OK`); `SUPER+Space` bind is in `punar-binds.conf` and parses | **NOT MET** | **No check script has ever opened the command center** (`grep commandcenter` across `m2..m9-check.sh` returns nothing; only `aipanel` and `approval` are opened over `qs ipc`). Its action table is still M1's two static entries plus `DesktopEntries`; M2 §2 listed rename-workspace / go-to-workspace / layout-preset actions as in-scope and **they did not ship** (M2's own §8 verification table never claims they did). Spec 75 step 3 — type `Open Atlas` — has **no owner and no implementation**. §6.2 row 1. |
+| 4 | use universal command center | M1 + **M13** | `CommandCenter.qml` ships and loads (it is inside `PUNAR_DESKTOP_OK`); `PUNAR+Space` bind is in `punar-binds.conf` and parses | **NOT MET** | **No check script has ever opened the command center** (`grep commandcenter` across `m2..m9-check.sh` returns nothing; only `aipanel` and `approval` are opened over `qs ipc`). Its action table is still M1's two static entries plus `DesktopEntries`; M2 §2 listed rename-workspace / go-to-workspace / layout-preset actions as in-scope and **they did not ship** (M2's own §8 verification table never claims they did). Spec 75 step 3 — type `Open Atlas` — has **no owner and no implementation**. §6.2 row 1. |
 | 5 | manage windows without mouse | M1/M2 | `m2-check.sh` drives every window operation via `hyprctl dispatch` and asserts the resulting state — `PUNAR_M2_OK`, run 32825539021; the keyboard grammar parses under `Hyprland --verify-config` on the pinned 0.56.2-1 | **HUMAN-VERIFIED ONLY — never executed** | **No keystroke has ever been injected anywhere in this project.** `hyprctl dispatch` proves the dispatcher; it does not traverse the bind table. The 23-step walkthrough in `keyboard-grammar.md` "must be executed by a human against a booted desktop image" and has been the single open M1 acceptance item since 2026-08-25. §3.4, §7.5. |
 | 6 | switch project workspaces | M2 | `m2-check.sh` rows 1–11: rename → `workspaces.json` schema-valid → shell restart → name restored — `PUNAR_M2_OK`, run 32825539021 | **PROVEN IN CI** | Nothing for this item. The *command-center* route to it is item 4. |
-| 7 | launch browser/web app | M1 (browser) / **M11** (web app) | Browser: `chromium 151.0.7922.169-1` in the image, `SUPER+B` bind parses. Web app: `m11-check.sh` groups 1–8 (planned) | **PLANNED** | **Chromium has never been launched in any check script** (`grep chromium` across all `m*-check.sh`: no hits) — the browser half rests on human walkthrough step 12, unexecuted. The web-app half is M11, whose plan exists and whose code does not. |
+| 7 | launch browser/web app | M1 (browser) / **M11** (web app) | Browser: `chromium 151.0.7922.169-1` in the image, `PUNAR+B` bind parses. Web app: `m11-check.sh` groups 1–8 (planned) | **PLANNED** | **Chromium has never been launched in any check script** (`grep chromium` across all `m*-check.sh`: no hits) — the browser half rests on human walkthrough step 12, unexecuted. The web-app half is M11, whose plan exists and whose code does not. |
 | 8 | enroll into mocked Smplify | M5 | `m5-check.sh`, 63 assertions — enroll → managed → offline → unenroll — `PUNAR_M5_OK`, run 32849448721 | **PROVEN IN CI** | Nothing. Real Smplify is Phase 2 by spec 50. |
 | 9 | receive organization policy | M5 | `m5-check.sh`: `policy.d` envelopes written, strict-parsed, merged, reconciled; `punarctl policy explain` names the org source — run 32849448721 | **PROVEN IN CI** | Nothing. |
 | 10 | report compliance | M5 | `m5-check.sh`: compliance report asserted **on the mock's received side** (`received-compliance.jsonl`), category states only — run 32849448721 | **PROVEN IN CI** | Nothing. This is the strongest privacy evidence in the repository (§9, Test E). |
@@ -181,7 +181,7 @@ memory.
 | 17 | issue short-lived mock Dev credential | M9 | `m9-check.sh` groups 6–9, including the redaction sweep over the export tar, audit trail, ledger files and every Punar process's `/proc/*/environ` and `/proc/*/cmdline` | **IMPLEMENTED — NOT YET RUN** | Same run gap. The redaction sweep is the milestone's headline assertion and has never executed. |
 | 18 | deny Prod credential | M9 | `m9-check.sh` group 6 (`aws_prod` refusal + section-73 explanation + audit event) | **IMPLEMENTED — NOT YET RUN** | Same run gap. |
 | 19 | enforce project network rule | M12 | `m12-check.sh` groups 2–6 (planned): `nft` table partition, `socket cgroupv2` match, allow/deny probes from inside a live agent scope | **PLANNED** | `crates/punar-netd` is a lib stub. No `punar-net` nftables table has ever been installed. M6's declared network block is **still declared-not-enforced**, and M12's own §16 says the `socket cgroupv2` mechanism is asserted from documentation and not yet exercised on the pinned image. |
-| 20 | display local network activity | M12 | `m12-check.sh` groups 11–13 + the D-006 panel on `SUPER+P`, `punar-m12.png` (planned) | **PLANNED** | Same. M8's ledger row still reads `NOT YET OBSERVED · MILESTONE 12` on every surface. |
+| 20 | display local network activity | M12 | `m12-check.sh` groups 11–13 + the D-006 panel on `PUNAR+P`, `punar-m12.png` (planned) | **PLANNED** | Same. M8's ledger row still reads `NOT YET OBSERVED · MILESTONE 12` on every surface. |
 | 21 | detect an unknown/unmanaged AI fixture | M7 (detection) / M10 (alert) | `m7-check.sh`: the `foo-agent` fixture is found and classified `UNKNOWN · SUSPECTED` by the on-demand scan — run 32868450695 | **PROVEN IN CI** † | The *detection* is proven. **Periodic** detection (240 s timer), the D-009 local alert card and its dismissal/DND behavior are M10 — **PLANNED**, no code. The demo beat needs the alert, not just the scan. §3.4. |
 | 22 | allow authorized Smplify query of that local AI metadata | M10 | `m10-check.sh` (planned): device-pull on the sync piggyback, four scopes, three-way intersection, out-of-scope refusal recorded in `queries.jsonl` | **PLANNED** | No code. Authorization is mock roles from a fixture by design (real RBAC/IdP is Phase 2). |
 | 23 | remediate firewall drift | M4 | `m4-check.sh`, 29 assertions incl. the timer-driven drift-remediation demo — `PUNAR_M4_OK`, run 32849448721 | **PROVEN IN CI** | Nothing. The *graphical* display of the remediation is beat 11 and lands with System Control (§7.2). |
@@ -298,7 +298,7 @@ aspirational: *deterministic* is a property you assert, not a property
 you hope for.
 
 The **human runbook** exists because of Law 2. A script cannot press
-`SUPER+TAB` — it dispatches. It cannot judge whether the workspace
+`PUNAR+TAB` — it dispatches. It cannot judge whether the workspace
 transition in beat 12 reads as fluid or as a jump. It cannot notice that
 the enrollment block's alignment breaks at a longer org name, or that
 the approval overlay's affirmative is unreadable against the wallpaper.
@@ -367,9 +367,9 @@ check:
 | 09 network | Claude's active destinations and project route | `punarctl privacy connections` renders; the privacy panel shows the agent's rows and the denied production row | M12 | **skip until `PUNAR_M12_OK` exists** |
 | 10 shadow AI | Fixture unknown agent detected/classified; local warning; authorized Smplify query returns metadata | `foo-agent` classified `UNKNOWN · SUSPECTED`; the D-009 alert card renders; the mock answers an authorized `inventory` query and refuses an out-of-scope one | M7 (detection) + M10 (alert, query) | **partial** — classification `ok` today, alert + query **skip** until M10 |
 | 11 drift | Firewall disabled outside the supported UI; detected and remediated | `nft flush` outside punard; the reconcile timer fires; capability returns to `enabled`; **System Control shows the state flip** | M4 + **M13** (the graphical half) | **ok after M13** |
-| 12 multitasking | `SUPER+TAB`; switch Atlas / Punar / Browser; layouts restore | overview opens over IPC; three workspaces exist and are named; layout preset restores after a shell restart | M2 | **ok** (the *fluid* adjective is a runbook judgement — §4.6) |
+| 12 multitasking | `PUNAR+TAB`; switch Atlas / Punar / Browser; layouts restore | overview opens over IPC; three workspaces exist and are named; layout preset restores after a shell restart | M2 | **ok** (the *fluid* adjective is a runbook judgement — §4.6) |
 | 13 browser / web app | Installed web app launched from the command center; behaves like a native window | web app installed from the fixture manifest; launched; the window carries the recorded app id; the context tag renders on Punar surfaces | M11 | **skip until `PUNAR_M11_OK` exists**; the titlebar masthead is refused (decision 11) |
-| 14 privacy | Local privacy panel: relay state, active destinations, process/agent attribution | `SUPER+P` panel opens; relay row renders with its `SIMULATED` tag; per-process rows including the two honest zero-connection rows | M12 | **skip until `PUNAR_M12_OK` exists** |
+| 14 privacy | Local privacy panel: relay state, active destinations, process/agent attribution | `PUNAR+P` panel opens; relay row renders with its `SIMULATED` tag; per-process rows including the two honest zero-connection rows | M12 | **skip until `PUNAR_M12_OK` exists** |
 
 The honest reading of that table, at the moment this plan is written:
 **six beats pass today, three more pass once M13's own work lands, and
@@ -657,11 +657,11 @@ was cut.
 | 9 | **Broker issuance card** (gap 10) | 07 | Small | Beat 7 currently has no visual at all |
 | 10 | **Historical decision — superseded 2026-08-26:** one static wallpaper from D-007's sheet | 01, 12 | Superseded by `docs/design/wallpapers.md` | The owner-approved catalog now ships one original 3840×2400 artwork, three 3840×2400 photographs, and the Field vector; only the active asset is decoded |
 | 11 | **Fidelity review of D-005 and D-006** against the shipped panels, fixing only what the review finds | 05, 14 | Small | M7's and M12's own verification tables list plate fidelity as an unverified human review |
-| 12 | **Shortcut overlay** (hold `SUPER`, spec 12.3), reading `hyprctl binds -j` — no new data source | 01 | Small-medium | The cheapest way to make "keyboard-first" *visible*; **ranked last deliberately** — it is the first thing cut if the diet or btrfs runs long |
+| 12 | **Shortcut overlay** (hold `PUNAR`, spec 12.3), reading `hyprctl binds -j` — no new data source | 01 | Small-medium | The cheapest way to make "keyboard-first" *visible*; **ranked last deliberately** — it is the first thing cut if the diet or btrfs runs long |
 
 ### 7.2 System Control — scoped to what the beats need
 
-`SUPER+S` → `punar-shell` `SystemControl` (IPC target `systemcontrol`),
+`PUNAR+S` → `punar-shell` `SystemControl` (IPC target `systemcontrol`),
 Plate D-004's navigator chrome: arrow keys navigate, `Enter` opens,
 `Escape` returns, `/` searches (spec 63's own grammar, verbatim).
 
@@ -675,8 +675,8 @@ Ships in M13:
   state from `status.json` and `punarctl policy explain`. Unenrolled:
   these rows are **absent, not greyed** (DESIGN_LANGUAGE §8).
 
-Routes to surfaces that already exist: **AI** → the `SUPER+A` panel;
-**PRIVACY** → the `SUPER+P` panel (M12). Renders `NOT IN THIS BUILD`
+Routes to surfaces that already exist: **AI** → the `PUNAR+A` panel;
+**PRIVACY** → the `PUNAR+P` panel (M12). Renders `NOT IN THIS BUILD`
 with the owning phase: **SYSTEM** (Network, Bluetooth, Displays, Audio,
 Power) and **DEVELOPER** (Projects, Containers, Toolchains) — every one
 of which would need a setter Punar does not have.
@@ -758,7 +758,7 @@ Two moves, in order:
    assert that **every documented chord exists with the exact modmask,
    key, dispatcher and argument**, and that no undocumented bind exists.
    This turns the grammar document into a tested contract and catches the
-   whole class of "the doc says `SUPER+P`, the config says something
+   whole class of "the doc says `PUNAR+P`, the config says something
    else" — a class this repo is now exposed to, with four milestones
    claiming chords concurrently. It does **not** prove a keystroke
    traverses the table.
@@ -980,16 +980,16 @@ false. **A stale assertion is rewritten to assert the new invariant, not
 | `m12-check.sh` | *"shell notification on denial is M13"*; *"inline restriction explanations M13"* | the toast exists (M13 ships it); inline explanations are **never, as stated** — re-pointed, with the wrapped-process path named as Phase 2 |
 | `m1`/`m2` consumers of `idle-ram.sh` | `check-budgets.sh` reads two values | three more: `PUNAR_IDLE_CPU_PCT`, `PUNAR_IDLE_WRITE_KB`, and the breakdown file's presence |
 | `CommandCenter.qml` | `System Control · SystemControl() · arrives M3` stub | the real `systemcontrol` IPC action; the project verb (`Open <workspace>`); the stub `kind: "stub"` branch is removed if nothing else uses it |
-| `keyboard-grammar.md` | `SUPER+S` unclaimed; the walkthrough marked "must be executed by a human"; the M2+ shortcut-overlay row | `SUPER+S` claimed for System Control; the walkthrough's **executed** result with a date; the `SUPER+N` collision recorded (§10.5); the overlay row resolved either way |
+| `keyboard-grammar.md` | `PUNAR+S` unclaimed; the walkthrough marked "must be executed by a human"; the M2+ shortcut-overlay row | `PUNAR+S` claimed for System Control; the walkthrough's **executed** result with a date; the `PUNAR+N` collision recorded (§10.5); the overlay row resolved either way |
 | `IMPLEMENTATION_STATUS.md` | M8–M13 rows; the `Current milestone` heading | the post-M13 truth, including the §3.3 counts verbatim |
 | `PERFORMANCE_BUDGETS.md` | "budgets defined, nothing measured yet"; §1.5 has no boot number | the diet's before/after, the CPU and write baselines, the boot baseline, and the breakdown method as a new §2.5 |
 | `os/images/mkosi.conf` | btrfs+snapper listed under "not yet done" | done — or, on the §8.4 fallback, **still** listed with the reason it was attempted and abandoned |
 | `docs/api/ipc.md` | §1–§23 | plus `update.status` / `update.rollback` (§11), landed at implementation time |
 
-### 10.5 The `SUPER+N` collision, recorded
+### 10.5 The `PUNAR+N` collision, recorded
 
-M10 §17 lists `Super+N` among the notification-centre items it defers to
-M13. `SUPER+N` is already M2's **notes scratchpad**
+M10 §17 lists `Punar+N` among the notification-centre items it defers to
+M13. `PUNAR+N` is already M2's **notes scratchpad**
 (`keyboard-grammar.md`, shipped and exercised). M13 declines the
 notification centre (decision 10), so the collision does not need
 resolving now — but it must not be rediscovered by whoever builds one in
@@ -1095,8 +1095,8 @@ prose:
   verb; M2's own §8 verification table never claims otherwise.
 - D-002, D-004, D-008, D-010, D-011 and D-016 appear in no milestone
   document.
-- `SUPER+S` is unclaimed across the M1/M2/M7/M9/M10/M11/M12 grammars;
-  `SUPER+N` is claimed by M2 and wanted by M10 §17.
+- `PUNAR+S` is unclaimed across the M1/M2/M7/M9/M10/M11/M12 grammars;
+  `PUNAR+N` is claimed by M2 and wanted by M10 §17.
 
 What is **not** verified and must be at implementation time:
 

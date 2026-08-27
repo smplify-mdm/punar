@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 // punar-shell — Quickshell entrypoint.
 //
 // The whole graphical shell is ONE process. Every surface below is a
@@ -66,6 +67,84 @@ ShellRoot {
         SurfaceTiming.init();
     }
 
+    // The five user-invoked surfaces below retain 104–120 MiB apiece in an
+    // isolated process but construct in 31–59 ms (run 33044217553). Keep only
+    // their tiny IPC proxies resident. Construction starts on the same user
+    // action that opens the surface; the object is destroyed after its exit
+    // animation. `state()` therefore answers "closed" without creating what
+    // it is observing.
+    component DeferredSurface: Loader {
+        id: deferred
+
+        required property string surfaceName
+        property bool openWhenLoaded: false
+        readonly property DeferredSurfaceBase surface: deferred.item as DeferredSurfaceBase
+
+        active: false
+        asynchronous: false
+
+        function ensureLoaded(openAfter: bool): var {
+            if (deferred.surface !== null) {
+                if (openAfter)
+                    deferred.surface.show();
+                return deferred.surface;
+            }
+
+            deferred.openWhenLoaded = openAfter;
+            SurfaceTiming.beginConstruction(deferred.surfaceName, Date.now());
+            deferred.active = true;
+            return deferred.surface;
+        }
+
+        function openSurface(): void {
+            deferred.ensureLoaded(true);
+        }
+
+        function toggleSurface(): void {
+            if (deferred.surface === null) {
+                deferred.openSurface();
+                return;
+            }
+            deferred.surface.toggle();
+        }
+
+        function closeSurface(): void {
+            if (deferred.surface !== null)
+                deferred.surface.dismiss();
+        }
+
+        function surfaceState(): string {
+            return deferred.surface === null ? "closed" : deferred.surface.ipcState();
+        }
+
+        function residency(): string {
+            return deferred.surface === null ? "unloaded" : "resident";
+        }
+
+        // Called by the surface after its 300 ms exit animation, never at
+        // dismiss-begin. callLater prevents an object from destroying itself
+        // inside its own signal handler; the open check handles an immediate
+        // reopen without a race.
+        function releaseIfClosed(): void {
+            Qt.callLater(function () {
+                if (deferred.surface !== null && !deferred.surface.open) {
+                    deferred.openWhenLoaded = false;
+                    deferred.active = false;
+                }
+            });
+        }
+
+        onLoaded: {
+            if (deferred.surface === null)
+                return;
+            deferred.surface.unloadRequested.connect(deferred.releaseIfClosed);
+            if (deferred.openWhenLoaded) {
+                deferred.openWhenLoaded = false;
+                deferred.surface.show();
+            }
+        }
+    }
+
     // ── THE FIELD ────────────────────────────────────────────────────────
     // One background layer window per output. Zero timers, no keyboard focus:
     // it follows one atomic user preference and otherwise does no work.
@@ -78,24 +157,173 @@ ShellRoot {
         onBarCreated: readyMarker.running = true
     }
 
-    CommandCenter {
+    DeferredSurface {
+        id: commandCenterSurface
+        surfaceName: "commandcenter"
+        sourceComponent: CommandCenter {}
     }
 
-    Overview {
+    IpcHandler {
+        target: "commandcenter"
+
+        function toggle(): void {
+            commandCenterSurface.toggleSurface();
+        }
+        function open(): void {
+            commandCenterSurface.openSurface();
+        }
+        function close(): void {
+            commandCenterSurface.closeSurface();
+        }
+        function state(): string {
+            return commandCenterSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("commandcenter");
+        }
+        function residency(): string {
+            return commandCenterSurface.residency();
+        }
+        function explain(): string {
+            var surface = commandCenterSurface.surface;
+            return surface === null ? "none" : surface.ipcExplain();
+        }
+        function query(text: string): string {
+            var surface = commandCenterSurface.ensureLoaded(false);
+            return surface === null ? "unavailable" : surface.ipcQuery(text);
+        }
+        function run(): string {
+            var surface = commandCenterSurface.surface;
+            return surface === null ? "closed" : surface.ipcRun();
+        }
     }
 
-    // SUPER+S — System Control (spec §63, Plate D-004). The settings
-    // surface: the §63 taxonomy rail, real measured views, and dashed
-    // panels wherever no capability ships. Its one cross-surface ask is
-    // the AI views' link to SUPER+A rather than duplicating §20.
-    SystemControl {
-        onAiPanelRequested: aiPanel.show()
+    DeferredSurface {
+        id: overviewSurface
+        surfaceName: "overview"
+        sourceComponent: Overview {}
     }
 
-    // SUPER+/ — the §12.3 discoverability surface (Plate D-017). Generated
+    IpcHandler {
+        target: "overview"
+
+        function toggle(): void {
+            overviewSurface.toggleSurface();
+        }
+        function open(): void {
+            overviewSurface.openSurface();
+        }
+        function close(): void {
+            overviewSurface.closeSurface();
+        }
+        function state(): string {
+            return overviewSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("overview");
+        }
+        function residency(): string {
+            return overviewSurface.residency();
+        }
+    }
+
+    DeferredSurface {
+        id: systemControlSurface
+        surfaceName: "systemcontrol"
+        sourceComponent: SystemControl {
+            onAiPanelRequested: shellRoot.showAiPanel()
+        }
+    }
+
+    IpcHandler {
+        target: "systemcontrol"
+
+        function toggle(): void {
+            systemControlSurface.toggleSurface();
+        }
+        function open(): void {
+            systemControlSurface.openSurface();
+        }
+        function close(): void {
+            systemControlSurface.closeSurface();
+        }
+        function state(): string {
+            return systemControlSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("systemcontrol");
+        }
+        function residency(): string {
+            return systemControlSurface.residency();
+        }
+        function rail(): string {
+            var surface = systemControlSurface.ensureLoaded(false);
+            if (surface === null)
+                return "[]";
+            var result = surface.ipcRail();
+            systemControlSurface.releaseIfClosed();
+            return result;
+        }
+        function model(id: string): string {
+            var surface = systemControlSurface.ensureLoaded(false);
+            if (surface === null)
+                return "{}";
+            var result = surface.ipcModel(id);
+            systemControlSurface.releaseIfClosed();
+            return result;
+        }
+    }
+
+    // PUNAR+/ — the §12.3 discoverability surface (Plate D-017). Generated
     // from `hyprctl binds -j`, so it cannot drift from the machine it
     // describes. One query per session, on first open.
-    Shortcuts {
+    DeferredSurface {
+        id: shortcutsSurface
+        surfaceName: "shortcuts"
+        sourceComponent: Shortcuts {}
+    }
+
+    IpcHandler {
+        target: "shortcuts"
+
+        function toggle(): void {
+            shortcutsSurface.toggleSurface();
+        }
+        function open(): void {
+            shortcutsSurface.openSurface();
+        }
+        function close(): void {
+            shortcutsSurface.closeSurface();
+        }
+        function state(): string {
+            return shortcutsSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("shortcuts");
+        }
+        function residency(): string {
+            return shortcutsSurface.residency();
+        }
+        function reload(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            return surface === null ? "unavailable" : surface.ipcReload();
+        }
+        function rows(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcRows();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function undescribed(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcUndescribed();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
     }
 
     // The M9 approval gate (Plate D-003). It has no keybinding by
@@ -108,12 +336,47 @@ ShellRoot {
         id: approvalOverlay
     }
 
-    // SUPER+A — "AI on this device" (M7, Plate D-005). Renders from
+    // PUNAR+A — "AI on this device" (M7, Plate D-005). Renders from
     // /run/punar/agents.json via the Agents singleton's FileView; on a
     // machine where punar-agentd never wrote that file the panel opens
     // to its calm empty state.
-    AiPanel {
-        id: aiPanel
+    function showAiPanel(): void {
+        aiPanelSurface.openSurface();
+    }
+
+    function showAiPanelDetection(detectionId: string): void {
+        var panel = aiPanelSurface.ensureLoaded(false);
+        if (panel !== null)
+            panel.showDetection(detectionId);
+    }
+
+    DeferredSurface {
+        id: aiPanelSurface
+        surfaceName: "aipanel"
+        sourceComponent: AiPanel {}
+    }
+
+    IpcHandler {
+        target: "aipanel"
+
+        function toggle(): void {
+            aiPanelSurface.toggleSurface();
+        }
+        function open(): void {
+            aiPanelSurface.openSurface();
+        }
+        function close(): void {
+            aiPanelSurface.closeSurface();
+        }
+        function state(): string {
+            return aiPanelSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("aipanel");
+        }
+        function residency(): string {
+            return aiPanelSurface.residency();
+        }
     }
 
     // The M10 shadow-AI alert region (Plate D-009 Sect I). Like the M9
@@ -127,13 +390,13 @@ ShellRoot {
     //
     // [I] Inspect is wired here rather than inside the card so the alert
     // surface never reaches into another surface directly: it asks, and
-    // the shell root hands the detection to the SUPER+A panel, which opens
+    // the shell root hands the detection to the PUNAR+A panel, which opens
     // with its rail already sitting on that detection (milestone-10.md
     // §5.1). A shell built without an AI panel simply has nothing
     // connected to the signal.
     AlertStack {
         onInspectRequested: function (detectionId) {
-            aiPanel.showDetection(detectionId);
+            shellRoot.showAiPanelDetection(detectionId);
         }
     }
 
@@ -146,12 +409,12 @@ ShellRoot {
     //
     // Toasts never take the keyboard exclusively, so they can never swallow
     // a keystroke while the user is typing; the guaranteed keyboard path to
-    // the record is SUPER+SHIFT+N.
+    // the record is PUNAR+SHIFT+N.
     ToastStack {
         onCenterRequested: notificationCenter.show()
     }
 
-    // SUPER+SHIFT+N — the centre. It reads three registers and owns only
+    // PUNAR+SHIFT+N — the centre. It reads three registers and owns only
     // one of them: application notifications are its own daemon's; the
     // approval rows come from the SAME M9 Approvals singleton the gate
     // above uses, and the punar-agentd rows from the SAME M10 Alerts
@@ -162,7 +425,7 @@ ShellRoot {
     // Its two cross-surface asks are answered here, on the
     // AlertStack.onInspectRequested precedent: a row that points at a
     // pending approval opens the M9 gate on that approval, and a row that
-    // points at a detection opens the SUPER+A panel on that detection.
+    // points at a detection opens the PUNAR+A panel on that detection.
     NotificationCenter {
         id: notificationCenter
 
@@ -171,7 +434,7 @@ ShellRoot {
             approvalOverlay.show();
         }
         onInspectRequested: function (detectionId) {
-            aiPanel.showDetection(detectionId);
+            shellRoot.showAiPanelDetection(detectionId);
         }
     }
 
@@ -186,7 +449,7 @@ ShellRoot {
     }
 
     // ── THE LOCK ─────────────────────────────────────────────────────────
-    // SUPER+SHIFT+L. A real ext-session-lock-v1 lock authenticating through
+    // PUNAR+SHIFT+L. A real ext-session-lock-v1 lock authenticating through
     // PAM, not a full-screen overlay pretending to be one. It holds no
     // surface at all until locked, and there is deliberately no IPC
     // `unlock` verb — that would make the session socket a complete bypass

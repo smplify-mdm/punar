@@ -789,8 +789,8 @@ grep_row "privacy ledger: says the audit trail is separate and survives a purge"
 # privacy surface must always state WHAT CAN LEAVE THE DEVICE, whatever the
 # current truth is. So assert the row exists, is not blank, and says one of
 # the three honest things — the path does not exist yet and here is the
-# milestone that owns it; no organization is enrolled so there is no path at
-# all; or the path exists and here is the command that shows you every use of
+# milestone that owns it; personal mode has no path at all; or the path exists
+# and here is the command that shows you every use of
 # it. A blank row, a missing row, or an unexplained value fails.
 grep_re "privacy ledger: the REMOTE QUERY row exists and is not blank" \
     "${RUN_DIR}/m8-privacy.txt" '^REMOTE QUERY +[^[:space:]]'

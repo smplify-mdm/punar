@@ -56,7 +56,7 @@ QtObject {
             "target": "systemcontrol",
             "name": "System Control",
             "glyph": "SY",
-            "chord": "Super S",
+            "chord": "Punar S",
             "milestone": "Milestone 13",
             "keywords": "settings preferences system control security compliance encryption firewall organization enrollment policies device"
         },
@@ -64,7 +64,7 @@ QtObject {
             "target": "notifications",
             "name": "Notification center",
             "glyph": "NO",
-            "chord": "Super Shift N",
+            "chord": "Punar Shift N",
             "milestone": "Milestone 13",
             "keywords": "notification notifications alerts messages history center do not disturb"
         },
@@ -72,7 +72,7 @@ QtObject {
             "target": "shortcuts",
             "name": "Keyboard shortcuts",
             "glyph": "KB",
-            "chord": "Super /",
+            "chord": "Punar /",
             "milestone": "Milestone 13",
             "keywords": "keyboard shortcuts keys bindings chords help cheatsheet"
         },
@@ -80,7 +80,7 @@ QtObject {
             "target": "aipanel",
             "name": "AI on this device",
             "glyph": "AI",
-            "chord": "Super A",
+            "chord": "Punar A",
             "milestone": "Milestone 7",
             "keywords": "ai agents claude assistant authority ledger privacy sessions"
         },
@@ -88,7 +88,7 @@ QtObject {
             "target": "overview",
             "name": "Project overview",
             "glyph": "OV",
-            "chord": "Super Tab",
+            "chord": "Punar Tab",
             "milestone": "Milestone 2",
             "keywords": "overview workspaces projects windows switcher"
         }
@@ -97,7 +97,7 @@ QtObject {
     // ---- layout presets (spec §13.5) -------------------------------------
     //
     // punar-binds.conf names the command center as a consumer of this
-    // script in so many words: "the compositor binds (SUPER+comma/period →
+    // script in so many words: "the compositor binds (PUNAR+comma/period →
     // prev/next), the command center (exec, by preset name)". Five presets;
     // `grid` is not shipped (no native grid algorithm in Hyprland 0.56.2)
     // and therefore is not offered.
@@ -304,7 +304,7 @@ QtObject {
     }
 
     // Lowest workspace id not taken by a live workspace or a stored name.
-    // Stays inside 1..9 while it can, because those are the ids SUPER+1..9
+    // Stays inside 1..9 while it can, because those are the ids PUNAR+1..9
     // reach directly (punar-binds.conf).
     function freeWorkspaceId(): int {
         var taken = ({});

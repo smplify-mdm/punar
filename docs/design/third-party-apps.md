@@ -446,7 +446,7 @@ After:
   Runtime       org.freedesktop.Platform 25.08 · fetched (1.2 GB)
   Updates       automatic · security-sensitive · applies when you next
                 start Chrome · punarctl app update policy notify to change
-  Launch        SUPER+Space → Chrome
+  Launch        PUNAR+Space → Chrome
 ```
 
 House rules, all inherited: mono masthead, `PUNAR · <SECTION>` + hostname,

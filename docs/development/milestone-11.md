@@ -80,7 +80,7 @@ Binding prior contracts, **not relitigated**:
   (unmanaged-first — org chrome appears only when enrolled).
 
 M1 put upstream Chromium 151.0.7922.169-1 in the image and bound it to
-`SUPER+B`. That is a browser on a desktop, not browser *integration*: nothing
+`PUNAR+B`. That is a browser on a desktop, not browser *integration*: nothing
 about it is Punar's, nothing about it is inventoried, and nothing about it
 follows a project. **M11 builds the integration layer the spec has described
 since section 30.1 and keeps it small enough that a reviewer can read all of
@@ -180,7 +180,7 @@ Punar chrome over Chromium's own window content.
 | 12 | **A context is a Chromium profile directory selected with `--user-data-dir`, not `--profile-directory`.** `--user-data-dir` is the only option under which "own cookies · storage · sign-ins" is unconditionally true; `--profile-directory` shares one browser process and would make the plate's copy a half-truth. The cost is real and stated: each live context is a whole browser process tree. §5.2. |
 | 13 | **The isolation claim is a table, not an adjective.** Cookies, localStorage/IndexedDB/CacheStorage, sign-in state, history, and per-profile extensions: **isolated**. Same uid, same filesystem access, same kernel, one shared GPU process where the platform shares it, and no protection against a post-sandbox-escape renderer: **not isolated, and not claimed**. Certificates and network policy appear in the plate's managed row and are marked `SIMULATED`/`M12` respectively. §5.4. |
 | 14 | **`personal` always exists, is never deletable, and is the fallback.** Context ids match `^[a-z0-9][a-z0-9-]{0,31}$`; `personal` is reserved and pre-created; `org-<org_id>` is reserved and **derived from `/var/lib/punar/enrollment.json`** — it appears on enrollment, disappears on unenrollment, and no `webapps.context_create` call can mint or remove it. Unmanaged-first as a data rule, not a CSS rule (DESIGN_LANGUAGE §8). §5.3, §5.6. |
-| 15 | **"The workspace brings its context forward" means the binding changes, not that windows migrate or a browser starts.** Switching to workspace `atlas` rewrites `~/.local/state/punar/browser-context.json` (shell-written, `FileView` + `atomicWrites`, debounced 1 s — the M2 pattern, inotify, zero polling), so the *next* `SUPER+B` or context-less web-app launch uses `atlas`. Existing windows are not moved and nothing is auto-launched, because auto-starting a browser on a workspace switch is both slow and rude. The picker prints the cause. §5.5. |
+| 15 | **"The workspace brings its context forward" means the binding changes, not that windows migrate or a browser starts.** Switching to workspace `atlas` rewrites `~/.local/state/punar/browser-context.json` (shell-written, `FileView` + `atomicWrites`, debounced 1 s — the M2 pattern, inotify, zero polling), so the *next* `PUNAR+B` or context-less web-app launch uses `atlas`. Existing windows are not moved and nothing is auto-launched, because auto-starting a browser on a workspace switch is both slow and rude. The picker prints the cause. §5.5. |
 | 16 | **The workspace→context binding is a sibling file, never a new property of `workspace-state.json`.** The shipped M2 schema is not extended (M8 Decision-0 law, fourth application). New file, new tiny schema `schemas/browser/browser-context-state.json`. §5.5. |
 | 17 | **`browser.policy` is a new typed capability in punard's registry** — the M3 backend shape applied to a file. `desired_state ∈ {managed, unmanaged}`; the backend renders the effective policy document's `applications`/`browser` blocks into `/etc/chromium/policies/managed/punar-managed.json` (`0644 root:root`), then **verifies by re-reading and hashing**. It joins the M4 reconcile loop, so hand-editing that file is drift and gets remediated within one reconcile period — the firewall demo's shape, a second time, for the mechanism that actually enforces spec 62. §6. |
 | 18 | **The policy writer has a closed key allowlist, and it is data.** `browser/integration/policy-allowlist.json` names every Chromium policy key punard may write, one per spec-62 family; an effective-policy block naming anything else is refused with a section-73 message, not written best-effort. Reviewed like `signatures/suspected.json` (M7 §7.1 / M10 decision 22 precedent). §6.3. |
@@ -455,7 +455,7 @@ X-Punar-WebApp-Context=personal
   Workspace assignment (spec 31) is therefore the same mechanism M2 already
   ships for scratchpads — no special case in the window grammar, exactly as
   D-013 Sect IV register 02 promises.
-- `SUPER+B` is retargeted from `chromium --ozone-platform-hint=auto` to
+- `PUNAR+B` is retargeted from `chromium --ozone-platform-hint=auto` to
   `punarctl web-apps browse`, which opens a normal browser window **in the
   active context**. This is a behavior change to an M1 binding and is listed
   in §13.
@@ -467,7 +467,7 @@ a masthead titlebar reading `LINEAR · ATLAS`. What M11 delivers:
 |---|---|---|
 | No URL bar, no tab strip | `FULL` | `--app=` — upstream's feature. |
 | Window has a real, stable identity | `FULL` | `--class` + `StartupWMClass`. |
-| Tiles, tabs, workspace-assigns, answers Super-keys | `FULL` | It is an ordinary Wayland window; M2's grammar applies unchanged. |
+| Tiles, tabs, workspace-assigns, answers Punar-keys | `FULL` | It is an ordinary Wayland window; M2's grammar applies unchanged. |
 | Context tag on Punar surfaces (overview, command center, `punarctl web-apps list`) | `FULL` | Those surfaces read the Punar record. |
 | The literal `LINEAR · ATLAS` string inside the compositor's window decoration | `PARTIAL` | The window title belongs to the page. Forcing it means either patching Chromium (law 1) or painting over its window (§3.4). Deferred to M13 polish as a compositor-decoration question; tracked in §15. |
 | Web content region | not ours | The plate draws it dashed and labels it *"the app draws itself — not ours to draw"*. Correct, and it stays dashed. |
@@ -642,13 +642,13 @@ exactly. **Event-driven, inotify-backed, no timer, no polling loop**
 **What "brings forward" means, precisely:**
 
 - ✅ The *next* launch that does not name a context uses `active` — that is
-  `SUPER+B`, and any web app installed without a pinned `--context`.
+  `PUNAR+B`, and any web app installed without a pinned `--context`.
 - ✅ The picker and the command center print the cause: *"Active · Atlas —
   switched by workspace, or here by hand"*, which is D-013's own copy.
 - ❌ Existing windows are **not** migrated. A running Chromium cannot change
   its `--user-data-dir`.
 - ❌ Nothing is auto-launched. Starting a browser because someone pressed
-  `SUPER+2` would be slow, surprising, and would put a several-hundred-MB
+  `PUNAR+2` would be slow, surprising, and would put a several-hundred-MB
   process on the far side of a keystroke.
 
 Both ❌ rows are printed by `punarctl web-apps context status`. This is the
@@ -1040,7 +1040,7 @@ punarctl web-apps install <url> --name <name> [--icon <path>] [--context <ctx>] 
 punarctl web-apps install --from-manifest <path> [--context <ctx>]
 punarctl web-apps uninstall <id> [--purge-data]
 punarctl web-apps launch <id> [--context <ctx>]      # the .desktop Exec target
-punarctl web-apps browse [--context <ctx>]           # SUPER+B target
+punarctl web-apps browse [--context <ctx>]           # PUNAR+B target
 punarctl web-apps sync
 punarctl web-apps context list [--json]
 punarctl web-apps context create <id> [--name <display>]
@@ -1372,7 +1372,7 @@ group 7**, which is the drift demo and needs the real timer to fire.
     (m2/m5 session-env pattern), with the app window focused and the shell's
     context pill visible. Screenshot failure is a recorded `FAIL` line, per
     the m2 precedent — never a silent skip.
-21. `SUPER+B` equivalence: `punarctl web-apps browse --context atlas` opens a
+21. `PUNAR+B` equivalence: `punarctl web-apps browse --context atlas` opens a
     browser whose `--user-data-dir` is the `atlas` profile.
 
 **5 · Contexts isolate state.**
@@ -1480,10 +1480,10 @@ group 7**, which is the drift demo and needs the real timer to fire.
 `m11-argv-dryrun.txt`.
 
 **Human walkthrough additions** (keyboard-only, extending the M1/M2 lists):
-`SUPER+Space` → type `install web app` → the D-013 card → `↓` to choose a
+`PUNAR+Space` → type `install web app` → the D-013 card → `↓` to choose a
 separate context → `↵`; the app appears in the launcher and opens on its
-workspace; `SUPER+Space` → context picker → `↑↓↵` switches context and the
-next `SUPER+B` opens in it.
+workspace; `PUNAR+Space` → context picker → `↑↓↵` switches context and the
+next `PUNAR+B` opens in it.
 
 ---
 
@@ -1497,7 +1497,7 @@ M11 creates six, and one deliberate non-staleness.
 | # | Where | What goes stale | Must become |
 |---|---|---|---|
 | 1 | `crates/punarctl/src/main.rs`, `Command::Update` — *"this stub stays until a milestone claims it"* | **M11 claims the browser half.** Any unit test or check asserting `punarctl update status` exits `FAILURE`, or asserting the stub text is the *whole* output, is now wrong. | Assert `update status` exits **0**, prints a `BROWSER` block with the pinned version and `Security channel · not configured`, **and** still prints the system-orchestration stub text. The stub sentence must be narrowed in the source to name only orchestration. |
-| 2 | `docs/development/keyboard-grammar.md` — `SUPER + B  Browser (chromium, Wayland ozone)` and walkthrough step 12 *"chromium launches"* | `SUPER+B` no longer execs `chromium` directly; it goes through `punarctl web-apps browse` and honors the active context. | The binding line becomes *"Browser in the active context"*; walkthrough step 12 asserts a browser window whose `--user-data-dir` is the active context's profile — the invariant, not the binary name. |
+| 2 | `docs/development/keyboard-grammar.md` — `PUNAR + B  Browser (chromium, Wayland ozone)` and walkthrough step 12 *"chromium launches"* | `PUNAR+B` no longer execs `chromium` directly; it goes through `punarctl web-apps browse` and honors the active context. | The binding line becomes *"Browser in the active context"*; walkthrough step 12 asserts a browser window whose `--user-data-dir` is the active context's profile — the invariant, not the binary name. |
 | 3 | `os/modules/desktop/hypr/hyprland.conf` line 94, `$browser = chromium --ozone-platform-hint=auto` | The value changes to the context-aware launcher; the `--ozone-platform-hint` flag moves into `punarctl`'s allowlisted argv. | `$browser = punarctl web-apps browse`. Any doc or comment quoting the old value must be updated with it. No committed check greps this line today — verified — so this is a docs-and-config change, not a check change. |
 | 4 | `docs/development/milestone-1.md` §2.1 — *"Browser: chromium (upstream, unpatched) … launch/window integration only in M1"* | The *"only in M1"* caveat is fulfilled. | An **M11 amendment note** in the M1 row (the M3-amended-under-M4 convention). M1 is a build record; it is annotated, never rewritten. |
 | 5 | `docs/design/mockups/webapps-browser.html` Sect IV — 01 claims M1 ships *"Chromium with the Punar integration layer; install flow writes the launcher entry"*, 03 claims contexts land in *"M3–M4"*, 04 claims the managed context row lands in *"M5"* | **All three are false as shipped.** M1 shipped Chromium with no integration layer; M3–M4 shipped no contexts; M5 shipped no managed context row. M11 does all three. | Sect IV 01/03/04 should read **M11**. Sect III 04's dashed `SIMULATED` cert-roots tag **stays dashed** — M11 does not deploy a real root and must not undash it. The Sect II 04 "Notifications" register must gain a `PARTIAL`/deferred mark (§4.9: `UNSUPPORTED` in M11). The Sect III caption *"Same registry as `punarctl app list`"* becomes `punarctl web-apps list` (§10.1). **M11's implementation owns no mockup file** — this is a tracked design-doc delta for whoever next touches the plate, and it must not be silently left as-is. |

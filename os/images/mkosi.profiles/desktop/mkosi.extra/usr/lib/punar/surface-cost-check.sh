@@ -206,7 +206,7 @@ timing_ready() {
 }
 
 surface_closed() {
-    [ "$(ipc "$1" state | tr -d '[:space:]\"')" = "closed" ]
+    [ "$(ipc surfaceprobe surfaceState | tr -d '[:space:]\"')" = "closed" ]
 }
 
 for surface in ${SURFACES}; do
@@ -292,8 +292,8 @@ for surface in ${SURFACES}; do
             finish
         fi
 
-        ipc "${surface}" close >/dev/null 2>&1
-        if ! wait_for 15 surface_closed "${surface}"; then
+        ipc surfaceprobe close >/dev/null 2>&1
+        if ! wait_for 15 surface_closed; then
             note "FAIL ${surface} sample ${sample}: surface did not close"
             FAILED=1
         fi

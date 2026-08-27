@@ -67,7 +67,7 @@ from documentation:
   nothing.
 
 The `--ozone-platform-hint=auto` flag is why the file exists. It previously
-lived on the `SUPER+B` keybind, which meant exactly one launch path got a
+lived on the `PUNAR+B` keybind, which meant exactly one launch path got a
 native Wayland browser while the application launcher, `xdg-open` and any
 future web-app launcher went through `chromium.desktop` and got XWayland.
 

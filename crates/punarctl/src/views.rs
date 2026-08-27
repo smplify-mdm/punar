@@ -292,7 +292,7 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
     if !s.enrolled {
         out.push_str(&fmt::note(
             style,
-            "No organization is enrolled · enrolling later never applies retroactively",
+            "Personal device · enrollment later never applies retroactively",
         ));
     }
     Ok(out)
@@ -806,7 +806,7 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         ));
         out.push_str(&fmt::note(
             style,
-            "No organization is enrolled · nothing leaves this machine",
+            "Personal mode is local-only · nothing leaves this machine",
         ));
         // THE ONE POINTER, and it lives here on purpose. Requirement (3) is
         // that enrolling into a Smplify instance is genuinely possible and
@@ -993,7 +993,7 @@ const REMOTE_QUERY: &str = "scoped, audited, never continuous · see who asked w
 fn remote_query_line(log: Option<&model::QueriesList>) -> String {
     match log {
         None => REMOTE_QUERY.to_string(),
-        Some(log) if !log.enrolled => "none — no organization is enrolled · no \
+        Some(log) if !log.enrolled => "none — personal mode · no \
              remote-query path exists on this device"
             .to_string(),
         Some(log) => {
@@ -1619,7 +1619,7 @@ pub fn privacy_ledger(
 /// The calm personal-device sentence. Not an error, not an upsell, not an
 /// empty table that could read as "nobody has asked *yet*" — a statement
 /// that the path does not exist here (milestone-10.md section 11).
-const NO_QUERY_PATH: &str = "No organization is enrolled · no remote-query path exists on \
+const NO_QUERY_PATH: &str = "Personal mode · no remote-query path exists on \
                              this device · nothing has ever been asked.";
 
 /// The honesty label on every rendering of a requesting administrator.
@@ -1766,7 +1766,7 @@ pub fn privacy_queries(style: &Style, result: &Value, hostname: &str) -> Result<
     if !log.enrolled && !log.queries.is_empty() {
         out.push_str(&fmt::note(
             style,
-            "No organization is enrolled · the queries above are a record of \
+            "Personal device now · the queries above are a record of \
              what was asked while this device was enrolled, kept because \
              deleting it would be the device editing its own history",
         ));
@@ -3467,7 +3467,8 @@ mod tests {
         let lower = text.to_lowercase();
         assert!(!lower.contains("org "));
         assert!(!lower.contains("acme"));
-        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(text.contains("PERSONAL DEVICE"), "{text}");
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
     }
 
     #[test]
@@ -3515,7 +3516,8 @@ mod tests {
         });
         let text = status(&style, &result, &[]).unwrap();
         assert!(!text.contains("OVERALL"), "{text}");
-        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(text.contains("PERSONAL DEVICE"), "{text}");
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
     }
 
     #[test]
@@ -3552,7 +3554,7 @@ mod tests {
             text.contains("MERGED FROM OS DEFAULTS + YOUR PREFERENCES"),
             "{text}"
         );
-        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(!text.contains("PERSONAL DEVICE"), "{text}");
     }
 
     #[test]
@@ -3665,7 +3667,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("MANAGED"), "{text}");
-        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(!text.contains("PERSONAL DEVICE"), "{text}");
 
         // Without the enroll.status follow-up, the row degrades to the
         // domain instead of inventing a policy id.
@@ -3678,7 +3680,8 @@ mod tests {
         result.as_object_mut().unwrap().remove("org");
         let text = status(&style, &result, &[]).unwrap();
         assert!(!text.contains("ORGANIZATION  "), "{text}");
-        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(text.contains("PERSONAL DEVICE"), "{text}");
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
     }
 
     #[test]
@@ -3784,7 +3787,8 @@ mod tests {
         let style = Style::plain();
         let text = enroll_status(&style, &json!({"enrolled": false}), "punar-m5").unwrap();
         assert!(text.contains("PERSONAL"), "{text}");
-        assert!(text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
+        assert!(text.contains("PERSONAL MODE IS LOCAL-ONLY"), "{text}");
+        assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
 
         let result = json!({
             "enrolled": true,

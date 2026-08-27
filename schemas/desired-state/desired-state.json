@@ -189,9 +189,9 @@
           "properties": {
             "channel": {
               "title": "Update channel",
-              "description": "Update channel name, e.g. 'stable' (spec sections 38, 57). Kept as an open non-empty string: section 38 shows only 'stable', and section 57 defines rollout stages, not a channel enum — inventing one would be a speculative narrowing.",
+              "description": "Punar whole-image update channel (spec sections 38, 57): stable is the default and longest-soak channel, dev promotes faster after initial canary evidence, and edge is the earliest complete signed image after the full gate. The channel never selects a partial package transaction.",
               "type": "string",
-              "minLength": 1
+              "enum": ["stable", "dev", "edge"]
             }
           },
           "required": ["channel"],

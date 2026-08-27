@@ -1,8 +1,8 @@
 // BindRow — one binding in the help surface (Plate D-017 Sect IV).
 //
 // Modifiers chain outward-in, in the canonical order, joined by an ink-3
-// plus: Super + Shift + H. Both modifiers recede identically, so
-// SUPER+SHIFT+H and SUPER+H differ by one inserted grey object and the
+// plus: Punar + Shift + H. Both modifiers recede identically, so
+// PUNAR+SHIFT+H and PUNAR+H differ by one inserted grey object and the
 // same black key sits at the end of both — the reader compares the ENDS
 // of the rows, which is where the meaning is. The plus is deliberately
 // the keyboard vernacular and not a middle dot; the middle dot is the

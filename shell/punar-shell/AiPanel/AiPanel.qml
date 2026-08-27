@@ -1,5 +1,5 @@
 pragma ComponentBehavior: Bound
-// AiPanel — the SUPER+A "AI on this device" surface (Milestone 7),
+// AiPanel — the PUNAR+A "AI on this device" surface (Milestone 7),
 // implementing docs/design/mockups/ai-panel.html (Plate D-005, the
 // acceptance reference) and spec §25: the agent registry (§19), the
 // authority model (§20) and the ledger boundary (§21) on one
@@ -52,26 +52,24 @@ pragma ComponentBehavior: Bound
 // or unparsable file renders the calm empty panel — fail closed, never
 // an error surface.
 //
-// SUPER+A shows the data; SHIFT+DEL deletes it (spec §24.2 + §1.17:
+// PUNAR+A shows the data; SHIFT+DEL deletes it (spec §24.2 + §1.17:
 // deleting your own data cannot be terminal-only). The keystroke runs
 // `punarctl privacy purge --session <id> --yes` through the same
 // detached fixed-argv path, behind a two-step inline confirm.
 //
 // Toggled from Hyprland via Quickshell IPC:
 //   qs -p /usr/share/punar/shell ipc call aipanel toggle
-// Hyprland bind: bind = SUPER, A, exec, qs -p /usr/share/punar/shell ipc call aipanel toggle
+// Hyprland bind: bind = PUNAR, A, exec, qs -p /usr/share/punar/shell ipc call aipanel toggle
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import "../Theme"
 import "../Services"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     property bool openOnReady: false
     property bool windowVisible: false
 
@@ -1066,33 +1064,17 @@ Scope {
             root.show();
     }
 
-    // SUPER+A entry point. Hyprland bind:
-    //   bind = SUPER, A, exec, qs -p /usr/share/punar/shell ipc call aipanel toggle
-    IpcHandler {
-        target: "aipanel"
-
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.dismiss();
-        }
-        // Read-only, for the m7-check CI probe (the `overview` precedent).
-        function state(): string {
-            return root.open ? "open" : "closed";
-        }
-        function latency(): string {
-            return SurfaceTiming.sample("aipanel");
-        }
+    function ipcState(): string {
+        return root.open ? "open" : "closed";
     }
 
     Timer {
         id: hideTimer
         interval: Theme.durStandard
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     PanelWindow {
@@ -1899,7 +1881,7 @@ Scope {
                                     color: Theme.shellFg
                                     text: Status.enrolled
                                         ? "This ledger stays on this device · Admin queries are scoped, audited and visible here"
-                                        : "This ledger stays on this device · No organization is enrolled"
+                                        : "This ledger stays on this device · Personal mode is local-only"
                                     wrapMode: Text.WordWrap
                                 }
 

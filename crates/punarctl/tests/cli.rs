@@ -531,7 +531,7 @@ fn status_human_output_matches_the_d014_snapshot() {
          FIREWALL      MATCHES\n\
          HOSTNAME      MATCHES\n\
          TIMEZONE      MATCHES\n\
-         NO ORGANIZATION IS ENROLLED · ENROLLING LATER NEVER APPLIES RETROACTIVELY\n"
+         PERSONAL DEVICE · ENROLLMENT LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
     assert!(
@@ -2115,7 +2115,7 @@ fn privacy_queries_names_the_personal_scope_when_history_outlives_enrollment() {
     // Plate D-014 grammar, so this reads case-insensitively like its
     // neighbour above.
     assert!(
-        text.to_lowercase().contains("no organization is enrolled"),
+        text.to_lowercase().contains("personal device now"),
         "{text}"
     );
     assert!(
@@ -2141,7 +2141,7 @@ fn privacy_queries_on_a_personal_device_is_one_calm_line_and_exit_0() {
     let output = run_agents(&agentd, &["privacy", "queries"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("No organization is enrolled"), "{text}");
+    assert!(text.contains("Personal mode"), "{text}");
     assert!(text.contains("no remote-query path exists"), "{text}");
     assert!(text.contains("nothing has ever been asked"), "{text}");
     // fmt::note uppercases, per the Plate D-014 grammar.

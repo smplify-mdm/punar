@@ -6,7 +6,7 @@
 // are read.
 //
 //   · A MODIFIER cap is ink-3 on a `border` hairline with no fill — it
-//     recedes, because on a page of SUPER chords it carries no
+//     recedes, because on a page of PUNAR chords it carries no
 //     information.
 //   · A TERMINAL KEY cap is ink on an input-weight hairline with the
 //     muted fill — it is the thing that varies and the thing the reader

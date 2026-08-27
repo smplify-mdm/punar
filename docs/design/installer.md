@@ -1084,7 +1084,7 @@ on stage 06, cancels the install · single letters make binary choices.
 Bindings are printed in the frame footer, never hidden. **The pointer works
 and is never required.** No stage shows, requires or suggests a shell
 command, and there is no terminal in the live environment's session — the
-`SUPER+RETURN` bind is absent from the installer profile's Hyprland config,
+`PUNAR+RETURN` bind is absent from the installer profile's Hyprland config,
 because "no shell commands" is a property of the surface, not a request to
 the user.
 

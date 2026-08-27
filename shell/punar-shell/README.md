@@ -1,10 +1,10 @@
 # punar-shell
 
 The Punar desktop shell, in ONE process: the wallpaper, the top bar and
-its live status cluster, the SUPER+Space command center, the SUPER+TAB
-project overview, SUPER+S system control, the SUPER+A AI panel, the
+its live status cluster, the PUNAR+Space command center, the PUNAR+TAB
+project overview, PUNAR+S system control, the PUNAR+A AI panel, the
 approval gate, the shadow-AI alert region, the freedesktop notification
-daemon with its toasts / centre / OSD, the SUPER+/ shortcut help, the
+daemon with its toasts / centre / OSD, the PUNAR+/ shortcut help, the
 session lock, and the theme system — all implementing the field-note
 design language.
 
@@ -43,7 +43,7 @@ the machine.
 
 | File | Role |
 | --- | --- |
-| `shell.qml` | `ShellRoot` entrypoint; wires the ready marker; instantiates `WorkspaceState` |
+| `shell.qml` | `ShellRoot` entrypoint; wires the ready marker and always-resident IPC proxies; lazy-loads measured panels |
 | `Theme/Theme.qml` | Singleton: token loader + typed design properties |
 | `Services/Status.qml` | Singleton: enrollment/compliance context — watches `/run/punar/status.json` (M5, ipc.md §9) |
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
@@ -53,9 +53,9 @@ the machine.
 | `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
 | `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
-| `CommandCenter/CommandCenter.qml` | SUPER+Space overlay + `commandcenter` IPC handler |
-| `Overview/Overview.qml` | SUPER+TAB project-workspace overview + `overview` IPC handler (Plate D-007) |
-| `AiPanel/AiPanel.qml` | SUPER+A AI panel + `aipanel` IPC handler (Plate D-005) |
+| `CommandCenter/CommandCenter.qml` | Lazy PUNAR+Space overlay; `commandcenter` IPC proxy lives in `shell.qml` |
+| `Overview/Overview.qml` | Lazy PUNAR+TAB project-workspace overview (Plate D-007) |
+| `AiPanel/AiPanel.qml` | Lazy PUNAR+A AI panel (Plate D-005) |
 | `Approval/ApprovalOverlay.qml` | The M9 approval gate + `approval` IPC handler (Plate D-003 Sect II) |
 | `Alert/AlertStack.qml` | The M10 shadow-AI alert region + `alerts` IPC handler (Plate D-009 Sect I) |
 | `Theme/ThemeContrast.qml` | Singleton: the WCAG contrast gate (R1–R9) that refuses an illegible palette before a human sees it |
@@ -64,12 +64,12 @@ the machine.
 | `Wallpaper/Wallpaper.qml` | The desktop field, one background layer window per output; one active asset, zero timers |
 | `Bar/StatusCluster.qml` · `StatusSlot.qml` · `SlotPopover.qml` | The live right-hand cluster, its slots and their popover (Plate D-016) |
 | `CommandCenter/Actions.qml` · `ExplainCard.qml` | The six-kind typed action taxonomy and the §40 policy-explain card (Plate D-003) |
-| `SystemControl/SystemControl.qml` | SUPER+S settings surface + `systemcontrol` IPC handler (Plate D-004) — holds every colour, decides nothing |
+| `SystemControl/SystemControl.qml` | Lazy PUNAR+S settings surface (Plate D-004) — holds every colour, decides nothing |
 | `SystemControl/ControlData.qml` | Everything that panel KNOWS: file watches, `punarctl` probes, the view model, the mutations — holds no colour |
 | `Notifications/ToastStack.qml` | Transient toasts + `toasts` IPC handler (Plate D-009 Sect II) |
-| `Notifications/NotificationCenter.qml` | SUPER+SHIFT+N record + `notifications` IPC handler |
+| `Notifications/NotificationCenter.qml` | PUNAR+SHIFT+N record + `notifications` IPC handler |
 | `Notifications/Osd.qml` | Volume/brightness OSD + `osd` IPC handler — the one PANEL-voice surface |
-| `Shortcuts/Shortcuts.qml` · `BindTable.qml` · `BindRow.qml` · `ChordCap.qml` | SUPER+/ help, generated from `hyprctl binds -j` + `shortcuts` IPC handler (Plate D-017) |
+| `Shortcuts/Shortcuts.qml` · `BindTable.qml` · `BindRow.qml` · `ChordCap.qml` | Lazy PUNAR+/ help; bind-table singleton preserves one `hyprctl binds -j` query per session (Plate D-017) |
 | `Lock/Lock.qml` · `LockSurface.qml` | The real `ext-session-lock-v1` lock, authenticated through PAM + `lock` IPC handler (Plates D-002 / D-012) |
 
 ## Running on a dev machine
@@ -90,11 +90,26 @@ Toggle the command center or the overview from another terminal:
 
 ```sh
 qs ipc call commandcenter toggle
-quickshell ipc call overview toggle    # SUPER+TAB binding; `qs` works too
+quickshell ipc call overview toggle    # PUNAR+TAB binding; `qs` works too
 qs ipc call overview state             # prints "open" or "closed" (CI probe)
-qs ipc call aipanel toggle             # SUPER+A binding
+qs ipc call aipanel toggle             # PUNAR+A binding
 qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 ```
+
+## Measured surface lifecycle
+
+The command center, System Control, shortcut help, AI panel and overview are
+created on first use and destroyed after their 300 ms close animation. Their
+small IPC proxies remain resident, so `state()` and `residency()` never load a
+closed panel. Run 33044217553 measured real-`qs` construction medians of
+31–59 ms and isolated retained deltas of 106982–123032 KiB; those deltas share
+Qt/Quickshell code and must not be added together. Bar, wallpaper, approvals,
+alerts, notifications/toasts/OSD and lock stay eager because they are visible,
+event-driven, unbidden or security-critical.
+
+The shortcut rows are the deliberate exception inside a lazy surface:
+`BindTable` is a tiny singleton, so unloading the window never violates its
+one compositor query per session contract.
 
 ## Install layout (punar-desktop image)
 
@@ -106,27 +121,32 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 
 ## Keyboard contract (no mouse required — spec §12)
 
+The product calls the primary modifier the **Punar key** and writes it as
+`PUNAR`: Windows / Meta on PC hardware, or the guest-Meta position normally
+mapped from Command by an Apple VM client. Raw compositor terminology is not
+shown in the shell.
+
 Every chord below is bound in
 [`os/modules/desktop/hypr/punar-binds.conf`](../../os/modules/desktop/hypr/punar-binds.conf)
 in the **described** form, so `hyprctl binds -j` carries a human label and
-the SUPER+/ help surface renders the live table rather than a written copy
+the PUNAR+/ help surface renders the live table rather than a written copy
 of it. **If this list and the machine disagree, the machine is right.**
 
 | Chord | Surface |
 | --- | --- |
-| `SUPER + Space` | Command center |
-| `SUPER + Tab` | Project overview |
-| `SUPER + A` | AI panel |
-| `SUPER + S` | System control |
-| `SUPER + /` | Shortcut help |
-| `SUPER + SHIFT + N` | Notification centre (the plate asks for `SUPER+N`; the notes scratchpad has held it since M2) |
-| `SUPER + SHIFT + B` | Focus the bar's status cluster (the plate asks for `SUPER+B`; the browser has held it since M1) |
-| `SUPER + Escape` | Lock the session (`SUPER+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
+| `PUNAR + Space` | Command center |
+| `PUNAR + Tab` | Project overview |
+| `PUNAR + A` | AI panel |
+| `PUNAR + S` | System control |
+| `PUNAR + /` | Shortcut help |
+| `PUNAR + SHIFT + N` | Notification centre (the plate asks for `PUNAR+N`; the notes scratchpad has held it since M2) |
+| `PUNAR + SHIFT + B` | Focus the bar's status cluster (the plate asks for `PUNAR+B`; the browser has held it since M1) |
+| `PUNAR + Escape` | Lock the session (`PUNAR+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
 | media keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
 
 Two surfaces deliberately have **no chord at all** — see below.
 
-- `SUPER+Space` → Hyprland runs `qs ipc call commandcenter toggle`.
+- `PUNAR+Space` → Hyprland runs `qs ipc call commandcenter toggle`.
 - In the overlay: typing filters, `↑`/`↓` select (animated highlight),
   `Enter` launches, `Esc` closes. A scrim click also dismisses, but nothing
   requires the mouse.
@@ -139,14 +159,14 @@ Two surfaces deliberately have **no chord at all** — see below.
 
 - The **alert region has no opening keybinding either**, for the same
   reason: punar-agentd raises a card by writing `alerts.json`, and the
-  card appears. On it: `I` inspects (the SUPER+A panel, opened on that
+  card appears. On it: `I` inspects (the PUNAR+A panel, opened on that
   detection), `D` dismisses to the record, `↑`/`↓` walk a multi-card
   stack, and `Esc` **hands the keyboard back without dismissing
   anything** — the card, the record and the alert register all stay.
 
-## Overview — SUPER+TAB (M2, Plate D-007)
+## Overview — PUNAR+TAB (M2, Plate D-007)
 
-`SUPER+TAB` → Hyprland runs `quickshell ipc call overview toggle`
+`PUNAR+TAB` → Hyprland runs `quickshell ipc call overview toggle`
 (IpcHandler target `overview`, functions `toggle`/`open`/`close` plus the
 read-only `state`, which returns `open`/`closed` for the CI check). The
 overlay is a paper sheet over the 22% warm ink-wash scrim, holding a
@@ -252,9 +272,9 @@ milestone-5.md §8):
   directory (ipc.md §9's honest placement note); anything root-trusted
   stays on the punard socket.
 
-## AI panel — SUPER+A (M7, Plate D-005)
+## AI panel — PUNAR+A (M7, Plate D-005)
 
-`SUPER+A` → Hyprland runs
+`PUNAR+A` → Hyprland runs
 `qs -p /usr/share/punar/shell ipc call aipanel toggle` (IpcHandler target
 `aipanel`, functions `toggle`/`open`/`close` plus the read-only `state`,
 which returns `open`/`closed` for the `m7-check` probe). The panel is a
@@ -423,7 +443,7 @@ One layer-shell region at the D-009 toast position (top 13%, right 3.4%,
 `min(46%, 340px)` wide), rendering **only** `punar-agentd` detection
 alerts. It is the sliver `milestone-10.md` §5.6 names and nothing beside
 it: there is still no notification centre, no freedesktop notification
-daemon, no OSD, no `Super+N` and no persistent do-not-disturb toggle —
+daemon, no OSD, no `Punar+N` and no persistent do-not-disturb toggle —
 all four are M13.
 
 The card is the D-009 anatomy: **meta row · hairline · one sentence ·
@@ -439,7 +459,7 @@ Why · an agent-named executable is running from Downloads, outside any
 managed Punar session · signature unmanaged-path-agentlike
 Policy · Personal defaults
 
-[ INSPECT I ]  SUPER+A   [ DISMISS TO RECORD D ]
+[ INSPECT I ]  PUNAR+A   [ DISMISS TO RECORD D ]
 ────────────────────────────────────────────────────────────────────
 Suspected, not certain · nothing was blocked · punarctl agents list
 Punar · punar-agentd
@@ -529,7 +549,7 @@ action half survives truncation.
 | --- | --- | --- |
 | `app` | `DesktopEntry.execute()` — the argv Quickshell parsed from `Exec`, never a shell string | `Launch(chromium)` |
 | `project` | Hyprland `workspace <id>` (+ `renameworkspace <id> <name>` when allocating) | `OpenProject(atlas) · Workspace 2` |
-| `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Super S` |
+| `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Punar S` |
 | `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |
 | `wallpaper` | `WallpaperState.setWallpaper(<id>)` — finite installed catalog, atomic id preference | `SetWallpaper(stillpoint)` |
 | `explain` | `punarctl --json policy explain <path>` | `PolicyExplain(security.firewall)` |
@@ -559,7 +579,7 @@ touch fails harmlessly.
 
 ## Linting
 
-All **thirty-four** `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
+All **thirty-eight** `.qml` files pass `qmllint` with **zero warnings** (qmllint 6.11.2 /
 quickshell 0.3.0-3 from the pinned 2026/08/20 snapshot, run in a container
 built on the pinned builder base with `qt6-declarative` + `quickshell`
 installed from the same snapshot; default import path — Quickshell ships
@@ -651,7 +671,7 @@ and that deleting `agents.json` fails closed to the empty panel.
   toast: neither is drawn here, because M10 ships the detection alert and
   nothing else — the approval surface stays the M9 gate. The `MANAGED`
   pill rides the **meta row** rather than the plate's action row: at
-  340 px the action row is already full at `[I] Inspect · Super+A` +
+  340 px the action row is already full at `[I] Inspect · Punar+A` +
   `[D] Dismiss to record`, and an annotation that overlaps a button is
   worse than one that sits a line higher. Nothing else moves.
 - Approval overlay (M9): the same drop-shadow omission. D-003's identity

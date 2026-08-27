@@ -133,7 +133,7 @@ inspection of the same tag the package is built from.
 | Item | Verdict | Evidence |
 | --- | --- | --- |
 | Quickshell `FileView`: `atomicWrites` default **true** → writes go through `QSaveFile` (tmp + rename); parent directories created (`mkpath`) before write | **verified** | (a) quickshell `src/io/fileview.hpp:202-207,423`, `fileview.cpp:231,253,288` |
-| Quickshell `IpcHandler` (`qs ipc call <target> <fn>`) for the SUPER+TAB toggle — same mechanism M1 uses for the command center | **verified** | (a) `src/io/ipchandler.hpp`; M1 shell already exercises it |
+| Quickshell `IpcHandler` (`qs ipc call <target> <fn>`) for the PUNAR+TAB toggle — same mechanism M1 uses for the command center | **verified** | (a) `src/io/ipchandler.hpp`; M1 shell already exercises it |
 
 ---
 
@@ -146,7 +146,7 @@ inspection of the same tag the package is built from.
 | Layout presets **balanced / columns / rows / focus / stack** via `punar-layout.sh` (global) | **in** | §13.5; mapping in §4 |
 | Preset **grid** | **out** | no native grid algorithm in 0.56.2 (§1.3); faking it with per-window `resizewindowpixel` breaks on the next open/close reflow. Future path: `lua:<name>` custom layout when the compositor rebase makes Lua layouts worth adopting |
 | Per-workspace presets | **out (stretch)** | keyword-added workspace rules accumulate (§1.3 caveat); global presets are honest and sufficient for acceptance. Revisit with a rule-reset mechanism |
-| SUPER+TAB project overview implementing Plate D-007 | **in** | §14.2; data flow §5 |
+| PUNAR+TAB project overview implementing Plate D-007 | **in** | §14.2; data flow §5 |
 | Named workspaces: rename via command center, `name:` navigation, names in bar + overview | **in** | §14 |
 | Workspace-name persistence: `~/.local/state/punar/workspaces.json` + restore on shell start | **in** | §14.3 first slice (“layout memory ships first” per D-007 register: names + presets, not windows) |
 | Scratchpads: assistant + notes special workspaces joining M1's terminal | **in** | §13.6 |
@@ -157,12 +157,12 @@ inspection of the same tag the package is built from.
 | Drag-to-tile with the mouse, workspace-switch spatial slide | **out** | D-007 lists them as specified-in-words; keyboard grammar is the acceptance path |
 | `punard`/`punarctl` involvement | **out** | M3; the shell writes state directly (§6) |
 
-## 3. Binding resolution (spec §13.3 “SUPER+L” collision) and new chords
+## 3. Binding resolution (spec §13.3 “PUNAR+L” collision) and new chords
 
-**Decision: `SUPER+L` stays focus-right. The layout chooser lives in the
-command center; `SUPER+comma` / `SUPER+period` cycle presets directly.**
+**Decision: `PUNAR+L` stays focus-right. The layout chooser lives in the
+command center; `PUNAR+comma` / `PUNAR+period` cycle presets directly.**
 
-Justification: §13.3's own table assigns `SUPER+L` to both HJKL focus and
+Justification: §13.3's own table assigns `PUNAR+L` to both HJKL focus and
 the layout chooser and says “exact bindings may evolve.” Directional focus
 is the highest-frequency verb in the grammar and HJKL is its complete
 vocabulary — breaking the family for a low-frequency chooser inverts the
@@ -176,17 +176,17 @@ New M2 chords (M1 grammar untouched; all free keys checked against
 `punar-binds.conf`):
 
 ```text
-SUPER + G                    Toggle group on active window (togglegroup)
-SUPER + SHIFT + G            Move window out of group (moveoutofgroup)
-SUPER + [ / ]                Previous / next window in group (changegroupactive b / f)
-SUPER + CTRL + H/J/K/L       Move window into adjacent group (moveintogroup l/d/u/r)
-SUPER + SHIFT + V            Pin floating window (pin)
-SUPER + C                    Center floating window (centerwindow)
-SUPER + comma / period       Previous / next layout preset (exec punar-layout.sh prev|next)
-SUPER + A                    Assistant scratchpad (togglespecialworkspace assistant)
-SUPER + N                    Notes scratchpad (togglespecialworkspace notes)
-SUPER + TAB                  Project overview (exec quickshell ipc call overview toggle)
-SUPER + SHIFT + TAB          Previous open workspace (kept — fast cycle stays)
+PUNAR + G                    Toggle group on active window (togglegroup)
+PUNAR + SHIFT + G            Move window out of group (moveoutofgroup)
+PUNAR + [ / ]                Previous / next window in group (changegroupactive b / f)
+PUNAR + CTRL + H/J/K/L       Move window into adjacent group (moveintogroup l/d/u/r)
+PUNAR + SHIFT + V            Pin floating window (pin)
+PUNAR + C                    Center floating window (centerwindow)
+PUNAR + comma / period       Previous / next layout preset (exec punar-layout.sh prev|next)
+PUNAR + A                    Assistant scratchpad (togglespecialworkspace assistant)
+PUNAR + N                    Notes scratchpad (togglespecialworkspace notes)
+PUNAR + TAB                  Project overview (exec quickshell ipc call overview toggle)
+PUNAR + SHIFT + TAB          Previous open workspace (kept — fast cycle stays)
 ```
 
 `lockactivegroup`, rename-workspace, go-to-named-workspace, and the full
@@ -225,11 +225,11 @@ global in M2 (§2). The active preset is also written into the state file
 (§6) and re-applied by the same script on session start (`punar-layout.sh
 restore`, exec-once after the shell), so the preset survives reboot.
 
-## 5. Overview — SUPER+TAB, Plate D-007 (spec §14.2)
+## 5. Overview — PUNAR+TAB, Plate D-007 (spec §14.2)
 
 Data flow (no polling, renders on demand):
 
-1. `SUPER+TAB` → `quickshell ipc call overview toggle` (IpcHandler target
+1. `PUNAR+TAB` → `quickshell ipc call overview toggle` (IpcHandler target
    `overview`, functions `toggle`/`open`/`close`, plus a read-only `state`
    function returning `open|closed` for the CI check).
 2. On open, the overview QML calls `Hyprland.refreshWorkspaces()` and
@@ -250,7 +250,7 @@ Data flow (no polling, renders on demand):
    closes. Motion: open/close and selection use 300 ms
    `cubic-bezier(0.2,0,0,1)`; nothing else animates.
 4. The M1 placeholder bind (`workspace e+1`) is replaced by the IPC exec;
-   `SUPER+SHIFT+TAB` keeps the quick previous-workspace cycle.
+   `PUNAR+SHIFT+TAB` keeps the quick previous-workspace cycle.
 
 ## 6. Persistence — state-file contract
 

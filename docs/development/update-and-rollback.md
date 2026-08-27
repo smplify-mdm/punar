@@ -63,7 +63,7 @@ accept, amend or reject.
 
 ## 0. The architectural law of this document
 
-Seven rules. Every decision below is downstream of them.
+Eight rules. Every decision below is downstream of them.
 
 **Law 1 — Rollback is only trustworthy if it works when userspace does
 not.** The failure that actually strands a laptop is a kernel that panics,
@@ -108,6 +108,14 @@ prohibits continuous polling; 6.4 prohibits constant writes. An update
 system is the single largest disk-write event the OS performs, so §10
 prices it explicitly and makes it idle-scheduled, timer-driven with jitter,
 and structurally absent from the measurement window.
+
+**Law 8 — Governed rolling has two clocks.** The OS clock promotes one
+complete, signed, health-gated image through a chosen channel. The developer
+clock selects compilers, SDKs, AI runtimes, and services per project through
+`punar-env`. A request for a newer Rust, Node, CUDA, or model runtime must not
+turn into a partial base-system upgrade. This is how Punar keeps upstream
+velocity without letting two machines accidentally resolve two different
+operating systems under the same release name.
 
 ---
 
@@ -545,9 +553,35 @@ step writes it, the verify step re-reads it. That single move buys:
 - Drift detection for free: an out-of-band channel change is remediated by
   the existing `punard-reconcile.timer`.
 
-Channels for the MVP: `stable` (default), `rc`, `edge`, `dev`. The names are
-user-visible product surface, so ratifying them is a product decision
-(§12.2 item 6), and the schema stays an open string until it is made.
+Punar exposes three channels. They differ in **promotion evidence and
+cadence**, never in integrity, atomicity, or rollback:
+
+| Channel | Promise | Intended use |
+|---|---|---|
+| `stable` (default) | Longest soak; fully promoted only after the complete gate and available health evidence | Personal machines and enterprise fleets that value predictability |
+| `dev` | Faster promotion after the complete gate and an initial canary window | Engineers who want current platform packages without being first |
+| `edge` | Earliest promotable Punar image after the complete gate; least soak, explicitly opt-in | Contributors and engineers validating the newest base stack |
+
+`candidate` / release-candidate is an internal promotion state, not a fourth
+channel a person must choose. Even `edge` is a whole Punar release: signed
+manifest, exact package set, inactive-slot write, health check, and bootloader
+rollback. Punar never offers an *unsafe* channel and never performs a partial
+base-system upgrade.
+
+On a personal device, these are **the user's options**. `stable` is the
+factory OS default, not a remote assignment. The user may select `dev` or
+`edge`, return to `stable`, disable automatic checks, or keep checks while
+disabling automatic staging. `punarctl policy explain system.update_channel`
+must cite `Personal preference` after a user choice and `OS default` before
+one. An organization can become the winning source only after enrollment;
+there is no implicit Smplify layer on a personal machine.
+
+The other half of freshness is deliberately outside this table. A project can
+select `rust: nightly`, a newer Node line, or an AI runtime in its
+`ProjectEnvironment` manifest while the host stays on `stable`. Closing or
+destroying that environment releases its processes and storage under the M6
+lifecycle. The OS channel is therefore not a proxy for the age of every tool
+an engineer can use.
 
 ### 5.2 Staged rollout, evaluated locally (Law 5)
 
@@ -597,7 +631,17 @@ describes the product, and §5.4 describes the variant.
 
 #### 5.3.1 The experience
 
-1. A timer fires (§10: `OnBootSec=15min`, `OnUnitActiveSec=6h`,
+The factory personal-device settings are `stable`, automatic checks on,
+automatic staging on, payload downloads deferred on metered links, and
+automatic reboot permanently off. They are shown and editable after login in
+**System Control › System › Updates** and through the command center.
+They are not another page in the account-first onboarding card. The surface
+explains the three channels in the §5.1 language and shows the effective
+source (`OS default`, `Personal preference`, or—only after enrollment—the
+organization policy).
+
+1. When automatic checking is enabled, a timer fires (§10:
+   `OnBootSec=15min`, `OnUnitActiveSec=6h`,
    `RandomizedDelaySec=1h`). punard fetches `channel.json`, verifies it,
    evaluates the bucket. Cost: a few hundred bytes.
 2. If a release is admissible, punard fetches the manifest and **streams the
@@ -615,6 +659,11 @@ describes the product, and §5.4 describes the variant.
 
 5. That is all. **The device never reboots itself.** Ever. Not on a
    deadline, not for a critical CVE, not at 3 a.m.
+
+Changing channel never resolves packages on the device. It invalidates cached
+metadata and selects the next admissible whole release from that channel. The
+currently blessed slot remains bootable throughout, including when moving
+from `edge` back to `stable`.
 
 **Why this is good rather than merely safe:** because the write landed in
 the *inactive* slot, there is no install step to interrupt anyone. The
@@ -637,10 +686,12 @@ lands hardest on the unmanaged device.
   upsell — the same discipline applies to urgency).
 - **No nagging.** The line appears; it does not repeat, escalate, badge or
   modal. Discoverability is spec 12.3's job, not anxiety's.
-- **The user can turn automatic staging off**, and `update status` then says
-  what that means and what to type instead. Spec 73: every restriction —
-  including a self-imposed one — states what happens, why, and the next
-  step.
+- **The user can turn automatic checks or automatic staging off.** Turning
+  checks off causes no network contact and `update status` states when the
+  last signed metadata was seen. Turning only staging off still checks and
+  reports availability but writes no slot until the human acts. Spec 73:
+  every restriction — including a self-imposed one — states what happens,
+  why, and the next step.
 
 #### 5.3.3 The honest limit of unmanaged staging
 
@@ -1075,7 +1126,7 @@ security operator cares about invisible in the audit log.
 
 | Capability | Observed from | Applied by | Allowed states |
 |---|---|---|---|
-| `system.update_channel` | `/var/lib/punar/update/channel` | writing that file (and invalidating cached metadata) | `stable`, `rc`, `edge`, `dev` (pending §12.2 item 6) |
+| `system.update_channel` | `/var/lib/punar/update/channel` | writing that file (and invalidating cached metadata) | `stable`, `dev`, `edge` |
 
 Descriptor conforms to the shipped `schemas/capability/capability-descriptor.json`
 unchanged. It joins `security.firewall`, `system.hostname`,
@@ -1394,7 +1445,7 @@ boot 6  N+1 running again. update.auto_rollback in the audit log. Failed slot
 Items 1–3 are already carried in the project registry
 [`user-blocked.md`](user-blocked.md) (its items 7, 1, and 7 respectively);
 they are restated here with the update-specific detail, and the registry
-remains the single index. Items 4–7 are new and specific to this design.
+remains the single index. Item 4 is specific to this design.
 
 1. **Generate and hold the Punar release signing key** (ed25519) and decide
    custody: offline HSM, hardware token, or cloud KMS, plus rotation and
@@ -1409,20 +1460,15 @@ remains the single index. Items 4–7 are new and specific to this design.
    host.** ADR-001 already committed to both (*"Vendor infrastructure from
    day one"*); neither exists, and `snapshot.env` says so: *"until that
    mirror exists, CI pulls the ALA snapshot directly."* → registry item 7.
-4. **Decide whether an unmanaged device performs the update check by
-   default**, and write the first-boot consent text (spec 64, 65). The
-   mechanism supports either answer; the default is a product decision,
-   and it interacts with M12's zero-connection claims (§14 item 14).
-5. **Ratify or reject ADR-003** (§3.4) superseding ADR-001's MVP rollback
-   choice. If rejected, the implementation builds btrfs+snapper instead and
-   this document's §3 becomes the record of a considered alternative.
-6. **Ratify the channel naming taxonomy** (`stable` / `rc` / `edge` / `dev`)
-   — user-visible product surface, and the reason
-   `schemas/desired-state/desired-state.json` still types the channel as an
-   open string.
-7. **Decide the managed reboot-deadline policy** — whether Smplify may ever
+4. **Decide the managed reboot-deadline policy** — whether Smplify may ever
    force a reboot — *before* the desired-state schema is widened to express
    it (§5.4, §8.4).
+
+Two former blockers are resolved: ADR-003 is Accepted (2026-08-25), and the
+personal update policy is `stable` by default with user-owned `stable` /
+`dev` / `edge`, checking, and staging controls. Automatic checking is an
+explicitly documented outbound contact and can be disabled; automatic reboot
+does not exist.
 
 ---
 

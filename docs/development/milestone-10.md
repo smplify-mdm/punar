@@ -414,7 +414,7 @@ Why · an agent-named executable is running from Downloads, outside any
       managed Punar session · signature unmanaged-path-agentlike
 Policy · Personal defaults          (or: Policy · Acme · eng-ai-v3, when enrolled)
 
-  [I] Inspect · Super+A        [D] Dismiss to record
+  [I] Inspect · Punar+A        [D] Dismiss to record
 
 Suspected, not certain · nothing was blocked · punarctl agents list
 ```
@@ -572,7 +572,7 @@ rather than merely written — `dnd(on|off)`.
 no capability, and no UI toggle.** That is the honest minimum that makes
 decision 8 verifiable (§16 group 5); the toggle, its persistence and its
 capability are M13, and the panel says so. Third-party notifications,
-grouping, `Super+N`, `Clear all` and the OSD are untouched.
+grouping, `Punar+N`, `Clear all` and the OSD are untouched.
 
 ---
 
@@ -1495,7 +1495,7 @@ the existing artifact sweep; boot-test phase 12 greps the verdict.
 |---|---|---|
 | Detection cadence | timer, 240 s, three event triggers | exec-time notification / eBPF / fanotify / ptrace — **permanently out** (spec 1.14) |
 | Detection inputs | adapter signatures, suspected globs, path-provenance + name (§3.5) | network destinations, MCP activity, credential usage, process lineage, signing provenance — M12 / M9+ / revisit |
-| Alert | one card per signature, root-owned state file, D-009 anatomy, dismissal, DND breakthrough | notification centre, freedesktop notification daemon, OSD, persistent DND toggle + capability, grouping, `Super+N` — **M13** |
+| Alert | one card per signature, root-owned state file, D-009 anatomy, dismissal, DND breakthrough | notification centre, freedesktop notification daemon, OSD, persistent DND toggle + capability, grouping, `Punar+N` — **M13** |
 | Response to a detection | inform, record, alert | **block / kill / quarantine / `BLOCK NETWORK` / `REGISTER AS MANAGED`** — M12 + a policy verb; M10 renders no dead buttons |
 | Unknown-agent memory | persisted record + bounded ledger, 7-day retention, purgeable | repositories, zones, network, credentials, MCP for unmanaged agents — no producer; child-process trees — permanently out |
 | Remote query | device-pull on the sync piggyback; four scopes; three-way intersection | **real cloud, real transport (mTLS, device attestation), real discovery** — Phase 2; push / long-poll / inbound listener — **never** |

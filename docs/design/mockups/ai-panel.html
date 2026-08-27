@@ -103,7 +103,7 @@
     <div class="mast">
       <div>
         <div class="meta"><strong>Punar · AI on this device</strong></div>
-        <div class="meta">Agent registry, authority, and access ledger · Super + A</div>
+        <div class="meta">Agent registry, authority, and access ledger · Punar + A</div>
       </div>
       <div style="text-align:right">
         <div class="meta"><strong>Plate D-005</strong></div>
@@ -215,7 +215,7 @@
   const POLICY = () => MODE === 'managed' ? 'policy eng-ai-v3' : 'policy · personal defaults';
   const PRIVACY = () => MODE === 'managed'
     ? `<div class="privacy">This ledger stays on this device · <b>Admin queries are scoped, audited, and visible here</b><br>Last admin query · <b>None</b> · You never see less than your administrator</div>`
-    : `<div class="privacy">This ledger stays on this device · <b>No organization is enrolled</b><br>Nothing leaves this machine · <b>Enrolling later never applies retroactively</b></div>`;
+    : `<div class="privacy">This ledger stays on this device · <b>Personal mode is local-only</b><br>Enrollment later never applies retroactively</div>`;
   const claudeView = (cred) => `
     <div class="ptitle"><span class="t">Claude Code</span><span class="pill">Managed</span></div>
     <div class="psub">agt_123 · alice@acme.com · atlas-dev-42 · started 13:44</div>

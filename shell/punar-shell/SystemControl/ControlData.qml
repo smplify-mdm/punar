@@ -1255,7 +1255,7 @@ Scope {
             title: "AI Agents",
             sub: "AI · registry · " + Agents.managedCount + " managed · " + Agents.observedCount + " observed · " + Agents.unknownCount + " unknown",
             pill: {
-                label: "Super + A · Full panel"
+                label: "Punar + A · Full panel"
             },
             rows: rows,
             emptyRows: "No agent sessions · no suspected AI activity observed",
@@ -1278,7 +1278,7 @@ Scope {
             title: "Permissions",
             sub: "AI · authority model",
             pill: {
-                label: "Super + A · Full panel"
+                label: "Punar + A · Full panel"
             },
             kv: [
                 {
@@ -1353,7 +1353,7 @@ Scope {
             title: "Projects",
             sub: "Developer · workspaces · live",
             pill: {
-                label: "Super + Tab · Overview"
+                label: "Punar + Tab · Overview"
             },
             rows: rows,
             emptyRows: "No workspaces open",

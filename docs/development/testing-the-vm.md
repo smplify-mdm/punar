@@ -58,24 +58,26 @@ only the guest's 1280×800 display. It refuses to overwrite an existing file.
 
 ## 2. The ten-minute tour
 
-Everything is keyboard-first. `SUPER` is the modifier.
+Everything is keyboard-first. `PUNAR` means the **Punar key**: Windows / Meta
+on a PC keyboard, or the key your VM client maps to guest Meta (normally
+Command on an Apple keyboard).
 
 | Do this | Chord | What you should see |
 |---|---|---|
-| **Start here** | `SUPER + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
-| Terminal | `SUPER + Return` | foot, Geist Mono, panel surface |
-| Browser | `SUPER + B` | Chromium, native Wayland |
-| Find and open an app | `SUPER + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
-| Choose a wallpaper | `SUPER + Space` | Type `wallpaper`; Stillpoint, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
-| System control | `SUPER + S` | The settings surface |
-| Notification centre | `SUPER + SHIFT + N` | The centre; toasts appear on their own |
-| Project overview | `SUPER + Tab` | Workspaces as projects |
-| AI panel | `SUPER + A` | What AI has done on this device |
-| Close the focused app | `SUPER + Q` | Its window disappears and the menubar clears the app name |
-| Lock | `SUPER + Escape` | Password is `punar` |
+| **Start here** | `PUNAR + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
+| Terminal | `PUNAR + Return` | foot, Geist Mono, panel surface |
+| Browser | `PUNAR + B` | Chromium, native Wayland |
+| Find and open an app | `PUNAR + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
+| Choose a wallpaper | `PUNAR + Space` | Type `wallpaper`; Stillpoint, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
+| System control | `PUNAR + S` | The settings surface |
+| Notification centre | `PUNAR + SHIFT + N` | The centre; toasts appear on their own |
+| Project overview | `PUNAR + Tab` | Workspaces as projects |
+| AI panel | `PUNAR + A` | What AI has done on this device |
+| Close the focused app | `PUNAR + Q` | Its window disappears and the menubar clears the app name |
+| Lock | `PUNAR + Escape` | Password is `punar` |
 
-Layouts: `SUPER + ,` / `SUPER + .` cycle presets. `SUPER + 1..9` switch
-workspaces. `SUPER + T` is a scratchpad terminal.
+Layouts: `PUNAR + ,` / `PUNAR + .` cycle presets. `PUNAR + 1..9` switch
+workspaces. `PUNAR + T` is a scratchpad terminal.
 
 **Themes have no chord** — they are driven over IPC:
 

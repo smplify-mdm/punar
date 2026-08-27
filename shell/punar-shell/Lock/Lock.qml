@@ -41,7 +41,7 @@ pragma ComponentBehavior: Bound
 //   shell.qml:            Lock { }
 //   punar-binds.conf:     bindd = $mod, escape, Lock session, exec, $lock
 //   hyprland.conf:        $lock = qs -p /usr/share/punar/shell ipc call lock lock
-// The chord is SUPER+Escape, NOT the SUPER+SHIFT+L this file first
+// The chord is PUNAR+Escape, NOT the PUNAR+SHIFT+L this file first
 // recommended: all three L chords are load-bearing in the §13.3
 // directional grammar (focus-right / move-right / move-into-group-right)
 // and Hyprland fires both binds when two share a chord. Escape is free at

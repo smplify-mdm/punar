@@ -1,5 +1,5 @@
 pragma ComponentBehavior: Bound
-// Overview — the SUPER+TAB project-workspace overview (Milestone 2),
+// Overview — the PUNAR+TAB project-workspace overview (Milestone 2),
 // implementing docs/design/mockups/desktop-multitasking.html state
 // 03 OVERVIEW (Plate D-007, the acceptance reference): a grid of
 // project-workspace cards on a paper sheet over the warm ink-wash scrim.
@@ -15,20 +15,18 @@ pragma ComponentBehavior: Bound
 //
 // Toggled from Hyprland via Quickshell IPC:
 //   quickshell ipc call overview toggle   (equivalently: qs ipc call …)
-// Hyprland bind: bindd = SUPER, TAB, …, exec, quickshell ipc call overview toggle
+// Hyprland bind: bindd = PUNAR, TAB, …, exec, quickshell ipc call overview toggle
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import "../Theme"
 import "../Services"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     property bool openOnReady: false
     property bool windowVisible: false
     property string query: ""
@@ -111,32 +109,17 @@ Scope {
             root.show();
     }
 
-    // SUPER+TAB entry point (replaces the M1 `workspace e+1` placeholder).
-    IpcHandler {
-        target: "overview"
-
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.dismiss();
-        }
-        // Read-only, for the m2-exercise CI check.
-        function state(): string {
-            return root.open ? "open" : "closed";
-        }
-        function latency(): string {
-            return SurfaceTiming.sample("overview");
-        }
+    function ipcState(): string {
+        return root.open ? "open" : "closed";
     }
 
     Timer {
         id: hideTimer
         interval: Theme.durStandard
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     PanelWindow {
