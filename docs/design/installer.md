@@ -298,7 +298,7 @@ scheduled — they are cheap, and each one changes a build step if it is false:
 
 | # | Claim | Status |
 |---|---|---|
-| F1 | `mkosi --profile desktop,installer` composes **two** profiles. The repository passes a single profile today (`container-build.sh` line 452). mkosi renamed the option to a list form at some point in its 25.x line; the pinned version is whatever `pacman -S mkosi` resolved to in the 2026/08/20 snapshot | **TO VERIFY.** If it is single-valued, the fallback is one `mkosi.profiles/installer/` that includes the desktop content by `Include=` — a config change, not a design change |
+| F1 | `mkosi --profile desktop,installer` composes **two** profiles. The repository passes a single profile today (`container-build.sh` line 452). mkosi renamed the option to a list form at some point in its 25.x line; the pinned version is whatever `pacman -S mkosi` resolved to in the 2026/08/20 snapshot | **VERIFIED 2026-08-27.** Pinned mkosi 26 parses `Profiles=`/`--profile=` with a comma-delimited list and loads each matching `mkosi.profiles/` directory in order. Its scripts receive `$PROFILES` as a **space-delimited** string despite the same pinned manual still saying comma-delimited; the policy gate normalizes both and fixture-tests the distinction. |
 | F2 | `Format=uki` emits the installer UKI, and a second `mkosi` invocation emits the slot payload, from the same config tree | **TO VERIFY.** `Format=uki` is a documented mkosi output; that it composes with the profile split here is not |
 | F3 | The `xorriso -as mkisofs … -append_partition 2 … -e --interval:appended_partition_2:all::` idiom produces an image that boots as `-cdrom` **and** as a raw drive on OVMF | **TO VERIFY** — this is the exact form assertion I05 exists to prove, and it is the step with the least margin for a typo. The idiom is the one Arch's own `archiso` uses; that it is correct *here*, at this xorriso version, over these inputs, is what I05 asserts |
 | F4 | `libisoburn` is present in the 2026/08/20 snapshot and installs into the builder cleanly | **TO VERIFY.** Low risk; named because the builder's package list is a pin |
@@ -1358,12 +1358,18 @@ A3  /etc/subuid or /etc/subgid mentions punar   (item 5)
 A4  /etc/greetd/config.toml contains the string "initial_session"   (item 6)
 A5  any path matching these globs exists:                    (items 7–13)
       usr/lib/systemd/system/punar-m*-check.service
+      usr/lib/systemd/system/punar-surface-cost-check.service
+      usr/lib/systemd/system/punar-surfaces-check.service
+      usr/lib/systemd/system/punar-wifi-check.service
       usr/lib/systemd/system/punar-mock-smplify.service
       usr/lib/systemd/system/punar-boot-marker.service
       usr/lib/systemd/system/punar-desktop-marker.*
       usr/lib/systemd/system/punar-desktop-diag.*
       usr/lib/systemd/system/punar-idle-ram.service
       usr/lib/punar/m*-check.sh
+      usr/lib/punar/surface-cost-check.sh
+      usr/lib/punar/surfaces-check.sh
+      usr/lib/punar/wifi-check.sh
       usr/lib/punar/idle-ram.sh
       usr/lib/punar/desktop-ready.sh
       usr/lib/punar/foo-agent-fixture.sh
@@ -1373,7 +1379,7 @@ A5  any path matching these globs exists:                    (items 7–13)
       usr/share/punar/fixtures
 A6  any *.wants symlink points at a unit matching the A5 globs
 A7  /etc/sudoers.d/* contains NOPASSWD
-A8  the UKI cmdline contains "console=ttyS0" or "punar.live"
+A8  the UKI cmdline contains "console=ttyS0", "console=ttyAMA0" or "punar.live"
     (the installer profile is exempt from the punar.live half, and only
      that half, and it is exempt by name rather than by pattern)
 ```
@@ -1385,10 +1391,13 @@ and would be maintained by suppression. The denylist above is exact, it
 covers every artefact this repository creates, and A9 closes the gap:
 
 ```text
-A9  the set of enabled units (usr/lib/systemd/system/*.target.wants/*) is
-    byte-equal to os/images/expected-enabled-units.txt, which is committed
-    and reviewed. Any new enabled unit fails the build until someone edits
-    that file, which is exactly the moment to ask whether it should ship.
+A9  the set of enabled units under both
+    usr/lib/systemd/system/*.target.wants/* and
+    etc/systemd/system/*.target.wants/* is byte-equal to the committed,
+    architecture-specific expected-enabled-units manifest. This covers both
+    vendor links and links created by preset-all. Any new enabled unit fails
+    the build until someone edits that file, which is exactly the moment to
+    ask whether it should ship.
 ```
 
 A9 is the important one: it is an allowlist over the surface that actually

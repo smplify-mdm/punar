@@ -206,6 +206,9 @@ jobs:
       - name: Validate stabilized-idle performance gate branches
         run: ./tests/performance/check-budgets-test.sh
 
+      - name: Validate release-image policy gate branches
+        run: ./tests/images/release-image-policy-test.sh
+
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
