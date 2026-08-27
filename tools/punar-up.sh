@@ -51,8 +51,17 @@ fi
 
 if [ -f "${CACHE}/SHA256SUMS" ]; then
     echo "==> verifying checksum"
-    ( cd "$CACHE" && shasum -a 256 -c SHA256SUMS 2>/dev/null | grep -E "qcow2.*OK" ) \
+    # The shared manifest names both the desktop and minimal dev images, but
+    # this artifact intentionally contains only the desktop image. `shasum -c`
+    # therefore exits non-zero for the absent dev image even when these bytes
+    # are correct. Select and compare the exact artifact we are about to boot;
+    # accepting any `qcow2: OK` line could validate the wrong image.
+    EXPECTED_SHA=$(awk '$2 == "punar-desktop-x86_64.qcow2" {print $1}' \
+        "${CACHE}/SHA256SUMS")
+    ACTUAL_SHA=$(shasum -a 256 "$IMG" | awk '{print $1}')
+    [ -n "$EXPECTED_SHA" ] && [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] \
         || { echo "CHECKSUM MISMATCH — refusing to boot" >&2; exit 1; }
+    echo "    punar-desktop-x86_64.qcow2: OK"
 fi
 
 [ -f "${CACHE}/build-info.txt" ] && { echo "--- build-info ---"; cat "${CACHE}/build-info.txt"; echo "------------------"; }
