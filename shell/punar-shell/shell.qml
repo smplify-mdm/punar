@@ -67,7 +67,7 @@ ShellRoot {
         SurfaceTiming.init();
     }
 
-    // The five user-invoked surfaces below retain 104–120 MiB apiece in an
+    // The user-invoked surfaces below retain 104–120 MiB apiece in an
     // isolated process but construct in 31–59 ms (run 33044217553). Keep only
     // their tiny IPC proxies resident. Construction starts on the same user
     // action that opens the surface; the object is destroyed after its exit
@@ -411,7 +411,7 @@ ShellRoot {
     // a keystroke while the user is typing; the guaranteed keyboard path to
     // the record is PUNAR+SHIFT+N.
     ToastStack {
-        onCenterRequested: notificationCenter.show()
+        onCenterRequested: notificationCenterSurface.openSurface()
     }
 
     // PUNAR+SHIFT+N — the centre. It reads three registers and owns only
@@ -426,15 +426,84 @@ ShellRoot {
     // AlertStack.onInspectRequested precedent: a row that points at a
     // pending approval opens the M9 gate on that approval, and a row that
     // points at a detection opens the PUNAR+A panel on that detection.
-    NotificationCenter {
-        id: notificationCenter
-
-        onApprovalRequested: function (approvalId) {
-            approvalOverlay.selectedId = approvalId;
-            approvalOverlay.show();
+    DeferredSurface {
+        id: notificationCenterSurface
+        surfaceName: "notifications"
+        sourceComponent: NotificationCenter {
+            onApprovalRequested: function (approvalId) {
+                approvalOverlay.selectedId = approvalId;
+                approvalOverlay.show();
+            }
+            onInspectRequested: function (detectionId) {
+                shellRoot.showAiPanelDetection(detectionId);
+            }
         }
-        onInspectRequested: function (detectionId) {
-            shellRoot.showAiPanelDetection(detectionId);
+    }
+
+    IpcHandler {
+        target: "notifications"
+
+        function toggle(): void {
+            notificationCenterSurface.toggleSurface();
+        }
+        function open(): void {
+            notificationCenterSurface.openSurface();
+        }
+        function close(): void {
+            notificationCenterSurface.closeSurface();
+        }
+        function state(): string {
+            return notificationCenterSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("notifications");
+        }
+        function residency(): string {
+            return notificationCenterSurface.residency();
+        }
+        function count(): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcCount();
+            notificationCenterSurface.releaseIfClosed();
+            return result;
+        }
+        function focused(): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcFocused();
+            notificationCenterSurface.releaseIfClosed();
+            return result;
+        }
+        function owner(): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "unverified";
+            var result = surface.ipcOwner();
+            notificationCenterSurface.releaseIfClosed();
+            return result;
+        }
+        function dismiss(): string {
+            var surface = notificationCenterSurface.surface;
+            return surface === null ? "" : surface.ipcDismiss();
+        }
+        function clear(): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcClear();
+            notificationCenterSurface.releaseIfClosed();
+            return result;
+        }
+        function dnd(mode: string): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "off";
+            var result = surface.ipcDnd(mode);
+            notificationCenterSurface.releaseIfClosed();
+            return result;
         }
     }
 

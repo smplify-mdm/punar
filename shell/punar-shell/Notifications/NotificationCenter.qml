@@ -95,15 +95,13 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
 import "../Theme"
 import "../Services"
 
-Scope {
+DeferredSurfaceBase {
     id: root
 
-    property bool open: false
     property bool windowVisible: false
 
     // The row under the cursor, keyed by the id its own register uses.
@@ -502,61 +500,49 @@ Scope {
             root.show();
     }
 
-    // PUNAR+SHIFT+N entry point (os/modules/desktop/hypr/punar-binds.conf).
-    IpcHandler {
-        target: "notifications"
+    function dismiss(): void {
+        root.hide();
+    }
 
-        function toggle(): void {
-            root.toggle();
-        }
-        function open(): void {
-            root.show();
-        }
-        function close(): void {
-            root.hide();
-        }
-        function state(): string {
-            return root.open ? "open" : "closed";
-        }
-        function latency(): string {
-            return SurfaceTiming.sample("notifications");
-        }
+    function ipcState(): string {
+        return root.open ? "open" : "closed";
+    }
 
-        // ---- read-only probes (the alerts/approval/aipanel precedent) ----
-        function count(): string {
-            return String(root.rowCount);
-        }
-        function focused(): string {
-            return root.selectedKey;
-        }
-        // Who owns org.freedesktop.Notifications:
-        // punar | foreign | unverified.
-        function owner(): string {
-            return Notifications.ownership;
-        }
+    // Read-only and mutation methods are exposed through shell.qml's tiny
+    // resident IPC proxy. The visual ledger itself exists only while someone
+    // is using it.
+    function ipcCount(): string {
+        return String(root.rowCount);
+    }
 
-        // ---- verbs ----
-        function dismiss(): string {
-            var key = root.selectedKey;
-            root.dismissSelected();
-            return key;
-        }
-        function clear(): string {
-            var n = Notifications.count;
-            root.clearAll();
-            return String(n);
-        }
-        // `on` | `off` | `toggle`; anything else reports without changing.
-        // Persisted, so the answer survives a restart of the shell.
-        function dnd(mode: string): string {
-            if (mode === "on")
-                Notifications.setDnd(true);
-            else if (mode === "off")
-                Notifications.setDnd(false);
-            else if (mode === "toggle")
-                Notifications.toggleDnd();
-            return Notifications.dnd ? "on" : "off";
-        }
+    function ipcFocused(): string {
+        return root.selectedKey;
+    }
+
+    function ipcOwner(): string {
+        return Notifications.ownership;
+    }
+
+    function ipcDismiss(): string {
+        var key = root.selectedKey;
+        root.dismissSelected();
+        return key;
+    }
+
+    function ipcClear(): string {
+        var n = Notifications.count;
+        root.clearAll();
+        return String(n);
+    }
+
+    function ipcDnd(mode: string): string {
+        if (mode === "on")
+            Notifications.setDnd(true);
+        else if (mode === "off")
+            Notifications.setDnd(false);
+        else if (mode === "toggle")
+            Notifications.toggleDnd();
+        return Notifications.dnd ? "on" : "off";
     }
 
     Timer {
@@ -564,7 +550,10 @@ Scope {
 
         interval: Theme.durStandard
         repeat: false
-        onTriggered: root.windowVisible = false
+        onTriggered: {
+            root.windowVisible = false;
+            root.unloadRequested();
+        }
     }
 
     // The ONE clock on this surface, and it runs only while the surface is

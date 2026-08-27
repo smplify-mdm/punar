@@ -67,7 +67,7 @@ the machine.
 | `SystemControl/SystemControl.qml` | Lazy PUNAR+S settings surface (Plate D-004) — holds every colour, decides nothing |
 | `SystemControl/ControlData.qml` | Everything that panel KNOWS: file watches, `punarctl` probes, the view model, the mutations — holds no colour |
 | `Notifications/ToastStack.qml` | Transient toasts + `toasts` IPC handler (Plate D-009 Sect II) |
-| `Notifications/NotificationCenter.qml` | PUNAR+SHIFT+N record + `notifications` IPC handler |
+| `Notifications/NotificationCenter.qml` | PUNAR+SHIFT+N interruption ledger, loaded only while in use |
 | `Notifications/Osd.qml` | Volume/brightness OSD + `osd` IPC handler — the one PANEL-voice surface |
 | `Shortcuts/Shortcuts.qml` · `BindTable.qml` · `BindRow.qml` · `ChordCap.qml` | Lazy PUNAR+/ help; bind-table singleton preserves one `hyprctl binds -j` query per session (Plate D-017) |
 | `Lock/Lock.qml` · `LockSurface.qml` | The real `ext-session-lock-v1` lock, authenticated through PAM + `lock` IPC handler (Plates D-002 / D-012) |
@@ -98,14 +98,16 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 
 ## Measured surface lifecycle
 
-The command center, System Control, shortcut help, AI panel and overview are
-created on first use and destroyed after their 300 ms close animation. Their
-small IPC proxies remain resident, so `state()` and `residency()` never load a
-closed panel. Run 33044217553 measured real-`qs` construction medians of
-31–59 ms and isolated retained deltas of 106982–123032 KiB; those deltas share
-Qt/Quickshell code and must not be added together. Bar, wallpaper, approvals,
-alerts, notifications/toasts/OSD and lock stay eager because they are visible,
-event-driven, unbidden or security-critical.
+The command center, System Control, shortcut help, AI panel, overview and
+notification ledger are created on first use and destroyed after their 300 ms
+close animation. Their small IPC proxies remain resident, so `state()` and
+`residency()` never load a closed panel. Run 33044217553 measured real-`qs`
+construction medians of 31–59 ms and isolated retained deltas of
+106982–123032 KiB for the first five; the next canonical image run extends the
+same measurement to notifications. Those isolated deltas share Qt/Quickshell
+code and must not be added together. Bar, wallpaper, approvals, alerts,
+toasts/OSD and lock stay eager because they are visible, event-driven,
+unbidden or security-critical.
 
 The shortcut rows are the deliberate exception inside a lazy surface:
 `BindTable` is a tiny singleton, so unloading the window never violates its

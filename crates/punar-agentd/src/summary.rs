@@ -1,7 +1,7 @@
 //! `/run/punar/agents.json` — the AI panel's side contract (docs/api/ipc.md
 //! section 11), the sibling of M5's `status.json`.
 //!
-//! The shell renders the SUPER+A surface from this file with an
+//! The shell renders the PUNAR+A surface from this file with an
 //! event-driven `FileView`: no socket client in the shell, no polling loop,
 //! and no privileged data. Written at startup and on every change
 //! (register, end, reap, detection diff), atomically (tmp + rename), `0644`.

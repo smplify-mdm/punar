@@ -1,4 +1,4 @@
-// Typed contract shared by the five measured on-demand surfaces.
+// Typed contract shared by the measured on-demand surfaces.
 //
 // Loader.item is QObject to the QML type system. Without this small base,
 // shell.qml would have to make unchecked dynamic calls and qmllint could not
@@ -55,6 +55,30 @@ Scope {
 
     function ipcUndescribed(): string {
         return "0";
+    }
+
+    function ipcCount(): string {
+        return "0";
+    }
+
+    function ipcFocused(): string {
+        return "";
+    }
+
+    function ipcOwner(): string {
+        return "unverified";
+    }
+
+    function ipcDismiss(): string {
+        return "";
+    }
+
+    function ipcClear(): string {
+        return "0";
+    }
+
+    function ipcDnd(mode: string): string {
+        return mode === "on" ? "on" : "off";
     }
 
     function showDetection(detectionId: string): void {

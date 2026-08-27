@@ -557,7 +557,7 @@ jq_check "agents.json is summary-only: no pids, no command lines" \
 
 # --- 9. the AI panel with both rows on one screen (Plate D-005) --------------
 as_punar qs -p /usr/share/punar/shell ipc call aipanel open >/dev/null 2>&1
-check_true "qs ipc call aipanel open (the SUPER+A surface, opened over IPC)" "$?"
+check_true "qs ipc call aipanel open (the PUNAR+A surface, opened over IPC)" "$?"
 sleep 2
 panel_state="$(as_punar qs -p /usr/share/punar/shell ipc call aipanel state 2>/dev/null \
     | tr -d '[:space:]"')"

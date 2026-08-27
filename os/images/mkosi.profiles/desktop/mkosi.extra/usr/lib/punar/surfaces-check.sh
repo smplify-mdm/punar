@@ -203,9 +203,7 @@ fi
 for t in commandcenter systemcontrol notifications shortcuts aipanel overview; do
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
-    if [ "${t}" != "notifications" ]; then
-        check_eq "${t}.residency before open" "unloaded" "$(sresidency "${t}")"
-    fi
+    check_eq "${t}.residency before open" "unloaded" "$(sresidency "${t}")"
 
     # Capture the actual desktop BEFORE the trigger. The timing path waits one
     # second without polling so its measurement cannot be perturbed; taking
@@ -240,9 +238,7 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
         note "FAIL ${t}.toggle through Hyprland did not reach state=open (got '${state_after}')"
         FAILED=1
     fi
-    if [ "${t}" != "notifications" ]; then
-        check_eq "${t}.residency while open" "resident" "$(sresidency "${t}")"
-    fi
+    check_eq "${t}.residency while open" "resident" "$(sresidency "${t}")"
 
     # The surface must have a MAPPED WINDOW, not merely a flag set. state()
     # reads root.open; the window is bound to root.windowVisible. Asserting the
@@ -376,13 +372,11 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
         note "FAIL ${t} reports closed but punar-${t} is still mapped"
         FAILED=1
     fi
-    if [ "${t}" != "notifications" ]; then
-        if wait_for 15 t_unloaded "${t}"; then
-            note "ok   ${t} released its object tree after close"
-        else
-            note "FAIL ${t} closed but remained $(sresidency "${t}")"
-            FAILED=1
-        fi
+    if wait_for 15 t_unloaded "${t}"; then
+        note "ok   ${t} released its object tree after close"
+    else
+        note "FAIL ${t} closed but remained $(sresidency "${t}")"
+        FAILED=1
     fi
 done
 
@@ -677,7 +671,7 @@ esac
 # installed freedesktop entry to a typed Launch action. Then press its selected
 # row through commandcenter.run (the IPC equivalent of Enter), wait for a real
 # mapped window, and finally close that focused window through Hyprland's
-# `killactive` dispatcher — the action bound to SUPER+Q and rendered by the
+# `killactive` dispatcher — the action bound to PUNAR+Q and rendered by the
 # live shortcuts surface.
 launch_row="$(ipc commandcenter query chromium | tr -d '\r\n\"')"
 check_eq "command center finds installed Chromium" "app · Launch(chromium)" "${launch_row}"
@@ -690,7 +684,7 @@ check_eq "command center invokes the selected installed app" "app · Launch(chro
 if hyprctl binds -j 2>/dev/null \
         | jq -e 'any(.[]; .key == "Q" and .dispatcher == "killactive" and .description == "Close window")' \
         >/dev/null 2>&1; then
-    note "ok   live shortcuts expose SUPER+Q as Close window"
+    note "ok   live shortcuts expose PUNAR+Q as Close window"
 else
     note "FAIL live shortcuts do not expose Q / killactive / Close window"
     FAILED=1
@@ -704,7 +698,7 @@ fi
 #
 # It also proves the flags reach a launch path that is NOT the browser keybind.
 # DesktopEntry.execute() uses packaged chromium.desktop, exactly as xdg-open
-# does. Before this file existed the ozone hint lived on the SUPER+B bind alone
+# does. Before this file existed the ozone hint lived on the PUNAR+B bind alone
 # and this assertion would have failed.
 chromium_client() {
     hyprctl -j clients 2>/dev/null \
@@ -756,12 +750,12 @@ if wait_for 180 chromium_client; then
     fi
 
     # Close it as the person does. The focus operation is typed and bounded;
-    # killactive is the exact dispatcher behind SUPER+Q, not a process signal.
+    # killactive is the exact dispatcher behind PUNAR+Q, not a process signal.
     hyprctl dispatch focuswindow "class:^([Cc]hromium.*)$" >/dev/null 2>&1
     hyprctl dispatch killactive >/dev/null 2>&1
     no_chromium() { ! chromium_client; }
     if wait_for 60 no_chromium; then
-        note "ok   SUPER+Q close action removed the focused Chromium window"
+        note "ok   PUNAR+Q close action removed the focused Chromium window"
         # The other half of the relation: with nothing focused the bar names
         # nothing, so the left zone never leaves a stale application standing
         # after its window is gone.

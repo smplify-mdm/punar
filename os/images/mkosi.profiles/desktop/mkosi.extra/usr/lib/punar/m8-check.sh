@@ -881,7 +881,7 @@ jq_check "the runtime view names this session and is literally the agents.access
        and (.not_yet_observed | length) >= 3
        and (.privacy.local_only == true)))"
 as_punar qs -p /usr/share/punar/shell ipc call aipanel open >/dev/null 2>&1
-check_true "qs ipc call aipanel open (the SUPER+A surface)" "$?"
+check_true "qs ipc call aipanel open (the PUNAR+A surface)" "$?"
 sleep 2
 panel_state="$(as_punar qs -p /usr/share/punar/shell ipc call aipanel state 2>/dev/null \
     | tr -d '[:space:]"')"

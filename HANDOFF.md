@@ -32,8 +32,8 @@ are that machinery.
 
 ## 2. Current state
 
-**Green.** Run [33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
-on `879486f`, all seven jobs, including x86_64/ARM64 code contracts, the image,
+**Green.** Run [33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
+on `ba3dc945`, all seven jobs, including x86_64/ARM64 code contracts, the image,
 minimal boot, the full graphical desktop, and all ten in-VM exercises.
 
 | Exercise | Assertions | What it proves |
@@ -49,16 +49,15 @@ minimal boot, the full graphical desktop, and all ten in-VM exercises.
 | M10 shadow-AI | 135 | periodic detection, anti-nag alerts, remote query |
 | Desktop surfaces (live) | 64 | all 13 shell surfaces open/close/paint |
 
-**Latest measurement:** idle RAM **1345 MB mean / 1348 MB max** (target 1024 —
+**Latest measurement:** idle RAM **1333 MB mean / 1337 MB max** (target 1024 —
 never once met, not even at M1's 1162 MB), boot **20 s**, three daemons **7 MB**
 PSS. Earlier comparable runs measured 1265–1302 MB.
 
-**Previous 1302 MB run's per-process attribution:** shell 329 MiB · Hyprland
-163 MiB · Xwayland 43 MiB · hyprpolkitagent 15 MiB · foot 10 MiB. All
-processes summed to **672.8 MiB against 1302 MB whole-system used**; the
-remaining ~629 MB was kernel, tmpfs and page cache. The shell remains the
-largest actionable process cost; the next valid isolated-surface report must
-decide what can be lazy-loaded.
+**Latest per-process attribution:** shell 354 MiB · Hyprland 165 MiB ·
+Xwayland 43 MiB · hyprpolkitagent 15 MiB · foot server 10 MiB. The shell
+remains the largest actionable process cost; the first lazy pass saved only
+12 MB whole-system, so a second measured pass is in progress rather than
+claiming the target is solved.
 
 **Measured isolated surface cost (KVM).** Run 33044217553 verified the probe
 identity as the real `qs` executable on every sample. Medians are resident
@@ -71,10 +70,12 @@ overview      121299 · 35 · 106
 ```
 
 The isolated deltas share Qt/Quickshell code and are not additive. Since every
-construction median is 31–59 ms, the working tree unloads all five panels after
-close while hoisting their IPC contracts. The shortcuts bind table remains a
-tiny singleton, preserving one `hyprctl binds -j` query per session. This
-lazy-loading change is locally linted/runtime-tested but still awaits image CI.
+construction median is 31–59 ms, run 33050021488 proved all five panels unload
+after close while their IPC contracts remain available. The shortcuts bind
+table remains a tiny singleton, preserving one `hyprctl binds -j` query per
+session. The working tree now applies the same split to the visual notification
+ledger while leaving the event-receiving notification service resident; local
+lint and the live unloaded → resident → unloaded lifecycle are green.
 
 ---
 
@@ -277,32 +278,30 @@ tangible argument for ADR-005.
 > the summary.
 
 ### 7.1 Handed-off commits pushed
-The handed-off work, latency/ARM follow-ups, and verified desktop-field work
-were pushed on 2026-08-26;
-[run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
-is green on all seven jobs at `879486f`.
+The handed-off work, device classes, personal rolling-update controls,
+latency/memory follow-ups, and verified desktop-field work are pushed;
+[run 33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
+is green on all seven jobs at `ba3dc945`.
 
-### 7.2 Measured lazy-loading — local implementation, image CI next
+### 7.2 Measured lazy-loading — first pass proven, second pass next
 The corrected probe in run 33044217553 identified the real `qs` executable and
 measured all five candidate panels. Construction medians are 31–59 ms and
-isolated retained deltas are 106982–123032 KiB. The working tree therefore
-lazy-loads command center, System Control, shortcuts, AI panel and overview;
-each is destroyed after its exit animation. IPC handlers remain resident and
-the shortcuts binding cache is hoisted so reopening does not re-query Hyprland.
-Pinned `qmllint` and a headless live lifecycle exercise are green. The next
-required evidence is the full image/desktop CI run and its idle-RAM result.
+isolated retained deltas are 106982–123032 KiB. Run 33050021488 proved command
+center, System Control, shortcuts, AI panel and overview lazy-load in the real
+image. The canonical idle result improved from 1345 to 1333 MB — real, but far
+short of the target. The next pass lazy-loads only the NotificationCenter
+visual tree; the notification daemon, toasts, and event listeners stay eager.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval
-and alerts must appear *unbidden*; notifications/toasts/OSD must receive events
-while closed; the lock screen must never hesitate.
+and alerts must appear *unbidden*; toasts/OSD must receive events while closed;
+the lock screen must never hesitate.
 
-### 7.3 Implement device classes
-`docs/design/device-classes.md` — designed, unbuilt. The shape matters: every
-capability today is read-write, but **hardware is read-only**, so a device class
-is an *observed fact* that joins policy resolution as a source of **defaults**,
-outranked by explicit user preference. **It must be forceable** — CI runs one VM
-shape, so without an enumerated override exactly one class is ever exercised and
-the other two are code nobody has run.
+### 7.3 Device classes — complete
+`docs/design/device-classes.md` is implemented as read-only observation, not a
+mutable capability. `punard` classifies Linux facts into workstation, laptop,
+or appliance, publishes the typed result, and provides an enumerated force seam
+that the M3 image exercise runs through all three branches. The same check
+proves no class carries a weaker security/privacy result.
 
 ### 7.4 Designed and unbuilt, roughly by value
 - **Installer + onboarding** — `docs/design/installer.md`, `onboarding.md`.

@@ -20,7 +20,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
-| 3 | remain within idle budget | 1345 MB against a 1024 MB target; measured lazy-loading work awaits image CI |
+| 3 | remain within idle budget | 1333 MB against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -43,8 +43,8 @@ configuration syntax and must not leak back into the shell or user guides.
 ## 1. Immediately
 
 ### 1.1 Start from the verified head
-Commit `879486f` and all preceding handed-off work are on `origin/main`.
-[Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
+Commit `ba3dc945` and all preceding handed-off work are on `origin/main`.
+[Run 33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
 is green on all seven jobs, including x86_64/ARM64 code contracts, the image,
 minimal boot, and full graphical desktop. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
@@ -79,7 +79,7 @@ command centre 87 · System Control 116 · shortcuts 186. Full-path totals were
 
 **File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
-### 2.2 Measured lazy-loading — implemented, image CI pending
+### 2.2 Measured lazy-loading — first pass runtime-proven; second pass pending
 [Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
 fixed probe identity and measured the real `qs` executable on every sample.
 Median isolated cost (`resident delta KiB · construct ms · first map ms`):
@@ -91,14 +91,21 @@ overview      121299 · 35 · 106
 ```
 
 Those isolated deltas share Qt/Quickshell code and **must not be summed**.
-Every construction median is 31–59 ms, so the working tree lazy-loads all
-five user-invoked surfaces and destroys each after its 300 ms close animation.
+Every construction median is 31–59 ms, so run 33050021488 proved that all five
+user-invoked surfaces lazy-load and destroy themselves after their 300 ms close animation.
 Their `IpcHandler`s stay resident in `shell.qml`: `state()` answers `closed`
 and `residency()` answers `unloaded` without constructing the panel.
 
+The result was honest but modest: **1333 MB mean / 1337 MB max**, only 12 MB
+below the preceding 1345/1348 MB run and still above the 1024 MB target. The
+next working-tree pass separates the notification daemon from its visual
+ledger: the service remains eager, while the PUNAR+SHIFT+N window joins the
+measured lazy set. Local lint and a live headless lifecycle test are green;
+the canonical image result is pending.
+
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
-(must appear **unbidden**); notifications, toasts, OSD (must receive events
-while closed); lock (must never hesitate).
+(must appear **unbidden**); toasts and OSD (must receive events while closed);
+lock (must never hesitate).
 
 **Trap:** hoist each surface's `IpcHandler` **outside** its `Loader`, or
 `state()` cannot answer `"closed"` without instantiating the thing it is
@@ -113,23 +120,14 @@ explicit `shortcuts reload` remain the only invalidation paths.
 
 ---
 
-## 3. Finish the unmanaged-first pass
+## 3. Unmanaged-first pass — complete and runtime-proven
 
-`DESIGN_LANGUAGE.md` §8.1 ratifies one word table; the CLI and command centre
-are converted, **the rest is not**. Remaining (from a four-area audit; the
-daemon data model is deliberately **not** changing — the wire keeps its
-spelling and translation happens at render):
-
-- `SystemControl/SystemControl.qml` + `SystemControl/ControlData.qml` — the
-  capability card still renders `COMPLIANCE · COMPLIANT` on personal devices.
-- The **ORGANIZATION** section in System Control's sidebar (Enrollment,
-  Compliance, Policies). On a never-enrolled device this is empty furniture
-  implying you should fill it — but it is also where someone would *go* to
-  enroll. **Resolve that tension deliberately; do not just delete it.**
-- The remaining bare `· no organization is enrolled` tails in `views.rs`
-  are converted to positive personal-device language in the working tree;
-  the next full run must prove them.
-- `ExplainCard.qml`.
+`DESIGN_LANGUAGE.md` §8.1's word table is implemented across the CLI, command
+center, explain cards and System Control. Run 33050021488 proved on a live
+personal session that the Organization/enrollment rail is absent, Drift and
+Policy remain findable under Security, and both the summary and capability
+card render `DRIFT · MATCHES`. The daemon wire vocabulary deliberately remains
+stable; translation happens at render.
 
 **Rule:** personal words never presuppose an authority. `compliant → matches`,
 `non_compliant → drifted`, `remediating → restoring`; section key
@@ -141,10 +139,12 @@ read `LOCAL · COMPLIANT` on every personal machine.
 
 ---
 
-## 4. Device classes
+## 4. Device classes — complete and runtime-proven
 
-`docs/design/device-classes.md` — designed, unbuilt. Unblocks the Raspberry Pi
-and gives the RAM rule somewhere to live.
+`docs/design/device-classes.md` is implemented. `punard` reads `MemTotal`, core
+count, battery presence and display presence as read-only facts; its closed
+classifier produces workstation, laptop or appliance and publishes the result
+through typed IPC, CLI status and inventory.
 
 **The shape matters.** Every capability today is read-write (`observe()` +
 `apply()`). **Hardware is read-only** — you cannot apply RAM. So a device class
@@ -156,14 +156,10 @@ not a capability with desired state.
 `/sys/class/power_supply/BAT*`, whether a display is connected. Three classes
 only — `workstation`, `laptop`, `appliance`.
 
-**It must be forceable.** CI runs one VM shape, so without a typed enumerated
-override exactly one class is ever exercised and the other two are code nobody
-has run. This repo has shipped that failure before.
-
-**Two assertions matter most:** every class is exercised; and the right-hand
-column of `device-classes.md` §2 — the security and privacy guarantees — is
-**identical across all three**. That is what stops "adaptive" becoming "less
-safe on cheap hardware".
+The `punard classify-device --force <class>` seam is typed and run for all
+three branches by the M3 exercise. The same exercise asserts that none of the
+three output documents contains a security/privacy exception. Run 33050021488
+proved the complete path on the image.
 
 ---
 

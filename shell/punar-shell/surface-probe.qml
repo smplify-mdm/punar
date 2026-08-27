@@ -2,7 +2,7 @@
 //
 // This is a SECOND Quickshell configuration used only by the in-VM
 // performance exercise. The shipping shell now uses the measured lazy
-// wrappers while this process starts empty, loads exactly one of the five
+// wrappers while this process starts empty, loads exactly one user-invoked
 // user-invoked candidate surfaces, opens it once, and reports four timestamps.
 // A fresh process per sample keeps type caches and allocator history from one
 // surface out of the next surface's number.
@@ -45,6 +45,8 @@ ShellRoot {
             return Qt.resolvedUrl("AiPanel/AiPanel.qml");
         case "overview":
             return Qt.resolvedUrl("Overview/Overview.qml");
+        case "notifications":
+            return Qt.resolvedUrl("Notifications/NotificationCenter.qml");
         default:
             return "";
         }

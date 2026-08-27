@@ -1,5 +1,5 @@
 #!/bin/sh
-# Isolated construction/resident-cost measurement for the five shell surfaces
+# Isolated construction/resident-cost measurement for the shell surfaces
 # that are eligible for lazy loading.
 #
 # The production shell stays alive.  For each sample this script starts a
@@ -21,7 +21,7 @@ PROBE_PATH=/usr/share/punar/shell/surface-probe.qml
 PROBE_CMD="qs -p ${PROBE_PATH}"
 PROBE_LOG=/run/punar/surface-probe.log
 IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
-SURFACES="commandcenter systemcontrol shortcuts aipanel overview"
+SURFACES="commandcenter systemcontrol shortcuts aipanel overview notifications"
 SAMPLES=3
 MIN_PROBE_PSS_KIB=16384
 FAILED=0

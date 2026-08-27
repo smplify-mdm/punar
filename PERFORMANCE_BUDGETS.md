@@ -1,11 +1,10 @@
 # Performance Budgets
 
-Status: **budgets defined, nothing measured yet.** Every number in the baseline
-table below is `not yet measured`. The idle-RAM slice of the section 5
-enforcement harness is now implemented (`tests/performance/` plus the CI
-`desktop-test` job); the rest of section 5 remains planned. The first green
-`desktop-test` run produces the first real numbers, published as the
-`punar-desktop-ram-report` CI artifact.
+Status: **RAM measured and enforced; CPU, disk-I/O and boot-regression gates
+remain open.** The canonical 8 GiB / 4-vCPU KVM desktop run now records the
+whole-system idle window, combined first-party service PSS, zram state,
+per-process PSS and a boot-to-desktop proxy. Section 4 names the exact image
+and run. The remainder of section 5 is still planned.
 
 Authoritative source: [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md),
 sections 6 (Performance Budgets) and 7 (Adaptive Hardware Profiles). Per spec
@@ -14,11 +13,9 @@ time, and background activity are first-class engineering budgets, not
 nice-to-haves. If a budget and the spec ever disagree, the spec wins and this
 file must be corrected.
 
-Scope note on honesty (spec section 1.22): until Milestone 0's VM build exists
-and is measured, everything here is a commitment, not a result. Measurements
-taken inside VMs — especially emulated x86_64 VMs on the maintainer's arm64
-macOS host — must be labeled with their environment and are not comparable to
-bare-metal numbers.
+Scope note on honesty (spec section 1.22): measurements taken inside VMs —
+especially emulated x86_64 VMs on the maintainer's arm64 macOS host — must be
+labeled with their environment and are not comparable to bare-metal numbers.
 
 ---
 
@@ -90,10 +87,10 @@ Spec 6.5 mandates tracking, not a fixed number:
 - Track boot-to-usable-desktop time.
 - Every major release must measure boot performance and regress-test it.
 
-Until a first baseline exists there is no numeric boot budget; once Milestone
-0/1 produces a measured baseline, a regression threshold (e.g. "no release may
-regress boot-to-usable-desktop by more than X% against the recorded baseline")
-will be added here alongside the baseline value.
+A single-run usable-desktop proxy now exists, but the required median of three
+cold boots does not. A regression threshold is set only after that canonical
+baseline is collected; one convenient CI observation is not promoted into a
+budget.
 
 ### 1.6 Memory pressure behavior (companion requirement)
 
@@ -280,44 +277,40 @@ Budget implications:
 
 ## 4. Baseline results
 
-Every value below is **not yet measured**. As of 2026-08-24 the minimal
-`punar-dev` image builds and boots in CI (Milestone 0 accepted), but no
-graphical `punar-desktop` image has ever run, so no idle measurement exists.
-The measurement mechanism is now in place: the CI `desktop-test` job boots
-`punar-desktop` on the minimum-target VM shape (8 GB / 4 vCPU), runs the
-in-guest sampler per section 2.2, and uploads the result as the
-`punar-desktop-ram-report` CI artifact (`ram-report.txt` with mean/max and
-environment label, plus raw samples; gated by
-`tests/performance/check-budgets.sh`). The idle-RAM rows below are filled
-from the first green `desktop-test` run's artifact — never by hand — with
-environment labels as defined in 2.2 (`(VM)` under KVM; `(VM, emulated)`
-under TCG, indicative only). This table is filled in only from runs of the
-canonical methodology in section 2, with environment labels.
+The RAM rows come directly from the exported `punar-desktop-ram-report`
+artifact of green [run 33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488),
+commit `ba3dc945031c75243b3b7499d1be7ff90e2de032`, built from the pinned
+2026/08/20 Arch snapshot. The desktop job used KVM with the canonical 8 GiB /
+4-vCPU shape, ten-minute stabilization and thirty ten-second samples. Image
+SHA-256: `d0d9fe7f6282706418b4e5cdae8a3ffdbf5dcf00c48a1ae52b5a0f9fbf1a4527`.
+The usable-desktop value is explicitly a single-run host proxy, not the
+three-cold-boot median section 2.6 requires for a baseline.
 
 | Metric | Method | Budget | Measured value | Environment | Image / date |
 |---|---|---|---|---|---|
-| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | not yet measured | — | — |
-| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | not yet measured | — | — |
-| Punar services PSS (sum: punard + punar-agentd + punar-secrets) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | not yet measured | — | — |
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1333 MB** (target missed; ceiling met) | KVM VM, 8 GiB / 4 vCPU | `ba3dc945` / 2026-08-27 |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1337 MB** | KVM VM, 8 GiB / 4 vCPU | `ba3dc945` / 2026-08-27 |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **7 MB** | KVM VM, 8 GiB / 4 vCPU | `ba3dc945` / 2026-08-27 |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
 | Idle CPU, per Punar service | 2.4 | effectively 0% (< 0.5% of one core, interpretation) | not yet measured | — | — |
 | Idle disk writes, per Punar service | 2.5 | no sustained idle writers | not yet measured | — | — |
 | Boot to userspace complete | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
-| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **20 s single-run host proxy; not yet a baseline** | KVM VM | `ba3dc945` / 2026-08-27 |
 
 Waivers granted: none.
 
 ---
 
-## 5. CI enforcement plan — idle-RAM slice implemented, rest PLANNED
+## 5. CI enforcement plan — RAM implemented, rest PLANNED
 
 The whole-system idle-RAM gate from this design is implemented:
 `tests/performance/check-budgets.sh` (see `tests/performance/README.md`),
 fed by `tools/boot-test.sh --mode desktop` and wired as the CI
-`desktop-test` job — runtime-unverified until its first green run. The
-per-service RAM/CPU/disk checks, boot-regression gating, JSON results file,
-and tracked history below remain **planned, not implemented**. This is the
-design the remaining pieces will be built to.
+`desktop-test` job. Whole-system RAM and combined per-service PSS are both
+runtime-proven and gated. Per-service CPU/disk checks, cgroup-memory
+cross-check, boot-regression gating, JSON results file, and tracked history
+below remain **planned, not implemented**. This is the design the remaining
+pieces will be built to.
 
 ### 5.1 Harness shape
 
@@ -384,3 +377,4 @@ A `tests/performance/` harness that:
 | 2026-08-24 | Initial version: budgets transcribed from SPEC_v0.2 sections 6–7; methodology defined; all baselines `not yet measured`; CI harness documented as planned. |
 | 2026-08-24 | Status wording only, no numbers: M0 CI green (punar-dev builds and boots); section 4 now names the `desktop-test` job's `punar-desktop-ram-report` artifact as the sole source that will fill the baseline table; section 5 marked partially implemented (idle-RAM slice in `tests/performance/`). Everything remains `not yet measured`. |
 | 2026-08-25 | Milestone 9: `punar-secrets.service` joins the services-PSS sum (section 2.3) — the third resident daemon, added to the number honestly rather than left out of it. Thresholds unchanged (target < 100 MB, MVP ceiling < 150 MB): spec section 6.2 budgets the services *total*. Still `not yet measured` — the first real value comes from the `punar-desktop-ram-report` artifact of a CI run, and `docs/development/milestone-9.md` records the before/after from that run rather than asserting one here. |
+| 2026-08-27 | Recorded the canonical KVM RAM baseline from green run 33050021488: 1333 MB mean / 1337 MB max whole system and 7 MB combined service PSS. The 1024 MB target remains missed and visible; no waiver. Recorded the 20 s usable-desktop host proxy as informational, not the required three-boot baseline. |
