@@ -101,6 +101,27 @@ Not a number, but budget-relevant (spec 6.6): use zram, memory-pressure-aware
 service behavior, cgroups, and per-project limits where useful. On 8 GB
 systems, developer applications take priority over decorative OS effects.
 
+### 1.7 Feature resource contract
+
+Product-owner rule: **user workloads own the machine; the OS earns every
+resident process, wake-up and megabyte.** This applies while features are in
+use as well as at idle:
+
+- A developer feature is demand-loaded and project-scoped unless it has a
+  measured, always-on responsibility. Closing the project must stop its scope
+  and leave no child process, listening socket or retained project model.
+- Toolchains and SDKs are resolved from the project's pinned inputs and cached
+  on demand. They do not enter the base image merely for convenience.
+- Before a feature may ship, its evidence records cold activation time, active
+  PSS, PSS after teardown, idle wake-ups, idle writes and installed bytes. A
+  teardown result that does not return close to the pre-activation baseline is
+  a defect, not an allocator footnote.
+- Prefer activation and kernel/event signals over resident coordinators and
+  polling. Sharing an existing process is not automatically free: its
+  attributable retained model still has to be measured.
+- Hardware profiles may reduce effects, cache residency and optional local
+  compute. They never reduce security, privacy, integrity or audit guarantees.
+
 ---
 
 ## 2. Measurement methodology

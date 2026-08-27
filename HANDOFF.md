@@ -77,8 +77,12 @@ chord still includes Hyprland's configured `exec` → `qs` → shell path.
 Not preferences. Several of these **reversed** decisions that had already been
 made and defended.
 
-1. **Always use the least RAM possible.** This overrode a decision to keep
-   shell surfaces eagerly instantiated. See §7.2.
+1. **Always use the least RAM possible. User workloads own the machine; the OS
+   earns every resident process, wake-up and megabyte.** This overrode a
+   decision to keep shell surfaces eagerly instantiated. It also means a
+   project-scoped convenience must release its processes and memory when that
+   project closes, and an SDK does not belong in the base image merely because
+   a developer might use it. See §7.2 and `PERFORMANCE_BUDGETS.md` §1.7.
 2. **Speed is table stakes.** In tension with (1). The resolution is *measure,
    then decide per surface* — not pick a side. See §7.2.
 3. **Unmanaged-first, and stronger than it sounds.** The OS must be excellent,
