@@ -47,12 +47,12 @@ Everything is keyboard-first. `SUPER` is the modifier.
 | **Start here** | `SUPER + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
 | Terminal | `SUPER + Return` | foot, Geist Mono, panel surface |
 | Browser | `SUPER + B` | Chromium, native Wayland |
-| Command centre | `SUPER + Space` | Type to search; it resolves to typed capabilities |
+| Find and open an app | `SUPER + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
 | System control | `SUPER + S` | The settings surface |
 | Notification centre | `SUPER + SHIFT + N` | The centre; toasts appear on their own |
 | Project overview | `SUPER + Tab` | Workspaces as projects |
 | AI panel | `SUPER + A` | What AI has done on this device |
-| Close a window | `SUPER + Q` | |
+| Close the focused app | `SUPER + Q` | Its window disappears and the menubar clears the app name |
 | Lock | `SUPER + Escape` | Password is `punar` |
 
 Layouts: `SUPER + ,` / `SUPER + .` cycle presets. `SUPER + 1..9` switch
