@@ -1,0 +1,10 @@
+[Unit]
+Description=Punar periodic background work
+
+[Slice]
+# User workloads own the machine. Timer-driven reconciliation and discovery
+# still run, but lose CPU and I/O contention to interactive apps, compilers,
+# containers and tests. These weights do not cap an idle machine: background
+# work may use available capacity when nothing more important needs it.
+CPUWeight=10
+IOWeight=10

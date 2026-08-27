@@ -3,9 +3,9 @@
 # WHY THIS EXISTS. The image shipped a browser, a firewall and no way to get an
 # IP address: no DHCP client was enabled and no .network file existed, so a
 # machine with a working NIC came up with no address and the browser opened to
-# a network error. CI never caught it because tools/boot-test.sh runs the VM
-# with `-nic none` — the gate has no network by design, so the absence of
-# networking was invisible to every check.
+# a network error. The desktop gate now boots a virtio NIC and fails canonical
+# stabilized idle unless DHCP produced a default route, so this contract is
+# runtime-proven instead of inferred from the file.
 #
 # Scope, stated plainly: this is basic wired connectivity — DHCPv4, IPv6 RA,
 # and nothing else. It is NOT Milestone 12. The private relay (§33-34), network

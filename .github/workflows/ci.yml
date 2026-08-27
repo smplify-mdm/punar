@@ -26,10 +26,12 @@
 #                 behavior, privacy and RAM gates as x86_64. This proves the
 #                 generic ARM64 VM target, not Raspberry Pi hardware.
 #   desktop-test  M1–M10 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
-#                 in-guest canonical idle-RAM measurement + services-RSS
-#                 sample (summed PSS over the punard.service and, since M7,
-#                 punar-agentd.service cgroups — one COMBINED number, the
-#                 thresholds unchanged), then the
+#                 in-guest canonical stabilized-idle measurement: whole-RAM,
+#                 combined service PSS, per-service cgroup CPU and write
+#                 bytes, whole-guest CPU/block-write context, and live zram
+#                 state. Service facts cover punard, punar-agentd and
+#                 punar-secrets with unchanged combined-RAM thresholds,
+#                 then the
 #                 in-guest M2 multitasking exercise (milestone-2.md §7 —
 #                 punar-m2-check.service, verdict in m2-report.txt) and the
 #                 in-guest M3 daemon/CLI exercise (milestone-3.md §8 —
@@ -101,8 +103,10 @@
 #                 PERFORMANCE_BUDGETS.md gates
 #                 (tests/performance/check-budgets.sh: whole-system fail
 #                 mean > 1536 MB / warn > 1024 MB; services fail > 150 MB /
-#                 warn > 100 MB, absent fails even under TCG; other TCG
-#                 breaches warn-only, labeled emulated)
+#                 warn > 100 MB; max single-service idle CPU fail ≥ 0.50%
+#                 of one CPU; combined first-party writes fail above 64 KiB
+#                 per five-minute window; absent facts fail even under TCG;
+#                 numeric TCG breaches warn-only and remain labeled emulated)
 #
 # Runner pin: ubuntu-24.04, NOT ubuntu-latest — GitHub is migrating -latest
 # labels toward 26.04 during 2026 (research/crosscutting.md §2.1); an OS
@@ -199,6 +203,9 @@ jobs:
       - name: Validate schemas and fixtures
         run: ./tools/validate-schemas.sh
 
+      - name: Validate stabilized-idle performance gate branches
+        run: ./tests/performance/check-budgets-test.sh
+
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
@@ -248,6 +255,7 @@ jobs:
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             tests/performance/check-budgets.sh \
+            tests/performance/check-budgets-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
@@ -394,7 +402,7 @@ jobs:
             os/images/out/punar-desktop-arm64.qcow2 \
             os/images/out/arm64-desktop-proof
 
-      - name: Native ARM64 idle-RAM budget gate
+      - name: Native ARM64 stabilized-idle performance gate
         run: |
           ./tests/performance/check-budgets.sh \
             os/images/out/arm64-desktop-proof/ram-report.txt
@@ -497,7 +505,7 @@ jobs:
       - name: Desktop gate (PUNAR_DESKTOP_OK + idle-RAM + M2..M10 exercises + export)
         run: ./tools/boot-test.sh --mode desktop os/images/out/punar-desktop-x86_64.qcow2
 
-      - name: Idle-RAM budget gate (PERFORMANCE_BUDGETS.md)
+      - name: Stabilized-idle performance gate (PERFORMANCE_BUDGETS.md)
         run: ./tests/performance/check-budgets.sh os/images/out/desktop-proof/ram-report.txt
 
       # Uploads run even when a gate failed — the serial log and any partial
@@ -582,6 +590,7 @@ jobs:
             os/images/out/desktop-proof/ram-report.txt
             os/images/out/desktop-proof/ram-samples.txt
             os/images/out/desktop-proof/ram-processes.txt
+            os/images/out/desktop-proof/runtime-report.txt
             os/images/out/desktop-proof/meminfo
             os/images/out/desktop-proof/wifi-report.txt
             os/images/out/desktop-proof/wifi-*.txt

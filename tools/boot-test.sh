@@ -323,6 +323,14 @@ case "${MODE}" in
     *) die "invalid --mode '${MODE}' (expected minimal or desktop)" ;;
 esac
 
+# Docker bind mounts require an absolute host path. Resolve the desktop proof
+# directory once up front so an explicitly supplied relative path cannot be
+# misread as a named volume during the M9/M10 host-side schema replays.
+if [ "${MODE}" = desktop ]; then
+    mkdir -p "${PROOF_DIR}"
+    PROOF_DIR="$(cd "${PROOF_DIR}" && pwd -P)"
+fi
+
 [ -f "${IMAGE}" ] || die "image not found: ${IMAGE} (run tools/build-image.sh first)"
 case "${ARCH}" in
     x86_64) QEMU="qemu-system-x86_64" ;;
@@ -606,6 +614,7 @@ run_desktop() {
           "${PROOF_DIR}/ram-report.txt" \
           "${PROOF_DIR}/ram-samples.txt" \
           "${PROOF_DIR}/ram-processes.txt" \
+          "${PROOF_DIR}/runtime-report.txt" \
           "${PROOF_DIR}/meminfo" \
           "${PROOF_DIR}/wifi-report.txt" \
           "${PROOF_DIR}"/wifi-*.txt \
@@ -654,10 +663,10 @@ run_desktop() {
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
     # and milestone-1.md §6/§9: architecture-native virtio GPU (guest KMS,
     # llvmpipe rendering, no virgl needed under -display none) plus the
-    # punar.export virtio-serial
-    # channel captured to a plain host file. -nic none matches the minimal
-    # test; budgets §2.1 item 5 prefers idle-with-network — recorded as a
-    # deviation in tests/performance/README.md until guest networking lands.
+    # punar.export virtio-serial channel captured to a plain host file. The
+    # desktop gets a virtio NIC on QEMU's private user-mode network: canonical
+    # stabilized idle requires DHCP-connected networking, while the minimal
+    # boot smoke test remains intentionally offline.
     local qemu_args=(
         -machine "${MACHINE}"
         -cpu "${CPU}"
@@ -669,7 +678,7 @@ run_desktop() {
         "${DESKTOP_DISPLAY_ARGS[@]}"
         -serial "file:${SERIAL_LOG}"
         -monitor none
-        -nic none
+        -nic "user,model=virtio-net-pci"
         -no-reboot
         -device virtio-serial-pci
         -chardev "file,id=punarexp,path=${EXPORT_RAW}"
@@ -722,14 +731,15 @@ run_desktop() {
     if wait_for_pattern "${SERIAL_LOG}" "${services_rss_regex}" 120 "services-RSS line (PUNAR_SERVICES_RSS_MB)"; then
         services_rss="$(grep -aoE "${services_rss_regex}" "${SERIAL_LOG}" | tail -n 1)"
         services_rss="${services_rss#PUNAR_SERVICES_RSS_MB=}"
-        echo "==> Services RSS from guest (summed PSS, punard + punar-agentd cgroups): ${services_rss} MB"
+        echo "==> Services RSS from guest (summed PSS, punard + punar-agentd + punar-secrets cgroups): ${services_rss} MB"
     else
         warn "desktop-test: no PUNAR_SERVICES_RSS_MB line after the RAM result (pre-M3 guest image?); recording 'missing'"
     fi
 
     # Phase 3: artifact export on the virtio-serial channel (milestone-1.md
-    # §9). Non-fatal: the RAM gate rests on the serial numbers above, and the
-    # guest deliberately continues without a screenshot too.
+    # §9). Failure is not immediate so serial and later diagnostics survive;
+    # the runtime/zram phases fail closed if their typed report is absent.
+    # A screenshot alone remains optional visual evidence.
     local export_ok=0
     if wait_for_pattern "${EXPORT_RAW}" '^PUNAR_EXPORT_END$' "${EXPORT_TIMEOUT}" "PUNAR_EXPORT_END on export channel"; then
         export_ok=1
@@ -749,7 +759,7 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt ram-processes.txt meminfo m2-report.txt punar-m2.png \
+            for f in ram-samples.txt ram-processes.txt runtime-report.txt meminfo m2-report.txt punar-m2.png \
                      m3-report.txt m3-deny-stderr.txt \
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
@@ -834,8 +844,8 @@ run_desktop() {
         echo "# PUNAR_DESKTOP_OK_HOST_SECS is host wall clock from qemu start to the marker —"
         echo "# an informational boot-to-desktop proxy (budgets §2.6), not a measured boot metric."
         echo "# PUNAR_SERVICES_RSS_MB is the summed PSS (smaps_rollup) of the pids in EVERY"
-        echo "# Punar service cgroup at stabilized idle — punard.service and, since M7,"
-        echo "# punar-agentd.service (PERFORMANCE_BUDGETS.md §2.3; the variable name keeps"
+        echo "# Punar service cgroup at stabilized idle — punard.service, punar-agentd.service"
+        echo "# and punar-secrets.service (PERFORMANCE_BUDGETS.md §2.3; the variable name keeps"
         echo "# RSS as the fixed consumer contract, the value is summed PSS)."
         echo "PUNAR_RAM_MEAN_MB=${ram_mean}"
         echo "PUNAR_RAM_MAX_MB=${ram_max}"
@@ -847,7 +857,38 @@ run_desktop() {
         echo "PUNAR_DESKTOP_OK_HOST_SECS=${desktop_ok_secs}"
     } > "${PROOF_DIR}/ram-report.txt"
 
+    # Runtime facts use the same stabilized window as RAM. Keep their raw
+    # guest report as evidence and copy only typed facts into the budget
+    # input. This closes a previous verification hole where zram was observed
+    # in the guest but silently absent from the host report, so the host gate
+    # always treated a current image as an older, ungated one.
+    if [ -f "${PROOF_DIR}/runtime-report.txt" ]; then
+        grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_)[A-Z0-9_]*=[^[:space:]]+$' \
+            "${PROOF_DIR}/runtime-report.txt" >> "${PROOF_DIR}/ram-report.txt" || true
+    fi
+
     preserve_serial_log
+
+    # The remaining host-side behavioral phases depend on the export too.
+    # Fail here, after preserving serial, instead of allowing an incomplete
+    # runtime report to degrade into a series of misleading fallback verdicts.
+    local ram_report="${PROOF_DIR}/ram-report.txt"
+    if ! grep -qx 'PUNAR_IDLE_RUNTIME_PRESENT=yes' "${ram_report}"; then
+        echo "error: stabilized-idle runtime facts are absent or incomplete" >&2
+        exit 1
+    fi
+    if ! grep -qx 'PUNAR_ZRAM_PRESENT=yes' "${ram_report}"; then
+        echo "error: no /sys/block/zram0 on the guest, or the live zram fact was not exported" >&2
+        exit 1
+    fi
+    if ! grep -qx 'PUNAR_ZRAM_SWAP_ACTIVE=yes' "${ram_report}"; then
+        echo "error: zram0 exists but is not an active swap device (/proc/swaps)" >&2
+        exit 1
+    fi
+    local zram_algo zram_size
+    zram_algo="$(awk -F= '$1 == "PUNAR_ZRAM_ALGORITHM" {print $2; exit}' "${ram_report}")"
+    zram_size="$(awk -F= '$1 == "PUNAR_ZRAM_DISKSIZE_MB" {print $2; exit}' "${ram_report}")"
+    echo "==> zram: live and active, ${zram_size:-?} MB at ${zram_algo:-?}"
 
     # Phase 4: M2 exercise verdict (milestone-2.md §7). The guest wrote
     # /run/punar/m2-report.txt (per-assertion ok/FAIL lines + a final
@@ -1229,32 +1270,6 @@ run_desktop() {
         exit 1
     else
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
-    fi
-
-    # Phase 12e: zram. Spec 282 ("Use zram ...") and 294 ("aggressive zram")
-    # mandate it and the image shipped NONE until 2026-08-26 — no swap of any
-    # kind, nothing reclaimable under pressure. zram-generator is a systemd
-    # generator that runs at early boot, so a malformed config or a missing
-    # module leaves the machine silently swapless, which is indistinguishable
-    # from a machine that never wanted swap. Asserted on the running guest.
-    local ram_report="${PROOF_DIR}/ram-report.txt"
-    if [ -f "${ram_report}" ] && grep -q '^PUNAR_ZRAM_PRESENT=' "${ram_report}"; then
-        local zpresent zactive zalgo zsize
-        zpresent="$(grep '^PUNAR_ZRAM_PRESENT=' "${ram_report}" | cut -d= -f2)"
-        zactive="$(grep '^PUNAR_ZRAM_SWAP_ACTIVE=' "${ram_report}" | cut -d= -f2)"
-        zalgo="$(grep '^PUNAR_ZRAM_ALGORITHM=' "${ram_report}" | cut -d= -f2 || true)"
-        zsize="$(grep '^PUNAR_ZRAM_DISKSIZE_MB=' "${ram_report}" | cut -d= -f2 || true)"
-        if [ "${zpresent}" != "yes" ]; then
-            echo "error: no /sys/block/zram0 on the guest — spec 282/294 zram did not materialise" >&2
-            exit 1
-        fi
-        if [ "${zactive}" != "yes" ]; then
-            echo "error: zram0 exists but is not an active swap device (/proc/swaps) — the generator ran and produced nothing usable" >&2
-            exit 1
-        fi
-        echo "==> zram: active, ${zsize:-?} MB at ${zalgo:-?}"
-    else
-        echo "==> zram: no facts in ram-report.txt (older guest image); not gated this run"
     fi
 
     # Phase 12d: wireless verdict. A primary development machine is a laptop,

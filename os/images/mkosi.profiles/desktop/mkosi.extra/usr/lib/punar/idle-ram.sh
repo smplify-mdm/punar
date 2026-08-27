@@ -15,11 +15,127 @@ SAMPLE_COUNT="${PUNAR_RAM_SAMPLE_COUNT:-30}"
 SAMPLE_INTERVAL="${PUNAR_RAM_SAMPLE_INTERVAL:-10}"
 RUN_DIR=/run/punar
 EXPORT_PORT=/dev/virtio-ports/punar.export
+RUNTIME_REPORT="${RUN_DIR}/runtime-report.txt"
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service"
+
+mkdir -p "${RUN_DIR}"
+: > "${RUNTIME_REPORT}"
+
+emit_fact() {
+    echo "$1"
+    echo "$1" >> "${RUNTIME_REPORT}"
+}
+
+monotonic_ms() {
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
+}
+
+capture_service_counters() {
+    destination="$1"
+    : > "${destination}"
+    for unit in ${PUNAR_SERVICE_UNITS}; do
+        capture_cgroup_counters "${unit%.service}" \
+            "/sys/fs/cgroup/system.slice/${unit}" "${destination}"
+    done
+    # Timer-triggered reconcile and agent discovery run in a persistent,
+    # low-priority slice. Measuring the slice catches their cumulative work
+    # even though each oneshot service cgroup disappears between snapshots.
+    capture_cgroup_counters background \
+        /sys/fs/cgroup/punar.slice/punar-background.slice "${destination}"
+}
+
+capture_cgroup_counters() {
+    label="$1"
+    cgroup="$2"
+    destination="$3"
+    cpu_usec=absent
+    write_bytes=absent
+    if [ -r "${cgroup}/cpu.stat" ]; then
+        cpu_usec="$(awk '$1 == "usage_usec" {print $2; exit}' "${cgroup}/cpu.stat")"
+    fi
+    if [ -r "${cgroup}/io.stat" ]; then
+        write_bytes="$(awk '
+            {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^wbytes=/) {
+                        split($i, pair, "=")
+                        total += pair[2]
+                    }
+                }
+            }
+            END {printf "%.0f\n", total + 0}
+        ' "${cgroup}/io.stat")"
+    fi
+    case "${cpu_usec}" in ''|*[!0-9]*) cpu_usec=absent ;; esac
+    case "${write_bytes}" in ''|*[!0-9]*) write_bytes=absent ;; esac
+    printf '%s %s %s\n' "${label}" "${cpu_usec}" "${write_bytes}" >> "${destination}"
+}
+
+system_cpu_counters() {
+    awk '/^cpu / {
+        total = 0
+        for (i = 2; i <= NF; i++) total += $i
+        idle = $5 + $6
+        printf "%.0f %.0f\n", total, total - idle
+        exit
+    }' /proc/stat
+}
+
+block_write_sectors() {
+    total=0
+    found=0
+    for stat in /sys/block/vd*/stat /sys/block/sd*/stat \
+        /sys/block/nvme*n*/stat /sys/block/mmcblk*/stat; do
+        [ -r "${stat}" ] || continue
+        found=1
+        sectors="$(awk '{print $7}' "${stat}")"
+        case "${sectors}" in ''|*[!0-9]*) sectors=0 ;; esac
+        total=$((total + sectors))
+    done
+    if [ "${found}" -eq 1 ]; then
+        echo "${total}"
+    else
+        echo absent
+    fi
+}
 
 echo "punar: idle-ram: stabilizing ${STABILIZE_SECS}s, then ${SAMPLE_COUNT} samples every ${SAMPLE_INTERVAL}s"
 sleep "${STABILIZE_SECS}"
 
 : > "${RUN_DIR}/ram-samples.txt"
+
+# Canonical idle is connected idle, not an artificially quiet offline guest.
+# At the ten-minute boundary require both an up non-loopback link and the
+# default route installed by DHCP. `/proc` and sysfs keep this probe tiny and
+# avoid adding iproute2 or a polling process to the base image.
+network_link_up=no
+for operstate in /sys/class/net/*/operstate; do
+    [ -r "${operstate}" ] || continue
+    interface="${operstate%/operstate}"
+    interface="${interface##*/}"
+    [ "${interface}" = lo ] && continue
+    case "$(cat "${operstate}")" in
+        up|unknown) network_link_up=yes ;;
+    esac
+done
+network_default_route="$(awk '
+    NR > 1 && $1 != "lo" && $2 == "00000000" { found = 1 }
+    END { print found ? "yes" : "no" }
+' /proc/net/route)"
+network_online=no
+if [ "${network_link_up}" = yes ] && [ "${network_default_route}" = yes ]; then
+    network_online=yes
+fi
+emit_fact "PUNAR_NETWORK_LINK_UP=${network_link_up}"
+emit_fact "PUNAR_NETWORK_DEFAULT_ROUTE=${network_default_route}"
+emit_fact "PUNAR_NETWORK_ONLINE=${network_online}"
+
+counter_start="${RUN_DIR}/idle-counters-start.txt"
+counter_end="${RUN_DIR}/idle-counters-end.txt"
+window_start_ms="$(monotonic_ms)"
+capture_service_counters "${counter_start}"
+system_cpu_counters > "${RUN_DIR}/idle-system-cpu-start.txt"
+block_write_sectors > "${RUN_DIR}/idle-block-write-start.txt"
 sum=0
 max=0
 n=0
@@ -33,15 +149,98 @@ while [ "${n}" -lt "${SAMPLE_COUNT}" ]; do
         max="${used_mb}"
     fi
     n=$((n + 1))
-    if [ "${n}" -lt "${SAMPLE_COUNT}" ]; then
-        sleep "${SAMPLE_INTERVAL}"
-    fi
+    # Sleep after the last sample too: 30 samples at a 10 s cadence describe
+    # the complete 300 s canonical window, rather than ending at t=290 s.
+    sleep "${SAMPLE_INTERVAL}"
 done
 
 mean=$((sum / SAMPLE_COUNT))
 
+window_end_ms="$(monotonic_ms)"
+capture_service_counters "${counter_end}"
+system_cpu_counters > "${RUN_DIR}/idle-system-cpu-end.txt"
+block_write_sectors > "${RUN_DIR}/idle-block-write-end.txt"
+window_ms=$((window_end_ms - window_start_ms))
+if [ "${window_ms}" -le 0 ]; then
+    window_ms=1
+fi
+
+runtime_complete=yes
+service_cpu_max_bps=0
+service_write_bytes=0
+while read -r counter_name start_cpu start_write; do
+    end_line="$(awk -v wanted="${counter_name}" '$1 == wanted {print; exit}' "${counter_end}")"
+    end_cpu=absent
+    end_write=absent
+    read -r _end_unit end_cpu end_write <<EOF
+${end_line}
+EOF
+    case "${start_cpu}:${end_cpu}:${start_write}:${end_write}" in
+        *absent*|*[!0-9:]* )
+            runtime_complete=no
+            echo "punar: idle-runtime: missing cgroup counter for ${counter_name}" >&2
+            continue
+            ;;
+    esac
+    cpu_delta=$((end_cpu - start_cpu))
+    write_delta=$((end_write - start_write))
+    if [ "${cpu_delta}" -lt 0 ] || [ "${write_delta}" -lt 0 ]; then
+        runtime_complete=no
+        echo "punar: idle-runtime: counter moved backwards for ${counter_name}" >&2
+        continue
+    fi
+    # Hundredths of a percentage point of one CPU: 50 bps == 0.50%.
+    cpu_bps=$((cpu_delta * 10000 / (window_ms * 1000)))
+    if [ "${cpu_bps}" -gt "${service_cpu_max_bps}" ]; then
+        service_cpu_max_bps="${cpu_bps}"
+    fi
+    service_write_bytes=$((service_write_bytes + write_delta))
+    unit_key="$(printf '%s' "${counter_name}" | tr '[:lower:]-' '[:upper:]_')"
+    emit_fact "PUNAR_IDLE_CPU_${unit_key}_BPS=${cpu_bps}"
+    emit_fact "PUNAR_IDLE_WRITE_${unit_key}_BYTES=${write_delta}"
+done < "${counter_start}"
+
+system_total_start=0
+system_busy_start=0
+system_total_end=0
+system_busy_end=0
+read -r system_total_start system_busy_start < "${RUN_DIR}/idle-system-cpu-start.txt"
+read -r system_total_end system_busy_end < "${RUN_DIR}/idle-system-cpu-end.txt"
+system_total_delta=$((system_total_end - system_total_start))
+system_busy_delta=$((system_busy_end - system_busy_start))
+system_cpu_bps=0
+if [ "${system_total_delta}" -gt 0 ] && [ "${system_busy_delta}" -ge 0 ]; then
+    system_cpu_bps=$((system_busy_delta * 10000 / system_total_delta))
+else
+    runtime_complete=no
+fi
+
+block_start="$(cat "${RUN_DIR}/idle-block-write-start.txt")"
+block_end="$(cat "${RUN_DIR}/idle-block-write-end.txt")"
+block_write_bytes=0
+case "${block_start}:${block_end}" in
+    *[!0-9:]* ) runtime_complete=no ;;
+    *)
+        block_write_bytes=$(((block_end - block_start) * 512))
+        if [ "${block_write_bytes}" -lt 0 ]; then
+            runtime_complete=no
+            block_write_bytes=0
+        fi
+        ;;
+esac
+
+emit_fact "PUNAR_IDLE_RUNTIME_PRESENT=${runtime_complete}"
+emit_fact "PUNAR_IDLE_WINDOW_MS=${window_ms}"
+emit_fact "PUNAR_IDLE_CPU_MAX_BPS=${service_cpu_max_bps}"
+emit_fact "PUNAR_IDLE_SERVICE_WRITE_BYTES=${service_write_bytes}"
+emit_fact "PUNAR_IDLE_SYSTEM_CPU_BPS=${system_cpu_bps}"
+emit_fact "PUNAR_IDLE_BLOCK_WRITE_BYTES=${block_write_bytes}"
+
 # The line the CI desktop test greps for (gates: fail mean > 1536 MB hard
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
+emit_fact "PUNAR_RAM_MEAN_MB=${mean}"
+emit_fact "PUNAR_RAM_MAX_MB=${max}"
+# Preserve the one-line serial marker consumed by the host boot harness.
 echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 
 # Services-RSS sample (milestone-3.md §9, milestone-7.md §11): taken right
@@ -67,7 +266,6 @@ echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 # dead daemon is a gated failure in tests/performance/check-budgets.sh, even
 # under TCG, and that must not be maskable by a live sibling. The list grows
 # again as siblings ship (netd M12, ...).
-PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service"
 services_rss=absent
 pss_kb=0
 all_units_ok=1
@@ -92,7 +290,8 @@ if [ "${all_units_ok}" -eq 1 ]; then
     # Integer MB, rounded up.
     services_rss=$(((pss_kb + 1023) / 1024))
 fi
-echo "PUNAR_SERVICES_RSS_MB=${services_rss} (summed PSS over: ${PUNAR_SERVICE_UNITS})"
+emit_fact "PUNAR_SERVICES_RSS_MB=${services_rss}"
+echo "punar: idle-ram: summed PSS over: ${PUNAR_SERVICE_UNITS}"
 
 # WHO IS ACTUALLY HOLDING THE MEMORY. The whole-system idle figure has drifted
 # 115 MB above its target and the only attribution available was "the commit
@@ -119,13 +318,13 @@ if [ -e /sys/block/zram0 ]; then
     zram_disksize="$(cat /sys/block/zram0/disksize 2>/dev/null || echo 0)"
     zram_algo="$(sed -n 's/.*\[\([a-z0-9]*\)\].*/\1/p' /sys/block/zram0/comp_algorithm 2>/dev/null | head -1)"
     zram_active="$(awk 'NR>1 && $1 ~ /zram/ {print "yes"; exit}' /proc/swaps 2>/dev/null)"
-    echo "PUNAR_ZRAM_PRESENT=yes"
-    echo "PUNAR_ZRAM_DISKSIZE_MB=$((zram_disksize / 1024 / 1024))"
-    echo "PUNAR_ZRAM_ALGORITHM=${zram_algo:-unknown}"
-    echo "PUNAR_ZRAM_SWAP_ACTIVE=${zram_active:-no}"
+    emit_fact "PUNAR_ZRAM_PRESENT=yes"
+    emit_fact "PUNAR_ZRAM_DISKSIZE_MB=$((zram_disksize / 1024 / 1024))"
+    emit_fact "PUNAR_ZRAM_ALGORITHM=${zram_algo:-unknown}"
+    emit_fact "PUNAR_ZRAM_SWAP_ACTIVE=${zram_active:-no}"
 else
-    echo "PUNAR_ZRAM_PRESENT=no"
-    echo "PUNAR_ZRAM_SWAP_ACTIVE=no"
+    emit_fact "PUNAR_ZRAM_PRESENT=no"
+    emit_fact "PUNAR_ZRAM_SWAP_ACTIVE=no"
 fi
 
 ram_procs="${RUN_DIR:-/run/punar}/ram-processes.txt"

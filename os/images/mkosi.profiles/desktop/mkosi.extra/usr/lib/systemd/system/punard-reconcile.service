@@ -16,6 +16,7 @@ After=punard.service
 
 [Service]
 Type=oneshot
+Slice=punar-background.slice
 ExecStart=/usr/bin/punarctl --json reconcile
 StandardOutput=journal
 StandardError=journal

@@ -1,0 +1,6 @@
+# Synthetic legacy report: RAM exists, but runtime facts are absent.
+PUNAR_RAM_MEAN_MB=900
+PUNAR_RAM_MAX_MB=910
+PUNAR_RAM_ACCEL=kvm
+PUNAR_RAM_IMAGE=fixture.qcow2
+PUNAR_SERVICES_RSS_MB=7

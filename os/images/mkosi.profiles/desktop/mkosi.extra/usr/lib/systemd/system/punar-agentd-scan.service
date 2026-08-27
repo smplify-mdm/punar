@@ -33,6 +33,7 @@ After=punar-agentd.service
 
 [Service]
 Type=oneshot
+Slice=punar-background.slice
 ExecStart=/usr/bin/punarctl agents scan --trigger timer
 StandardOutput=journal
 StandardError=journal

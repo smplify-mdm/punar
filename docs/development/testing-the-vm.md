@@ -46,10 +46,22 @@ PUNAR_ARM64_IMAGES=desktop ./tools/build-arm64-image.sh
 ./tools/demo-arm64-vm.sh
 ```
 
-Connect TigerVNC to `127.0.0.1:5901`. The launcher uses a disposable disk
-snapshot, binds VNC and QMP to localhost, and gives its keyboard and pointer
-stable device IDs so automated press/release sequences cannot leave a virtual
-modifier latched. Set `PUNAR_VM_OFFLINE=1` when validating offline behavior.
+On macOS the launcher opens a direct Cocoa window by default, avoiding the VNC
+encode/decode and input-forwarding hop. Set `PUNAR_VM_DISPLAY=vnc` to use
+TigerVNC on `127.0.0.1:5901`, or `PUNAR_VM_DISPLAY=none` for a headless run.
+QMP remains bound to localhost on port 4445. The launcher uses a disposable
+disk snapshot and stable keyboard and pointer IDs so automated press/release
+sequences cannot leave a virtual modifier latched. Disposable writes use
+asynchronous caching: a host crash may lose the temporary session, but cannot
+mutate the reproducible qcow2. Set `PUNAR_VM_OFFLINE=1` when validating offline
+behavior.
+
+The guest CPU is native ARM64 under HVF on Apple Silicon; the framebuffer is
+still virtio-gpu software rendering inside the guest, even in the direct Cocoa
+window. That makes this VM useful for boot, behavior and CPU-latency testing,
+but pointer/animation smoothness is not bare-metal GPU evidence. Check host
+contention too: a busy Docker Desktop VM can consume more CPU and memory than
+Punar itself.
 
 When you are finished, stop the disposable guest cleanly from another terminal:
 

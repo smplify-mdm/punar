@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idle-RAM budget gate (PERFORMANCE_BUDGETS.md §1.1/§5.1; milestone-1.md §8).
+# Stabilized-idle performance budget gate (PERFORMANCE_BUDGETS.md §1/§5.1).
 #
 # Reads the ram-report.txt produced by `tools/boot-test.sh --mode desktop`
 # and applies the whole-system idle-RAM budgets:
@@ -34,7 +34,21 @@
 # summed PSS of the pids in every Punar service cgroup (§2.3 canonical
 # metric — cgroup attribution, never process-name matching).
 #
-# TCG-emulated runs (PUNAR_RAM_ACCEL != kvm) NEVER fail the build on a
+# The same five-minute window carries enforceable idle-CPU and first-party
+# write contracts (PERFORMANCE_BUDGETS.md §1.3–1.4/§2.4–2.5):
+#
+#   max first-party cgroup >= 0.50% of one CPU    ::error:: -> exit 1
+#   combined Punar service writes > 65,536 bytes  ::error:: -> exit 1
+#   short/missing runtime, network or zram facts  ::error:: -> exit 1
+#
+# CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
+# The write ceiling is the engineering interpretation recorded after two
+# native Apple-HVF windows each wrote exactly 8,192 first-party bytes. The
+# 64 KiB ceiling leaves 8x headroom for legitimate batches while rejecting a
+# sustained writer. Whole-guest block writes remain context only because they
+# include the journal, package-independent services and filesystem metadata.
+#
+# TCG-emulated runs (`PUNAR_RAM_ACCEL=tcg`) NEVER fail the build on a
 # NUMERIC breach: the numbers are labeled "(VM, emulated)" and indicative
 # only (PERFORMANCE_BUDGETS.md §2.2/§5.2) — ceiling breaches are downgraded
 # to warning annotations. The absent/missing services value is the one
@@ -48,6 +62,10 @@
 #   PUNAR_RAM_TARGET_MB       target in MB (default 1024)
 #   PUNAR_SERVICES_HARD_MB    services ceiling in MB (default 150)
 #   PUNAR_SERVICES_TARGET_MB  services target in MB (default 100)
+#   PUNAR_IDLE_CPU_HARD_BPS   per-service CPU ceiling, hundredths of one
+#                             percentage point (default 50 = 0.50%)
+#   PUNAR_IDLE_WRITE_HARD_BYTES combined first-party write ceiling per
+#                               five-minute window (default 65536 = 64 KiB)
 #
 # GitHub annotations (::error:: / ::warning::) are emitted only when
 # GITHUB_ACTIONS=true; locally the same text goes to stderr.
@@ -64,6 +82,8 @@ TARGET_MB="${PUNAR_RAM_TARGET_MB:-1024}"
 # < 150 MB MVP ceiling, judged against summed PSS (§2.3).
 SERVICES_HARD_MB="${PUNAR_SERVICES_HARD_MB:-150}"
 SERVICES_TARGET_MB="${PUNAR_SERVICES_TARGET_MB:-100}"
+IDLE_CPU_HARD_BPS="${PUNAR_IDLE_CPU_HARD_BPS:-50}"
+IDLE_WRITE_HARD_BYTES="${PUNAR_IDLE_WRITE_HARD_BYTES:-65536}"
 
 fail=0
 
@@ -95,19 +115,37 @@ require_number() {
     esac
 }
 
+format_bps() {
+    printf '%d.%02d%%' "$((10#$1 / 100))" "$((10#$1 % 100))"
+}
+
 [ -f "${REPORT}" ] \
     || die "check-budgets: report not found: ${REPORT} (run tools/boot-test.sh --mode desktop first)"
+require_number PUNAR_IDLE_CPU_HARD_BPS "${IDLE_CPU_HARD_BPS}"
+require_number PUNAR_IDLE_WRITE_HARD_BYTES "${IDLE_WRITE_HARD_BYTES}"
 
 MEAN_MB="$(get_field PUNAR_RAM_MEAN_MB)"
 MAX_MB="$(get_field PUNAR_RAM_MAX_MB)"
 ACCEL="$(get_field PUNAR_RAM_ACCEL)"
 IMAGE="$(get_field PUNAR_RAM_IMAGE)"
 SERVICES_MB="$(get_field PUNAR_SERVICES_RSS_MB)"
+RUNTIME_PRESENT="$(get_field PUNAR_IDLE_RUNTIME_PRESENT)"
+IDLE_WINDOW_MS="$(get_field PUNAR_IDLE_WINDOW_MS)"
+IDLE_CPU_MAX_BPS="$(get_field PUNAR_IDLE_CPU_MAX_BPS)"
+IDLE_SERVICE_WRITE_BYTES="$(get_field PUNAR_IDLE_SERVICE_WRITE_BYTES)"
+IDLE_SYSTEM_CPU_BPS="$(get_field PUNAR_IDLE_SYSTEM_CPU_BPS)"
+IDLE_BLOCK_WRITE_BYTES="$(get_field PUNAR_IDLE_BLOCK_WRITE_BYTES)"
+NETWORK_ONLINE="$(get_field PUNAR_NETWORK_ONLINE)"
+ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
+ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
+ZRAM_ALGORITHM="$(get_field PUNAR_ZRAM_ALGORITHM)"
+ZRAM_SWAP_ACTIVE="$(get_field PUNAR_ZRAM_SWAP_ACTIVE)"
 require_number PUNAR_RAM_MEAN_MB "${MEAN_MB}"
 require_number PUNAR_RAM_MAX_MB "${MAX_MB}"
 
-# Environment label per PERFORMANCE_BUDGETS.md §2.2: only KVM runs gate.
-if [ "${ACCEL}" = "kvm" ]; then
+# Environment label per PERFORMANCE_BUDGETS.md §2.2: native KVM and native
+# Apple-HVF runs gate; only TCG software emulation downgrades numeric breaches.
+if [ "${ACCEL}" = "kvm" ] || [ "${ACCEL}" = "hvf" ]; then
     LABEL="(VM)"
     EMULATED=0
 else
@@ -172,12 +210,99 @@ case "${SERVICES_MB:-missing}" in
         ;;
 esac
 
+# --- Stabilized idle CPU + writes. Absence fails on every accelerator: it
+# means the shipped sampler did not produce the evidence, not that emulation
+# was slow. Numeric CPU/write breaches follow RAM's TCG downgrade rule.
+if [ "${RUNTIME_PRESENT}" != "yes" ]; then
+    annotate error "idle runtime facts are incomplete or missing (PUNAR_IDLE_RUNTIME_PRESENT='${RUNTIME_PRESENT:-missing}') — every Punar service cgroup must expose CPU and I/O counters"
+    fail=1
+fi
+if [ "${NETWORK_ONLINE}" != "yes" ]; then
+    annotate error "stabilized idle was not DHCP-connected (PUNAR_NETWORK_ONLINE='${NETWORK_ONLINE:-missing}') — the canonical method requires a live non-loopback link and default route"
+    fail=1
+fi
+
+for field_and_value in \
+    "PUNAR_IDLE_WINDOW_MS:${IDLE_WINDOW_MS}" \
+    "PUNAR_IDLE_CPU_MAX_BPS:${IDLE_CPU_MAX_BPS}" \
+    "PUNAR_IDLE_SERVICE_WRITE_BYTES:${IDLE_SERVICE_WRITE_BYTES}" \
+    "PUNAR_IDLE_SYSTEM_CPU_BPS:${IDLE_SYSTEM_CPU_BPS}" \
+    "PUNAR_IDLE_BLOCK_WRITE_BYTES:${IDLE_BLOCK_WRITE_BYTES}" \
+    "PUNAR_ZRAM_DISKSIZE_MB:${ZRAM_DISKSIZE_MB}"; do
+    field="${field_and_value%%:*}"
+    value="${field_and_value#*:}"
+    case "${value}" in
+        ''|*[!0-9]*)
+            annotate error "check-budgets: field ${field} missing or non-numeric in ${REPORT} (got: '${value}')"
+            fail=1
+            ;;
+    esac
+done
+
+if [ -n "${IDLE_WINDOW_MS}" ] && case "${IDLE_WINDOW_MS}" in *[!0-9]*) false ;; *) true ;; esac \
+    && [ "${IDLE_WINDOW_MS}" -lt 300000 ]; then
+    annotate error "stabilized-idle window was ${IDLE_WINDOW_MS} ms, shorter than the canonical 300000 ms"
+    fail=1
+fi
+
+if [ "${ZRAM_PRESENT}" != yes ]; then
+    annotate error "live zram device is absent (PUNAR_ZRAM_PRESENT='${ZRAM_PRESENT:-missing}')"
+    fail=1
+fi
+if [ "${ZRAM_SWAP_ACTIVE}" != yes ]; then
+    annotate error "zram is not an active swap device (PUNAR_ZRAM_SWAP_ACTIVE='${ZRAM_SWAP_ACTIVE:-missing}')"
+    fail=1
+fi
+case "${ZRAM_ALGORITHM}" in
+    ''|unknown)
+        annotate error "active zram compression algorithm is not observable (PUNAR_ZRAM_ALGORITHM='${ZRAM_ALGORITHM:-missing}')"
+        fail=1
+        ;;
+esac
+if [ -n "${ZRAM_DISKSIZE_MB}" ] && case "${ZRAM_DISKSIZE_MB}" in *[!0-9]*) false ;; *) true ;; esac \
+    && [ "${ZRAM_DISKSIZE_MB}" -eq 0 ]; then
+    annotate error "zram device has zero capacity"
+    fail=1
+fi
+
+if [ -n "${IDLE_CPU_MAX_BPS}" ] && case "${IDLE_CPU_MAX_BPS}" in *[!0-9]*) false ;; *) true ;; esac; then
+    echo "    idle CPU: max first-party cgroup $(format_bps "${IDLE_CPU_MAX_BPS}") of one CPU; ceiling $(format_bps "${IDLE_CPU_HARD_BPS}")"
+    if [ -n "${IDLE_SYSTEM_CPU_BPS}" ] && case "${IDLE_SYSTEM_CPU_BPS}" in *[!0-9]*) false ;; *) true ;; esac; then
+        echo "              whole guest $(format_bps "${IDLE_SYSTEM_CPU_BPS}") across available CPUs (context only)"
+    fi
+    if [ "${IDLE_CPU_MAX_BPS}" -ge "${IDLE_CPU_HARD_BPS}" ]; then
+        if [ "${EMULATED}" -eq 1 ]; then
+            annotate warning "max first-party cgroup idle CPU $(format_bps "${IDLE_CPU_MAX_BPS}") ${LABEL} meets or exceeds the $(format_bps "${IDLE_CPU_HARD_BPS}") ceiling, but this is a TCG-emulated run — indicative only"
+        else
+            annotate error "max first-party cgroup idle CPU $(format_bps "${IDLE_CPU_MAX_BPS}") ${LABEL} meets or exceeds the $(format_bps "${IDLE_CPU_HARD_BPS}") ceiling (PERFORMANCE_BUDGETS.md §2.4)"
+            fail=1
+        fi
+    else
+        echo "==> OK: every first-party cgroup remained within the idle-CPU ceiling"
+    fi
+fi
+
+if [ -n "${IDLE_SERVICE_WRITE_BYTES}" ] && case "${IDLE_SERVICE_WRITE_BYTES}" in *[!0-9]*) false ;; *) true ;; esac; then
+    echo "    idle writes: ${IDLE_SERVICE_WRITE_BYTES} first-party service bytes; ceiling ${IDLE_WRITE_HARD_BYTES} bytes/5 min"
+    echo "                 ${IDLE_BLOCK_WRITE_BYTES:-?} whole-guest block bytes (context only)"
+    if [ "${IDLE_SERVICE_WRITE_BYTES}" -gt "${IDLE_WRITE_HARD_BYTES}" ]; then
+        if [ "${EMULATED}" -eq 1 ]; then
+            annotate warning "Punar first-party idle writes ${IDLE_SERVICE_WRITE_BYTES} bytes ${LABEL} exceed the ${IDLE_WRITE_HARD_BYTES}-byte five-minute ceiling, but this is a TCG-emulated run — indicative only"
+        else
+            annotate error "Punar first-party idle writes ${IDLE_SERVICE_WRITE_BYTES} bytes ${LABEL} exceed the ${IDLE_WRITE_HARD_BYTES}-byte five-minute ceiling (PERFORMANCE_BUDGETS.md §2.5)"
+            fail=1
+        fi
+    else
+        echo "==> OK: Punar first-party writes remained within the stabilized-idle ceiling"
+    fi
+fi
+
 if [ "${EMULATED}" -eq 1 ]; then
-    annotate warning "RAM numbers are from a TCG-emulated run ${LABEL}: indicative only, never a source of published baselines (PERFORMANCE_BUDGETS.md §5.2)"
+    annotate warning "performance numbers are from a TCG-emulated run ${LABEL}: indicative only, never a source of published baselines (PERFORMANCE_BUDGETS.md §5.2)"
 fi
 
 if [ "${fail}" -eq 1 ]; then
-    echo "==> FAIL: RAM budget gate (whole-system idle and/or Punar services)" >&2
+    echo "==> FAIL: stabilized-idle performance budget gate" >&2
     exit 1
 fi
-echo "==> PASS: RAM budget gate (whole-system idle + Punar services)"
+echo "==> PASS: stabilized-idle performance gate (RAM + services PSS + CPU + first-party writes + zram)"

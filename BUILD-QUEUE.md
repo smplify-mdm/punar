@@ -20,7 +20,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
-| 3 | remain within idle budget | 1333 MB against a 1024 MB target; hard ceiling met, optimization continues |
+| 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -79,7 +79,7 @@ command centre 87 · System Control 116 · shortcuts 186. Full-path totals were
 
 **File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
-### 2.2 Measured lazy-loading — first pass runtime-proven; second pass pending
+### 2.2 Measured lazy-loading — both passes runtime-proven
 [Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
 fixed probe identity and measured the real `qs` executable on every sample.
 Median isolated cost (`resident delta KiB · construct ms · first map ms`):
@@ -98,10 +98,12 @@ and `residency()` answers `unloaded` without constructing the panel.
 
 The result was honest but modest: **1333 MB mean / 1337 MB max**, only 12 MB
 below the preceding 1345/1348 MB run and still above the 1024 MB target. The
-next working-tree pass separates the notification daemon from its visual
-ledger: the service remains eager, while the PUNAR+SHIFT+N window joins the
-measured lazy set. Local lint and a live headless lifecycle test are green;
-the canonical image result is pending.
+second pass separated the notification daemon from its visual ledger: the
+service remains eager, while the PUNAR+SHIFT+N window joins the measured lazy
+set. The green x86 desktop job in run 33078009194 measured **1322 MB mean /
+1329 MB max** and proved 103 shell assertions. Notification construction was
+43 ms and first map 108 ms. This recovered another 11 MB without making its
+first open perceptibly slower.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); toasts and OSD (must receive events while closed);
@@ -117,6 +119,26 @@ path is compositor/render latency, not a reason to hold roughly 115 MiB. The
 `hyprctl binds -j` cache is now a tiny singleton, so the window unloads but the
 one-query-per-session contract survives every reopen. `configreloaded` and an
 explicit `shortcuts reload` remain the only invalidation paths.
+
+### 2.4 Stabilized-idle CPU and writes — runtime-proven and gated
+
+The existing RAM service now snapshots cgroup v2 CPU and write counters at the
+boundaries of the same full 300-second window. It covers all three resident
+daemons plus the timer-triggered reconcile and agent-scan work accumulated in
+a persistent `punar-background.slice`. The slice has CPU/I/O weight 10 against
+systemd's default 100, so periodic OS work yields under compiler, editor,
+container or test contention without being artificially capped on an idle
+machine.
+
+Native runs hard-fail when any first-party cgroup reaches 0.50% of one CPU;
+TCG numeric breaches remain labeled/warn-only. Two DHCP-connected Apple-HVF
+ARM64 windows measured 1205/1210 MB mean RAM, 1213 MB max, 18 MB combined
+service PSS, 0.00–0.01% maximum first-party CPU, and exactly 8,192 first-party
+write bytes each. The repeated write result established a 65,536-byte/five-
+minute native ceiling with 8× batching headroom. Whole-guest writes (1.39 MB
+in each window) remain context because they include the journal, filesystem
+metadata and non-Punar services. Missing counters, connected-idle facts or live
+zram fail on every accelerator.
 
 ---
 
@@ -188,12 +210,16 @@ HVF.
 The same lane now builds a complete 944 MiB ARM64 desktop image: shared shell
 and service content, Debian package/account/PAM and Chromium adapters, six
 native AArch64 Rust binaries, and a digest-verified ARM64 offline OCI base.
-On a fresh 4-vCPU Apple-HVF VM the kernel marker arrived in **7.997 s** and the
-usable desktop marker in **12.091 s**. The shipped M2–M10 services have each
-passed locally, including the full app lifecycle, firewall, policy,
-enrollment, container, AI/privacy, approval and detection exercises. The M2
-graphics policy also recognizes Debian's live `virtio_pci` spelling and has
-fake-sysfs coverage for virtual, AMD, Intel and Raspberry Pi VC4 cases.
+The latest exact image is
+`c2d39a395f1f2ea2a908e12d86e30d73c8cb6943a7a7b3f6d14e28473f02c1e1`.
+On its fresh connected 8-GiB / 4-vCPU Apple-HVF proof, the usable desktop marker
+arrived in **18 s** and all **707 M2–M10 assertions**, **103 shell-surface
+assertions**, **15 isolated surface-cost samples**, the live zram/network
+checks, and host schema replays passed. This includes the full app lifecycle,
+firewall, policy, enrollment, container, AI/privacy, expiring approval and
+detection exercises. The M2 graphics policy also recognizes Debian's live
+`virtio_pci` spelling and has fake-sysfs coverage for virtual, AMD, Intel and
+Raspberry Pi VC4 cases.
 
 **Scope boundary:** the architecture-aware canonical CI gate is wired but has
 not yet produced its first green run. These results prove QEMU's generic ARM
@@ -284,12 +310,11 @@ locally like our smplify deployment and other VMs."*
 - **`gtk3` already ships** (chromium depends on it), so the portal backend for
   screen-sharing is nearly free — check it, because "can you share your screen
   in a huddle" is a day-one blocker.
-- **CI cannot prove most of this** (`-nic none`, 14 GB runner disk with
-  `-snapshot`). M6 is the precedent for working around it: preload an OCI
-  archive, `podman load`. `podman kube play` runs real Kubernetes YAML offline
-  for zero added megabytes — but with `--network none` there is no Service and
-  no published port, so it cannot demonstrate "reach a service from the
-  browser". Say so rather than implying otherwise.
+- **CI cannot prove most external-network behavior** (QEMU user networking,
+  14 GB runner disk with `-snapshot`). M6 is the precedent for deterministic
+  coverage: preload an OCI archive, `podman load`. Its project container is
+  deliberately launched with `--network none`, so it cannot demonstrate
+  "reach a service from the browser". Say so rather than implying otherwise.
 
 ### 6.5 M11 browser/web-apps · M12 network + relay
 `docs/development/milestone-11.md`, `milestone-12.md`. Both designed, unbuilt.

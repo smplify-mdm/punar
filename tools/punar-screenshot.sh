@@ -1,13 +1,23 @@
 #!/bin/bash
-# Capture the exact framebuffer of the running local Punar demo VM.
+# Capture the exact framebuffer of the running local Punar demo VM. Prefer the
+# ARM launcher's localhost TCP QMP endpoint, then fall back to the x86 demo's
+# Unix socket.
 set -euo pipefail
 
-QMP=/tmp/punar-qmp.sock
+QMP_SOCKET="${PUNAR_QMP_SOCKET:-/tmp/punar-qmp.sock}"
+QMP_HOST="${PUNAR_QMP_HOST:-127.0.0.1}"
+QMP_PORT="${PUNAR_QMP_PORT:-4445}"
 
-if [ ! -S "$QMP" ]; then
-    echo "no local Punar VM is running" >&2
-    exit 1
-fi
+qmp_request() {
+    if nc -z "${QMP_HOST}" "${QMP_PORT}" >/dev/null 2>&1; then
+        nc -w 2 "${QMP_HOST}" "${QMP_PORT}" 2>/dev/null
+    elif [ -S "${QMP_SOCKET}" ]; then
+        nc -U "${QMP_SOCKET}" 2>/dev/null
+    else
+        echo "no local Punar VM is running (checked ${QMP_SOCKET} and ${QMP_HOST}:${QMP_PORT})" >&2
+        return 1
+    fi
+}
 
 if [ "$#" -gt 1 ]; then
     echo "usage: $0 [output.png]" >&2
@@ -53,15 +63,13 @@ REQUEST=$(printf \
     "$CAPTURE_PPM")
 REPLY=$(
     { printf '%s\n' '{"execute":"qmp_capabilities"}' "$REQUEST"; } \
-        | nc -U "$QMP" 2>/dev/null || true
+        | qmp_request || true
 )
-case "$REPLY" in
-    *'"error"'*)
-        echo "QEMU refused the framebuffer capture" >&2
-        echo "$REPLY" >&2
-        exit 1
-        ;;
-esac
+if [[ "${REPLY}" == *'"error"'* ]]; then
+    echo "QEMU refused the framebuffer capture" >&2
+    echo "$REPLY" >&2
+    exit 1
+fi
 
 i=0
 while [ "$i" -lt 20 ] && [ ! -s "$CAPTURE_PPM" ]; do

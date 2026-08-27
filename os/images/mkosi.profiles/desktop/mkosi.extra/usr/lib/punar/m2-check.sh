@@ -269,6 +269,16 @@ check_eq "activeworkspace after workspace name:Atlas" 1 \
 # --- 6. scratchpad special workspaces ----------------------------------------
 special_name() { hyprctl -j monitors 2>/dev/null | jq -r '.[0].specialWorkspace.name'; }
 special_is() { [ "$(special_name)" = "$1" ]; }
+special_is_stably_closed() {
+    # An empty special workspace disappears from monitors JSON before
+    # Hyprland necessarily finishes the close transaction. Require the
+    # observable closed state to survive a second sample; otherwise the next
+    # toggle can be accepted by IPC but lost behind that transaction on a
+    # heavily loaded (notably TCG-emulated) compositor.
+    special_is "" || return 1
+    sleep 1
+    special_is ""
+}
 
 # hyprctl normally returns synchronously, but the first IPC immediately after
 # a scratchpad client disconnect can briefly lose the compositor socket on a
@@ -327,9 +337,9 @@ else
 fi
 
 # Let Hyprland finish the empty-special-workspace close transaction before
-# exercising the next IPC dispatch. Without this boundary the client is gone
-# while the compositor can still be finalising special:term.
-wait_for 5 special_is "" || true
+# exercising the next IPC dispatch. A single blank monitors sample is not a
+# sufficient boundary under TCG; require it to remain blank across samples.
+wait_for 15 special_is_stably_closed || true
 
 for pad in assistant notes; do
     if dispatch_special "${pad}" && wait_for 15 special_is "special:${pad}"; then
@@ -339,7 +349,7 @@ for pad in assistant notes; do
         FAILED=1
     fi
     if special_is "special:${pad}"; then
-        if dispatch_special "${pad}" && wait_for 15 special_is ""; then
+        if dispatch_special "${pad}" && wait_for 15 special_is_stably_closed; then
             note "ok   special workspace hidden (${pad}) = "
         else
             note "FAIL special workspace hidden (${pad}) (got '$(special_name)')"

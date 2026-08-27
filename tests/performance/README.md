@@ -1,17 +1,13 @@
-# Performance gate — idle-RAM (Milestone 1)
+# Performance gate — stabilized idle
 
 This directory holds the CI enforcement harness that
-[`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md) §5 designed. As of
-2026-08-24 the **idle-RAM portion of that design is implemented** (this
-README, `check-budgets.sh`, the desktop mode of `tools/boot-test.sh`, and
-the `desktop-test` CI job); everything else in §5 (per-service PSS/cgroup
-tables, CPU, disk-I/O, boot regression gating, tracked history) **remains
-planned** — see "Not yet implemented" below.
-
-Honesty (spec 1.22): until the first green `desktop-test` CI run, the
-harness itself is config-validated but **runtime-unverified**; the budgets
-doc's §4 baseline table stays "not yet measured" until CI produces real
-numbers.
+[`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md) §5 designed. The
+desktop gate measures whole-system RAM, combined service PSS, each Punar
+service's cgroup CPU and writes, whole-guest CPU/block writes for context,
+and live zram state over one shared stabilized-idle window. RAM and service
+PSS, CPU, first-party writes, connected-idle state and zram are runtime-proven
+and gated. Boot-regression gating, the cgroup-memory cross-check, JSON history
+and bare-metal baselines remain open.
 
 ## How the gate works
 
@@ -32,8 +28,8 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
                           punar-idle-ram.service (in guest, canonical
                           method — see "What is measured")
                              │
-                             ├─ serial: "PUNAR_RAM_MEAN_MB=<n>
-                             │           PUNAR_RAM_MAX_MB=<n>"  (gate 2)
+                             ├─ serial: RAM + service PSS         (gate 2)
+                             ├─ export: CPU/write/zram facts      (gate 3)
                              │
                              └─ export channel: base64 tar of /run/punar
                                 between PUNAR_EXPORT_BEGIN/END sentinels
@@ -41,7 +37,7 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
                              ▼
                           host files in os/images/out/desktop-proof/
                              ▼
-                          tests/performance/check-budgets.sh  (gate 3)
+                          tests/performance/check-budgets.sh  (gate 4)
 ```
 
 1. **Gate 1 — graphical session up.** `boot-test.sh --mode desktop` fails
@@ -52,26 +48,41 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
    in-guest `punar-idle-ram.service` performs the canonical measurement and
    prints mean/max to the serial console; `boot-test.sh` records them into
    `ram-report.txt`. No RAM line, no pass.
-3. **Gate 3 — budget verdict.** `check-budgets.sh` reads `ram-report.txt`
-   and compares against the budgets (next section).
+3. **Gate 3 — runtime evidence complete.** Every Punar service cgroup must
+   expose CPU and I/O counters; zram facts must reach the host report. Missing
+   evidence is a failure on both native and emulated runs.
+4. **Gate 4 — budget verdict.** `check-budgets.sh` reads `ram-report.txt`
+   and applies the RAM, service-PSS, per-service CPU and combined first-party
+   write ceilings. Whole-guest writes are retained as context and are not
+   attributed to Punar.
 
-The artifact **export** (screenshot + raw samples) is collected on a
-dedicated virtio-serial channel and is deliberately **non-fatal**: a missing
-screenshot or corrupt export produces a `::warning::`, not a failure — the
-RAM gate rests on the serial numbers, and the guest likewise continues when
-grim fails (its absence is itself a diagnostic signal).
+The artifact **export** (screenshot + raw samples and runtime facts) is
+collected on a dedicated virtio-serial channel. A missing screenshot remains
+non-fatal because it is visual evidence, not the budget input. A broken export
+is allowed to continue long enough to preserve serial diagnostics, but the
+later runtime/zram phase fails closed when `runtime-report.txt` is absent.
+RAM still has its independent serial marker.
 
 ## What is measured
 
-Whole-system idle RAM, by the canonical method fixed in
-[`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md) §2.1–2.2 — the
-sampling runs **inside the guest** (`punar-idle-ram.service`), not on the
-host:
+All counters are read **inside the guest** by `punar-idle-ram.service`, over
+the canonical window fixed in
+[`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md) §2.1–2.5:
 
 - metric: `MemTotal - MemAvailable` from `/proc/meminfo`;
 - stabilization: **10 minutes** after the graphical session is up, no input;
 - window: **5 minutes**, sampled every **10 s** (30 samples); report mean
   and max;
+- per service: `cpu.stat usage_usec` and `io.stat wbytes` deltas from the
+  `punard`, `punar-agentd`, and `punar-secrets` systemd cgroups;
+- periodic work: the persistent, low-priority `punar-background.slice`
+  accumulates timer-triggered reconcile and agent-discovery work even though
+  their individual oneshot cgroups disappear between samples;
+- whole guest, context only: `/proc/stat` busy ratio and physical block-device
+  sectors-written delta;
+- memory pressure: `/sys/block/zram0` existence, size, active algorithm and
+  `/proc/swaps` membership are observed on the live boot, not inferred from
+  configuration;
 - VM shape: 8 GB RAM / 4 vCPU (the spec 5.1 minimum-target machine,
   budgets §5.1).
 
@@ -80,10 +91,11 @@ it never shortens or re-implements the stabilization (guest env overrides
 for shorter local runs exist but are labeled **non-canonical**, as are the
 `PUNAR_RAM_HARD_MB`/`PUNAR_RAM_TARGET_MB` overrides in `check-budgets.sh`).
 
-Known deviation from budgets §2.1 item 5: the VM runs with `-nic none`
-(matching the minimal boot test), so idle is currently measured **without**
-networking up. Recorded here until guest networking lands; the deviation
-makes the measured number, if anything, slightly optimistic.
+The desktop VM uses QEMU's private user-mode network with a virtio NIC. At the
+ten-minute boundary the guest emits `PUNAR_NETWORK_ONLINE=yes` only when a
+non-loopback link is up and DHCP has installed a default route. Missing or
+offline evidence fails the performance gate on every accelerator. The minimal
+boot-only smoke test remains intentionally offline.
 
 M2 interplay (milestone-2.md §7): the in-guest M2 multitasking exercise
 (`punar-m2-check.service`, started by `idle-ram.sh`) runs **strictly after**
@@ -103,23 +115,36 @@ not drift from it:
 | mean > hard ceiling | 1536 MB (1.5 GB) | `::error::`, job **fails** (release blocker) |
 | mean > target | 1024 MB (1.0 GB) | `::warning::`, job passes |
 | max > hard ceiling | 1536 MB | `::warning::` (informational; the gate is on the **mean** — survey decision, milestone-1.md §8 — until a baseline is recorded in budgets §4) |
+| combined first-party service PSS > ceiling | 150 MB | `::error::`, job **fails** |
+| combined first-party service PSS > target | 100 MB | `::warning::`, job passes |
+| any first-party cgroup idle CPU ≥ ceiling | 0.50% of one CPU | `::error::`, job **fails** |
+| combined first-party writes > ceiling | 65,536 B / 5 min | `::error::`, job **fails** |
+| any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
+| whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
 
 **TCG caveat:** when the runner has no usable `/dev/kvm`, boot-test degrades
-to TCG software emulation. RAM numbers from such runs are labeled
+to TCG software emulation. Numeric performance results from such runs are labeled
 `(VM, emulated)` in `ram-report.txt` (`PUNAR_RAM_ACCEL=tcg`) and are
 **indicative only — they never fail the build** (budgets §5.2); a ceiling
-breach is downgraded to a warning. Note the desktop test under TCG is also
+breach is downgraded to a warning. Missing daemons or facts still fail. Note
+the desktop test under TCG is also
 very slow (the 16-minute measurement is wall-clock on top of an emulated
 boot) and may exceed the CI job timeout — that surfaces the broken-KVM
 environment problem rather than hiding it.
+
+Native ARM64 under Apple Hypervisor Framework (`PUNAR_RAM_ACCEL=hvf`) is a
+gating run, just like same-architecture KVM. HVF is hardware virtualization,
+not the cross-architecture TCG path this caveat describes.
 
 ## Files produced (`os/images/out/desktop-proof/`)
 
 | File | Content |
 |---|---|
 | `punar-desktop-screenshot.png` | grim capture from inside the session — proof of real (llvmpipe) rendering. Uploaded as the `punar-desktop-screenshot` CI artifact. |
-| `ram-report.txt` | key=value: `PUNAR_RAM_MEAN_MB`, `PUNAR_RAM_MAX_MB`, `PUNAR_RAM_ACCEL`, `PUNAR_RAM_ENV_LABEL`, image, timestamp, and `PUNAR_DESKTOP_OK_HOST_SECS` (informational boot-to-desktop proxy, budgets §2.6). Input to `check-budgets.sh`. |
+| `ram-report.txt` | Typed host budget input: RAM, service PSS, idle CPU/write facts, zram facts, environment, image, timestamp and the informational desktop proxy. |
 | `ram-samples.txt` | raw per-sample `epoch used-MB` lines from the guest window. |
+| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters plus live zram facts. |
+| `ram-processes.txt` | Per-process PSS ranking at stabilized idle. |
 | `meminfo` | `/proc/meminfo` snapshot taken at desktop-ready. |
 | `serial.log` | full serial console log — preserved on failure too. |
 
@@ -133,26 +158,18 @@ tools/boot-test.sh --mode desktop \
 tests/performance/check-budgets.sh                 # reads desktop-proof/ram-report.txt
 ```
 
-On the maintainer's macOS arm64 host there is no x86 KVM: local runs are
-TCG, slow, warn-only, labeled `(VM, emulated)`, and never a source of
-published baselines. CI (x86_64, KVM) is canonical.
+On the maintainer's macOS arm64 host there is no x86 KVM: local **x86** runs
+are TCG, slow, warn-only, labeled `(VM, emulated)`, and never a source of
+published baselines. Native arm64 images run through Apple HVF and are
+release-gating evidence, like same-architecture KVM.
 
 ## Not yet implemented (still as designed in PERFORMANCE_BUDGETS.md §5)
 
-- **Per-service RAM table** (budgets §2.3: summed PSS from
-  `/proc/<pid>/smaps_rollup` per Punar unit cgroup, cross-checked against
-  `systemctl show -p MemoryCurrent`; or a `systemd-cgtop` snapshot). This
-  needs an **in-guest** collector — the host reaches the VM only through
-  the one-way serial log and the export channel — i.e. an extension of the
-  image's `idle-ram.sh` sampler writing a table into `/run/punar` for
-  export. The image-side sampler is owned by the image workstream, not this
-  directory. Planned; also moot until the Punar first-party services
-  (`punard` et al., M3) exist to attribute memory to.
-- Idle-CPU and disk-I/O checks (budgets §2.4–2.5), boot-time regression
-  gating (§2.6), the single-JSON results file, and the tracked run history
-  (§5.1 item 7 — for now, CI artifacts of each run are the history).
-- Baseline recording: `PERFORMANCE_BUDGETS.md` §4 must be updated from the
-  first stable CI numbers (owned by that file, not this harness).
+- Cgroup `memory.current` cross-check and per-unit PSS table. The combined
+  service PSS gate is already real; this is attribution depth, not a missing
+  headline number.
+- Boot-time regression gating (§2.6), the single-JSON results file, tracked
+  history (§5.1 item 7), and physical-device baselines.
 
 ## Measured idle RAM over time, and what moved it
 
@@ -175,6 +192,8 @@ number as a regression against it was wrong. What *is* a regression is the
 | [32941763915](https://github.com/smplify-mdm/punar/actions/runs/32941763915) | 1265 MB | 22 s | **the thirteen shell surfaces** |
 | [32945695360](https://github.com/smplify-mdm/punar/actions/runs/32945695360) | 1277 MB | 20 s | networkd + resolved + xdg-utils |
 | [33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202) | 1302 MB | 20 s | corrected surface-latency proof; shell PSS remained ~329 MiB |
+| [33078009194](https://github.com/smplify-mdm/punar/actions/runs/33078009194) | 1322 MB | 20 s | x86 KVM after all measured surface loaders; 7 MB first-party PSS |
+| local native ARM64, `c2d39a…c1e1` | 1205 / 1210 MB | 18 s | two connected Apple-HVF windows; 18 MB first-party PSS |
 
 **Attribution, measured rather than guessed.** The two runs above bracket the
 networking change exactly: everything else identical, `1265 → 1277`. Wired
@@ -182,22 +201,15 @@ DHCP, systemd-resolved and xdg-utils together cost **12 MB**, and boot got
 *faster* (22 s → 20 s) because `systemd-networkd-wait-online` is deliberately
 not enabled.
 
-The real regression is the row above it: **the thirteen surfaces cost ~90 MB**
-(1175 → 1265). Every surface is a `Scope` instantiated at shell startup
-regardless of whether it is ever opened, so a user who never presses
-`PUNAR + S` still pays for System Control's 1,518 lines of QML and
-ControlData's 1,621.
+The historical regression was the row above it: **the thirteen eager surfaces
+cost ~90 MB** (1175 → 1265). The measured response is now shipped: command
+centre, System Control, shortcuts, overview, AI panel, and the notification
+window construct on demand and unload after their close animation. Their small
+IPC handlers stay resident so `state()` can answer `"closed"` without loading
+the visual tree. Always-visible and unbidden security surfaces remain eager.
 
-**The obvious diet, not yet taken:** wrap each surface in a `Loader` that stays
-inactive until its first `open()`, keeping the `IpcHandler` outside the loader
-so `state()` can answer `"closed"` without instantiating anything. That is a
-change to all thirteen surfaces and it can break the surfaces exercise in ways
-static checks will not catch, so it wants its own pass and its own CI run
-rather than being folded into unrelated work. Recorded here so the number has
-an owner instead of drifting quietly.
-
-Three daemons still sum to **7 MB** PSS against a 100 MB target — the Rust
-side is not the problem and never has been.
+Three daemons sum to **7 MB** PSS on x86 KVM and **18 MB** on native ARM64,
+both comfortably below the 100 MB target. The Rust side is not the RAM problem.
 
 ## Who actually holds it (run 33024091202, per-process PSS at stabilized idle)
 
@@ -219,14 +231,12 @@ whole gap to 1024 MB.
 
 **Two levers, now measured rather than guessed:**
 
-1. **The shell, 328 MB.** This confirms the lazy-load plan is aimed at the
-   right process — it was a hypothesis until this run. Five surfaces are
-   genuinely on-demand (command centre, System Control, shortcuts, overview,
-   AI panel) and could sit behind inactive `Loader`s. The other eight cannot:
-   the bar and wallpaper are always visible; approval and alerts must appear
-   *unbidden*; notifications, toasts and the OSD must receive events while
-   closed; and putting the lock screen behind a loader would add latency to
-   the one surface that must never hesitate.
+1. **The shell, 328 MB in the historical eager sample.** This confirmed the
+   loader work was aimed at the right process. Five user-invoked surfaces and
+   the notification visual now sit behind inactive `Loader`s. The bar and
+   wallpaper remain visible; approval and alerts must appear *unbidden*;
+   toasts and the OSD must receive events while closed; and the lock screen
+   must never pay first-use construction latency.
 
 2. **Xwayland, 42.6 MB, with plausibly zero clients.** Chromium now runs native
    Wayland (`--ozone-platform-hint=auto` in `/etc/chromium-flags.conf`), foot is
@@ -280,7 +290,7 @@ round trip. A physical chord omits that client, then follows the same Hyprland
 `exec` → `qs` → shell path. The report names the boundary instead of subtracting
 a noisy estimate.
 
-The first corrected eager baseline is
+The corrected historical eager baseline is
 [run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202):
 
 | Surface | `dispatch_ms` | `shell_map_ms` | `total_ms` |
@@ -298,11 +308,12 @@ closed and unmapped; the exercise ended `PUNAR_SURFACES_OK` with 64 assertions.
 `shortcuts` is the first construction-cost suspect, but this eager sample does
 not identify its cause.
 
-**No regression threshold is gated yet.** One corrected sample is enough to
-choose the next measurement, not enough to define a stable distribution or a
-defensible percentile threshold. Establish repeated samples before gating one.
+**No interaction-latency regression threshold is gated yet.** The cost harness
+now repeats construction and first-map samples and the resulting 31–59 ms
+construction medians justified lazy-loading all measured user-invoked
+surfaces. A release threshold still needs a stable multi-run distribution.
 
-### The lazy-load plan: withdrawn, then reinstated — and why the withdrawal was wrong
+### Why the measured lazy-load plan shipped
 
 This section previously **withdrew** the `Loader`-per-surface change on the
 grounds that 1274 MB is unfelt on a machine idling with 6.7 GB free, so moving
@@ -315,31 +326,18 @@ a megabyte not holding model weights. The product owner's standing rule is now
 explicit — *always optimise for using the least RAM possible* — and the earlier
 call is retracted.
 
-**But it is not retracted by simply obeying the newer instruction.** Speed is
-also table stakes, and a reversal that makes the desktop feel worse would be
-trading one stated requirement for another. The two are only in conflict if
-first-open cost is perceptible, and **nobody has measured it**. So the order is:
-
-1. **Measure the construction cost per surface.** `surfaces-check.sh` now times
-   `dispatch_ms` and `shell_map_ms` (see above), but every surface is currently
-   eager, so
-   those numbers are *dispatch* latency, not *construction* latency. The
-   measurement that decides this is what a surface costs to build the first
-   time — and what it holds resident once built.
-2. **Lazy-load every surface whose construction is imperceptible.** If building
-   the AI panel on first `PUNAR + A` costs 40 ms, there is no trade at all:
-   the RAM is recovered and nothing is felt. Both rules are satisfied.
-3. **Keep eager only what measurement proves expensive**, and say so in the
-   commit with the number. "This surface stays resident because building it
-   costs 380 ms" is a defensible sentence; "surfaces are eager for speed" is
-   not, because it was never measured.
+Speed is also table stakes, so the project measured construction time and
+resident cost before changing residency. Surfaces with imperceptible measured
+construction moved behind loaders; always-visible, event-receiving, and
+security-critical surfaces stayed eager for explicit functional reasons.
 
 Where the two rules genuinely collide on a given surface, **RAM wins on
 constrained device classes and speed wins on capable ones** — which is exactly
 what [`docs/design/device-classes.md`](../../docs/design/device-classes.md)
 exists to express, and is a better answer than one global setting.
 
-**The dispatch instrument and corrected eager baseline now exist; construction
-and resident-cost measurement do not.** Do not lazy-load from either the
-historical 112–240 ms figures or one eager sample. The measurement in step 1
-is the next piece of work.
+The construction/resident-cost harness is now implemented and the lazy set is
+runtime-proven. Median construction costs were 31–59 ms for command centre,
+System Control, shortcuts, AI panel and overview; notifications constructed in
+43 ms. These numbers justified the current loader policy. Keep measuring them
+when a surface grows, and do not expand the lazy set without the same evidence.

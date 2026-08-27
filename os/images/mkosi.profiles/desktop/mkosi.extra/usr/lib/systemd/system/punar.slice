@@ -1,0 +1,7 @@
+[Unit]
+Description=Punar system workloads
+
+[Slice]
+# Parent for persistent Punar accounting groups. Resident daemons remain in
+# system.slice for direct per-unit PSS accounting; periodic work is isolated
+# under punar-background.slice.
