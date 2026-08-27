@@ -249,6 +249,21 @@ fi
     sha256sum -- "${BUILT[@]/%/.qcow2}" > SHA256SUMS.arm64
 )
 
+# A privileged builder is root inside Linux CI, while the following QEMU
+# steps run as the host runner. Keep the large image artifacts untouched, but
+# pre-create the two write targets with the caller's numeric ownership so the
+# boot harness can retain serial/runtime proof. Docker Desktop maps these IDs
+# back to the invoking macOS user as well.
+HOST_UID="${PUNAR_HOST_UID:-0}"
+HOST_GID="${PUNAR_HOST_GID:-0}"
+[[ "${HOST_UID}" =~ ^[0-9]+$ ]] \
+    || { echo "error: invalid PUNAR_HOST_UID: ${HOST_UID}" >&2; exit 2; }
+[[ "${HOST_GID}" =~ ^[0-9]+$ ]] \
+    || { echo "error: invalid PUNAR_HOST_GID: ${HOST_GID}" >&2; exit 2; }
+install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
+    "${IMAGES_DIR}/out/arm64-boot-proof" \
+    "${IMAGES_DIR}/out/arm64-desktop-proof"
+
 echo "==> Native ARM64 image build complete"
 ls -lh "${IMAGES_DIR}/out/arm64-build-info.txt" \
     "${IMAGES_DIR}/out/SHA256SUMS.arm64"

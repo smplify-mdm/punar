@@ -15,6 +15,8 @@ BUILDER_DIR="${REPO_ROOT}/os/images/builder-debian"
 PUNAR_BUILD_MODE="${PUNAR_BUILD_MODE:-build}"
 PUNAR_ARM64_IMAGES="${PUNAR_ARM64_IMAGES:-minimal}"
 BUILDER_TAG="punar-debian-builder:${PUNAR_DEBIAN_SNAPSHOT}-arm64"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "error: docker is required" >&2
@@ -59,5 +61,7 @@ docker run --rm --privileged \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
     --env "PUNAR_ARM64_IMAGES=${PUNAR_ARM64_IMAGES}" \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
+    --env "PUNAR_HOST_UID=${HOST_UID}" \
+    --env "PUNAR_HOST_GID=${HOST_GID}" \
     "${BUILDER_TAG}" \
     /work/os/images/arm64/container-build.sh
