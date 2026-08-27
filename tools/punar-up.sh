@@ -28,6 +28,16 @@ if [ -z "$RUN_ID" ]; then
 fi
 echo "==> run ${RUN_ID}"
 
+# A run id is an identity, not a quality signal. Refuse an explicit in-flight
+# or failed run as firmly as the implicit path does; a local demo is a release
+# checkpoint, not a way to look past a red gate.
+RUN_STATE=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion \
+    --jq '.status + " " + (.conclusion // "")')
+if [ "$RUN_STATE" != "completed success" ]; then
+    echo "run ${RUN_ID} is not a green milestone (${RUN_STATE}) — refusing to boot" >&2
+    exit 1
+fi
+
 STAMP="${CACHE}/.run-id"
 IMG="${CACHE}/punar-desktop-x86_64.qcow2"
 if [ ! -f "$IMG" ] || [ "$(cat "$STAMP" 2>/dev/null || echo none)" != "$RUN_ID" ]; then
