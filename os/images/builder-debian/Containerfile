@@ -1,0 +1,43 @@
+# Native aarch64 image builder for the pinned-Debian migration lane.
+#
+# The base is digest-pinned and apt itself is redirected to the same timestamp
+# before any package is installed. HTTP is intentional for the bootstrap:
+# debian:sid-slim contains no CA bundle, while apt authenticates the snapshot's
+# signed Release metadata with the pinned Debian archive keyring. ca-certificates
+# is then installed for mkosi's HTTPS target-image fetches.
+
+ARG BASE_IMAGE=docker.io/debian:sid-slim
+FROM ${BASE_IMAGE}
+
+ARG SNAPSHOT_ID=20260820T000000Z
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN printf '%s\n' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian/${SNAPSHOT_ID}/" \
+        'Suites: unstable' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
+        > /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' 'Acquire::Check-Valid-Until "false";' \
+        > /etc/apt/apt.conf.d/99-punar-snapshot \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        mkosi \
+        systemd-ukify \
+        systemd-boot-efi \
+        binutils \
+        qemu-utils \
+        dosfstools \
+        mtools \
+        e2fsprogs \
+        btrfs-progs \
+        erofs-utils \
+        cpio \
+        zstd \
+        ca-certificates \
+        debian-archive-keyring \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work

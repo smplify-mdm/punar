@@ -20,6 +20,9 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
+#   arm64-image   native Debian-snapshot image build on an ARM runner, then
+#                 AArch64 UEFI/QEMU boot smoke test with serial proof. This is
+#                 the minimal migration lane, not an arm64 desktop/Pi claim
 #   desktop-test  M1–M8 graphical gate on punar-desktop: PUNAR_DESKTOP_OK,
 #                 in-guest canonical idle-RAM measurement + services-RSS
 #                 sample (summed PSS over the punard.service and, since M7,
@@ -104,12 +107,12 @@
 # image build should not float. Standard public-repo runners are 4 vCPU /
 # 16 GB RAM / 14 GB SSD and expose /dev/kvm (permission granted via the udev
 # rule below, the pattern used by systemd's mkosi CI and the Android
-# emulator ecosystem). x86_64 CI remains the canonical IMAGE build
-# environment until ADR-005's substrate decision is ratified.
-# Architecture-neutral Rust and contracts run natively on x86_64 and arm64:
-# `ubuntu-24.04-arm` is a standard hosted runner, so architecture drift is
-# caught without pretending an arm64 image exists. The maintainer's arm64 Mac
-# still runs the x86 image path under emulation
+# emulator ecosystem). x86_64 CI remains the canonical shipping image while
+# the complete desktop crosses to ADR-005's accepted Debian substrate.
+# Architecture-neutral Rust/contracts and the minimal native ARM64 image run
+# on `ubuntu-24.04-arm`; the graphical product remains x86_64-only until the
+# desktop profile passes its equivalent runtime gate. The maintainer's arm64
+# Mac still runs the shipping x86 desktop under emulation
 # (docs/development/image-pipeline.md).
 
 name: ci
@@ -240,6 +243,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh \
+            tools/build-arm64-image.sh tools/boot-test-arm64.sh \
+            os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             tests/performance/check-budgets.sh \
             os/modules/desktop/hypr/punar-layout.sh \
@@ -328,6 +333,63 @@ jobs:
         run: |
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
+
+  arm64-image:
+    name: arm64-image (native build + AArch64 UEFI boot)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The target package cache is safe to reuse because mkosi reads the
+      # immutable snapshot timestamp from os/images/arm64/snapshot.env. The
+      # builder image itself is digest-pinned and redirects apt to that same
+      # snapshot before installing anything.
+      - name: Cache Debian ARM64 package snapshot
+        uses: actions/cache@v4
+        with:
+          path: os/images/cache/debian-arm64
+          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf') }}
+          restore-keys: punar-arm64-debian-${{ runner.arch }}-
+
+      - name: Build native ARM64 migration image
+        run: ./tools/build-arm64-image.sh
+
+      - name: Install AArch64 QEMU and UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-efi-aarch64 qemu-utils
+
+      - name: Verify native image checksum
+        run: |
+          cd os/images/out
+          sha256sum --check SHA256SUMS.arm64
+          qemu-img info punar-dev-arm64.qcow2
+
+      - name: Enable KVM access for the runner user
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          else
+            echo "::warning::/dev/kvm is unavailable; boot proof will use TCG"
+          fi
+
+      - name: Boot native ARM64 image
+        run: ./tools/boot-test-arm64.sh
+
+      - name: Upload ARM64 image and boot proof
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: punar-dev-arm64-image
+          path: |
+            os/images/out/punar-dev-arm64.qcow2
+            os/images/out/SHA256SUMS.arm64
+            os/images/out/arm64-build-info.txt
+            os/images/out/arm64-boot-proof/serial.log
+          if-no-files-found: error
+          retention-days: 7
 
   # M1..M8 graphical acceptance gate (milestone-1.md §7–§10,
   # milestone-2.md §7, milestone-3.md §8, milestone-4.md §10,

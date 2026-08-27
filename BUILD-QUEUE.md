@@ -163,41 +163,40 @@ proved the complete path on the image.
 
 ---
 
-## 5. arm64 / Raspberry Pi — required; substrate after ratification
+## 5. arm64 / Raspberry Pi — substrate accepted; native minimal boot proven
 
-**`docs/architecture/adr/ADR-005-arm64-support.md` is Proposed and AMENDED.
-Read §A before anything.** It corrects two errors in its own first draft.
-
-The owner has now confirmed ARM64 and Raspberry Pi as product requirements.
-That removes "stay x86_64-only" from the options; it does not by itself ratify
-the Debian pinned-sid recommendation or resolve Pi boot/rollback.
-
-Decision as amended: **Debian, tracking pinned sid.** Not testing — testing is
-36 days behind on chromium and structurally blocked by a missing armhf build
-and an arm64 reproducibility regression.
+**ADR-005 is Accepted for implementation: Debian, tracking pinned sid.** Not
+testing — testing was measured 36 days behind on Chromium and structurally
+blocked by a missing armhf build and an arm64 reproducibility regression.
+ADR-006 is also Accepted for implementation: Raspberry Pi uses its native
+partition-level `tryboot_a_b`, not third-party UEFI. Real-board reset,
+watchdog and power-loss tests remain mandatory before a Pi support claim.
 
 **Do not start an Arch ARM mirror.** That instruction was struck; its urgency
 rested on an rsync capability never verified to exist.
 
-**What makes this tractable:** 88,499 lines of the product are
-substrate-neutral. 68,614 lines of Rust reference Arch **zero** times; 19,885
-lines of QML mention it once, in a comment. The substrate is ~218 lines of
-image pipeline plus package names and the boot chain.
+**Minimal lane now proven locally:** `os/images/arm64/` uses digest-pinned
+`debian:sid-slim`; the builder's apt and mkosi's target both consume snapshot
+`20260820T000000Z`. Two clean builds produced the identical qcow2 SHA-256
+`bab2aba756c8a21d8ddf592fe225aa17d757b0dbed5681f8db4830ceb93802fd`.
+The 335 MiB qcow2 booted AA64 systemd-boot → Debian kernel
+`7.1.8+deb14.1-arm64` → real root → multi-user target in 11 seconds on Apple
+HVF. This proves generic UEFI ARM64 only — not the desktop, Pi or hardware.
 
-**Sequence when ratified:**
-1. `snapshot.debian.org` pinning in `os/images/snapshot.env` + `mkosi.conf`
-   (mkosi supports it natively — `mkosi/distribution/debian.py`).
-2. Translate package names in both `mkosi.conf` files.
-3. Swap the builder base to `debian:sid-slim` (publishes `linux/arm64/v8`).
-4. Add `ubuntu-24.04-arm` matrix legs to the `rust` and `contracts` jobs —
-   cheap and safe, since there is zero architecture-specific Rust.
-5. Only then attempt an arm64 image and the Pi boot chain.
+**Next sequence:**
 
-**ADR-003 is unresolved on Pi.** Its gain is *"rollback that works when
-userspace does not, because it is the firmware selecting a different,
-permanently-blessed UKI"* — the Pi's native chain is not UEFI. A weaker
-mechanism wearing ADR-003's name would be worse than an honest second
-mechanism. That needs its own ADR.
+1. Put the minimal native build and QEMU/aarch64 boot smoke test on the
+   `ubuntu-24.04-arm` CI runner.
+2. Port the desktop package names, Debian post-install/account/PAM adapters,
+   Chromium launcher flags, Rust binary build and per-architecture offline OCI
+   fixture. Keep the current x86_64 desktop as regression baseline meanwhile.
+3. Run the complete graphical/behavior/privacy gate natively on arm64. The
+   migration ends with one Debian substrate for both architectures; two
+   production substrates are not accepted.
+4. Generate the Pi two-boot/two-root/shared-data layout and software-test the
+   state machine, labelled as QEMU evidence.
+5. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
+   advertising Raspberry Pi support.
 
 ---
 

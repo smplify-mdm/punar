@@ -1,4 +1,4 @@
-# Image pipeline (Milestones 0–6)
+# Image pipeline (Milestones 0–10 + native ARM64 migration lane)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now produces two images from one config tree
@@ -28,10 +28,14 @@ pipeline now produces two images from one config tree
   `/usr/share/punar/fixtures/acme/`, and the `punar-m5-check` in-VM
   enrollment exercise ([milestone-5.md](milestone-5.md) §4, §10).
 
-Substrate per [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md):
-minimal Arch package payload, vendor-pinned snapshot channels, mkosi-built
-images, with an A/B image trajectory. This pipeline is the Milestone 0 slice
-of that: an unsigned, VM-only qcow2 that satisfies spec 76 Milestone 0
+The shipping x86_64 substrate follows
+[ADR-001](../architecture/adr/ADR-001-distribution-substrate.md): minimal Arch
+package payload, vendor-pinned snapshot channels, mkosi-built images, with an
+A/B image trajectory. [ADR-005](../architecture/adr/ADR-005-arm64-support.md)
+accepts Debian pinned sid as the common destination; the separate minimal
+ARM64 lane proves that migration substrate without implying the complete
+desktop has crossed yet. The minimal outputs are unsigned VM-only qcow2s that
+satisfy spec 76 Milestone 0
 ("reproducible build and VM boot") and spec 66 MVP ("VM image; repeatable
 build; development VM"). CI facts and precedents come from
 [research/crosscutting.md](../architecture/research/crosscutting.md).
@@ -79,7 +83,9 @@ CI run is the arbiter.
 | `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop; since M5 also the Acme fixtures `fixtures/organizations/acme/*.json` → `usr/share/punar/fixtures/acme/`, same staged-not-committed-twice pattern as the shell QML), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl -p punar-mock-smplify` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), `mkosi build` per selected image, raw→compressed qcow2, checksums, build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
 | `tools/build-image.sh` | Host-side wrapper: builds the builder container, runs the containerized build with the **repo root** mounted (the desktop staging needs `os/modules` + `shell/`). `tools/build-image.sh [dev|desktop|all]` (default `all`). Identical path in CI and locally. |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
-| `.github/workflows/ci.yml` | Jobs `rust`, `image`, `boot-test` on pinned `ubuntu-24.04` runners. |
+| `os/images/arm64/`, `os/images/builder-debian/` | Minimal native ARM64 lane: digest-pinned Debian builder, one immutable sid snapshot for builder and target, AA64 systemd-boot disk definition, deterministic development credentials and disposable-cache exclusions. This is generic UEFI/QEMU proof, not the desktop or Raspberry Pi. |
+| `tools/build-arm64-image.sh`, `tools/boot-test-arm64.sh` | Native ARM64 build wrapper and AArch64 UEFI/QEMU smoke test. The boot tool selects HVF/KVM when available, otherwise labels a TCG fallback, and retains the serial marker as proof. |
+| `.github/workflows/ci.yml` | Native Rust/contracts on pinned x86_64 and ARM64 runners; shipping x86 image/boot/desktop jobs; native minimal ARM64 image/boot job. |
 
 ## How a build works
 
@@ -351,7 +357,8 @@ the in-VM m6-check is the authoritative `podman run` proof.
 
 ## CI (canonical)
 
-`.github/workflows/ci.yml`, five jobs on **pinned `ubuntu-24.04`** — not
+`.github/workflows/ci.yml`, six job groups on pinned `ubuntu-24.04` or
+`ubuntu-24.04-arm` — not
 `ubuntu-latest`, because GitHub is migrating `-latest` labels during 2026 and
 an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
 4 vCPU / 16 GB RAM / 14 GB SSD, with working `/dev/kvm`.
@@ -371,7 +378,11 @@ an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
    canonical udev rule (crosscutting.md §2.1), runs `tools/boot-test.sh`, and
    re-verifies the artifact checksum. If KVM is unavailable the script warns
    and degrades to TCG rather than failing.
-5. **desktop-test** — needs `image`; boots `punar-desktop` through
+5. **arm64-image** — runs natively on `ubuntu-24.04-arm`, builds the minimal
+   image from the digest/timestamp-pinned Debian inputs, verifies its checksum,
+   then boots it through AArch64 UEFI and retains the qcow2 plus serial proof.
+   It deliberately makes no graphical-desktop or Raspberry Pi claim.
+6. **desktop-test** — needs `image`; boots `punar-desktop` through
    `tools/boot-test.sh --mode desktop` (PUNAR_DESKTOP_OK → idle-RAM →
    M2/M3/M4/M5 exercises → export → the four report gates), then the
    PERFORMANCE_BUDGETS.md gates, then uploads the screenshot artifact
@@ -387,6 +398,11 @@ an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
 ./tools/build-image.sh desktop            # just the M1 desktop image
 PUNAR_BUILD_MODE=summary ./tools/build-image.sh   # cheap: staging + `mkosi summary` only
 ./tools/boot-test.sh                      # needs qemu (brew install qemu)
+
+# Native minimal ARM64 path (fast on Apple Silicon)
+./tools/build-arm64-image.sh
+./tools/boot-test-arm64.sh
+PUNAR_BUILD_MODE=summary ./tools/build-arm64-image.sh
 ```
 
 What to expect, honestly:
@@ -415,6 +431,11 @@ What to expect, honestly:
 - A local boot test on the Mac runs under TCG only (Apple Silicon cannot
   hardware-virtualize x86); boot takes minutes. Not yet attempted locally
   (no qemu installed on the maintainer host).
+- The native ARM64 lane does not use Rosetta. On Apple Silicon it builds in a
+  `linux/arm64` container and boots QEMU's generic `virt` machine with HVF.
+  Two clean 2026-08-27 builds were byte-identical, and the retained image
+  reached `PUNAR_BOOT_OK` in 11 seconds. This remains a generic UEFI base,
+  not proof of the ARM desktop or Raspberry Pi firmware/peripherals.
 - Cheap config iteration without building:
   `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` — runs the desktop
   staging plus `mkosi summary` for both images inside the builder container
@@ -454,5 +475,6 @@ snapshots.
   build-to-build binary diff has been performed.
 - **Builder container not cached in CI.** Rebuilt each run from the pinned
   snapshot (correct, just slower); GHCR caching is an easy later win.
-- **arm64 runners are not boot-test capacity.** systemd's CI sets `no_kvm: 1`
-  on arm — x86_64 runners only for boot tests (crosscutting.md §2.1).
+- **ARM64 scope is minimal today.** Native build and generic UEFI/QEMU boot
+  are proven; the desktop package/PAM/Chromium/OCI adapters, graphical gate,
+  Raspberry Pi image layout, and real-board fault injection remain open.

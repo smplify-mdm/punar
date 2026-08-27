@@ -324,19 +324,27 @@ proves no class carries a weaker security/privacy result.
   podman dependency. Wi-Fi landed but screen-share portals have not.
 - **M11 browser/web-apps · M12 network/relay** — designed, unbuilt.
 
-### 7.5 ARM64 is required; ADR-005's substrate choice remains open
-`docs/architecture/adr/ADR-005-arm64-support.md` — **Proposed, not Accepted.**
+### 7.5 ARM64 substrate accepted; minimal native lane is build/boot proven
+`docs/architecture/adr/ADR-005-arm64-support.md` — **Accepted for
+implementation.** The common substrate is Debian pinned sid. The verified
+x86_64/Arch desktop remains the regression baseline only during migration;
+two production substrates are not the end state.
 
 The owner confirmed on 2026-08-26 that ARM64 and Raspberry Pi are product
-requirements. The open decision is no longer *whether* to support ARM; it is
-whether to accept this ADR's Debian pinned-sid substrate and how to implement
-the separate native Pi boot/rollback chain.
+requirements. ADR-006 is also Accepted for implementation: Pi uses its native
+partition-level `tryboot_a_b` path, not a third-party UEFI layer. No Pi support
+claim exists until a physical board passes reset, watchdog and power-loss
+fault injection.
 
-Punar is x86_64 only. ADR-001 never evaluated arm64 — architecture is absent
-from its criteria, appearing only as a consequence of choosing x86_64 CI
-runners. Arch has **no reproducible package archive on ARM**, verified three
-ways including mkosi's own
-`die("There is no known public mirror for snapshots of Arch Linux ARM")`.
+At proposal time Punar was x86_64-only and ADR-001 had never evaluated arm64.
+The repository now contains a separate minimal migration lane at
+`os/images/arm64/`: a digest-pinned native Debian builder and target both use
+snapshot `20260820T000000Z`; `tools/build-arm64-image.sh` produced a 335 MiB
+qcow2; two clean builds were byte-identical at SHA-256
+`bab2aba756c8a21d8ddf592fe225aa17d757b0dbed5681f8db4830ceb93802fd`;
+`tools/boot-test-arm64.sh` then reached
+`PUNAR_BOOT_OK kernel=7.1.8+deb14.1-arm64` in 11 seconds under Apple HVF.
+That is generic UEFI ARM64 proof, not desktop, Pi or bare-metal proof.
 
 **The cost of changing is low and was measured:** 88,499 lines of the product
 are substrate-neutral; the substrate is ~218 lines of pipeline plus package
@@ -347,7 +355,7 @@ and its findings are folded into **§A of the ADR**. All three attackers returne
 **AMEND, then ratify**: Debian is the right destination, the original argument
 was not sound. Read §A first — it corrects the ADR's own evidence.
 
-The decision, as amended:
+The accepted decision and remaining boundary:
 
 - **Option C (Debian) wins, tracking PINNED SID specifically.** Measured
   chromium age on arm64: sid **6.0 days** (identical version to Arch x86_64),
@@ -367,6 +375,10 @@ The decision, as amended:
   mkosi `die()` I cited as proof mkosi *refuses* snapshot-pinned Arch ARM is
   guarded by `if snapshot and not mirror` — it means "no public mirror exists",
   not "refuses". Supply a mirror and it proceeds.
+- **Next:** put the minimal build/boot on `ubuntu-24.04-arm`, port the complete
+  desktop and its Debian package/PAM/Chromium/OCI adapters, pass the graphical
+  gate natively, then build ADR-006's Pi layout and take it through physical
+  fault injection.
 
 **Standing instruction from that amendment:** a fact about a platform is a
 citation and an observation, or it is labelled unverified. Two rounds produced

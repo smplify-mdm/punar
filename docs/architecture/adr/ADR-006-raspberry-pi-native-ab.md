@@ -1,9 +1,10 @@
 # ADR-006 — Native Raspberry Pi `tryboot` for A/B rollback
 
-- Status: **Proposed** — implementation waits for Smplify ratification
+- Status: **Accepted for implementation** — 2026-08-27; physical-board fault
+  injection remains a release gate, not a completed claim
 - Date: 2026-08-26
 - Relates to: [ADR-003](ADR-003-ab-slots-over-snapper.md) (accepted A/B
-  requirement), [ADR-005](ADR-005-arm64-support.md) (proposed ARM substrate)
+  requirement), [ADR-005](ADR-005-arm64-support.md) (accepted ARM substrate)
 - Product requirement: ARM64 and Raspberry Pi are first-class targets
 
 ## Context
@@ -66,10 +67,15 @@ partition numbers in `autoboot.txt` after the same health gate used by x86.
 This is not the same implementation as systemd-boot counting, but it has the
 same safety property without emulating a PC firmware stack.
 
-## Proposed decision
+## Decision
 
 **Use native Raspberry Pi firmware and partition-level `tryboot_a_b` for Pi
 A/B updates. Do not put third-party UEFI firmware in Punar's Pi boot chain.**
+
+Acceptance chooses the mechanism so implementation can begin; it does not
+waive §Verification required before shipping support. Until the real-board
+reset, watchdog and power-loss matrix passes, generated Pi images must remain
+labelled engineering previews and Punar must not claim Raspberry Pi support.
 
 The slot is a pair:
 
@@ -124,7 +130,7 @@ documents that it is cancelled when the Arm CPU starts.
   OS rollback must not claim it protects an OS slot merely because the EEPROM
   itself updates safely.
 
-## Verification required before acceptance
+## Verification required before shipping support
 
 1. A generated Pi image has two boot/root pairs with distinct fixed PARTUUIDs
    and shared data partitions; every cmdline points only at its paired root.

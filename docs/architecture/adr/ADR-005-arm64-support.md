@@ -1,8 +1,11 @@
 # ADR-005 — Supporting arm64, and what it costs ADR-001
 
-- Status: **Proposed, AMENDED after adversarial review** — 2026-08-26.
-  ARM64/Raspberry Pi support is an accepted product requirement; the Debian
-  pinned-sid substrate recommendation in this ADR still awaits ratification.
+- Status: **Accepted for implementation** — 2026-08-27. ARM64/Raspberry Pi
+  support is an accepted product requirement, and the selected common
+  substrate is Debian pinned sid. The migration overlap is temporary: the
+  verified x86_64/Arch desktop remains the regression baseline while its
+  complete package and boot adapters cross to Debian; maintaining two
+  production substrates is not an accepted end state.
 - Amendment: §A records what the second review corrected, including an error of
   mine in the original evidence. Read §A before §Options; two of the original
   recommendations are struck.
@@ -11,6 +14,31 @@
 - Trigger: the product owner named a Raspberry Pi as a target device, and then
   asked the question this ADR exists to answer — *"If all the future devices
   run on arm then isn't it a miss that we can't support arm architecture?"*
+
+
+## Acceptance evidence — build the claim before accepting it
+
+The recommendation was accepted only after a native lane existed and removed
+the two largest unknowns in the proposal. On 2026-08-27:
+
+- `os/images/arm64/` built a real arm64 disk from Debian sid snapshot
+  `20260820T000000Z`; both the digest-pinned `debian:sid-slim` builder and its
+  apt toolchain consume that same snapshot before mkosi builds the target;
+- mkosi 26 produced an AA64 systemd-boot image with Debian's native
+  `7.1.8+deb14.1-arm64` kernel. `InitrdPackages=mount` expresses Debian's
+  util-linux package split through mkosi's supported interface rather than
+  mutating mkosi's installed resources;
+- two clean builds were byte-identical after removing a random development
+  password salt and disposable package cache/log files: SHA-256
+  `bab2aba756c8a21d8ddf592fe225aa17d757b0dbed5681f8db4830ceb93802fd`;
+- QEMU's generic ARM `virt` platform booted that qcow2 natively through Apple
+  HVF in 11 seconds and emitted
+  `PUNAR_BOOT_OK kernel=7.1.8+deb14.1-arm64` from multi-user userspace.
+
+This evidence accepts the substrate and generic UEFI ARM64 direction. It does
+**not** prove the desktop on arm64, Raspberry Pi firmware/peripherals, Secure
+Boot, A/B updates or any physical machine. Those remain separate runtime
+gates; ADR-006 owns the Pi-native boot selector.
 
 
 ## A. Amendment — what the second adversarial review corrected
@@ -126,8 +154,12 @@ does **not** silently ratify Debian pinned sid, nor does it resolve the Pi boot
 chain recorded below; those are implementation decisions with their own
 evidence and consequences.
 
-**Punar is x86_64 only.** `os/images/mkosi.conf` sets `Architecture=x86-64`.
-No arm64 image has ever been built, booted or tested.
+At proposal time Punar was x86_64 only: `os/images/mkosi.conf` fixed
+`Architecture=x86-64`, and no arm64 image had been built or booted. The
+accepted implementation now has a byte-reproducible, boot-gated minimal ARM64
+lane. The complete graphical product remains x86_64-only until the desktop
+profile crosses and passes equivalent runtime gates; the minimal lane is not a
+desktop-support claim.
 
 **ADR-001 did not weigh arm64 badly. It never weighed it at all.** Its criteria
 were reproducibility, package availability, maintenance burden, enterprise
@@ -246,10 +278,11 @@ verified to exist, and the review finds Option B not viable. Do not start it.
 
 ## Honest limits of the evidence
 
-The research behind this ADR ran seven agents; **two of three adversarial
-reviewers died on API errors**, so the counter-argument is under-developed. The
-one that survived found the others asking a question the owner had already
-answered, and a factual error that would have shipped a wrong build gate. Every
-verified claim above carries its method; the *options* deserve a second
-adversarial pass before ratification, particularly C's package-freshness claim,
-which is the criterion ADR-001 turned on.
+The research behind the proposal lost two of its first three adversarial
+reviewers to API errors; the completed second review then found and corrected
+the mkosi/Arch-ARM interpretation recorded in §A. Acceptance therefore rests
+on both the corrected review and the native build/rebuild/boot evidence above,
+not on the first recommendation alone. No physical ARM machine has run Punar,
+and no arm64 desktop gate is green yet. Package freshness is governed by the
+pinned sid promotion channel and still needs the same ongoing browser-cadence
+measurement required on x86_64.
