@@ -102,6 +102,11 @@ import "../Services"
 DeferredSurfaceBase {
     id: root
 
+    // Loader contract used by the isolated cost probe. Production opens the
+    // surface through shell.qml's DeferredSurface wrapper; the probe passes
+    // this flag at construction time so Loader.Ready and show() remain two
+    // separately measured timestamps, matching every other deferred surface.
+    property bool openOnReady: false
     property bool windowVisible: false
 
     // The row under the cursor, keyed by the id its own register uses.
@@ -484,6 +489,12 @@ DeferredSurfaceBase {
         root.reselect();
         root.windowVisible = true;
         root.open = true;
+    }
+
+    Component.onCompleted: {
+        SurfaceTiming.constructed("notifications");
+        if (root.openOnReady)
+            root.show();
     }
 
     function hide(): void {
