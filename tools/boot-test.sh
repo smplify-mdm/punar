@@ -478,6 +478,9 @@ QEMU_PID=""
 FIRMWARE_ARGS=()
 MINIMAL_DISPLAY_ARGS=(-display none)
 DESKTOP_DISPLAY_ARGS=(-display none)
+DISK_ARGS=(-drive "file=${IMAGE},format=qcow2,if=virtio")
+DESKTOP_NETWORK_ARGS=(-nic "user,model=virtio-net-pci")
+DESKTOP_SERIAL_ARGS=(-device virtio-serial-pci)
 
 if [ "${ARCH}" = "x86_64" ]; then
     cp "${OVMF_VARS}" "${VARS_COPY}"
@@ -491,9 +494,19 @@ if [ "${ARCH}" = "x86_64" ]; then
 else
     FIRMWARE_ARGS=(-bios "${AARCH64_FIRMWARE}")
     MACHINE="virt,accel=${ACCEL},highmem=on"
-    # AArch64 UEFI initializes virtio-gpu directly; it does not need a legacy
-    # PCI option ROM. Some minimal QEMU packages omit efi-virtio.rom entirely,
-    # and the default lookup then aborts before firmware starts.
+    # AArch64 UEFI initializes PCI virtio devices directly; none of them need
+    # a legacy option ROM. Some minimal QEMU packages omit efi-virtio.rom
+    # entirely, and the implicit lookup then aborts before firmware starts.
+    # Use explicit backends so romfile= can be set on every PCI frontend.
+    DISK_ARGS=(
+        -drive "file=${IMAGE},format=qcow2,if=none,id=punardisk"
+        -device "virtio-blk-pci,drive=punardisk,romfile="
+    )
+    DESKTOP_NETWORK_ARGS=(
+        -netdev "user,id=punarnet"
+        -device "virtio-net-pci,netdev=punarnet,romfile="
+    )
+    DESKTOP_SERIAL_ARGS=(-device "virtio-serial-pci,romfile=")
     DESKTOP_DISPLAY_ARGS+=(-device "virtio-gpu-pci,romfile=")
 fi
 
@@ -574,7 +587,7 @@ run_minimal() {
         -m 2048
         -smp 2
         "${FIRMWARE_ARGS[@]}"
-        -drive "file=${IMAGE},format=qcow2,if=virtio"
+        "${DISK_ARGS[@]}"
         -snapshot
         "${MINIMAL_DISPLAY_ARGS[@]}"
         -serial "file:${SERIAL_LOG}"
@@ -676,14 +689,14 @@ run_desktop() {
         -m 8192
         -smp 4
         "${FIRMWARE_ARGS[@]}"
-        -drive "file=${IMAGE},format=qcow2,if=virtio"
+        "${DISK_ARGS[@]}"
         -snapshot
         "${DESKTOP_DISPLAY_ARGS[@]}"
         -serial "file:${SERIAL_LOG}"
         -monitor none
-        -nic "user,model=virtio-net-pci"
+        "${DESKTOP_NETWORK_ARGS[@]}"
         -no-reboot
-        -device virtio-serial-pci
+        "${DESKTOP_SERIAL_ARGS[@]}"
         -chardev "file,id=punarexp,path=${EXPORT_RAW}"
         -device "virtserialport,chardev=punarexp,name=punar.export"
     )

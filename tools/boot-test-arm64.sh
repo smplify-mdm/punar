@@ -87,7 +87,9 @@ qemu-system-aarch64 \
     -m 2048 \
     -smp 4 \
     -bios "${FIRMWARE}" \
-    -drive "file=${IMAGE},format=qcow2,if=virtio,snapshot=on" \
+    -drive "file=${IMAGE},format=qcow2,if=none,id=punardisk" \
+    -device virtio-blk-pci,drive=punardisk,romfile= \
+    -snapshot \
     -nic none \
     -nographic \
     -no-reboot \

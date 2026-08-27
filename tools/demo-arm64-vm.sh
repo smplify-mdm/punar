@@ -86,7 +86,10 @@ if [ "${DISPLAY_BACKEND}" = vnc ] \
     die "VNC port ${VNC_PORT} is already in use"
 fi
 
-NETWORK=(-nic "user,model=virtio-net-pci")
+NETWORK=(
+    -netdev "user,id=punarnet"
+    -device "virtio-net-pci,netdev=punarnet,romfile="
+)
 if [ "${PUNAR_VM_OFFLINE:-0}" = 1 ]; then
     NETWORK=(-nic none)
 fi
@@ -104,7 +107,9 @@ exec "${QEMU}" \
     -smp "${PUNAR_VM_CPUS:-4}" \
     -m "${PUNAR_VM_MEMORY_MB:-3072}" \
     -bios "${FIRMWARE}" \
-    -drive "file=${IMAGE},if=virtio,format=qcow2,snapshot=on,cache=unsafe,aio=threads" \
+    -drive "file=${IMAGE},if=none,id=punardisk,format=qcow2,cache=unsafe,aio=threads" \
+    -device virtio-blk-pci,drive=punardisk,romfile= \
+    -snapshot \
     -device virtio-gpu-pci,id=punar-gpu,romfile= \
     -device qemu-xhci,id=punar-xhci \
     -device usb-kbd,id=punar-kbd \
