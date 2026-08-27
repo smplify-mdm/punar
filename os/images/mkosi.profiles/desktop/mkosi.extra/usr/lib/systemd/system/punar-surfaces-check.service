@@ -13,7 +13,7 @@
 # fixtures behind.
 
 [Unit]
-Description=Punar desktop-surfaces exercise — 13 shell surfaces, browser, link handling (CI)
+Description=Punar desktop-surfaces exercise — shell IPC, browser, link handling (CI)
 
 [Service]
 Type=oneshot

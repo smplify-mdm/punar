@@ -4,7 +4,7 @@ pragma ComponentBehavior: Bound
 // D-003's law, restated so it can be checked: *intent goes in, a typed
 // capability comes out*, and "the command center never generates a shell
 // string". This file is where that law is kept. Every row the overlay can
-// show is one of five kinds, each with exactly one execution mechanism:
+// show is one of six kinds, each with exactly one execution mechanism:
 //
 //   KIND        WHAT IT IS                  HOW IT RUNS
 //   ─────────── ─────────────────────────── ────────────────────────────────
@@ -19,10 +19,12 @@ pragma ComponentBehavior: Bound
 //   layout      a §13.5 layout preset       /usr/lib/punar/punar-layout.sh
 //                                           <preset> (fixed argv, one
 //                                           hyprctl --batch — M2 §4)
+//   wallpaper   an installed desktop field  WallpaperState.setWallpaper(id)
+//                                           (finite catalog, atomic pointer)
 //   explain     a §40 policy question       punarctl --json policy explain
 //                                           <path>, rendered inline
 //
-// There is no sixth kind and there is deliberately no generic "run this"
+// There is no seventh kind and there is deliberately no generic "run this"
 // kind: `ipc.md` §8's permanent non-goal ("no generic execution method of
 // any kind") is the same promise one layer up. Every list below is DATA —
 // adding a surface is one object literal, never a new branch in activate().
@@ -241,7 +243,7 @@ QtObject {
     // "go to atlas" / "project atlas" all mean the workspace `atlas`.
     // This is the whole of "natural language resolves to a typed action":
     // the words select a verb and an argument, and the verb is one of the
-    // five kinds above — never a command line.
+    // six kinds above — never a command line.
     function projectArgument(query: string): string {
         var q = String(query).trim();
         var m = q.match(/^(?:open|go\s+to|goto|switch\s+to|switch|project|workspace)\s+(.+)$/i);

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Punar desktop-surfaces in-VM exercise.
 #
-# WHY THIS EXISTS. The thirteen shell surfaces landed gated by qmllint (34
+# WHY THIS EXISTS. The shell surfaces landed gated by qmllint and
 # files, 0 warnings) and `hyprland --config ok`. Both are STATIC: they prove
 # the QML parses and the config loads, and neither proves a single surface
 # opens on a running machine. A typo in an IpcHandler target, a binding loop
@@ -570,6 +570,79 @@ else
     note "FAIL theme.list did not return parseable JSON"
     FAILED=1
 fi
+
+# Wallpaper is a finite typed preference, not merely an image that happened to
+# copy into the rootfs. Prove the live shell owns the expected catalog, starts
+# on the inviting default, can switch to the vector fallback, and restores the
+# default through the same atomic preference path the command center uses.
+ipc wallpaper state > /run/punar/surfaces-wallpaper-state.json 2>/dev/null
+if jq -e '.active == "signal-horizon" and .writable == true' \
+        /run/punar/surfaces-wallpaper-state.json >/dev/null 2>&1; then
+    note "ok   wallpaper starts on writable Signal Horizon default"
+else
+    note "FAIL wallpaper state is not the writable Signal Horizon default"
+    FAILED=1
+fi
+
+ipc wallpaper list > /run/punar/surfaces-wallpapers.json 2>/dev/null
+if jq -e '.default == "signal-horizon"
+        and (.wallpapers | length) == 5
+        and ([.wallpapers[].id] | sort) == (["daybreak", "earthrise", "field", "signal-horizon", "winterline"] | sort)' \
+        /run/punar/surfaces-wallpapers.json >/dev/null 2>&1; then
+    note "ok   wallpaper catalog exposes the five shipped choices"
+else
+    note "FAIL wallpaper catalog does not expose exactly daybreak/earthrise/field/signal-horizon/winterline"
+    FAILED=1
+fi
+
+wallpaper_asset() {
+    wa_name="$1"
+    wa_expected="$2"
+    wa_path="/usr/share/punar/shell/Wallpaper/assets/${wa_name}.jpg"
+    wa_actual="$(sha256sum "${wa_path}" 2>/dev/null | cut -d' ' -f1)"
+    wa_info="$(file -b "${wa_path}" 2>/dev/null || true)"
+    if [ "${wa_actual}" = "${wa_expected}" ] \
+            && printf '%s\n' "${wa_info}" | grep -Eq '3840[[:space:]]?x[[:space:]]?2400'; then
+        note "ok   ${wa_name} is the attributed 3840x2400 shipped asset"
+    else
+        note "FAIL ${wa_name} asset is missing, altered, or not 3840x2400 (sha='${wa_actual}', file='${wa_info}')"
+        FAILED=1
+    fi
+}
+
+wallpaper_asset daybreak 4aa5af32a22ead3930bab5b9b24e1a8c899ba13268e0e58acd94c96251905c18
+wallpaper_asset winterline 04aab01c53774d96d336ef0d15d235e10d9f1194ee7409615f7956615b5759f1
+wallpaper_asset earthrise f5a6fb900ec98de5acdcd817728fcadfba18a700949e9b474c9f58c71a4f182f
+wallpaper_asset signal-horizon e8cbaa1655582d442b760796819e966c1fa223cf77c2417e4ffb0c2d395ba5fa
+if [ -f /usr/share/punar/shell/Wallpaper/SOURCES.md ]; then
+    note "ok   wallpaper source and licence manifest ships beside the assets"
+else
+    note "FAIL Wallpaper/SOURCES.md missing — licensed assets have no shipped attribution"
+    FAILED=1
+fi
+
+ipc wallpaper set field > /run/punar/surfaces-wallpaper-set.json 2>/dev/null
+if jq -e '.applied == true and .active == "field"' \
+        /run/punar/surfaces-wallpaper-set.json >/dev/null 2>&1; then
+    note "ok   wallpaper.set commits the Field vector preference"
+else
+    note "FAIL wallpaper.set field was not applied"
+    FAILED=1
+fi
+
+ipc wallpaper reset > /run/punar/surfaces-wallpaper-reset.json 2>/dev/null
+if jq -e '.applied == true and .active == "signal-horizon" and .source == "shipped default"' \
+        /run/punar/surfaces-wallpaper-reset.json >/dev/null 2>&1; then
+    note "ok   wallpaper.reset restores the shipped Signal Horizon default"
+else
+    note "FAIL wallpaper.reset did not restore the shipped Signal Horizon default"
+    FAILED=1
+fi
+
+wallpaper_row="$(ipc commandcenter query wallpaper | tr -d '\r\n\"')"
+check_eq "command center exposes wallpaper as a typed action" \
+    "wallpaper · SetWallpaper(signal-horizon) · current" "${wallpaper_row}"
+ipc commandcenter close >/dev/null 2>&1
 
 bar_state="$(ipc bar state | tr -d '[:space:]"')"
 case "${bar_state}" in

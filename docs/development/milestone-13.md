@@ -655,7 +655,7 @@ was cut.
 | 7 | **Bind-table assertion + executed walkthrough** (§7.5) | 01, 12 | Small + one human hour | Turns the keyboard grammar from a document into a tested contract |
 | 8 | **Denial toast** (gap 13) | 08 | Small | Beat 8 currently has no visible reaction |
 | 9 | **Broker issuance card** (gap 10) | 07 | Small | Beat 7 currently has no visual at all |
-| 10 | **One static wallpaper** from D-007's sheet | 01, 12 | Very small (one asset + one config line) | Every screenshot in the artifact set has it; the current desktop is a flat token color |
+| 10 | **Historical decision — superseded 2026-08-26:** one static wallpaper from D-007's sheet | 01, 12 | Superseded by `docs/design/wallpapers.md` | The owner-approved catalog now ships one original 3840×2400 artwork, three 3840×2400 photographs, and the Field vector; only the active asset is decoded |
 | 11 | **Fidelity review of D-005 and D-006** against the shipped panels, fixing only what the review finds | 05, 14 | Small | M7's and M12's own verification tables list plate fidelity as an unverified human review |
 | 12 | **Shortcut overlay** (hold `SUPER`, spec 12.3), reading `hyprctl binds -j` — no new data source | 01 | Small-medium | The cheapest way to make "keyboard-first" *visible*; **ranked last deliberately** — it is the first thing cut if the diet or btrfs runs long |
 
@@ -789,7 +789,7 @@ Two moves, in order:
 | Multi-approval queue UI | Nothing — beat 6 raises one approval | No beat needs it |
 | D-010 updates/apps panel | Nothing — DoD 25 needs a *mechanism*, and `punarctl update status` + System Control's rows carry it | A panel over a mechanism that is one milestone old is premature |
 | D-011 projects panel | Beat 3, which the overview and command center already cover | Duplicate surface |
-| Animated/generated wallpaper, icon set, theming, sound | Beat 1's first second | Spec 6.6: on 8 GB systems, developer applications take priority over decorative OS effects. One static asset is the whole budget |
+| Animated/generated wallpaper, icon set, sound | Beat 1's first second | Spec 6.6: developer applications take priority. Static installed wallpaper choices are now accepted by `docs/design/wallpapers.md`; animation/generation remains outside the budget |
 | A recorded demo video | The demo's reach | Not a repository artifact; the screenshot set plus the runbook is the reviewable form |
 | Chromium titlebar masthead | Beat 13 | Decision 11 — patching Chromium violates spec 1.24 |
 

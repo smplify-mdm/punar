@@ -1,7 +1,7 @@
 # Punar wallpaper collection
 
-**Status:** shipped set, 2026-08-26 · **Manifest:** [`os/modules/desktop/wallpapers/wallpapers.json`](../../os/modules/desktop/wallpapers/wallpapers.json)
-**Companion:** the generated instrument plate in [`mockups/wallpaper.html`](mockups/wallpaper.html) (Plate D-015) remains the default.
+**Status:** historical candidate set, not staged into the image · **Manifest:** [`os/modules/desktop/wallpapers/wallpapers.json`](../../os/modules/desktop/wallpapers/wallpapers.json)
+**Superseded by:** the live catalog and default in [`wallpapers.md`](wallpapers.md).
 
 ---
 
@@ -75,13 +75,14 @@ Sources are 8K texture maps (43.6 MB combined). Each was centre-cropped to
 16:10 — the Plate D-015 sheet ratio — Lanczos-resampled to **3840×2400**,
 and encoded as progressive JPEG at quality 82, 4:2:0, with Pillow 12.3.0.
 
-**Total shipped: 16.3 MB.**
+**Candidate pool: 16.3 MB; shipped image cost: 0 MB.**
 
 The arithmetic, stated rather than waved at: against ADR-003's 8 GiB root
 slot that is **0.19%**, and against the 17 GiB fixed OS cost, **0.09%**.
-The whole set ships in the image; no download path is needed, and none
-exists. For contrast, the generated instrument plate is 4.9 KB — three
-orders of magnitude smaller, which is why it stays the default.
+The candidate set remains in the repository for its curation and licence
+record, but the image staging path does not copy it. For contrast, the
+generated instrument plate is 4.9 KB and remains available as the lean Field
+choice.
 
 ## 5. Honest limits
 

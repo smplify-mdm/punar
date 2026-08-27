@@ -1,75 +1,23 @@
-// Wallpaper — the desktop field (Plate D-015, docs/design/mockups/wallpaper.html).
+// Wallpaper — the quiet desktop field.
 //
-// "The desktop is the sheet a plate is drawn on, not a picture hung on a wall."
-// The background is the same instrument that draws the boot ring — a sixty-slot
-// dial, four concentric hairlines, dashed radials, one datum point — printed on
-// the field at watermark contrast, with the boot dial's progress arc REMOVED,
-// because an idle desktop is not doing anything and a ring that implied
-// progress would be a claim (D-015 Sect I.01, design language §7).
+// The owner brief now calls for an inviting high-resolution desktop field.
+// One original artwork and three curated 3840x2400 photographs ship beside
+// the theme-derived Field drawing, which remains the ultra-lean option.
+// Source, author, licence and modifications are recorded in SOURCES.md.
 //
-// This is Plate D-015 Sect V.03 "Delivery — recommended", implemented exactly
-// as the plate specifies it: a Quickshell background layer window inside the
-// existing punar-shell process. No hyprpaper, no second daemon, no new unit, no
-// new socket (Sect V.04).
+// PERFORMANCE CONTRACT. This is still one background window inside the one
+// punar-shell process: no wallpaper daemon, service, process, timer, network
+// fetch, animation or polling loop. Qt decodes only WallpaperState.activeFile
+// at the output's requested size.  The other choices cost installed bytes but
+// no resident memory; selection changes are atomic FileView writes and inotify
+// events. Reset runs one fixed-argv `rm -f`. A 16:10 RGBA texture costs about
+// 1920x1080 or 35.2 MiB at 3840x2160, regardless of which raster is selected.
 //
-// ZERO INPUTS (Sect V.01). This is the only shell surface with no data behind
-// it: it does not read /run/punar/status.json, agents.json, alerts.json or
-// approvals.json, it holds no IPC subscription, and it has no timer of any
-// kind. Nothing the machine can observe is allowed to change the field — which
-// is also why it can never lie (spec §1.22). The only thing it follows is the
-// active theme, and a theme is a preference the user set, not an observation.
-//
-// ZERO IDLE COST (Sect IV.04, spec §6.3). No animation, no script, no polling.
-// The SVG is rasterized once per output, at the size that output actually is,
-// and is a static texture thereafter. It is re-rasterized only on two events:
-// the output's resolution changing (the anchored layer surface resizes, and
-// `sourceSize` is bound to that size) and the theme changing (an inotify event
-// on the pointer or the theme document, through Theme). Output add/remove is
-// handled by `Variants` over `Quickshell.screens`, which is a live list — no
-// enumeration loop anywhere.
-//
-// NOT KEYBOARD-OPERABLE, AND CORRECTLY SO (spec §12). The field carries no
-// control, so there is nothing to operate and nothing to focus; it takes no
-// keyboard focus at all (layer-shell keyboard-interactivity none, the default
-// for the background layer) so it can never steal a keystroke from a surface
-// that does have controls. Adding a focus ring to a picture would be exactly
-// the "control that does nothing" spec §1.22 forbids.
-//
-// FOLLOWS THE THEME (theme-system.md §7.3, with one measured correction to its
-// panel row that is argued in full in ../Theme/Theme.qml). One template, three
-// substitutions, and the paper/panel variant IS the active mood:
-//
-//   variant   field           hairline                              emphasis
-//   paper     paper.surface   paper.muted                           paper.raise2
-//   panel     panel.surface   mix(panel.surface, panel.edge, 0.42)  mix(panel.surface, panel.edge, 0.75)
-//
-// Everything else in the drawing — the 1600x1000 viewBox, the dial at
-// (1152, 500) radius 208, the overscanned flat field, the 60-slot Morse rim —
-// is geometry, and geometry is grammar. A theme cannot move the dial.
-//
-// On the paper side the marks stay strictly quieter than a window border in
-// every SELECTABLE theme because validator rule R7 (theme-system.md §4.2)
-// refuses a palette where they would not: contrast(border, surface) must
-// strictly exceed both contrast(raise2, surface) and contrast(muted, surface).
-// Plate D-015 Sect II.02 states that rule; R7 is where it is now enforced. On
-// the panel side the 0.75 factor is what keeps the emphasis strictly under
-// panel.edge, which §7.2 binds the inactive window border to.
-//
-// MEMORY. One texture per output at the fitted size, RGBA8888: ~7.5 MB at
-// 1920x1080, ~30 MB at 3840x2160, plus ~5 KB of parsed SVG and one shared
-// template string. That is the figure Plate D-015 Sect V.03 already budgeted
-// ("about 8 MB at 1080p, 33 MB at 4K"). punar-shell is a USER process and is
-// not part of the spec §6.2 daemon RSS gate, which sums the punar daemons; this
-// surface adds no daemon and changes that sum by zero.
-//
-// PACKAGING. Rendering SVG needs Qt's svg image-format plugin
-// (/usr/lib/qt6/plugins/imageformats/libqsvg.so, package qt6-svg). It is
-// present in the punar-desktop image today only TRANSITIVELY: `quickshell`
-// 0.3.0-3 lists qt6-svg as a hard dependency, so pacman installs it. It is NOT
-// named in os/images/mkosi.profiles/desktop/mkosi.conf. Depending on another
-// package's dependency list for a file this surface reads directly is exactly
-// the kind of unstated assumption spec §1.22 exists to stop — the integrator
-// should add `qt6-svg` to that Packages list explicitly.
+// The background never accepts input or focus.  A person selects it through
+// the keyboard-first command center or the typed `wallpaper` IPC target.  The
+// default, Signal Horizon, uses generous negative space so application windows
+// stay visually primary. Field follows Theme.wallpaper* and preserves
+// D-015's original 1600x1000 geometry.
 
 // `Bound` because the per-output delegate below reads the shared template and
 // the sheet geometry from this file's root: it makes those captures explicit
@@ -81,6 +29,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import "../Services"
 import "../Theme"
 
 Scope {
@@ -104,10 +53,13 @@ Scope {
     // desktop with no restart: the pointer's FileView fires, Theme's derived
     // properties re-evaluate, this string rebuilds, and the Image re-rasterizes.
     readonly property string svg: {
-        if (root.template === "")
+        if (!WallpaperState.activeIsVector || root.template === "")
             return "";
         return root.template.split("__FIELD__").join(Theme.wallpaperField).split("__HAIRLINE__").join(Theme.wallpaperHairline).split("__EMPHASIS__").join(Theme.wallpaperEmphasis);
     }
+
+    readonly property string photoSource: WallpaperState.activeIsVector || WallpaperState.activeFile === "" ? "" : "file://" + Quickshell.shellDir + "/Wallpaper/assets/" + WallpaperState.activeFile
+    readonly property string activeSource: WallpaperState.activeIsVector ? root.svgSource : root.photoSource
 
     FileView {
         id: templateFile
@@ -219,10 +171,8 @@ Scope {
             WlrLayershell.namespace: "punar-wallpaper"
             WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
-            // Backstop 1 of 3 (D-015 Sect V.05): the window's own colour is the
-            // field token. It is also what fills the letterbox bars below, and
-            // because the field is one FLAT colour those bars are invisible on
-            // every aspect ratio.
+            // A missing/corrupt image degrades to a deliberate theme field,
+            // never black and never an error surface.
             color: Theme.wallpaperField
 
             // The fit scale of D-015 Sect III.03: the dial's diameter is always
@@ -230,19 +180,16 @@ Scope {
             // of the fitted width. The composition is a constant; only its
             // scale moves.
             readonly property real fitScale: (field.width <= 0 || field.height <= 0) ? 0 : Math.min(field.width / root.sheetWidth, field.height / root.sheetHeight)
+            readonly property real coverScale: (field.width <= 0 || field.height <= 0) ? 0 : Math.max(field.width / root.sheetWidth, field.height / root.sheetHeight)
 
             Image {
                 anchors.fill: parent
 
-                // Rasterize at EXACTLY the fitted 16:10 size rather than at the
-                // output size. The SVG carries preserveAspectRatio="xMidYMid
-                // meet", but Qt's SVG reader is not required to honour it when
-                // handed a scaled size, and a stretched dial is an ellipse.
-                // Fixing the raster's aspect makes the drawing's geometry
-                // independent of that question, and PreserveAspectFit then
-                // paints it at 1:1 with no resampling.
-                sourceSize: Qt.size(Math.round(root.sheetWidth * field.fitScale), Math.round(root.sheetHeight * field.fitScale))
-                fillMode: Image.PreserveAspectFit
+                // Field is rendered at its exact fitted 16:10 geometry.  The
+                // photographs are already 16:10 and request only the output's
+                // decoded size; PreserveAspectCrop handles non-16:10 screens.
+                sourceSize: WallpaperState.activeIsVector ? Qt.size(Math.round(root.sheetWidth * field.fitScale), Math.round(root.sheetHeight * field.fitScale)) : Qt.size(Math.round(root.sheetWidth * field.coverScale), Math.round(root.sheetHeight * field.coverScale))
+                fillMode: WallpaperState.activeIsVector ? Image.PreserveAspectFit : Image.PreserveAspectCrop
 
                 // Asynchronous so the layer surface maps immediately in the
                 // field colour; the drawing arrives a frame or two later on the
@@ -254,8 +201,8 @@ Scope {
                 // URI would only hold dead textures.
                 cache: false
 
-                source: root.svgSource
-                visible: root.svgSource !== "" && field.fitScale > 0
+                source: root.activeSource
+                visible: root.activeSource !== "" && field.width > 0 && field.height > 0
             }
         }
     }

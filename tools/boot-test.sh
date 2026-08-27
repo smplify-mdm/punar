@@ -1258,7 +1258,7 @@ run_desktop() {
     # milestone verdict now prints before this gate is applied.
     #
     # It is the check that answers
-    # "can a person actually use this machine" — the thirteen shell surfaces
+    # "can a person actually use this machine" — the shell surfaces
     # open and close on a live session, the browser starts as a NATIVE
     # Wayland client with /etc/chromium-flags.conf applied (read back from
     # the process's own argv, not from the file), the system can open a link

@@ -45,6 +45,15 @@ When you are finished, stop the disposable guest cleanly from another terminal:
 The launcher refuses to collide with an already-running VM and points to this
 command; it never unlinks a live QEMU monitor or silently replaces your session.
 
+Capture the VM's exact framebuffer at any point with:
+
+```bash
+./tools/punar-screenshot.sh /tmp/punar-command-center.png
+```
+
+This uses QEMU's monitor rather than a host-desktop screenshot, so the PNG is
+only the guest's 1280×800 display. It refuses to overwrite an existing file.
+
 ---
 
 ## 2. The ten-minute tour
@@ -57,6 +66,7 @@ Everything is keyboard-first. `SUPER` is the modifier.
 | Terminal | `SUPER + Return` | foot, Geist Mono, panel surface |
 | Browser | `SUPER + B` | Chromium, native Wayland |
 | Find and open an app | `SUPER + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
+| Choose a wallpaper | `SUPER + Space` | Type `wallpaper`; Signal Horizon, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
 | System control | `SUPER + S` | The settings surface |
 | Notification centre | `SUPER + SHIFT + N` | The centre; toasts appear on their own |
 | Project overview | `SUPER + Tab` | Workspaces as projects |
@@ -76,7 +86,7 @@ qs -p /usr/share/punar/shell ipc call theme show nocturne
 
 Seven themes ship (`paper`, `panel`, `graphite`, `nocturne`, `oxide`,
 `ember`, `contrast`). Any surface can be driven the same way — `ipc show`
-lists all thirteen targets.
+lists all fourteen targets.
 
 ---
 
@@ -85,7 +95,7 @@ lists all thirteen targets.
 This is the part worth reading before forming a judgement.
 
 **Real, and exercised by CI on every push:**
-the compositor and all thirteen shell surfaces, the terminal, the browser
+the compositor and all fourteen shell targets, the terminal, the browser
 (native Wayland, launched through the same flags on every path), link
 handling via `xdg-open`, the theme system, `punard` + `punarctl` and their
 typed capability API, declarative desired state and reconciliation, the

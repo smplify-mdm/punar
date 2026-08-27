@@ -64,6 +64,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import "." as Local
 import "../Services"
 import "../Theme"
 
@@ -87,7 +88,7 @@ Scope {
         color: Theme.shellInk3
     }
 
-    BindTable {
+    Local.BindTable {
         id: table
     }
 
@@ -624,7 +625,7 @@ Scope {
                                             Repeater {
                                                 model: blockItem.modelData.rows
 
-                                                delegate: BindRow {
+                                                delegate: Local.BindRow {
                                                     required property var modelData
 
                                                     width: blockBody.width

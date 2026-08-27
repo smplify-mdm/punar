@@ -26,13 +26,15 @@ pragma ComponentBehavior: Bound
 //             dashed with its milestone instead of pretending.
 //   layout    the §13.5 presets, by name, through punar-layout.sh — the
 //             consumer punar-binds.conf already names in prose.
+//   wallpaper a shipped desktop field, committed as one typed preference;
+//             no generic file picker, download or background process.
 //   explain   a §40 policy question, answered inline from
 //             `punarctl --json policy explain <path>`.
 //
 // ── THE LAW (spec §10, §12.2; D-003's register) ──────────────────────────
 // "The command center never generates a shell string." Every row prints
 // the typed capability or the concrete action it will invoke, in its right
-// meta column, BEFORE Enter. Plain language resolves to one of the five
+// meta column, BEFORE Enter. Plain language resolves to one of the six
 // kinds above and to nothing else — there is no free-text execution path
 // in this file, deliberately, mirroring ipc.md §8's permanent non-goal.
 //
@@ -51,6 +53,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
+import "." as Local
 import "../Theme"
 import "../Services"
 
@@ -86,7 +89,7 @@ Scope {
     // The action taxonomy. A plain object — no window, no timer, no file
     // of its own. (The application index is the `Apps` singleton from
     // ../Services; it needs no instance.)
-    Actions {
+    Local.Actions {
         id: actions
     }
 
@@ -505,6 +508,20 @@ Scope {
         };
     }
 
+    function wallpaperRow(wallpaper: var, group: string): var {
+        var current = String(wallpaper.id) === WallpaperState.activeId;
+        return {
+            "group": group,
+            "glyph": "WP",
+            "name": String(wallpaper.name),
+            "meta": "SetWallpaper(" + wallpaper.id + ")" + (current ? " · current" : ""),
+            "cap": true,
+            "kind": "wallpaper",
+            "state": "shipped",
+            "arg": String(wallpaper.id)
+        };
+    }
+
     function matches(haystack: string, q: string): bool {
         return q === "" || String(haystack).toLowerCase().indexOf(q) !== -1;
     }
@@ -560,6 +577,16 @@ Scope {
             var layout = actions.layouts[i];
             if (root.matches(layout.name + " " + layout.note + " layout preset", lower))
                 out.push(root.layoutRow(layout, "Actions"));
+        }
+
+        // A wallpaper is a finite installed preference, not an arbitrary
+        // command or file path. Typing "wallpaper", a title, or its visual
+        // intent exposes every matching shipped choice.
+        var wallpapers = WallpaperState.catalog;
+        for (i = 0; i < wallpapers.length; i++) {
+            var wallpaper = wallpapers[i];
+            if (root.matches("wallpaper background desktop " + wallpaper.id + " " + wallpaper.name + " " + wallpaper.intent, lower))
+                out.push(root.wallpaperRow(wallpaper, "Wallpaper"));
         }
 
         var namedVerbs = out.length;
@@ -643,6 +670,12 @@ Scope {
             else
                 root.note = "Layout preset unavailable on this machine";
             return;
+        case "wallpaper":
+            if (WallpaperState.setWallpaper(item.arg))
+                root.dismiss();
+            else
+                root.note = "That wallpaper is not installed or the preference cannot be written";
+            return;
         case "explain":
             // The answer replaces the list; the overlay stays open because
             // an answer the reader cannot read is not an answer.
@@ -688,7 +721,7 @@ Scope {
         // Live models this result set is derived from. Listed explicitly so
         // the binding re-evaluates when any of them changes — the probe
         // answering, an application appearing, a workspace being renamed.
-        readonly property var resultDeps: [Apps.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames]
+        readonly property var resultDeps: [Apps.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames, WallpaperState.activeId]
 
         readonly property var results: root.buildResults(queryInput.text, win.resultDeps)
         onResultsChanged: list.currentIndex = win.results.length > 0 ? 0 : -1
@@ -899,7 +932,7 @@ Scope {
                 }
 
                 // The §40 answer takes the body when a question was run.
-                ExplainCard {
+                Local.ExplainCard {
                     id: explainCard
                     width: parent.width
                     height: root.explainPath !== "" ? implicitHeight : 0

@@ -21,6 +21,7 @@
 // to pay to be read.
 
 import QtQuick
+import "." as Local
 import "../Theme"
 
 Item {
@@ -79,7 +80,7 @@ Item {
 
                     spacing: 3
 
-                    ChordCap {
+                    Local.ChordCap {
                         anchors.verticalCenter: parent.verticalCenter
                         kind: "mod"
                         text: modItem.modelData
@@ -94,7 +95,7 @@ Item {
                 }
             }
 
-            ChordCap {
+            Local.ChordCap {
                 anchors.verticalCenter: parent.verticalCenter
                 kind: "term"
                 text: bindRow.keyText

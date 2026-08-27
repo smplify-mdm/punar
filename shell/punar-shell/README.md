@@ -47,6 +47,7 @@ the machine.
 | `Theme/Theme.qml` | Singleton: token loader + typed design properties |
 | `Services/Status.qml` | Singleton: enrollment/compliance context — watches `/run/punar/status.json` (M5, ipc.md §9) |
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
+| `Services/WallpaperState.qml` | Singleton: four-entry wallpaper catalog + atomic user preference + `wallpaper` IPC handler |
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
 | `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
 | `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
@@ -60,9 +61,9 @@ the machine.
 | `Theme/ThemeContrast.qml` | Singleton: the WCAG contrast gate (R1–R9) that refuses an illegible palette before a human sees it |
 | `Services/Apps.qml` | Singleton: desktop-entry lookup + browser-by-role resolution for the command center |
 | `Services/Notifications.qml` | Singleton: the freedesktop notification **daemon** (`org.freedesktop.Notifications`) + bus-owner probe |
-| `Wallpaper/Wallpaper.qml` | The desktop field, one background layer window per output (Plate D-015). Zero data inputs |
+| `Wallpaper/Wallpaper.qml` | The desktop field, one background layer window per output; one active asset, zero timers |
 | `Bar/StatusCluster.qml` · `StatusSlot.qml` · `SlotPopover.qml` | The live right-hand cluster, its slots and their popover (Plate D-016) |
-| `CommandCenter/Actions.qml` · `ExplainCard.qml` | The five-kind typed action taxonomy and the §40 policy-explain card (Plate D-003) |
+| `CommandCenter/Actions.qml` · `ExplainCard.qml` | The six-kind typed action taxonomy and the §40 policy-explain card (Plate D-003) |
 | `SystemControl/SystemControl.qml` | SUPER+S settings surface + `systemcontrol` IPC handler (Plate D-004) — holds every colour, decides nothing |
 | `SystemControl/ControlData.qml` | Everything that panel KNOWS: file watches, `punarctl` probes, the view model, the mutations — holds no colour |
 | `Notifications/ToastStack.qml` | Transient toasts + `toasts` IPC handler (Plate D-009 Sect II) |
@@ -519,8 +520,8 @@ to trust the shell about its own root-owned file.
 ## Command center action taxonomy
 
 The two-entry static stub table is gone. Rows are produced from data in
-[`CommandCenter/Actions.qml`](CommandCenter/Actions.qml) in exactly FIVE
-kinds, each with one execution mechanism and **no sixth "run this string"
+[`CommandCenter/Actions.qml`](CommandCenter/Actions.qml) in exactly SIX
+kinds, each with one execution mechanism and **no seventh "run this string"
 escape hatch**. Every row prints its typed action, right-elided so the
 action half survives truncation.
 
@@ -530,6 +531,7 @@ action half survives truncation.
 | `project` | Hyprland `workspace <id>` (+ `renameworkspace <id> <name>` when allocating) | `OpenProject(atlas) · Workspace 2` |
 | `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Super S` |
 | `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |
+| `wallpaper` | `WallpaperState.setWallpaper(<id>)` — finite installed catalog, atomic id preference | `SetWallpaper(signal-horizon)` |
 | `explain` | `punarctl --json policy explain <path>` | `PolicyExplain(security.firewall)` |
 
 The browser is resolved **by role** — desktop-id list, then

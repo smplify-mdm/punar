@@ -1,12 +1,12 @@
 {
   "schema": "punar.wallpapers/1",
   "generated": "2026-08-26",
-  "note": "Licence record and shell input. Every entry is CC0; no attribution is legally required and creators are recorded anyway.",
+  "note": "Historical candidate pool; not staged into the current image. Every entry is CC0; no attribution is legally required and creators are recorded anyway.",
   "rule": "docs/design/wallpaper-collection.md",
   "generated_default": {
     "id": "plate-d015",
     "file": "../../../../docs/design/assets/punar-wallpaper-{paper,panel}.svg",
-    "note": "The generated instrument plate remains the default field. These photographs are alternates, never the default."
+    "note": "Historical default before the owner-approved Signal Horizon catalog. The generated instrument plate remains available as the lean Field choice."
   },
   "thresholds": {
     "paper_worst_patch_min_L": 0.175,

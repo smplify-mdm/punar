@@ -47,22 +47,24 @@ surface will say so.**
 |---|---|
 | **Plate** | D-015 · `mockups/wallpaper.html` |
 | **Chord** | none — it is the ground, not a control |
-| **IPC** | none of its own (follows `theme`) |
-| **Files** | `Wallpaper/Wallpaper.qml`, `Wallpaper/punar-wallpaper.svg.in` |
-| **Data source** | **none at all.** The only shell surface with zero inputs |
+| **IPC** | `wallpaper` — `state` / `list` / `set` / `reset` / `reload` |
+| **Files** | `Wallpaper/Wallpaper.qml`, `Wallpaper/assets/`, `Wallpaper/SOURCES.md`, `Services/WallpaperState.qml` |
+| **Data source** | one installed asset selected by `~/.config/punar/wallpaper.json` |
 | **Status** | **REAL** |
 
-The boot dial with its progress arc removed, drawn at watermark contrast
-on the field colour, one background layer window per output. It reads no
-status file and holds no timer, which is why it can never lie: nothing
-the machine can observe is allowed to change it. It follows the active
-theme's *mood* and nothing else. Marks stay strictly quieter than a
-window border in every selectable theme, because the theme contrast gate
-(R7) refuses a palette where they would not.
+Signal Horizon, an original violet landscape with generous negative space, is
+the inviting default. Daybreak, Winterline, and Earthrise are alternate
+3840×2400 photographs; Field is the original theme-derived vector for a
+constrained machine. Only the selected file is decoded. The shell holds no
+wallpaper timer, process, daemon,
+network request, animation, or polling loop; one FileView follows the one
+versioned preference.
 
 **Try it:** log in. It is the first thing you see. Then run
-`qs -p /usr/share/punar/shell ipc call theme set nocturne` and watch the
-desktop repaint with no restart.
+`qs -p /usr/share/punar/shell ipc call wallpaper set earthrise`, or press
+`SUPER+Space` and type `wallpaper`. The source, creator, licence,
+transformation, and distributed hash of every raster asset ship in
+`Wallpaper/SOURCES.md`.
 
 ---
 
@@ -122,7 +124,7 @@ it lands on the highest-severity slot.
 | **Files** | `CommandCenter/CommandCenter.qml`, `CommandCenter/Actions.qml`, `CommandCenter/ExplainCard.qml` |
 | **Status** | **REAL** |
 
-Rows are produced from data in exactly five typed kinds, each with one
+Rows are produced from data in exactly six typed kinds, each with one
 execution mechanism and no "run this string" escape hatch:
 
 | Kind | Mechanism | Printed action |
@@ -526,7 +528,7 @@ which is launched with user-mode networking precisely so it can be.
 
 ---
 
-## 3. IPC targets, all thirteen
+## 3. IPC targets, all fourteen
 
 Verified unique across the tree; `qs ipc show` is the authority.
 
@@ -545,6 +547,7 @@ Verified unique across the tree; `qs ipc show` is the authority.
 | `shortcuts` | toggle · open · close · state · reload · rows · undescribed |
 | `lock` | lock · state |
 | `theme` | status · list · show · validate · preview · clear · set · reset · reload |
+| `wallpaper` | state · list · set · reset · reload |
 
 ---
 
@@ -610,8 +613,9 @@ already runs, and the tools they shell out to (`wpctl`, `hyprctl`,
 - `shell/theme/themes/` → `/usr/share/punar/theme/themes/` (**8 files,
   ~7 KB**). Without this the shell resolves no theme document and silently
   renders the built-in fallback palette with nothing selectable.
-- The wallpaper template `Wallpaper/punar-wallpaper.svg.in` (5.8 KB) rides
-  along in the existing `cp -R shell/punar-shell/.` — no rule change.
+- The wallpaper template, source/licence manifest, and four 3840×2400 JPEGs
+  ride along in the existing `cp -R shell/punar-shell/.` — no staging rule
+  change. The raster assets add 8,501,172 bytes to the image payload.
 
 **New versioned file:** `mkosi.extra/etc/pam.d/punar-lock`.
 
@@ -635,7 +639,7 @@ Expectation, built up from what each surface actually holds:
 
 | Addition | Expected resident cost |
 |---|---|
-| Wallpaper texture | **the dominant term** — one RGBA8888 texture per output at the fitted size: ~7.5 MB at 1920×1080, ~30 MB at 3840×2160 (D-015 Sect V.03's own budget), plus a full-screen background layer surface |
+| Wallpaper texture | **the dominant term** — only the active image is decoded; a covering 16:10 RGBA8888 texture is ~8.8 MiB at 1920×1080 and ~35.2 MiB at 3840×2160, plus one full-screen layer surface |
 | System Control | ~4–6 MB; no detail view is instantiated until selected, and the layer surface exists only while open |
 | Notifications | low single-digit MB — D-Bus service registration plus the retained records; no image decode path, no cache, no history file |
 | Lock | ~0 until locked (it holds a `WlSessionLock` with **zero surfaces** while unlocked) |
@@ -685,7 +689,7 @@ or D-Bus. The wallpaper has no timer at all.
 | **Hyprland config** | `Hyprland --verify-config` on hyprland 0.56.2-1 in the pinned container, as an unprivileged user | **`config ok`** |
 | **— negative control** | injected `thisdispatcherdoesnotexist` | **correctly rejected** (`Invalid dispatcher … at line 321`) — the pass is not vacuous |
 | **Chord collisions** | every `bind*` row reduced to `(modmask, key)` and counted | **72 binds, 0 duplicate chords** |
-| **IPC target collisions** | every `IpcHandler.target` in the tree | **13 targets, all unique** |
+| **IPC target collisions** | every `IpcHandler.target` in the production shell tree | **14 targets, all unique** |
 | **Image config** | `PUNAR_BUILD_MODE=summary ./tools/build-image.sh all` | **exit 0**; `qt6-svg` present in the desktop profile's package list; themes staged to `usr/share/punar/theme/themes/` |
 | **qmllint, now in CI** | `./tools/qmllint.sh` — pinned container, the image's own Qt 6.11.2 / Quickshell 0.3.0 | **34 files, 0 warnings.** The gate fails on any output, because **qmllint exits 0 while printing warnings** — verified by injecting `Hyprland.thisPropertyDoesNotExist`, which it named while returning 0 |
 | **— negative control** | that same injected property | **correctly fails** (exit 1); on the restored tree, exit 0 |

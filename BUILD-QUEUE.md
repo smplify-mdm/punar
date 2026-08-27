@@ -190,10 +190,26 @@ mechanism. That needs its own ADR.
 
 ## 6. Product gaps, by value
 
+The desktop-field work is implemented: five typed
+choices, Signal Horizon as the original 3840×2400 default, exact asset hashes,
+and no resident wallpaper process. It is not a substitute for the RAM work:
+only the active raster is decoded, and Field remains the constrained-machine
+vector choice. The new live contract is `docs/design/wallpapers.md`.
+
 ### 6.1 Installer and onboarding
-`docs/design/installer.md`, `onboarding.md`. **Nobody can install Punar on a
-real machine today** — the only path is booting a prebuilt image. Blocks all
-hardware testing, which blocks 9 of the `user-blocked.md` items.
+`docs/design/installer.md`, `onboarding-flow.md`, and the backend notes in
+`onboarding.md`. **Nobody can install Punar on a real machine today** — the
+only path is booting a prebuilt image. Blocks all hardware testing, which
+blocks 9 of the `user-blocked.md` items.
+
+The owner has now simplified the interaction contract. The required path is
+one account card with exactly three user-provided values: username, password,
+and device name; password confirmation is verification, not another value. A
+compact recovery receipt follows in the same card. Do not resurrect M13's
+seven-stage wizard: network, timezone, organization, privacy, theme, wallpaper,
+AI, and updates belong after the usable desktop. The backend still owes a
+transactional account create, password secrecy, a real greeter/logout/login
+loop, A/B persistence, negative scans, and rollback-on-failure proof.
 
 **Known defect already found in the design:** `install.targets` excluded the
 boot medium but **not** the answers disk — a data-loss hazard. Check it.

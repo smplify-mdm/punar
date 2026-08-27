@@ -55,6 +55,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import "." as Local
 import "../Theme"
 import "../Services"
 
@@ -71,7 +72,7 @@ Scope {
 
     // Everything this surface knows. It holds no colour and draws
     // nothing; the data contract is the header of ControlData.qml.
-    ControlData {
+    Local.ControlData {
         id: ctl
 
         onAiPanelRequested: root.aiPanelRequested()

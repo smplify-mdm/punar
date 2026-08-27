@@ -179,7 +179,7 @@ that was already found and deleted once.
 **cgroup**, never by process name. Classification is computed by the daemon,
 never claimed by the caller. An agent may never approve its own request.
 
-**The shell is ONE process.** All 13 surfaces are `Scope`s inside a single
+**The shell is ONE process.** All live surfaces are `Scope`s inside a single
 `punar-shell` client — one Wayland connection, one IPC socket, one set of
 inotify watches. No wallpaper daemon, no notification daemon, no settings app.
 State is watched with `FileView` (inotify), never polled — spec §6.3 forbids
@@ -190,8 +190,14 @@ polling loops.
 qs -p /usr/share/punar/shell ipc show
 qs -p /usr/share/punar/shell ipc call <target> <verb>
 ```
-Thirteen targets: `bar commandcenter systemcontrol notifications toasts osd
-overview aipanel approval alerts shortcuts theme lock`.
+Fourteen targets: `bar commandcenter systemcontrol notifications toasts osd
+overview aipanel approval alerts shortcuts theme lock wallpaper`.
+
+`wallpaper` is a finite five-choice preference. Signal Horizon is the shipped
+default; only the active 3840×2400 raster is decoded, and Field remains the
+theme-derived ultra-lean vector. Source/rights records and exact hashes ship
+beside the assets. No wallpaper daemon, scan, download, animation, or timer was
+introduced.
 
 **Images are built by mkosi** from a vendor-pinned Arch Linux Archive date
 snapshot (`os/images/snapshot.env`). `container-build.sh::stage_desktop_extra`
@@ -218,6 +224,8 @@ repart config. DoD item 25 is honestly recorded as NOT MET.
 # Boot the newest CI-built image and open the viewer
 ./tools/punar-up.sh
 ./tools/demo-vm.sh <image.qcow2>      # a specific image
+./tools/punar-screenshot.sh <shot.png> # exact running-guest framebuffer
+./tools/punar-down.sh                 # graceful QMP stop
 ```
 
 Rust gates run in a container — the maintainer host is macOS arm64 with no
@@ -408,7 +416,8 @@ Never violate these; several are asserted in CI:
 
 ## 10. What is real vs simulated
 
-**Real and CI-exercised:** compositor, all 13 surfaces, terminal, browser
+**Real and CI-exercised:** compositor, the 13 pre-wallpaper-preference shell
+targets, terminal, browser
 (native Wayland, flags applied on every launch path), link handling, theme
 system, `punard`/`punarctl` and the typed capability API, desired state and
 reconciliation, the mock-enrolment journey, dev environments, agent registry,
@@ -418,7 +427,8 @@ access ledger, approval gates, secret broker, shadow-AI detection, zram.
 the Smplify control plane (`punar-mock-smplify`), identity providers, the
 private relay. Anything dashed in the design language is here by construction.
 
-**Not built:** installer, onboarding, `punarctl app`/Chrome install, execution
+**Not built:** installer, the onboarding account backend/first-run UI/greeter,
+`punarctl app`/Chrome install, execution
 trust, web-app install and browser contexts (M11), network policy and relay
 (M12), A/B partitioning (ADR-003 is ratified but unimplemented), arm64.
 
@@ -478,6 +488,8 @@ tested, using `mac80211_hwsim` to simulate hardware.
 | `docs/development/checks-conventions.md` | binding assertion rules |
 | `tests/performance/README.md` | every measured number, with reasoning |
 | `docs/design/DESIGN_LANGUAGE.md` | binding design language |
+| `docs/design/wallpapers.md` | owner-approved static desktop-field catalog + resource contract |
+| `docs/design/onboarding-flow.md` | binding one-card first-run interaction + acceptance contract |
 | `docs/api/ipc.md` | the wire contract (additive, `v: 1`) |
 | `docs/architecture/adr/` | ADR-001 substrate · ADR-002 binaries · ADR-003 A/B slots · ADR-005 required arm64 target / proposed substrate |
 | `docs/development/milestone-*.md` | per-milestone design + build record |

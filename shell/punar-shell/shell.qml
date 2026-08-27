@@ -30,6 +30,7 @@
 // name is unique, verified by `qs ipc show` and by grep over the tree):
 //   bar · commandcenter · overview · aipanel · approval · alerts
 //   systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
+//   wallpaper
 //
 // CROSS-SURFACE SIGNALS ARE WIRED HERE AND NOWHERE ELSE. No surface
 // reaches into another: a surface raises a signal saying what it wants,
@@ -61,15 +62,15 @@ ShellRoot {
     // (milestone-2.md §6).
     Component.onCompleted: {
         WorkspaceState.init();
+        WallpaperState.init();
         SurfaceTiming.init();
     }
 
     // ── THE FIELD ────────────────────────────────────────────────────────
-    // One background layer window per output (Plate D-015 Sect V.03). Zero
-    // data inputs, zero timers, no keyboard focus: it follows the active
-    // theme's mood and nothing else. Declared first because it is the sheet
-    // everything else is drawn on; layer-shell (not declaration order) is
-    // what actually keeps it underneath.
+    // One background layer window per output. Zero timers, no keyboard focus:
+    // it follows one atomic user preference and otherwise does no work.
+    // Declared first because it is the sheet everything else is drawn on;
+    // layer-shell (not declaration order) keeps it underneath.
     Wallpaper {
     }
 

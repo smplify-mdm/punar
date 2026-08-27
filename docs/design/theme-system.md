@@ -899,11 +899,11 @@ one hairline that carries meaning. Measured on the shipped set (paper variant,
 | `ember` | 1.064 | 1.153 | **1.267** |
 | `contrast` | 1.119 | 1.271 | **2.169** |
 
-**Honest limit, stated because the plate already states it:** Punar ships no
-wallpaper daemon. The live desktop is a flat `misc:background_color`, which is
-why §7.2 derives that colour and why the desktop follows the theme today with
-no new process. The SVGs are the greeter and documentation asset; if a
-wallpaper surface is ever added, this derivation is what it consumes.
+**Historical limit, superseded by `wallpapers.md`:** Punar still ships no
+wallpaper daemon, but the existing shell now owns one background layer and a
+finite static catalog. The derivation above remains live for the Field vector
+and for the deliberate flat-colour failure mode. Raster choices do not change
+theme grammar and only the active asset is decoded.
 
 ### 7.4 Portal colour scheme (best effort, *dashed*)
 

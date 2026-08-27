@@ -1,4 +1,11 @@
-# Punar Onboarding and the Local Account Model — design
+# Punar Onboarding and the Local Account Model — technical notes
+
+> **Flow superseded on 2026-08-26.** The binding product and interaction
+> contract is now [`onboarding-flow.md`](onboarding-flow.md): one account card,
+> three user-provided values, then a compact recovery receipt. The longer
+> seven-stage flow and any remaining full-name/theme/privacy/enrollment prompts
+> below are retained only as technical research for the identity backend; they
+> must not be implemented as first-run UI.
 
 **Status:** Design (proposed) · 2026-08-26 · **Owners:** `punard` (the account
 record, the typed methods), `punar-shell` (the OOBE surface), the installer
@@ -19,8 +26,9 @@ slots; `/var` and `/home` shared and never rolled back),
 engine, human-only resolution, self-resolution, the JIT grant),
 [`milestone-13.md`](../development/milestone-13.md) §5 (the OOBE layer, the
 marker, `system.keymap`, and the deferrals this document now un-defers),
-[`theme-system.md`](theme-system.md) §5/§6.1/§7.3 (the shipped set, why theme
-is *not* a capability, why there is no wallpaper),
+[`theme-system.md`](theme-system.md) §5/§6.1/§7.3 (the shipped set and why
+theme is *not* a capability), [`wallpapers.md`](wallpapers.md) (the desktop
+field is deliberately kept out of onboarding),
 [`execution-trust.md`](execution-trust.md) (the `/home`-and-`/var` split it
 depends on), [`DESIGN_LANGUAGE.md`](DESIGN_LANGUAGE.md) §7 (stroke and
 coverage), §8 (unmanaged-first),
@@ -35,7 +43,7 @@ the seam is §6.5).
 > **A machine that autologins a user called `punar` with the password `punar`
 > has no account model; it has a placeholder. The question this document
 > answers is not "how do we create a user" — `useradd` answers that — but
-> *what a person is on a Punar device*: a name that appears on the lock
+> *what a person is on a Punar device*: a username that appears on the lock
 > screen, a credential that is not ambient authority, a record that survives
 > an A/B swap because it was never on the root slot, and a shape that a
 > directory identity can later attach to without a rewrite.**
@@ -75,45 +83,42 @@ that no sentence below can be read as a description of the running system.
 
 ### 1.1 What the person provides
 
-Four values, one screen, in this order:
+Three values, one screen, in this order:
 
 ```text
-Your name         Alice Nguyen
-Username          alice                 ← derived, editable, then permanent
-Password          ••••••••••••          ← typed twice, or revealed
-This device       Alice's ThinkPad
-                  on the network: alices-thinkpad
+Username          alice                 ← permanent; /home/alice
+Password          ••••••••••••          ← confirm below; reveal is explicit
+Confirm password  ••••••••••••          ← verification, not a fourth value
+Device name       Alice's ThinkPad
+                  Network name: alices-thinkpad
 ```
 
 That is the whole account stage. No email. No security questions. No "hint".
-No account type radio — because §1.6 removes the question.
+No full-name prompt. No account type radio — because §1.6 removes the
+question. Password confirmation verifies the password and is never stored as
+a separate value.
 
 Each value has a job, and the job decides the rules:
 
 | Value | Its job | Mutable later? |
 |---|---|---|
-| **Full name** | The human-readable identity: greeter, lock screen, session, audit attribution, avatar initials | **Yes** — it is a display attribute |
 | **Username** | The POSIX identity: `uid` owner, home directory, socket admission, group membership, container subuid ranges | **No** — see §1.3 |
 | **Password** | The authenticator, and the thing standing between a stranger at your desk and a JIT grant | **Yes**, and no rotation is ever forced |
 | **Device name** | What the greeter masthead says and what the network hears | **Yes** — both halves |
 
-### 1.2 Full name
+### 1.2 Why there is no full-name prompt
 
-Free text, 1–64 grapheme clusters, any script. Stored as `realName` in the
-account record. Rejected only for control characters, `\n`, and leading or
-trailing whitespace (trimmed rather than refused).
+The first useful identity on a developer machine is the username: it names the
+home directory, terminal prompt, file ownership, audit actor, lock card, and
+local socket admission. Asking for a second personal name before the desktop
+is useful creates work without creating access.
 
-It is not a GECOS field in spirit even if it lands in one: GECOS is a
-comma-delimited legacy structure and Punar writes only its first component,
-with commas rejected at input so nothing downstream has to guess.
+The account record therefore starts with `realName: null`; every surface falls
+back to the username and derives a one-letter monogram. A human-readable
+display name remains editable later in System Control and a directory identity
+may provide one after enrollment. Neither possibility adds a first-run field.
 
-**Where it is rendered** — this is the personalisation the whole stage
-exists for, so it is worth listing: the greeter card (Plate D-002 §III),
-the lock screen, the session's own identity chip, `punarctl status`'s
-masthead, the approval card's `resolved_by` line, and the avatar initials
-(§3.3). One typed value, six surfaces, no second prompt.
-
-### 1.3 Username — rules, derivation, and the fact that it is permanent
+### 1.3 Username — rules and the fact that it is permanent
 
 **The rule, exactly:**
 
@@ -135,35 +140,10 @@ from, and a person should not be able to make an account that reads as one.
 | Anything matching `punar-*` | Reserved namespace for Punar service accounts, stated on the screen rather than discovered later |
 | Anything that would land below uid 1000 | Not reachable through this path anyway; asserted because a validator that only checks strings is not a validator |
 
-**Derivation from the full name** — the convenience, and its licence to fail:
-
-```text
-"Alice Nguyen"          → alice
-"José Álvarez"          → jose          (NFKD, combining marks dropped)
-"Ada"                   → ada
-"李雷"                   → (empty)       → the field stays blank
-"Alice Nguyen" (retry)  → (alice taken) → refused, not aliced
-```
-
-The algorithm: NFKD-normalise; drop combining marks; keep the first
-whitespace-delimited token; map to lowercase ASCII; drop every character the
-pattern forbids; truncate to 32; refuse if the result is empty or fails the
-pattern.
-
-Three deliberate refusals in that list:
-
-1. **Punar does not transliterate scripts it cannot transliterate honestly.**
-   A Latin-alphabet romanisation of a CJK, Devanagari or Arabic name is a
-   guess about a person's name, made by an operating system, at the first
-   moment it meets them. When derivation yields nothing the field is simply
-   empty and the label says *"Pick a short name for your files and terminal —
-   we couldn't make one from your name."* That is a better sentence than any
-   romanisation we could ship.
-2. **Punar never appends a digit.** `alice1` is what an OS produces when it
-   would rather not tell you something. The collision is named and the field
-   waits.
-3. **Derivation is a suggestion in an editable field, never a silent
-   commitment.** The field is focused and pre-filled; Tab moves past it.
+Punar does not generate the username from another field and never appends a
+digit to resolve a collision. The person enters the identifier they want; a
+collision is named and the field waits. The focused field explains its purpose
+in one line: *“Your home folder and terminal name.”*
 
 **And it is permanent.** Renaming a POSIX user after the home directory,
 file ownership, subuid ranges, container storage, systemd user units and
@@ -174,11 +154,11 @@ choosing, in the §73 voice:
 ```text
 Username    alice
             This one is permanent — it names your home folder and
-            everything in it. Your name and your device name can
-            change any time.
+            everything in it. Your display name and device name can
+            change later.
 ```
 
-An OS that tells you which of four fields is irreversible, *before* you
+An OS that tells you which of three values is irreversible, *before* you
 commit it, is doing the one thing that distinguishes a designed form from a
 generated one.
 
@@ -193,7 +173,7 @@ generated one.
 | Composition rules | **None** | No "must contain a symbol". Composition rules produce `Passw0rd!` and a sticky note |
 | Forced rotation | **Never** | Rotation without evidence of compromise is a mechanism for producing predictable increments |
 | Blocklist | **Yes, offline** | The top ~10 000 breached and common passwords, shipped as a file (§1.4.2) |
-| Context check | **Yes** | The username, each full-name token, the device name, and `punar` — case-insensitive, as substring |
+| Context check | **Yes** | The username, device name, and `punar` — case-insensitive, as substrings |
 | Character set | Every printable Unicode character including spaces | A passphrase must be typable as a sentence |
 | Hash | **yescrypt** (libxcrypt default on the pinned substrate) | Not chosen, inherited — and stated so nobody has to read the source to find out |
 
@@ -1032,18 +1012,14 @@ writing `~/.config/punar/theme.json` with the validation receipt. Not a
 capability, per theme-system §6.1's argument, which this document accepts
 without reopening.
 
-### 3.2 Wallpaper — refused, with the reason
+### 3.2 Wallpaper — real, deliberately kept out of first run
 
-**Onboarding does not offer a wallpaper, because Punar does not have one.**
-theme-system §7.3 is explicit: there is no wallpaper daemon; the live desktop
-is a flat `misc:background_color` derived from the theme; the two SVGs are
-the greeter and documentation asset. A picker at first boot would be a
-control for a subsystem that does not exist — the precise shape of thing this
-repo has spent thirteen milestones not shipping.
-
-If a wallpaper surface is ever added, theme-system §7.3's derivation is what
-it consumes, and the question of whether it belongs in onboarding gets asked
-then, on evidence.
+The shell now has the finite catalog specified by `wallpapers.md`, but
+onboarding still does not offer a picker. Username, password, and device name
+are the three values required to make the machine usable; visual preference is
+not. Signal Horizon is the safe shipped default, the Command Center exposes all
+five choices after handoff, and the existing Field vector remains the
+theme-derived constrained-machine option. No wallpaper daemon was added.
 
 ### 3.3 Avatar — initials, and no photograph
 
