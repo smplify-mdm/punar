@@ -10,8 +10,9 @@
 # milestone-8.md §12).
 #
 # Jobs:
-#   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace
-#   contracts     JSON Schemas + fixtures validation
+#   rust          fmt + clippy(-D warnings) + tests for the Cargo workspace,
+#                 natively on both x86_64 and arm64
+#   contracts     JSON Schemas + fixtures validation on both architectures
 #   image         containerized mkosi build of BOTH qcow2s — punar-dev
 #                 (minimal M0) and punar-desktop (M1) — via
 #                 tools/build-image.sh. Both are built on every run
@@ -103,9 +104,13 @@
 # image build should not float. Standard public-repo runners are 4 vCPU /
 # 16 GB RAM / 14 GB SSD and expose /dev/kvm (permission granted via the udev
 # rule below, the pattern used by systemd's mkosi CI and the Android
-# emulator ecosystem). x86_64 CI is the canonical build environment; the
-# maintainer's arm64 Mac only runs the same containerized path under
-# emulation (docs/development/image-pipeline.md).
+# emulator ecosystem). x86_64 CI remains the canonical IMAGE build
+# environment until ADR-005's substrate decision is ratified.
+# Architecture-neutral Rust and contracts run natively on x86_64 and arm64:
+# `ubuntu-24.04-arm` is a standard hosted runner, so architecture drift is
+# caught without pretending an arm64 image exists. The maintainer's arm64 Mac
+# still runs the x86 image path under emulation
+# (docs/development/image-pipeline.md).
 
 name: ci
 
@@ -127,8 +132,16 @@ env:
 
 jobs:
   rust:
-    name: rust (fmt, clippy, test)
-    runs-on: ubuntu-24.04
+    name: rust (${{ matrix.arch }}; fmt, clippy, test)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -150,8 +163,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
@@ -163,8 +176,16 @@ jobs:
         run: cargo test --workspace --locked
 
   contracts:
-    name: contracts (schemas + fixtures)
-    runs-on: ubuntu-24.04
+    name: contracts (${{ matrix.arch }}; schemas + fixtures)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
