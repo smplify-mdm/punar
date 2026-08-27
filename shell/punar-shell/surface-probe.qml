@@ -13,13 +13,8 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-// Qualify the two directory imports in this nested configuration.  The
-// production entrypoint sits beside Services/ and can use its singleton names
-// directly; this probe is one directory deeper and Quickshell otherwise
-// resolves those names as JavaScript globals at runtime.  That made the probe
-// answer IPC while every SurfaceTiming access raised ReferenceError.
-import "../Services" as Services
-import "../Theme" as ThemeModule
+import "Services"
+import "Theme"
 
 ShellRoot {
     id: root
@@ -32,22 +27,23 @@ ShellRoot {
     // its always-resident bar, wallpaper, approval and alert surfaces before
     // any candidate panel opens. Charge them to the empty probe baseline, not
     // independently to every candidate's isolated delta.
-    readonly property string sharedState: ThemeModule.Theme.activeId + "|" + Services.Status.state
-        + "|" + Services.Agents.scannedAt + "|" + String(Services.Alerts.activeCount)
-        + "|" + String(Services.Approvals.pendingCount)
+    readonly property string sharedState: Theme.activeId + "|" + Status.state
+        + "|" + Agents.scannedAt + "|" + String(Alerts.activeCount)
+        + "|" + String(Approvals.pendingCount)
+    property bool baselineReady: false
 
     function sourceFor(surface: string): url {
         switch (surface) {
         case "commandcenter":
-            return Qt.resolvedUrl("../CommandCenter/CommandCenter.qml");
+            return Qt.resolvedUrl("CommandCenter/CommandCenter.qml");
         case "systemcontrol":
-            return Qt.resolvedUrl("../SystemControl/SystemControl.qml");
+            return Qt.resolvedUrl("SystemControl/SystemControl.qml");
         case "shortcuts":
-            return Qt.resolvedUrl("../Shortcuts/Shortcuts.qml");
+            return Qt.resolvedUrl("Shortcuts/Shortcuts.qml");
         case "aipanel":
-            return Qt.resolvedUrl("../AiPanel/AiPanel.qml");
+            return Qt.resolvedUrl("AiPanel/AiPanel.qml");
         case "overview":
-            return Qt.resolvedUrl("../Overview/Overview.qml");
+            return Qt.resolvedUrl("Overview/Overview.qml");
         default:
             return "";
         }
@@ -81,7 +77,7 @@ ShellRoot {
         }
 
         root.startedAtMs = Date.now();
-        Services.SurfaceTiming.beginConstruction(surface, root.startedAtMs);
+        SurfaceTiming.beginConstruction(surface, root.startedAtMs);
         surfaceLoader.setSource(source, {"openOnReady": true});
         surfaceLoader.active = true;
     }
@@ -94,12 +90,16 @@ ShellRoot {
             return "error:" + root.problem;
         if (root.selectedSurface === "")
             return "pending";
-        return Services.SurfaceTiming.constructionSample(root.selectedSurface);
+        return SurfaceTiming.constructionSample(root.selectedSurface);
     }
 
     Component.onCompleted: {
-        Services.SurfaceTiming.init();
-        Services.WorkspaceState.init();
+        SurfaceTiming.init();
+        WorkspaceState.init();
+        // Force the same always-resident singleton set into the empty-process
+        // baseline before the checker reads PSS. A declared binding with no
+        // reader may remain lazy; this read is the explicit baseline contract.
+        root.baselineReady = root.sharedState.length > 0;
     }
 
     Loader {
@@ -124,6 +124,8 @@ ShellRoot {
         function state(): string {
             if (root.problem !== "")
                 return "error";
+            if (!root.baselineReady)
+                return "baseline-error";
             if (root.selectedSurface === "")
                 return "idle";
             if (surfaceLoader.status === Loader.Ready)

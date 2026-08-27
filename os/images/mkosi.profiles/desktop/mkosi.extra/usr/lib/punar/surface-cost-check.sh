@@ -17,8 +17,8 @@
 set -u
 
 REPORT=/run/punar/surfaces-costs.txt
-PROBE_DIR=/usr/share/punar/shell/Probe
-PROBE_CMD="qs -p ${PROBE_DIR}"
+PROBE_PATH=/usr/share/punar/shell/surface-probe.qml
+PROBE_CMD="qs -p ${PROBE_PATH}"
 PROBE_LOG=/run/punar/surface-probe.log
 IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
 SURFACES="commandcenter systemcontrol shortcuts aipanel overview"
@@ -122,7 +122,7 @@ probe_pid() {
         [ -r "${proc_dir}/cmdline" ] || continue
         probe_cmdline="$(tr '\000' ' ' < "${proc_dir}/cmdline" 2>/dev/null)"
         case "${probe_cmdline}" in
-            *"${PROBE_DIR}"*)
+            *"${PROBE_PATH}"*)
                 case "${probe_cmdline}" in
                     *" ipc call "*) ;;
                     *) printf '%s\n' "${proc_dir#/proc/}"; return 0 ;;
