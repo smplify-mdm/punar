@@ -58,11 +58,27 @@ ShellRoot {
 
         root.selectedSurface = surface;
         root.problem = "";
+        // Loading the real surface also registers its own IpcHandler. Do not
+        // mutate Quickshell's IPC target registry while this handler is still
+        // serializing its reply: that made the first `open` call complete
+        // without a payload even though `state` had just answered. Queue the
+        // construction for the next event-loop turn instead.
+        Qt.callLater(root.loadSelectedSurface);
+        return "loading";
+    }
+
+    function loadSelectedSurface(): void {
+        var surface = root.selectedSurface;
+        var source = root.sourceFor(surface);
+        if (surface === "" || String(source) === "") {
+            root.problem = "queued surface has no source";
+            return;
+        }
+
         root.startedAtMs = Date.now();
         SurfaceTiming.beginConstruction(surface, root.startedAtMs);
         surfaceLoader.setSource(source, {"openOnReady": true});
         surfaceLoader.active = true;
-        return "loading";
     }
 
     // start, loader-ready, show-begin, compositor-openlayer.  The last two

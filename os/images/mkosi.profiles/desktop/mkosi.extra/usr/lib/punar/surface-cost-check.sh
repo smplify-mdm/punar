@@ -19,6 +19,8 @@ set -u
 REPORT=/run/punar/surfaces-costs.txt
 PROBE_DIR=/usr/share/punar/shell/Probe
 PROBE_CMD="qs -p ${PROBE_DIR}"
+PROBE_LOG=/run/punar/surface-probe.log
+IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
 SURFACES="commandcenter systemcontrol shortcuts aipanel overview"
 SAMPLES=3
 FAILED=0
@@ -97,7 +99,21 @@ fi
 export WAYLAND_DISPLAY
 note "# instance=${HIS} wayland=${WAYLAND_DISPLAY} uid=$(id -u) user=$(id -un)"
 
-ipc() { ${PROBE_CMD} ipc call "$@" 2>/dev/null; }
+ipc() { ${PROBE_CMD} ipc call "$@" 2>> "${IPC_ERRORS}"; }
+
+probe_diagnostics() {
+    diagnostic_state="$(ipc surfaceprobe state 2>/dev/null | tr -d '[:space:]\"')"
+    diagnostic_timing="$(ipc surfaceprobe timing 2>/dev/null | tr -d '[:space:]\"')"
+    note "# probe state='${diagnostic_state}' timing='${diagnostic_timing}'"
+    if [ -s "${IPC_ERRORS}" ]; then
+        note "# probe IPC stderr (last 12 lines):"
+        tail -n 12 "${IPC_ERRORS}" | sed 's/^/#   /' >> "${REPORT}"
+    fi
+    if [ -s "${PROBE_LOG}" ]; then
+        note "# probe process log (last 30 lines):"
+        tail -n 30 "${PROBE_LOG}" | sed 's/^/#   /' >> "${REPORT}"
+    fi
+}
 
 # Identify the long-lived probe server without racing its short-lived `qs ipc`
 # clients, whose cmdlines carry the same -p path plus the words "ipc call".
@@ -130,7 +146,12 @@ stop_probe() {
 
 start_probe() {
     stop_probe
-    hyprctl dispatch exec "${PROBE_CMD}" >/dev/null 2>&1
+    : > "${PROBE_LOG}"
+    : > "${IPC_ERRORS}"
+    # Hyprland's exec path supplies the same session environment as the
+    # production shell. Capture this measurement-only process's diagnostics;
+    # ordinary successful reports remain data-only.
+    hyprctl dispatch exec "${PROBE_CMD} >>${PROBE_LOG} 2>&1" >/dev/null 2>&1
     if ! wait_for 60 probe_ready; then
         return 1
     fi
@@ -200,12 +221,14 @@ for surface in ${SURFACES}; do
         open_result="$(ipc surfaceprobe open "${surface}" | tr -d '[:space:]\"')"
         if [ "${open_result}" != "loading" ]; then
             note "FAIL ${surface} sample ${sample}: open returned '${open_result}'"
+            probe_diagnostics
             FAILED=1
             finish
         fi
 
         if ! wait_for 45 timing_ready; then
             note "FAIL ${surface} sample ${sample}: no construction/openlayer timing ('$(ipc surfaceprobe timing | tr -d '[:space:]\"')')"
+            probe_diagnostics
             FAILED=1
             finish
         fi
