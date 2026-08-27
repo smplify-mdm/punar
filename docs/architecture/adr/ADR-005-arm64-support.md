@@ -236,10 +236,12 @@ verified to exist, and the review finds Option B not viable. Do not start it.
 
 - **The Raspberry Pi boot chain.** ADR-003 selects the A/B slot with one UKI per
   slot on an ESP and relies on systemd-boot's boot counting; the Pi's native
-  chain is not UEFI. Whether third-party Pi UEFI firmware is sound enough to
-  carry ADR-003's stated gain — *rollback that works when userspace does not* —
-  is unresolved. A weaker mechanism wearing ADR-003's name would be worse than
-  an honest second mechanism, and that belongs in its own ADR.
+  chain is not UEFI. The official firmware's partition-level one-shot
+  `tryboot` mechanism is now verified and a native design preserving
+  ADR-003's *rollback when userspace does not start* property is proposed in
+  [ADR-006](ADR-006-raspberry-pi-native-ab.md). ADR-006 still awaits
+  ratification and bare-metal fault injection; it does not make this
+  substrate recommendation accepted.
 - **The device-class split.** See [`../../design/device-classes.md`](../../design/device-classes.md).
 
 ## Honest limits of the evidence

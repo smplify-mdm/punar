@@ -1,0 +1,159 @@
+# ADR-006 — Native Raspberry Pi `tryboot` for A/B rollback
+
+- Status: **Proposed** — implementation waits for Smplify ratification
+- Date: 2026-08-26
+- Relates to: [ADR-003](ADR-003-ab-slots-over-snapper.md) (accepted A/B
+  requirement), [ADR-005](ADR-005-arm64-support.md) (proposed ARM substrate)
+- Product requirement: ARM64 and Raspberry Pi are first-class targets
+
+## Context
+
+ADR-003 requires more than two root filesystems. Its reason for existing is
+rollback when the new userspace cannot come up: firmware tries a pending slot,
+health-gated userspace commits it, and an uncommitted failure returns to the
+permanently known-good slot.
+
+The x86_64 mechanism uses systemd-boot boot counting and one UKI per slot. A
+Raspberry Pi's native boot chain is not UEFI, so copying that mechanism through
+third-party UEFI firmware would add a new privileged dependency without first
+asking whether the board firmware already has the required primitive.
+
+It does. Raspberry Pi's current official documentation specifies:
+
+- a one-shot `tryboot` flag which is **cleared before** the candidate OS is
+  started, so a crash or reset returns to the ordinary configuration;
+- partition-level A/B selection through `autoboot.txt`, `boot_partition` and
+  `tryboot_a_b=1`;
+- the current boot partition and tryboot state exposed read-only in device
+  tree under `/proc/device-tree/chosen/bootloader/`;
+- an example update flow that writes the inactive partition, boots it once,
+  validates it, and swaps `autoboot.txt` only after success;
+- `tryboot` support on all Raspberry Pi models, with a write-protected-EEPROM
+  caveat on early Pi 4 revisions.
+
+Primary sources (verified 2026-08-26):
+
+- <https://www.raspberrypi.com/documentation/computers/config_txt.html#example-update-flow-for-ab-booting>
+- <https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#fail-safe-os-updates-tryboot>
+
+This decides the selection and rollback mechanism only. ADR-005's Debian
+pinned-sid recommendation remains separately Proposed; an accepted boot
+mechanism does not choose a package substrate.
+
+## Options considered
+
+### A — Third-party UEFI firmware plus the x86 UKI layout
+
+This would reuse systemd-boot almost literally. It also inserts a third-party
+firmware layer ahead of every kernel boot, makes board support depend on that
+project's release cadence, and still requires native Pi firmware to reach it.
+The visual symmetry with x86 is not worth a larger trusted boot chain.
+
+### B — Userspace pointer with no firmware one-shot
+
+Write an `active-slot` file, reboot, and change it back if the candidate
+userspace reports failure. This fails the exact case ADR-003 exists to handle:
+if userspace never starts, nothing changes the pointer back. Rejected.
+
+### C — Native Pi `tryboot`, with Pi-specific boot partitions
+
+Two FAT boot partitions each carry the firmware-visible kernel/initramfs,
+device tree and cmdline for one matching root slot. `autoboot.txt` selects the
+known-good boot partition normally and the inactive one only under the
+one-shot tryboot flag. The candidate commits by atomically swapping the two
+partition numbers in `autoboot.txt` after the same health gate used by x86.
+
+This is not the same implementation as systemd-boot counting, but it has the
+same safety property without emulating a PC firmware stack.
+
+## Proposed decision
+
+**Use native Raspberry Pi firmware and partition-level `tryboot_a_b` for Pi
+A/B updates. Do not put third-party UEFI firmware in Punar's Pi boot chain.**
+
+The slot is a pair:
+
+```text
+boot A (FAT)  ── cmdline root=PARTUUID(root A)  ── root A
+boot B (FAT)  ── cmdline root=PARTUUID(root B)  ── root B
+shared data   ── /var + /home + Punar identity, never rolled back
+```
+
+Normal `autoboot.txt` selects the blessed boot partition. Its `[tryboot]`
+branch selects the candidate. Boot and root partitions are always written and
+verified as one slot; a configuration may never point boot A at root B.
+
+## Update state machine
+
+1. Identify the running boot partition from device tree, never from a mutable
+   userspace preference.
+2. Stream the signed release into the inactive root and boot partitions;
+   verify manifest signature, admissibility, streamed digest and post-write
+   re-read digest in ADR-003's order.
+3. Leave the ordinary `boot_partition` unchanged. Set the `[tryboot]` branch
+   to the inactive boot partition and invoke `reboot "0 tryboot"`.
+4. The firmware clears the one-shot flag before starting the candidate. A
+   reset before commit therefore returns to the ordinary blessed partition.
+5. Early candidate userspace proves all of: expected slot identity, root is
+   read-only, Punar daemons are healthy, boot reconcile completed, and the
+   version/state migration is admissible.
+6. Only then atomically rewrite `autoboot.txt`, swapping ordinary and tryboot
+   partition numbers. Record the blessing in the local audit trail and reboot
+   normally.
+
+A kernel/userspace hang still needs a reset to take the already-cleared
+tryboot path back to the blessed slot. Punar must therefore configure the
+Linux hardware watchdog on supported Pi boards and a bounded kernel panic
+reboot. The bootloader watchdog alone is insufficient because Raspberry Pi
+documents that it is cancelled when the Arm CPU starts.
+
+## Security and failure properties
+
+- The candidate cannot bless itself before the health unit reaches the final
+  atomic write; a partial write of `autoboot.txt` must be rejected in the image
+  test and recovered from a separately verified previous copy.
+- Slot payload signatures remain user-blocked item 7, and Pi Secure Boot keys
+  remain user-blocked item 1. CI uses ephemeral keys and labels that proof
+  `SIMULATED`, exactly as x86 does.
+- The Pi's boot partition is FAT and cannot provide Unix ownership. Trust comes
+  from signed boot artifacts and a booted root that does not expose the boot
+  partitions to the session user, not from pretending FAT has permissions.
+- An ESP/FAT corruption can still destroy both entries. Recovery media remains
+  required; no A/B scheme makes damaged boot media self-healing.
+- EEPROM A/B *firmware* update support on Pi 5 is a separate mechanism. Punar's
+  OS rollback must not claim it protects an OS slot merely because the EEPROM
+  itself updates safely.
+
+## Verification required before acceptance
+
+1. A generated Pi image has two boot/root pairs with distinct fixed PARTUUIDs
+   and shared data partitions; every cmdline points only at its paired root.
+2. QEMU/aarch64 checks the slot builder and state machine, explicitly labelled
+   as software-path evidence rather than Raspberry Pi hardware evidence.
+3. On a real Pi, deliberately fail before the health service, during daemon
+   startup, and after userspace starts but before blessing; watchdog/reset must
+   return to the old slot every time.
+4. Power removal during inactive-slot write and during the `autoboot.txt`
+   commit must leave at least one bootable blessed slot.
+5. The same security/privacy assertions run on the Pi appliance class as on
+   x86_64. No class may weaken them.
+
+## Consequences
+
+We gain a smaller native boot chain and preserve ADR-003's central property on
+Pi. We accept two platform adapters around one shared update state machine:
+systemd-boot/UKI on UEFI machines, native `tryboot`/FAT boot pairs on Pi.
+
+The update payload format must therefore carry platform boot artifacts rather
+than assuming every machine consumes a UKI. Shared root/data layout,
+verification order, health criteria, audit vocabulary and N-1 state rule stay
+identical.
+
+## Revisit triggers
+
+- Raspberry Pi removes or materially changes partition-level `tryboot`.
+- Bare-metal fault injection cannot reliably reset an uncommitted hang.
+- Native Pi UEFI becomes vendor-supported and measurably reduces rather than
+  enlarges the trusted/maintenance surface.
+- A future substrate provides a vendor-supported atomic Pi deployment model
+  with equal or stronger pre-userspace rollback semantics.
