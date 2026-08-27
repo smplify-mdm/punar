@@ -20,7 +20,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **ADR-003 ratified but NOT built** — no repart config, single `Format=disk` |
-| 3 | remain within idle budget | 1274 MB against a 1024 MB target **never once met** |
+| 3 | remain within idle budget | 1302 MB against a 1024 MB target **never once met** |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -31,12 +31,11 @@ unmanaged-first work in `HANDOFF.md` §3.3 is not cosmetic.
 
 ## 1. Immediately
 
-### 1.1 Push the local commits
-```bash
-git log --oneline origin/main..HEAD    # several commits, gates pass locally
-```
-Run the gates anyway (`HANDOFF.md` §6), then push. **Never push while a CI run
-is in flight** — the concurrency group cancels it.
+### 1.1 Start from the verified head
+Commit `9f3cd43` and all preceding handed-off work are on `origin/main`.
+[Run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
+is green on all five jobs. **Never push while a CI run is in flight** — the
+concurrency group cancels it.
 
 ---
 
@@ -46,7 +45,7 @@ This is first because the instruments exist, the numbers are recorded, and the
 owner's two hardest rules (**least RAM possible**, **speed is table stakes**)
 collide here. `tests/performance/README.md` carries the full reasoning.
 
-### 2.1 Corrected latency instrument — run it in KVM
+### 2.1 Corrected latency instrument — complete
 The replacement is implemented in this tree. It re-enters each configured
 `qs IPC` toggle through Hyprland, timestamps `show()` and the compositor's
 `openlayer` event inside the long-lived shell, and exposes the pair on the
@@ -58,10 +57,13 @@ bind is a Hyprland `exec` of that command. The product process belongs in the
 path. The defect was the checker's repeated `qs` and `hyprctl` polling, not a
 single process that only the checker used.
 
-**Done when:** the next KVM `surfaces-latency.txt` records
-`dispatch_ms`/`shell_map_ms`/`total_ms`, states the sub-2 ms internal clock
-uncertainty, records the checker-only Hyprland-client calibration, and the
-surface exercise remains green.
+Completed by
+[run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202):
+the surface exercise remained green, clock uncertainty is stated as `<2 ms`,
+and the checker-only `hyprctl` calibration was 12 ms. Corrected eager
+`shell_map_ms` baseline: overview 67 · notifications 69 · AI panel 73 ·
+command centre 87 · System Control 116 · shortcuts 186. Full-path totals were
+106–226 ms; the checker-only dispatch span was 39–41 ms.
 
 **File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
@@ -87,11 +89,12 @@ while closed); lock (must never hesitate).
 `state()` cannot answer `"closed"` without instantiating the thing it is
 reporting on — which defeats the entire change and breaks 13 assertions.
 
-### 2.3 Re-measure `shortcuts`; do not trust the historical 240 ms
-The polling-contaminated instrument reported it slowest by 65 ms.
-`Shortcuts/` is 1,313 lines across 4 files and builds its table from `hyprctl
-binds -j` — 72 binds. The table remains the first suspect, but the corrected
-KVM sample comes before any change.
+### 2.3 `shortcuts` is the first construction-cost suspect
+The corrected instrument confirms it is slowest: **186 ms shell-to-map**, 70 ms
+behind System Control and 99 ms behind Command Centre. This is eager-render
+latency, not construction cost. `Shortcuts/` is 1,313 lines across 4 files and
+builds its table from `hyprctl binds -j` — 72 binds. Instrument first-open
+construction before changing it; do not infer a cause from the number alone.
 
 ---
 

@@ -32,8 +32,8 @@ are that machinery.
 
 ## 2. Current state
 
-**Green.** Run [33002447374](https://github.com/smplify-mdm/punar/actions/runs/33002447374)
-on `4bfc1e9`, all five jobs, **760 assertions** across ten in-VM exercises.
+**Green.** Run [33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
+on `9f3cd43`, all five jobs, **760 assertions** across ten in-VM exercises.
 
 | Exercise | Assertions | What it proves |
 |---|---:|---|
@@ -48,25 +48,27 @@ on `4bfc1e9`, all five jobs, **760 assertions** across ten in-VM exercises.
 | M10 shadow-AI | 135 | periodic detection, anti-nag alerts, remote query |
 | Desktop surfaces (live) | 64 | all 13 shell surfaces open/close/paint |
 
-**Measured:** idle RAM **1269–1277 MB** (target 1024 — never once met, not even
-at M1's 1162 MB), boot **18–20 s**, three daemons **7 MB** PSS.
+**Latest measurement:** idle RAM **1302 MB mean / 1309 MB max** (target 1024 —
+never once met, not even at M1's 1162 MB), boot **20 s**, three daemons **7 MB**
+PSS. Earlier comparable runs measured 1265–1277 MB.
 
-**Per-process attribution:** shell 328 MB · Hyprland 163 MB · Xwayland 43 MB ·
-hyprpolkitagent 15 MB · foot 10 MB. All processes sum to **671 MB against
-1274 MB reported** — over half the headline figure is kernel and page cache,
-not process memory. Anyone planning to reach 1024 MB by trimming processes is
-working against 53% of the number.
+**Per-process attribution:** shell 329 MiB · Hyprland 163 MiB · Xwayland 43 MiB
+· hyprpolkitagent 15 MiB · foot 10 MiB. All processes sum to **672.8 MiB
+against 1302 MB whole-system used**; the remaining ~629 MB is kernel, tmpfs and
+page cache. The shell remains the largest actionable process cost.
 
-**Surface open latency (KVM, first ever recorded).** These are an **upper
-bound**: each poll spawns a `qs` client process, which a keypress does not do.
+**Corrected eager surface latency (KVM).** `shell_map_ms` is measured wholly
+inside the long-lived shell, from `show()` to Hyprland's `openlayer`, with no
+polling process in the interval and `<2 ms` clock uncertainty:
 
 ```
-overview 112ms  notifications 113ms  aipanel 124ms
-commandcenter 125ms  systemcontrol 175ms  shortcuts 240ms
+overview 67ms  notifications 69ms  aipanel 73ms
+commandcenter 87ms  systemcontrol 116ms  shortcuts 186ms
 ```
 
-**Unpushed local commits exist.** Check `git log --oneline origin/main..HEAD`.
-Gates pass locally; push them first.
+Full checker-to-map totals were 106–226 ms. Those totals include one
+checker-only `hyprctl` client (12 ms largest calibrated round trip); a physical
+chord still includes Hyprland's configured `exec` → `qs` → shell path.
 
 ---
 
@@ -249,7 +251,9 @@ tangible argument for ADR-005.
 
 ### 7.1 Handed-off commits pushed
 The eight commits formerly ahead of `origin/main` passed every local gate and
-were pushed on 2026-08-26. Check the resulting CI run before pushing again.
+were pushed on 2026-08-26. The latency/ARM follow-up commits are also pushed;
+[run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202)
+is green on all five jobs at `9f3cd43`.
 
 ### 7.2 Fix the latency instrument, then use it
 The first `surfaces-check.sh` latency numbers included repeated polling
@@ -257,14 +261,15 @@ processes. The replacement timestamps `show()` and Hyprland's `openlayer`
 event inside the long-lived shell. **Correction:** a physical keypress does
 spawn one `qs` process through the configured Hyprland `exec`; that is product
 cost and remains in the full path. The old claim that a keypress spawns nothing
-was false.
+was false. The corrected KVM baseline is now recorded in §2: `shortcuts` is
+slowest at 186 ms shell-to-map, but that is still eager-render latency rather
+than construction cost.
 
 Then settle the RAM/speed tension with data. Measure what each surface costs to
 **construct** (not dispatch) and to hold **resident**. Lazy-load every surface
 whose construction is imperceptible; keep eager only what measurement proves
-expensive, **with the number in the commit message**. The historical
-`shortcuts` 240 ms sample is polling-contaminated; re-measure it before treating
-it as real. Full reasoning and the retraction that preceded it:
+expensive, **with the number in the commit message**. Full reasoning and the
+retraction that preceded it:
 `tests/performance/README.md`.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval

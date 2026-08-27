@@ -174,6 +174,7 @@ number as a regression against it was wrong. What *is* a regression is the
 | [32868450695](https://github.com/smplify-mdm/punar/actions/runs/32868450695) | 1175 MB | — | M7 added a second daemon (+13 MB) |
 | [32941763915](https://github.com/smplify-mdm/punar/actions/runs/32941763915) | 1265 MB | 22 s | **the thirteen shell surfaces** |
 | [32945695360](https://github.com/smplify-mdm/punar/actions/runs/32945695360) | 1277 MB | 20 s | networkd + resolved + xdg-utils |
+| [33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202) | 1302 MB | 20 s | corrected surface-latency proof; shell PSS remained ~329 MiB |
 
 **Attribution, measured rather than guessed.** The two runs above bracket the
 networking change exactly: everything else identical, `1265 → 1277`. Wired
@@ -198,23 +199,23 @@ an owner instead of drifting quietly.
 Three daemons still sum to **7 MB** PSS against a 100 MB target — the Rust
 side is not the problem and never has been.
 
-## Who actually holds it (run 32959913805, per-process PSS at stabilized idle)
+## Who actually holds it (run 33024091202, per-process PSS at stabilized idle)
 
 | Process | PSS | |
 |---|---:|---|
-| `qs` — punar-shell | **328.1 MB** | every surface, in one process |
-| `Hyprland` | 163.2 MB | compositor, including llvmpipe software rendering |
-| `Xwayland` | **42.6 MB** | X11 compatibility — see below |
-| `hyprpolkitagent` | 14.9 MB | polkit prompts |
-| `foot` | 10.5 MB | the terminal the exercise opened |
-| **sum of all processes** | **671 MB** | |
-| whole-system used | 1274 MB | |
+| `qs` — punar-shell | **329.2 MiB** | every surface, in one process |
+| `Hyprland` | 162.8 MiB | compositor, including llvmpipe software rendering |
+| `Xwayland` | **42.5 MiB** | X11 compatibility — see below |
+| `hyprpolkitagent` | 15.0 MiB | polkit prompts |
+| `foot` | 10.4 MiB | the terminal the exercise opened |
+| **sum of all processes** | **672.8 MiB** | |
+| whole-system used | 1302 MB | |
 
-**Over half of the headline number is not process memory at all.** Per-process
-PSS sums to 671 MB against a reported 1274 MB; the remaining ~600 MB is kernel
-allocations, tmpfs and page cache that `MemAvailable` declines to count as
-available. Any plan to reach 1024 MB by trimming processes is working against
-53% of the figure, and that is worth knowing before anyone promises the target.
+**Nearly half of the headline number is not process memory at all.** Per-process
+PSS sums to 672.8 MiB against 1302 MB whole-system used; the remaining ~629 MB
+is kernel allocations, tmpfs and page cache that `MemAvailable` declines to
+count as available. Process trimming remains necessary, but cannot explain the
+whole gap to 1024 MB.
 
 **Two levers, now measured rather than guessed:**
 
@@ -279,9 +280,27 @@ round trip. A physical chord omits that client, then follows the same Hyprland
 `exec` → `qs` → shell path. The report names the boundary instead of subtracting
 a noisy estimate.
 
-**No threshold is gated yet, on purpose.** There is no basis for one until the
-first numbers exist, and picking a limit before measuring is exactly how idle
-RAM ended up with a 1024 MB target that has never once been met.
+The first corrected eager baseline is
+[run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202):
+
+| Surface | `dispatch_ms` | `shell_map_ms` | `total_ms` |
+|---|---:|---:|---:|
+| Overview | 39 | **67** | 106 |
+| Notifications | 40 | **69** | 109 |
+| AI panel | 41 | **73** | 114 |
+| Command centre | 40 | **87** | 127 |
+| System Control | 41 | **116** | 157 |
+| Shortcuts | 40 | **186** | 226 |
+
+The largest of five checker-only `hyprctl` probes was 12 ms. All six surfaces
+also opened, mapped, changed the screen relative to the closed-desktop frame,
+closed and unmapped; the exercise ended `PUNAR_SURFACES_OK` with 64 assertions.
+`shortcuts` is the first construction-cost suspect, but this eager sample does
+not identify its cause.
+
+**No regression threshold is gated yet.** One corrected sample is enough to
+choose the next measurement, not enough to define a stable distribution or a
+defensible percentile threshold. Establish repeated samples before gating one.
 
 ### The lazy-load plan: withdrawn, then reinstated — and why the withdrawal was wrong
 
@@ -320,7 +339,7 @@ constrained device classes and speed wins on capable ones** — which is exactly
 what [`docs/design/device-classes.md`](../../docs/design/device-classes.md)
 exists to express, and is a better answer than one global setting.
 
-**The dispatch instrument is implemented; construction and resident-cost
-measurement are not.** Do not lazy-load from the historical 112–240 ms figures.
-The next CI artifact establishes the corrected eager baseline; then the
-measurement in step 1 is the next piece of work.
+**The dispatch instrument and corrected eager baseline now exist; construction
+and resident-cost measurement do not.** Do not lazy-load from either the
+historical 112–240 ms figures or one eager sample. The measurement in step 1
+is the next piece of work.
