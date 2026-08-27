@@ -29,7 +29,8 @@
 #   floating  togglefloating/centerwindow/pin flags, then restored
 #   naming    renameworkspace 1 Atlas → workspaces JSON; workspace
 #             name:Atlas navigation
-#   specials  togglespecialworkspace assistant/notes via monitors JSON
+#   specials  terminal is absent at idle, PUNAR+T helper demand-starts one
+#             footclient and toggles it; assistant/notes via monitors JSON
 #   overview  qs -p /usr/share/punar/shell ipc call overview toggle/state; grim screenshot
 #             punar-m2.png with the overview open (Plate D-007 proof)
 #   state     ~/.local/state/punar/workspaces.json validated with jq
@@ -244,6 +245,45 @@ check_eq "activeworkspace after workspace name:Atlas" 1 \
 
 # --- 6. scratchpad special workspaces ----------------------------------------
 special_name() { hyprctl -j monitors 2>/dev/null | jq -r '.[0].specialWorkspace.name'; }
+
+# Resource contract: no hidden terminal window is billed to every session.
+# The warm foot server remains; the first summon creates exactly one client,
+# maps it onto special:term, and the second summon hides it. Record the cold
+# path before setting a regression budget from repeated KVM evidence.
+scratch_count() {
+    hyprctl -j clients 2>/dev/null \
+        | jq '[.[] | select(.class == "punar-scratch")] | length'
+}
+scratch_ready() {
+    [ "$(scratch_count)" = "1" ] && [ "$(special_name)" = "special:term" ]
+}
+scratch_gone() { [ "$(scratch_count)" = "0" ]; }
+
+check_eq "scratch terminal absent before first use" "0" "$(scratch_count)"
+scratch_started_ms="$(date +%s%3N)"
+/usr/lib/punar/punar-scratchpad.sh >/dev/null 2>&1
+if wait_for 15 scratch_ready; then
+    scratch_ready_ms="$(date +%s%3N)"
+    note "ok   scratch terminal demand-started and shown in $((scratch_ready_ms - scratch_started_ms)) ms"
+else
+    note "FAIL scratch terminal did not demand-start on special:term"
+    FAILED=1
+fi
+/usr/lib/punar/punar-scratchpad.sh >/dev/null 2>&1
+sleep 1
+check_eq "scratch terminal hidden by second toggle" "" "$(special_name)"
+scratch_address="$(hyprctl -j clients 2>/dev/null \
+    | jq -r '.[] | select(.class == "punar-scratch") | .address' | head -1)"
+if [ -n "${scratch_address}" ]; then
+    hyprctl dispatch closewindow "address:${scratch_address}" >/dev/null 2>&1
+fi
+if wait_for 15 scratch_gone; then
+    note "ok   scratch terminal closed without a retained client"
+else
+    note "FAIL scratch terminal client remained after close"
+    FAILED=1
+fi
+
 for pad in assistant notes; do
     hyprctl dispatch togglespecialworkspace "${pad}" >/dev/null 2>&1
     sleep 1

@@ -144,8 +144,9 @@ plus the graphical workstation. Full decisions in
   subuid/subgid ranges for rootless podman.
 - **Shell**: Hyprland `exec-once` runs `qs -p /usr/share/punar/shell`
   (quickshell must be pointed at the installed QML — bare `quickshell`
-  would find no config), the hyprpolkitagent user unit, a foot server +
-  the pre-spawned scratchpad foot, then `/usr/lib/punar/desktop-ready.sh`.
+  would find no config), the hyprpolkitagent user unit and a foot server,
+  then `/usr/lib/punar/desktop-ready.sh`. The scratchpad window is created
+  on its first PUNAR+T and is not part of idle residency.
 - **Ready-marker chain** (§7): tmpfiles creates `/run/punar`
   (0755 punar punar) → shell touches `/run/punar/shell-ready` when the bar
   is up → `desktop-ready.sh` (user session) waits on it, captures

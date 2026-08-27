@@ -69,13 +69,15 @@ stage_desktop_extra() {
 
     # Hyprland config (hyprlang files; install path per their headers).
     cp "${mod}"/hypr/*.conf "${extra}/etc/xdg/hypr/"
-    # Layout preset engine (milestone-2.md §4): source of truth lives
-    # beside the hypr configs; binds, exec-once and m2-check.sh all
-    # reference /usr/lib/punar/punar-layout.sh. Staged (gitignored) into
-    # the otherwise-versioned usr/lib/punar directory.
-    rm -f "${extra}/usr/lib/punar/punar-layout.sh"
+    # Session helpers: source of truth lives beside the Hyprland config.
+    # Both are staged (gitignored) into the otherwise-versioned
+    # usr/lib/punar directory.
+    rm -f "${extra}/usr/lib/punar/punar-layout.sh" \
+          "${extra}/usr/lib/punar/punar-scratchpad.sh"
     install -m 0755 "${mod}/hypr/punar-layout.sh" \
         "${extra}/usr/lib/punar/punar-layout.sh"
+    install -m 0755 "${mod}/hypr/punar-scratchpad.sh" \
+        "${extra}/usr/lib/punar/punar-scratchpad.sh"
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"

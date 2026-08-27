@@ -243,6 +243,7 @@ jobs:
             os/images/scripts/container-build.sh \
             tests/performance/check-budgets.sh \
             os/modules/desktop/hypr/punar-layout.sh \
+            os/modules/desktop/hypr/punar-scratchpad.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh \

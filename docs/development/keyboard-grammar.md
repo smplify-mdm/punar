@@ -154,18 +154,18 @@ milestone-2.md §6).
 ### Scratchpads (spec §13.6)
 
 ```text
-PUNAR + T                    Scratchpad terminal (special:term; foot with
-                             app-id punar-scratch pre-spawned at session
-                             start)
+PUNAR + T                    Scratchpad terminal (special:term; a warm-server
+                             footclient is created on first use)
 PUNAR + SHIFT + A            Assistant scratchpad (special:assistant)
 PUNAR + N                    Notes scratchpad (special:notes)
 ```
 
 Every scratchpad presents as the same centered card: floating, 60% × 60%
 of the monitor (Plate D-007's justified float), parked silently on its
-special workspace at spawn. The assistant and notes pads have nothing
-pre-spawned in M2 — the shell/command center launches their clients, and
-the app-id rules (`punar-assistant`, `punar-notes`) park them. If a
+special workspace at spawn. The terminal helper creates a `footclient` only
+on first use; assistant and notes likewise have nothing pre-spawned — the
+shell/command center launches their clients, and the app-id rules
+(`punar-assistant`, `punar-notes`) park them. If a
 scratchpad's window is closed its special workspace closes with it;
 relaunch via PUNAR+Space or `foot --app-id=punar-scratch`.
 
