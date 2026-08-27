@@ -578,21 +578,49 @@ case "${bar_state}" in
        FAILED=1 ;;
 esac
 
-# --- group 5: the browser is a NATIVE WAYLAND client, with our flags ---------
-# This is the assertion that proves /etc/chromium-flags.conf was found, parsed
+# --- group 5: people can FIND, OPEN, and CLOSE an installed application -------
+# This is the ordinary desktop loop, driven through the same product surfaces
+# and compositor actions a person uses.  A direct `chromium` exec followed by
+# `kill $pid` used to prove browser packaging while leaving the actual app
+# launcher and close-window affordance unexercised.
+#
+# First prove discoverability: the live command-centre model must resolve an
+# installed freedesktop entry to a typed Launch action. Then press its selected
+# row through commandcenter.run (the IPC equivalent of Enter), wait for a real
+# mapped window, and finally close that focused window through Hyprland's
+# `killactive` dispatcher — the action bound to SUPER+Q and rendered by the
+# live shortcuts surface.
+launch_row="$(ipc commandcenter query chromium | tr -d '\r\n\"')"
+check_eq "command center finds installed Chromium" "app · Launch(chromium)" "${launch_row}"
+
+launch_result="$(ipc commandcenter run | tr -d '\r\n\"')"
+check_eq "command center invokes the selected installed app" "app · Launch(chromium)" "${launch_result}"
+
+# The live binding table is the discoverable source of truth; require the
+# close action to be present there rather than trusting a config-file grep.
+if hyprctl binds -j 2>/dev/null \
+        | jq -e 'any(.[]; .key == "Q" and .dispatcher == "killactive" and .description == "Close window")' \
+        >/dev/null 2>&1; then
+    note "ok   live shortcuts expose SUPER+Q as Close window"
+else
+    note "FAIL live shortcuts do not expose Q / killactive / Close window"
+    FAILED=1
+fi
+
+# The browser must also be a NATIVE WAYLAND client, with our flags. This is
+# the assertion that proves /etc/chromium-flags.conf was found, parsed
 # and applied — not that it exists. The launcher silently SKIPS any line with
 # unbalanced quotes, so a file that is present and readable can still apply
 # nothing at all; only the running process settles it.
 #
-# It also proves the flags reach a launch path that is NOT the keybind. The
-# exec below is a bare `chromium` with no arguments, exactly as the packaged
-# chromium.desktop and xdg-open invoke it. Before this file existed the ozone
-# hint lived on the SUPER+B bind alone and this assertion would have failed.
+# It also proves the flags reach a launch path that is NOT the browser keybind.
+# DesktopEntry.execute() uses packaged chromium.desktop, exactly as xdg-open
+# does. Before this file existed the ozone hint lived on the SUPER+B bind alone
+# and this assertion would have failed.
 chromium_client() {
     hyprctl -j clients 2>/dev/null \
         | jq -e '[ .[] | select(.class | ascii_downcase | test("chromium")) ] | length >= 1'
 }
-hyprctl dispatch exec chromium >/dev/null 2>&1
 if wait_for 180 chromium_client; then
     note "ok   chromium window appeared"
 
@@ -638,12 +666,13 @@ if wait_for 180 chromium_client; then
         FAILED=1
     fi
 
-    # Leave the session as we found it — later groups and the idle-RAM sample
-    # must not inherit a browser.
-    [ -n "${cpid}" ] && kill "${cpid}" 2>/dev/null
+    # Close it as the person does. The focus operation is typed and bounded;
+    # killactive is the exact dispatcher behind SUPER+Q, not a process signal.
+    hyprctl dispatch focuswindow "class:^([Cc]hromium.*)$" >/dev/null 2>&1
+    hyprctl dispatch killactive >/dev/null 2>&1
     no_chromium() { ! chromium_client; }
     if wait_for 60 no_chromium; then
-        note "ok   chromium closed, session restored"
+        note "ok   SUPER+Q close action removed the focused Chromium window"
         # The other half of the relation: with nothing focused the bar names
         # nothing, so the left zone never leaves a stale application standing
         # after its window is gone.
@@ -655,7 +684,7 @@ if wait_for 180 chromium_client; then
             FAILED=1
         fi
     else
-        note "FAIL chromium still present after kill — later measurements are polluted"
+        note "FAIL Chromium window still present after killactive — later measurements are polluted"
         FAILED=1
     fi
 else

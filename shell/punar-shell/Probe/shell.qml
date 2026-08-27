@@ -13,8 +13,13 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "../Services"
-import "../Theme"
+// Qualify the two directory imports in this nested configuration.  The
+// production entrypoint sits beside Services/ and can use its singleton names
+// directly; this probe is one directory deeper and Quickshell otherwise
+// resolves those names as JavaScript globals at runtime.  That made the probe
+// answer IPC while every SurfaceTiming access raised ReferenceError.
+import "../Services" as Services
+import "../Theme" as ThemeModule
 
 ShellRoot {
     id: root
@@ -27,9 +32,9 @@ ShellRoot {
     // its always-resident bar, wallpaper, approval and alert surfaces before
     // any candidate panel opens. Charge them to the empty probe baseline, not
     // independently to every candidate's isolated delta.
-    readonly property string sharedState: Theme.activeId + "|" + Status.state
-        + "|" + Agents.scannedAt + "|" + String(Alerts.activeCount)
-        + "|" + String(Approvals.pendingCount)
+    readonly property string sharedState: ThemeModule.Theme.activeId + "|" + Services.Status.state
+        + "|" + Services.Agents.scannedAt + "|" + String(Services.Alerts.activeCount)
+        + "|" + String(Services.Approvals.pendingCount)
 
     function sourceFor(surface: string): url {
         switch (surface) {
@@ -76,7 +81,7 @@ ShellRoot {
         }
 
         root.startedAtMs = Date.now();
-        SurfaceTiming.beginConstruction(surface, root.startedAtMs);
+        Services.SurfaceTiming.beginConstruction(surface, root.startedAtMs);
         surfaceLoader.setSource(source, {"openOnReady": true});
         surfaceLoader.active = true;
     }
@@ -89,12 +94,12 @@ ShellRoot {
             return "error:" + root.problem;
         if (root.selectedSurface === "")
             return "pending";
-        return SurfaceTiming.constructionSample(root.selectedSurface);
+        return Services.SurfaceTiming.constructionSample(root.selectedSurface);
     }
 
     Component.onCompleted: {
-        SurfaceTiming.init();
-        WorkspaceState.init();
+        Services.SurfaceTiming.init();
+        Services.WorkspaceState.init();
     }
 
     Loader {
