@@ -1,14 +1,16 @@
 # Punar application catalog and install experience — design
 
 **Status:** design of record, proposed 2026-08-25 · partially implemented
-2026-08-27. The signed local catalog, typed `apps.*` daemon/CLI path, Command
-Center inspection/action card, and `PUNAR+S` Applications browse entry ship as
-one Spotify vertical slice. Installed rows launch directly; catalog rows open
-their exact inspected card; the keyed browse action still exposes the whole
-catalog. The broad curated catalog, shared Flatpak
-persistence, generic web-app creation, and canonical full-flow CI gate remain
-open; every later section describing those pieces is still a plan unless the
-build queue says otherwise (spec 1.22).
+2026-08-28. The signed local catalog, typed `apps.*` daemon/CLI path, responsive
+Command Center application library, inspection/action card, and `PUNAR+S`
+Applications entry ship with six common applications and local identity icons.
+Installed desktop entries launch directly and implementation helpers such as
+Foot server/client collapse into one Terminal product. Catalog rows open their
+exact inspected card; an install still requires verified pinned metadata and a
+separate explicit click. A broad catalog service, apps that need a deliberate
+broad-filesystem consent path, generic web-app creation, and the canonical
+full-flow CI gate remain open; every later section describing those pieces is
+still a plan unless the build queue says otherwise (spec 1.22).
 
 **Spec authorities:** section 16 (developer experience; *"Avoid preinstalling
 excessive toolchains on the host. Prefer project isolation."*), section 46

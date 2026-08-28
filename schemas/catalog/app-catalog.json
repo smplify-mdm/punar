@@ -87,6 +87,8 @@
       "properties": {
         "id": {"$ref": "#/$defs/id"},
         "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "icon": {"type": "string", "pattern": "^[A-Za-z0-9._-]+\\.svg$"},
+        "featured": {"type": "boolean"},
         "category": {"enum": ["browsers", "communication", "editors", "graphics", "media", "productivity", "terminals", "utilities"]},
         "summary": {"type": "string", "minLength": 1, "maxLength": 240},
         "trustTier": {"enum": ["curated", "community"]},

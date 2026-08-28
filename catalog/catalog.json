@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "catalogVersion": "2026.08.27.1",
-  "generatedAt": "2026-08-27T20:00:00Z",
+  "catalogVersion": "2026.08.28.1",
+  "generatedAt": "2026-08-28T05:00:00Z",
   "remotes": [
     {
       "id": "flathub",
@@ -11,8 +11,90 @@
   ],
   "apps": [
     {
+      "id": "telegram",
+      "name": "Telegram",
+      "icon": "telegram.svg",
+      "featured": true,
+      "category": "communication",
+      "summary": "Fast messaging, voice calls, group conversations, and file sharing across your devices.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": ["x86_64"],
+          "remote": "flathub",
+          "appId": "org.telegram.desktop",
+          "ref": "app/org.telegram.desktop/x86_64/stable",
+          "commit": "f1f68e081e2a36d995dd5a24bd1d56e4eb5cf2603081da5732511f8cfe29fc47",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "a0959069de476eae39b30db109ef721da0daf4586eba80a070eb92089ac0544f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": ["aarch64"],
+          "remote": "flathub",
+          "appId": "org.telegram.desktop",
+          "ref": "app/org.telegram.desktop/aarch64/stable",
+          "commit": "27f21f17888075ac458507c0e8865ca93928b8fcab3be7fdc17b5647d7d43857",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "dd2c18e8685eff74bff65386cb3d47656b80bb60846393cdf07a92ad977f6563"
+        }
+      ]
+    },
+    {
+      "id": "firefox",
+      "name": "Firefox",
+      "icon": "firefox.svg",
+      "featured": true,
+      "category": "browsers",
+      "summary": "An independent, open-source browser with strong privacy controls and broad web compatibility.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": ["x86_64"],
+          "remote": "flathub",
+          "appId": "org.mozilla.firefox",
+          "ref": "app/org.mozilla.firefox/x86_64/stable",
+          "commit": "0c9162f4cf3d26af289524068c7ebef2a1b10f7cf6f913749f2f9bc3f3ce0dde",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "1c83208d196531604b340f21e5f16835468356850a0e5f99feb31cdea4082c06"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": ["aarch64"],
+          "remote": "flathub",
+          "appId": "org.mozilla.firefox",
+          "ref": "app/org.mozilla.firefox/aarch64/stable",
+          "commit": "c84b98e041e58749e824ae83bb2de6da268f0a0ca19f299329a6943de768cb67",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "9789327903f64b67b40acc4d0d198e5a13b4b3d5a42bcca1acf20f0dcf158785"
+        }
+      ]
+    },
+    {
       "id": "spotify",
       "name": "Spotify",
+      "icon": "spotify.svg",
+      "featured": true,
       "category": "media",
       "summary": "Music and podcasts while you work. The native desktop client is offered where its publisher provides Linux binaries; the web player is the ARM64 fallback.",
       "trustTier": "community",
@@ -44,6 +126,126 @@
           "kind": "web",
           "architectures": ["x86_64", "aarch64"],
           "url": "https://open.spotify.com/",
+          "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "element",
+      "name": "Element",
+      "icon": "element.svg",
+      "featured": true,
+      "category": "communication",
+      "summary": "Secure team messaging and video calls built on the open Matrix communication network.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": ["x86_64"],
+          "remote": "flathub",
+          "appId": "im.riot.Riot",
+          "ref": "app/im.riot.Riot/x86_64/stable",
+          "commit": "88fa8a11a3c3a113700a9f2b3694d38dfcdea6c799a17c470b1f811a50f8f198",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "d8a418f102f3a292724117ab90ed440a82ee6a43178166cfa211c0377ef5892d"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": ["aarch64"],
+          "remote": "flathub",
+          "appId": "im.riot.Riot",
+          "ref": "app/im.riot.Riot/aarch64/stable",
+          "commit": "eed329fb670bc96f9f45c87eda3ad7ea2b119f5f86ca7564c3ce00f9197b9a95",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "0db666c9576dffeb9f06fc66e153d721ec209cf62a92196398b13f0594fc12db"
+        }
+      ]
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "icon": "slack.svg",
+      "featured": true,
+      "category": "communication",
+      "summary": "Workplace messaging, channels, huddles, and team collaboration. ARM64 devices use Slack in Chromium app mode.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Slack."
+        },
+        {
+          "id": "platform:x86-only",
+          "text": "Slack currently publishes its Linux desktop client only for x86_64. ARM64 devices use Slack in Chromium app mode."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": ["x86_64"],
+          "remote": "flathub",
+          "appId": "com.slack.Slack",
+          "ref": "app/com.slack.Slack/x86_64/stable",
+          "commit": "5bae401d6799cc1a5ecff8ff3645225797aa724a1db7b4fbfd69b1ec8a7d398d",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "b1e5eb708e9d069b8a3e4dff42962725524bb3525a5b603b7dbd877f167d1ae6"
+        },
+        {
+          "kind": "web",
+          "architectures": ["aarch64"],
+          "url": "https://app.slack.com/",
+          "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "discord",
+      "name": "Discord",
+      "icon": "discord.svg",
+      "featured": true,
+      "category": "communication",
+      "summary": "Community messaging, voice, and video. ARM64 devices use Discord in Chromium app mode.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Discord."
+        },
+        {
+          "id": "platform:x86-only",
+          "text": "Discord currently publishes its Linux desktop client only for x86_64. ARM64 devices use Discord in Chromium app mode."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": ["x86_64"],
+          "remote": "flathub",
+          "appId": "com.discordapp.Discord",
+          "ref": "app/com.discordapp.Discord/x86_64/stable",
+          "commit": "7dbf56111b9eb045f48078eea1681c755c4d49e00f7f20d07c5fb0715bcf508a",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "72fb1247d667ede1fd9383e965a2719a688e30f252c0e1be2faef7311c59cb8d"
+        },
+        {
+          "kind": "web",
+          "architectures": ["aarch64"],
+          "url": "https://discord.com/app",
           "browser": "chromium"
         }
       ]

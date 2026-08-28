@@ -155,14 +155,15 @@ TPM/measured boot, the Smplify control plane (a local mock), identity
 providers, and the private relay. Anything drawn with a dashed stroke in the
 design language is in this category by construction.
 
-**Real and locally release-VM proven, with the canonical CI gate still being
-expanded:** first-run onboarding; the signed local application catalog;
+**Real and locally release-VM proven, with the expanded canonical CI gate in
+progress:** first-run onboarding; the signed local application catalog;
 `punarctl app` inspection and typed install actions; Command Center and System
 Control discovery; and Spotify's architecture-aware x86_64 Flatpak / ARM64 web
-fallback. The catalog currently contains one vertical slice, not a broad app
-selection.
+fallback. The current image source now offers Telegram, Firefox, Spotify,
+Element, Slack, and Discord in one searchable responsive library. It is still a
+small approved catalog, not an unbounded live Flathub search.
 
-**Not built at all:** the installer, the full third-party catalog (including
+**Not built at all:** the installer, a broad third-party catalog (including
 the Google Chrome install command), execution trust / the Gatekeeper-class
 exec gate, generic user-defined web apps and browser contexts (the remaining
 Milestone 11 work), network policy and the relay (Milestone 12), and the real

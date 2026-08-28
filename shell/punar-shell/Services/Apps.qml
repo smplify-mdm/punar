@@ -42,7 +42,14 @@ Singleton {
     id: root
 
     // Live model of installed, visible applications.
-    readonly property var entries: DesktopEntries.applications.values
+    // Distribution packages occasionally expose implementation launchers as
+    // ordinary applications. Foot is the important example: `foot.desktop`,
+    // `footclient.desktop`, and `foot-server.desktop` are three ways to reach
+    // one terminal product. A person should see one Terminal, not a process
+    // topology. Keep the canonical entry and suppress only the two explicitly
+    // known helpers; this is intentionally not a fuzzy name filter.
+    readonly property var rawEntries: DesktopEntries.applications.values
+    readonly property var entries: root.productEntries(root.rawEntries)
 
     // Role candidates, most-specific first. Ids are freedesktop desktop-file
     // ids without the `.desktop` suffix. `chromium` is the id Arch's
@@ -54,6 +61,33 @@ Singleton {
 
     readonly property string browserCategory: "WebBrowser"
     readonly property string terminalCategory: "TerminalEmulator"
+
+    function productEntries(entries: var): var {
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+            var id = root.bareId(entries[i]);
+            if (id === "footclient" || id === "foot-server")
+                continue;
+            out.push(entries[i]);
+        }
+        return out;
+    }
+
+    // Product names may deliberately differ from a package's desktop-file
+    // name. Keep aliases here so every launcher/settings surface agrees.
+    function displayName(entry: var): string {
+        var id = root.bareId(entry);
+        if (id === "foot" || id === "footclient" || id === "foot-server")
+            return "Terminal";
+        return String(entry && entry.name ? entry.name : "Application");
+    }
+
+    function iconSource(entry: var): string {
+        if (entry === null || entry === undefined)
+            return "";
+        var icon = String(entry.icon || "");
+        return icon === "" ? "" : Quickshell.iconPath(icon, true);
+    }
 
     // The resolved role entries (null when the machine has none — the
     // caller must render that honestly rather than offer a dead row).
@@ -97,6 +131,20 @@ Singleton {
         return null;
     }
 
+    // Catalog ids are product ids ("firefox"), while an installed Flatpak's
+    // desktop entry is its application id ("org.mozilla.firefox"). Join on
+    // the declared source id so every browse surface hides an app immediately
+    // after installation instead of offering it twice.
+    function catalogAppInstalled(app: var): bool {
+        var sources = app && Array.isArray(app.sources) ? app.sources : [];
+        for (var i = 0; i < sources.length; i++) {
+            var appId = String(sources[i].appId || "").toLowerCase();
+            if (appId !== "" && root.entryById(appId) !== null)
+                return true;
+        }
+        return false;
+    }
+
     function resolveRole(ids: var, category: string): var {
         for (var i = 0; i < ids.length; i++) {
             var byId = root.entryById(ids[i]);
@@ -133,7 +181,7 @@ Singleton {
     function score(entry: var, q: string): int {
         if (q === "")
             return 10;
-        var name = String(entry.name).toLowerCase();
+        var name = root.displayName(entry).toLowerCase();
         if (name === q)
             return 100;
         if (name.indexOf(q) === 0)
@@ -172,7 +220,7 @@ Singleton {
                 scored.push({
                     "entry": list[i],
                     "score": s,
-                    "name": String(list[i].name)
+                    "name": root.displayName(list[i])
                 });
         }
         scored.sort(function (a, b) {

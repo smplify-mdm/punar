@@ -17,6 +17,8 @@ Singleton {
 
     readonly property string installedPath: "/usr/share/punar/catalog/catalog.json"
     readonly property string devPath: Quickshell.shellDir + "/../../catalog/catalog.json"
+    readonly property string installedIconDir: "/usr/share/punar/catalog/icons"
+    readonly property string devIconDir: Quickshell.shellDir + "/../../catalog/icons"
     property var document: ({ "apps": [] })
     readonly property var entries: root.document && Array.isArray(root.document.apps) ? root.document.apps : []
 
@@ -47,7 +49,7 @@ Singleton {
         // An empty query is the browse view. The catalog is intentionally
         // curated and finite, so showing it is not a live-store fetch.
         if (q === "")
-            return 10;
+            return app.featured === true ? 20 : 10;
         var name = String(app.name || "").toLowerCase();
         var id = String(app.id || "").toLowerCase();
         if (name === q || id === q)
@@ -78,5 +80,27 @@ Singleton {
         for (var k = 0; k < cap; k++)
             out.push(scored[k].app);
         return out;
+    }
+
+    function byId(id: string): var {
+        var want = String(id).toLowerCase();
+        for (var i = 0; i < root.entries.length; i++) {
+            if (String(root.entries[i].id).toLowerCase() === want)
+                return root.entries[i];
+        }
+        return null;
+    }
+
+    // Icons are signed-image content and must resolve locally. The schema and
+    // daemon enforce the same basename-only shape; this guard keeps the shell
+    // safe even when it is run directly against an unvalidated dev catalog.
+    function iconSource(app: var): string {
+        if (app === null || app === undefined)
+            return "";
+        var name = String(app.icon || "");
+        if (!/^[A-Za-z0-9._-]+\.svg$/.test(name))
+            return "";
+        var base = catalogFile.path === root.installedPath ? root.installedIconDir : root.devIconDir;
+        return "file://" + base + "/" + name;
     }
 }

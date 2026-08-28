@@ -342,9 +342,10 @@ fi
 
 # A privileged builder is root inside Linux CI, while the following QEMU
 # steps run as the host runner. Keep the large image artifacts untouched, but
-# pre-create the two write targets with the caller's numeric ownership so the
-# boot harness can retain serial/runtime proof. Docker Desktop maps these IDs
-# back to the invoking macOS user as well.
+# pre-create every write target with the caller's numeric ownership so the
+# boot harnesses can retain serial/runtime proof. The host cannot create a new
+# sibling beneath the root-owned out directory after this container exits.
+# Docker Desktop maps these IDs back to the invoking macOS user as well.
 HOST_UID="${PUNAR_HOST_UID:-0}"
 HOST_GID="${PUNAR_HOST_GID:-0}"
 [[ "${HOST_UID}" =~ ^[0-9]+$ ]] \
@@ -353,6 +354,7 @@ HOST_GID="${PUNAR_HOST_GID:-0}"
     || { echo "error: invalid PUNAR_HOST_GID: ${HOST_GID}" >&2; exit 2; }
 install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
     "${IMAGES_DIR}/out/arm64-boot-proof" \
+    "${IMAGES_DIR}/out/arm64-update-rollback-proof" \
     "${IMAGES_DIR}/out/arm64-desktop-proof"
 
 echo "==> Native ARM64 image build complete"

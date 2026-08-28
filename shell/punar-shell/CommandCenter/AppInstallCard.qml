@@ -12,6 +12,7 @@ Item {
     // "loading" · "ready" · "installing" · "opening" · "failed"
     property string phase: "loading"
     property var record: null
+    property string iconSource: ""
     property string failure: ""
     signal actionRequested()
 
@@ -53,35 +54,68 @@ Item {
             width: parent.width
             spacing: 7
 
-            Text {
+            Row {
                 width: parent.width
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: 17
-                font.weight: 550
-                color: Theme.shellFg
-                text: {
-                    if (root.phase === "loading")
-                        return "Checking the exact package and permissions…";
-                    if (root.phase === "failed")
-                        return "This application could not be prepared.";
-                    if (root.record === null)
-                        return "Application";
-                    return String(root.record.name);
-                }
-            }
+                spacing: 12
 
-            Text {
-                width: parent.width
-                visible: text !== ""
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: 13
-                font.weight: 400
-                lineHeight: 1.25
-                lineHeightMode: Text.ProportionalHeight
-                color: Theme.shellInk2
-                text: root.phase === "failed" ? root.failure : (root.record !== null ? String(root.record.summary || "") : "")
+                Rectangle {
+                    width: 58
+                    height: 58
+                    radius: Theme.radius
+                    color: Theme.shellSurface
+                    border.width: Theme.hairline
+                    border.color: Theme.shellBorder
+
+                    Image {
+                        id: detailIcon
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        source: root.iconSource
+                        fillMode: Image.PreserveAspectFit
+                        smooth: true
+                    }
+                    Meta {
+                        anchors.centerIn: parent
+                        visible: detailIcon.source.toString() === "" || detailIcon.status !== Image.Ready
+                        text: "App"
+                    }
+                }
+
+                Column {
+                    width: parent.width - 70
+                    spacing: 5
+
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        font.family: Theme.fontSans
+                        font.pixelSize: 18
+                        font.weight: 600
+                        color: Theme.shellFg
+                        text: {
+                            if (root.phase === "loading")
+                                return "Checking source and access…";
+                            if (root.phase === "failed")
+                                return "This application could not be prepared.";
+                            if (root.record === null)
+                                return "Application";
+                            return String(root.record.name);
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        visible: text !== ""
+                        wrapMode: Text.WordWrap
+                        font.family: Theme.fontSans
+                        font.pixelSize: 13
+                        font.weight: 400
+                        lineHeight: 1.25
+                        lineHeightMode: Text.ProportionalHeight
+                        color: Theme.shellInk2
+                        text: root.phase === "failed" ? root.failure : (root.record !== null ? String(root.record.summary || "") : "")
+                    }
+                }
             }
 
             Row {

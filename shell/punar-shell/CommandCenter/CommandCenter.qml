@@ -75,6 +75,9 @@ DeferredSurfaceBase {
     property string appPhase: ""
     property var appRecord: null
     property string appFailure: ""
+    // Browse mode expands this same lazy surface into the application library;
+    // no second resident launcher/store process is introduced.
+    property bool appBrowse: false
 
     // One honest line under the results — why a row did nothing, or why a
     // question has no answer on this device. Cleared by the next keystroke;
@@ -124,6 +127,7 @@ DeferredSurfaceBase {
         root.appPhase = "";
         root.appRecord = null;
         root.appFailure = "";
+        root.appBrowse = false;
         root.note = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
@@ -143,6 +147,8 @@ DeferredSurfaceBase {
             return "closed";
         if (root.explainPath !== "")
             return "explain";
+        if (root.appBrowse && root.appId === "")
+            return "applications";
         return root.appId !== "" ? "application" : "open";
     }
 
@@ -161,8 +167,16 @@ DeferredSurfaceBase {
 
     function ipcApplication(id: string): string {
         root.show();
+        root.appBrowse = true;
         root.askApp(id);
         return "catalog-app · " + id;
+    }
+
+    function ipcBrowseApplications(): string {
+        root.show();
+        root.appBrowse = true;
+        win.setApplicationQuery("");
+        return "applications";
     }
 
     function ipcRun(): string {
@@ -171,6 +185,10 @@ DeferredSurfaceBase {
         if (root.appId !== "") {
             root.appAction();
             return "catalog-app · " + root.appId;
+        }
+        if (root.appBrowse) {
+            applicationBrowser.activateCurrent();
+            return "application-library";
         }
         var item = list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null;
         if (item === null)
@@ -595,7 +613,8 @@ DeferredSurfaceBase {
         return {
             "group": group,
             "glyph": Apps.glyphFor(entry.name),
-            "name": String(entry.name),
+            "icon": Apps.iconSource(entry),
+            "name": Apps.displayName(entry),
             "meta": "Launch(" + Apps.bareId(entry) + ")",
             "cap": false,
             "kind": "app",
@@ -609,6 +628,7 @@ DeferredSurfaceBase {
         return {
             "group": group,
             "glyph": Apps.glyphFor(String(app.name || app.id)),
+            "icon": Catalog.iconSource(app),
             "name": String(app.name),
             "meta": "Application(" + String(app.id) + ") · on demand",
             "cap": true,
@@ -628,13 +648,28 @@ DeferredSurfaceBase {
         return {
             "group": group,
             "glyph": glyph,
-            "name": label + " · " + String(entry.name),
+            "icon": Apps.iconSource(entry),
+            "name": label + " · " + Apps.displayName(entry),
             "meta": "Launch(" + Apps.bareId(entry) + ")",
             "cap": true,
             "kind": "app",
             "state": "shipped",
             "arg": "",
             "entry": entry
+        };
+    }
+
+    function applicationBrowserRow(group: string): var {
+        return {
+            "group": group,
+            "glyph": "AP",
+            "icon": "",
+            "name": "Browse applications",
+            "meta": "ApplicationLibrary(installed + approved)",
+            "cap": true,
+            "kind": "app-browser",
+            "state": "shipped",
+            "arg": ""
         };
     }
 
@@ -735,6 +770,7 @@ DeferredSurfaceBase {
                 out.push(termRow);
                 shownIds[Apps.bareId(Apps.terminal)] = true;
             }
+            out.push(root.applicationBrowserRow("Suggested"));
 
             var installed = Apps.search("", 0);
             var installedGroup = "Installed · " + installed.length;
@@ -768,6 +804,8 @@ DeferredSurfaceBase {
         var termHit = root.roleRow(Apps.terminal, "TE", "Open terminal", "Actions");
         if (termHit !== null && (root.matches("open terminal shell console", lower) || root.matches(String(Apps.terminal.name), lower)))
             out.push(termHit);
+        if (root.matches("applications apps app store install software get", lower))
+            out.push(root.applicationBrowserRow("Actions"));
 
         for (i = 0; i < actions.surfaces.length; i++) {
             var surface = actions.surfaces[i];
@@ -844,6 +882,10 @@ DeferredSurfaceBase {
             return;
         root.note = "";
         switch (item.kind) {
+        case "app-browser":
+            root.appBrowse = true;
+            win.setApplicationQuery("");
+            return;
         case "app":
             if (Apps.launch(item.entry))
                 root.dismiss();
@@ -915,11 +957,23 @@ DeferredSurfaceBase {
 
         function setQuery(text: string): void {
             queryInput.text = text;
+            root.appBrowse = false;
             root.explainPath = "";
             root.appId = "";
             root.appPhase = "";
             root.appRecord = null;
             root.note = "";
+        }
+
+        function setApplicationQuery(text: string): void {
+            root.explainPath = "";
+            root.appId = "";
+            root.appPhase = "";
+            root.appRecord = null;
+            root.appFailure = "";
+            root.note = "";
+            queryInput.text = text;
+            queryInput.forceActiveFocus();
         }
 
         onVisibleChanged: {
@@ -964,7 +1018,7 @@ DeferredSurfaceBase {
         Rectangle {
             id: card
 
-            width: Math.min(560, win.width * 0.78)
+            width: root.appBrowse ? Math.min(900, win.width * 0.90) : Math.min(560, win.width * 0.78)
             anchors.horizontalCenter: parent.horizontalCenter
             y: root.open ? win.height * 0.11 : (win.height * 0.11) - 10
             height: cardColumn.implicitHeight
@@ -1109,18 +1163,26 @@ DeferredSurfaceBase {
                                     root.appRecord = null;
                                     root.appFailure = "";
                                 }
+                                else if (root.appBrowse) {
+                                    root.appBrowse = false;
+                                    queryInput.text = "";
+                                }
                                 else
                                     root.dismiss();
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Down:
-                                if (root.appId === "")
+                                if (root.appId === "" && root.appBrowse)
+                                    applicationBrowser.move(1);
+                                else if (root.appId === "")
                                     list.incrementCurrentIndex();
                                 root.note = "";
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Up:
-                                if (root.appId === "")
+                                if (root.appId === "" && root.appBrowse)
+                                    applicationBrowser.move(-1);
+                                else if (root.appId === "")
                                     list.decrementCurrentIndex();
                                 root.note = "";
                                 event.accepted = true;
@@ -1129,6 +1191,8 @@ DeferredSurfaceBase {
                             case Qt.Key_Enter:
                                 if (root.appId !== "")
                                     root.appAction();
+                                else if (root.appBrowse)
+                                    applicationBrowser.activateCurrent();
                                 else
                                     root.activate(list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null);
                                 event.accepted = true;
@@ -1140,7 +1204,9 @@ DeferredSurfaceBase {
                     Text {
                         anchors.fill: queryInput
                         visible: queryInput.text === ""
-                        text: "Type — an app, a setting, a project, or plain intent"
+                        text: root.appBrowse
+                            ? "Search installed and approved applications"
+                            : "Type — an app, a setting, a project, or plain intent"
                         font.family: Theme.fontSans
                         font.pixelSize: 17
                         font.weight: 400
@@ -1171,16 +1237,39 @@ DeferredSurfaceBase {
                     visible: root.appId !== ""
                     phase: root.appPhase === "" ? "loading" : root.appPhase
                     record: root.appRecord
+                    iconSource: Catalog.iconSource(Catalog.byId(root.appId))
                     failure: root.appFailure
                     onActionRequested: root.appAction()
+                }
+
+                Local.ApplicationBrowser {
+                    id: applicationBrowser
+                    width: parent.width
+                    // Keep the whole card inside short and side-by-side
+                    // displays. The browser itself scrolls; shell chrome does
+                    // not fall beyond the output edge.
+                    height: root.appBrowse && root.appId === ""
+                        ? Math.max(240, Math.min(implicitHeight, win.height * 0.62))
+                        : 0
+                    visible: root.appBrowse && root.appId === ""
+                    query: queryInput.text
+                    onLaunchRequested: function(entry) {
+                        if (Apps.launch(entry))
+                            root.dismiss();
+                        else
+                            root.note = "That application could not be launched";
+                    }
+                    onCatalogRequested: function(id) {
+                        root.askApp(id);
+                    }
                 }
 
                 ListView {
                     id: list
 
                     width: parent.width
-                    height: root.explainPath !== "" || root.appId !== "" ? 0 : Math.min(contentHeight, 300)
-                    visible: root.explainPath === "" && root.appId === ""
+                    height: root.explainPath !== "" || root.appId !== "" || root.appBrowse ? 0 : Math.min(contentHeight, 300)
+                    visible: root.explainPath === "" && root.appId === "" && !root.appBrowse
                     clip: true
                     interactive: contentHeight > height
                     keyNavigationWraps: false
@@ -1279,8 +1368,18 @@ DeferredSurfaceBase {
                                         requestPaint()
                                 }
 
+                                Image {
+                                    id: rowIcon
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    source: String(row.modelData.icon || "")
+                                    fillMode: Image.PreserveAspectFit
+                                    smooth: true
+                                }
+
                                 Text {
                                     anchors.centerIn: parent
+                                    visible: rowIcon.source.toString() === "" || rowIcon.status !== Image.Ready
                                     text: row.modelData.glyph
                                     font.family: Theme.fontMono
                                     font.pixelSize: 8
@@ -1339,7 +1438,7 @@ DeferredSurfaceBase {
                 Item {
                     width: parent.width
                     height: 36
-                    visible: root.explainPath === "" && root.appId === "" && win.results.length === 0
+                    visible: root.explainPath === "" && root.appId === "" && !root.appBrowse && win.results.length === 0
 
                     Meta {
                         anchors.left: parent.left
@@ -1386,7 +1485,9 @@ DeferredSurfaceBase {
                         font.pixelSize: 8
                         font.weight: 500
                         font.letterSpacing: Theme.tracking(8, 0.13)
-                        text: root.explainPath !== "" || root.appId !== "" ? "Esc Back · Esc Esc Close" : "↑↓ Navigate · Click or ↵ Open · Esc Close"
+                        text: root.explainPath !== "" || root.appId !== "" || root.appBrowse
+                            ? "Esc Back · ↑↓ Navigate · Click or ↵ Open"
+                            : "↑↓ Navigate · Click or ↵ Open · Esc Close"
                     }
                     Meta {
                         anchors.right: parent.right

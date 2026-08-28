@@ -997,7 +997,7 @@ Scope {
             var installedId = Apps.bareId(installed[i]);
             knownIds[installedId] = true;
             rows.push({
-                name: String(installed[i].name),
+                name: Apps.displayName(installed[i]),
                 meta: "Installed · select to open",
                 tone: "",
                 tag: "Installed",
@@ -1012,7 +1012,7 @@ Scope {
         var availableCount = 0;
         for (var k = 0; k < available.length; k++) {
             var app = available[k];
-            if (knownIds[String(app.id).toLowerCase()] === true)
+            if (knownIds[String(app.id).toLowerCase()] === true || Apps.catalogAppInstalled(app))
                 continue;
             availableCount++;
             rows.push({

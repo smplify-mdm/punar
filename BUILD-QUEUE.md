@@ -16,7 +16,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27):** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Generic user-defined web-app install/context support remains M11 work and this proof is not yet a canonical CI gate. |
+| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The 2026-08-28 source adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; canonical runtime proof for that expansion is pending. Generic user-defined web-app install/context support remains M11 work. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
@@ -380,10 +380,12 @@ locally like our smplify deployment and other VMs."*
 
 ### 6.5 M11 browser/web-apps · M12 network + relay
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
-implemented**: the curated catalog, typed daemon/CLI calls and Command Center
-app card, plus the System Control Applications browse path, support a pinned
-x86_64 Flatpak source and an ARM64 Chromium-app-mode fallback for Spotify,
-proven on a clean ARM64 release VM. Generic web-app
+implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
+Center application library, and System Control Applications browse path expose
+six common apps. Native sources are commit- and metadata-digest-pinned per
+architecture; unsupported ARM64 publisher clients use labelled Chromium web
+fallbacks. Spotify's path is proven on a clean ARM64 release VM; the expanded
+six-app runtime gate is in progress. Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
 remain open. M12 is still designed and unbuilt; it closes DoD items 19 and 20.
 The private relay is `user-blocked.md` item 6 and is the largest item on that

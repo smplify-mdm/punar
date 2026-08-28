@@ -69,6 +69,10 @@ struct Disclosure {
 struct App {
     id: String,
     name: String,
+    #[serde(default)]
+    icon: String,
+    #[serde(default)]
+    featured: bool,
     category: String,
     summary: String,
     trust_tier: String,
@@ -383,6 +387,8 @@ impl AppManager {
         Ok(json!({
             "id": app.id,
             "name": app.name,
+            "icon": app.icon,
+            "featured": app.featured,
             "category": app.category,
             "summary": app.summary,
             "trust_tier": app.trust_tier,
@@ -539,6 +545,12 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                 app.id
             )));
         }
+        if !is_safe_icon_basename(&app.icon) {
+            return Err(AppError::InvalidCatalog(format!(
+                "app {:?} has an unsafe icon basename",
+                app.id
+            )));
+        }
         for source in &app.sources {
             if let Source::Flatpak {
                 remote,
@@ -578,6 +590,19 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn is_safe_icon_basename(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let Some(stem) = value.strip_suffix(".svg") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -747,7 +772,8 @@ mod tests {
                 "url": "https://dl.flathub.org/repo/"
             }],
             "apps": [{
-                "id": "spotify", "name": "Spotify", "category": "media",
+                "id": "spotify", "name": "Spotify", "icon": "spotify.svg",
+                "featured": true, "category": "media",
                 "summary": "Music", "trustTier": "community", "license": "proprietary",
                 "publisher": "flathub", "bundledUpdater": "disabled-by-packaging",
                 "disclosures": [],
@@ -775,6 +801,8 @@ mod tests {
             .unwrap()
             .with_arch("x86_64");
         let result = manager.catalog(Some("spotify"), None).unwrap();
+        assert_eq!(result["app"]["icon"], "spotify.svg");
+        assert_eq!(result["app"]["featured"], true);
         assert_eq!(result["app"]["inspection"]["verified"], true);
         assert_eq!(result["app"]["inspection"]["containment"], "sandboxed");
         assert!(
@@ -784,6 +812,22 @@ mod tests {
                 .iter()
                 .any(|p| p == "Network access")
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn catalog_rejects_an_icon_path_instead_of_a_local_basename() {
+        let (dir, bin, digest) = fixture("unused");
+        let catalog_path = write_catalog(&dir, &digest);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        catalog["apps"][0]["icon"] = json!("../spotify.svg");
+        fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+
+        assert!(matches!(
+            AppManager::load(Some(&catalog_path), bin),
+            Err(AppError::InvalidCatalog(_))
+        ));
         let _ = fs::remove_dir_all(dir);
     }
 

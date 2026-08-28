@@ -297,6 +297,12 @@ desktop-field work, native onboarding, recovery, app catalog, and ARM64 A/B
 update path are pushed. Before handoff, require local `HEAD` to equal
 `origin/main` and consult the newest workflow run for that exact remote commit.
 
+The 2026-08-28 application-library batch is the next durability checkpoint: it
+groups Foot's helper desktop entries into one Terminal product, adds local
+freedesktop/catalog icons, and exposes six common apps in one responsive
+Command Center browse mode. Do not claim this batch as pushed or runtime-proven
+until `BUILD-QUEUE.md` records its exact commit and workflow run.
+
 ### 7.2 Measured lazy-loading — first pass proven, second pass next
 The corrected probe in run 33044217553 identified the real `qs` executable and
 measured all five candidate panels. Construction medians are 31–59 ms and
@@ -320,13 +326,11 @@ proves no class carries a weaker security/privacy result.
 ### 7.4 Designed and unbuilt, roughly by value
 - **Installer + onboarding** — `docs/design/installer.md`, `onboarding.md`.
   Nobody can install Punar on a real machine today.
-- **`punarctl app` + Chrome install** — `docs/design/third-party-apps.md`,
-  `app-catalog.md`. **Two planning rounds were rejected by all reviewers** for
-  proposing to ship unverifiable facts: hand-transcribed image digests, sizes,
-  and a `containment: sandboxed` *safety* label nothing could check. Flatpak is
-  the settled mechanism (ADR-003 forces it — `/var/lib/flatpak` is the only
-  place a user-installed app survives an image swap). Read those objections
-  before re-planning.
+- **Catalog breadth + broad-filesystem consent** — `docs/design/third-party-apps.md`,
+  `app-catalog.md`. The typed `punarctl app` path and first curated apps now
+  exist. Editors and creative tools that request `home` or `host` filesystem
+  access remain deliberately excluded until their card has an explicit consent
+  contract; never weaken the daemon's containment check merely to add rows.
 - **Execution trust** — `docs/design/execution-trust.md`. fanotify
   `FAN_OPEN_EXEC_PERM` inside `punard`. `CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y`
   is verified present. This widens `punard` to `CAP_SYS_ADMIN` — a real
@@ -449,21 +453,25 @@ Never violate these; several are asserted in CI:
 
 ## 10. What is real vs simulated
 
-**Real and CI-exercised:** compositor, the 13 pre-wallpaper-preference shell
-targets, terminal, browser
+**Real and CI-exercised:** compositor, shell surfaces, terminal, browser
 (native Wayland, flags applied on every launch path), link handling, theme
 system, `punard`/`punarctl` and the typed capability API, desired state and
 reconciliation, the mock-enrolment journey, dev environments, agent registry,
-access ledger, approval gates, secret broker, shadow-AI detection, zram.
+access ledger, approval gates, secret broker, shadow-AI detection, zram,
+native onboarding and recovery, the first signed app-catalog vertical slice,
+and generic ARM64 image build/boot. The six-app library expansion is source-
+complete but must retain its separate pending CI status until its exact run is
+green.
 
 **Real but SIMULATED and labelled everywhere:** Secure Boot, TPM/measured boot,
 the Smplify control plane (`punar-mock-smplify`), identity providers, the
 private relay. Anything dashed in the design language is here by construction.
 
-**Not built:** installer, the onboarding account backend/first-run UI/greeter,
-`punarctl app`/Chrome install, execution
-trust, web-app install and browser contexts (M11), network policy and relay
-(M12), A/B partitioning (ADR-003 is ratified but unimplemented), arm64.
+**Not built:** bare-metal installer media and install flow, a broad catalog and
+broad-filesystem consent path, execution trust, generic user-defined web-app
+install and browser contexts (M11), network policy and relay (M12), and physical
+Raspberry Pi boot/peripheral/fault-injection proof. Generic QEMU ARM64 and A/B
+partition/update primitives are real; they are not Pi support.
 
 **Untested by CI:** networking — the gate runs the VM with `-nic none`, so DHCP
 and resolved were reasoned about and first exercised by a human. Wi-Fi *is*

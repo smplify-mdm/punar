@@ -11,9 +11,17 @@ runtime result, never publisher copy. It also contains no application payload:
 the base image ships only Flatpak itself, this catalog, and Flathub's signed
 remote descriptor. Apps and runtimes are fetched on demand into shared `/var`.
 
-Spotify is native on x86_64 because its upstream Linux payload is x86_64-only.
-ARM64/Raspberry Pi selects the official Spotify web player in Chromium. Both
-appear as one catalog identity; Punar never labels the ARM path as a native app.
+The first browseable catalog release contains Telegram, Firefox, Spotify,
+Element, Slack, and Discord. Telegram, Firefox, and Element have separately
+pinned x86_64 and ARM64 Flatpak sources. Spotify, Slack, and Discord use pinned
+native Flatpaks on x86_64 and an explicitly labelled Chromium web-app fallback
+on ARM64 where their publishers do not provide a native Linux payload. Punar
+never labels a web fallback as a native installation.
+
+`icons/` contains local identity marks shown by the shell. The schema and
+`punard` accept basename-only SVG names; image staging copies those files beside
+the catalog. Installed application icons still come from their freedesktop
+desktop entries, not this directory.
 
 Run `tools/verify-app-catalog.sh` during a catalog refresh. It builds a clean
 temporary Flatpak user installation from the committed remote descriptor,

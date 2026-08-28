@@ -145,7 +145,8 @@ systemcontrol_models_ready() {
         && jq -e '.title == "Applications"
             and (.sub | contains(" installed · ") and contains(" available · catalog "))
             and any(.rows[]; .tag == "Installed")
-            and any(.rows[]; .name == "Spotify" and .tag == "Available")
+            and ([.rows[] | select(.tag == "Available") | .name] | sort
+                == ["Discord", "Element", "Firefox", "Slack", "Spotify", "Telegram"])
             and any(.actions[]; .hotkey == "O" and .kind == "applicationBrowser")' \
             /run/punar/surfaces-systemcontrol-applications.json >/dev/null 2>&1
 }
@@ -360,6 +361,22 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
         else
             note "FAIL personal System Control did not render its live compliance and Applications models"
             FAILED=1
+        fi
+    fi
+
+    # The dedicated application library is an on-demand mode of Command
+    # Center, not a second resident store process. Exercise its typed IPC
+    # entry and export a frame so CI proves the responsive browse component
+    # actually instantiated with the signed six-app catalog.
+    if [ "${t}" = "commandcenter" ]; then
+        browse_result="$(ipc commandcenter applications | tr -d '\r\n\"')"
+        check_eq "command center opens the application library" "applications" "${browse_result}"
+        check_eq "application library reports its distinct state" "applications" "$(sstate commandcenter)"
+        sleep 1
+        if grim /run/punar/surfaces-applications.png 2>/dev/null; then
+            note "ok   application library frame captured ($(wc -c < /run/punar/surfaces-applications.png | tr -d ' ') bytes)"
+        else
+            note "info application library screenshot unavailable (grim failed; not an assertion)"
         fi
     fi
 
@@ -679,8 +696,10 @@ esac
 # installed freedesktop entry to a typed Launch action. Then press its selected
 # row through commandcenter.run (the IPC equivalent of Enter), wait for a real
 # mapped window, and finally close that focused window through Hyprland's
-# `killactive` dispatcher — the action bound to PUNAR+Q and rendered by the
-# live shortcuts surface.
+# native close action — the action bound to PUNAR+Q and rendered by the live
+# shortcuts surface. Lua-native binds intentionally expose `__lua` plus an
+# opaque callback id through `hyprctl binds`; their stable runtime contract is
+# the key and human description, while actual close behavior is proven below.
 launch_row="$(ipc commandcenter query chromium | tr -d '\r\n\"')"
 check_eq "command center finds installed Chromium" "app · Launch(chromium)" "${launch_row}"
 
@@ -690,11 +709,11 @@ check_eq "command center invokes the selected installed app" "app · Launch(chro
 # The live binding table is the discoverable source of truth; require the
 # close action to be present there rather than trusting a config-file grep.
 if hyprctl binds -j 2>/dev/null \
-        | jq -e 'any(.[]; .key == "Q" and .dispatcher == "killactive" and .description == "Close window")' \
+        | jq -e 'any(.[]; .key == "Q" and .dispatcher == "__lua" and .description == "Close window")' \
         >/dev/null 2>&1; then
-    note "ok   live shortcuts expose PUNAR+Q as Close window"
+    note "ok   live Lua shortcuts expose PUNAR+Q as Close window"
 else
-    note "FAIL live shortcuts do not expose Q / killactive / Close window"
+    note "FAIL live Lua shortcuts do not expose Q / __lua / Close window"
     FAILED=1
 fi
 
@@ -759,15 +778,18 @@ if wait_for 180 chromium_client; then
 
     # The ordinary close and emergency force-quit paths are deliberately not
     # the same action. The live table must expose a window-actions surface —
-    # never a direct kill dispatcher — and that surface must snapshot the
-    # focused browser before it enables its controls.
+    # never an unguarded Force quit description — and that surface must
+    # snapshot the focused browser before it enables its controls. Hyprland's
+    # Lua provider deliberately reports callback dispatchers as `__lua`, so
+    # the opaque callback id is not treated as inspectable command text.
     if hyprctl binds -j 2>/dev/null \
             | jq -e 'any(.[]; .key == "Q" and .description == "Window actions"
-                and .dispatcher == "exec" and (.arg | contains("ipc call windowactions toggle")))' \
+                and .dispatcher == "__lua")
+                and all(.[]; .key != "Q" or .description != "Force quit")' \
             >/dev/null 2>&1; then
-        note "ok   live shortcuts expose guarded Window actions (no direct force-kill bind)"
+        note "ok   live Lua shortcuts expose guarded Window actions (no direct Force quit bind)"
     else
-        note "FAIL live shortcuts do not expose the guarded Window actions surface"
+        note "FAIL live Lua shortcuts do not expose the guarded Window actions surface"
         FAILED=1
     fi
 

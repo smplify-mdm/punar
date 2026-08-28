@@ -231,6 +231,10 @@ ShellRoot {
             var surface = commandCenterSurface.surface;
             return surface === null ? "closed" : surface.ipcRun();
         }
+        function applications(): string {
+            var surface = commandCenterSurface.ensureLoaded(false);
+            return surface === null ? "unavailable" : surface.ipcBrowseApplications();
+        }
     }
 
     DeferredSurface {
@@ -281,7 +285,7 @@ ShellRoot {
                 if (catalogId !== "")
                     surface.ipcApplication(catalogId);
                 else
-                    surface.show();
+                    surface.ipcBrowseApplications();
             }
         }
     }

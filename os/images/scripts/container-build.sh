@@ -213,11 +213,14 @@ stage_desktop_extra() {
     # image. Runtime permissions are re-derived from the pinned Flatpak
     # metadata by punard before every install.
     rm -rf "${extra}/usr/share/punar/catalog"
-    install -d "${extra}/usr/share/punar/catalog/remotes"
+    install -d "${extra}/usr/share/punar/catalog/remotes" \
+        "${extra}/usr/share/punar/catalog/icons"
     install -m 0644 "${REPO_ROOT}/catalog/catalog.json" \
         "${extra}/usr/share/punar/catalog/catalog.json"
     install -m 0644 "${REPO_ROOT}/catalog/remotes/flathub.flatpakrepo" \
         "${extra}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
+    install -m 0644 "${REPO_ROOT}"/catalog/icons/*.svg \
+        "${extra}/usr/share/punar/catalog/icons/"
 
     # M9: the two data files the approval gate and the credential broker
     # read at runtime (milestone-9.md §5.2, §6.1). Staged for exactly the
