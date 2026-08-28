@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use punar_common::install::{
-    InstallApplyParams, InstallDiskIdentity, InstallEncryption, InstallPartitionPlan,
-    InstallPayloadPlan, InstallPlan, InstallPlanParams, InstallPlanResult,
-    InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult, InstallTarget,
-    InstallTargetPartition, InstallTargetsResult, canonical_json,
+    InstallApplyParams, InstallAwaiting, InstallDiskIdentity, InstallEncryption, InstallFailure,
+    InstallOverallState, InstallPartitionPlan, InstallPayloadPlan, InstallPhase, InstallPhaseState,
+    InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryAckParams,
+    InstallRecoveryMode, InstallStatusResult, InstallTarget, InstallTargetPartition,
+    InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
@@ -226,6 +227,233 @@ impl Installer {
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         bytes.push(b'\n');
         write_atomic(&self.sources.status_path, &bytes, 0o644)?;
+        Ok(())
+    }
+
+    /// Begin the fixed nine-phase transaction. A second caller may not reset
+    /// or replace a running, awaiting, or succeeded install in this live boot.
+    pub fn start_transaction_status(
+        &self,
+        plan_token: &str,
+        disk: &str,
+        root_slot_bytes: u64,
+    ) -> Result<(), InstallError> {
+        validate_plan_token(plan_token)?;
+        device_path(&self.sources.dev_root, disk)?;
+        if root_slot_bytes == 0 {
+            return Err(InstallError::Invalid(
+                "the root-slot progress denominator must be non-zero".into(),
+            ));
+        }
+        self.transition_status(|current| {
+            if matches!(
+                current.state,
+                InstallOverallState::Running
+                    | InstallOverallState::Awaiting
+                    | InstallOverallState::Succeeded
+            ) {
+                return Err(InstallError::Refused(
+                    "an installation transaction is already active or complete".into(),
+                ));
+            }
+            let mut next = InstallStatusResult::idle();
+            next.state = InstallOverallState::Running;
+            next.plan_token = Some(plan_token.to_string());
+            next.disk = Some(disk.to_string());
+            next.phase = Some(InstallPhase::VerifyRelease);
+            next.phases[phase_index(InstallPhase::VerifyRelease)].state =
+                InstallPhaseState::Running;
+            let write = &mut next.phases[phase_index(InstallPhase::WriteSlotA)];
+            write.completed_bytes = Some(0);
+            write.total_bytes = Some(root_slot_bytes);
+            Ok(next)
+        })
+    }
+
+    /// Advance to exactly the next named phase. Skipping or moving backward
+    /// is refused rather than rendered as fabricated progress.
+    pub fn enter_phase(&self, phase: InstallPhase) -> Result<(), InstallError> {
+        self.transition_status(|current_status| {
+            if current_status.state != InstallOverallState::Running {
+                return Err(InstallError::Invalid(
+                    "installer phase advancement requires a running transaction".into(),
+                ));
+            }
+            let current = current_status.phase.ok_or_else(|| {
+                InstallError::Invalid("the running installer has no current phase".into())
+            })?;
+            let current_index = phase_index(current);
+            let target_index = phase_index(phase);
+            if target_index != current_index + 1 {
+                return Err(InstallError::Invalid(
+                    "installer phases must advance exactly once in fixed order".into(),
+                ));
+            }
+            if current == InstallPhase::WriteSlotA {
+                let progress = &current_status.phases[current_index];
+                if progress.completed_bytes != progress.total_bytes {
+                    return Err(InstallError::Invalid(
+                        "root slot A must be completely written before re-read verification".into(),
+                    ));
+                }
+            }
+            let mut next = current_status.clone();
+            next.phases[current_index].state = InstallPhaseState::Complete;
+            next.phases[target_index].state = InstallPhaseState::Running;
+            next.phase = Some(phase);
+            Ok(next)
+        })
+    }
+
+    pub fn update_write_progress(&self, completed_bytes: u64) -> Result<(), InstallError> {
+        self.transition_status(|current| {
+            if current.state != InstallOverallState::Running
+                || current.phase != Some(InstallPhase::WriteSlotA)
+            {
+                return Err(InstallError::Invalid(
+                    "byte progress is available only while writing root slot A".into(),
+                ));
+            }
+            let mut next = current.clone();
+            let progress = &mut next.phases[phase_index(InstallPhase::WriteSlotA)];
+            let total = progress.total_bytes.ok_or_else(|| {
+                InstallError::Invalid("root-slot progress has no denominator".into())
+            })?;
+            let previous = progress.completed_bytes.unwrap_or(0);
+            if completed_bytes < previous || completed_bytes > total {
+                return Err(InstallError::Invalid(
+                    "root-slot progress must be monotonic and no greater than its total".into(),
+                ));
+            }
+            progress.completed_bytes = Some(completed_bytes);
+            Ok(next)
+        })
+    }
+
+    pub fn await_recovery_status(&self, awaiting: InstallAwaiting) -> Result<(), InstallError> {
+        self.transition_status(|current| {
+            if current.state != InstallOverallState::Running
+                || current.phase != Some(InstallPhase::Encrypt)
+            {
+                return Err(InstallError::Invalid(
+                    "the recovery checkpoint may be entered only after encryption".into(),
+                ));
+            }
+            let mut next = current.clone();
+            next.state = InstallOverallState::Awaiting;
+            next.awaiting = Some(awaiting);
+            next.phases[phase_index(InstallPhase::Encrypt)].state = InstallPhaseState::Waiting;
+            Ok(next)
+        })
+    }
+
+    pub fn resume_recovery_status(&self) -> Result<(), InstallError> {
+        self.transition_status(|current| {
+            if current.state != InstallOverallState::Awaiting
+                || current.phase != Some(InstallPhase::Encrypt)
+                || current.awaiting.is_none()
+            {
+                return Err(InstallError::Invalid(
+                    "no recovery checkpoint is awaiting confirmation".into(),
+                ));
+            }
+            let mut next = current.clone();
+            next.state = InstallOverallState::Running;
+            next.awaiting = None;
+            next.phases[phase_index(InstallPhase::Encrypt)].state = InstallPhaseState::Complete;
+            Ok(next)
+        })
+    }
+
+    pub fn complete_transaction_status(&self) -> Result<(), InstallError> {
+        self.transition_status(|current| {
+            if current.state != InstallOverallState::Running
+                || current.phase != Some(InstallPhase::VerifyInstalled)
+            {
+                return Err(InstallError::Invalid(
+                    "installation can complete only from final verification".into(),
+                ));
+            }
+            let mut next = current.clone();
+            next.phases[phase_index(InstallPhase::VerifyInstalled)].state =
+                InstallPhaseState::Complete;
+            next.state = InstallOverallState::Succeeded;
+            next.phase = None;
+            Ok(next)
+        })
+    }
+
+    /// Record a secret-free terminal failure with an honest description of
+    /// whether destructive work had begun.
+    pub fn fail_transaction_status(
+        &self,
+        phase: InstallPhase,
+        error: &InstallError,
+    ) -> Result<(), InstallError> {
+        let mut failed_plan_token = None;
+        self.transition_status(|current| {
+            if !matches!(
+                current.state,
+                InstallOverallState::Running | InstallOverallState::Awaiting
+            ) {
+                return Err(InstallError::Invalid(
+                    "only an active installation can enter failed state".into(),
+                ));
+            }
+            if current.phase != Some(phase) {
+                return Err(InstallError::Invalid(
+                    "the failure phase must match the active installer phase".into(),
+                ));
+            }
+            failed_plan_token = current.plan_token.clone();
+            let mut next = current.clone();
+            let index = phase_index(phase);
+            next.state = InstallOverallState::Failed;
+            next.phase = Some(phase);
+            next.awaiting = None;
+            next.phases[index].state = InstallPhaseState::Failed;
+            let disk_changed = index >= phase_index(InstallPhase::Partition);
+            next.failure = Some(InstallFailure {
+                message: format!(
+                    "The installation stopped during {}: {}.",
+                    phase_name(phase),
+                    public_error_reason(error)
+                ),
+                disk_state: if disk_changed {
+                    "The selected disk may be partially prepared and is not guaranteed to boot."
+                        .into()
+                } else {
+                    "No disk bytes were changed by the installer.".into()
+                },
+                next_step: if disk_changed {
+                    "Restart from the Punar installation medium and begin the installation again."
+                        .into()
+                } else {
+                    "Correct the reported condition, refresh the plan, and try again.".into()
+                },
+            });
+            Ok(next)
+        })?;
+        if let Some(plan_token) = failed_plan_token {
+            self.cancel_personal_recovery(&plan_token);
+        }
+        Ok(())
+    }
+
+    /// Serialize state transitions under the same lock used by readers. The
+    /// file is replaced before the in-memory value, so a failed publish never
+    /// advertises a transition through only one of the two read sides.
+    fn transition_status(
+        &self,
+        transition: impl FnOnce(&InstallStatusResult) -> Result<InstallStatusResult, InstallError>,
+    ) -> Result<(), InstallError> {
+        let mut current = self.status.lock().unwrap();
+        let next = transition(&current)?;
+        let mut bytes =
+            serde_json::to_vec(&next).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        bytes.push(b'\n');
+        write_atomic(&self.sources.status_path, &bytes, 0o644)?;
+        *current = next;
         Ok(())
     }
 
@@ -914,6 +1142,43 @@ fn read_descriptor_file(
         )));
     }
     Ok(bytes)
+}
+
+const fn phase_index(phase: InstallPhase) -> usize {
+    match phase {
+        InstallPhase::VerifyRelease => 0,
+        InstallPhase::Partition => 1,
+        InstallPhase::Encrypt => 2,
+        InstallPhase::Format => 3,
+        InstallPhase::WriteSlotA => 4,
+        InstallPhase::ReRead => 5,
+        InstallPhase::Boot => 6,
+        InstallPhase::Seed => 7,
+        InstallPhase::VerifyInstalled => 8,
+    }
+}
+
+const fn phase_name(phase: InstallPhase) -> &'static str {
+    match phase {
+        InstallPhase::VerifyRelease => "release verification",
+        InstallPhase::Partition => "disk partitioning",
+        InstallPhase::Encrypt => "disk encryption",
+        InstallPhase::Format => "filesystem creation",
+        InstallPhase::WriteSlotA => "root-slot writing",
+        InstallPhase::ReRead => "written-image verification",
+        InstallPhase::Boot => "boot installation",
+        InstallPhase::Seed => "first-boot seeding",
+        InstallPhase::VerifyInstalled => "installed-system verification",
+    }
+}
+
+const fn public_error_reason(error: &InstallError) -> &'static str {
+    match error {
+        InstallError::Refused(_) => "a safety precondition was refused",
+        InstallError::Invalid(_) => "an installer input or transition was invalid",
+        InstallError::Trust(_) => "release signature or manifest verification failed",
+        InstallError::Io(_) => "a required device or filesystem operation failed",
+    }
 }
 
 fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
@@ -1656,6 +1921,149 @@ mod tests {
                 .to_string_lossy()
                 .contains("tmp"))
         );
+    }
+
+    #[test]
+    fn transaction_status_proves_ordered_progress_recovery_and_success() {
+        let fixture = Fixture::new();
+        let installer = fixture.installer();
+        let token = "a".repeat(64);
+        installer.initialize_status_file().unwrap();
+        installer
+            .start_transaction_status(&token, "/dev/vda", 100)
+            .unwrap();
+
+        let status = installer.status();
+        assert_eq!(status.state, InstallOverallState::Running);
+        assert_eq!(status.plan_token.as_deref(), Some(token.as_str()));
+        assert_eq!(status.disk.as_deref(), Some("/dev/vda"));
+        assert_eq!(status.phase, Some(InstallPhase::VerifyRelease));
+        assert_eq!(status.phases.len(), InstallPhase::ALL.len());
+        assert_eq!(
+            status.phases[phase_index(InstallPhase::WriteSlotA)].completed_bytes,
+            Some(0)
+        );
+        assert_eq!(
+            status.phases[phase_index(InstallPhase::WriteSlotA)].total_bytes,
+            Some(100)
+        );
+        assert!(
+            installer
+                .start_transaction_status(&token, "/dev/vda", 100)
+                .is_err()
+        );
+        assert!(installer.enter_phase(InstallPhase::Encrypt).is_err());
+
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer
+            .await_recovery_status(InstallAwaiting::RecoveryKeyAck)
+            .unwrap();
+        let waiting = installer.status();
+        assert_eq!(waiting.state, InstallOverallState::Awaiting);
+        assert_eq!(waiting.awaiting, Some(InstallAwaiting::RecoveryKeyAck));
+        assert_eq!(
+            waiting.phases[phase_index(InstallPhase::Encrypt)].state,
+            InstallPhaseState::Waiting
+        );
+        assert!(installer.enter_phase(InstallPhase::Format).is_err());
+
+        installer.resume_recovery_status().unwrap();
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+        installer.update_write_progress(40).unwrap();
+        assert!(installer.update_write_progress(39).is_err());
+        assert!(installer.update_write_progress(101).is_err());
+        assert!(installer.enter_phase(InstallPhase::ReRead).is_err());
+        installer.update_write_progress(100).unwrap();
+        installer.enter_phase(InstallPhase::ReRead).unwrap();
+        installer.enter_phase(InstallPhase::Boot).unwrap();
+        installer.enter_phase(InstallPhase::Seed).unwrap();
+        installer
+            .enter_phase(InstallPhase::VerifyInstalled)
+            .unwrap();
+        installer.complete_transaction_status().unwrap();
+
+        let succeeded = installer.status();
+        assert_eq!(succeeded.state, InstallOverallState::Succeeded);
+        assert_eq!(succeeded.phase, None);
+        assert!(
+            succeeded
+                .phases
+                .iter()
+                .all(|phase| phase.state == InstallPhaseState::Complete)
+        );
+        let persisted: InstallStatusResult =
+            serde_json::from_slice(&fs::read(&fixture.sources.status_path).unwrap()).unwrap();
+        assert_eq!(persisted, succeeded);
+        assert!(
+            installer
+                .start_transaction_status(&token, "/dev/vda", 100)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transaction_failure_is_secret_free_honest_and_cancels_recovery() {
+        const KEY: &str = "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
+
+        let fixture = Fixture::new();
+        let installer = fixture.installer();
+        let token = "b".repeat(64);
+        installer.initialize_status_file().unwrap();
+        installer
+            .start_transaction_status(&token, "/dev/vda", 100)
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer
+            .begin_personal_recovery(&token, SecretRecoveryKey::parse(KEY).unwrap(), 1, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        installer
+            .await_recovery_status(InstallAwaiting::RecoveryKeyAck)
+            .unwrap();
+        installer
+            .fail_transaction_status(
+                InstallPhase::Encrypt,
+                &InstallError::Invalid(KEY.to_string()),
+            )
+            .unwrap();
+
+        let failed = installer.status();
+        assert_eq!(failed.state, InstallOverallState::Failed);
+        assert_eq!(failed.phase, Some(InstallPhase::Encrypt));
+        assert_eq!(failed.awaiting, None);
+        assert_eq!(
+            failed.phases[phase_index(InstallPhase::Encrypt)].state,
+            InstallPhaseState::Failed
+        );
+        let failure = failed.failure.unwrap();
+        assert!(failure.disk_state.contains("partially prepared"));
+        assert!(!failure.message.contains(KEY));
+        let persisted = fs::read_to_string(&fixture.sources.status_path).unwrap();
+        assert!(!persisted.contains(KEY));
+        assert!(installer.wait_for_personal_recovery(&token).is_err());
+
+        let second = Fixture::new();
+        let installer = second.installer();
+        installer.initialize_status_file().unwrap();
+        installer
+            .start_transaction_status(&token, "/dev/vdb", 100)
+            .unwrap();
+        installer
+            .fail_transaction_status(
+                InstallPhase::VerifyRelease,
+                &InstallError::Trust(KEY.to_string()),
+            )
+            .unwrap();
+        let failure = installer.status().failure.unwrap();
+        assert_eq!(
+            failure.disk_state,
+            "No disk bytes were changed by the installer."
+        );
+        assert!(!failure.message.contains(KEY));
     }
 
     #[test]

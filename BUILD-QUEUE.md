@@ -370,6 +370,19 @@ no timeout/default-continue. Cancellation drops the only
 types are unit-proven; executor/status/audit wiring and the live
 descriptor-duplication proof remain before the methods are registered.
 
+The executor-facing status coordinator is now implemented and locally green
+on ARM64 Linux across the full workspace. It serializes each transition under
+one lock and atomically publishes the same value to IPC and
+`/run/punar/install.json`; phases cannot skip or move backward, slot A cannot
+advance to re-read until its byte count equals the signed raw size, recovery
+is an explicit waiting state, and terminal failures cancel any personal-key
+checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
+pre-write refusal from a disk that may be partially prepared. Tests prove the
+complete nine-phase success path, monotonic progress, recovery pause/resume,
+secret-free failure, key cancellation and persisted/in-memory agreement. The
+destructive executor, audit wiring and live descriptor-duplication proof still
+remain before `install.apply` is registered.
+
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
 typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that
