@@ -7,8 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 
 use punar_common::install::{
@@ -19,13 +20,15 @@ use punar_common::install::{
     InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
-    Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
+    Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
+    verify_release_manifest,
 };
 use punar_recovery::{PersonalRecoveryConfirmation, PersonalRecoveryView, SecretRecoveryKey};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::util::{sha256_hex, write_atomic};
+use crate::util::{hex, sha256_hex, write_atomic};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -48,6 +51,10 @@ const PLAN_REGISTRY_LIMIT: usize = 16;
 const PASSPHRASE_MAX_BYTES: usize = 4096;
 const OOBE_ANSWERS_MAX_BYTES: usize = 1024 * 1024;
 const RECOVERY_GROUPS_MAX_BYTES: usize = 64;
+const SLOT_IO_BYTES: usize = 4 * 1024 * 1024;
+const STATUS_PROGRESS_BYTES: u64 = 64 * 1024 * 1024;
+const DIRECT_IO_BLOCK_BYTES: usize = 4096;
+const DIRECT_IO_BLOCKS: usize = SLOT_IO_BYTES / DIRECT_IO_BLOCK_BYTES;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -66,6 +73,7 @@ pub struct InstallerSources {
     pub release_signature_path: PathBuf,
     pub release_keys_dir: PathBuf,
     pub status_path: PathBuf,
+    pub zstd_path: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
     /// against `release_keys_dir` and leaves this `None`.
     pub release_manifest_override: Option<ReleaseManifest>,
@@ -87,6 +95,7 @@ impl Default for InstallerSources {
             release_signature_path: PathBuf::from("/run/punar/install/release.json.sig"),
             release_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
             status_path: PathBuf::from("/run/punar/install.json"),
+            zstd_path: PathBuf::from("/usr/bin/zstd"),
             release_manifest_override: None,
             architecture_override: None,
             boot_platform_override: None,
@@ -193,6 +202,13 @@ struct ObservedDisk {
     target: InstallTarget,
     protected: bool,
 }
+
+/// `O_DIRECT` requires every userspace base address and length to be aligned.
+/// A vector of these blocks is heap-backed, contiguous and 4096-byte aligned
+/// without weakening this crate's `forbid(unsafe_code)` boundary.
+#[cfg(target_os = "linux")]
+#[repr(align(4096))]
+struct DirectIoBlock([u8; DIRECT_IO_BLOCK_BYTES]);
 
 /// The install surface exists only when this exact UKI command-line token is
 /// present. Substrings and alternate values do not enable it.
@@ -455,6 +471,171 @@ impl Installer {
         write_atomic(&self.sources.status_path, &bytes, 0o644)?;
         *current = next;
         Ok(())
+    }
+
+    /// Re-read the signed manifest and verify the compressed artifact through
+    /// one already-open descriptor. No target byte is touched in this phase.
+    pub fn verify_release_payload(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::VerifyRelease)?;
+        self.open_verified_payload(plan).map(drop)
+    }
+
+    /// Decompress the already-verified artifact into root slot A through one
+    /// bounded 4 MiB buffer, hashing the exact raw bytes as they are written.
+    /// The destination is derived from the confirmed disk, never supplied by
+    /// the IPC caller.
+    #[cfg(target_os = "linux")]
+    pub fn write_slot_a(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+        self.require_transaction_phase(plan, InstallPhase::WriteSlotA)?;
+        validate_root_slot_payload(plan)?;
+        let payload = self.open_verified_payload(plan)?;
+        let slot_path = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        let mut slot = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(
+                i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
+                    .expect("open flags fit libc::c_int"),
+            )
+            .open(&slot_path)?;
+        if !slot.metadata()?.file_type().is_block_device() {
+            return Err(InstallError::Refused(
+                "root slot A is not a block device".into(),
+            ));
+        }
+
+        let mut child = Command::new(&self.sources.zstd_path)
+            .args(["-dc", "--"])
+            .stdin(Stdio::from(payload))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut decompressed = child.stdout.take().ok_or_else(|| {
+            InstallError::Io(std::io::Error::other(
+                "zstd did not provide its fixed output pipe",
+            ))
+        })?;
+        let mut last_published = 0_u64;
+        let copied = stream_exact_payload(
+            &mut decompressed,
+            &mut slot,
+            plan.payload.uncompressed_size_bytes,
+            &plan.payload.uncompressed_digest_sha256,
+            |completed| {
+                if completed == plan.payload.uncompressed_size_bytes
+                    || completed.saturating_sub(last_published) >= STATUS_PROGRESS_BYTES
+                {
+                    self.update_write_progress(completed)?;
+                    last_published = completed;
+                }
+                Ok(())
+            },
+        );
+        drop(decompressed);
+        if let Err(error) = copied {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = slot.sync_all();
+            return Err(error);
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            let _ = slot.sync_all();
+            return Err(InstallError::Io(std::io::Error::other(
+                "zstd refused the verified release payload",
+            )));
+        }
+        slot.sync_all()?;
+        drop(slot);
+        Ok(())
+    }
+
+    /// Close the writer, re-open slot A with `O_DIRECT`, and hash the bytes
+    /// returned by the block device. This cannot be satisfied by hashing the
+    /// write buffer or by a normal page-cache read.
+    #[cfg(target_os = "linux")]
+    pub fn verify_written_slot_a(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::ReRead)?;
+        validate_root_slot_payload(plan)?;
+        let slot_path = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        digest_direct_block_device(
+            &slot_path,
+            plan.payload.uncompressed_size_bytes,
+            &plan.payload.uncompressed_digest_sha256,
+        )
+    }
+
+    fn require_transaction_phase(
+        &self,
+        plan: &InstallPlan,
+        phase: InstallPhase,
+    ) -> Result<(), InstallError> {
+        let token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        let status = self.status();
+        if status.state != InstallOverallState::Running
+            || status.plan_token.as_deref() != Some(token.as_str())
+            || status.disk.as_deref() != Some(plan.disk.device.as_str())
+            || status.phase != Some(phase)
+        {
+            return Err(InstallError::Invalid(
+                "the executor phase is not bound to this active installation plan".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_verified_payload(&self, plan: &InstallPlan) -> Result<File, InstallError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let manifest = self.release_manifest()?;
+        if manifest.release_id != plan.payload.release_id
+            || manifest.payload.filename != plan.payload.filename
+            || manifest.payload.digest_sha256 != plan.payload.digest_sha256
+            || manifest.payload.size_bytes != plan.payload.compressed_size_bytes
+            || manifest.payload.uncompressed_digest_sha256
+                != plan.payload.uncompressed_digest_sha256
+            || manifest.payload.uncompressed_size_bytes != plan.payload.uncompressed_size_bytes
+        {
+            return Err(InstallError::Trust(
+                "the signed release no longer matches the confirmed install plan".into(),
+            ));
+        }
+        let parent = self
+            .sources
+            .release_manifest_path
+            .parent()
+            .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
+        let path = parent.join(&manifest.payload.filename);
+        if path.file_name().and_then(|name| name.to_str())
+            != Some(manifest.payload.filename.as_str())
+        {
+            return Err(InstallError::Trust(
+                "release payload filename escapes its fixed directory".into(),
+            ));
+        }
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
+                    .expect("open flags fit libc::c_int"),
+            )
+            .open(path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(InstallError::Trust(
+                "release payload is not a regular file".into(),
+            ));
+        }
+        verify_reader(
+            &mut file,
+            &plan.payload.digest_sha256,
+            plan.payload.compressed_size_bytes,
+        )
+        .map_err(|error| InstallError::Trust(error.to_string()))?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
     }
 
     pub fn targets(&self) -> Result<InstallTargetsResult, InstallError> {
@@ -1128,7 +1309,7 @@ fn read_descriptor_file(
     }
 
     let mut bytes = Zeroizing::new(Vec::with_capacity(maximum.min(4096)));
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take((maximum + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() {
@@ -1554,6 +1735,163 @@ fn device_path(dev_root: &Path, device: &str) -> Result<PathBuf, InstallError> {
     Ok(dev_root.join(name))
 }
 
+fn partition_device_path(
+    dev_root: &Path,
+    disk: &str,
+    partition: u32,
+) -> Result<PathBuf, InstallError> {
+    if partition == 0 {
+        return Err(InstallError::Invalid(
+            "partition number must be greater than zero".into(),
+        ));
+    }
+    let disk_path = device_path(dev_root, disk)?;
+    let name = disk_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| InstallError::Invalid("disk has no device-node name".into()))?;
+    let separator = if name.as_bytes().last().is_some_and(u8::is_ascii_digit) {
+        "p"
+    } else {
+        ""
+    };
+    Ok(dev_root.join(format!("{name}{separator}{partition}")))
+}
+
+fn validate_root_slot_payload(plan: &InstallPlan) -> Result<(), InstallError> {
+    let slot = plan
+        .partitions
+        .iter()
+        .find(|partition| partition.number == 2)
+        .ok_or_else(|| InstallError::Invalid("install plan has no root slot A".into()))?;
+    if slot.name != "PUNAR-ROOT-A"
+        || slot.partuuid != ROOT_A_PARTUUID
+        || slot.size_bytes != ROOT_SIZE
+        || slot.encrypted
+    {
+        return Err(InstallError::Invalid(
+            "install plan root slot A does not match the fixed product layout".into(),
+        ));
+    }
+    if plan.payload.uncompressed_size_bytes == 0
+        || plan.payload.uncompressed_size_bytes > slot.size_bytes
+        || plan.payload.uncompressed_size_bytes % DIRECT_IO_BLOCK_BYTES as u64 != 0
+    {
+        return Err(InstallError::Invalid(
+            "release payload does not fit the aligned root slot A write contract".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn stream_exact_payload(
+    source: &mut impl Read,
+    destination: &mut impl Write,
+    expected_size: u64,
+    expected_digest: &str,
+    mut progress: impl FnMut(u64) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let mut buffer = vec![0_u8; SLOT_IO_BYTES];
+    let mut hasher = Sha256::new();
+    let mut completed = 0_u64;
+    while completed < expected_size {
+        let remaining = expected_size - completed;
+        let wanted = usize::try_from(remaining.min(SLOT_IO_BYTES as u64))
+            .expect("bounded payload chunk fits usize");
+        let read = source.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(InstallError::Trust(
+                "decompressed release payload ended before its signed size".into(),
+            ));
+        }
+        destination.write_all(&buffer[..read])?;
+        hasher.update(&buffer[..read]);
+        completed = completed
+            .checked_add(read as u64)
+            .ok_or_else(|| InstallError::Invalid("release payload size overflow".into()))?;
+        progress(completed)?;
+    }
+
+    let mut extra = [0_u8; 1];
+    if source.read(&mut extra)? != 0 {
+        return Err(InstallError::Trust(
+            "decompressed release payload exceeds its signed size".into(),
+        ));
+    }
+    if hex(&hasher.finalize()) != expected_digest {
+        return Err(InstallError::Trust(
+            "decompressed release payload digest does not match its signed identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn digest_direct_block_device(
+    path: &Path,
+    expected_size: u64,
+    expected_digest: &str,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+    if expected_size == 0 || expected_size % DIRECT_IO_BLOCK_BYTES as u64 != 0 {
+        return Err(InstallError::Invalid(
+            "direct slot verification requires a non-empty 4096-byte-aligned payload".into(),
+        ));
+    }
+    let flags =
+        rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::DIRECT;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
+        .open(path)?;
+    if !file.metadata()?.file_type().is_block_device() {
+        return Err(InstallError::Refused(
+            "root slot A is not a block device".into(),
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    let mut completed = 0_u64;
+    while completed < expected_size {
+        let remaining_blocks =
+            usize::try_from((expected_size - completed) / DIRECT_IO_BLOCK_BYTES as u64)
+                .unwrap_or(usize::MAX);
+        let block_count = remaining_blocks.min(DIRECT_IO_BLOCKS);
+        let mut blocks = std::iter::repeat_with(|| DirectIoBlock([0; DIRECT_IO_BLOCK_BYTES]))
+            .take(block_count)
+            .collect::<Vec<_>>();
+        let mut slices = blocks
+            .iter_mut()
+            .map(|block| IoSliceMut::new(&mut block.0))
+            .collect::<Vec<_>>();
+        let expected_read = block_count * DIRECT_IO_BLOCK_BYTES;
+        let read = loop {
+            match file.read_vectored(&mut slices) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        drop(slices);
+        if read != expected_read {
+            return Err(InstallError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "root slot A returned a short O_DIRECT re-read",
+            )));
+        }
+        for block in &blocks {
+            hasher.update(block.0.as_slice());
+        }
+        completed += read as u64;
+    }
+    if hex(&hasher.finalize()) != expected_digest {
+        return Err(InstallError::Trust(
+            "root slot A does not match the signed release after O_DIRECT re-read".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn gpt_edge_sha256(
     path: &Path,
     size_bytes: u64,
@@ -1893,6 +2231,79 @@ mod tests {
         assert_eq!(parent_disk("sdaa2", &disks), Some("sdaa"));
         assert_eq!(parent_disk("nvme0n1p3", &disks), Some("nvme0n1"));
         assert_eq!(parent_disk("mmcblk0p4", &disks), Some("mmcblk0"));
+    }
+
+    #[test]
+    fn partition_device_paths_handle_lettered_and_numbered_disk_names() {
+        let dev = Path::new("/dev");
+        assert_eq!(
+            partition_device_path(dev, "/dev/vda", 2).unwrap(),
+            PathBuf::from("/dev/vda2")
+        );
+        assert_eq!(
+            partition_device_path(dev, "/dev/nvme0n1", 2).unwrap(),
+            PathBuf::from("/dev/nvme0n1p2")
+        );
+        assert_eq!(
+            partition_device_path(dev, "/dev/mmcblk0", 4).unwrap(),
+            PathBuf::from("/dev/mmcblk0p4")
+        );
+        assert!(partition_device_path(dev, "/dev/vda", 0).is_err());
+        assert!(partition_device_path(dev, "/dev/../vda", 2).is_err());
+    }
+
+    #[test]
+    fn exact_payload_stream_rejects_short_extra_and_changed_bytes() {
+        let payload = b"the exact decompressed root payload";
+        let digest = sha256_hex(payload);
+        let mut written = Vec::new();
+        let mut progress = Vec::new();
+        stream_exact_payload(
+            &mut payload.as_slice(),
+            &mut written,
+            payload.len() as u64,
+            &digest,
+            |completed| {
+                progress.push(completed);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(written, payload);
+        assert_eq!(progress, [payload.len() as u64]);
+
+        let mut short_output = Vec::new();
+        let error = stream_exact_payload(
+            &mut payload[..payload.len() - 1].as_ref(),
+            &mut short_output,
+            payload.len() as u64,
+            &digest,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ended before"));
+
+        let mut extra_output = Vec::new();
+        let error = stream_exact_payload(
+            &mut [payload.as_slice(), b"extra"].concat().as_slice(),
+            &mut extra_output,
+            payload.len() as u64,
+            &digest,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+
+        let mut changed_output = Vec::new();
+        let error = stream_exact_payload(
+            &mut payload.as_slice(),
+            &mut changed_output,
+            payload.len() as u64,
+            &"0".repeat(64),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("digest"));
     }
 
     #[test]

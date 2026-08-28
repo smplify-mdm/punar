@@ -27,6 +27,7 @@ thiserror = { workspace = true }
 # rustix = SO_PEERCRED + pre-listen socket setup without unsafe;
 # signal-hook = safe SIGTERM handling for graceful shutdown.
 rustix = { workspace = true, features = ["process"] }
+sha2 = { workspace = true }
 signal-hook = { workspace = true }
 # Installer passphrases and the optional first-boot passthrough are consumed
 # from peer-owned descriptors and zeroized as soon as their transaction ends.
