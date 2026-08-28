@@ -630,7 +630,30 @@ fn read_peer_descriptor(
     let owned = pidfd_getfd(&pidfd, foreign_fd, PidfdGetfdFlags::empty()).map_err(|error| {
         InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
     })?;
-    read_descriptor_file(File::from(owned), maximum, kind)
+    read_secret_descriptor_file(File::from(owned), maximum, kind)
+}
+
+#[cfg(target_os = "linux")]
+fn read_secret_descriptor_file(
+    mut file: File,
+    maximum: usize,
+    kind: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, InstallError> {
+    use rustix::fs::{SealFlags, fcntl_get_seals};
+
+    let required = SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK;
+    let seals = fcntl_get_seals(&file).map_err(|_| {
+        InstallError::Invalid(format!(
+            "the {kind} descriptor must refer to sealed anonymous memory"
+        ))
+    })?;
+    if !seals.contains(required) {
+        return Err(InstallError::Invalid(format!(
+            "the {kind} descriptor must be sealed against writes and resizing"
+        )));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    read_descriptor_file(file, maximum, kind)
 }
 
 fn read_descriptor_file(
@@ -1228,6 +1251,37 @@ mod tests {
         let empty = fixture.root.join("empty");
         fs::write(&empty, b"").unwrap();
         assert!(read_descriptor_file(File::open(empty).unwrap(), 64, "test secret").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn secret_intake_requires_a_write_and_resize_sealed_memfd() {
+        use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
+
+        let fixture = Fixture::new();
+        let disk_file = fixture.root.join("disk-backed-secret");
+        fs::write(&disk_file, b"must not persist").unwrap();
+        let error =
+            match read_secret_descriptor_file(File::open(&disk_file).unwrap(), 64, "test secret") {
+                Err(error) => error,
+                Ok(_) => panic!("a disk-backed secret descriptor was accepted"),
+            };
+        assert!(error.to_string().contains("sealed anonymous memory"));
+
+        let owned = memfd_create(
+            "punar-secret-test",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        let mut file = File::from(owned);
+        file.write_all(b"correct horse battery staple").unwrap();
+        fcntl_add_seals(
+            &file,
+            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+        )
+        .unwrap();
+        let bytes = read_secret_descriptor_file(file, 64, "test secret").unwrap();
+        assert_eq!(bytes.as_slice(), b"correct horse battery staple");
     }
 
     #[test]

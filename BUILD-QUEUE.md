@@ -334,7 +334,10 @@ the human root peer's passphrase and optional OOBE descriptors with
 `pidfd_getfd`, never accepting secret bytes in JSON, argv, environment, status,
 errors or audit. Unit and cross-architecture daemon tests are green; the live
 installer VM still owes the kernel-privilege proof because ordinary container
-seccomp blocks `pidfd_getfd`. The recovery gate,
+seccomp blocks `pidfd_getfd`. Secret input is now restricted further to
+anonymous memfds sealed against writes, growth and shrinkage; ordinary files
+are refused, and the daemon rewinds the duplicated open description before
+its bounded read. The recovery gate,
 partition/encrypt/write/re-read/boot/seed executor, ISO assembly and the
 unattended VM lane are still next.
 

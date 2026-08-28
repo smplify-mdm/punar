@@ -1268,6 +1268,9 @@ proposes; the owners of `ipc.md` and `schemas/` decide.
   parsed. The definitions come from
   `/usr/share/punar/repart.d/`, on disk, in the image, unmodifiable without
   a release.
+  Both input descriptors must be sealed anonymous memfds; ordinary files and
+  unsealed memory files are refused. This makes “no secret on disk” an
+  enforced admission rule rather than a promise the UI is expected to keep.
 - **`install.status`** is the read side of `/run/punar/install.json`.
 
 There is **no** `install.exec`, no `install.script`, no `install.chroot`,

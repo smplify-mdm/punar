@@ -714,7 +714,11 @@ registry for this daemon boot and re-reads the serial, WWN, size,
 logical-sector size, both GPT edges and signed release. Only an exact match may
 reach the future executor, and failed revalidation cannot silently register a
 new token. Its strict parameter type carries descriptor numbers for the
-passphrase and optional OOBE passthrough, never their bytes. **The public
+passphrase and optional OOBE passthrough, never their bytes. Each input must
+be an anonymous memfd sealed against writes, growth and shrinkage; a normal
+file is refused, so the descriptor mechanism cannot quietly persist a secret
+to disk. The daemon rewinds the duplicated open description before applying
+its 4 KiB passphrase or 1 MiB OOBE bound. **The public
 mutating `install.apply` method is not registered in this slice**: exposing a
 method that stopped after preflight would claim an installer that does not
 exist. There is no `install.exec`, script, hook or caller-supplied command/path.
