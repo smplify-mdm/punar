@@ -5,15 +5,16 @@
 //! person can confirm.  The later `install.apply` milestone must re-read the
 //! physical identity in that object before its first write.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use punar_common::install::{
-    InstallDiskIdentity, InstallEncryption, InstallPartitionPlan, InstallPayloadPlan, InstallPlan,
-    InstallPlanParams, InstallPlanResult, InstallRecoveryMode, InstallTarget,
-    InstallTargetPartition, InstallTargetsResult, canonical_json,
+    InstallApplyParams, InstallDiskIdentity, InstallEncryption, InstallPartitionPlan,
+    InstallPayloadPlan, InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryMode,
+    InstallTarget, InstallTargetPartition, InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
@@ -39,6 +40,7 @@ const ROOT_SIZE: u64 = 8 * GIB;
 const DATA_MINIMUM: u64 = 16 * GIB;
 const TARGET_DISK_BYTES: u64 = 128_000_000_000;
 const GPT_LBAS: u64 = 34;
+const PLAN_REGISTRY_LIMIT: usize = 16;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -104,6 +106,32 @@ impl InstallError {
 #[derive(Clone, Debug)]
 pub struct Installer {
     sources: InstallerSources,
+    plans: Arc<Mutex<PlanRegistry>>,
+}
+
+#[derive(Debug, Default)]
+struct PlanRegistry {
+    order: VecDeque<String>,
+    plans: BTreeMap<String, InstallPlan>,
+}
+
+impl PlanRegistry {
+    fn insert(&mut self, token: String, plan: InstallPlan) {
+        if self.plans.contains_key(&token) {
+            self.order.retain(|existing| existing != &token);
+        }
+        self.order.push_back(token.clone());
+        self.plans.insert(token, plan);
+        while self.order.len() > PLAN_REGISTRY_LIMIT {
+            if let Some(expired) = self.order.pop_front() {
+                self.plans.remove(&expired);
+            }
+        }
+    }
+
+    fn get(&self, token: &str) -> Option<InstallPlan> {
+        self.plans.get(token).cloned()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -122,7 +150,10 @@ pub fn live_mode_from_cmdline(cmdline: &str) -> bool {
 
 impl Installer {
     pub fn new(sources: InstallerSources) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            plans: Arc::new(Mutex::new(PlanRegistry::default())),
+        }
     }
 
     pub fn targets(&self) -> Result<InstallTargetsResult, InstallError> {
@@ -141,6 +172,19 @@ impl Installer {
     }
 
     pub fn plan(&self, params: &InstallPlanParams) -> Result<InstallPlanResult, InstallError> {
+        let result = self.compute_plan(params)?;
+        self.plans
+            .lock()
+            .unwrap()
+            .insert(result.plan_token.clone(), result.plan.clone());
+        Ok(result)
+    }
+
+    /// Compute a plan without admitting its token to the current-boot
+    /// registry. This distinction is security-relevant: a failed apply
+    /// revalidation must not silently mint an admissible token for the
+    /// changed disk it just refused.
+    fn compute_plan(&self, params: &InstallPlanParams) -> Result<InstallPlanResult, InstallError> {
         validate_answers(params)?;
         let disks = self.observe_disks()?;
         let observed = disks
@@ -266,6 +310,67 @@ impl Installer {
             plan,
             plan_token,
         })
+    }
+
+    /// Re-establish every property the person confirmed immediately before
+    /// the future transaction's first write.
+    ///
+    /// Success still changes no bytes. It proves the token was minted by this
+    /// daemon boot, the fixed apply fields agree with the cached plan, and a
+    /// fresh discovery/manifest/GPT-edge pass produces the same canonical
+    /// token. The mutating executor is allowed to begin only after this call.
+    pub fn preflight_apply(
+        &self,
+        params: &InstallApplyParams,
+    ) -> Result<InstallPlan, InstallError> {
+        validate_apply_params(params)?;
+        let cached = self
+            .plans
+            .lock()
+            .unwrap()
+            .get(&params.plan_token)
+            .ok_or_else(|| {
+                InstallError::Invalid(
+                    "plan_token was not produced by this live environment during this boot".into(),
+                )
+            })?;
+        if cached.disk.device != params.disk {
+            return Err(InstallError::Invalid(
+                "disk does not match the disk inside the confirmed plan".into(),
+            ));
+        }
+        if cached.keymap != params.keymap {
+            return Err(InstallError::Invalid(
+                "keymap does not match the keymap inside the confirmed plan".into(),
+            ));
+        }
+        match (cached.encryption, params.passphrase_fd) {
+            (InstallEncryption::Luks2, None) => {
+                return Err(InstallError::Invalid(
+                    "an encrypted installation requires passphrase_fd".into(),
+                ));
+            }
+            (InstallEncryption::None, Some(_)) => {
+                return Err(InstallError::Invalid(
+                    "an unencrypted installation must not carry passphrase_fd".into(),
+                ));
+            }
+            _ => {}
+        }
+
+        let refreshed = self.compute_plan(&InstallPlanParams {
+            disk: params.disk.clone(),
+            keymap: params.keymap.clone(),
+            encryption: cached.encryption,
+            recovery_mode: cached.recovery_mode,
+        })?;
+        if refreshed.plan_token != params.plan_token || refreshed.plan != cached {
+            return Err(InstallError::Invalid(
+                "the physical disk, existing GPT edges, or signed release changed after confirmation"
+                    .into(),
+            ));
+        }
+        Ok(cached)
     }
 
     fn architecture(&self) -> Architecture {
@@ -454,6 +559,41 @@ fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
             "an encrypted plan requires personal_copy or organization_escrow recovery".into(),
         )),
     }
+}
+
+fn validate_apply_params(params: &InstallApplyParams) -> Result<(), InstallError> {
+    if params.plan_token.len() != 64
+        || !params
+            .plan_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(InstallError::Invalid(
+            "plan_token must be one lowercase SHA-256 digest".into(),
+        ));
+    }
+    for (name, fd) in [
+        ("passphrase_fd", params.passphrase_fd),
+        ("oobe_answers_fd", params.oobe_answers_fd),
+    ] {
+        if fd.is_some_and(|value| !(3..=1_048_575).contains(&value)) {
+            return Err(InstallError::Invalid(format!(
+                "{name} must name a non-standard descriptor held by the calling process"
+            )));
+        }
+    }
+    let locale = params.seed.locale.as_str();
+    if locale.is_empty()
+        || locale.len() > 64
+        || !locale
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.@-".contains(&byte))
+    {
+        return Err(InstallError::Invalid(
+            "seed.locale must be one 1–64 character locale token".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn partition_plan(
@@ -922,6 +1062,26 @@ mod tests {
         }
     }
 
+    fn apply_params(plan: &InstallPlanResult) -> InstallApplyParams {
+        InstallApplyParams {
+            plan_token: plan.plan_token.clone(),
+            disk: plan.plan.disk.device.clone(),
+            passphrase_fd: Some(3),
+            keymap: plan.plan.keymap.clone(),
+            seed: punar_common::install::InstallSeedParams {
+                locale: "C.UTF-8".into(),
+            },
+            oobe_answers_fd: None,
+            unattended: false,
+        }
+    }
+
+    fn first_mib(path: &Path) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 1024 * 1024];
+        File::open(path).unwrap().read_exact(&mut bytes).unwrap();
+        bytes
+    }
+
     #[test]
     fn partition_parenting_handles_sd_nvme_and_mmc_names() {
         let disks = vec![
@@ -1051,6 +1211,158 @@ mod tests {
             changed.plan.disk.existing_gpt_sha256
         );
         assert_ne!(first.plan_token, changed.plan_token);
+    }
+
+    #[test]
+    fn apply_preflight_accepts_only_this_boots_unchanged_plan() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        assert_eq!(
+            installer.preflight_apply(&apply_params(&plan)).unwrap(),
+            plan.plan
+        );
+
+        let stranger = fixture.installer();
+        let error = stranger.preflight_apply(&apply_params(&plan)).unwrap_err();
+        assert!(error.to_string().contains("during this boot"));
+    }
+
+    #[test]
+    fn apply_preflight_rereads_identity_and_gpt_edges_before_any_write() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        let mut disk = File::options()
+            .write(true)
+            .open(fixture.sources.dev_root.join("vda"))
+            .unwrap();
+        disk.write_all(&[0xa5]).unwrap();
+        drop(disk);
+
+        let disk_path = fixture.sources.dev_root.join("vda");
+        let before = first_mib(&disk_path);
+
+        let error = installer.preflight_apply(&apply_params(&plan)).unwrap_err();
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert_eq!(first_mib(&disk_path), before);
+
+        // Revalidation computes the changed plan only for comparison. It
+        // must not register that new token as though a person had confirmed
+        // a second install.plan result.
+        let changed = installer
+            .compute_plan(&encrypted_params("/dev/vda"))
+            .unwrap();
+        let error = installer
+            .preflight_apply(&apply_params(&changed))
+            .unwrap_err();
+        assert!(error.to_string().contains("during this boot"));
+        assert_eq!(first_mib(&disk_path), before);
+    }
+
+    #[test]
+    fn apply_preflight_refuses_a_same_size_physical_disk_swap_without_writing() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "ORIGINAL-128G");
+        fs::write(
+            fixture.sources.sys_class_block.join("vda/device/wwid"),
+            "wwn-original\n",
+        )
+        .unwrap();
+        let installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+
+        fs::write(
+            fixture.sources.sys_class_block.join("vda/device/serial"),
+            "REPLACEMENT-128G\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.sources.sys_class_block.join("vda/device/wwid"),
+            "wwn-replacement\n",
+        )
+        .unwrap();
+        let disk_path = fixture.sources.dev_root.join("vda");
+        let before = first_mib(&disk_path);
+
+        let error = installer.preflight_apply(&apply_params(&plan)).unwrap_err();
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert_eq!(first_mib(&disk_path), before);
+    }
+
+    #[test]
+    fn apply_preflight_refuses_a_reenumerated_device_node_without_writing() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "CONFIRMED-128G");
+        let installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+
+        fixture.add_disk("vdb", 253, 128_000_000_000, "OTHER-128G");
+        fs::remove_dir_all(fixture.sources.sys_class_block.join("vda")).unwrap();
+        fs::remove_file(fixture.sources.dev_root.join("vda")).unwrap();
+        fs::rename(
+            fixture.sources.sys_class_block.join("vdb"),
+            fixture.sources.sys_class_block.join("vda"),
+        )
+        .unwrap();
+        fs::rename(
+            fixture.sources.dev_root.join("vdb"),
+            fixture.sources.dev_root.join("vda"),
+        )
+        .unwrap();
+        let disk_path = fixture.sources.dev_root.join("vda");
+        let before = first_mib(&disk_path);
+
+        let error = installer.preflight_apply(&apply_params(&plan)).unwrap_err();
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert_eq!(first_mib(&disk_path), before);
+    }
+
+    #[test]
+    fn plan_registry_is_bounded_and_evicts_the_oldest_confirmation() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let installer = fixture.installer();
+        let mut params = encrypted_params("/dev/vda");
+        params.keymap = "layout0".into();
+        let first = installer.plan(&params).unwrap();
+        let mut newest = first.clone();
+        for index in 1..=PLAN_REGISTRY_LIMIT {
+            params.keymap = format!("layout{index}");
+            newest = installer.plan(&params).unwrap();
+        }
+
+        let error = installer
+            .preflight_apply(&apply_params(&first))
+            .unwrap_err();
+        assert!(error.to_string().contains("during this boot"));
+        assert_eq!(
+            installer.preflight_apply(&apply_params(&newest)).unwrap(),
+            newest.plan
+        );
+    }
+
+    #[test]
+    fn apply_preflight_rejects_fields_outside_the_confirmed_plan() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+
+        let mut changed = apply_params(&plan);
+        changed.disk = "/dev/vdb".into();
+        assert!(installer.preflight_apply(&changed).is_err());
+        changed = apply_params(&plan);
+        changed.keymap = "de".into();
+        assert!(installer.preflight_apply(&changed).is_err());
+        changed = apply_params(&plan);
+        changed.passphrase_fd = Some(2);
+        assert!(installer.preflight_apply(&changed).is_err());
+        changed = apply_params(&plan);
+        changed.seed.locale = "../../etc".into();
+        assert!(installer.preflight_apply(&changed).is_err());
     }
 
     #[test]

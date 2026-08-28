@@ -707,9 +707,15 @@ The response validates against `schemas/install/plan.json`. `plan_token` is
 SHA-256 over compact, recursively key-sorted JSON of the nested `plan` object
 (the `jq -cS` JSON bytes, excluding jq's trailing newline). A change to either
 GPT edge or any plan field changes
-the token. The future `install.apply` must re-read the bound identity before
-its first write; **that mutating method is not implemented in this slice**.
-There is no `install.exec`, script, hook or caller-supplied command/path.
+the token. The internal zero-write apply preflight now keeps a bounded token
+registry for this daemon boot and re-reads the serial, WWN, size,
+logical-sector size, both GPT edges and signed release. Only an exact match may
+reach the future executor, and failed revalidation cannot silently register a
+new token. Its strict parameter type carries descriptor numbers for the
+passphrase and optional OOBE passthrough, never their bytes. **The public
+mutating `install.apply` method is not registered in this slice**: exposing a
+method that stopped after preflight would claim an installer that does not
+exist. There is no `install.exec`, script, hook or caller-supplied command/path.
 
 ## 6. Audit contract (spec section 53)
 

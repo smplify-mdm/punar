@@ -316,9 +316,18 @@ identity; its recursively canonical JSON token changes when either GPT edge or
 any field changes. Tests cover dm-backed boot-media exclusion, the answer-disk
 exclusion, the 33 GiB arithmetic, reinstall-on-target versus foreign-Punar
 refusal, strict live-mode gating, root authorization and audit outcomes. The
-result schema is `schemas/install/plan.json`. This remains deliberately unable
-to write a byte: `install.apply`, recovery-key wiring, ISO assembly and the
-unattended VM install lane are still next.
+result schema is `schemas/install/plan.json`. The next zero-write boundary is
+also implemented and locally green on ARM64 and x86_64: apply parameters are a
+strict object with descriptor numbers but no secret bytes; a bounded
+current-boot token registry admits only plans returned by explicit
+`install.plan`; and preflight re-reads the serial, WWN, size, logical-sector
+size, both GPT edges and signed release before a mutating executor may start.
+Tests cover a same-sized physical-disk swap, a changed GPT edge and device-node
+re-enumeration, each with the target byte-identical across refusal. The public
+`install.apply` method still remains deliberately unregistered until its
+transaction exists, so this slice remains unable to write a byte. Secret-FD
+intake, the recovery gate, partition/encrypt/write/re-read/boot/seed executor,
+ISO assembly and the unattended VM lane are still next.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

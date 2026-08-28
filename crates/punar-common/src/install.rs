@@ -157,6 +157,35 @@ pub struct InstallPlanResult {
     pub plan_token: String,
 }
 
+/// The only caller-provided seed value. All other seed fields are derived by
+/// `punard` from the verified plan and its own clock; account data is never an
+/// installer input.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallSeedParams {
+    pub locale: String,
+}
+
+/// Strict params for `install.apply`.
+///
+/// Secret material is deliberately absent. `passphrase_fd` and
+/// `oobe_answers_fd` name descriptors held open by the authenticated peer;
+/// the daemon duplicates and consumes them without placing their bytes in a
+/// request, process argument, environment variable, result, or audit event.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallApplyParams {
+    pub plan_token: String,
+    pub disk: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passphrase_fd: Option<u32>,
+    pub keymap: String,
+    pub seed: InstallSeedParams,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oobe_answers_fd: Option<u32>,
+    pub unattended: bool,
+}
+
 /// Deterministic JSON used by the installer confirmation token.
 ///
 /// Objects are recursively sorted by Unicode code point, arrays retain their
@@ -195,5 +224,27 @@ mod tests {
             canonical_json(&value).unwrap(),
             br#"{"a":{"b":[3,{"c":5,"q":4}],"y":2},"z":1}"#
         );
+    }
+
+    #[test]
+    fn apply_params_have_descriptor_numbers_but_no_secret_fields() {
+        let value = serde_json::json!({
+            "plan_token": "0".repeat(64),
+            "disk": "/dev/vda",
+            "passphrase_fd": 3,
+            "keymap": "us",
+            "seed": {"locale": "C.UTF-8"},
+            "unattended": false
+        });
+        let params: InstallApplyParams = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(params.passphrase_fd, Some(3));
+        for forbidden in ["passphrase", "recovery_key", "password", "account"] {
+            let mut object = value.as_object().unwrap().clone();
+            object.insert(forbidden.into(), Value::String("secret".into()));
+            assert!(
+                serde_json::from_value::<InstallApplyParams>(Value::Object(object)).is_err(),
+                "{forbidden}"
+            );
+        }
     }
 }
