@@ -27,6 +27,9 @@ esac
 
 MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart-arm64.XXXXXX)"
 MKOSI_RAW_OUTPUT_DIR="$(mktemp -d /var/tmp/punar-mkosi-output-arm64.XXXXXX)"
+# Generated output roots are gitignored and therefore absent in a clean
+# checkout. Create the host-mounted destination before the first conversion.
+install -d "${IMAGES_DIR}/out"
 # UUIDv5(URL, https://punar.org/filesystem-device/PUNAR-DATA). See the shared
 # x86 build script: this stabilizes the device identity, not btrfs's separate
 # subvolume UUIDs. A production installer may provide a per-device value.

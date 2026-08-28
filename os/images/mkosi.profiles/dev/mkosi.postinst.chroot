@@ -7,6 +7,9 @@ set -eu
 # input (direct DRM/input access safety net; the session normally gets these
 # via logind), uucp (serial ports, dev debugging). Password matches the M0
 # root convention (documented dev convenience, not a secret).
+if ! getent group punar >/dev/null 2>&1; then
+    groupadd --system punar
+fi
 useradd -m -g punar -G wheel,video,input,uucp -s /bin/bash punar
 echo 'punar:punar' | chpasswd
 
