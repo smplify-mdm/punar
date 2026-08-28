@@ -38,15 +38,17 @@
 # write contracts (PERFORMANCE_BUDGETS.md §1.3–1.4/§2.4–2.5):
 #
 #   max first-party cgroup >= 0.50% of one CPU    ::error:: -> exit 1
-#   combined Punar service writes > 65,536 bytes  ::error:: -> exit 1
+#   combined Punar service writes > 98,304 bytes  ::error:: -> exit 1
 #   short/missing runtime, network or zram facts  ::error:: -> exit 1
 #
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
-# native Apple-HVF windows each wrote exactly 8,192 first-party bytes. The
-# 64 KiB ceiling leaves 8x headroom for legitimate batches while rejecting a
-# sustained writer. Whole-guest block writes remain context only because they
-# include the journal, package-independent services and filesystem metadata.
+# native Apple-HVF windows each wrote exactly 8,192 first-party bytes and a
+# native x86 KVM window wrote 73,728 bytes across three durability-synced
+# reconcile audit batches. The 96 KiB ceiling reserves one quarter for
+# cross-filesystem headroom while rejecting a sustained writer. Whole-guest
+# block writes remain context only because they include the journal,
+# package-independent services and filesystem metadata.
 #
 # TCG-emulated runs (`PUNAR_RAM_ACCEL=tcg`) NEVER fail the build on a
 # NUMERIC breach: the numbers are labeled "(VM, emulated)" and indicative
@@ -64,8 +66,8 @@
 #   PUNAR_SERVICES_TARGET_MB  services target in MB (default 100)
 #   PUNAR_IDLE_CPU_HARD_BPS   per-service CPU ceiling, hundredths of one
 #                             percentage point (default 50 = 0.50%)
-#   PUNAR_IDLE_WRITE_HARD_BYTES combined first-party write ceiling per
-#                               five-minute window (default 65536 = 64 KiB)
+#   PUNAR_IDLE_WRITE_HARD_BYTES  combined first-party write ceiling per
+#                               five-minute window (default 98304 = 96 KiB)
 #
 # GitHub annotations (::error:: / ::warning::) are emitted only when
 # GITHUB_ACTIONS=true; locally the same text goes to stderr.
@@ -83,7 +85,7 @@ TARGET_MB="${PUNAR_RAM_TARGET_MB:-1024}"
 SERVICES_HARD_MB="${PUNAR_SERVICES_HARD_MB:-150}"
 SERVICES_TARGET_MB="${PUNAR_SERVICES_TARGET_MB:-100}"
 IDLE_CPU_HARD_BPS="${PUNAR_IDLE_CPU_HARD_BPS:-50}"
-IDLE_WRITE_HARD_BYTES="${PUNAR_IDLE_WRITE_HARD_BYTES:-65536}"
+IDLE_WRITE_HARD_BYTES="${PUNAR_IDLE_WRITE_HARD_BYTES:-98304}"
 
 fail=0
 

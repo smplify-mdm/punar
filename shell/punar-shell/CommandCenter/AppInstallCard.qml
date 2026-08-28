@@ -26,7 +26,10 @@ Item {
     readonly property var permissions: root.verified && Array.isArray(root.inspection.permissions) ? root.inspection.permissions : []
     readonly property var disclosures: root.record !== null && Array.isArray(root.record.disclosures) ? root.record.disclosures : []
 
-    implicitHeight: Math.min(320, content.implicitHeight + 28)
+    // The action is deliberately outside the scrolling permission body. A
+    // long Flatpak permission set must never push Install/Open below the
+    // panel edge or leave Enter acting on an invisible control.
+    implicitHeight: Math.min(380, content.implicitHeight + 28 + actionBar.height)
 
     component Meta: Text {
         font.family: Theme.fontMono
@@ -39,11 +42,15 @@ Item {
     }
 
     Flickable {
-        anchors.fill: parent
+        id: detailsScroll
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: actionBar.top
         anchors.leftMargin: 16
         anchors.rightMargin: 16
         anchors.topMargin: 14
-        anchors.bottomMargin: 14
+        anchors.bottomMargin: 6
         contentHeight: content.implicitHeight
         clip: true
         interactive: contentHeight > height
@@ -198,40 +205,70 @@ Item {
                 }
             }
 
-            Rectangle {
-                width: actionLabel.implicitWidth + 24
-                height: actionLabel.implicitHeight + 13
-                radius: Theme.radiusTag
-                color: root.ready ? Theme.shellFg : Theme.shellSurface
-                border.width: Theme.hairline
-                border.color: root.phase === "failed" ? Theme.shellStatusBad : Theme.shellFg
-                Meta {
-                    id: actionLabel
-                    anchors.centerIn: parent
-                    color: root.ready ? Theme.shellSurface : (root.phase === "failed" ? Theme.shellStatusBad : Theme.shellInk3)
-                    text: {
-                        if (root.phase === "loading")
-                            return "Checking…";
-                        if (root.phase === "installing")
-                            return "Installing…";
-                        if (root.phase === "opening")
-                            return "Opening…";
-                        if (root.phase === "failed")
-                            return "Try again ↵";
-                        if (root.webSource)
-                            return "Open web app ↵";
-                        if (root.installed)
-                            return "Open ↵";
-                        return "Install ↵";
-                    }
-                }
+        }
+    }
 
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: root.ready || root.phase === "failed"
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: root.actionRequested()
+    Item {
+        id: actionBar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 54
+
+        Rectangle {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: Theme.hairline
+            color: Theme.shellBorder
+        }
+
+        Meta {
+            anchors.left: actionButton.right
+            anchors.leftMargin: 12
+            anchors.verticalCenter: parent.verticalCenter
+            visible: detailsScroll.contentHeight > detailsScroll.height
+            text: "Scroll to review all access"
+        }
+
+        Rectangle {
+            id: actionButton
+            anchors.left: parent.left
+            anchors.leftMargin: 16
+            anchors.verticalCenter: parent.verticalCenter
+            width: actionLabel.implicitWidth + 24
+            height: actionLabel.implicitHeight + 13
+            radius: Theme.radiusTag
+            color: root.ready ? Theme.shellFg : Theme.shellSurface
+            border.width: Theme.hairline
+            border.color: root.phase === "failed" ? Theme.shellStatusBad : Theme.shellFg
+
+            Meta {
+                id: actionLabel
+                anchors.centerIn: parent
+                color: root.ready ? Theme.shellSurface : (root.phase === "failed" ? Theme.shellStatusBad : Theme.shellInk3)
+                text: {
+                    if (root.phase === "loading")
+                        return "Checking…";
+                    if (root.phase === "installing")
+                        return "Installing…";
+                    if (root.phase === "opening")
+                        return "Opening…";
+                    if (root.phase === "failed")
+                        return "Try again ↵";
+                    if (root.webSource)
+                        return "Open web app ↵";
+                    if (root.installed)
+                        return "Open ↵";
+                    return "Install ↵";
                 }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.ready || root.phase === "failed"
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.actionRequested()
             }
         }
     }

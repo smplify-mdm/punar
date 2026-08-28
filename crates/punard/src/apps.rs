@@ -478,7 +478,10 @@ impl AppManager {
         }
         let result = run_with_timeout(
             &self.flatpak_bin,
-            &["list", "--system", "--app", "--columns=application,commit"],
+            // Flatpak names the active deployment checksum `active` in the
+            // list-column API (including Debian's 1.18.x build). `commit` is
+            // accepted by `remote-info`, but is not a list column.
+            &["list", "--system", "--app", "--columns=application,active"],
             INSPECT_TIMEOUT,
         )
         .map_err(|e| AppError::Backend(e.to_string()))?;
@@ -752,7 +755,7 @@ mod tests {
         let metadata_path = dir.join("metadata");
         fs::write(&metadata_path, metadata).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
             metadata_path.display()
         );
         fs::write(&bin, script).unwrap();
@@ -871,7 +874,7 @@ mod tests {
         let argv_path = dir.join("argv");
         let bin = dir.join("stateful-flatpak");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(),
             metadata_path.display(),
             state_path.display(),

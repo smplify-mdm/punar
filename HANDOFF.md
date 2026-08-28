@@ -297,11 +297,16 @@ desktop-field work, native onboarding, recovery, app catalog, and ARM64 A/B
 update path are pushed. Before handoff, require local `HEAD` to equal
 `origin/main` and consult the newest workflow run for that exact remote commit.
 
-The 2026-08-28 application-library batch is the next durability checkpoint: it
-groups Foot's helper desktop entries into one Terminal product, adds local
+The 2026-08-28 application-library batch is pushed as `2e317c572a8f92dfad1cd157352fdc8dda0eefcf`:
+it groups Foot's helper desktop entries into one Terminal product, adds local
 freedesktop/catalog icons, and exposes six common apps in one responsive
-Command Center browse mode. Do not claim this batch as pushed or runtime-proven
-until `BUILD-QUEUE.md` records its exact commit and workflow run.
+Command Center browse mode. [Run 33146409332](https://github.com/smplify-mdm/punar/actions/runs/33146409332)
+proved the x86 application runtime surface and both image builds, but the
+overall run is red on a cross-filesystem idle-write ceiling and one immediate
+ARM/TCG group-state read. Connected ARM/HVF testing then found Flatpak 1.18's
+installed revision column is named `active`, not `commit`; the follow-up fixes
+all three gates and keeps the long application detail action visible, but must
+not be called pushed or canonically green until its own commit and run exist.
 
 ### 7.2 Measured lazy-loading — first pass proven, second pass next
 The corrected probe in run 33044217553 identified the real `qs` executable and
@@ -459,9 +464,9 @@ system, `punard`/`punarctl` and the typed capability API, desired state and
 reconciliation, the mock-enrolment journey, dev environments, agent registry,
 access ledger, approval gates, secret broker, shadow-AI detection, zram,
 native onboarding and recovery, the first signed app-catalog vertical slice,
-and generic ARM64 image build/boot. The six-app library expansion is source-
-complete but must retain its separate pending CI status until its exact run is
-green.
+and generic ARM64 image build/boot. The responsive six-app library itself is
+x86 runtime-proven in run 33146409332; its ARM Flatpak detail correction and
+the two unrelated runtime-gate corrections remain pending follow-up CI.
 
 **Real but SIMULATED and labelled everywhere:** Secure Boot, TPM/measured boot,
 the Smplify control plane (`punar-mock-smplify`), identity providers, the

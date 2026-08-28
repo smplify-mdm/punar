@@ -1233,7 +1233,11 @@ DeferredSurfaceBase {
                 Local.AppInstallCard {
                     id: appCard
                     width: parent.width
-                    height: root.appId !== "" ? implicitHeight : 0
+                    // The detail body owns its scrolling and pinned action;
+                    // cap it to the output just like the application browser.
+                    height: root.appId !== ""
+                        ? Math.max(240, Math.min(implicitHeight, win.height * 0.62))
+                        : 0
                     visible: root.appId !== ""
                     phase: root.appPhase === "" ? "loading" : root.appPhase
                     record: root.appRecord

@@ -212,7 +212,16 @@ check_eq "general:layout restored to dwindle" dwindle "$(layout_option)"
 # focused group — deterministic, no direction guessing.
 hyprctl keyword group:auto_group 1 >/dev/null 2>&1
 hyprctl dispatch "hl.dsp.group.toggle()" >/dev/null 2>&1
-check_eq "grouped count after togglegroup" 1 "$(active_field '.grouped | length')"
+grouped_one() { hyprctl -j activewindow | jq -e '.grouped | length == 1'; }
+# Hyprland accepts the native Lua dispatch synchronously, but on a heavily
+# TCG-emulated compositor the follow-up IPC read can briefly return no frame.
+# Judge the resulting state, as the later two-member check already does,
+# instead of treating one empty transport read as a failed group operation.
+if wait_for 120 grouped_one; then
+    note "ok   grouped count after togglegroup = 1"
+else
+    check_eq "grouped count after togglegroup" 1 "$(active_field '.grouped | length')"
+fi
 hyprctl dispatch "hl.dsp.exec_cmd('foot')" >/dev/null 2>&1
 grouped_two() { hyprctl -j activewindow | jq -e '.grouped | length == 2'; }
 if wait_for 120 grouped_two; then

@@ -16,7 +16,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The 2026-08-28 source adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; canonical runtime proof for that expansion is pending. Generic user-defined web-app install/context support remains M11 work. |
+| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. Connected ARM/HVF testing found and locally proved the Flatpak 1.18 `active` revision-column correction; follow-up CI is pending. Generic user-defined web-app install/context support remains M11 work. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
@@ -139,11 +139,12 @@ Native runs hard-fail when any first-party cgroup reaches 0.50% of one CPU;
 TCG numeric breaches remain labeled/warn-only. Two DHCP-connected Apple-HVF
 ARM64 windows measured 1205/1210 MB mean RAM, 1213 MB max, 18 MB combined
 service PSS, 0.00–0.01% maximum first-party CPU, and exactly 8,192 first-party
-write bytes each. The repeated write result established a 65,536-byte/five-
-minute native ceiling with 8× batching headroom. Whole-guest writes (1.39 MB
-in each window) remain context because they include the journal, filesystem
-metadata and non-Punar services. Missing counters, connected-idle facts or live
-zram fail on every accelerator.
+write bytes each. A later native x86 KVM window measured 73,728 bytes across
+three durability-synced reconcile audit batches; the cross-filesystem ceiling
+is therefore 98,304 bytes/five minutes, reserving one quarter of the ceiling
+without hiding a sustained writer. Whole-guest writes remain context because they include the
+journal, filesystem metadata and non-Punar services. Missing counters,
+connected-idle facts or live zram fail on every accelerator.
 
 The first x86 KVM run of that gate correctly failed: all three service cgroups
 were alive, but `cpu.stat`/`io.stat` were not exposed because the units had
@@ -384,8 +385,10 @@ implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
 six common apps. Native sources are commit- and metadata-digest-pinned per
 architecture; unsupported ARM64 publisher clients use labelled Chromium web
-fallbacks. Spotify's path is proven on a clean ARM64 release VM; the expanded
-six-app runtime gate is in progress. Generic web-app
+fallbacks. Spotify's path is proven on a clean ARM64 release VM and the
+expanded library passed its x86 runtime surface in run 33146409332. Connected
+ARM/HVF testing then proved the corrected Firefox native-detail path, including
+its pinned source and verified permissions; follow-up CI is pending. Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
 remain open. M12 is still designed and unbuilt; it closes DoD items 19 and 20.
 The private relay is `user-blocked.md` item 6 and is the largest item on that

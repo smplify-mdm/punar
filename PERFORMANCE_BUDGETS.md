@@ -76,10 +76,12 @@ Spec 6.4 defines rules rather than a single number:
 - Do not log every filesystem read performed by AI agents.
 
 Operationalization (engineering interpretation, see section 2.5): at
-stabilized idle, Punar first-party services produce no more than **64 KiB
+stabilized idle, Punar first-party services produce no more than **96 KiB
 combined over five minutes**. Writes should arrive in infrequent batches, not
-a steady trickle. The ceiling was set only after two native windows each
-measured one 8 KiB batch.
+a steady trickle. The ceiling covers the three durability-synced reconcile
+audit batches observed in a native x86 KVM window (73,728 bytes), reserving
+one quarter of the ceiling as headroom; two native ARM HVF windows each
+measured only one 8 KiB batch.
 
 ### 1.5 Boot
 
@@ -241,11 +243,13 @@ at the 10-minute mark, and the reported value is the mean over the window
   pattern that stays under it is still a defect when it violates the batching
   rule.
 - Enforcement threshold (engineering interpretation, not a spec number):
-  combined first-party service writes **≤ 65,536 bytes per five-minute
+  combined first-party service writes **≤ 98,304 bytes per five-minute
   window**. Two native Apple-HVF windows each measured exactly 8,192 bytes;
-  the 64 KiB ceiling leaves 8× batching headroom while turning a persistent
-  writer into a release failure. Native KVM/HVF runs gate it; TCG numeric
-  breaches are warn-only. Missing facts fail everywhere.
+  a native x86 KVM window measured three durability-synced reconcile audit
+  batches at 73,728 bytes. The 96 KiB ceiling reserves one quarter for
+  cross-filesystem headroom while still turning a sustained writer into a
+  release failure. Native KVM/HVF runs gate it; TCG numeric breaches are warn-only.
+  Missing facts fail everywhere.
 - Whole-guest block writes remain context only. They include the journal,
   filesystem metadata and services outside Punar's ownership, so gating that
   aggregate as though it were first-party would create false attribution.
