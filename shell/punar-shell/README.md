@@ -584,14 +584,13 @@ Enter on it states the absence instead of doing nothing.
 
 ## Ready marker
 
-Once the bar object tree completes, `shell.qml` runs
-`touch /run/punar/shell-ready` (`/run/punar` comes from a root tmpfiles.d
-entry, `0755 punar punar` — milestone-1.md §7). `desktop-ready.sh`
-(Hyprland `exec-once`, owned by the compositor/image work) waits on that
-file — fallback `pgrep quickshell` — then screenshots via grim and touches
-`/run/punar/desktop-ready`, which the root marker unit turns into
-`PUNAR_DESKTOP_OK` on serial. On dev machines without `/run/punar` the
-touch fails harmlessly.
+Once the bar object tree completes, `shell.qml` creates
+`$XDG_RUNTIME_DIR/punar/shell-ready`. The production health gate accepts the
+marker only for a regular user and verifies that both it and
+`/run/user/<uid>` are owned by that UID. The dev-only `desktop-ready.sh`
+keeps its `pgrep quickshell` fallback, takes the milestone screenshot, and
+creates `/run/punar/desktop-ready` for its root marker unit. On dev machines
+without `XDG_RUNTIME_DIR`, the shell command fails harmlessly.
 
 ## Linting
 

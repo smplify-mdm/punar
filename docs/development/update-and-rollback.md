@@ -503,7 +503,8 @@ The order is the design (Law 3):
      (proves what landed, not what was sent — catches a lying storage stack)
 6. verify the UKI's digest, then install it to the ESP under a temp name,
      fsync, rename into place as `punar_<version>+3-0.efi`
-7. set it as the default entry
+7. set `punar_<version>*.efi` as the default selector, so boot-counter
+   decrements and the final blessing rename cannot make the default stale
 ```
 
 Steps 1–5 are reversible by deleting a file. The device becomes committed at
@@ -800,7 +801,7 @@ prettier field name.
 |---|---|---|---|
 | 1 | **Boot completed** | `multi-user.target` reached; `punar-boot-marker.service` emits `PUNAR_BOOT_OK` | The system did not finish starting |
 | 2 | **The control plane answers** | `punard` responds to `status` on `/run/punard/punard.sock`; `punar-agentd` responds on its sibling socket (ipc.md §1, §10.1) | Punar itself is broken on this release |
-| 3 | **The graphical session came up** | the `PUNAR_DESKTOP_OK` chain: shell touches `/run/punar/shell-ready` → `desktop-ready.sh` touches `/run/punar/desktop-ready` → `punar-desktop-marker.path` fires | The user would face a black screen — the single worst update outcome |
+| 3 | **The graphical session came up** | the authenticated shell creates `$XDG_RUNTIME_DIR/punar/shell-ready`; the health gate verifies that `/run/user/<uid>` and the marker belong to that regular user | The user would face a black screen — the single worst update outcome |
 | 4 | **Capabilities verify** | one section-42 `reconcile` pass with **no** `verify_failed` across the registry (M4 decision 4) | The new release cannot enforce the state the device is supposed to be in |
 
 Notes that keep this honest:
@@ -832,6 +833,10 @@ reaches `+0-3` is no longer offered. This follows the Boot Loader
 Specification's boot-counting contract: the absence of a counter means
 "good", while zero tries left means "bad". See
 <https://uapi-group.org/specifications/specs/boot_loader_specification/#boot-counting>.
+
+`loader.conf` uses `default punar_<version>*.efi`, not the literal counted
+filename. systemd-boot's `default` value is a glob; the stable selector keeps
+matching the same entry as `+3-0` becomes `+2-1` and finally `.efi`.
 
 **Why not a punar-owned counter, argued:** a counter maintained by punard
 requires punard to run to be decremented. The failures that need automatic

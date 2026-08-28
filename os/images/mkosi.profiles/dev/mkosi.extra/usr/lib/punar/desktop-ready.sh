@@ -3,23 +3,25 @@
 # user via Hyprland `exec-once` — LAST in the exec-once order, so the shell
 # has already been launched when this starts.
 #
-# Waits for punar-shell's own ready flag (/run/punar/shell-ready, touched by
-# shell.qml once the bar completes), captures proof-of-rendering + meminfo
+# Waits for punar-shell's own private ready flag (below XDG_RUNTIME_DIR,
+# touched by shell.qml once the bar completes), captures rendering + meminfo
 # into /run/punar, then creates /run/punar/desktop-ready — which triggers
 # the root punar-desktop-marker.path/.service to print PUNAR_DESKTOP_OK on
 # the serial console. /run/punar is created by tmpfiles.d (0755 punar punar).
 
 RUN_DIR=/run/punar
+SHELL_READY_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/punar
+SHELL_READY=${SHELL_READY_DIR}/shell-ready
 WAIT_SECS=180
 
 i=0
 while [ "${i}" -lt "${WAIT_SECS}" ]; do
-    [ -e "${RUN_DIR}/shell-ready" ] && break
+    [ -e "${SHELL_READY}" ] && break
     i=$((i + 1))
     sleep 1
 done
 
-if [ ! -e "${RUN_DIR}/shell-ready" ]; then
+if [ ! -e "${SHELL_READY}" ]; then
     # Fallback signal per the shell contract: is a quickshell process up at
     # all? Proceed either way — a screenshot of a shell-less session is
     # still diagnostic gold in CI, and the RAM measurement must still run.

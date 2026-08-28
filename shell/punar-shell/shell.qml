@@ -578,14 +578,14 @@ ShellRoot {
     }
 
     // Ready marker (milestone-1.md §7 / survey decision 6): once the bar is
-    // constructed, touch /run/punar/shell-ready. /run/punar is created by a
-    // root tmpfiles.d entry (0755 punar punar); desktop-ready.sh — run by
-    // Hyprland exec-once — waits on this file (fallback: pgrep quickshell),
-    // then screenshots and touches /run/punar/desktop-ready, which the root
-    // punar-desktop-marker unit turns into PUNAR_DESKTOP_OK on serial.
-    // On a dev machine without /run/punar the touch fails harmlessly.
+    // constructed, touch a marker below the authenticated user's private
+    // XDG runtime directory. /run/punar is deliberately root-owned in the
+    // production profile, so a desktop process must never need write access
+    // there. The update health gate validates that the marker and its runtime
+    // directory belong to the UID named by /run/user/<uid> before trusting it.
+    // On a dev machine without XDG_RUNTIME_DIR the command fails harmlessly.
     Process {
         id: readyMarker
-        command: ["touch", "/run/punar/shell-ready"]
+        command: ["/bin/sh", "-c", "test -n \"${XDG_RUNTIME_DIR:-}\" && install -d -m 0700 \"${XDG_RUNTIME_DIR}/punar\" && touch \"${XDG_RUNTIME_DIR}/punar/shell-ready\""]
     }
 }

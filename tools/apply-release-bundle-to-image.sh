@@ -193,10 +193,15 @@ PY
         old_uki="$(find "${work}/esp/EFI/Linux" -maxdepth 1 -type f -name "*.efi" -print -quit)"
         [ -n "${old_uki}" ] || { echo "error: no last-known-good UKI exists" >&2; exit 1; }
         new_name="punar_${PUNAR_VERSION}+3-0.efi"
+        default_selector="punar_${PUNAR_VERSION}*.efi"
         install -m 0644 "${PUNAR_UKI}" "${work}/esp/EFI/Linux/${new_name}.new"
         sync -f "${work}/esp/EFI/Linux/${new_name}.new"
         mv "${work}/esp/EFI/Linux/${new_name}.new" "${work}/esp/EFI/Linux/${new_name}"
-        printf "default %s\ntimeout 0\n" "${new_name}" > "${work}/esp/loader/loader.conf.new"
+        # The default is a glob by design. The Boot Loader Specification
+        # stores retry state in the filename, and systemd-bless-boot removes
+        # that suffix after success. A selector naming +3-0 exactly would be
+        # stale after either the first decrement or the final blessing.
+        printf "default %s\ntimeout 0\n" "${default_selector}" > "${work}/esp/loader/loader.conf.new"
         sync -f "${work}/esp/loader/loader.conf.new"
         mv "${work}/esp/loader/loader.conf.new" "${work}/esp/loader/loader.conf"
         sync -f "${work}/esp"
@@ -205,6 +210,7 @@ PY
         [ -f "${old_uki}" ]
         [ "$(sha256sum "${work}/esp/EFI/Linux/${new_name}" | awk "{print \$1}")" \
             = "$(sha256sum "${PUNAR_UKI}" | awk "{print \$1}")" ]
+        grep -Fxq "default ${default_selector}" "${work}/esp/loader/loader.conf"
         objcopy --only-section=.cmdline --output-target=binary \
             "${work}/esp/EFI/Linux/${new_name}" "${work}/cmdline"
         tr -d "\000" < "${work}/cmdline" | grep -Fqi "root=PARTUUID=${PUNAR_SLOT_B_UUID}"
@@ -217,6 +223,7 @@ PY
             printf "slot_readback_sha256=%s\n" "${readback_digest}"
             printf "last_known_good_uki=%s\n" "$(basename "${old_uki}")"
             printf "pending_uki=%s\n" "${new_name}"
+            printf "default_selector=%s\n" "${default_selector}"
             printf "boot_tries_left=3\n"
             printf "boot_tries_done=0\n"
         } > "${PUNAR_REPORT}"

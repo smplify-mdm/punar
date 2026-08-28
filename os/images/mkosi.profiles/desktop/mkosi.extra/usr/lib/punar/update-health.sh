@@ -36,6 +36,21 @@ write_report() {
     mv "${tmp}" "${REPORT}"
 }
 
+desktop_marker_is_trusted() {
+    # The greeter is a system user (UID < 1000). Only accept a marker from a
+    # regular authenticated account, and verify both objects are owned by the
+    # UID encoded in /run/user/<uid> before treating the desktop as ready.
+    for marker in /run/user/[1-9][0-9][0-9][0-9]*/punar/shell-ready; do
+        [ -e "${marker}" ] || continue
+        runtime_dir=${marker%/punar/shell-ready}
+        runtime_uid=${runtime_dir##*/}
+        [ "$(stat -c %u "${runtime_dir}")" = "${runtime_uid}" ] || continue
+        [ "$(stat -c %u "${marker}")" = "${runtime_uid}" ] || continue
+        return 0
+    done
+    return 1
+}
+
 while [ "${attempt}" -lt "${MAX_WAIT}" ]; do
     systemctl --quiet is-active multi-user.target && boot=true || boot=false
 
@@ -55,7 +70,7 @@ while [ "${attempt}" -lt "${MAX_WAIT}" ]; do
         control_plane=false
     fi
 
-    [ -e "${RUN_DIR}/shell-ready" ] && desktop=true || desktop=false
+    desktop_marker_is_trusted && desktop=true || desktop=false
     if [ -s "${STATUS_JSON}" ] \
         && jq -e '.compliance.overall == "compliant"
             and ([.compliance.capabilities[].state]
