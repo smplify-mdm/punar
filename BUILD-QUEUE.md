@@ -338,6 +338,15 @@ seccomp blocks `pidfd_getfd`. The recovery gate,
 partition/encrypt/write/re-read/boot/seed executor, ISO assembly and the
 unattended VM lane are still next.
 
+The executor's compressed-versus-written identity ambiguity is closed before
+its first write: the signed release manifest now binds both the downloaded
+`.zst` digest/size and the exact uncompressed root-slot digest/size. The
+installer plan carries both identities. Download verification compares the
+compressed pair; decompression and the post-`fsync`, device re-read compare the
+uncompressed pair. The existing update proof harness enforces the same rule,
+so installer and updater cannot accidentally compare compressed bytes with a
+raw partition.
+
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
 typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that

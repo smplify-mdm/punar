@@ -12,6 +12,7 @@
     "filename": "punar-desktop-aarch64-uefi-2026.08.27.1.slot.raw.zst",
     "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
     "size_bytes": 734003200,
+    "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
     "uncompressed_size_bytes": 8589934592,
     "compression": "zstd"
   },

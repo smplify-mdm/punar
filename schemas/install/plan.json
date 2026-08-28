@@ -102,6 +102,7 @@
         "filename",
         "digest_sha256",
         "compressed_size_bytes",
+        "uncompressed_digest_sha256",
         "uncompressed_size_bytes"
       ],
       "properties": {
@@ -117,9 +118,24 @@
           "maxLength": 255,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
-        "digest_sha256": { "$ref": "#/$defs/digest" },
-        "compressed_size_bytes": { "type": "integer", "minimum": 1 },
-        "uncompressed_size_bytes": { "type": "integer", "minimum": 1 }
+        "digest_sha256": {
+          "allOf": [{ "$ref": "#/$defs/digest" }],
+          "description": "Signed SHA-256 of the compressed release artifact."
+        },
+        "compressed_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Signed compressed artifact byte count."
+        },
+        "uncompressed_digest_sha256": {
+          "allOf": [{ "$ref": "#/$defs/digest" }],
+          "description": "Signed SHA-256 of the exact bytes written to and re-read from root slot A."
+        },
+        "uncompressed_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Signed root-slot byte count covered by uncompressed_digest_sha256."
+        }
       },
       "additionalProperties": false
     },

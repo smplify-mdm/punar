@@ -702,7 +702,8 @@ Root-only, non-mutating, and audited as `action: "install.plan"`,
 4. reads the first and last 34 logical sectors and binds their SHA-256, the
    serial, optional WWN, size and device node inside the plan;
 5. returns the four fixed partitions, byte offsets/sizes, filesystems,
-   encryption decision, data subvolumes and signed payload digest.
+   encryption decision, data subvolumes, the signed compressed-artifact
+   digest/size and the signed uncompressed-slot digest/size.
 
 The response validates against `schemas/install/plan.json`. `plan_token` is
 SHA-256 over compact, recursively key-sorted JSON of the nested `plan` object

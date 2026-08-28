@@ -59,6 +59,7 @@ BOOT_PLATFORM="$(jq -er '.boot_platform' "${RELEASE_DIR}/release.json")"
 PAYLOAD_NAME="$(jq -er '.payload.filename' "${RELEASE_DIR}/release.json")"
 PAYLOAD_DIGEST="$(jq -er '.payload.digest_sha256' "${RELEASE_DIR}/release.json")"
 PAYLOAD_SIZE="$(jq -er '.payload.size_bytes' "${RELEASE_DIR}/release.json")"
+UNCOMPRESSED_DIGEST="$(jq -er '.payload.uncompressed_digest_sha256' "${RELEASE_DIR}/release.json")"
 UNCOMPRESSED_SIZE="$(jq -er '.payload.uncompressed_size_bytes' "${RELEASE_DIR}/release.json")"
 UKI_NAME="$(jq -er '.boot_artifact.filename' "${RELEASE_DIR}/release.json")"
 UKI_DIGEST="$(jq -er '.boot_artifact.digest_sha256' "${RELEASE_DIR}/release.json")"
@@ -112,6 +113,7 @@ docker run --rm --privileged --platform linux/arm64 \
     --env "PUNAR_PAYLOAD=$(container_path "${PAYLOAD}")" \
     --env "PUNAR_UKI=$(container_path "${UKI}")" \
     --env "PUNAR_VERSION=${VERSION}" \
+    --env "PUNAR_UNCOMPRESSED_DIGEST=${UNCOMPRESSED_DIGEST}" \
     --env "PUNAR_UNCOMPRESSED_SIZE=${UNCOMPRESSED_SIZE}" \
     --env "PUNAR_SLOT_B_UUID=${SLOT_B_UUID}" \
     --env "PUNAR_SLOT_B_FS_UUID=${SLOT_B_FS_UUID}" \
@@ -159,7 +161,9 @@ PY
         [ "${slot_bytes}" = "${PUNAR_UNCOMPRESSED_SIZE}" ] \
             || { echo "error: payload does not exactly fill slot B" >&2; exit 1; }
 
-        expected_raw_digest="$(zstd -dc "${PUNAR_PAYLOAD}" | sha256sum | awk "{print \$1}")"
+        decompressed_digest="$(zstd -dc "${PUNAR_PAYLOAD}" | sha256sum | awk "{print \$1}")"
+        [ "${decompressed_digest}" = "${PUNAR_UNCOMPRESSED_DIGEST}" ] \
+            || { echo "error: uncompressed payload digest mismatch" >&2; exit 1; }
         root_loop="$(losetup --find --show \
             --offset "$((root_start * 512))" --sizelimit "${slot_bytes}" "${PUNAR_IMAGE}")"
         zstd -dc "${PUNAR_PAYLOAD}" \
@@ -172,7 +176,7 @@ PY
             --offset "$((root_start * 512))" --sizelimit "${slot_bytes}" "${PUNAR_IMAGE}")"
         readback_digest="$(dd if="${root_loop}" bs=4M iflag=fullblock,direct count="$((slot_bytes / 4194304))" status=none \
             | sha256sum | awk "{print \$1}")"
-        [ "${readback_digest}" = "${expected_raw_digest}" ] \
+        [ "${readback_digest}" = "${PUNAR_UNCOMPRESSED_DIGEST}" ] \
             || { echo "error: slot B post-write digest mismatch" >&2; exit 1; }
         e2fsck -fn "${root_loop}"
         [ "$(blkid -p -s UUID -o value "${root_loop}")" = "${PUNAR_SLOT_B_FS_UUID}" ] \

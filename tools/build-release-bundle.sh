@@ -127,6 +127,7 @@ docker run --rm --privileged \
 PAYLOAD="${RELEASE_DIR}/${PAYLOAD_NAME}"
 UKI="${RELEASE_DIR}/${UKI_NAME}"
 PAYLOAD_DIGEST="$(shasum -a 256 "${PAYLOAD}" | awk '{print $1}')"
+UNCOMPRESSED_DIGEST="$(shasum -a 256 "${TEMP_DIR}/slot-b.raw" | awk '{print $1}')"
 UKI_DIGEST="$(shasum -a 256 "${UKI}" | awk '{print $1}')"
 PAYLOAD_SIZE="$(wc -c < "${PAYLOAD}" | tr -d ' ')"
 UKI_SIZE="$(wc -c < "${UKI}" | tr -d ' ')"
@@ -145,6 +146,7 @@ jq -n \
     --arg payload_filename "${PAYLOAD_NAME}" \
     --arg payload_digest "${PAYLOAD_DIGEST}" \
     --argjson payload_size "${PAYLOAD_SIZE}" \
+    --arg uncompressed_digest "${UNCOMPRESSED_DIGEST}" \
     --argjson uncompressed_size "${UNCOMPRESSED_SIZE}" \
     --arg uki_filename "${UKI_NAME}" \
     --arg uki_digest "${UKI_DIGEST}" \
@@ -158,7 +160,8 @@ jq -n \
       architecture: "aarch64", boot_platform: "uefi", version: $version,
       channel: $channel, snapshot_pin: $snapshot_pin, overlay_pin: null,
       payload: {filename: $payload_filename, digest_sha256: $payload_digest,
-        size_bytes: $payload_size, uncompressed_size_bytes: $uncompressed_size,
+        size_bytes: $payload_size, uncompressed_digest_sha256: $uncompressed_digest,
+        uncompressed_size_bytes: $uncompressed_size,
         compression: "zstd"},
       boot_artifact: {kind: "uki", filename: $uki_filename,
         digest_sha256: $uki_digest, size_bytes: $uki_size},

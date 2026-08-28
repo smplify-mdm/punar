@@ -116,12 +116,27 @@
     },
     "payload": {
       "type": "object",
-      "required": ["filename", "digest_sha256", "size_bytes", "uncompressed_size_bytes", "compression"],
+      "required": ["filename", "digest_sha256", "size_bytes", "uncompressed_digest_sha256", "uncompressed_size_bytes", "compression"],
       "properties": {
         "filename": { "$ref": "#/$defs/filename" },
-        "digest_sha256": { "$ref": "#/$defs/digest" },
-        "size_bytes": { "type": "integer", "minimum": 1 },
-        "uncompressed_size_bytes": { "type": "integer", "minimum": 1 },
+        "digest_sha256": {
+          "allOf": [{ "$ref": "#/$defs/digest" }],
+          "description": "SHA-256 of the compressed artifact named by filename."
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Compressed artifact size in bytes."
+        },
+        "uncompressed_digest_sha256": {
+          "allOf": [{ "$ref": "#/$defs/digest" }],
+          "description": "SHA-256 of the exact uncompressed bytes written to and re-read from a root slot."
+        },
+        "uncompressed_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exact root-slot byte count covered by uncompressed_digest_sha256."
+        },
         "compression": { "const": "zstd" }
       },
       "additionalProperties": false

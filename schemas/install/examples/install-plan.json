@@ -21,6 +21,7 @@
       "filename": "slot.raw.zst",
       "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
       "compressed_size_bytes": 912680550,
+      "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
       "uncompressed_size_bytes": 8589934592
     },
     "partitions": [
@@ -67,5 +68,5 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "106d9c0976c0ee522d771e16c881f1ac993414ce51c286c3261fe349eb43de72"
+  "plan_token": "0bf1dc00484dc27fe3e3eae4df6b480e420209039a3428d650c39556e4ad13a7"
 }

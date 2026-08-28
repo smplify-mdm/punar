@@ -165,7 +165,7 @@ make it default.
 An install is that sequence with two additions on the front (create the
 partition table; create the LUKS container and filesystems) and one on the
 back (seed the shared partition with `machine-id`, the device id and the
-account). **It reuses the code path, the digest discipline, the failure
+hardware report, but no account). **It reuses the code path, the digest discipline, the failure
 ordering and the audit events that the update design already owns.**
 
 Consequences worth naming:
@@ -953,7 +953,7 @@ rule that keeps it honest:
 > else is a checklist.
 
 Exactly one phase has a real denominator — `write-slot-a`, whose total is
-`release.json`'s `payload.size_bytes`. It gets a bar and a byte count.
+`release.json`'s `payload.uncompressed_size_bytes`. It gets a bar and a byte count.
 The other eight get a state and, where they have one, a real number.
 
 ```text
@@ -1228,7 +1228,8 @@ proposes; the owners of `ipc.md` and `schemas/` decide.
   check to protect an input is relying on an accident.
 - **`install.plan`** takes the answers and returns the *entire* resulting
   layout — partition numbers, type GUIDs, literal UUIDs, byte offsets,
-  sizes, filesystems, subvolumes, the payload digest — **plus the target's
+  sizes, filesystems, subvolumes, both the compressed-artifact and
+  uncompressed-slot payload digests — **plus the target's
   physical identity: `disk.serial`, `disk.wwn` when present, `disk.size_bytes`,
   and `disk.existing_gpt_sha256`, the digest of the first and last 34 LBAs as
   they were read** — and then
@@ -1284,12 +1285,12 @@ specification.
 
 | Phase | Operation | Mechanism |
 |---|---|---|
-| verify | manifest signature, payload digest | in-process ed25519 + sha256; trusted keys from `/usr/share/punar/keys/release/*.pub` |
+| verify | manifest signature, compressed payload digest/size and uncompressed slot digest/size | in-process ed25519 + sha256; trusted keys from `/usr/share/punar/keys/release/*.pub` |
 | partition | create the GPT | `systemd-repart` with `--definitions=` pointing at the shipped directories only |
 | encrypt | LUKS2 format + enroll | `systemd-repart` `Encrypt=key-file`, key on an FD; `systemd-cryptenroll --recovery-key` |
 | format | vfat + btrfs + subvolumes | `systemd-repart` `Format=` / `Subvolumes=` |
 | write-slot-a | stream payload → slot A | `repart` `CopyBlocks=`, or a bounded 4 MiB read/write loop in `punard` — the same loop `update.apply` uses |
-| re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.size_bytes` bytes, sha256, compare. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
+| re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.uncompressed_size_bytes` bytes, sha256, and compare `payload.uncompressed_digest_sha256`. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
 | boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the slot UKI; write `loader.conf`. **`--no-variables` is a decision, not a default** (§7.3.1) |
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log. **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
@@ -1634,7 +1635,7 @@ Gating unless marked. **40 assertions.**
 |---|---|
 | I01 | The ISO is produced from the pinned snapshot by `tools/build-image.sh`; `xorriso -indev … -toc` lists exactly the expected top-level entries and no others. |
 | I02 | The appended ESP partition contains `EFI/BOOT/BOOTX64.EFI` and **exactly one** UKI; that UKI's `.cmdline` section contains `punar.live=1` and **no** `root=PARTUUID=`. |
-| I03 | `release.json` validates against `schemas/update/release-manifest.json`; its `payload.digest_sha256` equals the sha256 of the payload file on the ISO; `release.json.sig` verifies against the per-run ephemeral key. *(Key custody: SIMULATED, user-blocked 7.)* |
+| I03 | `release.json` validates against `schemas/update/release-manifest.json`; its `payload.digest_sha256` equals the sha256 of the compressed payload file on the ISO; decompression yields exactly `uncompressed_size_bytes` with sha256 `uncompressed_digest_sha256`; `release.json.sig` verifies against the per-run ephemeral key. *(Key custody: SIMULATED, user-blocked 7.)* |
 | I04 | The live erofs tree and the slot payload tree are **identical**: same file list, same modes, same per-file sha256, compared against `tree-manifest.json`. |
 
 **Live boot:**
@@ -1664,7 +1665,7 @@ Gating unless marked. **40 assertions.**
 | I15 | **`findmnt --json` shows `/`, `/efi`, `/var`, `/home`, `/var/tmp` as five distinct mounts, and `/home`'s mount id is not `/`'s.** *(This is the assertion that makes `execution-trust.md` V3 true and the mount-mark design buildable.)* |
 | I16 | `/var/lib/punar` is on the `/var` mount, not on the root slot. |
 | I17 | The ESP holds systemd-boot and **exactly one** UKI (slot A's); slot B exists, is zero-filled, and has no UKI. |
-| I18 | sha256 of the first `payload.size_bytes` bytes of slot A equals `release.json`'s `payload.digest_sha256`. |
+| I18 | sha256 of the first `payload.uncompressed_size_bytes` bytes of slot A equals `release.json`'s `payload.uncompressed_digest_sha256`. |
 | I19 | Booting with a **wrong** passphrase does not reach `PUNAR_BOOT_OK`; with the right one it does. |
 | I20 | `/etc/fstab` and `/etc/crypttab` on the installed system are **byte-identical** to the vendor copies inside the payload (nothing per-device was written into `/etc` — ADR-003's rollback-hazard rule). |
 | I21 | `/dev/shm` is mounted `noexec`. |

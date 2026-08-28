@@ -210,6 +210,7 @@ pub struct PayloadArtifact {
     pub filename: String,
     pub digest_sha256: String,
     pub size_bytes: u64,
+    pub uncompressed_digest_sha256: String,
     pub uncompressed_size_bytes: u64,
     pub compression: String,
 }
@@ -324,6 +325,7 @@ impl ReleaseManifest {
         }
         validate_filename(&self.payload.filename)?;
         validate_sha256_hex(&self.payload.digest_sha256)?;
+        validate_sha256_hex(&self.payload.uncompressed_digest_sha256)?;
         if self.payload.size_bytes == 0
             || self.payload.uncompressed_size_bytes == 0
             || self.payload.compression != "zstd"
@@ -831,6 +833,10 @@ mod tests {
     fn runtime_validation_matches_schema_edges() {
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         manifest.payload.filename = "payload:slot.zst".into();
+        assert!(manifest.validate().is_err());
+
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        manifest.payload.uncompressed_digest_sha256 = "not-a-digest".into();
         assert!(manifest.validate().is_err());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();

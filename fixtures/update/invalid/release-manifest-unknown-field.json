@@ -12,6 +12,7 @@
     "filename": "payload.slot.raw.zst",
     "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
     "size_bytes": 4,
+    "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
     "uncompressed_size_bytes": 8,
     "compression": "zstd"
   },

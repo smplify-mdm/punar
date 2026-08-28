@@ -434,7 +434,7 @@ release.json.sig                            detached signature over release.json
 | `channel` | string | The channel this release was published to. A device refuses a manifest whose channel is not its own — a release cannot be smuggled across channels |
 | `snapshot_pin` | string | The ALA date this was built from (`2026/08/20`) — ADR-001's channel object, made visible on the device |
 | `overlay_pin` | object \| null | The `punar-security` overlay pin set, when present (§9) |
-| `payload` | object | `{ digest_sha256, size_bytes, compression }` |
+| `payload` | object | `{ digest_sha256, size_bytes, uncompressed_digest_sha256, uncompressed_size_bytes, compression }`; the first identity covers the downloaded `.zst`, the second covers the exact root-slot bytes |
 | `uki` | object | `{ digest_sha256, size_bytes }` |
 | `min_from` | string \| null | Lowest version that may update *to* this release directly (§3.6, §11.3) |
 | `security` | object | `{ severity: "none"\|"important"\|"critical", advisory_ids: [...] }` — drives the §5.3 tone, never an action |
@@ -497,9 +497,11 @@ The order is the design (Law 3):
      image_id matches this device
      channel matches
      current >= min_from
-4. stream payload → inactive slot, hashing as it goes
-     abort on digest mismatch; slot is not bootable regardless (§11.2)
-5. fsync, then RE-READ the written slot from disk and hash it again
+4. stream payload → inactive slot, hashing both compressed input and
+     uncompressed output; compare both signed manifest digests and sizes
+     (abort on either mismatch; slot is not bootable regardless, §11.2)
+5. fsync, then RE-READ `uncompressed_size_bytes` from the written slot and
+     compare `uncompressed_digest_sha256`
      (proves what landed, not what was sent — catches a lying storage stack)
 6. verify the UKI's digest, then install it to the ESP under a temp name,
      fsync, rename into place as `punar_<version>+3-0.efi`

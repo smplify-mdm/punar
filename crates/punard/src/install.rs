@@ -340,6 +340,7 @@ impl Installer {
                 filename: manifest.payload.filename,
                 digest_sha256: manifest.payload.digest_sha256,
                 compressed_size_bytes: manifest.payload.size_bytes,
+                uncompressed_digest_sha256: manifest.payload.uncompressed_digest_sha256,
                 uncompressed_size_bytes: manifest.payload.uncompressed_size_bytes,
             },
             partitions,
@@ -1372,6 +1373,10 @@ mod tests {
         );
         assert_eq!(first.plan.partitions.len(), 4);
         assert_eq!(first.plan.disk.serial, "TARGET-128G");
+        assert_eq!(
+            first.plan.payload.uncompressed_digest_sha256,
+            "4444444444444444444444444444444444444444444444444444444444444444"
+        );
 
         let mut disk = File::options()
             .write(true)

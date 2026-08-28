@@ -112,6 +112,7 @@ pub struct InstallPayloadPlan {
     pub filename: String,
     pub digest_sha256: String,
     pub compressed_size_bytes: u64,
+    pub uncompressed_digest_sha256: String,
     pub uncompressed_size_bytes: u64,
 }
 
