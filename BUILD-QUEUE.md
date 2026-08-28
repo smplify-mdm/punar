@@ -19,7 +19,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27):** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Generic user-defined web-app install/context support remains M11 work and this proof is not yet a canonical CI gate. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
-| 25 | demonstrate rollback/update mechanism | **NOT MET.** The four-partition A/B foundation is now implemented and ARM64-build/boot-proven locally; inactive-slot write, health-gated blessing and rollback are still unbuilt. |
+| 25 | demonstrate rollback/update mechanism | **LOCALLY PROVEN, NOT YET A CANONICAL GATE.** A signed release fixture was verified, streamed into inactive slot B, read back and hashed, selected with systemd-boot counting, deliberately refused blessing while onboarding prevented desktop health, then passed the authenticated-desktop health gate and was blessed by `systemd-bless-boot`. A dedicated forced-failure proof that exhausts all tries and automatically returns to the last-known-good slot is still required before this item is fully met. |
 | 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
@@ -27,12 +27,14 @@ And spec §81 Test A is the real bar: *"If Smplify management were removed,
 would an engineer still choose Punar?"* The answer must be yes. That is why the
 unmanaged-first work in `HANDOFF.md` §3.3 is not cosmetic.
 
-The update product is now three-channel governed rolling: `stable` (default),
-`dev`, and opt-in `edge`. All three are complete signed A/B images with the
-same verification and rollback path; only promotion cadence and soak differ.
-Project toolchain freshness belongs to `punar-env`, never a partial host
-upgrade. The mechanism is still unbuilt, so this is a binding implementation
-rule rather than a shipped claim.
+The update product is three-channel governed rolling: `stable` (default),
+`dev`, and opt-in `edge`. All three deliver complete signed A/B images through
+the same verification and rollback path; only promotion cadence and soak
+differ. Project toolchain freshness belongs to `punar-env`, never a partial
+host upgrade. The core apply, boot-counting, health-gate, and blessing path is
+implemented and locally proven. Channel transport/promotion, production key
+custody, the forced automatic-fallback gate, and canonical CI coverage remain
+unshipped.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
@@ -42,11 +44,14 @@ configuration syntax and must not leak back into the shell or user guides.
 
 ## 1. Immediately
 
-### 1.1 Start from the verified head
-Commit `ba3dc945` and all preceding handed-off work are on `origin/main`.
-[Run 33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
-is green on all seven jobs, including x86_64/ARM64 code contracts, the image,
-minimal boot, and full graphical desktop. **Never push while a CI run is in flight** — the
+### 1.1 Start from the remote head
+`origin/main` is the durable source of truth. Before handing off, require
+`git rev-parse HEAD` and `git rev-parse origin/main` to match and leave no
+uncommitted source changes. Run `33050021488` is the last historical seven-job
+green baseline; newer work adds native onboarding, recovery, the application
+catalog, ARM64 A/B update apply, health-gated blessing, and clean-checkout image
+fixes. Use the newest run on the current remote head rather than treating that
+historical run as current. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
 
 ---
@@ -248,8 +253,13 @@ The minimal ARM64 image now also carries the real four-partition foundation:
 1 GiB ESP, populated 8 GiB slot A, empty 8 GiB slot B and 16 GiB shared btrfs
 with isolated `/var`, `/home` and `/var/tmp`. A content-aware gate passed all
 five layout groups, and the result reached `PUNAR_BOOT_OK` in about six seconds
-under Apple HVF. Its corrected sparse qcow2 digest is
-`b3a9a5b97a501c0e7d92f8cb6c0bf01b2988f2909a11e01b1cfbc7c1df18c89c`.
+under Apple HVF. The exact-head ARM64 release artifact rebuilt on 2026-08-27 is
+950 MiB with SHA-256
+`faf62850fd12cc476209af3750c86a7e0ec40b4bea2f41743a1a9b2830ef2db1`.
+Its provenance records source commit `e03598ec`, Debian snapshot
+`20260820T000000Z`, mkosi 26, and generic UEFI/QEMU ARM64 scope. Build outputs
+remain intentionally ignored; source, pins, and build recipes are the durable
+GitHub inputs.
 
 An unchanged-input comparison found the ESP and root-slot regions stable but
 the full qcow2 non-identical because btrfs assigns fresh UUIDs to the three
@@ -257,11 +267,11 @@ subvolumes. The filesystem/device identities are fixed; subvolume UUIDs are
 not configurable at the pinned toolchain. Promotion therefore signs the exact
 artifact and makes no bit-for-bit reproducibility claim.
 
-**Scope boundary:** the architecture-aware canonical CI gate is wired but has
-not yet produced its first green run. These results prove QEMU's generic ARM
-`virt` platform and the *layout*, not Raspberry Pi firmware/peripherals, a real
-GPU, Secure Boot, an A/B update or rollback, an installer, or any physical ARM
-machine.
+**Scope boundary:** these results prove QEMU's generic ARM `virt` platform,
+the A/B layout, inactive-slot apply, and a healthy counted boot being blessed.
+They do not prove Raspberry Pi firmware/peripherals, a real GPU, Secure Boot,
+automatic fallback after exhausting failed boots, an installer, or any
+physical ARM machine.
 
 **Next sequence:**
 

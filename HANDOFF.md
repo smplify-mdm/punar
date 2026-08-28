@@ -32,9 +32,14 @@ are that machinery.
 
 ## 2. Current state
 
-**Green.** Run [33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
+**Last fully green canonical baseline:** run
+[33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
 on `ba3dc945`, all seven jobs, including x86_64/ARM64 code contracts, the image,
-minimal boot, the full graphical desktop, and all ten in-VM exercises.
+minimal boot, the full graphical desktop, and all ten in-VM exercises. Newer
+work on `origin/main` adds native onboarding, recovery, the app catalog, ARM64
+A/B apply and health-gated boot blessing. Treat the newest workflow run on the
+current remote head as authoritative; do not describe a newer head as green
+because this historical baseline passed.
 
 | Exercise | Assertions | What it proves |
 |---|---:|---|
@@ -278,10 +283,11 @@ tangible argument for ADR-005.
 > the summary.
 
 ### 7.1 Handed-off commits pushed
-The handed-off work, device classes, personal rolling-update controls,
-latency/memory follow-ups, and verified desktop-field work are pushed;
-[run 33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
-is green on all seven jobs at `ba3dc945`.
+`origin/main` is the durable source of truth. The handed-off work, device
+classes, personal rolling-update controls, latency/memory follow-ups, verified
+desktop-field work, native onboarding, recovery, app catalog, and ARM64 A/B
+update path are pushed. Before handoff, require local `HEAD` to equal
+`origin/main` and consult the newest workflow run for that exact remote commit.
 
 ### 7.2 Measured lazy-loading — first pass proven, second pass next
 The corrected probe in run 33044217553 identified the real `qs` executable and

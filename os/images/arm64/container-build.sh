@@ -233,6 +233,15 @@ reset_staged_architecture_content() {
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci" \
            "${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
+
+    # Empty directories are not represented by git. A clean checkout has no
+    # ARM profile-local extra trees until staging runs, but the minimal image
+    # is intentionally built before desktop staging. Keep both profile roots
+    # present so mkosi's profile discovery never depends on residue from an
+    # earlier local build.
+    install -d \
+        "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra" \
+        "${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra"
 }
 
 run_mkosi() {
