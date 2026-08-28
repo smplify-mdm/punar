@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# V-REPART: executable proof for the four systemd-repart assumptions in
+# V-REPART: executable proof for the six systemd-repart assumptions in
 # docs/design/installer.md section 11. Run as root inside either pinned image
 # builder container; the test creates only disposable sparse disks under /run.
 set -euo pipefail
@@ -29,8 +29,12 @@ WORK_DIR="$(mktemp -d /run/punar-repart-spike.XXXXXX)"
 LOOP_DEVICE=""
 CRYPT_NAME="punar-repart-spike-$$"
 RECOVERY_CRYPT_NAME="${CRYPT_NAME}-recovery"
+STREAM_CRYPT_NAME="${CRYPT_NAME}-streaming"
 
 cleanup() {
+    if [ -e "/dev/mapper/${STREAM_CRYPT_NAME}" ]; then
+        cryptsetup close "${STREAM_CRYPT_NAME}" || true
+    fi
     if [ -e "/dev/mapper/${RECOVERY_CRYPT_NAME}" ]; then
         cryptsetup close "${RECOVERY_CRYPT_NAME}" || true
     fi
@@ -56,12 +60,18 @@ new_disk() {
 
 attach_disk() {
     local path="$1"
+    attach_partition "${path}" 0
+}
+
+attach_partition() {
+    local path="$1"
+    local index="$2"
     local partition_start
     local partition_size
 
     read -r partition_start partition_size < <(
         sfdisk --json "${path}" \
-            | python3 -c 'import json,sys; p=json.load(sys.stdin)["partitiontable"]["partitions"][0]; print(p["start"], p["size"])'
+            | python3 -c 'import json,sys; p=json.load(sys.stdin)["partitiontable"]["partitions"][int(sys.argv[1])]; print(p["start"], p["size"])' "${index}"
     )
     LOOP_DEVICE="$(losetup \
         --find \
@@ -235,7 +245,56 @@ unset recovery_key
 detach_disk
 echo "V-REPART PASS: LUKS2 filesystem opens with installer and typed recovery slots"
 
-# 4. The install payload lives below /run and is copied block-for-block into
+# 4. The production streaming overlay must remove CopyBlocks= without
+# changing the four-partition ABI, and the pinned repart must consume its
+# encryption key through /dev/stdin. This is the exact mechanism punard can
+# drive with a pipe: no key file and no 8 GiB payload.raw below /run.
+mkdir -p "${WORK_DIR}/streaming-rendered"
+"/work/tools/render-repart-definitions.sh" \
+    "${WORK_DIR}/streaming-rendered" \
+    /work/os/images/repart.d/install \
+    /work/os/images/repart.d/install-encrypted \
+    /work/os/images/repart.d/install-streaming
+if grep -Rq '^CopyBlocks=' "${WORK_DIR}/streaming-rendered"; then
+    echo "error: production streaming definitions still require CopyBlocks" >&2
+    exit 1
+fi
+new_disk "${WORK_DIR}/streaming.raw" 34G
+streaming_key="punar-repart-stdin-proof-256-bits"
+printf '%s' "${streaming_key}" \
+    | systemd-repart \
+        --dry-run=no \
+        --offline=no \
+        --empty=force \
+        --pretty=no \
+        --key-file=/dev/stdin \
+        --definitions="${WORK_DIR}/streaming-rendered" \
+        "${WORK_DIR}/streaming.raw" >/dev/null
+streaming_table="$(sfdisk --json "${WORK_DIR}/streaming.raw")"
+python3 -c '
+import json, sys
+parts = json.load(sys.stdin)["partitiontable"]["partitions"]
+expected = ["PUNAR-ESP", "PUNAR-ROOT-A", "PUNAR-ROOT-B", "PUNAR-DATA"]
+assert [part.get("name") for part in parts] == expected
+' <<<"${streaming_table}"
+attach_partition "${WORK_DIR}/streaming.raw" 1
+if blkid --probe --output value --match-tag TYPE "$(partition_path)" >/dev/null 2>&1; then
+    echo "error: streaming root A was formatted before punard wrote it" >&2
+    exit 1
+fi
+detach_disk
+attach_partition "${WORK_DIR}/streaming.raw" 3
+[ "$(blkid --probe --output value --match-tag TYPE "$(partition_path)")" = "crypto_LUKS" ]
+cryptsetup luksDump "$(partition_path)" | grep -Eq '^Version:[[:space:]]+2$'
+printf '%s' "${streaming_key}" \
+    | cryptsetup open --key-file=- "$(partition_path)" "${STREAM_CRYPT_NAME}"
+[ "$(blkid --probe --output value --match-tag TYPE "/dev/mapper/${STREAM_CRYPT_NAME}")" = "btrfs" ]
+cryptsetup close "${STREAM_CRYPT_NAME}"
+unset streaming_key
+detach_disk
+echo "V-REPART PASS: fixed streaming layout consumes its LUKS key from a pipe"
+
+# 5. The install payload lives below /run and is copied block-for-block into
 # slot A. Compare the exact payload digest with the first payload-sized bytes
 # of the created partition, rather than trusting repart's success status.
 mkdir -p "${WORK_DIR}/copy-definitions"
@@ -265,4 +324,4 @@ partition_digest="$(dd if="$(partition_path)" bs=1M count=8 status=none | sha256
 detach_disk
 echo "V-REPART PASS: CopyBlocks accepts a /run path and copies exact bytes"
 
-echo "V-REPART PASS: required capabilities hold with the explicit merge fallback"
+echo "V-REPART PASS: required capabilities hold with streaming and merge fallbacks"

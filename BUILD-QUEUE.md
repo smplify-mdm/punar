@@ -347,6 +347,17 @@ uncompressed pair. The existing update proof harness enforces the same rule,
 so installer and updater cannot accidentally compare compressed bytes with a
 raw partition.
 
+The pinned systemd 261.2 transaction probe also closed the 8 GiB temporary
+payload problem. `systemd-repart` does not treat `--defer-partitions=root` as
+permission to ignore a configured `CopyBlocks=` source, and `--key-file=-` is
+not accepted. The fixed shipped `install-streaming/20-root-a.conf` overlay
+removes `CopyBlocks=` without changing the partition ABI, and `/dev/stdin`
+does accept the passphrase from a pipe. V-REPART now proves the exact merged
+production definition set creates four partitions, leaves root A blank,
+creates LUKS2+btrfs data, and opens it with the piped key. `punard` can
+therefore own a bounded verified slot write without storing either the secret
+or an 8 GiB raw payload on the live filesystem.
+
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
 typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that

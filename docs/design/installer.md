@@ -202,6 +202,9 @@ os/images/
   repart.d/install/*.conf          NEW — THE DEVICE LAYOUT. Single source of truth.
                                    Staged into the image at
                                    /usr/share/punar/repart.d/install/
+  repart.d/install-encrypted/      NEW — fixed LUKS2 overlay for shared data
+  repart.d/install-streaming/      NEW — fixed root-A overlay without CopyBlocks=;
+                                   punard owns the bounded verified write
   mkosi.profiles/dev/              NEW — every CI and development convenience (§8.2)
   mkosi.profiles/desktop/          MODIFIED — product content only; postinst loses
                                    the punar user; greetd loses [initial_session]
@@ -535,10 +538,15 @@ argument for this layout.
                    Subvolumes=/@var /@home /@var-tmp
 ```
 
-and one overlay directory, `repart.d/install-encrypted/`, containing a
-single complete `50-data.conf` with `Encrypt=key-file`. It intentionally does
-not set `EncryptKDF=minimal`; that shortcut belongs only to V-REPART's random
+and two fixed overlay directories. `repart.d/install-encrypted/` contains a
+complete `50-data.conf` with `Encrypt=key-file`. It intentionally does not set
+`EncryptKDF=minimal`; that shortcut belongs only to V-REPART's random
 disposable test key, never to a person's passphrase.
+`repart.d/install-streaming/` contains a complete `20-root-a.conf` without
+`CopyBlocks=`. The production installer renders both overlays after the base,
+so repart creates and formats the fixed layout while `punard` decompresses and
+writes slot A with a bounded 4 MiB buffer. This avoids materializing an 8 GiB
+`payload.raw` in `/run`; no caller chooses either definitions directory.
 
 **V-REPART falsified the original merge assumption.** Pinned systemd 261.2
 accepts repeated `--definitions=`, but the **first** directory wins for a
@@ -1747,12 +1755,15 @@ fixture and because "the disk was not touched" is the same check five times.
 A spike first, because one experiment can invalidate the shape of §4.7:
 
 **V-REPART — COMPLETE on native ARM64; native x86_64 is the cross-architecture
-CI authority.** `tests/images/repart-spike.sh` proved four properties against
+CI authority.** `tests/images/repart-spike.sh` proved six properties against
 systemd 261.2: repeated directories are first-wins; the explicit renderer is
 later-wins; `MakeDirectories=` + `Subvolumes=` creates the three real btrfs
-subvolumes; `Encrypt=key-file` creates an openable LUKS2 filesystem; and
-`CopyBlocks=` from `/run` reproduces the exact payload digest. The fallback
-became the implementation because the original priority assumption was false.
+subvolumes; `Encrypt=key-file` creates an openable LUKS2 filesystem and a typed
+recovery slot; the fixed streaming layout consumes its passphrase from a pipe,
+creates blank root A, and does not require `payload.raw`; and `CopyBlocks=`
+from `/run` reproduces the exact payload digest. The fallbacks became the
+implementation because the original priority and deferred-copy assumptions
+were false.
 
 Then, in order, because each step is only testable after the one before:
 
