@@ -346,13 +346,13 @@ QtObject {
             return -1;
         var found = root.findProject(target);
         var id = found !== null ? found.id : root.freeWorkspaceId();
-        Hyprland.dispatch("workspace " + id);
+        HyprlandActions.focusWorkspace(id);
         // A live workspace already carrying the name needs no rename; a
         // stored-but-not-yet-created one does (WorkspaceState also applies
         // it on createworkspacev2 — doing it here makes the verb
         // deterministic rather than dependent on event ordering).
         if (found === null || !found.live)
-            Hyprland.dispatch("renameworkspace " + id + " " + target);
+            HyprlandActions.renameWorkspace(id, target);
         return id;
     }
 

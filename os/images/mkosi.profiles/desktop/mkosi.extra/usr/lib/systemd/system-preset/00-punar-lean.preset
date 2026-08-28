@@ -1,0 +1,15 @@
+# Punar owns these lifecycle decisions. Package defaults must not silently
+# add rootful API sockets, periodic container jobs, a second firewall owner,
+# or a network-online boot barrier to a lean developer workstation.
+disable podman*.service
+disable podman*.socket
+disable podman*.timer
+disable netavark*.service
+disable netavark*.socket
+disable nftables.service
+disable systemd-networkd-wait-online.service
+disable systemd-homed*.service
+disable dpkg-db-backup.timer
+
+# greetd owns VT1 on a graphical product image.
+disable getty@*.service

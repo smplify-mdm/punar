@@ -11,7 +11,9 @@ members = [
     "crates/punar-env",
     "crates/punar-mock-smplify",
     "crates/punar-netd",
+    "crates/punar-onboard",
     "crates/punar-policy",
+    "crates/punar-recovery",
     "crates/punar-secrets",
     "crates/punar-workspace",
     "crates/punarctl",
@@ -33,6 +35,7 @@ punar-common = { path = "crates/punar-common" }
 # reimplementation of the same protocol (milestone-10.md section 7).
 punar-mock-smplify = { path = "crates/punar-mock-smplify" }
 punar-policy = { path = "crates/punar-policy" }
+punar-recovery = { path = "crates/punar-recovery" }
 
 # External
 serde = { version = "1", features = ["derive"] }
@@ -62,3 +65,22 @@ signal-hook = "0.3"
 # serde_norway or unsafe-libyaml-norway as of 2026-08); documented fallback
 # per the M6 plan: pin the frozen serde_yaml 0.9.34+deprecated.
 serde_norway = "0.9"
+# First-run identity is one of the few places a plaintext authenticator exists
+# in memory. zeroize keeps that boundary explicit; the unsafe volatile write
+# stays inside the audited dependency, as with rustix and signal-hook above.
+zeroize = "1"
+# Device display names are counted as human-visible grapheme clusters and
+# normalized before deriving an RFC-1123 hostname. These crates are pure Rust
+# and add no resident process or runtime service.
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+# Recovery escrow is RFC 9180 HPKE, not a Punar cryptographic construction.
+# Pin the patch because the upstream crate explicitly reserves patch-level
+# changes in its `danger` API; Punar does not use that module, but an exact
+# security dependency is easier to audit. Disable the default post-quantum
+# suites: this protocol fixes one reviewed suite and does not negotiate.
+hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "chacha", "x25519"] }
+base64 = "0.22"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+getrandom = "0.4"

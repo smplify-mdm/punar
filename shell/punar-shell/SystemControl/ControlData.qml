@@ -72,6 +72,12 @@ Scope {
     // Live filter text from the `/` search field.
     property string query: ""
 
+    // Local-only filter and catalog for the Date & Time chooser. The list
+    // comes from the installed tzdata package; opening Settings performs no
+    // network lookup.
+    property string timezoneQuery: ""
+    property var timezoneNames: ["UTC"]
+
     // The capability awaiting a typed reason ([E] · §48 requires one).
     // "" = nothing armed. Cleared by Esc, by moving the selection and by
     // closing the panel — a request never stays armed behind the reader.
@@ -89,6 +95,12 @@ Scope {
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
+
+    // Raised by the Applications pane. An installed entry is a typed
+    // DesktopEntry launch; a catalog id opens the exact inspect/install
+    // card; two empty arguments mean browse everything. shell.qml is the
+    // only place allowed to connect those sibling surfaces.
+    signal applicationRequested(var entry, string catalogId)
 
     // ---------------------------------------------------------------
     // Small helpers. Tones are STRINGS here ("ok"/"warn"/"bad"/"") —
@@ -325,6 +337,12 @@ Scope {
     }
 
     readonly property var grantList: {
+        // The protected approvals projection is event-driven and updates in
+        // the same transaction that resolves the approval. Prefer it once
+        // loaded so a newly approved grant makes this open pane actionable
+        // immediately. The one-shot CLI probe remains the startup fallback.
+        if (Approvals.loaded)
+            return Array.isArray(Approvals.grants) ? Approvals.grants : [];
         var p = data.obj(grantsProbe.payload);
         if (p === null || !Array.isArray(p.grants))
             return [];
@@ -473,6 +491,33 @@ Scope {
         onLoadFailed: data.secureBootValue = ""
     }
 
+    function parseTimezones(body: string): void {
+        var seen = {"UTC": true};
+        var zones = ["UTC"];
+        var lines = String(body).split("\n");
+        for (var i = 0; i < lines.length; ++i) {
+            if (lines[i] === "" || lines[i].indexOf("#") === 0)
+                continue;
+            var fields = lines[i].split("\t");
+            if (fields.length < 3)
+                continue;
+            var zone = fields[2];
+            if (!seen[zone] && /^[A-Za-z0-9_+-]+(\/[A-Za-z0-9_+-]+)*$/.test(zone)) {
+                seen[zone] = true;
+                zones.push(zone);
+            }
+        }
+        zones.sort();
+        data.timezoneNames = zones;
+    }
+
+    FileView {
+        id: timezoneCatalog
+        path: "/usr/share/zoneinfo/zone.tab"
+        blockLoading: true
+        onLoaded: data.parseTimezones(timezoneCatalog.text())
+    }
+
     function refreshKernelFacts(): void {
         routeFile.reload();
         operFile.reload();
@@ -517,10 +562,12 @@ Scope {
                 section: "System",
                 items: [
                     {id: "network", name: "Network"},
+                    {id: "datetime", name: "Date & Time"},
                     {id: "bluetooth", name: "Bluetooth"},
                     {id: "displays", name: "Displays"},
                     {id: "audio", name: "Audio"},
-                    {id: "power", name: "Power"}
+                    {id: "power", name: "Power"},
+                    {id: "applications", name: "Applications"}
                 ]
             },
             {section: "Security", items: securityItems},
@@ -630,6 +677,12 @@ Scope {
             // a process so this shell could send a message to itself and
             // open the same panel twice. One request, one opening.
             data.aiPanelRequested();
+        } else if (kind === "applicationBrowser") {
+            data.applicationRequested(null, "");
+        } else if (kind === "application") {
+            data.applicationRequested(a.entry, "");
+        } else if (kind === "catalogApplication") {
+            data.applicationRequested(null, String(a.appId));
         } else if (kind === "privilege") {
             // §48 requires a reason, so the reason is asked for before
             // anything is sent. Esc cancels; Enter submits.
@@ -674,6 +727,8 @@ Scope {
     function select(itemId: string): void {
         data.selectedId = itemId;
         data.reasonForCapability = "";
+        if (itemId !== "datetime")
+            data.timezoneQuery = "";
     }
 
     function refreshAll(): void {
@@ -807,6 +862,8 @@ Scope {
     function systemView(id: string): var {
         if (id === "network")
             return data.viewNetwork();
+        if (id === "datetime")
+            return data.viewDateTime();
         if (id === "bluetooth") {
             return {
                 title: "Bluetooth",
@@ -825,7 +882,173 @@ Scope {
             return data.viewAudio();
         if (id === "power")
             return data.viewPower();
+        if (id === "applications")
+            return data.viewApplications();
         return null;
+    }
+
+    function timezoneRows(current: string, writable: bool): var {
+        var rows = [];
+        var queryText = data.timezoneQuery.trim().toLowerCase();
+        var common = [
+            "UTC", "America/Los_Angeles", "America/New_York",
+            "Europe/London", "Asia/Kolkata"
+        ];
+        var source = queryText === "" ? common : data.timezoneNames;
+        var added = {};
+        if (current !== "" && current !== "unknown" && queryText === "")
+            source = [current].concat(source);
+        for (var i = 0; i < source.length && rows.length < 24; ++i) {
+            var zone = String(source[i]);
+            if (added[zone] || (queryText !== "" && zone.toLowerCase().indexOf(queryText) < 0))
+                continue;
+            added[zone] = true;
+            var row = {
+                name: zone,
+                meta: zone === current ? "Current timezone" : (writable ? "Select to use this timezone" : "Request access below to change"),
+                tone: zone === current ? "ok" : "",
+                tag: zone === current ? "Current" : ""
+            };
+            if (writable && zone !== current) {
+                row.action = {
+                    kind: "capset",
+                    path: "time.timezone",
+                    value: zone
+                };
+            }
+            rows.push(row);
+        }
+        return rows;
+    }
+
+    function viewDateTime(): var {
+        var exp = data.explainFor("time.timezone");
+        var cap = data.capFor("time.timezone");
+        if (exp === null || cap === null) {
+            return {
+                title: "Date & Time",
+                sub: "System · timezone",
+                dashed: data.awaiting()
+            };
+        }
+        var current = data.stateWord(exp.effective_value);
+        var source = data.obj(exp.source);
+        var sourceKind = data.str(source, "kind", "");
+        var grant = data.grantFor("time.timezone");
+        var writable = grant !== null && cap.mutable === true;
+        var mode = sourceKind === "local_user_preference"
+            ? "Manual"
+            : (sourceKind.indexOf("organization_") === 0
+                ? "Managed"
+                : (sourceKind === "os_secure_default" ? "Automatic · UTC fallback" : "Automatic from network"));
+        var actions = [];
+        if (writable) {
+            actions.push({
+                hotkey: "R",
+                label: "Revoke access",
+                tone: "danger",
+                kind: "revoke",
+                grantId: data.str(grant, "grant_id", "")
+            });
+        } else {
+            actions.push({
+                hotkey: "E",
+                label: exp.user_override_permitted === true ? "Change timezone · Approval required" : "Request exception · Approval required",
+                tone: "amber",
+                kind: "privilege",
+                path: "time.timezone"
+            });
+        }
+        actions.push({
+            hotkey: "P",
+            label: "View policy",
+            tone: "ghost",
+            kind: "goto",
+            target: "policies"
+        });
+        return {
+            title: "Date & Time",
+            sub: "System · local tzdata · no location service",
+            zonePicker: true,
+            kv: [
+                {k: "Timezone", v: current},
+                {k: "Mode", v: mode, mono: false},
+                {k: "Source", v: data.str(source, "name", "Unknown source")}
+            ],
+            rows: data.timezoneRows(current, writable),
+            emptyRows: "No timezone matches that search",
+            grant: grant,
+            actions: actions,
+            note: writable
+                ? "Search the IANA timezone catalog and choose a row. The change is applied through punard, audited, and protected from later network overrides."
+                : "Punar selects a timezone from RFC 4833 network information when available and otherwise uses UTC. To choose manually, request short-lived access below; no IP address or location is sent to a third party."
+        };
+    }
+
+    function viewApplications(): var {
+        // Installed applications are the compositor session's live desktop
+        // entry index. Available applications are the finite catalog shipped
+        // in the signed root slot. Neither path performs network I/O merely
+        // because the reader opened System Control.
+        var rows = [];
+        var installed = Apps.search("", 0);
+        var knownIds = ({});
+        for (var i = 0; i < installed.length; i++) {
+            var installedId = Apps.bareId(installed[i]);
+            knownIds[installedId] = true;
+            rows.push({
+                name: String(installed[i].name),
+                meta: "Installed · select to open",
+                tone: "",
+                tag: "Installed",
+                action: {
+                    kind: "application",
+                    entry: installed[i]
+                }
+            });
+        }
+
+        var available = Catalog.search("", 0);
+        var availableCount = 0;
+        for (var k = 0; k < available.length; k++) {
+            var app = available[k];
+            if (knownIds[String(app.id).toLowerCase()] === true)
+                continue;
+            availableCount++;
+            rows.push({
+                name: String(app.name),
+                meta: data.titleCase(String(app.category)) + " · " + data.titleCase(String(app.trustTier)) + " · select to inspect",
+                tone: "",
+                tag: "Available",
+                action: {
+                    kind: "catalogApplication",
+                    appId: String(app.id)
+                }
+            });
+        }
+
+        var version = Catalog.document && typeof Catalog.document.catalogVersion === "string"
+            ? Catalog.document.catalogVersion : "unavailable";
+        return {
+            title: "Applications",
+            sub: "System · " + installed.length + " installed · " + availableCount + " available · catalog " + version,
+            pill: {
+                label: Status.enrolled ? "Policy applies" : "User installs allowed"
+            },
+            rows: rows,
+            emptyRows: "No installed or catalog applications are visible",
+            note: Status.enrolled
+                ? "Installed entries come from this live session; available entries come from the signed image catalog. Organization policy is evaluated by punard before any install."
+                : "Installed entries come from this live session; available entries come from the signed image catalog. Opening the browser below fetches nothing until you choose an application.",
+            actions: [
+                {
+                    hotkey: "O",
+                    label: "Browse and install",
+                    tone: "ghost",
+                    kind: "applicationBrowser"
+                }
+            ]
+        };
     }
 
     function viewNetwork(): var {

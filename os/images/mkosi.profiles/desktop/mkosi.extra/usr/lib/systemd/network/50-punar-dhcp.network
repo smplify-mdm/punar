@@ -37,3 +37,7 @@ IPv6PrivacyExtensions=yes
 # systemd's default (SendHostname=yes).
 SendHostname=no
 UseDomains=yes
+# Honor RFC 4833 timezone information when the local DHCP server provides it.
+# This receives a network setting; it does not call an IP-geolocation service
+# or disclose the device address to a third party. UTC remains the fallback.
+UseTimezone=yes

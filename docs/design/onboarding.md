@@ -622,9 +622,12 @@ you, not by us. That is what "encrypted" means.
 password made of public facts); a Smplify-held escrow on a personal device
 (the §8 unmanaged-first line — a personal device holds no vendor key); a
 "reset via email" path (there is no email in this account model, §1.1). On an
-**enrolled** device an org-held escrow of the *disk* key is a legitimate
-enterprise requirement — it belongs to `installer.md` and the enrollment
-chain, not to the local account model, and this document does not create one.
+**enrolled** device whose organization requires it, the installer generates a
+separate disk recovery key on-device and escrows only its tenant-wrapped form
+to Smplify. This is automatic and does not expose the key to the end user, but
+the fact and the organization that can recover the disk remain visible and
+audited. The mechanism and its trust boundary belong to `installer.md` §5.3;
+the local account model never handles that key.
 
 ### 1.9 What is stored, where, and what an update must never lose
 
@@ -1114,7 +1117,7 @@ root:root`:
   "installedAt": "2026-08-26T09:14:03Z",
   "imageVersion": "punar-0.1.0-…",
   "diskEncrypted": true,
-  "diskRecoveryKeyShown": true
+  "diskRecovery": { "mode": "personal_copy" }
 }
 ```
 
@@ -1123,10 +1126,12 @@ treats it as advisory in every case: a missing, malformed or unreadable seed
 degrades to the §2.1 defaults with no error shown to the user, because a
 person opening a new laptop should not be shown a parser's opinion.
 
-`diskEncrypted` and `diskRecoveryKeyShown` are read for one purpose: if the
-disk is **not** encrypted, stage 03's recovery-code copy changes, because
-"nothing on this disk can be recovered" is false on an unencrypted disk and
-Punar does not print sentences that are false on the device printing them.
+`diskEncrypted` and `diskRecovery.mode` are read for one purpose: stage 03's
+recovery copy must be true for this device. `personal_copy` says the disk owner
+received a key; `organization_escrow` says the named organization can recover
+the disk; `none` accompanies an unencrypted install. First boot never reads or
+receives recovery material. If the disk is **not** encrypted, "nothing on this
+disk can be recovered" is false and Punar does not print it.
 
 The installer writes **nothing else** first boot depends on, and first boot
 writes nothing back into `install/`.
@@ -1141,8 +1146,10 @@ rather than restated here:
 2. Create `/var` and `/home` per ADR-003, with `/var/lib/punar` present and
    `0700 root root` before first boot.
 3. Write `seed.json` (§4.3), or write nothing.
-4. Own the disk secret and the disk recovery key entirely, and display them
-   at install time — first boot never shows, stores or asks for them.
+4. Own the disk secret and disk recovery key entirely. On a personal install,
+   display the recovery key once; on an enrolled escrow-required install,
+   wrap and escrow it without displaying it. First boot never shows, stores or
+   asks for recovery material in either lane.
 5. Reserve ESP room for the §1.8 Layer-2 recovery entry as a **fourth** UKI,
    or record explicitly that Layer 2 does not exist yet — in which case §1.8
    Layer 2 becomes dashed and §8's honest-limits list gains a line.

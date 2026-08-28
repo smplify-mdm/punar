@@ -5,7 +5,7 @@
 //! separate lifetimes, and lifting four short functions into `punar-common`
 //! would widen a *contract* crate for convenience. The behavior — including
 //! the `O_EXCL` temp-file rule that keeps root from following a planted
-//! symlink in the user-writable `/run/punar` (spec section 61) — is
+//! sibling symlink even if a deployment supplies a writable directory — is
 //! identical, and the tests below re-prove it here.
 
 use std::fs::{self, OpenOptions};
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 ///
 /// The temp file is opened `O_CREAT|O_EXCL` because this helper also writes
 /// `/run/punar/agents.json` into a directory owned by the unprivileged
-/// session user (tmpfiles: `0755 punar:punar`), where a predictable temp
+/// root (tmpfiles: `0755 root:root`), where a predictable temp
 /// name opened without `O_EXCL` would let that user plant a symlink and
 /// have root truncate an arbitrary file (spec section 61). A pre-existing
 /// temp file (stale leftover or planted link) is unlinked — `remove_file`

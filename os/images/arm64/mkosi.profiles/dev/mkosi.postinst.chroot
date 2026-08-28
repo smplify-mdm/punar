@@ -1,0 +1,30 @@
+#!/bin/sh
+# Debian/ARM64 development-profile account. Product adapters remain in the
+# desktop profile, so a release build cannot acquire these credentials.
+set -eu
+
+groupadd --force punar
+
+supplementary=""
+for group in sudo video input dialout; do
+    if getent group "${group}" >/dev/null 2>&1; then
+        if [ -n "${supplementary}" ]; then
+            supplementary="${supplementary},${group}"
+        else
+            supplementary="${group}"
+        fi
+    fi
+done
+
+# Fixed dev-only SHA-512 crypt for password "punar". chpasswd would generate
+# a new salt on every build and make the disk, initrd credential and UKI drift.
+# Dollar signs below are literal crypt delimiters.
+# shellcheck disable=SC2016
+useradd --create-home --gid punar --groups "${supplementary}" \
+    --shell /bin/bash \
+    --password '$6$punar-arm64-dev$gWTgk1f0Vl76wHmu/qPIXM89H0xcFqIkBBj9DEPteme3zLnOiSlzdNK/fp4y4jowrT0WWdFFdhUFHC5.Ejxe3/' \
+    punar
+
+rm -f /etc/subuid /etc/subgid
+printf '%s\n' 'punar:100000:65536' > /etc/subuid
+printf '%s\n' 'punar:100000:65536' > /etc/subgid

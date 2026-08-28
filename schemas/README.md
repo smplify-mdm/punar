@@ -11,7 +11,7 @@ Contract layer for Punar (Smplify). Every schema in this tree follows the conven
   https://schemas.punar.dev/v1alpha1/<domain>/<name>.json
   ```
 
-  where `<domain>` is the directory under `schemas/` (`common`, `ai-agent`, `audit`, `capability`, `desired-state`, `network`, `policy`, `project`) and `<name>` is the file basename. Example: `https://schemas.punar.dev/v1alpha1/audit/audit-event.json`.
+  where `<domain>` is the directory under `schemas/` (`common`, `ai-agent`, `audit`, `capability`, `desired-state`, `network`, `policy`, `project`, `update`) and `<name>` is the file basename. Example: `https://schemas.punar.dev/v1alpha1/audit/audit-event.json`.
 - The `$id` host is a namespace, not a live URL. Validators must resolve refs from the local `schemas/` tree (preload/registry), never over the network.
 
 ## Versioning

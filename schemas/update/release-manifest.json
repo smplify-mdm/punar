@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/update/release-manifest.json",
+  "title": "Punar release manifest",
+  "description": "Signed identity for one complete A/B root-slot payload and its platform boot artifact. The target fields prevent a valid artifact for another architecture or boot chain from being admitted.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "release_id",
+    "image_id",
+    "architecture",
+    "boot_platform",
+    "version",
+    "channel",
+    "snapshot_pin",
+    "overlay_pin",
+    "payload",
+    "boot_artifact",
+    "min_from",
+    "security",
+    "provenance",
+    "sbom"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 192,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "image_id": { "$ref": "#/$defs/image_id" },
+    "architecture": { "$ref": "#/$defs/architecture" },
+    "boot_platform": { "$ref": "#/$defs/boot_platform" },
+    "version": { "$ref": "#/$defs/version" },
+    "channel": { "$ref": "#/$defs/channel" },
+    "snapshot_pin": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
+    },
+    "overlay_pin": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/overlay_pin" }
+      ]
+    },
+    "payload": { "$ref": "#/$defs/payload" },
+    "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
+    "min_from": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/version" }
+      ]
+    },
+    "security": { "$ref": "#/$defs/security" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "sbom": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "image_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^punar-[a-z0-9][a-z0-9-]*$"
+    },
+    "architecture": {
+      "enum": ["x86_64", "aarch64"]
+    },
+    "boot_platform": {
+      "enum": ["uefi", "raspberry_pi"]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]{4}\\.(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.[0-9]+$"
+    },
+    "channel": {
+      "enum": ["stable", "dev", "edge"]
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "filename": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "overlay_pin": {
+      "type": "object",
+      "required": ["channel", "snapshot_pin", "digest_sha256"],
+      "properties": {
+        "channel": { "const": "punar-security" },
+        "snapshot_pin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
+        },
+        "digest_sha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": ["filename", "digest_sha256", "size_bytes", "uncompressed_size_bytes", "compression"],
+      "properties": {
+        "filename": { "$ref": "#/$defs/filename" },
+        "digest_sha256": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "uncompressed_size_bytes": { "type": "integer", "minimum": 1 },
+        "compression": { "const": "zstd" }
+      },
+      "additionalProperties": false
+    },
+    "boot_artifact": {
+      "type": "object",
+      "required": ["kind", "filename", "digest_sha256", "size_bytes"],
+      "properties": {
+        "kind": { "enum": ["uki", "raspberry_pi_bootfs"] },
+        "filename": { "$ref": "#/$defs/filename" },
+        "digest_sha256": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "security": {
+      "type": "object",
+      "required": ["severity", "advisory_ids"],
+      "properties": {
+        "severity": { "enum": ["none", "important", "critical"] },
+        "advisory_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["git_commit", "ci_run_id", "builder_base_digest", "source_date_epoch", "built_at"],
+      "properties": {
+        "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "ci_run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+        "builder_base_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "source_date_epoch": { "type": "integer", "minimum": 0 },
+        "built_at": { "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

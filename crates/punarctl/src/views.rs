@@ -3313,6 +3313,177 @@ pub fn secrets_revoked(style: &Style, result: &Value, hostname: &str) -> Result<
     Ok(out)
 }
 
+/// Local application catalog or installation-state list. The source word is
+/// descriptive, never a trust claim; containment appears only in the detail
+/// renderer after punard has verified live metadata.
+pub fn apps(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let apps = result
+        .get("apps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "apps result has no apps array".to_string())?;
+    let mut out = fmt::masthead(style, "Applications", hostname);
+    if apps.is_empty() {
+        out.push_str(&fmt::note(style, "No catalog applications matched"));
+        return Ok(out);
+    }
+    let rows: Vec<Row> = apps
+        .iter()
+        .map(|app| {
+            let id = app.get("id").and_then(Value::as_str).unwrap_or("unknown");
+            let source = app
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let installed = app.get("installed").and_then(Value::as_bool);
+            let (state, slot) = match (source, installed) {
+                (_, Some(true)) => ("installed", Slot::Ok),
+                ("web", _) => ("web app", Slot::Neutral),
+                (_, Some(false)) => ("available", Slot::Neutral),
+                _ => (source, Slot::Neutral),
+            };
+            let name = app.get("name").and_then(Value::as_str).unwrap_or(id);
+            let summary = app.get("summary").and_then(Value::as_str).unwrap_or("");
+            let description = if summary.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} · {summary}")
+            };
+            Row::new(id, state, slot, &description)
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "Inspect permissions before install · punarctl app show <id>",
+    ));
+    Ok(out)
+}
+
+pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let app = result
+        .get("app")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "apps.catalog result has no app object".to_string())?;
+    let text = |key: &str| app.get(key).and_then(Value::as_str).unwrap_or("unknown");
+    let mut out = fmt::masthead(style, text("name"), hostname);
+    let source = text("source");
+    let trust = text("trust_tier");
+    let installed = app
+        .get("installed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut rows = vec![
+        Row::new("Catalog id", text("id"), Slot::Neutral, text("summary")),
+        Row::new("Source", source, Slot::Neutral, text("publisher")),
+        Row::new(
+            "Trust",
+            trust,
+            if trust == "curated" {
+                Slot::Ok
+            } else {
+                Slot::Warn
+            },
+            text("license"),
+        ),
+        Row::new(
+            "State",
+            if source == "web" {
+                "open in browser"
+            } else if installed {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if installed { Slot::Ok } else { Slot::Neutral },
+            "",
+        ),
+    ];
+    if let Some(inspection) = app.get("inspection").and_then(Value::as_object) {
+        if inspection.get("verified").and_then(Value::as_bool) == Some(true) {
+            let containment = inspection
+                .get("containment")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            rows.push(Row::new(
+                "Containment",
+                containment,
+                if containment == "sandboxed" {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                "computed from the pinned Flatpak metadata",
+            ));
+            rows.push(Row::new(
+                "Runtime",
+                inspection
+                    .get("runtime")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                Slot::Neutral,
+                "",
+            ));
+        }
+    }
+    out.push_str(&fmt::rows(style, &rows));
+
+    if let Some(permissions) = app
+        .get("inspection")
+        .and_then(|v| v.get("permissions"))
+        .and_then(Value::as_array)
+    {
+        out.push_str(&fmt::section(style, "Permissions", "verified metadata"));
+        for permission in permissions.iter().filter_map(Value::as_str) {
+            out.push_str(&format!("{}\n", style.muted(&format!("· {permission}"))));
+        }
+    }
+    if let Some(disclosures) = app.get("disclosures").and_then(Value::as_array) {
+        for disclosure in disclosures {
+            if let Some(message) = disclosure.get("text").and_then(Value::as_str) {
+                out.push_str(&fmt::note(style, message));
+            }
+        }
+    }
+    if let Some(digest) = app
+        .get("inspection")
+        .and_then(|v| v.get("metadata_sha256"))
+        .and_then(Value::as_str)
+    {
+        out.push_str(&fmt::note(style, &format!("Metadata sha256 · {digest}")));
+    }
+    Ok(out)
+}
+
+pub fn app_mutation(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+    verb: &str,
+) -> Result<String, String> {
+    let id = result
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "application mutation result has no id".to_string())?;
+    let changed = result
+        .get("changed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "application mutation result has no changed state".to_string())?;
+    let mut out = fmt::masthead(style, "Application", hostname);
+    out.push_str(&fmt::verdict(
+        style,
+        Slot::Ok,
+        &format!(
+            "✓ {id} · {}",
+            if changed {
+                verb.to_string()
+            } else {
+                "already in that state".to_string()
+            }
+        ),
+    ));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

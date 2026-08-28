@@ -16,7 +16,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | browser yes; web-app install is M11, unbuilt |
+| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27):** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Generic user-defined web-app install/context support remains M11 work and this proof is not yet a canonical CI gate. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **NOT MET.** The four-partition A/B foundation is now implemented and ARM64-build/boot-proven locally; inactive-slot write, health-gated blessing and rollback are still unbuilt. |
@@ -215,7 +215,7 @@ The minimal image booted AA64 systemd-boot → Debian kernel
 `7.1.8+deb14.1-arm64` → real root → multi-user target in 11 seconds on Apple
 HVF.
 
-The same lane now builds a complete 944 MiB ARM64 desktop image: shared shell
+The same lane now builds a complete ARM64 desktop image: shared shell
 and service content, Debian package/account/PAM and Chromium adapters, six
 native AArch64 Rust binaries, and a digest-verified ARM64 offline OCI base.
 The latest exact image is
@@ -228,6 +228,21 @@ firewall, policy, enrollment, container, AI/privacy, expiring approval and
 detection exercises. The M2 graphics policy also recognizes Debian's live
 `virtio_pci` spelling and has fake-sysfs coverage for virtual, AMD, Intel and
 Raspberry Pi VC4 cases.
+
+The final 2026-08-27 release rebuild adds the signed-catalog application path
+without preinstalling third-party payloads and makes every discovery path
+pointer-actionable. Its exact qcow2 is 995,295,232 bytes (949 MiB by `ls`,
+960 MiB allocated by `du`; 33 GiB virtual) with SHA-256
+`f9fe1b26888891cc3432121ed4f7ae1183570f1b9d31fe564ea3e8b8b4d00387`.
+A clean Apple-HVF boot proved inline password-context validation, completed
+onboarding, reached the desktop, opened Command Center by clicking the
+top-left **PUNAR** target, and browsed five installed apps plus Spotify at
+`PUNAR+S` → Applications. Pointer tests proved the Spotify row hands off
+directly to its inspected card, the card opens `https://open.spotify.com/` in
+Chromium app mode, and an installed Chromium row launches directly. The card
+disclosed the ARM64 web fallback and community status. The native x86_64
+catalog source is a commit- and metadata-digest-pinned Flathub Flatpak;
+neither app payload is part of the base image.
 
 The minimal ARM64 image now also carries the real four-partition foundation:
 1 GiB ESP, populated 8 GiB slot A, empty 8 GiB slot B and 16 GiB shared btrfs
@@ -279,6 +294,18 @@ only path is booting a prebuilt image. The prebuilt image is now A/B-shaped,
 which removes the disk-layout prerequisite but does not make it an installer.
 The missing installer blocks hardware testing, which blocks 9 of the
 `user-blocked.md` items.
+
+The encryption seam is now materially ahead of the installer. On 2026-08-27
+the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
+typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that
+key without printing or persisting it. `punar-recovery` implements the
+zeroizing personal one-screen display/copy + two-random-group confirmation
+and the managed RFC 9180 HPKE envelope. `punard` wraps locally, uploads only
+ciphertext and verifies an exact signed receipt; the real dev/CI Smplify mock
+proves device-token binding, separate recovery-release RBAC, required reason
+code and append-only audit. **This is component proof, not a shipping claim:**
+installer/UI wiring, installed-image proof, real portal IdP/step-up, tenant
+KMS/HSM custody and rotation are still open.
 
 The owner has now simplified the interaction contract. The required path is
 one account card with exactly three user-provided values: username, password,
@@ -341,9 +368,15 @@ locally like our smplify deployment and other VMs."*
   "reach a service from the browser". Say so rather than implying otherwise.
 
 ### 6.5 M11 browser/web-apps · M12 network + relay
-`docs/development/milestone-11.md`, `milestone-12.md`. Both designed, unbuilt.
-M12 closes DoD items 19 and 20; the private relay is `user-blocked.md` item 6
-and is the largest item on that list.
+`docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
+implemented**: the curated catalog, typed daemon/CLI calls and Command Center
+app card, plus the System Control Applications browse path, support a pinned
+x86_64 Flatpak source and an ARM64 Chromium-app-mode fallback for Spotify,
+proven on a clean ARM64 release VM. Generic web-app
+creation, persistent launchers, browser contexts and the complete M11 check
+remain open. M12 is still designed and unbuilt; it closes DoD items 19 and 20.
+The private relay is `user-blocked.md` item 6 and is the largest item on that
+list.
 
 ---
 

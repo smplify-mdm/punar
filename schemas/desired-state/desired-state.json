@@ -54,6 +54,20 @@
                   "title": "Disk encryption required",
                   "description": "Whether disk encryption is required on this device (spec sections 38, 44.2).",
                   "type": "boolean"
+                },
+                "recoveryKeyEscrow": {
+                  "title": "Recovery-key escrow",
+                  "description": "Organization policy for automatic escrow of a device-generated LUKS recovery key. The key is wrapped to the tenant recovery public key before leaving the device and never enters policy, logs, argv, environment variables, or persisted plaintext.",
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "title": "Escrow enabled",
+                      "description": "Require an enrolled device to wrap and escrow its disk recovery key to Smplify. Personal devices never inherit this setting.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["enabled"],
+                  "additionalProperties": false
                 }
               },
               "required": ["required"],

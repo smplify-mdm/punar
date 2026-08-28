@@ -68,6 +68,14 @@ DeferredSurfaceBase {
     // Non-empty while the §40 explain answer replaces the result list.
     property string explainPath: ""
 
+    // Non-empty while a catalog application replaces the result list. The
+    // row comes from the signed local catalog; the card comes from punard's
+    // live pinned-metadata inspection.
+    property string appId: ""
+    property string appPhase: ""
+    property var appRecord: null
+    property string appFailure: ""
+
     // One honest line under the results — why a row did nothing, or why a
     // question has no answer on this device. Cleared by the next keystroke;
     // never on a timer.
@@ -112,6 +120,10 @@ DeferredSurfaceBase {
             return;
         root.open = false;
         root.explainPath = "";
+        root.appId = "";
+        root.appPhase = "";
+        root.appRecord = null;
+        root.appFailure = "";
         root.note = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
@@ -129,7 +141,9 @@ DeferredSurfaceBase {
     function ipcState(): string {
         if (!root.open)
             return "closed";
-        return root.explainPath !== "" ? "explain" : "open";
+        if (root.explainPath !== "")
+            return "explain";
+        return root.appId !== "" ? "application" : "open";
     }
 
     function ipcExplain(): string {
@@ -145,9 +159,19 @@ DeferredSurfaceBase {
         return top === null ? "no-match" : (top.kind + " · " + top.meta);
     }
 
+    function ipcApplication(id: string): string {
+        root.show();
+        root.askApp(id);
+        return "catalog-app · " + id;
+    }
+
     function ipcRun(): string {
         if (!root.open)
             return "closed";
+        if (root.appId !== "") {
+            root.appAction();
+            return "catalog-app · " + root.appId;
+        }
         var item = list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null;
         if (item === null)
             return "no-match";
@@ -379,6 +403,169 @@ DeferredSurfaceBase {
         explainCard.phase = "failed";
     }
 
+    // ---- catalog application inspection + action ------------------------
+
+    Process {
+        id: appInspectProc
+        stdout: StdioCollector {
+            id: appInspectOut
+            waitForEnd: true
+            onStreamFinished: root.finishAppInspect()
+        }
+        stderr: StdioCollector {
+            id: appInspectErr
+            waitForEnd: true
+            onStreamFinished: root.finishAppInspect()
+        }
+        onRunningChanged: if (!appInspectProc.running)
+            root.finishAppInspect()
+    }
+
+    Process {
+        id: appInstallProc
+        stdout: StdioCollector {
+            id: appInstallOut
+            waitForEnd: true
+            onStreamFinished: root.finishAppInstall()
+        }
+        stderr: StdioCollector {
+            id: appInstallErr
+            waitForEnd: true
+            onStreamFinished: root.finishAppInstall()
+        }
+        onRunningChanged: if (!appInstallProc.running)
+            root.finishAppInstall()
+    }
+
+    Process {
+        id: appOpenProc
+        stderr: StdioCollector {
+            id: appOpenErr
+            waitForEnd: true
+        }
+        Component.onCompleted: appOpenProc.exited.connect(function(exitCode) {
+            root.finishAppOpen(exitCode);
+        })
+    }
+
+    function firstError(text: string, fallback: string): string {
+        var lines = String(text).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (line !== "")
+                return line;
+        }
+        return fallback;
+    }
+
+    function askApp(id: string): void {
+        if (appInspectProc.running)
+            appInspectProc.running = false;
+        root.explainPath = "";
+        root.appId = id;
+        root.appPhase = "loading";
+        root.appRecord = null;
+        root.appFailure = "";
+        try {
+            appInspectProc.command = ["punarctl", "--json", "app", "show", id];
+            appInspectProc.running = true;
+        } catch (e) {
+            root.appFailure = "punarctl is not available on this machine.";
+            root.appPhase = "failed";
+        }
+    }
+
+    function finishAppInspect(): void {
+        if (root.appId === "" || (root.appPhase !== "loading" && root.appPhase !== "failed"))
+            return;
+        var parsed = root.parseLastLine(appInspectOut.text);
+        if (parsed !== null && typeof parsed === "object" && parsed.app) {
+            root.appRecord = parsed.app;
+            root.appPhase = "ready";
+            return;
+        }
+        if (appInspectProc.running)
+            return;
+        root.appFailure = root.firstError(appInspectErr.text, "The package source could not be verified.");
+        root.appPhase = "failed";
+    }
+
+    function appAction(): void {
+        if (root.appId === "")
+            return;
+        if (root.appPhase === "failed") {
+            root.askApp(root.appId);
+            return;
+        }
+        if (root.appPhase !== "ready" || root.appRecord === null)
+            return;
+        var source = String(root.appRecord.source || "");
+        if (source === "web" || root.appRecord.installed === true) {
+            root.appPhase = "opening";
+            try {
+                appOpenProc.command = ["punarctl", "app", "open", root.appId];
+                appOpenProc.running = true;
+            } catch (e) {
+                root.appFailure = "The application launcher is unavailable.";
+                root.appPhase = "failed";
+            }
+            return;
+        }
+        var inspection = root.appRecord.inspection;
+        if (source !== "flatpak" || !inspection || inspection.verified !== true || inspection.containment !== "sandboxed") {
+            root.appFailure = "This package needs a security review before Punar can install it.";
+            root.appPhase = "failed";
+            return;
+        }
+        var digest = String(inspection.metadata_sha256 || "");
+        if (digest.length !== 64) {
+            root.appFailure = "The verified metadata digest is missing.";
+            root.appPhase = "failed";
+            return;
+        }
+        root.appPhase = "installing";
+        try {
+            appInstallProc.command = [
+                "punarctl", "--json", "app", "install", root.appId, "--yes",
+                "--confirm-metadata-sha256", digest
+            ];
+            appInstallProc.running = true;
+        } catch (e) {
+            root.appFailure = "The application installer is unavailable.";
+            root.appPhase = "failed";
+        }
+    }
+
+    function finishAppInstall(): void {
+        if (root.appId === "" || (root.appPhase !== "installing" && root.appPhase !== "failed"))
+            return;
+        var parsed = root.parseLastLine(appInstallOut.text);
+        if (parsed !== null && typeof parsed === "object" && parsed.installed === true) {
+            var updated = ({});
+            for (var key in root.appRecord)
+                updated[key] = root.appRecord[key];
+            updated.installed = true;
+            root.appRecord = updated;
+            root.appPhase = "ready";
+            return;
+        }
+        if (appInstallProc.running)
+            return;
+        root.appFailure = root.firstError(appInstallErr.text, "The install did not complete.");
+        root.appPhase = "failed";
+    }
+
+    function finishAppOpen(exitCode: int): void {
+        if (root.appId === "" || root.appPhase !== "opening")
+            return;
+        if (exitCode === 0) {
+            root.dismiss();
+            return;
+        }
+        root.appFailure = root.firstError(appOpenErr.text, "The application could not start.");
+        root.appPhase = "failed";
+    }
+
     // ---- row construction -------------------------------------------------
 
     function titleCase(name: string): string {
@@ -415,6 +602,19 @@ DeferredSurfaceBase {
             "state": "shipped",
             "arg": "",
             "entry": entry
+        };
+    }
+
+    function catalogAppRow(app: var, group: string): var {
+        return {
+            "group": group,
+            "glyph": Apps.glyphFor(String(app.name || app.id)),
+            "name": String(app.name),
+            "meta": "Application(" + String(app.id) + ") · on demand",
+            "cap": true,
+            "kind": "catalog-app",
+            "state": "shipped",
+            "arg": String(app.id)
         };
     }
 
@@ -518,17 +718,43 @@ DeferredSurfaceBase {
 
         if (q === "") {
             // Empty state (mockup 01): what this device has, not a menu.
+            // Installed and catalog applications are visible without the
+            // reader guessing a name first. This is the quick browse path;
+            // typing still ranks the full live indexes.
             var known = actions.knownProjects();
             for (i = 0; i < known.length && i < 4; i++)
                 out.push(root.projectRow(known[i].name, "Recent", true));
+            var shownIds = ({});
             var browserRow = root.roleRow(Apps.browser, "BR", "Open browser", "Suggested");
-            if (browserRow !== null)
+            if (browserRow !== null) {
                 out.push(browserRow);
+                shownIds[Apps.bareId(Apps.browser)] = true;
+            }
             var termRow = root.roleRow(Apps.terminal, "TE", "Open terminal", "Suggested");
-            if (termRow !== null)
+            if (termRow !== null) {
                 out.push(termRow);
+                shownIds[Apps.bareId(Apps.terminal)] = true;
+            }
+
+            var installed = Apps.search("", 0);
+            var installedGroup = "Installed · " + installed.length;
+            var installedShown = 0;
+            for (i = 0; i < installed.length && installedShown < 8; i++) {
+                var installedId = Apps.bareId(installed[i]);
+                if (shownIds[installedId] === true)
+                    continue;
+                out.push(root.appRow(installed[i], installedGroup));
+                shownIds[installedId] = true;
+                installedShown++;
+            }
+
+            var available = Catalog.search("", 8);
+            var availableGroup = "Get applications · " + Catalog.entries.length;
+            for (i = 0; i < available.length; i++)
+                out.push(root.catalogAppRow(available[i], availableGroup));
+
             for (i = 0; i < actions.surfaces.length; i++)
-                out.push(root.surfaceRow(actions.surfaces[i], "Suggested"));
+                out.push(root.surfaceRow(actions.surfaces[i], "System"));
             return out;
         }
 
@@ -591,6 +817,9 @@ DeferredSurfaceBase {
         var matchedApps = Apps.search(lower, 8);
         for (i = 0; i < matchedApps.length; i++)
             out.push(root.appRow(matchedApps[i], "Applications"));
+        var catalogApps = Catalog.search(lower, 4);
+        for (i = 0; i < catalogApps.length; i++)
+            out.push(root.catalogAppRow(catalogApps[i], "Get applications"));
 
         // ---- policy (spec §40) ----
         var asked = actions.isQuestion(q) ? actions.questionPath(q) : "";
@@ -620,6 +849,9 @@ DeferredSurfaceBase {
                 root.dismiss();
             else
                 root.note = "That application could not be launched";
+            return;
+        case "catalog-app":
+            root.askApp(item.arg);
             return;
         case "project":
             if (actions.openProject(item.arg) >= 0)
@@ -684,6 +916,9 @@ DeferredSurfaceBase {
         function setQuery(text: string): void {
             queryInput.text = text;
             root.explainPath = "";
+            root.appId = "";
+            root.appPhase = "";
+            root.appRecord = null;
             root.note = "";
         }
 
@@ -697,7 +932,7 @@ DeferredSurfaceBase {
         // Live models this result set is derived from. Listed explicitly so
         // the binding re-evaluates when any of them changes — the probe
         // answering, an application appearing, a workspace being renamed.
-        readonly property var resultDeps: [Apps.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames, WallpaperState.activeId]
+        readonly property var resultDeps: [Apps.entries, Catalog.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames, WallpaperState.activeId]
 
         readonly property var results: root.buildResults(queryInput.text, win.resultDeps)
         onResultsChanged: list.currentIndex = win.results.length > 0 ? 0 : -1
@@ -851,6 +1086,9 @@ DeferredSurfaceBase {
                         onTextChanged: {
                             root.note = "";
                             root.explainPath = "";
+                            root.appId = "";
+                            root.appPhase = "";
+                            root.appRecord = null;
                             // The set of explainable paths is fetched from
                             // punard once, the first time a question is
                             // actually asked — never on open, never on a
@@ -865,23 +1103,34 @@ DeferredSurfaceBase {
                                 // First Escape leaves the answer, second closes.
                                 if (root.explainPath !== "")
                                     root.explainPath = "";
+                                else if (root.appId !== "") {
+                                    root.appId = "";
+                                    root.appPhase = "";
+                                    root.appRecord = null;
+                                    root.appFailure = "";
+                                }
                                 else
                                     root.dismiss();
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Down:
-                                list.incrementCurrentIndex();
+                                if (root.appId === "")
+                                    list.incrementCurrentIndex();
                                 root.note = "";
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Up:
-                                list.decrementCurrentIndex();
+                                if (root.appId === "")
+                                    list.decrementCurrentIndex();
                                 root.note = "";
                                 event.accepted = true;
                                 break;
                             case Qt.Key_Return:
                             case Qt.Key_Enter:
-                                root.activate(list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null);
+                                if (root.appId !== "")
+                                    root.appAction();
+                                else
+                                    root.activate(list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null);
                                 event.accepted = true;
                                 break;
                             }
@@ -915,12 +1164,23 @@ DeferredSurfaceBase {
                     visible: root.explainPath !== ""
                 }
 
+                Local.AppInstallCard {
+                    id: appCard
+                    width: parent.width
+                    height: root.appId !== "" ? implicitHeight : 0
+                    visible: root.appId !== ""
+                    phase: root.appPhase === "" ? "loading" : root.appPhase
+                    record: root.appRecord
+                    failure: root.appFailure
+                    onActionRequested: root.appAction()
+                }
+
                 ListView {
                     id: list
 
                     width: parent.width
-                    height: root.explainPath !== "" ? 0 : Math.min(contentHeight, 300)
-                    visible: root.explainPath === ""
+                    height: root.explainPath !== "" || root.appId !== "" ? 0 : Math.min(contentHeight, 300)
+                    visible: root.explainPath === "" && root.appId === ""
                     clip: true
                     interactive: contentHeight > height
                     keyNavigationWraps: false
@@ -968,6 +1228,7 @@ DeferredSurfaceBase {
                         required property var modelData
 
                         readonly property bool sel: row.ListView.isCurrentItem
+                        readonly property bool hovered: rowMouse.containsMouse
                         // DESIGN_LANGUAGE §7: a dashed stroke marks a
                         // mechanism outside the current production claim.
                         readonly property bool unshipped: row.modelData.state === "absent"
@@ -998,7 +1259,7 @@ DeferredSurfaceBase {
                                     radius: Theme.radiusTag
                                     color: Theme.shellSurface
                                     border.width: Theme.hairline
-                                    border.color: row.sel ? Theme.shellFg : Theme.shellBorder
+                                    border.color: row.sel || row.hovered ? Theme.shellFg : Theme.shellBorder
                                 }
 
                                 Canvas {
@@ -1025,7 +1286,7 @@ DeferredSurfaceBase {
                                     font.pixelSize: 8
                                     font.weight: 600
                                     font.letterSpacing: Theme.tracking(8, 0.06)
-                                    color: row.unshipped ? Theme.shellInk3 : (row.sel ? Theme.shellFg : Theme.shellInk2)
+                                    color: row.unshipped ? Theme.shellInk3 : (row.sel || row.hovered ? Theme.shellFg : Theme.shellInk2)
                                 }
                             }
 
@@ -1061,7 +1322,11 @@ DeferredSurfaceBase {
                         }
 
                         MouseArea {
+                            id: rowMouse
+
                             anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 list.currentIndex = row.index;
                                 root.activate(row.modelData);
@@ -1074,7 +1339,7 @@ DeferredSurfaceBase {
                 Item {
                     width: parent.width
                     height: 36
-                    visible: root.explainPath === "" && win.results.length === 0
+                    visible: root.explainPath === "" && root.appId === "" && win.results.length === 0
 
                     Meta {
                         anchors.left: parent.left
@@ -1121,7 +1386,7 @@ DeferredSurfaceBase {
                         font.pixelSize: 8
                         font.weight: 500
                         font.letterSpacing: Theme.tracking(8, 0.13)
-                        text: root.explainPath !== "" ? "Esc Back · Esc Esc Close" : "↑↓ Navigate · ↵ Run · Esc Close"
+                        text: root.explainPath !== "" || root.appId !== "" ? "Esc Back · Esc Esc Close" : "↑↓ Navigate · Click or ↵ Open · Esc Close"
                     }
                     Meta {
                         anchors.right: parent.right

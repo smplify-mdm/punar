@@ -1,0 +1,20 @@
+[package]
+name = "punar-recovery"
+description = "Device-side LUKS recovery-key wrapping and signed Smplify escrow receipt verification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+hpke = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

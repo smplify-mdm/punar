@@ -1,0 +1,70 @@
+#!/bin/sh
+# Final release-tree assertion. mkosi executes this outside the image after
+# package presets/firstboot and before UKI generation, with BUILDROOT and the
+# serialized MKOSI_CONFIG available.
+set -eu
+
+# systemd-networkd's vendor [Install] Also= relationship recreates this link
+# after the Punar preset disables wait-online. Normalize that exact generated
+# edge after presets: Punar configures links asynchronously and never lets an
+# absent interface hold the desktop boot path for 90 seconds.
+WAIT_ONLINE_LINK="${BUILDROOT}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"
+if [ -L "${WAIT_ONLINE_LINK}" ]; then
+    unlink "${WAIT_ONLINE_LINK}"
+elif [ -e "${WAIT_ONLINE_LINK}" ]; then
+    echo "error: expected wait-online enablement to be a symlink: ${WAIT_ONLINE_LINK}" >&2
+    exit 2
+fi
+
+CHECKER=''
+for candidate in \
+    "${SRCDIR}/check-release-image.sh" \
+    "${SRCDIR}/tools/check-release-image.sh" \
+    "${SRCDIR}/../../tools/check-release-image.sh" \
+    "${SRCDIR}/../../../tools/check-release-image.sh"; do
+    if [ -x "${candidate}" ]; then
+        CHECKER=${candidate}
+        break
+    fi
+done
+[ -n "${CHECKER}" ] || {
+    echo 'error: check-release-image.sh is not reachable from SRCDIR' >&2
+    exit 2
+}
+
+case "${ARCHITECTURE}" in
+    x86-64|x86_64) manifest_name=expected-enabled-units.x86_64.txt ;;
+    arm64|aarch64) manifest_name=expected-enabled-units.arm64.txt ;;
+    *)
+        echo "error: no release enabled-unit manifest for ${ARCHITECTURE}" >&2
+        exit 2
+        ;;
+esac
+
+MANIFEST=''
+for candidate in \
+    "${SRCDIR}/${manifest_name}" \
+    "${SRCDIR}/os/images/${manifest_name}" \
+    "${SRCDIR}/../${manifest_name}"; do
+    if [ -f "${candidate}" ]; then
+        MANIFEST=${candidate}
+        break
+    fi
+done
+[ -n "${MANIFEST}" ] || MANIFEST="${SRCDIR}/${manifest_name}"
+
+KERNEL_COMMAND_LINE=$(python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = json.load(stream)
+value = config.get("KernelCommandLine", [])
+if isinstance(value, str):
+    print(value)
+else:
+    print(" ".join(str(item) for item in value))
+' "${MKOSI_CONFIG}")
+
+exec "${CHECKER}" "${BUILDROOT}" "${PROFILES:-}" \
+    "${KERNEL_COMMAND_LINE}" "${MANIFEST}"

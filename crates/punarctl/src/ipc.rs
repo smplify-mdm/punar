@@ -62,6 +62,12 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// raised to 90 s — for that one verb only.
 pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// A live Flatpak metadata inspection may contact the configured remote.
+pub const APP_INSPECT_TIMEOUT: Duration = Duration::from_secs(45);
+/// A first Flatpak install may fetch a platform runtime; keep the budget
+/// bounded but human-sized for slow links.
+pub const APP_MUTATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// Exit codes per Plate D-014 Sect III / docs/api/ipc.md section 7.
 /// 0 = success and 2 = usage (owned by clap) complete the set.
 pub const EXIT_ERROR: u8 = 1;

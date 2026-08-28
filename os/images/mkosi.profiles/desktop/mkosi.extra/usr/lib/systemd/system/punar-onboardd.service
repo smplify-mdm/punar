@@ -1,0 +1,29 @@
+[Unit]
+Description=Punar first-account transaction service
+Documentation=file:/usr/share/doc/punar/onboarding-flow.md
+ConditionPathExists=!/var/lib/punar/onboarding/completed.json
+Requires=punar-identity-materialize.service
+After=punar-identity-materialize.service
+Before=greetd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punar-onboardd serve
+Restart=on-failure
+RestartSec=750ms
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Account creation owns this one writable subtree while the rest of the image
+# remains read-only. ProtectHome=read-only would remount /home above this
+# allow-list and makes the real first-run transaction fail before commit.
+ReadWritePaths=-/run/userdb -/run/punar -/run/punar-onboardd -/run/punar-first-login /var/lib/punar /home
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal

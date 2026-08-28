@@ -1,0 +1,3 @@
+# Populated from the first clean desktop-profile build, then reviewed.
+# An empty placeholder intentionally makes a release build fail A9 until that
+# proof is captured; desktop,dev CI builds bypass the release-only assertion.

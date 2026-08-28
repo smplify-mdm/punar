@@ -93,6 +93,11 @@ each direction. No length prefixes, no binary framing.
   reconcile pass, which TCG runs make slow — and `punarctl` uses a 90 s
   response timeout for the `enroll start`/`enroll stop` verbs. Every other
   method keeps the 10 s/15 s bounds unchanged.
+  **Application amendment:** `apps.catalog` may spend 30 s verifying remote
+  metadata (`punarctl`: 45 s), while `apps.install` and `apps.remove` have
+  bounded 30-minute/10-minute backend transactions (`punarctl`: 30 minutes).
+  They remain one synchronous inspect→mutate→verify transaction; expiry kills
+  the child and returns a typed failure.
 - Responses are emitted as a single line; UTF-8; no ANSI, no pretty-printing.
 
 ## 3. Envelope
@@ -197,6 +202,10 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `privilege.request` (M9) | any connected peer **except agent-attributed peers** | yes | always |
 | `privilege.status` (M9) | any connected peer | no (lazy expiry sweep) | no |
 | `privilege.revoke` (M9) | grant owner or root | yes | always |
+| `apps.catalog` | any connected peer | no | no |
+| `apps.list` | any connected peer | no | no |
+| `apps.install` | **human, personal device only** | yes | always |
+| `apps.remove` | **human, personal device only** | yes | always |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -578,6 +587,74 @@ Unenrollment stops all future sync and restores local state; it does not
 (and could not honestly claim to) retract what the org already received.
 Works with the control plane unreachable — it touches only local files.
 
+### 5.12 `apps.catalog`
+
+Params are `{"query":"music"}` for a local catalog search,
+`{"id":"spotify"}` for one exact app plus live source inspection, or `{}`
+for all local summaries. `id` and `query` together are `invalid_params`.
+Read-only, any connected peer, not audited.
+
+The catalog is immutable signed-image data. A Flatpak detail query runs
+`remote-info` at the catalog's exact commit, hashes the exact returned
+metadata, rejects any mismatch, and derives the `containment` and
+`permissions` result fields from that metadata. There is deliberately no
+publisher-authored or catalog-authored containment label.
+
+An ARM64 app with no native payload returns its curated web source instead:
+
+```json
+{"app":{"id":"spotify","name":"Spotify","source":"web",
+ "url":"https://open.spotify.com/","browser":"chromium","action":"open",
+ "installed":false,"disclosures":[...]}}
+```
+
+The x86_64 native result includes `app_id`, `installed`, and:
+
+```json
+"inspection":{"verified":true,"commit":"<64 hex>",
+ "runtime":"org.freedesktop.Platform/x86_64/25.08",
+ "metadata_sha256":"<64 hex>","containment":"sandboxed",
+ "permissions":["Network access","Audio playback",...]}
+```
+
+If the remote metadata differs, no detail card claiming verified containment
+is returned: the method fails `verify_failed`.
+
+### 5.13 `apps.list`
+
+Params: none. Read-only, any connected peer, not audited. Returns each catalog
+id, selected architecture source, native installed state and observed commit.
+Web apps are not falsely represented as locally installed packages.
+
+### 5.14 `apps.install`
+
+Params:
+
+```json
+{"id":"spotify","confirm_metadata_sha256":"<64 lowercase hex>"}
+```
+
+The digest is the value shown by the calling app card. Under a single daemon
+transaction lock, punard re-inspects the exact pinned commit and requires the
+catalog digest, caller-confirmed digest and observed digest to agree. It then
+installs with a fixed Flatpak argv and verifies the resulting commit. No
+request field can supply a remote, ref, commit, executable or option.
+
+The call is allowed only for a human-attributed peer on a personal device.
+Agent-attributed calls are denied and audited. Enrolled devices fail closed
+until the organization application-policy bridge is implemented; this keeps a
+personal catalog from bypassing managed software policy. Audit action is
+`system.install_package`, resource is the catalog id, with `success`, `noop`,
+`failure` or `verify_failed`.
+
+### 5.15 `apps.remove`
+
+Params: `{"id":"spotify"}`. Same human/personal authorization and
+serialization as install. The Flatpak application id is resolved from the
+catalog, removal is fixed-argv and absence is verified. Audit action is
+`system.remove_package`; web sources have no local package and return
+`conflict` rather than pretending to remove browser data.
+
 ## 6. Audit contract (spec section 53)
 
 - File: `/var/log/punar/audit.jsonl` — one `AuditEvent` JSON object per line,
@@ -738,16 +815,17 @@ render enrollment/compliance chrome without a socket connection or polling
 
   (`org_name` is `null` and `enrolled` is `false` on a personal device.)
   No raw hardware facts, per-capability rows, policy ids, device id, or
-  hostname: the file is world-readable in a user-owned directory and carries
+  hostname: the file is world-readable and carries
   only what the shell renders or uses for its resident-cost decision. A
   missing/unknown class fails to `appliance`, the least-resident experience;
   it never changes a security or privacy guarantee.
-- **Non-authoritative by design**: `/run/punar` is `0755 punar:punar` (M1
-  contract), so the session user can replace the file — acceptable because
-  it is display data consumed by that same user's own session; anything
-  root-trusted stays on the socket (the section 1.1 argument, inverted).
-  Consumers must fail closed: missing or unparsable file renders as
-  unenrolled calm paper.
+- **Non-authoritative by design**: `/run/punar` is `0755 root:root`; daemons
+  write the `0644 root:root` summaries and sessions only read them. Root
+  ownership prevents local replacement, but the content remains display data,
+  never an authorization input; anything root-trusted stays on the socket.
+  Consumers fail closed: missing or unparsable renders as unenrolled calm
+  paper. The dev profile alone overlays the directory owner for disposable
+  proof artifacts; that rule is excluded from release images.
 
 ## 10. Sibling contract (M7): `punar-agentd` socket — `agents.*`
 
@@ -1277,7 +1355,7 @@ render the D-005 ledger section with an event-driven `FileView` and no
 socket client.
 
 - **`0640 root:punar`, inside the root-owned `/run/punar-agentd`
-  directory** — deliberately *not* in user-writable `/run/punar` like
+  directory** — deliberately *not* in world-readable `/run/punar` beside
   `status.json`/`agents.json`. A ledger is personal data: (a) only group
   `punar` (the agentd socket's own admission set, section 10.1) may read
   it, and (b) because the directory is root-owned, a local user cannot
@@ -1611,16 +1689,13 @@ punard at **every** approval state transition and every grant change, so
 `ELEVATED` bar chip with an event-driven `FileView` and **no socket
 client in the shell**.
 
-- **`0640 root:punar`, inside the root-owned `/run/punard`
-  directory** — deliberately *not* `/run/punar` alongside
-  `status.json`/`agents.json`. That M1 directory is `0755 punar:punar`,
-  so a local process can unlink a file there and bind its own. For a
-  counts fingerprint that is a nuisance; for **the file that tells a
-  human what they are about to authorize** it is a spoofing primitive —
-  show a benign contract block over a dangerous `apr_` id and the human
-  presses `A`. Root ownership of the whole path is what makes section 61
-  "filesystem permissions" mean anything, and this is the same argument
-  that put `ledger.json` in `/run/punar-agentd`.
+- **`0640 root:punar`, inside the `0750 root:punar` `/run/punard`
+  directory** — deliberately *not* `/run/punar` alongside the
+  world-readable `status.json`/`agents.json`. Approval details are visible
+  only to admitted users, and root ownership prevents local replacement.
+  Both properties matter for **the file that tells a human what they are
+  about to authorize**; this is the same argument that put `ledger.json` in
+  `/run/punar-agentd`.
 - Content:
 
 ```json
@@ -2221,7 +2296,7 @@ never speaks to it.
 
 ---
 
-## 19. Control-plane protocol additions (M10): `punar-mock-smplify`
+## 19. Control-plane protocol additions (M10 + recovery custody): `punar-mock-smplify`
 
 Status: **shipped in Milestone 10** (spec section 51;
 `docs/development/milestone-10.md` §7, §9.1, §12, §13.3). The
@@ -2230,10 +2305,16 @@ is never enabled and its `--help` says so. In production this hop is
 Punar ⇄ Smplify cloud over mutually authenticated TLS; here it is a
 root-only UDS with NDJSON, §2–§4 framing unchanged, `v: 1`.
 
+The recovery methods added on 2026-08-27 are a dev/CI contract proof, not a
+claim that the production portal or installer exists. Their wire documents
+validate against `schemas/encryption/`; their security contract is §19.6.
+
 ### 19.1 Device-facing (`device_token` authenticated, as M5)
 
 | Method | Params | Result |
 |---|---|---|
+| `recovery.key` | `{device_token}` | `{tenant_recovery_key}` — RFC 9180 suite + HPKE and receipt-verification **public** keys |
+| `recovery.escrow` | `{device_token, envelope}` | `{receipt}` — Ed25519-signed and bound to device/LUKS/keyslot/key-id/envelope digest |
 | `queries.pending` | `{device_token}` | `{queries: [{query_id, requesting_admin, organization, requested_scope, session_id?, received_at}]}` |
 | `queries.answer` | `{device_token, query_id, answer}` | `{accepted: true}` |
 
@@ -2251,6 +2332,13 @@ The pulled question's field list is the whole field list. There is no
 administrator could use to ask for something the closed scope
 vocabulary cannot name.
 
+The same token-to-device rule protects recovery custody. The mock rejects an
+envelope unless its organization, tenant key id and `device_id` all match the
+authenticated device. Server state receives a `RecoveryEnvelope` whose type
+has no plaintext field. A transport success is not enough: `punard` reports
+escrowed only after it locally verifies the returned signature and every
+binding field against the exact envelope digest.
+
 ### 19.2 Admin-facing (the names M5 reserved, now real)
 
 | Method | Params | Result |
@@ -2260,6 +2348,7 @@ vocabulary cannot name.
 | `admin.ai_query` | `{admin, device_id, scope, session_id?}` | `{query_id, status: "pending", note}` |
 | `admin.query_result` | `{admin, query_id}` | `{status: "pending"\|"answered"\|"refused", answer?, identity_verified: false}` |
 | `admin.fleet` | `{admin}` | the §12.1 fleet aggregate as structured data |
+| `admin.recovery_release` | `{admin, device_id, reason}` | one-time plaintext key + LUKS UUID/keyslot/key id; always `identity_verified: false` in this mock |
 
 `admin.ai_query` returns immediately and **sends nothing anywhere**; the
 administrator's client polls `admin.query_result`. `admin.query_result`
@@ -2267,6 +2356,15 @@ answers only the administrator who asked. `admin.fleet` is role-gated to
 `fleet_viewer` and above, expressed as *a role that may ask about
 `authority`* so a fixture that renames roles cannot silently open the
 view.
+
+`admin.recovery_release` is not implied by any query scope or fleet access.
+The fixture's separate `recovery_release_roles` list grants it only to
+`security_admin`. `reason` is a 1–63 character structured code rather than
+free text, keeping recovery material and arbitrary sensitive prose out of the
+audit trail. Denied, missing, unwrap-failed and successful attempts are
+appended before the method returns. A successful response is explicitly
+one-time and secret-bearing; clients must never log, cache or place it on a
+command line.
 
 ### 19.3 Two new error codes, deliberately distinct
 
@@ -2285,9 +2383,10 @@ query the organization may not ask never reaches a device at all.
 
 `fixtures/organizations/acme/admins.json` maps identities to roles and
 roles to scopes (`helpdesk` → `inventory`; `fleet_viewer` → `inventory`,
-`authority`; `security_admin` → all four). An **absent or unreadable**
-table knows nobody and permits nothing; every `admin.*` call then
-refuses and names the missing file.
+`authority`; `security_admin` → all four), plus the independent
+`recovery_release_roles` grant. An **absent or unreadable** table knows nobody
+and permits nothing; every `admin.*` call then refuses and names the missing
+file.
 
 > These identities are **fixture strings, not authenticated
 > principals**. There is no IdP, no SSO, no signature and no session.
@@ -2300,16 +2399,39 @@ refuses and names the missing file.
 
 ### 19.5 Mock state
 
-Two files join `/var/lib/punar-mock-smplify/` (0700 root):
+Four files join `/var/lib/punar-mock-smplify/` (0700 root):
 `queries.json` (the pending/answered queue, atomic rewrite, 0600) and
-`received-answers.jsonl` (append-only, what devices returned, verbatim).
-Both persist across restarts, deliberately: the check stops and starts
-the mock, and a queue that forgot on restart would drop questions behind
-the check's back.
+`received-answers.jsonl` (append-only, what devices returned, verbatim), plus
+`received-recovery-envelopes.jsonl` (tenant-wrapped envelopes only) and
+`recovery-releases.jsonl` (append-only operator, device, structured reason,
+time, outcome and the mock's `identity_verified: false` disclosure). No
+recovery key is written to either recovery file. All persist across restarts,
+deliberately: the check stops and starts the mock, and a queue or custody
+store that forgot on restart would silently lose work.
 
 **The queue stores no way to reach a device** — no address, endpoint,
 host, port, URL or callback. That is not a policy this crate follows; it
 is a capability it does not have.
+
+### 19.6 Recovery cryptographic and production boundary
+
+The device fixes one non-negotiated RFC 9180 suite:
+DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305. HPKE associated
+data length-prefixes and domain-separates organization id, tenant key id,
+device id, LUKS UUID and recovery keyslot. The envelope digest is a separate
+domain-separated binary encoding, independent of JSON field order. The
+receipt's Ed25519 key is distinct from the HPKE recipient key. Suite changes
+require a protocol version and migration; downgrade is rejected.
+
+The mock carries the RFC appendix's public test HPKE private key so CI can
+prove release and unwrap. Its administrator strings are not authenticated,
+and every release says so. A production Smplify implementation may return a
+key only after authenticated tenant identity, a distinct recovery-release
+RBAC grant, step-up authorization and an audited reason. The tenant private
+key must remain in tenant-scoped KMS/HSM custody; there is no vendor-global
+decryption key. Portal release gives an authorized operator a recovery key;
+it creates no network path into pre-boot LUKS and cannot unlock a device
+remotely by itself.
 
 ---
 
@@ -2319,13 +2441,12 @@ is a capability it does not have.
 /run/punar-agentd/alerts.json   0640 root:punar
 ```
 
-**Root-owned, deliberately.** M9 §8.1 moved `approvals.json` out of the
-user-writable `/run/punar` because a file that tells a human what to
-believe must not be replaceable by an unprivileged process. The argument
-is at least as strong here: a forged card reading *"Unknown AI activity
-suspected · your-bank-helper"* with an `Inspect` action is a phishing
-primitive, and `/run/punar` is `0755 punar:punar`. `/run/punar-agentd`
-already exists root-owned since M8's `ledger.json` (§13.2).
+**Root-owned, deliberately.** A file that tells a human what to believe must
+not be replaceable by an unprivileged process. A forged card reading
+*"Unknown AI activity suspected · your-bank-helper"* with an `Inspect`
+action is a phishing primitive. `/run/punar-agentd` supplies both root
+ownership and the `0750 root:punar` traversal boundary required for these
+group-readable details; `/run/punar` holds only world-readable summaries.
 
 ```json
 { "v": 1,

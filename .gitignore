@@ -12,6 +12,11 @@ target-*/
 # OS image build outputs
 os/images/out/
 
+# Local VM evidence can include usernames, device state, or one-time recovery
+# material. Keep proof screenshots/reports off GitHub; CI publishes scrubbed
+# artifacts through its own retention-controlled channel.
+artifacts/
+
 # macOS
 .DS_Store
 .AppleDouble

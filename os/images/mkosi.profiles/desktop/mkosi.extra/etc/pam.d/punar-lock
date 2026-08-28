@@ -21,7 +21,7 @@
 # the account is locked out, `authfail` counts a failure, `authsucc` clears
 # the counter.
 #
-# No `nullok`: the image gives the dev user a real password
+# No `nullok`: onboarding requires every human account to have a real password
 # (mkosi.postinst.chroot), and a lock that opens on an empty passphrase is
 # not a lock. No `try_first_pass` either — nothing runs before pam_unix
 # here, so there is no earlier token for it to try.

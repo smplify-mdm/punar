@@ -1,0 +1,20 @@
+[package]
+name = "punar-onboard"
+description = "Punar first-run identity backend, greetd client, and zero-resident account materializer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+rustix = { workspace = true, features = ["rand"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-segmentation = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

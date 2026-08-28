@@ -1,7 +1,7 @@
 #!/bin/sh
 # Punar graphical session entry (started by greetd; milestone-1.md §4, §6).
 #
-# Graphics environment must be selected HERE, not in hyprland.conf:
+# Graphics environment must be selected HERE, not in hyprland.lua:
 # aquamarine reads it before Hyprland parses any config. The helper keeps the
 # proven virtio-vga/no-virgl software path in VMs without disabling the GPU on
 # bare metal.
@@ -42,7 +42,7 @@ fi
 # The CPU is hardware-virtualized on Apple Silicon, but every animated frame
 # is still rasterized by llvmpipe and copied to the host. Keep the product's
 # short spatial motion on real GPUs; on the proven software path, layer a
-# tiny runtime config over the same system config and disable compositor
+# tiny Lua runtime config over the same system config and disable compositor
 # animation. This changes no bare-metal behavior and makes local VM input
 # feel immediate instead of queueing frames behind a 300 ms transition. The
 # helper returns the product config unchanged on real GPUs.

@@ -21,19 +21,40 @@ case "${MODE}" in
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${MODE})" >&2; exit 2 ;;
 esac
 case "${IMAGES}" in
-    minimal|desktop|all) ;;
-    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, or all (got: ${IMAGES})" >&2; exit 2 ;;
+    minimal|desktop|release|all) ;;
+    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, release, or all (got: ${IMAGES})" >&2; exit 2 ;;
 esac
 
 MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart-arm64.XXXXXX)"
+MKOSI_RAW_OUTPUT_DIR="$(mktemp -d /var/tmp/punar-mkosi-output-arm64.XXXXXX)"
 # UUIDv5(URL, https://punar.org/filesystem-device/PUNAR-DATA). See the shared
 # x86 build script: this stabilizes the device identity, not btrfs's separate
 # subvolume UUIDs. A production installer may provide a per-device value.
 BTRFS_DEVICE_UUID="ef4a2286-ac11-53c0-a40d-8d2bae7511cc"
-cleanup_repart() {
+cleanup_build() {
     rm -rf "${MKOSI_REPART_DIR}"
+
+    # Keep the sparse raw disk on Docker's native Linux filesystem. Only the
+    # compressed qcow2 crosses VirtioFS; otherwise mkosi's output handoff can
+    # materialize all 33 GiB on the host.
+    local raw
+    for raw in "${MKOSI_RAW_OUTPUT_DIR}"/*.raw; do
+        [ -f "${raw}" ] || continue
+        truncate --size 0 -- "${raw}" || true
+        rm -f -- "${raw}"
+    done
+    rm -rf "${MKOSI_RAW_OUTPUT_DIR}"
+
+    # Docker Desktop's VirtioFS process may retain a read descriptor after a
+    # generated raw image is unlinked. Zero the disposable intermediate first
+    # so those open descriptors cannot pin tens of gigabytes on the host.
+    for raw in "${IMAGES_DIR}/out"/punar-*-arm64.raw; do
+        [ -f "${raw}" ] || continue
+        truncate --size 0 -- "${raw}" || true
+        rm -f -- "${raw}"
+    done
 }
-trap cleanup_repart EXIT
+trap cleanup_build EXIT
 "${REPO_ROOT}/tools/render-mkosi-repart.sh" \
     "${MKOSI_REPART_DIR}" "${IMAGES_DIR}/repart.d/install"
 
@@ -44,7 +65,8 @@ stage_desktop_content() {
 }
 
 stage_punar_binaries() {
-    local extra="${ARM64_DIR}/mkosi.extra"
+    local extra="${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra"
+    local dev_extra="${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra"
     local cargo_target="${IMAGES_DIR}/cache/cargo-target-arm64"
 
     echo "==> Building native ARM64 Punar binaries (--release --locked; $(rustc --version))"
@@ -54,7 +76,7 @@ stage_punar_binaries() {
             CARGO_TARGET_DIR="${cargo_target}" \
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
-                -p punar-secrets -p punar-mock-smplify
+                -p punar-secrets -p punar-onboard -p punar-mock-smplify
     )
 
     install -d "${extra}/usr/bin"
@@ -64,18 +86,28 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-env" \
         "${cargo_target}/release/punar-agentd" \
         "${cargo_target}/release/punar-secrets" \
-        "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-onboard" \
+        "${cargo_target}/release/punar-onboardd" \
+        "${cargo_target}/release/punar-greet" \
         "${extra}/usr/bin/"
+    install -d "${dev_extra}/usr/bin"
+    install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${dev_extra}/usr/bin/"
 
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
-        punar-mock-smplify; do
+        punar-onboard punar-onboardd punar-greet; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2
             exit 1
         }
     done
+    readelf -h "${dev_extra}/usr/bin/punar-mock-smplify" \
+        | grep -q 'Machine:.*AArch64' || {
+        echo "error: punar-mock-smplify is not an AArch64 binary" >&2
+        exit 1
+    }
 }
 
 # Assemble the M6 offline base from Debian's pinned static BusyBox. This is
@@ -83,7 +115,7 @@ stage_punar_binaries() {
 # no registry, no nested container engine, fixed metadata and a verified
 # package digest.
 stage_env_base_oci() {
-    local extra="${ARM64_DIR}/mkosi.extra"
+    local extra="${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra"
     local cache_dir="${IMAGES_DIR}/cache/debian-arm64-pkgs"
     local pkg='busybox-static_1%3a1.38.0-3+b1_arm64.deb'
     local pkg_version='1:1.38.0-3+b1'
@@ -191,6 +223,18 @@ stage_env_base_oci() {
     rm -rf "${work}"
 }
 
+reset_staged_architecture_content() {
+    # Generated and gitignored. The previous layout placed the two generated
+    # subtrees at the ARM config root beside VERSIONED Debian product
+    # adapters. Clear only those legacy subtrees, never the whole extra tree,
+    # then clear the three profile-local destinations before mkosi runs.
+    rm -rf "${ARM64_DIR}/mkosi.extra/usr/bin" \
+           "${ARM64_DIR}/mkosi.extra/usr/share/punar/oci" \
+           "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
+           "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci" \
+           "${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
+}
+
 run_mkosi() {
     local image_id="$1"
     shift
@@ -198,6 +242,7 @@ run_mkosi() {
     mkosi --force \
         --snapshot "${PUNAR_DEBIAN_SNAPSHOT}" \
         --source-date-epoch "${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
+        --output-directory "${MKOSI_RAW_OUTPUT_DIR}" \
         --environment "SYSTEMD_REPART_MKFS_OPTIONS_BTRFS=--device-uuid=${BTRFS_DEVICE_UUID}" \
         --repart-directory "${MKOSI_REPART_DIR}" \
         "$@" "${MODE}"
@@ -205,8 +250,9 @@ run_mkosi() {
 
 convert_output() {
     local image_id="$1"
-    local raw="${IMAGES_DIR}/out/${image_id}.raw"
+    local raw="${MKOSI_RAW_OUTPUT_DIR}/${image_id}.raw"
     local qcow="${IMAGES_DIR}/out/${image_id}.qcow2"
+    local tmp_qcow="${qcow}.tmp"
     [ -f "${raw}" ] || {
         echo "error: expected ${raw}" >&2
         exit 1
@@ -214,32 +260,49 @@ convert_output() {
     echo "==> Verifying A/B layout and shared-state mounts in ${raw}"
     "${REPO_ROOT}/tests/images/check-repart-layout.sh" "${raw}" arm64
     echo "==> Converting ${raw} -> ${qcow}"
-    qemu-img convert -O qcow2 -c "${raw}" "${qcow}"
-    rm -f "${raw}" "${IMAGES_DIR}/out/${image_id}"
+    rm -f -- "${tmp_qcow}"
+    qemu-img convert -O qcow2 -c "${raw}" "${tmp_qcow}"
+    mv -f -- "${tmp_qcow}" "${qcow}"
+    truncate --size 0 -- "${raw}"
+    rm -f -- "${raw}" "${MKOSI_RAW_OUTPUT_DIR}/${image_id}"
 }
 
 BUILT=()
+reset_staged_architecture_content
 if [ "${IMAGES}" = "minimal" ] || [ "${IMAGES}" = "all" ]; then
-    run_mkosi punar-dev-arm64
+    run_mkosi punar-dev-arm64 --profile dev
     if [ "${MODE}" = "build" ]; then
         convert_output punar-dev-arm64
         BUILT+=(punar-dev-arm64)
     fi
 fi
 
-if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
+    || [ "${IMAGES}" = "all" ]; then
     stage_desktop_content
     if [ "${MODE}" = "build" ]; then
         stage_punar_binaries
         stage_env_base_oci
     fi
-    run_mkosi punar-desktop-arm64 \
+    if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+        run_mkosi punar-desktop-arm64 \
+            --profile desktop,dev \
+            --image-id punar-desktop-arm64 \
+            --hostname punar-desktop-arm64
+        if [ "${MODE}" = "build" ]; then
+            convert_output punar-desktop-arm64
+            BUILT+=(punar-desktop-arm64)
+        fi
+    fi
+fi
+
+if [ "${IMAGES}" = "release" ]; then
+    run_mkosi punar-release-arm64 \
         --profile desktop \
-        --image-id punar-desktop-arm64 \
-        --hostname punar-desktop-arm64
+        --image-id punar-release-arm64
     if [ "${MODE}" = "build" ]; then
-        convert_output punar-desktop-arm64
-        BUILT+=(punar-desktop-arm64)
+        convert_output punar-release-arm64
+        BUILT+=(punar-release-arm64)
     fi
 fi
 

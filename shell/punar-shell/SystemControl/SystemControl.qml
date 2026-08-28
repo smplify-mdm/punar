@@ -67,6 +67,7 @@ DeferredSurfaceBase {
     // Re-emitted from ControlData so the shell root may wire the AI
     // section straight to the PUNAR+A panel (the AlertStack precedent).
     signal aiPanelRequested
+    signal applicationRequested(var entry, string catalogId)
 
     // Everything this surface knows. It holds no colour and draws
     // nothing; the data contract is the header of ControlData.qml.
@@ -74,6 +75,9 @@ DeferredSurfaceBase {
         id: ctl
 
         onAiPanelRequested: root.aiPanelRequested()
+        onApplicationRequested: function(entry, catalogId) {
+            root.applicationRequested(entry, catalogId);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -290,8 +294,16 @@ DeferredSurfaceBase {
         property string meta: ""
         property string tone: "" // "" = no status, so no colour (§2)
         property string tag: ""
+        property bool actionable: false
+        signal triggered
 
         implicitHeight: Math.max(30, rowName.implicitHeight + 18)
+
+        Rectangle {
+            anchors.fill: parent
+            color: Theme.shellMuted
+            visible: rowLine.actionable && rowLineMouse.containsMouse
+        }
 
         Rectangle {
             anchors.left: parent.left
@@ -343,6 +355,16 @@ DeferredSurfaceBase {
             color: rowLine.tone === "bad" ? Theme.shellStatusBad : Theme.shellInk3
             text: rowLine.meta
             elide: Text.ElideLeft
+        }
+
+        MouseArea {
+            id: rowLineMouse
+
+            anchors.fill: parent
+            enabled: rowLine.actionable
+            hoverEnabled: rowLine.actionable
+            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: rowLine.triggered()
         }
     }
 
@@ -507,7 +529,11 @@ DeferredSurfaceBase {
         }
 
         MouseArea {
+            id: actionMouse
+
             anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
             onClicked: actionTag.triggered()
         }
     }
@@ -1190,6 +1216,61 @@ DeferredSurfaceBase {
                         }
                     }
 
+                    // Date & Time owns one local tzdata search field. It
+                    // filters the installed IANA catalog only; no text or
+                    // location leaves the device.
+                    Item {
+                        id: timezoneSearchBox
+
+                        width: parent.width
+                        visible: ctl.view.zonePicker === true
+                        height: visible ? 58 : 0
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: 40
+                            radius: Theme.radiusTag
+                            color: Theme.shellMuted
+                            border.width: timezoneSearch.activeFocus ? 2 : Theme.hairline
+                            border.color: timezoneSearch.activeFocus ? Theme.shellFg : Theme.shellBorder
+
+                            TextInput {
+                                id: timezoneSearch
+
+                                anchors.fill: parent
+                                anchors.leftMargin: 13
+                                anchors.rightMargin: 13
+                                verticalAlignment: TextInput.AlignVCenter
+                                font.family: Theme.fontSans
+                                font.pixelSize: 13
+                                color: Theme.shellFg
+                                selectionColor: Theme.shellFg
+                                selectedTextColor: Theme.shellSurface
+                                activeFocusOnTab: timezoneSearchBox.visible
+                                Accessible.role: Accessible.EditableText
+                                Accessible.name: "Search timezones"
+                                onTextChanged: ctl.timezoneQuery = timezoneSearch.text
+                                Keys.onEscapePressed: {
+                                    timezoneSearch.text = "";
+                                    win.focusRail();
+                                }
+                            }
+
+                            Text {
+                                anchors.fill: timezoneSearch
+                                visible: timezoneSearch.text === ""
+                                verticalAlignment: Text.AlignVCenter
+                                text: "Search cities or regions"
+                                font.family: Theme.fontSans
+                                font.pixelSize: 13
+                                color: Theme.shellInk3
+                                Accessible.ignored: true
+                            }
+                        }
+                    }
+
                     // Lists.
                     Repeater {
                         model: ctl.view.rows === undefined ? [] : ctl.view.rows
@@ -1202,6 +1283,9 @@ DeferredSurfaceBase {
                             meta: modelData.meta
                             tone: modelData.tone === undefined ? "" : modelData.tone
                             tag: modelData.tag === undefined ? "" : modelData.tag
+                            actionable: modelData.action !== undefined
+                            onTriggered: if (modelData.action !== undefined)
+                                ctl.runAction(modelData.action)
                         }
                     }
 

@@ -2,12 +2,14 @@
 # Build the Punar VM images (qcow2) via the containerized mkosi toolchain.
 #
 # Images (milestone-1.md §3):
-#   punar-dev      — minimal M0 image (PUNAR_BOOT_OK boot gate), unchanged.
-#   punar-desktop  — M1 graphical workstation (mkosi profile "desktop").
+#   punar-dev      — minimal CI image (profile "dev").
+#   punar-desktop  — graphical CI/demo image (profiles "desktop,dev").
+#   punar-release  — production-safe graphical image (profile "desktop").
 #
 # Usage:
-#   tools/build-image.sh [dev|desktop|all]     (default: all)
-# or set PUNAR_IMAGES=dev|desktop|all. Set PUNAR_BUILD_MODE=summary for the
+#   tools/build-image.sh [dev|desktop|release|all]     (default: all)
+# or set PUNAR_IMAGES=dev|desktop|release|all. `all` retains the CI pair and
+# does not implicitly add the release artifact. Set PUNAR_BUILD_MODE=summary for the
 # cheap config-validation path (staging + `mkosi summary`, no image build).
 #
 # Canonical execution environment: x86_64 CI runners (.github/workflows/ci.yml,
@@ -22,8 +24,8 @@
 # mounted into the container: the desktop profile stages Hyprland/foot/font
 # configs from os/modules/desktop and the shell from shell/ at build time.
 #
-# Output: os/images/out/punar-dev-x86_64.qcow2 and/or
-#         os/images/out/punar-desktop-x86_64.qcow2 (+ SHA256SUMS, build-info.txt)
+# Output: os/images/out/punar-{dev,desktop,release}-x86_64.qcow2 as selected
+#         (+ SHA256SUMS and build-info.txt in build mode)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

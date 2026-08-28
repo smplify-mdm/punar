@@ -36,8 +36,8 @@ case "${PUNAR_BUILD_MODE}" in
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${PUNAR_BUILD_MODE})" >&2; exit 2 ;;
 esac
 case "${PUNAR_ARM64_IMAGES}" in
-    minimal|desktop|all) ;;
-    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, or all (got: ${PUNAR_ARM64_IMAGES})" >&2; exit 2 ;;
+    minimal|desktop|release|all) ;;
+    *) echo "error: PUNAR_ARM64_IMAGES must be minimal, desktop, release, or all (got: ${PUNAR_ARM64_IMAGES})" >&2; exit 2 ;;
 esac
 
 GIT_SHA="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"

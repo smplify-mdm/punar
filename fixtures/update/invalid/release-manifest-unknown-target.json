@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "release_id": "punar-desktop-stable-riscv64-uefi-2026.08.27.1",
+  "image_id": "punar-desktop",
+  "architecture": "riscv64",
+  "boot_platform": "uefi",
+  "version": "2026.08.27.1",
+  "channel": "stable",
+  "snapshot_pin": "20260820T000000Z",
+  "overlay_pin": null,
+  "payload": {
+    "filename": "payload.slot.raw.zst",
+    "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "size_bytes": 4,
+    "uncompressed_size_bytes": 8,
+    "compression": "zstd"
+  },
+  "boot_artifact": {
+    "kind": "uki",
+    "filename": "boot.uki.efi",
+    "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "size_bytes": 4
+  },
+  "min_from": null,
+  "security": { "severity": "none", "advisory_ids": [] },
+  "provenance": {
+    "git_commit": "0123456789abcdef0123456789abcdef01234567",
+    "ci_run_id": "local-20260827",
+    "builder_base_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "source_date_epoch": 1787184000,
+    "built_at": "2026-08-27T22:00:00Z"
+  },
+  "sbom": null
+}

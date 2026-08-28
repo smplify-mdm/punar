@@ -56,7 +56,7 @@
 //! process; the argument is at least as strong here. A forged card
 //! reading *"Unknown AI activity suspected · your-bank-helper"* with an
 //! `Inspect` action is a phishing primitive, and `/run/punar` is
-//! `0755 punar:punar`.
+//! `0755 root:root`.
 //!
 //! # What the engine does not do
 //!

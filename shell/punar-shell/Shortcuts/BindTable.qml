@@ -115,6 +115,7 @@ Singleton {
             "approval": "SURFACES",
             "alerts": "SURFACES",
             "notifications": "SURFACES",
+            "windowactions": "WINDOWS",
             "systemcontrol": "SURFACES",
             "shortcuts": "SURFACES",
             "bar": "SURFACES",

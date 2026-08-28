@@ -29,7 +29,7 @@ pragma ComponentBehavior: Bound
 // IPC TARGETS REGISTERED BY THIS TREE (all reachable as
 // `qs -p /usr/share/punar/shell ipc call <target> <method>`; every target
 // name is unique, verified by `qs ipc show` and by grep over the tree):
-//   bar · commandcenter · overview · aipanel · approval · alerts
+//   bar · commandcenter · overview · windowactions · aipanel · approval · alerts
 //   systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
 //   wallpaper
 //
@@ -53,6 +53,7 @@ import "Services"
 import "Shortcuts"
 import "SystemControl"
 import "Wallpaper"
+import "WindowActions"
 
 ShellRoot {
     id: shellRoot
@@ -155,6 +156,40 @@ ShellRoot {
 
     Bar {
         onBarCreated: readyMarker.running = true
+        onCommandCenterRequested: commandCenterSurface.openSurface()
+        onWindowActionsRequested: windowActionsSurface.openSurface()
+    }
+
+    // The normal close path is always available directly on PUNAR+Q. This
+    // compact surface adds pointer discoverability and a guarded force-quit
+    // path without keeping another layer window resident at idle.
+    DeferredSurface {
+        id: windowActionsSurface
+        surfaceName: "windowactions"
+        sourceComponent: WindowActions {}
+    }
+
+    IpcHandler {
+        target: "windowactions"
+
+        function toggle(): void {
+            windowActionsSurface.toggleSurface();
+        }
+        function open(): void {
+            windowActionsSurface.openSurface();
+        }
+        function close(): void {
+            windowActionsSurface.closeSurface();
+        }
+        function state(): string {
+            return windowActionsSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("windowactions");
+        }
+        function residency(): string {
+            return windowActionsSurface.residency();
+        }
     }
 
     DeferredSurface {
@@ -232,6 +267,22 @@ ShellRoot {
         surfaceName: "systemcontrol"
         sourceComponent: SystemControl {
             onAiPanelRequested: shellRoot.showAiPanel()
+            onApplicationRequested: function(entry, catalogId) {
+                systemControlSurface.closeSurface();
+                if (entry !== null && entry !== undefined) {
+                    Apps.launch(entry);
+                    return;
+                }
+                var surface = commandCenterSurface.ensureLoaded(false);
+                if (surface === null) {
+                    commandCenterSurface.openSurface();
+                    return;
+                }
+                if (catalogId !== "")
+                    surface.ipcApplication(catalogId);
+                else
+                    surface.show();
+            }
         }
     }
 

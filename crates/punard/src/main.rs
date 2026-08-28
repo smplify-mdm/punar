@@ -100,10 +100,9 @@ struct RunArgs {
     status_file: PathBuf,
 
     /// M9 approval summary the shell watches (docs/api/ipc.md section 15).
-    /// Inside the **root-owned** `/run/punard`, deliberately not beside
-    /// `status.json` in the user-writable `/run/punar`: this is the file
-    /// that tells a human what they are about to authorize, and a file a
-    /// local process can substitute is a spoofing primitive.
+    /// Inside the `0750 root:punar` `/run/punard`, deliberately not beside
+    /// the world-readable status summary: approval details are admitted-user
+    /// data, and a file a local process can substitute is a spoofing primitive.
     #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_FILE)]
     approvals_file: PathBuf,
 
@@ -122,6 +121,16 @@ struct RunArgs {
     /// production service never sets it; status labels forced results.
     #[arg(long, value_name = "CLASS")]
     device_class_override: Option<DeviceClass>,
+
+    /// Signed image application catalog. Desktop images install this file;
+    /// setting an empty path is not supported because no fallback catalog
+    /// or arbitrary source exists.
+    #[arg(long, default_value = "/usr/share/punar/catalog/catalog.json")]
+    app_catalog: PathBuf,
+
+    /// Flatpak binary used by the typed application capability.
+    #[arg(long, default_value = "/usr/bin/flatpak")]
+    flatpak_bin: PathBuf,
 }
 
 fn build_registry(args: &RunArgs) -> Registry {
@@ -134,10 +143,20 @@ fn build_registry(args: &RunArgs) -> Registry {
             PathBuf::from("/etc/hostname"),
             PathBuf::from("/proc/sys/kernel/hostname"),
         )),
-        Box::new(TimezoneBackend::new(
-            PathBuf::from("/etc/localtime"),
-            PathBuf::from("/usr/share/zoneinfo"),
-        )),
+        Box::new(
+            TimezoneBackend::new(
+                PathBuf::from("/etc/localtime"),
+                PathBuf::from("/usr/share/zoneinfo"),
+            )
+            .with_network_timezone_dropins(vec![
+                PathBuf::from(
+                    "/etc/systemd/network/50-punar-dhcp.network.d/90-punar-timezone.conf",
+                ),
+                PathBuf::from(
+                    "/etc/systemd/network/60-punar-wifi.network.d/90-punar-timezone.conf",
+                ),
+            ]),
+        ),
     ])
 }
 
@@ -173,6 +192,8 @@ fn run(args: RunArgs) -> ExitCode {
         ai_defaults_file: args.ai_defaults_file,
         console_uid: args.console_uid,
         device_class_override: args.device_class_override,
+        app_catalog_path: Some(args.app_catalog),
+        flatpak_bin: args.flatpak_bin,
         ..cfg
     };
 

@@ -9,7 +9,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-for command in systemd-repart losetup mount umount mountpoint btrfs cryptsetup \
+for command in systemd-repart systemd-cryptenroll losetup mount umount mountpoint btrfs cryptsetup \
     blkid sfdisk sha256sum truncate dd head awk grep python3 mknod; do
     command -v "${command}" >/dev/null 2>&1 \
         || { echo "error: required command is missing: ${command}" >&2; exit 1; }
@@ -28,8 +28,12 @@ done
 WORK_DIR="$(mktemp -d /run/punar-repart-spike.XXXXXX)"
 LOOP_DEVICE=""
 CRYPT_NAME="punar-repart-spike-$$"
+RECOVERY_CRYPT_NAME="${CRYPT_NAME}-recovery"
 
 cleanup() {
+    if [ -e "/dev/mapper/${RECOVERY_CRYPT_NAME}" ]; then
+        cryptsetup close "${RECOVERY_CRYPT_NAME}" || true
+    fi
     if [ -e "/dev/mapper/${CRYPT_NAME}" ]; then
         cryptsetup close "${CRYPT_NAME}" || true
     fi
@@ -169,8 +173,10 @@ detach_disk
 echo "V-REPART PASS: btrfs subvolumes are materialized"
 
 # 3. Encrypt=key-file must produce a LUKS2 container that the same key opens,
-# with the requested filesystem inside. EncryptKDF=minimal is appropriate for
-# this high-entropy disposable test key and keeps the architecture matrix fast.
+# with the requested filesystem inside. Then systemd-cryptenroll must create a
+# typed 256-bit recovery key that independently unlocks the same container.
+# EncryptKDF=minimal is appropriate for these high-entropy disposable test
+# keys and keeps the architecture matrix fast.
 mkdir -p "${WORK_DIR}/encrypted-definitions"
 head -c 64 /dev/urandom > "${WORK_DIR}/install.key"
 chmod 0600 "${WORK_DIR}/install.key"
@@ -202,8 +208,32 @@ cryptsetup open \
     "${encrypted_partition}" "${CRYPT_NAME}"
 [ "$(blkid --probe --output value --match-tag TYPE "/dev/mapper/${CRYPT_NAME}")" = "ext4" ]
 cryptsetup close "${CRYPT_NAME}"
+
+# systemd deliberately emits only the recovery key on stdout; all explanatory
+# text and status go to stderr. Keep it only in shell memory, never a file or
+# process argument, validate its canonical shape, prove its LUKS slot exists,
+# and use stdin to open the container before unsetting it.
+recovery_key="$(systemd-cryptenroll \
+    --unlock-key-file="${WORK_DIR}/install.key" \
+    --recovery-key \
+    "${encrypted_partition}")"
+if ! grep -Eq '^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$' <<<"${recovery_key}"; then
+    echo "error: systemd-cryptenroll did not return canonical modhex64" >&2
+    exit 1
+fi
+recovery_keyslot="$(cryptsetup luksDump --dump-json-metadata "${encrypted_partition}" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(t["keyslots"][0] for t in d["tokens"].values() if t["type"] == "systemd-recovery"))')"
+case "${recovery_keyslot}" in
+    ''|*[!0-9]*) echo "error: recovery token did not name a numeric keyslot" >&2; exit 1 ;;
+esac
+printf '%s' "${recovery_key}" \
+    | cryptsetup open --key-file=- \
+        "${encrypted_partition}" "${RECOVERY_CRYPT_NAME}"
+[ "$(blkid --probe --output value --match-tag TYPE "/dev/mapper/${RECOVERY_CRYPT_NAME}")" = "ext4" ]
+cryptsetup close "${RECOVERY_CRYPT_NAME}"
+unset recovery_key
 detach_disk
-echo "V-REPART PASS: key-file encryption creates an openable LUKS2 filesystem"
+echo "V-REPART PASS: LUKS2 filesystem opens with installer and typed recovery slots"
 
 # 4. The install payload lives below /run and is copied block-for-block into
 # slot A. Compare the exact payload digest with the first payload-sized bytes

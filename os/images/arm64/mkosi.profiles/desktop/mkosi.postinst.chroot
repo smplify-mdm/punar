@@ -1,14 +1,23 @@
 #!/bin/sh
-# Debian/ARM64 desktop post-install adapter. Development credentials only;
-# production onboarding replaces this account transactionally.
+# Debian/ARM64 product adapter. No human user, password or autologin is
+# created here; release onboarding owns that transaction.
 set -eu
 
-groupadd --force punar
+# Stable admission group shared by every human account, regardless of the
+# username chosen in onboarding. It must predate tmpfiles and daemon startup.
+if ! getent group punar >/dev/null 2>&1; then
+    groupadd --system punar
+fi
 
-# Unlike Arch's greetd package, Debian's package does not create the account
-# named by our shared default_session.  greetd validates every configured
-# session user before it starts the initial autologin session, so omitting
-# this adapter prevents Hyprland from being attempted at all.
+# Match x86 product policy: rootless Podman is available on demand, while its
+# user API socket and periodic lifecycle jobs remain explicitly opt-in.
+systemctl --global disable \
+    podman-auto-update.service podman-auto-update.timer \
+    podman-clean-transient.service podman-restart.service \
+    podman.service podman.socket >/dev/null 2>&1 || true
+
+# Debian's greetd package does not create the account named by our shared
+# default_session. This locked system account runs agreety/onboarding only.
 if ! getent group greeter >/dev/null 2>&1; then
     groupadd --system greeter
 fi
@@ -18,28 +27,23 @@ if ! getent passwd greeter >/dev/null 2>&1; then
 fi
 install -d -m 0750 -o greeter -g greeter /var/lib/greetd
 
-supplementary=""
-for group in sudo video input dialout; do
-    if getent group "${group}" >/dev/null 2>&1; then
-        if [ -n "${supplementary}" ]; then
-            supplementary="${supplementary},${group}"
-        else
-            supplementary="${group}"
-        fi
-    fi
-done
+# Same signed, payload-free remote definition as x86. Spotify itself selects
+# the web source on ARM64, while other curated Flatpaks can remain available
+# when their publishers provide ARM builds.
+flatpak remote-add --system --if-not-exists --from flathub \
+    /usr/share/punar/catalog/remotes/flathub.flatpakrepo
 
-# Fixed dev-only SHA-512 crypt for password "punar". chpasswd would generate
-# a new salt on every build and make the disk, initrd credential and UKI drift.
-# Dollar signs below are literal crypt delimiters.
-# shellcheck disable=SC2016
-useradd --create-home --gid punar --groups "${supplementary}" \
-    --shell /bin/bash \
-    --password '$6$punar-arm64-dev$gWTgk1f0Vl76wHmu/qPIXM89H0xcFqIkBBj9DEPteme3zLnOiSlzdNK/fp4y4jowrT0WWdFFdhUFHC5.Ejxe3/' \
-    punar
+# See the shared x86 adapter: /var is authoritative; these are runtime views
+# consumed by rootless-container tooling, never slot-local account records.
+ln -sfn ../run/punar/subuid /etc/subuid
+ln -sfn ../run/punar/subgid /etc/subgid
 
-printf '%s\n' 'punar:100000:65536' > /etc/subuid
-printf '%s\n' 'punar:100000:65536' > /etc/subgid
+# Debian presets do not own this vendor health dependency. The bless generator
+# pulls in boot-complete.target only for a counted entry; the target then
+# requires this check and cannot complete when any signal fails.
+install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
+ln -sfn ../punar-update-health.service \
+    /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
 # Debian's Chromium wrapper reads /etc/chromium.d rather than Arch's
 # /etc/chromium-flags.conf directly. Keep the product defaults in one source
@@ -48,10 +52,8 @@ install -d -m 0755 /etc/chromium.d
 install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
     /etc/chromium.d/punar-flags
 
-# Product services use the cross-distribution /usr/bin path exercised by the
-# Arch image. Debian packages nft as an administrator command under
-# /usr/sbin; keep one binary contract rather than carrying substrate branches
-# inside the privileged control plane.
+# Debian packages nft under /usr/sbin; product services use the shared
+# cross-distribution /usr/bin contract.
 ln -sfn /usr/sbin/nft /usr/bin/nft
 
 fc-cache --system-only -f \

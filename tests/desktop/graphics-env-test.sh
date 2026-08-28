@@ -90,15 +90,15 @@ mkdir -m 0700 "${SOFTWARE_RUNTIME}"
     . "${HELPER}"
     PUNAR_GRAPHICS_MODE=software
     XDG_RUNTIME_DIR="${SOFTWARE_RUNTIME}"
-    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.conf
+    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.lua
     export PUNAR_GRAPHICS_MODE XDG_RUNTIME_DIR PUNAR_HYPRLAND_SYSTEM_CONFIG
     punar_select_hyprland_config
     [ "${PUNAR_HYPRLAND_CONFIG}" = \
-        "${SOFTWARE_RUNTIME}/punar-hyprland-software.conf" ]
+        "${SOFTWARE_RUNTIME}/punar-hyprland-software.lua" ]
 )
-EXPECTED_SOFTWARE_CONFIG='source = /test/product-hyprland.conf
-animations { enabled = false }'
-ACTUAL_SOFTWARE_CONFIG="$(cat "${SOFTWARE_RUNTIME}/punar-hyprland-software.conf")"
+EXPECTED_SOFTWARE_CONFIG='require("/test/product-hyprland.lua")
+hl.config({ animations = { enabled = false } })'
+ACTUAL_SOFTWARE_CONFIG="$(cat "${SOFTWARE_RUNTIME}/punar-hyprland-software.lua")"
 [ "${ACTUAL_SOFTWARE_CONFIG}" = "${EXPECTED_SOFTWARE_CONFIG}" ] || {
     printf 'FAIL software compositor overlay: got %s\n' \
         "${ACTUAL_SOFTWARE_CONFIG}" >&2
@@ -113,19 +113,50 @@ HARDWARE_CONFIG="$(
     . "${HELPER}"
     PUNAR_GRAPHICS_MODE=hardware
     XDG_RUNTIME_DIR="${HARDWARE_RUNTIME}"
-    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.conf
+    PUNAR_HYPRLAND_SYSTEM_CONFIG=/test/product-hyprland.lua
     export PUNAR_GRAPHICS_MODE XDG_RUNTIME_DIR PUNAR_HYPRLAND_SYSTEM_CONFIG
     punar_select_hyprland_config
     printf '%s' "${PUNAR_HYPRLAND_CONFIG}"
 )"
-[ "${HARDWARE_CONFIG}" = /test/product-hyprland.conf ] || {
+[ "${HARDWARE_CONFIG}" = /test/product-hyprland.lua ] || {
     printf 'FAIL hardware compositor config: got %s\n' "${HARDWARE_CONFIG}" >&2
     exit 1
 }
-[ ! -e "${HARDWARE_RUNTIME}/punar-hyprland-software.conf" ] || {
+[ ! -e "${HARDWARE_RUNTIME}/punar-hyprland-software.lua" ] || {
     printf 'FAIL hardware path created a software compositor overlay\n' >&2
     exit 1
 }
 printf 'ok   hardware compositor path keeps product motion\n'
+
+# Hyprland evaluates native Lua config from its process working directory.
+# A relative require can pass a build-directory verification and then resolve
+# from / under greetd, leaving the desktop in emergency mode with no binds.
+PRODUCT_CONFIG="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
+for module in punar-look.lua punar-binds.lua punar-session-profile.lua; do
+    grep -Fq "require(\"/etc/xdg/hypr/${module}\")" "${PRODUCT_CONFIG}" || {
+        printf 'FAIL product compositor config does not import %s by installed path\n' \
+            "${module}" >&2
+        exit 1
+    }
+done
+if grep -Fq 'require("./' "${PRODUCT_CONFIG}" \
+    || grep -Fq "require('./" "${PRODUCT_CONFIG}"; then
+    printf 'FAIL product compositor config contains a working-directory-relative import\n' >&2
+    exit 1
+fi
+printf 'ok   product compositor modules use installed absolute paths\n'
+
+# Keyboard-only operation is a floor, not a pointer prohibition. The shipped
+# compositor must support divider/edge dragging with a practical invisible
+# grab area, and the retained legacy config must not tell a different story.
+LOOK_LUA="${REPO_ROOT}/os/modules/desktop/hypr/punar-look.lua"
+LOOK_CONF="${REPO_ROOT}/os/modules/desktop/hypr/punar-look.conf"
+grep -Eq 'resize_on_border[[:space:]]*=[[:space:]]*true' "${LOOK_LUA}"
+grep -Eq 'extend_border_grab_area[[:space:]]*=[[:space:]]*15' "${LOOK_LUA}"
+grep -Eq 'hover_icon_on_border[[:space:]]*=[[:space:]]*true' "${LOOK_LUA}"
+grep -Eq 'resize_on_border[[:space:]]*=[[:space:]]*true' "${LOOK_CONF}"
+grep -Eq 'extend_border_grab_area[[:space:]]*=[[:space:]]*15' "${LOOK_CONF}"
+grep -Eq 'hover_icon_on_border[[:space:]]*=[[:space:]]*true' "${LOOK_CONF}"
+printf 'ok   app borders support pointer resize with a 15 px grab area\n'
 
 echo PUNAR_GRAPHICS_ENV_OK

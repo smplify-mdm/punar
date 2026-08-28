@@ -39,6 +39,7 @@ PUNAR + 1..9                 Go to workspace 1..9
 PUNAR + SHIFT + 1..9         Move window to workspace 1..9
 PUNAR + SHIFT + TAB          Previous open workspace (fast cycle)
 PUNAR + Space                Universal command center (punar-shell IPC)
+PUNAR + SHIFT + Space        Command center fallback for VM clients that reserve PUNAR + Space
 ```
 
 (`PUNAR+TAB` was the M1 workspace-cycle placeholder; M2 rebinds it to the
@@ -64,8 +65,10 @@ Escape · Return              Exit resize mode
 
 ```text
 PUNAR + Q                    Close window
-PUNAR + Return               Terminal (footclient; falls back to foot if
-                             the foot server is down)
+PUNAR + SHIFT + Q            Window actions (close normally or confirm a
+                             force quit for the exact focused app)
+PUNAR + Return               Terminal (a detached footclient; falls back to
+                             foot only if the foot server is down)
 PUNAR + B                    Browser (chromium, Wayland ozone)
 ```
 

@@ -1,8 +1,14 @@
 # Punar application catalog and install experience — design
 
-**Status:** design of record, proposed 2026-08-25 · unimplemented (spec 1.22:
-nothing in this document ships today; every claim below is a plan until a
-milestone lands it and `IMPLEMENTATION_STATUS.md` says so).
+**Status:** design of record, proposed 2026-08-25 · partially implemented
+2026-08-27. The signed local catalog, typed `apps.*` daemon/CLI path, Command
+Center inspection/action card, and `PUNAR+S` Applications browse entry ship as
+one Spotify vertical slice. Installed rows launch directly; catalog rows open
+their exact inspected card; the keyed browse action still exposes the whole
+catalog. The broad curated catalog, shared Flatpak
+persistence, generic web-app creation, and canonical full-flow CI gate remain
+open; every later section describing those pieces is still a plan unless the
+build queue says otherwise (spec 1.22).
 
 **Spec authorities:** section 16 (developer experience; *"Avoid preinstalling
 excessive toolchains on the host. Prefer project isolation."*), section 46

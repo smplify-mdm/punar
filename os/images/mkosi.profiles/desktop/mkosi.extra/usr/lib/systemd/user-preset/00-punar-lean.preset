@@ -1,0 +1,10 @@
+# Keep the idle user session lean. Rootless Podman remains an on-demand CLI;
+# its API and lifecycle jobs are opt-in. Hyprland owns exactly one deliberate
+# Foot server process, so the package's separate systemd server/socket must not
+# create a duplicate. PipeWire's unused generic filter chain also stays off.
+disable podman*.service
+disable podman*.socket
+disable podman*.timer
+disable foot-server.service
+disable foot-server.socket
+disable filter-chain.service

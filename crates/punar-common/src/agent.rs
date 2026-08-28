@@ -77,7 +77,7 @@ pub const AGENTS_SUMMARY_VERSION: u32 = 1;
 /// proposed `docs/api/ipc.md` section 20).
 ///
 /// `0640 root:punar` in the **root-owned** `/run/punar-agentd`, never in
-/// the user-writable `/run/punar`: a forged card reading *"Unknown AI
+/// the world-readable `/run/punar`: a forged card reading *"Unknown AI
 /// activity suspected · your-bank-helper"* with an `Inspect` action is a
 /// phishing primitive, and M9 already moved `approvals.json` out of
 /// `/run/punar` for exactly this reason. Display data whose authority is

@@ -49,6 +49,22 @@ PUNAR_ARM64_IMAGES=desktop ./tools/build-arm64-image.sh
 On macOS the launcher opens a direct Cocoa window by default, avoiding the VNC
 encode/decode and input-forwarding hop. Set `PUNAR_VM_DISPLAY=vnc` to use
 TigerVNC on `127.0.0.1:5901`, or `PUNAR_VM_DISPLAY=none` for a headless run.
+For a shareable VNC window on macOS, use TigerVNC. Apple Screen Sharing can
+appear as a connected QEMU client while remaining stuck on **Connecting**;
+it is not a supported QEMU VNC client. The launcher opens an installed
+TigerVNC automatically:
+
+```sh
+PUNAR_VM_DISPLAY=vnc ./tools/demo-arm64-vm.sh
+```
+
+The listener is restricted to localhost, and the default session needs no
+viewer password. Set `PUNAR_VNC_PASSWORD=punar` only when a password prompt is
+useful for a demo; enter it in TigerVNC, not Apple Screen Sharing. Set
+`PUNAR_VM_OPEN_VIEWER=0` when another supported viewer will connect manually.
+The ordinary local path remains `PUNAR_VM_DISPLAY=cocoa`, with no
+encode/decode hop.
+
 QMP remains bound to localhost on port 4445. The launcher uses a disposable
 disk snapshot and stable keyboard and pointer IDs so automated press/release
 sequences cannot leave a virtual modifier latched. Disposable writes use
@@ -94,9 +110,9 @@ Command on an Apple keyboard).
 | **Start here** | `PUNAR + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
 | Terminal | `PUNAR + Return` | foot, Geist Mono, panel surface |
 | Browser | `PUNAR + B` | Chromium, native Wayland |
-| Find and open an app | `PUNAR + Space` | Type `Chromium`, then Enter; installed `.desktop` entries are searched live |
+| Find and open an app | `PUNAR + Space` | The launcher lists installed and available applications immediately; type to filter, then click a row or press Enter. If macOS reserves Command+Space, use `PUNAR + SHIFT + Space` or click **PUNAR** in the top-left bar. |
 | Choose a wallpaper | `PUNAR + Space` | Type `wallpaper`; Stillpoint, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
-| System control | `PUNAR + S` | The settings surface |
+| System control | `PUNAR + S` | The settings surface. Choose **Applications** to browse the live installed list and signed local catalog. Click an installed row to open it, click an available row to inspect it, or press `O` to browse everything in Command Center. |
 | Notification centre | `PUNAR + SHIFT + N` | The centre; toasts appear on their own |
 | Project overview | `PUNAR + Tab` | Workspaces as projects |
 | AI panel | `PUNAR + A` | What AI has done on this device |
@@ -115,7 +131,7 @@ qs -p /usr/share/punar/shell ipc call theme show nocturne
 
 Seven themes ship (`paper`, `panel`, `graphite`, `nocturne`, `oxide`,
 `ember`, `contrast`). Any surface can be driven the same way — `ipc show`
-lists all fourteen targets.
+lists all fifteen targets.
 
 ---
 
@@ -124,7 +140,7 @@ lists all fourteen targets.
 This is the part worth reading before forming a judgement.
 
 **Real, and exercised by CI on every push:**
-the compositor and all fourteen shell targets, the terminal, the browser
+the compositor and all fifteen shell targets, the terminal, the browser
 (native Wayland, launched through the same flags on every path), link
 handling via `xdg-open`, the theme system, `punard` + `punarctl` and their
 typed capability API, declarative desired state and reconciliation, the
@@ -139,18 +155,26 @@ TPM/measured boot, the Smplify control plane (a local mock), identity
 providers, and the private relay. Anything drawn with a dashed stroke in the
 design language is in this category by construction.
 
-**Not built at all:** the installer and onboarding, `punarctl app` and the
-third-party app catalogue (including the Google Chrome install command),
-execution trust / the Gatekeeper-class exec gate, web-app install and
-browser contexts (Milestone 11), and network policy and the relay
-(Milestone 12). Each of these is *designed* — see `docs/design/` — and
-none of it is claimed as working.
+**Real and locally release-VM proven, with the canonical CI gate still being
+expanded:** first-run onboarding; the signed local application catalog;
+`punarctl app` inspection and typed install actions; Command Center and System
+Control discovery; and Spotify's architecture-aware x86_64 Flatpak / ARM64 web
+fallback. The catalog currently contains one vertical slice, not a broad app
+selection.
 
-**Networking is new and untested by CI.** The gate runs the VM with
-`-nic none`, so wired DHCP + resolved have never been exercised by a
-machine. The demo VM is launched *with* user-mode networking specifically so
-you are the first to try it. If the browser cannot load a page, that is the
-first thing to check:
+**Not built at all:** the installer, the full third-party catalog (including
+the Google Chrome install command), execution trust / the Gatekeeper-class
+exec gate, generic user-defined web apps and browser contexts (the remaining
+Milestone 11 work), network policy and the relay (Milestone 12), and the real
+update/rollback state machine. Each is designed in `docs/design/`; none is
+claimed as working.
+
+**Networking is locally proven but not exercised by the offline CI gate.** The
+gate runs the VM with `-nic none`; a clean ARM64 Apple-HVF release VM has since
+loaded the official Spotify web player over QEMU user networking. The same
+release passed device-level pointer tests for top-bar launcher, installed app,
+catalog app, and card action hit targets. If a demo VM cannot load a page,
+DHCP and resolved are still the first things to check:
 
 ```bash
 networkctl status

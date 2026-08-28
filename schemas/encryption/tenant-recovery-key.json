@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/encryption/tenant-recovery-key.json",
+  "title": "Tenant recovery key",
+  "description": "Public HPKE wrapping and independent receipt-verification keys delivered to an enrolled Punar device through the authenticated Smplify enrollment chain. This document contains no private key material.",
+  "type": "object",
+  "properties": {
+    "v": { "const": 1 },
+    "organization_id": { "$ref": "#/$defs/identifier" },
+    "key_id": { "$ref": "#/$defs/identifier" },
+    "suite": {
+      "const": "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_CHACHA20POLY1305"
+    },
+    "public_key": {
+      "description": "32-byte RFC 9180 DHKEM(X25519, HKDF-SHA256) public key, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "receipt_signing_public_key": {
+      "description": "32-byte Ed25519 public key used only to verify escrow receipts, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    }
+  },
+  "required": [
+    "v",
+    "organization_id",
+    "key_id",
+    "suite",
+    "public_key",
+    "receipt_signing_public_key"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    }
+  }
+}

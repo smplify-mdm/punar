@@ -1,0 +1,17 @@
+#!/bin/sh
+# x86_64 development-profile account. Release onboarding creates the first
+# human account transactionally; this fixed user exists only for CI and demos.
+set -eu
+
+# Dev user for the greetd autologin session. Groups: wheel (admin), video +
+# input (direct DRM/input access safety net; the session normally gets these
+# via logind), uucp (serial ports, dev debugging). Password matches the M0
+# root convention (documented dev convenience, not a secret).
+useradd -m -g punar -G wheel,video,input,uucp -s /bin/bash punar
+echo 'punar:punar' | chpasswd
+
+# Rootless podman: subordinate uid/gid ranges (spec §76 M1 Podman
+# deliverable; newuidmap/newgidmap ship in base's shadow).
+rm -f /etc/subuid /etc/subgid
+echo 'punar:100000:65536' > /etc/subuid
+echo 'punar:100000:65536' > /etc/subgid

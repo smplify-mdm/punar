@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 /// The temp file is opened with `O_CREAT|O_EXCL` (`create_new`), never
 /// `O_CREAT`-follow: since M5 this helper also writes the section 9 status
 /// file into `/run/punar`, a directory owned by the unprivileged session
-/// user (tmpfiles.d: `0755 punar:punar`), where a predictable tmp name
+/// root (tmpfiles.d: `0755 root:root`), where a predictable tmp name
 /// opened without `O_EXCL` would let that user plant a symlink and have
 /// root truncate an arbitrary file (spec section 61). A pre-existing tmp
 /// (stale crash leftover or a planted link) is unlinked and the exclusive

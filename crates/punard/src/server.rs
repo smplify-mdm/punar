@@ -31,15 +31,15 @@ use punar_common::audit::{
 };
 use punar_common::ipc::{
     ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
-    ApprovalsResolveParams, AuditStatus, AuditTailParams, CapabilitiesGetParams,
-    CapabilitiesSetParams, CapabilityCompliance, Classification as WireClassification,
-    ComplianceBlock, ComplianceState, EnrollStartParams, EnrollStartResult, EnrollStatusResult,
-    EnrollStopResult, ErrorCode, FirstSync, IpcError, LastQuery, LastSync, MAX_REQUEST_LINE_BYTES,
-    Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
-    PolicyExplainParams, PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams,
-    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
-    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
-    StatusResult,
+    ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams, AuditStatus,
+    AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams, CapabilityCompliance,
+    Classification as WireClassification, ComplianceBlock, ComplianceState, EnrollStartParams,
+    EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode, FirstSync, IpcError,
+    LastQuery, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
+    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
+    PolicySourceRef, PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult,
+    PrivilegeStatusResult, ReconcileEntry, ReconcileResult, RemediationOutcome, Request,
+    ResolveDecision, Response, SERVER_READ_TIMEOUT, StatusResult,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -48,6 +48,7 @@ use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 
 use crate::approvals::{self, ApprovalStore};
+use crate::apps::{AppError, AppManager};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
@@ -149,8 +150,8 @@ pub struct DaemonConfig {
     pub kernel_release_path: PathBuf,
     /// M9: the approval summary the shell watches (docs/api/ipc.md section
     /// 15). `/run/punard/approvals.json` in production — deliberately
-    /// inside the **root-owned** runtime directory, not beside
-    /// `status.json` in the user-writable `/run/punar`. Defaults to a
+    /// inside the `0750 root:punar` runtime directory, not beside the
+    /// world-readable `status.json` summary. Defaults to a
     /// state-dir file so embedded/test daemons never write outside their
     /// tempdir.
     pub approvals_file: PathBuf,
@@ -170,6 +171,15 @@ pub struct DaemonConfig {
     pub device_sources: DeviceSources,
     /// Typed CI seam. Production leaves this unset and reports `observed`.
     pub device_class_override: Option<punar_common::DeviceClass>,
+    /// Immutable application catalog shipped in the signed OS image. `None`
+    /// disables the surface for non-desktop builds and host tests.
+    pub app_catalog_path: Option<PathBuf>,
+    /// Flatpak client binary; injectable so tests can prove fixed argv and
+    /// fail-closed verification without modifying the host.
+    pub flatpak_bin: PathBuf,
+    /// Cross-architecture integration-test seam. Production always leaves
+    /// this unset and uses the compiled target architecture.
+    pub app_arch_override: Option<String>,
 }
 
 impl DaemonConfig {
@@ -197,6 +207,9 @@ impl DaemonConfig {
             agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
             device_sources: DeviceSources::default(),
             device_class_override: None,
+            app_catalog_path: None,
+            flatpak_bin: PathBuf::from("/usr/bin/flatpak"),
+            app_arch_override: None,
         }
     }
 }
@@ -307,6 +320,10 @@ struct Inner {
     shutdown: AtomicBool,
     active: Mutex<usize>,
     slot_freed: Condvar,
+    apps: AppManager,
+    /// Flatpak has its own transaction lock, but serializing at the typed
+    /// API also makes our inspect→mutate→verify chain indivisible.
+    app_mutation: Mutex<()>,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -332,6 +349,12 @@ impl Daemon {
         }
         let device_id = load_or_create_device_id(&cfg.state_dir.join("device-id"))?;
         let device_profile = observe_profile(&cfg.device_sources, cfg.device_class_override);
+        let apps = AppManager::load_for_arch(
+            cfg.app_catalog_path.as_deref(),
+            cfg.flatpak_bin.clone(),
+            cfg.app_arch_override.as_deref(),
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let audit = AuditWriter::open(&cfg.audit_path)?;
         // Group ownership (root:punar) is the daemon's job, not the
         // writer's; meaningful only when running as root (tests are not).
@@ -445,6 +468,8 @@ impl Daemon {
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
                 slot_freed: Condvar::new(),
+                apps,
+                app_mutation: Mutex::new(()),
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
@@ -776,6 +801,46 @@ fn invalid_state(reason: &str) -> IpcError {
     )
 }
 
+fn app_ipc_error(error: AppError) -> IpcError {
+    let (code, what, next) = match &error {
+        AppError::InvalidCatalog(_) => (
+            ErrorCode::Internal,
+            "The application catalog could not be trusted",
+            "verify the signed OS image and restart punard",
+        ),
+        AppError::NotFound(_) => (
+            ErrorCode::NotFound,
+            "That application is not in this Punar catalog",
+            "run `punarctl app search <words>` to see supported applications",
+        ),
+        AppError::Unsupported { .. } => (
+            ErrorCode::Conflict,
+            "That application has no native package for this device",
+            "inspect the app card for its supported web or architecture-specific path",
+        ),
+        AppError::Verification(_) => (
+            ErrorCode::VerifyFailed,
+            "The application source changed after it was cataloged",
+            "refresh to a newly signed Punar catalog before retrying",
+        ),
+        AppError::Policy(_) => (
+            ErrorCode::Denied,
+            "Application policy refused that package",
+            "choose a sandboxed package or wait for the explicit broad-access approval surface",
+        ),
+        AppError::Backend(_) => (
+            ErrorCode::ApplyFailed,
+            "The application service could not complete the request",
+            "check network connectivity and `flatpak remotes`, then retry",
+        ),
+    };
+    IpcError::with_details(
+        code,
+        format!("{what}.\nWhy: {error}.\nNext step: {next}."),
+        json!({ "component": "application_catalog" }),
+    )
+}
+
 impl Inner {
     fn log_audit(&self, event: AuditEvent) {
         match self.audit.lock().unwrap().append(&event) {
@@ -895,6 +960,176 @@ impl Inner {
             Method::PrivilegeRequest(params) => self.handle_privilege_request(peer, params),
             Method::PrivilegeStatus => self.handle_privilege_status(peer),
             Method::PrivilegeRevoke(params) => self.handle_privilege_revoke(peer, params),
+            Method::AppsCatalog(params) => self.handle_apps_catalog(params),
+            Method::AppsList => self.handle_apps_list(),
+            Method::AppsInstall(params) => self.handle_apps_install(peer, params),
+            Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
+        }
+    }
+
+    fn handle_apps_catalog(&self, params: &AppsCatalogParams) -> Result<Value, IpcError> {
+        if params.id.is_some() && params.query.is_some() {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                "Choose one application id or one search query, not both. Next step: run `punarctl app search <words>` or `punarctl app show <id>`.".to_string(),
+                json!({ "params": ["id", "query"] }),
+            ));
+        }
+        if params
+            .query
+            .as_ref()
+            .is_some_and(|q| q.len() > 80 || q.contains('\n') || q.contains('\r'))
+        {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                "The application search must be one line of at most 80 characters. Next step: shorten the search and retry.".to_string(),
+                json!({ "param": "query" }),
+            ));
+        }
+        self.apps
+            .catalog(params.id.as_deref(), params.query.as_deref())
+            .map_err(app_ipc_error)
+    }
+
+    fn handle_apps_list(&self) -> Result<Value, IpcError> {
+        self.apps.list().map_err(app_ipc_error)
+    }
+
+    fn app_mutation_authorized(
+        &self,
+        peer: &Peer,
+        action: &str,
+        id: &str,
+    ) -> Result<AuditActor, IpcError> {
+        let actor = self.actor_of(peer);
+        if actor.source == PrincipalKind::AiAgent {
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &actor,
+                action,
+                id,
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "An AI agent may not install or remove desktop applications. Policy: personal defaults — application mutations require the person at the device. Next step: open Command Center and choose the application yourself.".to_string(),
+                json!({ "application": id, "decision": "deny", "policy_ids": ["personal-defaults"] }),
+            ));
+        }
+        if self.enrollment.lock().unwrap().is_some() {
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &actor,
+                action,
+                id,
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "This device is enrolled, so application changes must first pass its organization application policy. That policy bridge is not active in this build; the safe result is no change. Next step: use the managed software catalog after the application-policy milestone lands.".to_string(),
+                json!({ "application": id, "decision": "deny", "policy_ids": ["organization-application-policy"] }),
+            ));
+        }
+        Ok(actor)
+    }
+
+    fn handle_apps_install(
+        &self,
+        peer: &Peer,
+        params: &AppsInstallParams,
+    ) -> Result<Value, IpcError> {
+        let action = "system.install_package";
+        let actor = self.app_mutation_authorized(peer, action, &params.id)?;
+        if params.confirm_metadata_sha256.len() != 64
+            || !params
+                .confirm_metadata_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                "The install confirmation is not a SHA-256 metadata digest. Nothing was installed. Next step: inspect the app again and confirm the digest shown on that card.".to_string(),
+                json!({ "param": "confirm_metadata_sha256" }),
+            ));
+        }
+        let _guard = self.app_mutation.lock().unwrap();
+        match self
+            .apps
+            .install(&params.id, &params.confirm_metadata_sha256)
+        {
+            Ok(result) => {
+                let outcome = if result["changed"] == true {
+                    AuditOutcome::Success
+                } else {
+                    AuditOutcome::Noop
+                };
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    action,
+                    &params.id,
+                    Decision::Allow,
+                    outcome,
+                ));
+                Ok(result)
+            }
+            Err(error) => {
+                let (decision, outcome) = match &error {
+                    AppError::Verification(_) => (Decision::Allow, AuditOutcome::VerifyFailed),
+                    AppError::Policy(_) => (Decision::Deny, AuditOutcome::Denied),
+                    _ => (Decision::Allow, AuditOutcome::Failure),
+                };
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    action,
+                    &params.id,
+                    decision,
+                    outcome,
+                ));
+                Err(app_ipc_error(error))
+            }
+        }
+    }
+
+    fn handle_apps_remove(
+        &self,
+        peer: &Peer,
+        params: &AppsRemoveParams,
+    ) -> Result<Value, IpcError> {
+        let action = "system.remove_package";
+        let actor = self.app_mutation_authorized(peer, action, &params.id)?;
+        let _guard = self.app_mutation.lock().unwrap();
+        match self.apps.remove(&params.id) {
+            Ok(result) => {
+                let outcome = if result["changed"] == true {
+                    AuditOutcome::Success
+                } else {
+                    AuditOutcome::Noop
+                };
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    action,
+                    &params.id,
+                    Decision::Allow,
+                    outcome,
+                ));
+                Ok(result)
+            }
+            Err(error) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    action,
+                    &params.id,
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                ));
+                Err(app_ipc_error(error))
+            }
         }
     }
 

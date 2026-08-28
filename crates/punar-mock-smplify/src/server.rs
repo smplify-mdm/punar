@@ -18,6 +18,8 @@
 //! | `policy.fetch` | `{device_token}` | `{"policies": [<envelope + embedded policy>]}` |
 //! | `compliance.report` | `{device_token, report}` | `{"accepted": true}` |
 //! | `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` |
+//! | `recovery.key` | `{device_token}` | authenticated tenant HPKE + receipt-verification public material |
+//! | `recovery.escrow` | `{device_token, envelope}` | a signed receipt bound to that envelope |
 //! | `queries.pending` | `{device_token}` | `{"queries": [<PendingQuery>, …]}` — **the device asks; nothing is pushed** |
 //! | `queries.answer` | `{device_token, query_id, answer}` | `{"accepted": true}` — the answer is stored verbatim |
 //! | `admin.devices` | `{admin}` | `{"devices": [{device_id, enrolled_at, last_sync, compliance_state}]}` |
@@ -25,6 +27,7 @@
 //! | `admin.ai_query` | `{admin, device_id, scope, session_id?}` | `{query_id, status: "pending"}`, or `denied` / `out_of_scope` |
 //! | `admin.query_result` | `{admin, query_id}` | `{status, answer?}` |
 //! | `admin.fleet` | `{admin}` | the section 12.1 aggregate as structured data |
+//! | `admin.recovery_release` | `{admin, device_id, reason}` | one audited plaintext recovery-key release; dev/CI only |
 //!
 //! The admin half is role-gated by [`crate::rbac`] **before** a query is
 //! enqueued — an administrator without the role cannot even ask. That check
@@ -39,7 +42,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ed25519_dalek::{Signer, SigningKey};
 use punar_common::ipc::{MAX_REQUEST_LINE_BYTES, SERVER_READ_TIMEOUT, SERVER_WRITE_TIMEOUT};
+use punar_common::time::utc_now_rfc3339;
+use punar_recovery::{EscrowReceipt, HPKE_SUITE, RecoveryEnvelope, TenantRecoveryKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -56,6 +64,20 @@ use crate::state::{ATTESTATION_SIMULATED, QueryStatus, StateStore};
 /// documented protocol floor.) Shape check only: nothing cryptographic
 /// happens here, the acceptance is *simulated* and logged as such.
 pub const BOOTSTRAP_MIN_HEX_CHARS: usize = 32;
+
+/// Dev/CI-only recovery fixture. This complete HPKE keypair is RFC 9180
+/// appendix A.2.1 public test material, so the mock can prove authorized
+/// recovery release as well as device-side custody. The Ed25519 seed is also
+/// public test material and signs receipts only. Production keeps both
+/// private keys in tenant-scoped KMS/HSM custody; neither is compiled into a
+/// production service.
+const MOCK_RECOVERY_KEY_ID: &str = "trk_mock_2026_08";
+const MOCK_HPKE_PUBLIC_KEY: &str = "QxDul9iMwfCIpVdsd6sM9cOseX89lROcbIS1QpxZZio";
+const MOCK_HPKE_PRIVATE_KEY: [u8; 32] = [
+    0x80, 0x57, 0x99, 0x1e, 0xef, 0x8f, 0x1f, 0x1a, 0xf1, 0x8f, 0x4a, 0x94, 0x91, 0xd1, 0x6a, 0x1c,
+    0xe3, 0x33, 0xf6, 0x95, 0xd4, 0xdb, 0x8e, 0x38, 0xda, 0x75, 0x97, 0x5c, 0x44, 0x78, 0xe0, 0xfb,
+];
+const MOCK_RECEIPT_SIGNING_SEED: [u8; 32] = [9; 32];
 
 /// A startup failure: bad fixtures or an unusable state directory.
 #[derive(Debug)]
@@ -369,6 +391,19 @@ struct QueriesAnswerParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RecoveryKeyParams {
+    device_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryEscrowParams {
+    device_token: String,
+    envelope: RecoveryEnvelope,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdminParams {
     admin: String,
 }
@@ -399,6 +434,14 @@ struct AdminQueryResultParams {
     query_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminRecoveryReleaseParams {
+    admin: String,
+    device_id: String,
+    reason: String,
+}
+
 fn parse_params<T: serde::de::DeserializeOwned>(
     method: &str,
     params: Option<Value>,
@@ -424,6 +467,12 @@ fn dispatch(inner: &Inner, method: &str, params: Option<Value>) -> Result<Value,
         "policy.fetch" => policy_fetch(inner, params),
         "compliance.report" => compliance_report(inner, params),
         "inventory.report" => inventory_report(inner, params),
+        // Device-facing recovery custody: the device fetches tenant public
+        // material, then uploads only an HPKE envelope. Nothing is pushed to
+        // the device. Decryption is reachable only through the separately
+        // RBAC-gated and audited dev recovery-release method below.
+        "recovery.key" => recovery_key(inner, params),
+        "recovery.escrow" => recovery_escrow(inner, params),
         // M10 device-facing: the device dials outward and collects the
         // questions addressed to it. There is no inverse of these two
         // methods anywhere in this crate.
@@ -435,6 +484,7 @@ fn dispatch(inner: &Inner, method: &str, params: Option<Value>) -> Result<Value,
         "admin.ai_query" => admin_ai_query(inner, params),
         "admin.query_result" => admin_query_result(inner, params),
         "admin.fleet" => admin_fleet(inner, params),
+        "admin.recovery_release" => admin_recovery_release(inner, params),
         _ => Err(MockError::with_details(
             ErrorCode::UnknownMethod,
             format!("{method} is not a method of the mock control plane."),
@@ -529,6 +579,87 @@ fn inventory_report(inner: &Inner, params: Option<Value>) -> Result<Value, MockE
         .append_inventory(&device_id, &p.inventory)
         .map_err(internal)?;
     Ok(json!({"accepted": true}))
+}
+
+fn tenant_recovery_key(organization_id: &str) -> TenantRecoveryKey {
+    let signing_key = SigningKey::from_bytes(&MOCK_RECEIPT_SIGNING_SEED);
+    TenantRecoveryKey {
+        v: 1,
+        organization_id: organization_id.to_string(),
+        key_id: MOCK_RECOVERY_KEY_ID.to_string(),
+        suite: HPKE_SUITE.to_string(),
+        public_key: MOCK_HPKE_PUBLIC_KEY.to_string(),
+        receipt_signing_public_key: URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+    }
+}
+
+fn recovery_key(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: RecoveryKeyParams = parse_params("recovery.key", params)?;
+    let state = inner.state.lock().unwrap();
+    require_token(&state, &p.device_token)?;
+    let key = tenant_recovery_key(&inner.fixtures.org_id);
+    key.validate().map_err(|_| {
+        MockError::new(
+            ErrorCode::Internal,
+            "The dev/CI tenant recovery-key fixture is invalid.",
+        )
+    })?;
+    Ok(json!({"tenant_recovery_key": key}))
+}
+
+fn recovery_escrow(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: RecoveryEscrowParams = parse_params("recovery.escrow", params)?;
+    p.envelope.validate().map_err(|_| {
+        MockError::with_details(
+            ErrorCode::InvalidParams,
+            "The recovery envelope failed its public shape and binding checks.",
+            json!({"param": "envelope"}),
+        )
+    })?;
+    let tenant_key = tenant_recovery_key(&inner.fixtures.org_id);
+    let mut state = inner.state.lock().unwrap();
+    let device_id = require_token(&state, &p.device_token)?.to_string();
+    if p.envelope.organization_id != inner.fixtures.org_id
+        || p.envelope.tenant_key_id != tenant_key.key_id
+        || p.envelope.device_id != device_id
+    {
+        return Err(MockError::with_details(
+            ErrorCode::InvalidParams,
+            "The recovery envelope is not bound to this token, organization, and tenant key.",
+            json!({"param": "envelope", "reason": "binding_mismatch"}),
+        ));
+    }
+    state
+        .append_recovery_envelope(&device_id, &p.envelope)
+        .map_err(internal)?;
+
+    let digest = p.envelope.digest_hex().map_err(|_| {
+        MockError::new(
+            ErrorCode::Internal,
+            "Could not digest the recovery envelope.",
+        )
+    })?;
+    let mut receipt = EscrowReceipt {
+        v: 1,
+        receipt_id: format!("rct_{}", &digest[..16]),
+        received_at: utc_now_rfc3339(),
+        organization_id: p.envelope.organization_id.clone(),
+        tenant_key_id: p.envelope.tenant_key_id.clone(),
+        device_id: p.envelope.device_id.clone(),
+        luks_uuid: p.envelope.luks_uuid.clone(),
+        recovery_keyslot: p.envelope.recovery_keyslot,
+        envelope_sha256: digest,
+        signature: String::new(),
+    };
+    let signing_key = SigningKey::from_bytes(&MOCK_RECEIPT_SIGNING_SEED);
+    let payload = receipt.signing_payload().map_err(|_| {
+        MockError::new(
+            ErrorCode::Internal,
+            "Could not encode the recovery receipt.",
+        )
+    })?;
+    receipt.signature = URL_SAFE_NO_PAD.encode(signing_key.sign(&payload).to_bytes());
+    Ok(json!({"receipt": receipt}))
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +958,112 @@ fn admin_fleet(inner: &Inner, params: Option<Value>) -> Result<Value, MockError>
     }
     let state = inner.state.lock().unwrap();
     Ok(fleet::aggregate(&state).to_json())
+}
+
+/// Dev/CI proof of the other half of escrow: a separately permissioned,
+/// reason-bound operator may release the newest key for one device. The
+/// private key is public RFC test material in this mock; production performs
+/// this unwrap inside tenant-scoped KMS/HSM custody after authenticated,
+/// step-up portal authorization.
+fn admin_recovery_release(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminRecoveryReleaseParams = parse_params("admin.recovery_release", params)?;
+    if !valid_release_identifier(&p.device_id, 128) || !valid_release_identifier(&p.reason, 63) {
+        return Err(MockError::with_details(
+            ErrorCode::InvalidParams,
+            "Recovery release requires a valid device id and a 1–63 character structured reason code (letters, numbers, '.', '_', ':', or '-').",
+            json!({"param": "device_id|reason"}),
+        ));
+    }
+
+    if let Err(error) = require_admin(inner, &p.admin) {
+        append_recovery_release_audit(inner, &p, "denied")?;
+        return Err(error);
+    }
+    if !inner.fixtures.admins.permits_recovery_release(&p.admin) {
+        append_recovery_release_audit(inner, &p, "denied")?;
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "The role {:?} may not release disk recovery material. The attempt was audited. Next step: a role explicitly listed in recovery_release_roles performs the recovery.",
+                inner.fixtures.admins.role_of(&p.admin).unwrap_or("unknown")
+            ),
+            json!({"admin": p.admin, "device_id": p.device_id, "identity_verified": false}),
+        ));
+    }
+
+    let envelope = {
+        let state = inner.state.lock().unwrap();
+        if state.device(&p.device_id).is_none() {
+            drop(state);
+            append_recovery_release_audit(inner, &p, "not_found")?;
+            return Err(MockError::with_details(
+                ErrorCode::NotFound,
+                format!("No device {:?} is registered with this mock.", p.device_id),
+                json!({"device_id": p.device_id}),
+            ));
+        }
+        state
+            .latest_recovery_envelope(&p.device_id)
+            .map_err(internal)?
+    };
+    let Some(envelope) = envelope else {
+        append_recovery_release_audit(inner, &p, "not_found")?;
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            "This device has no escrowed recovery envelope. The attempt was audited.",
+            json!({"device_id": p.device_id}),
+        ));
+    };
+
+    let recovery_key = match envelope.open_for_recipient(&MOCK_HPKE_PRIVATE_KEY) {
+        Ok(key) => key,
+        Err(_) => {
+            append_recovery_release_audit(inner, &p, "unwrap_failed")?;
+            return Err(MockError::new(
+                ErrorCode::Internal,
+                "The tenant recovery service could not unwrap this envelope; no recovery material was released.",
+            ));
+        }
+    };
+    append_recovery_release_audit(inner, &p, "released")?;
+    let device_id = envelope.device_id;
+    let luks_uuid = envelope.luks_uuid;
+    let recovery_keyslot = envelope.recovery_keyslot;
+    let tenant_key_id = envelope.tenant_key_id;
+    Ok(recovery_key.deliver_to_unlock_sink(|key| {
+        json!({
+            "device_id": device_id,
+            "luks_uuid": luks_uuid,
+            "recovery_keyslot": recovery_keyslot,
+            "tenant_key_id": tenant_key_id,
+            "reason": p.reason,
+            "recovery_key": key,
+            "identity_verified": false,
+            "release_once": true,
+            "warning": "dev/CI mock: asserted fixture identity, not a production IdP; protect this one-time response and never log it",
+        })
+    }))
+}
+
+fn append_recovery_release_audit(
+    inner: &Inner,
+    params: &AdminRecoveryReleaseParams,
+    outcome: &str,
+) -> Result<(), MockError> {
+    inner
+        .state
+        .lock()
+        .unwrap()
+        .append_recovery_release(&params.admin, &params.device_id, &params.reason, outcome)
+        .map_err(internal)
+}
+
+fn valid_release_identifier(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 /// Read the last received line for one device out of an append-only log.

@@ -63,7 +63,12 @@ echo "    using ${QMLLINT}"
 # code is therefore a vacuous gate — it would report "clean" while naming the
 # defect on the line above. The standard this repo holds the shell to is ZERO
 # warnings, so any output at all is the failure.
-out=$("${QMLLINT}" --qmldirs /usr/lib/qt6/qml "${files[@]}" 2>&1) || true
+# The greeter is a separate Quickshell configuration root and imports the
+# shared Theme singleton by module name. Point qmllint at the product module
+# root as well as the Quickshell system modules so that independent root is
+# checked under the same resolution rules it uses in the image.
+out=$("${QMLLINT}" --qmldirs /usr/lib/qt6/qml \
+    --qmldirs shell/punar-shell "${files[@]}" 2>&1) || true
 if [ -n "${out}" ]; then
     printf "%s\n" "${out}"
     echo "qmllint reported the above; the shell standard is zero warnings" >&2

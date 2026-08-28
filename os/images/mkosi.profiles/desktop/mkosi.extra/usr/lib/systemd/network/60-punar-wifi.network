@@ -27,3 +27,6 @@ IPv6PrivacyExtensions=yes
 # it does on the wired path, not less.
 SendHostname=no
 UseDomains=yes
+# Network-provided automatic timezone (RFC 4833), with the same privacy
+# posture as wired networking: receive locally, never query a GeoIP service.
+UseTimezone=yes

@@ -1,0 +1,11 @@
+# Punar greetd stack. The first line accepts exactly one root-owned, boot-local
+# token created by the completed onboarding transaction; after it is consumed,
+# every login takes the ordinary password path. There is no null-password mode.
+auth      [success=done default=ignore]  pam_exec.so quiet seteuid /usr/bin/punar-onboardd first-login
+auth      required                      pam_unix.so
+
+account   required                      pam_unix.so
+
+session   required                      pam_unix.so
+session   optional                      pam_limits.so
+session   optional                      pam_systemd.so

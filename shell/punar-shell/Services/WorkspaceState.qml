@@ -135,7 +135,7 @@ Singleton {
             if (name === undefined)
                 continue;
             if (!root.isNamed(ws))
-                Hyprland.dispatch("renameworkspace " + ws.id + " " + name);
+                HyprlandActions.renameWorkspace(ws.id, name);
             delete pending[ws.id];
             changed = true;
         }

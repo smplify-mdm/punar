@@ -50,6 +50,7 @@
 pub mod agentd;
 pub mod aipolicy;
 pub mod approvals;
+pub mod apps;
 pub mod authz;
 pub mod backends;
 pub mod capability;

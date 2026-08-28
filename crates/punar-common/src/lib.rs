@@ -47,6 +47,9 @@
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
+//! - [`update`] — strict signed release/channel metadata, target admission,
+//!   deterministic privacy-preserving rollout cohorts, and bounded streaming
+//!   SHA-256 verification (update-and-rollback design sections 4–5).
 //!
 //! Dependency policy (budget + supply chain, PERFORMANCE_BUDGETS.md section
 //! 6.2): `serde`/`serde_json`/`thiserror`, plus `rustix` since M7.
@@ -74,6 +77,7 @@ pub mod principal;
 pub mod query;
 mod redacted;
 pub mod time;
+pub mod update;
 
 pub use agent::{AgentClassification, AgentStatus, RegistryRecord};
 pub use approval::{Approval, ApprovalEnvelope, ApprovalKind, ApprovalStatus, Grant, Requester};

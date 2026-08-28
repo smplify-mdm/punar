@@ -509,6 +509,35 @@ pub struct EnrollStartParams {
     pub org_domain: String,
 }
 
+/// Local catalog lookup. `id` asks for one app plus a live source
+/// inspection; `query` searches image-shipped catalog data. Passing both is
+/// rejected by the daemon rather than guessed at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsCatalogParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+/// Install an application by catalog id. The metadata digest is the exact
+/// value displayed by the caller's pre-install card; punard independently
+/// re-inspects the pinned commit and requires all three values to agree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsInstallParams {
+    pub id: String,
+    pub confirm_metadata_sha256: String,
+}
+
+/// Remove the native package associated with one catalog id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsRemoveParams {
+    pub id: String,
+}
+
 // -- M9 approval + privilege params (contract section 14) -------------------
 
 /// Params for `approvals.get`.
@@ -733,11 +762,22 @@ pub enum Method {
     /// `privilege.revoke` (M9) — hand privilege back before it lapses.
     /// Owner or root; always audited.
     PrivilegeRevoke(PrivilegeRevokeParams),
+    /// `apps.catalog` — search the immutable local catalog or inspect one
+    /// selected source. Read; any admitted human peer.
+    AppsCatalog(AppsCatalogParams),
+    /// `apps.list` — installed state for catalog applications. Read.
+    AppsList,
+    /// `apps.install` — a typed, catalog-bound Flatpak install. Human only;
+    /// its source, commit and metadata digest are not caller-controlled.
+    AppsInstall(AppsInstallParams),
+    /// `apps.remove` — remove the native package for one catalog id. Human
+    /// only and always audited.
+    AppsRemove(AppsRemoveParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 19] = [
+    pub const NAMES: [&'static str; 23] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -757,6 +797,10 @@ impl Method {
         "privilege.request",
         "privilege.status",
         "privilege.revoke",
+        "apps.catalog",
+        "apps.list",
+        "apps.install",
+        "apps.remove",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -782,6 +826,10 @@ impl Method {
             Method::PrivilegeRequest(_) => "privilege.request",
             Method::PrivilegeStatus => "privilege.status",
             Method::PrivilegeRevoke(_) => "privilege.revoke",
+            Method::AppsCatalog(_) => "apps.catalog",
+            Method::AppsList => "apps.list",
+            Method::AppsInstall(_) => "apps.install",
+            Method::AppsRemove(_) => "apps.remove",
         }
     }
 
@@ -824,6 +872,13 @@ impl Method {
             Method::PrivilegeRequest(_) | Method::PrivilegeStatus | Method::PrivilegeRevoke(_) => {
                 false
             }
+            // Personal-device application installation is available to the
+            // admitted desktop user. The daemon still rejects agent-scoped
+            // and enrolled-device mutations in the handler.
+            Method::AppsCatalog(_)
+            | Method::AppsList
+            | Method::AppsInstall(_)
+            | Method::AppsRemove(_) => false,
         }
     }
 
@@ -837,7 +892,8 @@ impl Method {
             | Method::EnrollStatus
             | Method::EnrollStop
             | Method::ApprovalsList
-            | Method::PrivilegeStatus => return None,
+            | Method::PrivilegeStatus
+            | Method::AppsList => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
@@ -848,6 +904,9 @@ impl Method {
             Method::ApprovalsResolve(p) => serde_json::to_value(p),
             Method::PrivilegeRequest(p) => serde_json::to_value(p),
             Method::PrivilegeRevoke(p) => serde_json::to_value(p),
+            Method::AppsCatalog(p) => serde_json::to_value(p),
+            Method::AppsInstall(p) => serde_json::to_value(p),
+            Method::AppsRemove(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -909,6 +968,10 @@ impl Method {
             "privilege.revoke" => {
                 Self::parse_required_params(method, params).map(Method::PrivilegeRevoke)
             }
+            "apps.catalog" => Self::parse_required_params(method, params).map(Method::AppsCatalog),
+            "apps.list" => Self::expect_no_params(method, params).map(|()| Method::AppsList),
+            "apps.install" => Self::parse_required_params(method, params).map(Method::AppsInstall),
+            "apps.remove" => Self::parse_required_params(method, params).map(Method::AppsRemove),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -1897,6 +1960,19 @@ mod tests {
                 grant_id: Some("gnt_2b8e11c4".to_string()),
                 all: None,
             }),
+            Method::AppsCatalog(AppsCatalogParams {
+                id: Some("spotify".to_string()),
+                query: None,
+            }),
+            Method::AppsList,
+            Method::AppsInstall(AppsInstallParams {
+                id: "spotify".to_string(),
+                confirm_metadata_sha256:
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            }),
+            Method::AppsRemove(AppsRemoveParams {
+                id: "spotify".to_string(),
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -2066,7 +2142,7 @@ mod tests {
 
     #[test]
     fn no_params_methods_accept_absent_or_empty_params_only() {
-        for method in ["status", "capabilities.list", "reconcile"] {
+        for method in ["status", "capabilities.list", "reconcile", "apps.list"] {
             let ok =
                 Request::parse_json_line(&format!(r#"{{"v":1,"id":"1","method":"{method}"}}"#))
                     .unwrap();
@@ -2082,6 +2158,24 @@ mod tests {
             .unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{method}");
         }
+    }
+
+    #[test]
+    fn app_params_are_strict_and_typed() {
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"apps.catalog","params":{"id":"spotify"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::AppsCatalog(AppsCatalogParams { id: Some(id), query: None }) if id == "spotify"
+        ));
+
+        let reject = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"apps.install","params":{"id":"spotify","confirm_metadata_sha256":"abc","command":"curl evil"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::InvalidParams);
     }
 
     #[test]

@@ -31,11 +31,13 @@
 //! (strict envelope, 4096-byte lines, sequential per connection, 10 s
 //! timeouts), `result` XOR `error` responses. The method table
 //! ([`server`]): `org.discover`, `enroll.register`, `policy.fetch`,
-//! `compliance.report`, `inventory.report` (M5); `queries.pending` /
+//! `compliance.report`, `inventory.report` (M5); `recovery.key` /
+//! `recovery.escrow` (device-side recovery custody); `queries.pending` /
 //! `queries.answer` (M10, device-facing — the device dials outward and
 //! collects questions addressed to it); and the admin surface
 //! `admin.devices`, `admin.device`, `admin.ai_query`, `admin.query_result`,
-//! `admin.fleet` (M10, SPEC section 51), role-gated by [`rbac`].
+//! `admin.fleet` (M10, SPEC section 51), plus the separately permissioned
+//! and audited `admin.recovery_release`, role-gated by [`rbac`].
 //!
 //! # The law this crate must not break (milestone-10.md law 1)
 //!
@@ -57,6 +59,12 @@
 //! m5-check offline stop→start must not invalidate the device token, and
 //! the kept history after unenroll is the honest record that M5
 //! unenrollment is local-only.
+//! Recovery custody persists only tenant-wrapped envelopes. The dev release
+//! proof uses public RFC test private material, requires an explicitly
+//! permitted role plus a structured reason, and writes a non-secret audit
+//! record before returning a one-time plaintext response. Production replaces
+//! the fixture identity and key with authenticated portal identity, step-up
+//! authorization, and tenant-scoped KMS/HSM custody.
 //!
 //! [`enroll.register`]: server::MockServer
 

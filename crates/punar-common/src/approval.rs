@@ -97,12 +97,11 @@ pub const GRANT_MAX_MINUTES: u64 = 60;
 
 /// The shell's approval summary file (docs/api/ipc.md section 15).
 ///
-/// Deliberately **not** `/run/punar/approvals.json`: that directory is
-/// `0755 punar:punar`, so a local process could unlink a file there and bind
-/// its own. For a counts fingerprint that is a nuisance; for the file that
-/// tells a human what they are about to authorize it is a spoofing
-/// primitive. `/run/punard` is root-owned, which is what makes SPEC section
-/// 61's "filesystem permissions" mean anything here.
+/// Deliberately **not** `/run/punar/approvals.json`: that directory contains
+/// world-readable display summaries. Approval details are group-readable and
+/// live behind `/run/punard`'s `0750 root:punar` traversal boundary, so an
+/// unrelated local account cannot even name them. Root ownership of both
+/// directories prevents replacement by an unprivileged process.
 pub const APPROVALS_SUMMARY_FILE: &str = "/run/punard/approvals.json";
 
 /// Subdirectory of the punard state directory holding approval records.

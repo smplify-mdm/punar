@@ -67,6 +67,12 @@ Scope {
     // Emitted once the bar object tree is complete — shell.qml uses this
     // to write the desktop ready marker (see shell.qml).
     signal barCreated()
+    // Clicking the focused application name asks the shell root to open the
+    // deferred lifecycle surface. Bar never reaches into a sibling surface.
+    signal windowActionsRequested()
+    // The brand is the pointer-accessible application launcher. This keeps
+    // the desktop operable when a VM client or host reserves PUNAR+Space.
+    signal commandCenterRequested()
 
     // Active Hyprland workspace in the masthead grammar (M2 named project
     // workspaces): a named workspace shows its NAME, an unnamed one falls
@@ -260,19 +266,96 @@ Scope {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 0
 
-                MetaLabel {
-                    text: "Punar"
-                    font.weight: 600
-                    color: Theme.shellFg
+                // Give the launcher a real bar-height hit target. A MouseArea
+                // parented directly to the text inherited the text's tiny
+                // implicit box; on a scaled VM that made most visible pixels
+                // miss even though the word itself looked clickable.
+                Item {
+                    id: brandButton
+
+                    width: brandLabel.implicitWidth + 12
+                    height: bar.height
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Theme.shellMuted
+                        visible: brandMouse.containsMouse || brandMouse.pressed
+                    }
+
+                    MetaLabel {
+                        id: brandLabel
+
+                        anchors.left: parent.left
+                        anchors.leftMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Punar"
+                        font.weight: 600
+                        color: Theme.shellFg
+                    }
+
+                    Rectangle {
+                        anchors.left: brandLabel.left
+                        anchors.right: brandLabel.right
+                        anchors.bottom: parent.bottom
+                        height: Theme.hairline
+                        color: Theme.shellFg
+                        visible: brandMouse.containsMouse
+                    }
+
+                    MouseArea {
+                        id: brandMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.commandCenterRequested()
+                    }
                 }
                 MetaLabel {
+                    anchors.verticalCenter: parent.verticalCenter
                     text: " · " + root.workspaceLabel
                 }
-                MetaLabel {
-                    text: " · " + root.focusedApp
+                Item {
+                    id: focusedAppButton
+
                     // An empty workspace has no focused window, and a
                     // separator with nothing after it is worse than silence.
                     visible: root.focusedApp !== ""
+                    width: visible ? focusedAppLabel.implicitWidth + 12 : 0
+                    height: bar.height
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Theme.shellMuted
+                        visible: focusedAppMouse.containsMouse || focusedAppMouse.pressed
+                    }
+
+                    MetaLabel {
+                        id: focusedAppLabel
+
+                        anchors.left: parent.left
+                        anchors.leftMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "· " + root.focusedApp
+                    }
+
+                    Rectangle {
+                        anchors.left: focusedAppLabel.left
+                        anchors.right: focusedAppLabel.right
+                        anchors.bottom: parent.bottom
+                        height: Theme.hairline
+                        color: Theme.shellFg
+                        visible: focusedAppMouse.containsMouse
+                    }
+
+                    MouseArea {
+                        id: focusedAppMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.windowActionsRequested()
+                    }
                 }
             }
 

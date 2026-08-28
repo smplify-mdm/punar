@@ -18,7 +18,7 @@
 //! one that decides**; this one only makes the org-side half of SPEC
 //! section 24.1 ("RBAC applies") independently true.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use punar_common::query::{QueryScope, ScopeSet};
@@ -38,6 +38,7 @@ pub struct AdminDirectory {
     pub unrecognised_scopes: Vec<String>,
     roles: BTreeMap<String, ScopeSet>,
     admins: BTreeMap<String, String>,
+    recovery_release_roles: BTreeSet<String>,
 }
 
 impl AdminDirectory {
@@ -80,11 +81,20 @@ impl AdminDirectory {
                 }
             }
         }
+        let recovery_release_roles = document
+            .get("recovery_release_roles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
         AdminDirectory {
             source: Some(path),
             unrecognised_scopes,
             roles,
             admins,
+            recovery_release_roles,
         }
     }
 
@@ -110,6 +120,14 @@ impl AdminDirectory {
     /// the view: the gate is "a role that may ask about authority".
     pub fn permits_fleet(&self, admin: &str) -> bool {
         self.permits(admin, QueryScope::Authority)
+    }
+
+    /// Recovery release is intentionally a separate permission from remote
+    /// query scopes. It is granted only when the fixture names the admin's
+    /// role in `recovery_release_roles`; missing configuration fails closed.
+    pub fn permits_recovery_release(&self, admin: &str) -> bool {
+        self.role_of(admin)
+            .is_some_and(|role| self.recovery_release_roles.contains(role))
     }
 
     /// Number of known identities (startup log).
@@ -181,6 +199,11 @@ mod tests {
         assert!(rbac.permits_fleet("cio@acme.com"));
         assert!(rbac.permits_fleet("secops@acme.com"));
         assert!(!rbac.permits_fleet("nobody@acme.com"));
+
+        assert!(!rbac.permits_recovery_release("helpdesk@acme.com"));
+        assert!(!rbac.permits_recovery_release("cio@acme.com"));
+        assert!(rbac.permits_recovery_release("secops@acme.com"));
+        assert!(!rbac.permits_recovery_release("nobody@acme.com"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

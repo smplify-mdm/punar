@@ -50,6 +50,7 @@ from referencing import Registry, Resource
 REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "schemas"
 FIXTURES = REPO / "fixtures"
+CATALOG = REPO / "catalog"
 # Staged runtime data shipped inside the desktop image (M7 adapters, signature
 # heuristics). Validated in place so the file the image ships is the file the
 # schema checked -- no copy to drift.
@@ -60,6 +61,8 @@ STAGED_AGENTS = REPO / "os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/p
 # First match wins. Schema None => deliberately unvalidated seed file.
 # ---------------------------------------------------------------------------
 MANIFEST: list[tuple[str, str | None]] = [
+    # --- signed-image application catalog -----------------------------------
+    ("catalog/catalog.json", "schemas/catalog/app-catalog.json"),
     # --- schemas/**/examples/ ------------------------------------------------
     ("schemas/ai-agent/examples/agent-definition*", "schemas/ai-agent/agent-definition.json"),
     ("schemas/ai-agent/examples/ledger-summary*", "schemas/ai-agent/ledger-summary.json"),
@@ -68,12 +71,17 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("schemas/audit/examples/audit-event.*", "schemas/audit/audit-event.json"),
     ("schemas/capability/examples/*", "schemas/capability/capability-descriptor.json"),
     ("schemas/desired-state/examples/*", "schemas/desired-state/desired-state.json"),
+    ("schemas/encryption/examples/escrow-receipt*", "schemas/encryption/escrow-receipt.json"),
+    ("schemas/encryption/examples/recovery-envelope*", "schemas/encryption/recovery-envelope.json"),
+    ("schemas/encryption/examples/tenant-recovery-key*", "schemas/encryption/tenant-recovery-key.json"),
     ("schemas/network/examples/network-zone*", "schemas/network/network-zone.json"),
     ("schemas/network/examples/project-network-policy*", "schemas/network/project-network-policy.json"),
     ("schemas/policy/examples/ai-policy-*", "schemas/policy/ai-policy.json"),
     ("schemas/policy/examples/model-governance-*", "schemas/policy/model-governance.json"),
     ("schemas/policy/examples/policy-source-*", "schemas/policy/policy-source.json"),
     ("schemas/project/examples/*", "schemas/project/project-environment.json"),
+    ("schemas/update/examples/release-manifest*", "schemas/update/release-manifest.json"),
+    ("schemas/update/examples/channel-metadata*", "schemas/update/channel-metadata.json"),
     ("schemas/workspace/examples/*", "schemas/workspace/workspace-state.json"),
     # --- fixtures/<domain>/{valid,invalid}/ ---------------------------------
     ("fixtures/ai-agent/*/agent-definition.*", "schemas/ai-agent/agent-definition.json"),
@@ -83,12 +91,17 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/audit/*/audit-event.*", "schemas/audit/audit-event.json"),
     ("fixtures/capability/*/*", "schemas/capability/capability-descriptor.json"),
     ("fixtures/desired-state/*/*", "schemas/desired-state/desired-state.json"),
+    ("fixtures/encryption/*/escrow-receipt*", "schemas/encryption/escrow-receipt.json"),
+    ("fixtures/encryption/*/recovery-envelope*", "schemas/encryption/recovery-envelope.json"),
+    ("fixtures/encryption/*/tenant-recovery-key*", "schemas/encryption/tenant-recovery-key.json"),
     ("fixtures/network/*/network-zone.*", "schemas/network/network-zone.json"),
     ("fixtures/network/*/project-network-policy.*", "schemas/network/project-network-policy.json"),
     ("fixtures/policy/*/ai-policy-*", "schemas/policy/ai-policy.json"),
     ("fixtures/policy/*/model-governance-*", "schemas/policy/model-governance.json"),
     ("fixtures/policy/*/policy-source-*", "schemas/policy/policy-source.json"),
     ("fixtures/project/*/project-environment.*", "schemas/project/project-environment.json"),
+    ("fixtures/update/*/release-manifest*", "schemas/update/release-manifest.json"),
+    ("fixtures/update/*/channel-metadata*", "schemas/update/channel-metadata.json"),
     ("fixtures/workspace/*/workspace-state.*", "schemas/workspace/workspace-state.json"),
     # --- seed data: fixtures/agents/ (fixtures/agents/README.md table) ------
     ("fixtures/agents/claude-code.registry-record.json", "schemas/ai-agent/registry-record.json"),
@@ -272,6 +285,7 @@ def main() -> int:
         [p for p in SCHEMAS.rglob("examples/*") if p.suffix in DOC_SUFFIXES]
         + [p for p in FIXTURES.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
         + [p for p in STAGED_AGENTS.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
+        + [p for p in CATALOG.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
     )
     for dp in doc_paths:
         relpath = rel(dp)

@@ -65,7 +65,7 @@ pub const LEDGER_INDEX_FILE: &str = "index.json";
 
 /// The AI panel's read-only view (docs/api/ipc.md section 13.2).
 ///
-/// Deliberately **not** in the user-writable `/run/punar` beside
+/// Deliberately **not** in the world-readable `/run/punar` beside
 /// `status.json`/`agents.json`: a ledger is personal data, so it lives in
 /// the root-owned agentd runtime directory as `0640 root:punar` — only
 /// the socket's own admission set may read it, and a local user cannot

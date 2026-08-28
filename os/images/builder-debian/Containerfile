@@ -27,6 +27,7 @@ RUN printf '%s\n' \
         mkosi \
         systemd-ukify \
         systemd-boot-efi \
+        systemd-cryptsetup \
         binutils \
         qemu-utils \
         dosfstools \

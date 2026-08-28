@@ -528,7 +528,7 @@ which is launched with user-mode networking precisely so it can be.
 
 ---
 
-## 3. IPC targets, all fourteen
+## 3. IPC targets, all fifteen
 
 Verified unique across the tree; `qs ipc show` is the authority.
 
@@ -536,6 +536,7 @@ Verified unique across the tree; `qs ipc show` is the authority.
 |---|---|
 | `bar` | focus · release · state |
 | `commandcenter` | toggle · open · close · state · explain · query · run |
+| `windowactions` | toggle · open · close · state · latency · residency |
 | `overview` | toggle · open · close · state |
 | `systemcontrol` | toggle · open · close · state |
 | `aipanel` | toggle · open · close · state |
@@ -683,7 +684,7 @@ or D-Bus. The wallpaper has no timer at all.
 | **Hyprland config** | `Hyprland --verify-config` on hyprland 0.56.2-1 in the pinned container, as an unprivileged user | **`config ok`** |
 | **— negative control** | injected `thisdispatcherdoesnotexist` | **correctly rejected** (`Invalid dispatcher … at line 321`) — the pass is not vacuous |
 | **Chord collisions** | every `bind*` row reduced to `(modmask, key)` and counted | **72 binds, 0 duplicate chords** |
-| **IPC target collisions** | every `IpcHandler.target` in the production shell tree | **14 targets, all unique** |
+| **IPC target collisions** | every `IpcHandler.target` in the production shell tree | **15 targets, all unique** |
 | **Image config** | `PUNAR_BUILD_MODE=summary ./tools/build-image.sh all` | **exit 0**; `qt6-svg` present in the desktop profile's package list; themes staged to `usr/share/punar/theme/themes/` |
 | **qmllint, now in CI** | `./tools/qmllint.sh` — pinned container, the image's own Qt 6.11.2 / Quickshell 0.3.0 | **34 files, 0 warnings.** The gate fails on any output, because **qmllint exits 0 while printing warnings** — verified by injecting `Hyprland.thisPropertyDoesNotExist`, which it named while returning 0 |
 | **— negative control** | that same injected property | **correctly fails** (exit 1); on the restored tree, exit 0 |

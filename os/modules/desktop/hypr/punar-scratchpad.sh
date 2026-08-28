@@ -20,22 +20,25 @@ flock 9
 
 if hyprctl -j clients 2>/dev/null \
         | jq -e 'any(.[]; .class == "punar-scratch")' >/dev/null 2>&1; then
-    exec hyprctl dispatch togglespecialworkspace term
+    exec hyprctl dispatch "hl.dsp.workspace.toggle_special('term')"
 fi
 
 # The window rule parks this app-id on special:term silently. Wait only on the
 # cold path so the workspace is toggled after the client maps; this removes a
 # compositor-ordering race and keeps the ordinary toggle path synchronous.
-# foot is the fixed fallback if the warm server is unavailable after a crash.
-hyprctl dispatch exec \
-    'footclient --app-id=punar-scratch || foot --app-id=punar-scratch' \
-    >/dev/null 2>&1
+# --no-wait separates launch success from the eventual shell exit status. A
+# normally closed scratchpad must not be mistaken for a server failure and
+# immediately replaced by a standalone foot window. foot remains the fixed
+# fallback when the warm server is genuinely unavailable after a crash.
+if ! footclient --no-wait --app-id=punar-scratch >/dev/null 2>&1; then
+    foot --app-id=punar-scratch >/dev/null 2>&1 &
+fi
 
 attempt=0
 while [ "${attempt}" -lt 100 ]; do
     if hyprctl -j clients 2>/dev/null \
             | jq -e 'any(.[]; .class == "punar-scratch")' >/dev/null 2>&1; then
-        exec hyprctl dispatch togglespecialworkspace term
+        exec hyprctl dispatch "hl.dsp.workspace.toggle_special('term')"
     fi
     attempt=$((attempt + 1))
     sleep 0.02

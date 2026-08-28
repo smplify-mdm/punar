@@ -13,6 +13,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -64,6 +65,15 @@ impl TestDaemon {
     /// desired.json, …). Runs the boot reconcile before the socket opens,
     /// like `punard run`.
     fn start_with(peer: PeerSource, mock: MockCapability, prepare: impl FnOnce(&Path)) -> Self {
+        Self::start_configured(peer, mock, prepare, |_, _| {})
+    }
+
+    fn start_configured(
+        peer: PeerSource,
+        mock: MockCapability,
+        prepare: impl FnOnce(&Path),
+        configure: impl FnOnce(&mut DaemonConfig, &Path),
+    ) -> Self {
         let dir = test_dir("d");
         let (group_file, passwd_file) = write_nss_files(&dir);
         let state_dir = dir.join("state");
@@ -71,13 +81,14 @@ impl TestDaemon {
         prepare(&state_dir);
 
         let registry = Registry::new(vec![Box::new(mock.clone())]);
-        let cfg = DaemonConfig {
+        let mut cfg = DaemonConfig {
             group_file,
             passwd_file,
             peer_source: peer,
             io_timeout: Duration::from_secs(5),
             ..DaemonConfig::new(dir.join("punard.sock"), state_dir, dir.join("audit.jsonl"))
         };
+        configure(&mut cfg, &dir);
         let daemon = Daemon::new(cfg, registry).unwrap();
         daemon.boot_reconcile();
         let handle = daemon.spawn().unwrap();
@@ -142,6 +153,48 @@ impl TestDaemon {
     fn state_path(&self, name: &str) -> PathBuf {
         self.dir.join("state").join(name)
     }
+}
+
+fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
+    let metadata = "[Application]\nruntime=org.freedesktop.Platform/x86_64/25.08\n[Context]\nshared=network;\nsockets=wayland;pulseaudio;\ndevices=dri;\n";
+    let digest = punard::util::sha256_hex(metadata.as_bytes());
+    let metadata_path = dir.join("app-metadata");
+    let state_path = dir.join("app-state");
+    let argv_path = dir.join("app-argv");
+    fs::write(&metadata_path, metadata).unwrap();
+    let flatpak = dir.join("flatpak");
+    let commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fs::write(
+        &flatpak,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            argv_path.display(), metadata_path.display(), state_path.display(),
+            state_path.display(), state_path.display(), state_path.display(), commit,
+            state_path.display(), state_path.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+    let catalog = dir.join("catalog.json");
+    fs::write(
+        &catalog,
+        serde_json::to_vec_pretty(&json!({
+            "v": 1, "catalogVersion": "test", "generatedAt": "2026-08-27T00:00:00Z",
+            "remotes": [{"id":"flathub", "repoFile":"/usr/share/punar/catalog/remotes/flathub.flatpakrepo", "url":"https://dl.flathub.org/repo/"}],
+            "apps": [{
+                "id":"spotify", "name":"Spotify", "category":"media", "summary":"Music",
+                "trustTier":"community", "license":"proprietary", "publisher":"flathub",
+                "bundledUpdater":"disabled-by-packaging", "disclosures":[],
+                "sources":[{"kind":"flatpak", "architectures":["x86_64"], "remote":"flathub",
+                    "appId":"com.spotify.Client", "ref":"app/com.spotify.Client/x86_64/stable",
+                    "commit":commit, "runtime":"org.freedesktop.Platform/x86_64/25.08",
+                    "metadataSha256":digest}]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (catalog, flatpak, digest)
 }
 
 impl Drop for TestDaemon {
@@ -235,6 +288,65 @@ fn capabilities_list_returns_schema_shaped_descriptors() {
     assert_eq!(d["current_state"], "off");
     // M4: desired_state renders the effective value (the OS-default seed).
     assert_eq!(d["desired_state"], "off");
+}
+
+#[test]
+fn catalog_install_is_digest_bound_human_available_and_audited() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
+    assert_eq!(
+        detail["result"]["app"]["inspection"]["verified"], true,
+        "{detail}"
+    );
+    assert_eq!(
+        detail["result"]["app"]["inspection"]["containment"],
+        "sandboxed"
+    );
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap();
+
+    let stale = td.call(
+        "apps.install",
+        Some(json!({
+            "id": "spotify",
+            "confirm_metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        })),
+    );
+    assert_eq!(stale["error"]["code"], "verify_failed");
+    assert!(!td.dir.join("app-state").exists());
+
+    let installed = td.call(
+        "apps.install",
+        Some(json!({
+            "id": "spotify",
+            "confirm_metadata_sha256": digest,
+        })),
+    );
+    assert_eq!(installed["result"]["installed"], true);
+    assert_eq!(installed["result"]["changed"], true);
+    let events = td.audit_lines();
+    let event = events.last().unwrap();
+    assert_schema_shaped(event);
+    assert_eq!(event["action"], "system.install_package");
+    assert_eq!(event["resource"], "spotify");
+    assert_eq!(event["source"], "human");
+    assert_eq!(event["result"], "success");
 }
 
 #[test]

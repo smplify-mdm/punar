@@ -13,6 +13,8 @@ VNC_DISPLAY="${PUNAR_VNC_DISPLAY:-1}"
 QMP_PORT="${PUNAR_QMP_PORT:-4445}"
 VNC_PORT="$((5900 + VNC_DISPLAY))"
 DISPLAY_BACKEND="${PUNAR_VM_DISPLAY:-auto}"
+VNC_PASSWORD="${PUNAR_VNC_PASSWORD:-}"
+OPEN_VIEWER="${PUNAR_VM_OPEN_VIEWER:-1}"
 
 die() {
     echo "error: $*" >&2
@@ -70,7 +72,11 @@ case "${DISPLAY_BACKEND}" in
         DISPLAY_LABEL="native Cocoa window"
         ;;
     vnc)
-        DISPLAY_ARGS=(-display "vnc=127.0.0.1:${VNC_DISPLAY}")
+        if [ -n "${VNC_PASSWORD}" ]; then
+            DISPLAY_ARGS=(-display "vnc=127.0.0.1:${VNC_DISPLAY},password=on")
+        else
+            DISPLAY_ARGS=(-display "vnc=127.0.0.1:${VNC_DISPLAY}")
+        fi
         DISPLAY_LABEL="VNC 127.0.0.1:${VNC_PORT} (display :${VNC_DISPLAY})"
         ;;
     none)
@@ -99,6 +105,46 @@ echo "    display ${DISPLAY_LABEL}"
 echo "    QMP  127.0.0.1:${QMP_PORT}"
 echo "    disk changes are disposable (-snapshot)"
 echo "    graphics are software-rendered in this VM; judge bare-metal GPU smoothness separately"
+
+# QEMU starts with VNC authentication enabled but no usable password. Set it
+# through the localhost-only QMP channel as soon as the monitor is ready,
+# keeping the password out of argv. macOS Screen Sharing can complete the TCP
+# handshake but does not reliably interoperate with QEMU's RFB security modes;
+# TigerVNC is the supported macOS VNC client.
+if [ "${DISPLAY_BACKEND}" = vnc ] && [ -n "${VNC_PASSWORD}" ]; then
+    (
+        attempt=0
+        while [ "${attempt}" -lt 50 ]; do
+            nc -z 127.0.0.1 "${QMP_PORT}" >/dev/null 2>&1 && break
+            sleep 0.1
+            attempt=$((attempt + 1))
+        done
+        {
+            printf '%s\n' '{"execute":"qmp_capabilities"}'
+            sleep 0.1
+            printf '%s\n' "{\"execute\":\"change-vnc-password\",\"arguments\":{\"password\":\"${VNC_PASSWORD}\"}}"
+        } | nc -w 2 127.0.0.1 "${QMP_PORT}" >/dev/null 2>&1 || true
+    ) &
+fi
+
+if [ "${DISPLAY_BACKEND}" = vnc ] && [ "${HOST_OS}" = Darwin ] \
+    && [ "${OPEN_VIEWER}" != 0 ]; then
+    (
+        attempt=0
+        while [ "${attempt}" -lt 50 ]; do
+            nc -z 127.0.0.1 "${VNC_PORT}" >/dev/null 2>&1 && break
+            sleep 0.1
+            attempt=$((attempt + 1))
+        done
+        if [ -d /Applications/TigerVNC.app ]; then
+            open -b com.tigervnc.tigervnc --args "127.0.0.1:${VNC_PORT}" \
+                >/dev/null 2>&1 || true
+        else
+            echo "warning: TigerVNC is required for QEMU VNC on macOS" >&2
+            echo "warning: install it or use PUNAR_VM_DISPLAY=cocoa" >&2
+        fi
+    ) &
+fi
 
 exec "${QEMU}" \
     -name punar-arm64-milestone \

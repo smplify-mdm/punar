@@ -69,7 +69,7 @@ mod watch;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Parser, Subcommand};
@@ -133,6 +133,11 @@ enum Command {
     Capabilities {
         #[command(subcommand)]
         command: Option<CapabilitiesCommand>,
+    },
+    /// Find, inspect, install, open, or remove curated applications.
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
     },
     /// Show whether tracked settings still match, and what was put back.
     Compliance,
@@ -215,6 +220,47 @@ enum CapabilitiesCommand {
         /// Desired state value, like `enabled`. Sent as a string; the
         /// daemon validates it against the capability's allowed states.
         desired_state: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppCommand {
+    /// Search the local signed application catalog.
+    Search {
+        /// App name, category, or purpose.
+        query: String,
+    },
+    /// Inspect the exact source, trust disclosure, and live permissions.
+    Show {
+        /// Catalog id, such as `spotify`.
+        id: String,
+    },
+    /// List catalog apps and native installation state.
+    List,
+    /// Install the pinned native package for this architecture.
+    Install {
+        /// Catalog id, such as `spotify`.
+        id: String,
+        /// Skip the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Digest from a Command Center card. Hidden because ordinary CLI
+        /// use obtains it from the card it prints immediately beforehand.
+        #[arg(long, hide = true, value_name = "SHA256")]
+        confirm_metadata_sha256: Option<String>,
+    },
+    /// Open an installed native app, or its curated web-app fallback.
+    Open {
+        /// Catalog id, such as `spotify`.
+        id: String,
+    },
+    /// Remove the native package. User data is left to Flatpak policy.
+    Remove {
+        /// Catalog id, such as `spotify`.
+        id: String,
+        /// Skip the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -555,6 +601,183 @@ fn rpc(
     match client.call(method, params) {
         Ok(result) => render_or_json(json, &result, render),
         Err(error) => fail(&error),
+    }
+}
+
+fn inspect_app(client: &Client, id: &str) -> Result<Value, CallError> {
+    client.call_with_timeout(
+        "apps.catalog",
+        Some(json!({ "id": id })),
+        crate::ipc::APP_INSPECT_TIMEOUT,
+    )
+}
+
+fn app_install(
+    client: &Client,
+    style: &Style,
+    json_output: bool,
+    id: &str,
+    yes: bool,
+    confirmed: Option<String>,
+) -> ExitCode {
+    let detail = match inspect_app(client, id) {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let app = match detail.get("app") {
+        Some(app) => app,
+        None => {
+            return fail(&CallError::Protocol {
+                why: "apps.catalog returned no app object".to_string(),
+            });
+        }
+    };
+    if app.get("source").and_then(Value::as_str) != Some("flatpak") {
+        eprintln!(
+            "{} has no native package for this architecture. Next step: `punarctl app open {id}` opens its curated web app.",
+            app.get("name").and_then(Value::as_str).unwrap_or(id)
+        );
+        return ExitCode::FAILURE;
+    }
+    let shown_digest = app
+        .pointer("/inspection/metadata_sha256")
+        .and_then(Value::as_str);
+    let digest = match (confirmed, shown_digest) {
+        (Some(value), Some(shown)) if value == shown => value,
+        (Some(_), Some(_)) => {
+            eprintln!(
+                "The app card is stale: its metadata digest changed. Nothing was installed. Next step: reopen the card and retry."
+            );
+            return ExitCode::FAILURE;
+        }
+        (None, Some(value)) => value.to_string(),
+        _ => {
+            eprintln!(
+                "The app source was not verified, so Punar will not install it. Next step: check the Flatpak remote and inspect the app again."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !json_output {
+        match views::app_detail(style, &detail, &local_hostname()) {
+            Ok(card) => print!("{card}"),
+            Err(why) => return fail(&CallError::Protocol { why }),
+        }
+    }
+    if !yes && !json_output && std::io::stdin().is_terminal() {
+        eprint!("Install this exact verified version? Type yes to continue: ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if answer.trim() != "yes" {
+            eprintln!("Install aborted — nothing was changed.");
+            return ExitCode::FAILURE;
+        }
+    }
+    match client.call_with_timeout(
+        "apps.install",
+        Some(json!({
+            "id": id,
+            "confirm_metadata_sha256": digest,
+        })),
+        crate::ipc::APP_MUTATION_TIMEOUT,
+    ) {
+        Ok(result) => render_or_json(json_output, &result, |v| {
+            views::app_mutation(style, v, &local_hostname(), "installed")
+        }),
+        Err(error) => fail(&error),
+    }
+}
+
+fn app_remove(client: &Client, style: &Style, json_output: bool, id: &str, yes: bool) -> ExitCode {
+    if !yes && !json_output && std::io::stdin().is_terminal() {
+        eprint!("Remove {id}? Type yes to continue: ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if answer.trim() != "yes" {
+            eprintln!("Removal aborted — nothing was changed.");
+            return ExitCode::FAILURE;
+        }
+    }
+    match client.call_with_timeout(
+        "apps.remove",
+        Some(json!({ "id": id })),
+        crate::ipc::APP_MUTATION_TIMEOUT,
+    ) {
+        Ok(result) => render_or_json(json_output, &result, |v| {
+            views::app_mutation(style, v, &local_hostname(), "removed")
+        }),
+        Err(error) => fail(&error),
+    }
+}
+
+fn app_open(client: &Client, id: &str) -> ExitCode {
+    let detail = match inspect_app(client, id) {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let Some(app) = detail.get("app") else {
+        return fail(&CallError::Protocol {
+            why: "apps.catalog returned no app object".to_string(),
+        });
+    };
+    let mut command = match app.get("source").and_then(Value::as_str) {
+        Some("web") => {
+            let Some(url) = app.get("url").and_then(Value::as_str) else {
+                return fail(&CallError::Protocol {
+                    why: "the curated web app has no URL".to_string(),
+                });
+            };
+            if app.get("browser").and_then(Value::as_str) != Some("chromium")
+                || !url.starts_with("https://")
+            {
+                return fail(&CallError::Protocol {
+                    why: "the curated web-app launch contract is invalid".to_string(),
+                });
+            }
+            let mut command = std::process::Command::new("/usr/bin/chromium");
+            command
+                .arg(format!("--app={url}"))
+                .arg(format!("--class=punar-webapp-{id}"))
+                .arg("--ozone-platform-hint=auto");
+            command
+        }
+        Some("flatpak") => {
+            if app.get("installed").and_then(Value::as_bool) != Some(true) {
+                eprintln!(
+                    "{} is not installed. Next step: `punarctl app install {id}`.",
+                    app.get("name").and_then(Value::as_str).unwrap_or(id)
+                );
+                return ExitCode::FAILURE;
+            }
+            let Some(app_id) = app.get("app_id").and_then(Value::as_str) else {
+                return fail(&CallError::Protocol {
+                    why: "the curated Flatpak has no application id".to_string(),
+                });
+            };
+            let mut command = std::process::Command::new("/usr/bin/flatpak");
+            command.args(["run", "--system", app_id]);
+            command
+        }
+        _ => {
+            return fail(&CallError::Protocol {
+                why: "the application source is not supported by this client".to_string(),
+            });
+        }
+    };
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "The application could not start.\nWhy: {error}.\nNext step: inspect it with `punarctl app show {id}`."
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -1144,6 +1367,43 @@ fn main() -> ExitCode {
                 }
             }
         },
+        Command::App { command } => match command {
+            AppCommand::Search { query } => {
+                let hostname = local_hostname();
+                match client.call_with_timeout(
+                    "apps.catalog",
+                    Some(json!({ "query": query })),
+                    crate::ipc::APP_INSPECT_TIMEOUT,
+                ) {
+                    Ok(result) => {
+                        render_or_json(json, &result, |v| views::apps(&style, v, &hostname))
+                    }
+                    Err(error) => fail(&error),
+                }
+            }
+            AppCommand::Show { id } => {
+                let hostname = local_hostname();
+                match inspect_app(&client, &id) {
+                    Ok(result) => {
+                        render_or_json(json, &result, |v| views::app_detail(&style, v, &hostname))
+                    }
+                    Err(error) => fail(&error),
+                }
+            }
+            AppCommand::List => {
+                let hostname = local_hostname();
+                rpc(&client, json, "apps.list", None, |v| {
+                    views::apps(&style, v, &hostname)
+                })
+            }
+            AppCommand::Install {
+                id,
+                yes,
+                confirm_metadata_sha256,
+            } => app_install(&client, &style, json, &id, yes, confirm_metadata_sha256),
+            AppCommand::Open { id } => app_open(&client, &id),
+            AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
+        },
         Command::Audit { command } => match command {
             AuditCommand::Tail { n } => {
                 let hostname = local_hostname();
@@ -1677,6 +1937,21 @@ mod tests {
     fn command_surface_parses() {
         let examples: &[&[&str]] = &[
             &["punarctl", "status"],
+            &["punarctl", "app", "search", "spotify"],
+            &["punarctl", "app", "show", "spotify"],
+            &["punarctl", "app", "list"],
+            &["punarctl", "app", "install", "spotify"],
+            &["punarctl", "app", "install", "spotify", "--yes"],
+            &[
+                "punarctl",
+                "app",
+                "install",
+                "spotify",
+                "--confirm-metadata-sha256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+            &["punarctl", "app", "open", "spotify"],
+            &["punarctl", "app", "remove", "spotify", "--yes"],
             &["punarctl", "capabilities"],
             &["punarctl", "compliance"],
             &["punarctl", "policy", "effective"],

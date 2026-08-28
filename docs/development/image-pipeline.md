@@ -1,15 +1,17 @@
 # Image pipeline (Milestones 0–10 + native ARM64 migration lane)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
-pipeline now produces two images from one config tree
+pipeline now exposes three compositions from one config tree
 ([milestone-1.md](milestone-1.md) §3):
 
 - **punar-dev** — the minimal Milestone 0 userspace on the production-shaped
   four-partition foundation (the `PUNAR_BOOT_OK` gate stays cheap and
   regression-isolated even though its disk now exercises A/B boundaries).
-- **punar-desktop** — the Milestone 1 graphical workstation: the base config
-  plus the mkosi `desktop` profile (`os/images/mkosi.profiles/desktop/`)
-  adding Hyprland, punar-shell (Quickshell), greetd autologin session, foot,
+- **punar-desktop** — the graphical CI/demo workstation: the safe base plus
+  the mkosi `desktop,dev` profiles. The desktop profile adds product content;
+  the dev profile alone adds the fixed account, serial access, autologin,
+  mocks, fixtures, markers and behavioral proof services. The workstation has
+  Hyprland, punar-shell (Quickshell), foot,
   chromium, git/neovim/podman, pipewire, vendored fonts, and the
   `PUNAR_DESKTOP_OK` ready-marker / idle-RAM / artifact-export chain.
   Since Milestone 3 it also carries the Punar control plane —
@@ -28,6 +30,11 @@ pipeline now produces two images from one config tree
   Acme organization fixtures staged verbatim to
   `/usr/share/punar/fixtures/acme/`, and the `punar-m5-check` in-VM
   enrollment exercise ([milestone-5.md](milestone-5.md) §4, §10).
+- **punar-release** — the `desktop` profile without `dev`: no fixed human
+  account or hostname, locked root, no autologin/serial console, no mocks or
+  test services. A finalize-time release policy checks those invariants and an
+  architecture-reviewed complete system/user unit enablement manifest before
+  UKI generation. Account creation belongs to onboarding.
 
 The shipping x86_64 substrate follows
 [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md): minimal Arch
@@ -80,15 +87,17 @@ CI run is the arbiter.
 | --- | --- |
 | `os/images/snapshot.env` | The input pins: ALA snapshot date + builder base image digest. Single source of truth. |
 | `os/images/builder/Containerfile` | Builder container: pinned Arch + mkosi 26 + UKI/filesystem tools + `rust` (1:1.97.1-1 from the same snapshot — compiles `punard`/`punarctl` for the desktop image; no rustup, single toolchain provenance, milestone-3.md §7). |
-| `os/images/mkosi.conf` | Base image definition: minimal Arch payload (`base`, `linux`), UEFI/systemd-boot, UKI, serial console, root autologin. Shared by both images. |
+| `os/images/mkosi.conf` | Product-safe base image definition: minimal Arch payload (`base`, `linux`), UEFI/systemd-boot, UKI, no credential, hostname, autologin, or serial console. |
 | `os/images/repart.d/install/` | Canonical four-partition contract: fixed ESP and root-slot sizes/identities plus shared btrfs state. `install-encrypted/` is the production LUKS2 overlay; direct VM images deliberately use the plaintext base while exercising the same mount boundaries. |
-| `os/images/mkosi.extra/` | Files copied verbatim into every image; currently `punar-boot-marker.service` + its enablement symlink. |
-| `os/images/mkosi.profiles/desktop/` | The M1 `punar-desktop` profile: `mkosi.conf` (the verified §2.1 package additions), `mkosi.postinst.chroot` (dev user `punar` + subuid/subgid for rootless podman, `systemctl enable greetd`, `graphical.target`, fc-cache), and `mkosi.extra/` — the versioned parts (greetd `config.toml`, `/usr/lib/punar/{session.sh,desktop-ready.sh,idle-ram.sh}`, `punar-desktop-marker.path/.service`, `punar-idle-ram.service`, tmpfiles `/run/punar`) plus build-time-staged parts (gitignored; see next row). |
+| `os/images/mkosi.extra/` | Base extra tree; intentionally contains no development marker after the profile split. |
+| `os/images/mkosi.profiles/desktop/` | Product desktop packages, locked release greeter, session chain, product daemons/data, lean system/user presets, and generated desktop assets/binaries. Its postinstall creates only stable system groups/adapters and warms fonts. |
+| `os/images/mkosi.profiles/dev/` | Development-only credentials, fixed `punar` account, serial console, autologin, mocks, fixtures, boot/desktop markers, performance probes, and M2–M10 exercise services. Never compose it into a release payload. |
+| `os/images/mkosi.finalize`, `os/images/check-release-image.sh`, `os/images/expected-enabled-units.*.txt` | Release-tree firewall: rejects login credentials/users, autologin, serial/live flags, dev paths, NOPASSWD rules, and any unreviewed system or user unit enablement. `dev` compositions skip it explicitly. |
 | `os/modules/desktop/`, `shell/punar-shell/`, `shell/theme/` | Source of truth for Hyprland config (`/etc/xdg/hypr/`), foot config (`/etc/xdg/foot/foot.ini`), fontconfig defaults + vendored fonts (`/usr/share/fonts/punar/`), the punar-shell QML (`/usr/share/punar/shell/`) and design tokens (`/usr/share/punar/theme/punar-tokens.json`). `container-build.sh` re-verifies the font sha256 manifest and stages these into the desktop profile's `mkosi.extra/` on every build — nothing is committed twice. |
-| `os/images/scripts/container-build.sh` | Runs inside the builder container: staging (desktop; since M5 also the Acme fixtures `fixtures/organizations/acme/*.json` → `usr/share/punar/fixtures/acme/`, same staged-not-committed-twice pattern as the shell QML), since M3 `stage_punar_binaries()` (`cargo build --release --locked -p punard -p punarctl -p punar-mock-smplify` with CARGO_HOME/target under `os/images/cache`, binaries installed 0755 into the desktop extra tree's `usr/bin/` — gitignored; **skipped entirely in summary mode**), renders the ordinary-image repart set into `/run`, runs `mkosi build`, content-checks the raw A/B layout, then converts it to compressed qcow2 and writes checksums/build metadata. `PUNAR_IMAGES=dev|desktop|all`, `PUNAR_BUILD_MODE=build|summary`. Honest hermeticity limit: crates.io is fetched at build time, pinned by the committed `Cargo.lock` (`--locked`); the runtime VM needs no network. |
+| `os/images/scripts/container-build.sh` | Stages product assets/binaries into `desktop`, mocks/fixtures into `dev`, renders the repart set, builds, content-checks the raw A/B layout, converts to qcow2, and writes checksums/metadata. `PUNAR_IMAGES=dev|desktop|release|all`; historical `all` is the CI pair (`dev` + `desktop,dev`), while `release` is explicit. `PUNAR_BUILD_MODE=build|summary`. Crates are lockfile-pinned but fetched at build time. |
 | `tools/render-repart-definitions.sh`, `tools/render-mkosi-repart.sh` | Deterministically merge base + overlay definitions and derive mkosi population rules without duplicating partition identity/geometry. The explicit merge is required because pinned systemd 261.2 gives the first repeated `--definitions=` directory priority. |
 | `tests/images/repart-spike.sh`, `tests/images/check-repart-layout.sh` | V-REPART toolchain proof plus the raw-image content gate: exact GPT contract, root-A population and mutable-tree exclusion, empty root B, exactly three shared subvolumes, deterministic direct-image btrfs device identity, hardened mount options, and a UKI selecting literal slot A. |
-| `tools/build-image.sh` | Host-side wrapper: builds the builder container, runs the containerized build with the **repo root** mounted (the desktop staging needs `os/modules` + `shell/`). `tools/build-image.sh [dev|desktop|all]` (default `all`). Identical path in CI and locally. |
+| `tools/build-image.sh` | Host-side wrapper: builds the builder container and runs the containerized path with the repository mounted for desktop staging. `tools/build-image.sh [dev|desktop|release|all]` (default `all`). |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
 | `os/images/arm64/`, `os/images/builder-debian/` | Native ARM64 minimal + desktop lane: digest-pinned Debian base upgraded wholly from one immutable sid snapshot, AA64 systemd-boot disk definitions, Debian desktop/package/PAM adapters, native AArch64 Punar binaries, per-architecture offline OCI fixture, deterministic development credentials and disposable-cache exclusions. This proves generic UEFI/QEMU, not Raspberry Pi hardware. |
 | `tools/build-arm64-image.sh`, `tools/boot-test-arm64.sh`, `tools/demo-arm64-vm.sh` | Native ARM64 build wrapper, cheap AArch64 UEFI smoke test, and localhost-only interactive desktop launcher. The boot paths select HVF/KVM when available, otherwise label a TCG fallback, and retain serial proof. The architecture-aware `tools/boot-test.sh` runs the same full desktop gate on ARM64 and x86_64. |
@@ -116,18 +125,20 @@ CI run is the arbiter.
 5. The raw image is converted to a compressed qcow2
    (`os/images/out/punar-dev-x86_64.qcow2`), plus `SHA256SUMS` and
    `build-info.txt` (snapshot date, mkosi/qemu-img versions, git SHA).
-6. With `PUNAR_IMAGES=all` (the default) or `desktop`, the desktop content is
+6. With `PUNAR_IMAGES=all` (the default), `desktop`, or `release`, product desktop content is
    staged (font manifest verified first; since M5 the Acme fixtures land in
    `usr/share/punar/fixtures/acme/`), `punard` + `punarctl` +
    `punar-mock-smplify` are compiled `--release --locked` with the builder's
    snapshot-pinned Rust and staged into the profile's `usr/bin/` (build mode
    only — summary mode never compiles), and mkosi runs a second time with
-   `--profile desktop --image-id punar-desktop --hostname punar-desktop` —
+   `--profile desktop,dev --image-id punar-desktop --hostname punar-desktop` —
    scalar overrides on the CLI, so no profile scalar-merge ambiguity — and the
    result is converted to `os/images/out/punar-desktop-x86_64.qcow2`. Both
    builds share `CacheDirectory=cache`, so packages download once; the cargo
    home/target live under the same `os/images/cache` and ride the same CI
-   cache entry.
+   cache entry. `PUNAR_IMAGES=release` instead composes only `desktop`, names
+   the output `punar-release`, leaves the hostname/account unset for
+   onboarding, and must pass the release finalizer before image generation.
 
 Determinism posture (per ADR-001: input-pinned, not bit-for-bit): base image
 by digest, packages from a date snapshot, `SourceDateEpoch` clamped to the
@@ -146,7 +157,16 @@ metadata after creation. The honest claim is **input-pinned with stable OS
 payload and partition identities, not bit-for-bit reproducible disk output**.
 Release promotion must continue to name and sign the exact built artifact.
 
-The image itself: UEFI-only, systemd, a 1 GiB ESP, populated 8 GiB root A,
+Both containerized build lanes keep mkosi's sparse raw output on Docker's
+native Linux filesystem and stream only the compressed QCOW2 through the
+host-mounted `out/` directory. This is a correctness requirement on Docker
+Desktop: handing the raw disk across filesystems can expand its 33 GiB virtual
+size into a fully allocated host copy, while building the root tree directly
+on VirtioFS fails because that mount cannot preserve the required POSIX ACLs.
+Conversion writes a temporary QCOW2 and atomically replaces the prior artifact;
+the exit trap truncates any disposable raw output before unlinking it.
+
+The development image itself: UEFI-only, systemd, a 1 GiB ESP, populated 8 GiB root A,
 empty 8 GiB root B and a minimum 16 GiB shared btrfs partition whose three
 subvolumes mount at `/var`, `/home` and `/var/tmp`. The qcow2 stays sparse, so
 that 33 GiB virtual floor does not allocate 33 GiB on the host. The UKI selects
@@ -449,7 +469,8 @@ PUNAR_BUILD_MODE=summary ./tools/build-image.sh   # cheap: staging + `mkosi summ
 # Native ARM64 path (fast on Apple Silicon)
 PUNAR_ARM64_IMAGES=all ./tools/build-arm64-image.sh
 ./tools/boot-test-arm64.sh
-./tools/demo-arm64-vm.sh                  # desktop on localhost VNC :5901
+./tools/demo-arm64-vm.sh                  # native Cocoa window on macOS
+PUNAR_VM_DISPLAY=vnc ./tools/demo-arm64-vm.sh  # localhost TigerVNC :5901
 PUNAR_BUILD_MODE=summary PUNAR_ARM64_IMAGES=all ./tools/build-arm64-image.sh
 ```
 

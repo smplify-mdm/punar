@@ -4,7 +4,8 @@
 set -eu
 
 REPO_ROOT=$(cd -- "$(dirname "$0")/../.." && pwd)
-CHECKER="${REPO_ROOT}/tools/check-release-image.sh"
+CHECKER="${REPO_ROOT}/os/images/check-release-image.sh"
+FINALIZE="${REPO_ROOT}/os/images/mkosi.finalize"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/punar-release-policy.XXXXXX")
 trap 'rm -rf "${TEST_ROOT}"' EXIT INT TERM
 
@@ -12,9 +13,16 @@ CLEAN="${TEST_ROOT}/clean"
 CASE="${TEST_ROOT}/case"
 EXPECTED="${TEST_ROOT}/expected-enabled-units.txt"
 mkdir -p "${CLEAN}/etc/greetd" "${CLEAN}/etc/sudoers.d" \
+    "${CLEAN}/etc/xdg/hypr" \
     "${CLEAN}/usr/lib/systemd/system/multi-user.target.wants" \
+    "${CLEAN}/etc/systemd/system/punard.service.wants" \
+    "${CLEAN}/usr/lib/systemd/user/default.target.wants" \
     "${CLEAN}/usr/lib/punar" "${CLEAN}/usr/bin" \
     "${CLEAN}/usr/share/punar"
+printf '%s\n' 'hl.config({ misc = { disable_hyprland_logo = true } })' \
+    > "${CLEAN}/etc/xdg/hypr/hyprland.lua"
+printf '%s\n' 'hl.config({ animations = { enabled = false } })' \
+    > "${CLEAN}/etc/xdg/hypr/punar-greeter.lua"
 printf '%s\n' \
     'root:!:20500:0:99999:7:::' \
     'daemon:*:20500:0:99999:7:::' > "${CLEAN}/etc/shadow"
@@ -30,11 +38,21 @@ printf '%s\n' '[Unit]' 'Description=Punar product service' \
     > "${CLEAN}/usr/lib/systemd/system/punard.service"
 ln -s ../punard.service \
     "${CLEAN}/usr/lib/systemd/system/multi-user.target.wants/punard.service"
+printf '%s\n' '[Unit]' 'Description=Punar product helper' \
+    > "${CLEAN}/usr/lib/systemd/system/punar-helper.service"
+ln -s /usr/lib/systemd/system/punar-helper.service \
+    "${CLEAN}/etc/systemd/system/punard.service.wants/punar-helper.service"
+printf '%s\n' '[Unit]' 'Description=Punar user product service' \
+    > "${CLEAN}/usr/lib/systemd/user/punar-user.service"
+ln -s ../punar-user.service \
+    "${CLEAN}/usr/lib/systemd/user/default.target.wants/punar-user.service"
 printf '%s\n' \
+    'etc/systemd/system/punard.service.wants/punar-helper.service -> /usr/lib/systemd/system/punar-helper.service' \
+    'usr/lib/systemd/user/default.target.wants/punar-user.service -> ../punar-user.service' \
     'usr/lib/systemd/system/multi-user.target.wants/punard.service -> ../punard.service' \
     > "${EXPECTED}"
 
-KERNEL='console=tty0 root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea rw'
+KERNEL='console=tty0 systemd.getty_auto=no root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea rw'
 
 reset_case() {
     rm -rf "${CASE}"
@@ -71,9 +89,13 @@ mutate_a6() {
 mutate_a7() { printf '%s\n' 'wheel ALL=(ALL) NOPASSWD: ALL' > "${CASE}/etc/sudoers.d/dev"; }
 mutate_noop() { :; }
 mutate_a9() {
-    : > "${CASE}/usr/lib/systemd/system/surprise.service"
+    : > "${CASE}/usr/lib/systemd/user/surprise.service"
     ln -s ../surprise.service \
-        "${CASE}/usr/lib/systemd/system/multi-user.target.wants/surprise.service"
+        "${CASE}/usr/lib/systemd/user/default.target.wants/surprise.service"
+}
+mutate_a10() {
+    mv "${CASE}/etc/xdg/hypr/punar-greeter.lua" \
+        "${CASE}/etc/xdg/hypr/punar-greeter.conf"
 }
 
 reset_case
@@ -86,6 +108,21 @@ echo 'ok   clean release fixture passes'
     "${TEST_ROOT}/missing-manifest" \
     | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 echo 'ok   dev profile bypass is explicit'
+
+printf '%s\n' '{"KernelCommandLine":["console=tty0","console=ttyS0"]}' \
+    > "${TEST_ROOT}/mkosi-config.json"
+reset_case
+mkdir -p "${CASE}/etc/systemd/system/network-online.target.wants"
+ln -s /usr/lib/systemd/system/systemd-networkd-wait-online.service \
+    "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"
+BUILDROOT="${CASE}" \
+PROFILES='desktop dev' \
+ARCHITECTURE=x86-64 \
+SRCDIR="${REPO_ROOT}/os/images" \
+MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
+    "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
+[ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
+echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
 
 expect_fail A1 mutate_a1
 expect_fail A2 mutate_a2
@@ -105,6 +142,16 @@ grep -q 'release-image violation A8:' "${TEST_ROOT}/stderr"
 echo 'ok   A8 rejects a release serial console'
 
 reset_case
+if "${CHECKER}" "${CASE}" desktop \
+    'console=tty0 root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea rw' \
+    "${EXPECTED}" > "${TEST_ROOT}/stdout" 2> "${TEST_ROOT}/stderr"; then
+    echo 'FAIL A8: automatic firmware getty generation was accepted' >&2
+    exit 1
+fi
+grep -q 'release-image violation A8:' "${TEST_ROOT}/stderr"
+echo 'ok   A8 rejects automatic firmware serial gettys'
+
+reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} punar.live=1" "${EXPECTED}" \
     > "${TEST_ROOT}/stdout" 2> "${TEST_ROOT}/stderr"; then
     echo 'FAIL A8: live mode outside installer was accepted' >&2
@@ -116,5 +163,6 @@ grep -q 'release-image violation A8:' "${TEST_ROOT}/stderr"
 echo 'ok   A8 scopes live mode to the installer profile'
 
 expect_fail A9 mutate_a9
+expect_fail A10 mutate_a10
 
 echo PUNAR_RELEASE_IMAGE_POLICY_TEST_OK

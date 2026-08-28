@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/encryption/escrow-receipt.json",
+  "title": "Smplify recovery-key escrow receipt",
+  "description": "Ed25519-signed acknowledgement bound to one exact recovery envelope. A device reports escrowed/compliant only after local signature and binding verification.",
+  "type": "object",
+  "properties": {
+    "v": { "const": 1 },
+    "receipt_id": { "$ref": "#/$defs/identifier" },
+    "received_at": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "organization_id": { "$ref": "#/$defs/identifier" },
+    "tenant_key_id": { "$ref": "#/$defs/identifier" },
+    "device_id": { "$ref": "#/$defs/identifier" },
+    "luks_uuid": { "$ref": "#/$defs/uuid" },
+    "recovery_keyslot": { "type": "integer", "minimum": 0, "maximum": 31 },
+    "envelope_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "signature": {
+      "description": "64-byte Ed25519 signature over the domain-separated receipt payload, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    }
+  },
+  "required": [
+    "v",
+    "receipt_id",
+    "received_at",
+    "organization_id",
+    "tenant_key_id",
+    "device_id",
+    "luks_uuid",
+    "recovery_keyslot",
+    "envelope_sha256",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    }
+  }
+}

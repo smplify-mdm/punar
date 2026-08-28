@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "receipt_id": "rct_000001",
+  "received_at": "2026-08-27T21:00:00Z",
+  "organization_id": "org_acme",
+  "tenant_key_id": "trk_2026_08",
+  "device_id": "dev_456",
+  "luks_uuid": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9",
+  "recovery_keyslot": 1,
+  "envelope_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

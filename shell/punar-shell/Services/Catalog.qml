@@ -1,0 +1,82 @@
+pragma Singleton
+pragma ComponentBehavior: Bound
+// Catalog — read-only projection of the signed image application catalog.
+//
+// This singleton performs local discovery only. It never renders permissions,
+// trust containment, installed state, or an install command: those values are
+// obtained from punard after a live pinned-metadata inspection when a person
+// selects a row. Keeping those two stages separate makes typing instantaneous
+// and prevents publisher text from becoming a security claim.
+
+import QtQuick
+import Quickshell
+import Quickshell.Io
+
+Singleton {
+    id: root
+
+    readonly property string installedPath: "/usr/share/punar/catalog/catalog.json"
+    readonly property string devPath: Quickshell.shellDir + "/../../catalog/catalog.json"
+    property var document: ({ "apps": [] })
+    readonly property var entries: root.document && Array.isArray(root.document.apps) ? root.document.apps : []
+
+    FileView {
+        id: catalogFile
+        path: root.installedPath
+        blockLoading: true
+        watchChanges: false
+        onLoaded: {
+            try {
+                var parsed = JSON.parse(catalogFile.text());
+                root.document = parsed && parsed.v === 1 && Array.isArray(parsed.apps) ? parsed : ({ "apps": [] });
+            } catch (e) {
+                console.warn("punar-shell: application catalog is invalid at", catalogFile.path, e);
+                root.document = ({ "apps": [] });
+            }
+        }
+        onLoadFailed: {
+            if (catalogFile.path === root.installedPath)
+                catalogFile.path = root.devPath;
+            else
+                root.document = ({ "apps": [] });
+        }
+    }
+
+    function score(app: var, query: string): int {
+        var q = String(query).trim().toLowerCase();
+        // An empty query is the browse view. The catalog is intentionally
+        // curated and finite, so showing it is not a live-store fetch.
+        if (q === "")
+            return 10;
+        var name = String(app.name || "").toLowerCase();
+        var id = String(app.id || "").toLowerCase();
+        if (name === q || id === q)
+            return 100;
+        if (name.indexOf(q) === 0 || id.indexOf(q) === 0)
+            return 80;
+        if (name.indexOf(q) !== -1 || id.indexOf(q) !== -1)
+            return 60;
+        var context = String(app.category || "") + " " + String(app.summary || "");
+        return context.toLowerCase().indexOf(q) !== -1 ? 30 : -1;
+    }
+
+    function search(query: string, limit: int): var {
+        var scored = [];
+        var list = root.entries;
+        for (var i = 0; i < list.length; i++) {
+            var rank = root.score(list[i], query);
+            if (rank >= 0)
+                scored.push({ "app": list[i], "rank": rank });
+        }
+        scored.sort(function(a, b) {
+            if (a.rank !== b.rank)
+                return b.rank - a.rank;
+            return String(a.app.name).localeCompare(String(b.app.name));
+        });
+        var out = [];
+        var cap = limit > 0 ? Math.min(limit, scored.length) : scored.length;
+        for (var k = 0; k < cap; k++)
+            out.push(scored[k].app);
+        return out;
+    }
+}

@@ -249,17 +249,24 @@ jobs:
       - name: Lint the shell QML (qmllint, pinned to the image's Qt/Quickshell)
         run: ./tools/qmllint.sh
 
+      - name: Enforce Hyprland 0.56 dispatcher API
+        run: ./tools/check-hyprland-dispatchers.sh
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/demo-arm64-vm.sh \
+            tools/check-hyprland-dispatchers.sh \
+            os/images/check-release-image.sh \
             tools/render-repart-definitions.sh \
             tools/render-mkosi-repart.sh \
+            os/images/mkosi.finalize \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             tests/images/check-repart-layout.sh \
+            tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
@@ -267,22 +274,22 @@ jobs:
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
             tests/desktop/graphics-env-test.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/idle-ram.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/wifi-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m2-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m3-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m4-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m5-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m6-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m7-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m8-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m9-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m10-check.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/in-agent-scope.sh \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mock-agent \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m2-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m3-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m4-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m5-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m6-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m7-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m8-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m9-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m10-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/in-agent-scope.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/punar-mock-agent \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/foo-agent-fixture.sh
 
       - name: Test hardware-aware graphics selection
         run: ./tests/desktop/graphics-env-test.sh

@@ -20,6 +20,8 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/shell/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/theme/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/
+mkosi.profiles/dev/mkosi.extra/usr/share/punar/fixtures/
+mkosi.profiles/dev/mkosi.extra/usr/bin/
 # M6: the punar-env-base OCI archive + digest note, assembled from the pinned
 # snapshot's busybox by scripts/container-build.sh (stage_env_base_oci) on
 # every build — never commit (milestone-6.md §6.2).
@@ -39,5 +41,11 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/secrets/
 # Native ARM64 product binaries and offline developer base are staged by the
 # ARM image adapter. They intentionally live in the architecture-local extra
 # tree so an ARM build can never pick up the x86_64 staging cache above.
+# Keep the two former root-level destinations ignored during migration; the
+# build helper removes their contents without touching the versioned Debian
+# adapters stored beside them.
 arm64/mkosi.extra/usr/bin/
 arm64/mkosi.extra/usr/share/punar/oci/
+arm64/mkosi.profiles/desktop/mkosi.extra/usr/bin/
+arm64/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci/
+arm64/mkosi.profiles/dev/mkosi.extra/usr/bin/

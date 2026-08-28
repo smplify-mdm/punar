@@ -53,6 +53,7 @@ the machine.
 | `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
 | `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
+| `WindowActions/WindowActions.qml` | Lazy focused-app menu: graceful close plus two-step, exact-window force quit |
 | `CommandCenter/CommandCenter.qml` | Lazy PUNAR+Space overlay; `commandcenter` IPC proxy lives in `shell.qml` |
 | `Overview/Overview.qml` | Lazy PUNAR+TAB project-workspace overview (Plate D-007) |
 | `AiPanel/AiPanel.qml` | Lazy PUNAR+A AI panel (Plate D-005) |
@@ -60,6 +61,8 @@ the machine.
 | `Alert/AlertStack.qml` | The M10 shadow-AI alert region + `alerts` IPC handler (Plate D-009 Sect I) |
 | `Theme/ThemeContrast.qml` | Singleton: the WCAG contrast gate (R1–R9) that refuses an illegible palette before a human sees it |
 | `Services/Apps.qml` | Singleton: desktop-entry lookup + browser-by-role resolution for the command center |
+| `Services/Catalog.qml` | Singleton: read-only local discovery from the signed application catalog; never supplies permission or containment claims |
+| `CommandCenter/AppInstallCard.qml` | Live app-source, trust, permission and action card backed by punard's pinned-metadata inspection |
 | `Services/Notifications.qml` | Singleton: the freedesktop notification **daemon** (`org.freedesktop.Notifications`) + bus-owner probe |
 | `Wallpaper/Wallpaper.qml` | The desktop field, one background layer window per output; one active asset, zero timers |
 | `Bar/StatusCluster.qml` · `StatusSlot.qml` · `SlotPopover.qml` | The live right-hand cluster, its slots and their popover (Plate D-016) |
@@ -98,8 +101,8 @@ qs ipc call aipanel state              # prints "open" or "closed" (CI probe)
 
 ## Measured surface lifecycle
 
-The command center, System Control, shortcut help, AI panel, overview and
-notification ledger are created on first use and destroyed after their 300 ms
+The command center, System Control, shortcut help, AI panel, overview, focused
+window actions and notification ledger are created on first use and destroyed after their 300 ms
 close animation. Their small IPC proxies remain resident, so `state()` and
 `residency()` never load a closed panel. Run 33044217553 measured real-`qs`
 construction medians of 31–59 ms and isolated retained deltas of
@@ -143,10 +146,21 @@ of it. **If this list and the machine disagree, the machine is right.**
 | `PUNAR + /` | Shortcut help |
 | `PUNAR + SHIFT + N` | Notification centre (the plate asks for `PUNAR+N`; the notes scratchpad has held it since M2) |
 | `PUNAR + SHIFT + B` | Focus the bar's status cluster (the plate asks for `PUNAR+B`; the browser has held it since M1) |
+| `PUNAR + Q` | Ask the focused window to close normally |
+| `PUNAR + SHIFT + Q` | Window actions: close normally or enter the two-step Force quit confirmation |
 | `PUNAR + Escape` | Lock the session (`PUNAR+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
 | media keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
 
 Two surfaces deliberately have **no chord at all** — see below.
+
+The focused app name in the top bar is also clickable. Its window-actions
+surface snapshots and validates the exact active window before showing any
+control. **Close window** sends the normal compositor close request, allowing
+the app to save, prompt, refuse, or keep background work alive. **Force quit
+app** is visually separated, warns that unsaved work can be lost, and requires
+a second explicit confirmation before Hyprland sends `SIGKILL` to the process
+owning that snapshotted window. Focus changes dismiss the snapshot rather than
+risk acting on a different app.
 
 - `PUNAR+Space` → Hyprland runs `qs ipc call commandcenter toggle`.
 - In the overlay: typing filters, `↑`/`↓` select (animated highlight),

@@ -1,0 +1,17 @@
+[Unit]
+Description=Punar health gate for automatic update rollback
+Documentation=https://systemd.io/AUTOMATIC_BOOT_ASSESSMENT/
+Requires=punard.service punar-agentd.service
+After=multi-user.target graphical.target punard.service punar-agentd.service
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/punar/update-health.sh
+TimeoutStartSec=180
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+RequiredBy=boot-complete.target

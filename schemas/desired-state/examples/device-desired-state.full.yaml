@@ -12,6 +12,8 @@ spec:
   security:
     diskEncryption:
       required: true
+      recoveryKeyEscrow:
+        enabled: true
 
     secureBoot:
       required: true

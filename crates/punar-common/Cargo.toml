@@ -20,3 +20,9 @@ thiserror = { workspace = true }
 # crate. `flock` is not reachable from safe std, and workspace crates are
 # #![forbid(unsafe_code)].
 rustix = { workspace = true }
+# M13-U release verification. These are already workspace dependencies used
+# by recovery-key escrow; adding them here creates no second cryptographic
+# implementation or unpinned supply-chain edge. Release signatures are raw
+# Ed25519 over the exact manifest bytes, and payload/cohort hashing is SHA-256.
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }

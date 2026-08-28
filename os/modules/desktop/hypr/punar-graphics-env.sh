@@ -70,21 +70,21 @@ punar_configure_graphics() {
 
 # Select the compositor config after punar_configure_graphics. Real GPUs use
 # the product config directly. An unaccelerated virtual adapter receives the
-# same config through one private runtime overlay that disables compositor
+# same Lua config through one private runtime overlay that disables compositor
 # animation; this avoids asking llvmpipe to draw transition frames while
-# leaving bare-metal motion untouched.
+# leaving bare-metal motion untouched and never falls back to legacy hyprlang.
 punar_select_hyprland_config() {
-    punar_system_config="${PUNAR_HYPRLAND_SYSTEM_CONFIG:-/etc/xdg/hypr/hyprland.conf}"
+    punar_system_config="${PUNAR_HYPRLAND_SYSTEM_CONFIG:-/etc/xdg/hypr/hyprland.lua}"
     PUNAR_HYPRLAND_CONFIG="${punar_system_config}"
 
     if [ "${PUNAR_GRAPHICS_MODE:-software}" = software ] \
         && [ -n "${XDG_RUNTIME_DIR:-}" ] \
         && [ -d "${XDG_RUNTIME_DIR}" ]; then
-        PUNAR_HYPRLAND_CONFIG="${XDG_RUNTIME_DIR}/punar-hyprland-software.conf"
+        PUNAR_HYPRLAND_CONFIG="${XDG_RUNTIME_DIR}/punar-hyprland-software.lua"
         umask 077
         {
-            printf 'source = %s\n' "${punar_system_config}"
-            printf '%s\n' 'animations { enabled = false }'
+            printf 'require(%s)\n' "$(printf '%s' "${punar_system_config}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/')"
+            printf '%s\n' 'hl.config({ animations = { enabled = false } })'
         } > "${PUNAR_HYPRLAND_CONFIG}"
     fi
 

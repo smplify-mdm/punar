@@ -305,6 +305,27 @@ impl AuditEvent {
         }
     }
 
+    /// A typed mutation outside the capability registry. The caller supplies
+    /// a closed action chosen by first-party daemon code; request data may be
+    /// the resource, but can never become an executable action.
+    pub fn action(
+        device_id: &str,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        decision: Decision,
+        outcome: AuditOutcome,
+    ) -> AuditEvent {
+        AuditEvent::m3_event(
+            device_id,
+            actor,
+            action,
+            resource,
+            decision,
+            outcome.as_str(),
+        )
+    }
+
     /// A `capabilities.set` event (allowed path — every result: success,
     /// noop, failure, verify_failed). Denials go through
     /// [`AuditEvent::denial`].

@@ -8,7 +8,7 @@ Deterministic mock data for tests and the MVP hero demo (spec section 75). The M
 
 Two kinds of directories:
 
-1. **Schema-domain fixtures** — `<domain>/valid/` and `<domain>/invalid/` cases exercising the schemas in `schemas/<domain>/` (`ai-agent`, `audit`, `capability`, `desired-state`, `network`, `policy`). Valid files must validate; invalid files must fail for the one reason their filename states.
+1. **Schema-domain fixtures** — `<domain>/valid/` and `<domain>/invalid/` cases exercising the schemas in `schemas/<domain>/` (`ai-agent`, `audit`, `capability`, `desired-state`, `network`, `policy`, `update`). Valid files must validate; invalid files must fail for the one reason their filename states.
 2. **Mock control-plane seed data** — `organizations/` and `policies/`, consumed by enrollment (spec section 49), policy tests, and the hero demo. All seed files are valid documents.
 
 Empty directories are placeholders for future domains.

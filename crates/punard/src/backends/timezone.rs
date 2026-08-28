@@ -47,6 +47,9 @@ pub struct TimezoneBackend {
     pub localtime: PathBuf,
     /// `/usr/share/zoneinfo` in the image.
     pub zoneinfo_dir: PathBuf,
+    /// systemd-networkd drop-ins written after an explicit manual choice.
+    /// Empty in host tests that do not model the network stack.
+    pub network_timezone_dropins: Vec<PathBuf>,
 }
 
 impl TimezoneBackend {
@@ -54,7 +57,37 @@ impl TimezoneBackend {
         TimezoneBackend {
             localtime,
             zoneinfo_dir,
+            network_timezone_dropins: Vec::new(),
         }
+    }
+
+    pub fn with_network_timezone_dropins(mut self, paths: Vec<PathBuf>) -> Self {
+        self.network_timezone_dropins = paths;
+        self
+    }
+
+    fn disable_network_timezone(&self) -> Result<(), BackendError> {
+        const CONTENT: &[u8] = b"[DHCPv4]\nUseTimezone=no\n";
+        for path in &self.network_timezone_dropins {
+            let parent = path
+                .parent()
+                .ok_or_else(|| BackendError::new("network timezone drop-in has no parent"))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                BackendError::new(format!("creating {} failed: {e}", parent.display()))
+            })?;
+            let tmp = parent.join(format!(".punar-timezone.{}", std::process::id()));
+            let _ = fs::remove_file(&tmp);
+            fs::write(&tmp, CONTENT)
+                .map_err(|e| BackendError::new(format!("writing {} failed: {e}", tmp.display())))?;
+            if let Err(error) = fs::rename(&tmp, path) {
+                let _ = fs::remove_file(&tmp);
+                return Err(BackendError::new(format!(
+                    "installing {} failed: {error}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Normalize a symlink target to a zoneinfo name, tolerating absolute
@@ -140,6 +173,10 @@ impl Capability for TimezoneBackend {
                 src.display()
             )));
         }
+        // An explicit capability write is a manual choice. Disable future
+        // RFC 4833 DHCP timezone updates before changing /etc/localtime so
+        // the selected zone cannot be silently replaced on lease renewal.
+        self.disable_network_timezone()?;
         let parent = self
             .localtime
             .parent()
@@ -217,6 +254,26 @@ mod tests {
         b.apply(&json!("Europe/Berlin")).unwrap();
         assert_eq!(b.observe().unwrap(), json!("Europe/Berlin"));
         assert!(!b.verify(&json!("UTC")).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_choice_disables_network_timezone_updates() {
+        let (dir, backend) = fixture();
+        let wired = dir.join("etc/systemd/network/50-punar-dhcp.network.d/90-punar-timezone.conf");
+        let wifi = dir.join("etc/systemd/network/60-punar-wifi.network.d/90-punar-timezone.conf");
+        let backend = backend.with_network_timezone_dropins(vec![wired.clone(), wifi.clone()]);
+
+        backend.apply(&json!("Europe/Berlin")).unwrap();
+        assert_eq!(
+            fs::read_to_string(wired).unwrap(),
+            "[DHCPv4]\nUseTimezone=no\n"
+        );
+        assert_eq!(
+            fs::read_to_string(wifi).unwrap(),
+            "[DHCPv4]\nUseTimezone=no\n"
+        );
+        assert_eq!(backend.observe().unwrap(), json!("Europe/Berlin"));
         let _ = fs::remove_dir_all(&dir);
     }
 

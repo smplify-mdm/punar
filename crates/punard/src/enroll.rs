@@ -26,6 +26,10 @@ use punar_common::Redacted;
 use punar_common::query::{
     CP_METHOD_QUERIES_ANSWER, CP_METHOD_QUERIES_PENDING, PendingQuery, ScopeSet,
 };
+use punar_recovery::{
+    EscrowReceipt, RecoveryBinding, RecoveryEnvelope, RecoveryError, SecretRecoveryKey,
+    TenantRecoveryKey, VerifiedEscrowReceipt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -67,6 +71,35 @@ pub enum UpstreamError {
     Unreachable(String),
     /// The control plane answered with a structured error.
     Refused { code: String, message: String },
+}
+
+/// The automatic escrow path has only two failure domains: the authenticated
+/// control-plane hop, or local cryptographic/contract verification. Neither
+/// variant carries recovery material.
+#[derive(Debug)]
+pub enum RecoveryEscrowError {
+    Upstream(UpstreamError),
+    Local(RecoveryError),
+}
+
+impl From<UpstreamError> for RecoveryEscrowError {
+    fn from(value: UpstreamError) -> Self {
+        Self::Upstream(value)
+    }
+}
+
+impl From<RecoveryError> for RecoveryEscrowError {
+    fn from(value: RecoveryError) -> Self {
+        Self::Local(value)
+    }
+}
+
+/// Public envelope plus a locally verified receipt. The plaintext key has
+/// already fallen out of the function without ever entering either object.
+#[derive(Debug)]
+pub struct RecoveryEscrowOutcome {
+    pub envelope: RecoveryEnvelope,
+    pub receipt: VerifiedEscrowReceipt,
 }
 
 impl UpstreamError {
@@ -231,6 +264,73 @@ impl ControlPlaneClient {
             json!({ "device_token": token.expose_secret(), "inventory": inventory }),
         )
         .map(|_| ())
+    }
+
+    /// Fetch tenant public material through the same authenticated endpoint
+    /// and device token as policy. A raw unauthenticated URL is never accepted.
+    pub fn recovery_key(
+        &self,
+        token: &Redacted<String>,
+    ) -> Result<TenantRecoveryKey, UpstreamError> {
+        let result = self.call(
+            "recovery.key",
+            json!({"device_token": token.expose_secret()}),
+        )?;
+        let value = result.get("tenant_recovery_key").cloned().ok_or_else(|| {
+            UpstreamError::Unreachable(
+                "recovery.key answered without tenant recovery material".into(),
+            )
+        })?;
+        let key: TenantRecoveryKey = serde_json::from_value(value).map_err(|_| {
+            UpstreamError::Unreachable(
+                "recovery.key answered with malformed tenant recovery material".into(),
+            )
+        })?;
+        key.validate().map_err(|_| {
+            UpstreamError::Unreachable(
+                "recovery.key answered with unusable tenant recovery material".into(),
+            )
+        })?;
+        Ok(key)
+    }
+
+    /// Upload an already wrapped envelope. The recovery key cannot appear in
+    /// this request because [`RecoveryEnvelope`] has no plaintext field.
+    pub fn recovery_escrow(
+        &self,
+        token: &Redacted<String>,
+        envelope: &RecoveryEnvelope,
+    ) -> Result<EscrowReceipt, UpstreamError> {
+        let result = self.call(
+            "recovery.escrow",
+            json!({
+                "device_token": token.expose_secret(),
+                "envelope": envelope,
+            }),
+        )?;
+        let value = result.get("receipt").cloned().ok_or_else(|| {
+            UpstreamError::Unreachable("recovery.escrow answered without a receipt".into())
+        })?;
+        serde_json::from_value(value).map_err(|_| {
+            UpstreamError::Unreachable("recovery.escrow answered with a malformed receipt".into())
+        })
+    }
+
+    /// The one automatic managed-device flow: fetch authenticated tenant
+    /// public material → HPKE seal locally → upload ciphertext → verify the
+    /// signed, exact receipt. A caller must not report `escrowed` until this
+    /// returns `Ok`.
+    pub fn escrow_recovery_key(
+        &self,
+        token: &Redacted<String>,
+        binding: &RecoveryBinding,
+        recovery_key: &SecretRecoveryKey,
+    ) -> Result<RecoveryEscrowOutcome, RecoveryEscrowError> {
+        let tenant_key = self.recovery_key(token)?;
+        let envelope = tenant_key.seal(binding, recovery_key)?;
+        let raw_receipt = self.recovery_escrow(token, &envelope)?;
+        let receipt = raw_receipt.verify(&tenant_key, &envelope)?;
+        Ok(RecoveryEscrowOutcome { envelope, receipt })
     }
 
     /// M10: `queries.pending {device_token}` — **the device asks** for the

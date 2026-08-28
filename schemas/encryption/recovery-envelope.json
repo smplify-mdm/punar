@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/encryption/recovery-envelope.json",
+  "title": "Wrapped LUKS recovery-key envelope",
+  "description": "The only recovery-key object uploaded by a Punar device. Organization, device, LUKS UUID and keyslot are authenticated as HPKE associated data; plaintext recovery material is structurally absent.",
+  "type": "object",
+  "properties": {
+    "v": { "const": 1 },
+    "suite": {
+      "const": "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_CHACHA20POLY1305"
+    },
+    "organization_id": { "$ref": "#/$defs/identifier" },
+    "tenant_key_id": { "$ref": "#/$defs/identifier" },
+    "device_id": { "$ref": "#/$defs/identifier" },
+    "luks_uuid": { "$ref": "#/$defs/uuid" },
+    "recovery_keyslot": { "type": "integer", "minimum": 0, "maximum": 31 },
+    "encapsulated_key": {
+      "description": "32-byte HPKE encapsulated key, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "ciphertext": {
+      "description": "71-byte encrypted canonical modhex64 recovery key, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{95}$"
+    },
+    "tag": {
+      "description": "16-byte ChaCha20Poly1305 authentication tag, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    }
+  },
+  "required": [
+    "v",
+    "suite",
+    "organization_id",
+    "tenant_key_id",
+    "device_id",
+    "luks_uuid",
+    "recovery_keyslot",
+    "encapsulated_key",
+    "ciphertext",
+    "tag"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/catalog/app-catalog.json",
+  "title": "Punar application catalog",
+  "description": "Signed-image application identities and their fixed install sources. Runtime containment is deliberately absent: punard computes it from signed Flatpak metadata before every install.",
+  "type": "object",
+  "required": ["v", "catalogVersion", "generatedAt", "remotes", "apps"],
+  "properties": {
+    "v": {"const": 1},
+    "catalogVersion": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "remotes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/remote"},
+      "maxItems": 8
+    },
+    "apps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/app"},
+      "maxItems": 160
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "remote": {
+      "type": "object",
+      "required": ["id", "repoFile", "url"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "repoFile": {"type": "string", "pattern": "^/usr/share/punar/catalog/remotes/[A-Za-z0-9._-]+$"},
+        "url": {"type": "string", "pattern": "^https://"}
+      },
+      "additionalProperties": false
+    },
+    "disclosure": {
+      "type": "object",
+      "required": ["id", "text"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:._-]{0,63}$"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 240}
+      },
+      "additionalProperties": false
+    },
+    "flatpak": {
+      "type": "object",
+      "required": ["kind", "architectures", "remote", "appId", "ref", "commit", "runtime", "metadataSha256"],
+      "properties": {
+        "kind": {"const": "flatpak"},
+        "architectures": {
+          "type": "array",
+          "items": {"enum": ["x86_64", "aarch64"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "remote": {"$ref": "#/$defs/id"},
+        "appId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]+$"},
+        "ref": {"type": "string", "pattern": "^app/[A-Za-z0-9._-]+/(x86_64|aarch64)/[A-Za-z0-9._-]+$"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "runtime": {"type": "string", "pattern": "^[A-Za-z0-9._/-]+$"},
+        "metadataSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "web": {
+      "type": "object",
+      "required": ["kind", "architectures", "url", "browser"],
+      "properties": {
+        "kind": {"const": "web"},
+        "architectures": {
+          "type": "array",
+          "items": {"enum": ["x86_64", "aarch64"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "url": {"type": "string", "pattern": "^https://"},
+        "browser": {"const": "chromium"}
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "required": ["id", "name", "category", "summary", "trustTier", "license", "publisher", "bundledUpdater", "disclosures", "sources"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "category": {"enum": ["browsers", "communication", "editors", "graphics", "media", "productivity", "terminals", "utilities"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 240},
+        "trustTier": {"enum": ["curated", "community"]},
+        "license": {"enum": ["free", "mixed", "proprietary"]},
+        "publisher": {"enum": ["upstream", "flathub", "third-party"]},
+        "bundledUpdater": {"enum": ["none", "disabled-by-packaging"]},
+        "disclosures": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/disclosure"},
+          "maxItems": 12
+        },
+        "sources": {
+          "type": "array",
+          "items": {"oneOf": [{"$ref": "#/$defs/flatpak"}, {"$ref": "#/$defs/web"}]},
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

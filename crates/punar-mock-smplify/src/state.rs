@@ -11,7 +11,11 @@
 //! - `queries.json` — the M10 pending-query queue (milestone-10.md section
 //!   13.3), atomic rewrite, mode 0600;
 //! - `received-answers.jsonl` — append-only, exactly what each device
-//!   returned, verbatim.
+//!   returned, verbatim;
+//! - `received-recovery-envelopes.jsonl` — tenant-wrapped recovery
+//!   envelopes, never plaintext keys;
+//! - `recovery-releases.jsonl` — append-only operator/device/reason/outcome
+//!   audit for the dev recovery-release proof, never recovery material.
 //!
 //! The queue is the whole of the M10 "push": there is none. An
 //! administrator's question sits here until **the device comes and gets
@@ -33,6 +37,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use punar_common::time::utc_now_rfc3339;
+use punar_recovery::RecoveryEnvelope;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -171,6 +176,84 @@ impl StateStore {
                 "received_at": utc_now_rfc3339(),
                 "device_id": device_id,
                 "inventory": inventory,
+            }),
+        )
+    }
+
+    /// Store exactly the tenant-wrapped envelope. The append-only custody
+    /// file never receives plaintext; the mock's separate, RBAC-gated release
+    /// path unwraps only after loading an envelope from this store.
+    pub fn append_recovery_envelope(
+        &mut self,
+        device_id: &str,
+        envelope: &RecoveryEnvelope,
+    ) -> io::Result<()> {
+        self.append_line(
+            RECOVERY_ENVELOPES_FILE,
+            json!({
+                "received_at": utc_now_rfc3339(),
+                "device_id": device_id,
+                "envelope": envelope,
+            }),
+        )
+    }
+
+    /// Read the newest wrapped envelope for one device. Corrupt custody
+    /// fails loudly; silently skipping a damaged line could release an old
+    /// key after rotation.
+    pub fn latest_recovery_envelope(
+        &self,
+        device_id: &str,
+    ) -> io::Result<Option<RecoveryEnvelope>> {
+        let path = self.dir.join(RECOVERY_ENVELOPES_FILE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)?;
+        for line in text.lines().rev() {
+            let value: Value = serde_json::from_str(line).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: corrupt recovery custody: {e}", path.display()),
+                )
+            })?;
+            if value.get("device_id").and_then(Value::as_str) == Some(device_id) {
+                let envelope = value.get("envelope").cloned().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: recovery custody line has no envelope", path.display()),
+                    )
+                })?;
+                return serde_json::from_value(envelope).map(Some).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: malformed recovery envelope: {e}", path.display()),
+                    )
+                });
+            }
+        }
+        Ok(None)
+    }
+
+    /// Append the non-secret audit record before returning from a recovery
+    /// release attempt. `reason` is a short validated reason code, not free
+    /// text, and `outcome` is chosen by the server.
+    pub fn append_recovery_release(
+        &self,
+        operator: &str,
+        device_id: &str,
+        reason: &str,
+        outcome: &str,
+    ) -> io::Result<()> {
+        self.append_line(
+            RECOVERY_RELEASES_FILE,
+            json!({
+                "occurred_at": utc_now_rfc3339(),
+                "operator": operator,
+                "device_id": device_id,
+                "reason": reason,
+                "outcome": outcome,
+                "identity_verified": false,
             }),
         )
     }
@@ -366,6 +449,10 @@ pub const INVENTORY_FILE: &str = "received-inventory.jsonl";
 pub const QUERIES_FILE: &str = "queries.json";
 /// M10 append-only log of what devices returned, verbatim.
 pub const ANSWERS_FILE: &str = "received-answers.jsonl";
+/// Dev/CI portal custody: wrapped envelopes only, never plaintext keys.
+pub const RECOVERY_ENVELOPES_FILE: &str = "received-recovery-envelopes.jsonl";
+/// Dev/CI append-only audit of recovery release attempts; no key material.
+pub const RECOVERY_RELEASES_FILE: &str = "recovery-releases.jsonl";
 
 /// Where one queued question stands. `pending` until the device that owns
 /// it answers; the terminal value mirrors the device's own

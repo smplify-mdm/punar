@@ -6,6 +6,7 @@
     "fleet_viewer": ["inventory", "authority"],
     "security_admin": ["inventory", "authority", "resource_summary", "security_events"]
   },
+  "recovery_release_roles": ["security_admin"],
   "admins": {
     "helpdesk@acme.com": "helpdesk",
     "cio@acme.com": "fleet_viewer",

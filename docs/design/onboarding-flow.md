@@ -17,7 +17,7 @@ layout control because entering a password with the wrong keymap is a lockout,
 not a preference. The card says:
 
 ```text
-Make this machine yours
+Make this machine yours.
 Three details, then the desktop is ready.
 
 USERNAME
@@ -34,13 +34,20 @@ Network name: alices-thinkpad
 
                                       CONTINUE  ↵
 
-No email · No cloud account · Nothing leaves this machine
+Local account · Created on this device
+No email required · Start without a cloud login
+Private setup · These details stay here
 ```
 
-Those are exactly three user-provided values. Confirmation verifies the
-password and is not a fourth value. There is no full name, avatar, account
-type, network, timezone, organization, telemetry, AI, theme, wallpaper, or
-update question. Their defaults are already safe:
+Those are exactly three required user-provided values. Confirmation verifies
+the password and is not a fourth value. Timezone is not an onboarding question:
+Punar automatically accepts RFC 4833 timezone data from the local DHCP server
+and otherwise keeps the honest UTC fallback. It does not call a GeoIP service.
+The user can search the installed IANA timezone catalog and make a manual,
+audited choice later in **System Control › System › Date & Time**; that choice
+then disables later network timezone overrides. There is no full name, avatar,
+account type, organization, telemetry, AI, theme, wallpaper, or update
+question. Their defaults are already safe:
 
 - display name falls back to the username and can be edited later;
 - Stillpoint and the Paper theme make the first desktop immediately coherent;
@@ -48,6 +55,15 @@ update question. Their defaults are already safe:
 - the device starts personal and unenrolled;
 - network, timezone, enrollment, appearance, and accessibility remain
   discoverable in System Control after the desktop is usable.
+
+The three closing facts describe this setup transaction, not every future
+network action an installed app can take. In particular, the interface does
+not claim that "nothing leaves this machine": a browser can use the network
+and an explicitly enrolled device can later exchange the governed fields in
+its enrollment contract. The truthful promise here is narrower and stronger:
+the local account needs no email or cloud login, and the account details are
+processed on the device. Automatic timezone only receives a setting offered by
+the connected network; the later manual chooser reads local tzdata.
 
 If the account is created successfully, the same card—not a new wizard page—
 morphs into a short receipt:

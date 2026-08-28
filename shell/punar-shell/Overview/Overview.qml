@@ -175,7 +175,7 @@ DeferredSurfaceBase {
                      ? root.cards[grid.currentIndex] : null;
             if (ws === null)
                 return;
-            Hyprland.dispatch("workspace " + ws.id);
+            HyprlandActions.focusWorkspace(ws.id);
             root.dismiss();
         }
 
@@ -193,9 +193,9 @@ DeferredSurfaceBase {
         function commitRename(wsId: int, text: string): bool {
             var name = text.trim();
             if (name === "") {
-                Hyprland.dispatch("renameworkspace " + wsId);
+                HyprlandActions.renameWorkspace(wsId, "");
             } else if (WorkspaceState.validName(name)) {
-                Hyprland.dispatch("renameworkspace " + wsId + " " + name);
+                HyprlandActions.renameWorkspace(wsId, name);
             } else {
                 return false;
             }

@@ -6,13 +6,18 @@
 # bash, mkosi, qemu-img, sha256sum, base64, and the repo layout.
 #
 # Images (milestone-1.md §3):
-#   punar-dev      — minimal M0 image, unchanged (PUNAR_BOOT_OK gate).
-#   punar-desktop  — M1 graphical workstation (mkosi profile "desktop";
+#   punar-dev      — minimal M0 image (mkosi profile "dev"; PUNAR_BOOT_OK).
+#   punar-desktop  — graphical development workstation (profiles
+#                    "desktop,dev";
 #                    --profile/--image-id/--hostname passed on the CLI so no
 #                    profile scalar-merge ambiguity).
+#   punar-release  — production-safe graphical workstation (profile
+#                    "desktop" only; hostname and first user are onboarding
+#                    outputs, never baked into the image).
 #
 # Env knobs:
-#   PUNAR_IMAGES     dev | desktop | all   (default: all)
+#   PUNAR_IMAGES     dev | desktop | release | all   (default: all; `all`
+#                    means the historical CI pair, not release)
 #   PUNAR_BUILD_MODE build | summary | stage (default: build; summary runs
 #                    staging + `mkosi summary`; stage refreshes only the
 #                    architecture-neutral desktop tree for the native ARM
@@ -31,8 +36,8 @@ IMAGES="${PUNAR_IMAGES:-all}"
 MODE="${PUNAR_BUILD_MODE:-build}"
 
 case "${IMAGES}" in
-    dev|desktop|all) ;;
-    *) echo "error: PUNAR_IMAGES must be dev, desktop, or all (got: ${IMAGES})" >&2; exit 2 ;;
+    dev|desktop|release|all) ;;
+    *) echo "error: PUNAR_IMAGES must be dev, desktop, release, or all (got: ${IMAGES})" >&2; exit 2 ;;
 esac
 case "${MODE}" in
     build|summary) ;;
@@ -44,16 +49,37 @@ case "${MODE}" in
 esac
 
 MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart.XXXXXX)"
+MKOSI_RAW_OUTPUT_DIR="$(mktemp -d /var/tmp/punar-mkosi-output-x86_64.XXXXXX)"
 # UUIDv5(URL, https://punar.org/filesystem-device/PUNAR-DATA). mkfs.btrfs
 # otherwise randomizes its single-device UUID even when repart supplies a
 # stable filesystem UUID. This stabilizes that identity only; btrfs still
 # generates per-subvolume UUIDs, so it is not a bit-reproducibility claim.
 # The value is a direct-image input, not a production-install rule.
 BTRFS_DEVICE_UUID="ef4a2286-ac11-53c0-a40d-8d2bae7511cc"
-cleanup_repart() {
+cleanup_build() {
     rm -rf "${MKOSI_REPART_DIR}"
+
+    # Keep sparse raw disks on Docker's native Linux filesystem. Streaming a
+    # compressed qcow2 to the host avoids a full-size VirtioFS copy and also
+    # keeps rootfs assembly on a filesystem with working POSIX ACLs.
+    local raw
+    for raw in "${MKOSI_RAW_OUTPUT_DIR}"/*.raw; do
+        [ -f "${raw}" ] || continue
+        truncate --size 0 -- "${raw}" || true
+        rm -f -- "${raw}"
+    done
+    rm -rf "${MKOSI_RAW_OUTPUT_DIR}"
+
+    # Docker Desktop's VirtioFS process may retain a read descriptor after a
+    # generated raw image is unlinked. Zero the disposable intermediate first
+    # so those open descriptors cannot pin tens of gigabytes on the host.
+    for raw in "${IMAGES_DIR}/out"/punar-*.raw; do
+        [ -f "${raw}" ] || continue
+        truncate --size 0 -- "${raw}" || true
+        rm -f -- "${raw}"
+    done
 }
-trap cleanup_repart EXIT
+trap cleanup_build EXIT
 "${REPO_ROOT}/tools/render-mkosi-repart.sh" \
     "${MKOSI_REPART_DIR}" "${IMAGES_DIR}/repart.d/install"
 
@@ -67,6 +93,7 @@ stage_desktop_extra() {
     local tokens="${REPO_ROOT}/shell/theme/punar-tokens.json"
     local themes="${REPO_ROOT}/shell/theme/themes"
     local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
+    local dev_extra="${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra"
 
     echo "==> Verifying vendored font manifest"
     (cd "${mod}/fonts" && sha256sum --quiet -c MANIFEST.sha256)
@@ -78,16 +105,22 @@ stage_desktop_extra() {
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
            "${extra}/usr/share/punar/theme" \
-           "${extra}/usr/share/punar/fixtures"
+           "${extra}/usr/share/punar/fixtures" \
+           "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
-             "${extra}/usr/share/punar/fixtures/acme" \
-             "${extra}/usr/share/punar/fixtures/projects/atlas"
+             "${dev_extra}/usr/share/punar/fixtures/acme" \
+             "${dev_extra}/usr/share/punar/fixtures/projects/atlas"
 
-    # Hyprland config (hyprlang files; install path per their headers).
-    cp "${mod}"/hypr/*.conf "${extra}/etc/xdg/hypr/"
+    # Hyprland config. Lua is the supported provider from 0.55 onward; 0.56
+    # warns on every legacy .conf session and 0.57 removes that parser.
+    cp "${mod}"/hypr/*.lua "${extra}/etc/xdg/hypr/"
+    # Product hook: deliberately empty. The dev profile overlays this exact
+    # file with the desktop-ready CI marker; a release session starts no test
+    # process merely because Hyprland launched.
+    : > "${extra}/etc/xdg/hypr/punar-session-profile.lua"
     # Session helpers: source of truth lives beside the Hyprland config.
     # All are staged (gitignored) into the otherwise-versioned
     # usr/lib/punar directory.
@@ -145,7 +178,7 @@ stage_desktop_extra() {
     # ai_policy_file lives outside the fixture dir and is deliberately not
     # served until AI capabilities land (M7+).
     cp "${REPO_ROOT}/fixtures/organizations/acme/"*.json \
-       "${extra}/usr/share/punar/fixtures/acme/"
+       "${dev_extra}/usr/share/punar/fixtures/acme/"
     # M6: Atlas project fixture for the in-VM developer-environment
     # exercise (milestone-6.md §8) — m6-check copies it from
     # /usr/share/punar/fixtures/projects/atlas to ~punar/atlas and asserts
@@ -157,7 +190,7 @@ stage_desktop_extra() {
     # declaration); the README is repo documentation, not fixture data.
     cp "${REPO_ROOT}/fixtures/projects/atlas/project-environment.yaml" \
        "${REPO_ROOT}/fixtures/projects/atlas/project-network-policy.json" \
-       "${extra}/usr/share/punar/fixtures/projects/atlas/"
+       "${dev_extra}/usr/share/punar/fixtures/projects/atlas/"
     # M8: the comm -> process-class table for the AI Access Ledger
     # (milestone-8.md §3.2). Staged, never committed twice, for a reason
     # stronger than tidiness: punar-agentd compiles THIS FILE in with
@@ -170,6 +203,18 @@ stage_desktop_extra() {
     rm -f "${extra}/usr/share/punar/agents/process-classes.json"
     install -m 0644 "${REPO_ROOT}/crates/punar-agentd/data/process-classes.json" \
         "${extra}/usr/share/punar/agents/process-classes.json"
+
+    # On-demand application catalog. Only identities, pins, disclosures and
+    # the remote signing key ship here — no application or runtime payload is
+    # preinstalled, so Spotify support does not tax boot, RAM or the base
+    # image. Runtime permissions are re-derived from the pinned Flatpak
+    # metadata by punard before every install.
+    rm -rf "${extra}/usr/share/punar/catalog"
+    install -d "${extra}/usr/share/punar/catalog/remotes"
+    install -m 0644 "${REPO_ROOT}/catalog/catalog.json" \
+        "${extra}/usr/share/punar/catalog/catalog.json"
+    install -m 0644 "${REPO_ROOT}/catalog/remotes/flathub.flatpakrepo" \
+        "${extra}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
 
     # M9: the two data files the approval gate and the credential broker
     # read at runtime (milestone-9.md §5.2, §6.1). Staged for exactly the
@@ -215,6 +260,7 @@ stage_desktop_extra() {
 # the test VM runs -nic none).
 stage_punar_binaries() {
     local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
+    local dev_extra="${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra"
     local cargo_target="${IMAGES_DIR}/cache/cargo-target"
 
     # punar-mock-smplify is the M5 dev/CI mock control plane (milestone-5.md
@@ -236,17 +282,17 @@ stage_punar_binaries() {
     # It is counted honestly in the services-RSS gate: idle-ram.sh sums all
     # three service cgroups into the one PUNAR_SERVICES_RSS_MB the budget is
     # judged against (PERFORMANCE_BUDGETS.md §2.3).
-    echo "==> Building punard + punarctl + punar-env + punar-agentd + punar-secrets + punar-mock-smplify (release, --locked; $(rustc --version))"
+    echo "==> Building Punar product services, onboarding and CLIs + dev mock (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
             CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
                 CARGO_TARGET_DIR="${cargo_target}" \
                 cargo build --release --locked \
                     -p punard -p punarctl -p punar-env -p punar-agentd \
-                    -p punar-secrets -p punar-mock-smplify
+                    -p punar-secrets -p punar-onboard -p punar-mock-smplify
     )
 
-    echo "==> Staging punard + punarctl + punar-env + punar-agentd + punar-secrets + punar-mock-smplify into ${extra}/usr/bin (gitignored)"
+    echo "==> Staging product binaries into ${extra}/usr/bin and the mock into ${dev_extra}/usr/bin"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
@@ -254,8 +300,20 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-env" \
         "${cargo_target}/release/punar-agentd" \
         "${cargo_target}/release/punar-secrets" \
-        "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-onboard" \
+        "${cargo_target}/release/punar-onboardd" \
+        "${cargo_target}/release/punar-greet" \
         "${extra}/usr/bin/"
+    install -d "${dev_extra}/usr/bin"
+    install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${dev_extra}/usr/bin/"
+}
+
+reset_staged_binaries() {
+    # Generated and gitignored. Clear them before the minimal build so an old
+    # desktop build can never leak product/mock binaries into punar-dev.
+    rm -rf "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
+           "${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
 }
 
 # M6 offline container base image (milestone-6.md §6): `punar-env up` needs
@@ -447,6 +505,7 @@ run_mkosi() {
     for attempt in 1 2 3; do
         if mkosi --force \
             --mirror "${MIRROR}" \
+            --output-directory "${MKOSI_RAW_OUTPUT_DIR}" \
             --environment "SYSTEMD_REPART_MKFS_OPTIONS_BTRFS=--device-uuid=${BTRFS_DEVICE_UUID}" \
             --repart-directory "${MKOSI_REPART_DIR}" \
             "$@" "${MODE}"; then
@@ -463,21 +522,22 @@ run_mkosi() {
 convert_output() {
     local image_id="$1"
     local qcow="out/${image_id}-x86_64.qcow2"
-    local raw="out/${image_id}.raw"
+    local tmp_qcow="${qcow}.tmp"
+    local raw="${MKOSI_RAW_OUTPUT_DIR}/${image_id}.raw"
 
     # mkosi names the disk output <ImageId>.raw; glob defensively in case a
     # future mkosi appends version/architecture suffixes.
     if [ ! -f "${raw}" ]; then
         shopt -s nullglob
-        for candidate in "out/${image_id}"*.raw; do
+        for candidate in "${MKOSI_RAW_OUTPUT_DIR}/${image_id}"*.raw; do
             raw="${candidate}"
             break
         done
         shopt -u nullglob
     fi
     if [ ! -f "${raw}" ]; then
-        echo "error: no .raw output for ${image_id} found in out/" >&2
-        ls -la out/ >&2 || true
+        echo "error: no .raw output for ${image_id} found in ${MKOSI_RAW_OUTPUT_DIR}" >&2
+        ls -la "${MKOSI_RAW_OUTPUT_DIR}" >&2 || true
         exit 1
     fi
 
@@ -485,21 +545,26 @@ convert_output() {
     "${REPO_ROOT}/tests/images/check-repart-layout.sh" "${raw}" x86_64
 
     echo "==> Converting ${raw} -> ${qcow} (compressed qcow2)"
-    qemu-img convert -O qcow2 -c "${raw}" "${qcow}"
-    rm -f "${raw}"
+    rm -f -- "${tmp_qcow}"
+    qemu-img convert -O qcow2 -c "${raw}" "${tmp_qcow}"
+    mv -f -- "${tmp_qcow}" "${qcow}"
+    truncate --size 0 -- "${raw}"
+    rm -f -- "${raw}" "${MKOSI_RAW_OUTPUT_DIR}/${image_id}"
 }
 
 BUILT=()
+reset_staged_binaries
 
 if [ "${IMAGES}" = "dev" ] || [ "${IMAGES}" = "all" ]; then
-    run_mkosi punar-dev
+    run_mkosi punar-dev --profile dev
     if [ "${MODE}" = "build" ]; then
         convert_output punar-dev
         BUILT+=("punar-dev")
     fi
 fi
 
-if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
+    || [ "${IMAGES}" = "all" ]; then
     stage_desktop_extra
     if [ "${MODE}" = "stage" ]; then
         echo "==> Architecture-neutral desktop staging complete"
@@ -509,13 +574,25 @@ if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
         stage_punar_binaries
         stage_env_base_oci
     fi
-    run_mkosi punar-desktop \
+    if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+        run_mkosi punar-desktop \
+            --profile desktop,dev \
+            --image-id punar-desktop \
+            --hostname punar-desktop
+        if [ "${MODE}" = "build" ]; then
+            convert_output punar-desktop
+            BUILT+=("punar-desktop")
+        fi
+    fi
+fi
+
+if [ "${IMAGES}" = "release" ]; then
+    run_mkosi punar-release \
         --profile desktop \
-        --image-id punar-desktop \
-        --hostname punar-desktop
+        --image-id punar-release
     if [ "${MODE}" = "build" ]; then
-        convert_output punar-desktop
-        BUILT+=("punar-desktop")
+        convert_output punar-release
+        BUILT+=("punar-release")
     fi
 fi
 

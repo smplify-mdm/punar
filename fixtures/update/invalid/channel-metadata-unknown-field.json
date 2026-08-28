@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "image_id": "punar-desktop",
+  "architecture": "aarch64",
+  "boot_platform": "uefi",
+  "channel": "stable",
+  "current": "2026.08.27.1",
+  "release_manifest": "releases/2026.08.27.1/release.json",
+  "rollout_bps": 1000,
+  "halted": false,
+  "published_at": "2026-08-27T22:00:00Z",
+  "min_supported_version": "2026.08.01.1",
+  "device_id": "dev_this-must-never-be-sent"
+}

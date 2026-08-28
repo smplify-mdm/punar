@@ -206,6 +206,10 @@ signed, versioned root-filesystem image, followed by a reboot into it.**
   `mkosi.conf`'s fixed `Seed=7ad2f9bf-…` exists to make partition UUIDs
   *stable across builds*, which would make two slots built from the same
   config identical twins; the slot UUIDs must be authored, not derived).
+- The populated filesystems also have distinct UUIDs and labels. Rebinding a
+  release from slot A to B means changing `/etc/fstab`, the ext4 UUID, and the
+  label to `PUNAR-ROOT-B`; changing only the UKI's PARTUUID leaves ambiguous
+  filesystem identities for fsck and recovery tooling.
 - One partition is active (mounted `/`), the other is the staging target.
 - `/var` (holding `/var/lib/punar`, the audit log, the ledger, containers,
   and `/home`) is a third, shared partition. It is **not** rolled back.
@@ -819,12 +823,15 @@ Notes that keep this honest:
 ```text
 punar_2026.09.02.1+3-0.efi      3 tries left, 0 done
 punar_2026.09.02.1+2-1.efi      after one failed attempt
-punar_2026.08.25.1+0.efi        blessed — permanent, never counted again
+punar_2026.08.25.1.efi          blessed — counter removed, permanent
 ```
 
 systemd-boot decrements the counter at boot; `systemd-bless-boot.service`
 removes the counter once `boot-complete.target` is reached; an entry that
-reaches `+0-3` is no longer offered.
+reaches `+0-3` is no longer offered. This follows the Boot Loader
+Specification's boot-counting contract: the absence of a counter means
+"good", while zero tries left means "bad". See
+<https://uapi-group.org/specifications/specs/boot_loader_specification/#boot-counting>.
 
 **Why not a punar-owned counter, argued:** a counter maintained by punard
 requires punard to run to be decremented. The failures that need automatic
@@ -862,7 +869,7 @@ boot
                  │   Requires ordering into boot-complete.target
                  │   TimeoutStartSec=180
                  ├─ PASS ⇒ boot-complete.target reached
-                 │          ⇒ systemd-bless-boot strips the counter (+0)
+                 │          ⇒ systemd-bless-boot strips the counter entirely
                  │          ⇒ release is permanent; the OTHER slot becomes
                  │            the rollback target; audit update.health success
                  └─ FAIL ⇒ boot-complete.target NOT reached
@@ -1356,7 +1363,7 @@ boot 6  N+1 running again. update.auto_rollback in the audit log. Failed slot
 
 | # | Assertion |
 |---|---|
-| A1 | The repart configuration defines exactly two root partitions with **distinct, literal** PARTUUIDs, an ESP ≥ 1 GiB, and `/var` as the remainder — checked with `mkosi summary` on the config and `sfdisk --json` on the built image |
+| A1 | The repart configuration defines exactly two root partitions with **distinct, literal** PARTUUIDs, an ESP ≥ 1 GiB, and `/var` as the remainder — checked with `mkosi summary` on the config and `sfdisk --json` on the built image; once populated, the two roots also have distinct filesystem UUIDs and labels |
 | A2 | Each slot's UKI embeds `root=PARTUUID=<its own slot>` — extracted from both UKIs' `.cmdline` sections and compared; the two must differ |
 | A3 | In-VM `findmnt --json`: `/`, `/var`, `/home`, `/var/lib/punar` resolve as designed; `/var/lib/punar` is **not** on the root slot |
 | A4 | **No Punar-owned mutable file under `/etc` lacks a capability behind it** — a host test over a committed list, failing on any addition (§3.6) |
