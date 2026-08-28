@@ -503,8 +503,8 @@ The order is the design (Law 3):
      (proves what landed, not what was sent — catches a lying storage stack)
 6. verify the UKI's digest, then install it to the ESP under a temp name,
      fsync, rename into place as `punar_<version>+3-0.efi`
-7. set `punar_<version>*.efi` as the default selector, so boot-counter
-   decrements and the final blessing rename cannot make the default stale
+7. set `punar_<version>*.efi` as the assessment-aware `preferred` selector,
+   so counter/blessing renames remain matched while `+0-N` is skipped
 ```
 
 Steps 1–5 are reversible by deleting a file. The device becomes committed at
@@ -834,9 +834,12 @@ Specification's boot-counting contract: the absence of a counter means
 "good", while zero tries left means "bad". See
 <https://uapi-group.org/specifications/specs/boot_loader_specification/#boot-counting>.
 
-`loader.conf` uses `default punar_<version>*.efi`, not the literal counted
-filename. systemd-boot's `default` value is a glob; the stable selector keeps
-matching the same entry as `+3-0` becomes `+2-1` and finally `.efi`.
+`loader.conf` uses `preferred punar_<version>*.efi`, not `default` and not the
+literal counted filename. The pinned systemd-boot's assessment-aware
+`preferred` glob keeps matching the entry as `+3-0` becomes `+2-1` and finally
+`.efi`, but stops selecting it once it reaches `+0-N`; the older good entry
+then wins. `default` is deliberately not assessment-aware and must not be used
+for a counted pending release.
 
 **Why not a punar-owned counter, argued:** a counter maintained by punard
 requires punard to run to be decremented. The failures that need automatic
@@ -852,13 +855,28 @@ transient firmware hiccup — should not roll back a good release); five wastes
 minutes of a user's life watching a machine fail to boot. Three is the
 systemd default and the greenboot convention.
 
-**Availability caveat (spec 1.22):** `systemd-bless-boot.service`,
-`boot-complete.target` and `bootctl`'s counting support all ship with
-systemd, but their presence and behavior in the pinned ALA snapshot
-(`2026/08/20`) has **not been verified by this document** — no build has been
-run. Implementation must verify it in the builder container before anything
-depends on it, and the fallback (a `bootctl`-driven equivalent implemented
-in the health unit) must be priced then, not assumed now.
+**Implementation evidence (2026-08-27).**
+`tools/update-rollback-test-arm64.sh` makes a disposable persistent raw copy of
+the native ARM64 image, installs a counted pending UKI whose root PARTUUID
+cannot exist, and performs four real UEFI boots. The first three boots prove
+the on-ESP transitions `+2-1`, `+1-2`, and `+0-3`. The fourth boot proves the
+exhausted entry is skipped and reaches `PUNAR_BOOT_OK` from slot A. The local
+report recorded `PUNAR_UPDATE_AUTO_ROLLBACK_OK`, three failed attempts, and a
+12-second HVF fallback boot. The gate is wired into the native ARM64 CI job;
+canonical remote evidence remains pending.
+
+This proof caught a material implementation error before release: a
+`default` glob is intentionally not assessment-aware in the pinned systemd
+261 boot manager and continued selecting `+0-3`. Its `preferred` glob does
+check boot assessment. The apply path and this gate therefore use
+`preferred punar_<version>*.efi`; changing that back to `default` disables
+automatic fallback even though filename counters continue to decrement.
+
+**Availability boundary (spec 1.22):** the pinned native ARM64 Debian systemd
+261.2 image has now verified `systemd-bless-boot`, `boot-complete.target`,
+filename counting, and assessment-aware `preferred` selection. Any future
+substrate or boot-manager version must rerun the four-boot gate; source-level
+API similarity is not accepted as equivalent evidence.
 
 ### 6.4 The exact rule that triggers an automatic rollback
 
@@ -1557,21 +1575,21 @@ This is a recommendation to M13's owner. This document does not modify
 Everything this design does not do, and every place a claim would outrun the
 evidence.
 
-1. **No image has ever been built with this layout, and no boot has ever
-   been performed against it.** This document is a plan. `mkosi`'s repart
-   handling for a two-root layout, and the presence and behavior of
-   `systemd-bless-boot` / `boot-complete.target` in ALA snapshot
-   `2026/08/20`, are **stated as requirements to verify at implementation
-   time**, not as verified facts (§6.3).
+1. **The generic UEFI ARM64 image now has this layout and the update path has
+   local runtime evidence, but no installer or physical-board proof.** Build
+   gates verify the two-root/shared-state repart layout. Signed apply,
+   health-gated blessing, and four-boot automatic fallback have run under
+   QEMU/HVF. That does not prove Raspberry Pi firmware, bare-metal storage,
+   power-loss recovery, Secure Boot, or an install onto a user-selected disk.
 2. **The disk arithmetic rests on an estimate nobody has measured.** The
    1.5–2.5 GB desktop image figure is labeled *"estimate, not measurement"*
    in `milestone-1.md` and has not been measured since. §3.5 gives a *rule*
    (`1.5 × R_max`, rounded up) precisely so the arithmetic survives the first
    real number, but the 8 GiB slot size is provisional.
-3. **This design contradicts an Accepted ADR.** ADR-001 chose btrfs+snapper
-   for the MVP. §3.4 argues the case; it does not settle it. Until ADR-003
-   is ratified, this is a proposal against a ratified decision, and the
-   implementation should not start.
+3. **ADR-003 now supersedes ADR-001's btrfs+snapper rollback choice.** The A/B
+   mechanism is implemented on generic UEFI ARM64; x86_64 substrate migration,
+   installer integration, and Raspberry Pi's distinct ADR-006 boot state
+   machine remain separate work.
 4. **An OS rollback does not roll back user data or Punar state**, by
    design (§3.6). The N-1 compatibility rule and `min_from` reduce the
    hazard; they do not eliminate it. A release that writes a state format

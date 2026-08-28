@@ -19,7 +19,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 | 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27):** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Generic user-defined web-app install/context support remains M11 work and this proof is not yet a canonical CI gate. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
-| 25 | demonstrate rollback/update mechanism | **LOCALLY PROVEN, NOT YET A CANONICAL GATE.** A signed release fixture was verified, streamed into inactive slot B, read back and hashed, selected with systemd-boot counting, deliberately refused blessing while onboarding prevented desktop health, then passed the authenticated-desktop health gate and was blessed by `systemd-bless-boot`. A dedicated forced-failure proof that exhausts all tries and automatically returns to the last-known-good slot is still required before this item is fully met. |
+| 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
 | 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
@@ -31,9 +31,9 @@ The update product is three-channel governed rolling: `stable` (default),
 `dev`, and opt-in `edge`. All three deliver complete signed A/B images through
 the same verification and rollback path; only promotion cadence and soak
 differ. Project toolchain freshness belongs to `punar-env`, never a partial
-host upgrade. The core apply, boot-counting, health-gate, and blessing path is
-implemented and locally proven. Channel transport/promotion, production key
-custody, the forced automatic-fallback gate, and canonical CI coverage remain
+host upgrade. The core apply, boot-counting, health-gate, blessing, and
+automatic-fallback path is implemented and locally proven. Channel
+transport/promotion, production key custody, and canonical CI coverage remain
 unshipped.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
@@ -270,8 +270,9 @@ artifact and makes no bit-for-bit reproducibility claim.
 **Scope boundary:** these results prove QEMU's generic ARM `virt` platform,
 the A/B layout, inactive-slot apply, and a healthy counted boot being blessed.
 They do not prove Raspberry Pi firmware/peripherals, a real GPU, Secure Boot,
-automatic fallback after exhausting failed boots, an installer, or any
-physical ARM machine.
+an installer, or any physical ARM machine. Automatic fallback is now proven
+on a disposable persistent copy by the four-boot ARM64 gate, but not yet by a
+canonical remote run.
 
 **Next sequence:**
 

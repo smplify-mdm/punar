@@ -82,6 +82,14 @@ session. The working tree now applies the same split to the visual notification
 ledger while leaving the event-receiving notification service resident; local
 lint and the live unloaded → resident → unloaded lifecycle are green.
 
+The native ARM64 update lane now has a local four-boot automatic-fallback
+proof. A deliberately unbootable counted UKI transitioned through `+2-1`,
+`+1-2`, and `+0-3`; boot four reached `PUNAR_BOOT_OK` from the permanently good
+slot-A UKI. The proof found a real boot-selection bug: systemd 261's `default`
+selector ignores assessment and can keep selecting `+0-N`; counted pending
+releases must use the assessment-aware `preferred` selector. The gate is wired
+into ARM64 CI but does not become canonical until its exact remote run passes.
+
 ---
 
 ## 3. Standing rules from the product owner
@@ -465,6 +473,10 @@ tested, using `mac80211_hwsim` to simulate hardware.
 
 ## 11. Failure modes that have already cost a cycle
 
+- **Hyprland 0.55+ no longer live-switches `general:layout` through
+  `hyprctl keyword`.** The command can return success while every workspace
+  remains `dwindle`. Use one native `hyprctl eval 'hl.config({...})'` call and
+  assert both `getoption general:layout` and each workspace's `tiledLayout`.
 - **`qmllint` exits 0 while printing warnings.** `tools/qmllint.sh` therefore
   fails on any output. The first version of that gate read the exit code and
   reported "clean" one line below the defect it had just named.

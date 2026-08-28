@@ -9,11 +9,11 @@
 #
 # Usage:          punar-layout.sh <balanced|columns|rows|focus|stack|next|prev|restore>
 #
-# ONE `hyprctl --batch` of `keyword` commands per invocation — every preset
-# sets general:layout plus all of its algorithm keys, so applying a preset
-# is deterministic (independent of the previous preset) and idempotent.
-# `general:layout` live-refreshes (REFRESH_LAYOUTS, verified milestone-2.md
-# §1.3), so windows re-tile immediately.
+# ONE `hyprctl eval` of one native `hl.config` table per invocation — every
+# preset sets general.layout plus all of its algorithm keys, so applying a
+# preset is deterministic (independent of the previous preset) and idempotent.
+# Hyprland 0.55 removed live `hyprctl keyword general:layout` updates; eval is
+# the supported Lua configuration path and re-tiles windows immediately.
 #
 # Consumers: the compositor binds (PUNAR+comma/period → prev/next), the
 # command center (exec, by preset name), session start (exec-once restore),
@@ -49,21 +49,20 @@ is_preset() {
     esac
 }
 
-# Preset → keyword batch (mapping fixed by milestone-2.md §4; all keywords
-# verified against hyprland 0.56.2-1). Semicolon-joined for `hyprctl
-# --batch` ([[BATCH]] handler, verified §1.3).
-batch_for() {
+# Preset → native Lua config (mapping fixed by milestone-2.md §4 and verified
+# against the pinned Hyprland 0.56.2-1 runtime).
+config_for() {
     case "$1" in
         balanced)
-            echo "keyword general:layout dwindle; keyword dwindle:default_split_ratio 1.0; keyword dwindle:preserve_split 1" ;;
+            echo 'hl.config({ general = { layout = "dwindle" }, dwindle = { default_split_ratio = 1.0, preserve_split = true } })' ;;
         columns)
-            echo "keyword general:layout scrolling; keyword scrolling:column_width 0.5; keyword scrolling:direction right; keyword scrolling:fullscreen_on_one_column 1" ;;
+            echo 'hl.config({ general = { layout = "scrolling" }, scrolling = { column_width = 0.5, direction = "right", fullscreen_on_one_column = true } })' ;;
         rows)
-            echo "keyword general:layout master; keyword master:orientation top; keyword master:mfact 0.5" ;;
+            echo 'hl.config({ general = { layout = "master" }, master = { orientation = "top", mfact = 0.5 } })' ;;
         focus)
-            echo "keyword general:layout master; keyword master:orientation left; keyword master:mfact 0.72" ;;
+            echo 'hl.config({ general = { layout = "master" }, master = { orientation = "left", mfact = 0.72 } })' ;;
         stack)
-            echo "keyword general:layout monocle" ;;
+            echo 'hl.config({ general = { layout = "monocle" } })' ;;
         *)
             return 1 ;;
     esac
@@ -104,8 +103,8 @@ current_preset() {
 
 apply() {
     preset="$1"
-    batch="$(batch_for "${preset}")" || usage
-    hyprctl --batch "${batch}" >/dev/null
+    config="$(config_for "${preset}")" || usage
+    hyprctl eval "${config}" >/dev/null
     mkdir -p "${RUN_DIR}"
     printf '%s\n' "${preset}" >"${CACHE}"
 }
