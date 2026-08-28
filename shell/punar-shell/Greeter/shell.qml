@@ -829,6 +829,10 @@ Scope {
 
             Item {
                 id: masthead
+                // The keyboard menu drops into the card's vertical space.
+                // Keep the whole masthead above the later card sibling so the
+                // popover cannot be clipped behind the onboarding surface.
+                z: 30
                 visible: panel.primary
                 anchors.left: parent.left
                 anchors.right: parent.right
@@ -850,8 +854,8 @@ Scope {
                     id: keyboardControl
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 86
-                    height: 34
+                    width: 120
+                    height: 38
                     activeFocusOnTab: true
                     Accessible.role: Accessible.Button
                     Accessible.name: "Keyboard layout " + root.keyboardLayouts[panel.layoutIndex].label
@@ -860,15 +864,27 @@ Scope {
                     Meta {
                         anchors.centerIn: parent
                         text: "Keyboard · " + root.keyboardLayouts[panel.layoutIndex].label
-                        color: Theme.panelFg
+                        color: Theme.ink
                         z: 1
                     }
                     Rectangle {
                         anchors.fill: parent
-                        color: Theme.panelSurface
+                        // This is a neutral setup control, not an alert. A
+                        // paper button stays distinct from the dark wallpaper
+                        // without borrowing the panel's black status-card look.
+                        color: Theme.paperSurface
                         radius: Theme.radiusTag
-                        border.width: keyboardControl.activeFocus ? 2 : Theme.hairline
-                        border.color: keyboardControl.activeFocus ? Theme.panelFg : Theme.panelInk3
+                        border.width: Theme.hairline
+                        border.color: Theme.inputBorder
+                    }
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        visible: keyboardControl.activeFocus
+                        color: "transparent"
+                        radius: Theme.radiusTag + 2
+                        border.width: 2
+                        border.color: Theme.panelFg
                     }
                     Keys.onPressed: function (event) {
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
@@ -894,9 +910,9 @@ Scope {
                     width: layoutChoices.implicitWidth + 20
                     height: layoutChoices.implicitHeight + 18
                     radius: Theme.radiusTag
-                    color: Theme.panelSurface
+                    color: Theme.paperSurface
                     border.width: Theme.hairline
-                    border.color: Theme.panelInk3
+                    border.color: Theme.inputBorder
                     z: 20
 
                     Row {
@@ -914,7 +930,9 @@ Scope {
                                 width: 34
                                 height: 28
                                 radius: Theme.radiusTag
-                                color: panel.layoutIndex === layoutChoice.index ? Theme.panelEdge : Theme.panelSurface
+                                color: panel.layoutIndex === layoutChoice.index ? Theme.raise2 : Theme.paperSurface
+                                border.width: panel.layoutIndex === layoutChoice.index ? Theme.hairline : 0
+                                border.color: Theme.inputBorder
                                 activeFocusOnTab: layoutMenu.visible
                                 Accessible.role: Accessible.Button
                                 Accessible.name: layoutChoice.modelData.label + " keyboard layout"
@@ -922,7 +940,7 @@ Scope {
                                 Meta {
                                     anchors.centerIn: parent
                                     text: layoutChoice.modelData.label
-                                    color: Theme.panelFg
+                                    color: Theme.ink
                                 }
                                 Rectangle {
                                     anchors.fill: parent
@@ -931,7 +949,7 @@ Scope {
                                     color: "transparent"
                                     radius: Theme.radiusTag
                                     border.width: 2
-                                    border.color: Theme.panelFg
+                                    border.color: Theme.ink
                                 }
                                 function select(): void {
                                     panel.layoutIndex = layoutChoice.index;

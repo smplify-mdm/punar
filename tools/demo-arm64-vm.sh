@@ -8,7 +8,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${1:-${REPO_ROOT}/os/images/out/punar-desktop-arm64.qcow2}"
+# The interactive launcher is a product demo, so its default must be the
+# release image. `punar-desktop-arm64.qcow2` deliberately combines the
+# desktop and dev profiles for boot-gate exercises; those exercises create
+# synthetic agent history and must never be mistaken for user data.
+IMAGE="${1:-${REPO_ROOT}/os/images/out/punar-release-arm64.qcow2}"
 VNC_DISPLAY="${PUNAR_VNC_DISPLAY:-1}"
 QMP_PORT="${PUNAR_QMP_PORT:-4445}"
 VNC_PORT="$((5900 + VNC_DISPLAY))"
@@ -22,6 +26,13 @@ die() {
 }
 
 [ -f "${IMAGE}" ] || die "no such image: ${IMAGE}"
+case "$(basename "${IMAGE}")" in
+    punar-desktop-arm64.qcow2)
+        [ "${PUNAR_VM_ALLOW_CI_FIXTURES:-0}" = 1 ] || die \
+            "punar-desktop-arm64.qcow2 is the CI exercise image and contains synthetic test activity; use punar-release-arm64.qcow2 (the default), or set PUNAR_VM_ALLOW_CI_FIXTURES=1 only when debugging the gates"
+        echo "warning: CI exercise image selected; synthetic test activity will be visible" >&2
+        ;;
+esac
 QEMU="$(command -v qemu-system-aarch64 || true)"
 [ -n "${QEMU}" ] || die "qemu-system-aarch64 is required"
 

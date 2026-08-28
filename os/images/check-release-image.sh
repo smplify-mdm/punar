@@ -224,6 +224,26 @@ for legacy_config in hyprland.conf punar-greeter.conf; do
     fi
 done
 
+# A11: a release may ship agent adapters and detection rules, but never the
+# history those mechanisms produce. Build or test residue here would be shown
+# as genuine activity on first boot, which is indistinguishable from lying to
+# the user. Empty runtime-owned directories are fine; persisted records are
+# not.
+for state_file in \
+    var/lib/punar/agents/registry.jsonl \
+    var/lib/punar/agents/detections.jsonl \
+    var/lib/punar/agents/detections-index.json \
+    var/lib/punar/agents/ledger/index.json; do
+    if [ -e "${ROOT}/${state_file}" ]; then
+        fail A11 "seeded agent state exists: ${state_file}"
+    fi
+done
+if [ -d "${ROOT}/var/lib/punar/agents/ledger" ] \
+    && find "${ROOT}/var/lib/punar/agents/ledger" -mindepth 1 -print -quit \
+        | grep -q .; then
+    fail A11 'seeded agent ledger records exist'
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

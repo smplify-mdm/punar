@@ -333,6 +333,12 @@ fi
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "scope: generic UEFI/QEMU ARM64; Raspberry Pi firmware and peripherals remain a separate gate"
+    if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
+        echo "desktop-artifact: CI exercise image; contains dev fixtures and must not be shown as a product demo"
+    fi
+    if [ "${IMAGES}" = "release" ]; then
+        echo "release-artifact: product image; release-image policy rejects dev fixtures and synthetic test harnesses"
+    fi
 } > "${IMAGES_DIR}/out/arm64-build-info.txt"
 
 (

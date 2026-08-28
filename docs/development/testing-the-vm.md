@@ -42,7 +42,7 @@ The ARM64 desktop runs under hardware virtualization instead of the very slow
 x86-on-ARM translation path:
 
 ```sh
-PUNAR_ARM64_IMAGES=desktop ./tools/build-arm64-image.sh
+PUNAR_ARM64_IMAGES=release ./tools/build-arm64-image.sh
 ./tools/demo-arm64-vm.sh
 ```
 
@@ -57,6 +57,14 @@ TigerVNC automatically:
 ```sh
 PUNAR_VM_DISPLAY=vnc ./tools/demo-arm64-vm.sh
 ```
+
+The interactive launcher defaults to `punar-release-arm64.qcow2`. That is the
+product image: it starts onboarding and contains no seeded projects, agent
+sessions, alerts, test credentials, or mock services. The similarly named
+`punar-desktop-arm64.qcow2` is a CI exercise artifact assembled from the
+`desktop,dev` profiles; its boot gates intentionally create synthetic history.
+The launcher refuses that artifact unless a gate developer explicitly sets
+`PUNAR_VM_ALLOW_CI_FIXTURES=1`, and it must never be used for a product demo.
 
 The listener is restricted to localhost, and the default session needs no
 viewer password. Set `PUNAR_VNC_PASSWORD=punar` only when a password prompt is
@@ -159,12 +167,15 @@ design language is in this category by construction.
 progress:** first-run onboarding; the signed local application catalog;
 `punarctl app` inspection and typed install actions; Command Center and System
 Control discovery; and Spotify's architecture-aware x86_64 Flatpak / ARM64 web
-fallback. The current image source now offers Telegram, Firefox, Spotify,
-Element, Slack, and Discord in one searchable responsive library. It is still a
-small approved catalog, not an unbounded live Flathub search.
+fallback. The current image source now offers Telegram, Firefox, ChatGPT,
+Claude, Spotify, Element, Slack, and Discord in one searchable responsive
+library. Claude and ChatGPT are official web applications on both architectures
+and are labelled accordingly. Searches include names, summaries, categories,
+and curated keywords, so `AI assistant` and `coding` find both entries. It is
+still a small approved catalog, not an unbounded live Flathub search.
 
-**Not built at all:** the installer, a broad third-party catalog (including
-the Google Chrome install command), execution trust / the Gatekeeper-class
+**Not built at all:** a broad third-party catalog (including the Google Chrome
+install command), execution trust / the Gatekeeper-class
 exec gate, generic user-defined web apps and browser contexts (the remaining
 Milestone 11 work), network policy and the relay (Milestone 12), and the real
 update/rollback state machine. Each is designed in `docs/design/`; none is

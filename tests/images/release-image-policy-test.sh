@@ -97,6 +97,11 @@ mutate_a10() {
     mv "${CASE}/etc/xdg/hypr/punar-greeter.lua" \
         "${CASE}/etc/xdg/hypr/punar-greeter.conf"
 }
+mutate_a11() {
+    mkdir -p "${CASE}/var/lib/punar/agents"
+    printf '%s\n' '{"session_id":"agt_fixture"}' \
+        > "${CASE}/var/lib/punar/agents/registry.jsonl"
+}
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -164,5 +169,6 @@ echo 'ok   A8 scopes live mode to the installer profile'
 
 expect_fail A9 mutate_a9
 expect_fail A10 mutate_a10
+expect_fail A11 mutate_a11
 
 echo PUNAR_RELEASE_IMAGE_POLICY_TEST_OK

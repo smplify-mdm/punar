@@ -469,8 +469,8 @@ PUNAR_BUILD_MODE=summary ./tools/build-image.sh   # cheap: staging + `mkosi summ
 # Native ARM64 path (fast on Apple Silicon)
 PUNAR_ARM64_IMAGES=all ./tools/build-arm64-image.sh
 ./tools/boot-test-arm64.sh
-./tools/demo-arm64-vm.sh                  # native Cocoa window on macOS
-PUNAR_VM_DISPLAY=vnc ./tools/demo-arm64-vm.sh  # localhost TigerVNC :5901
+./tools/demo-arm64-vm.sh                  # release image, native Cocoa on macOS
+PUNAR_VM_DISPLAY=vnc ./tools/demo-arm64-vm.sh  # release image, localhost TigerVNC :5901
 PUNAR_BUILD_MODE=summary PUNAR_ARM64_IMAGES=all ./tools/build-arm64-image.sh
 ```
 
