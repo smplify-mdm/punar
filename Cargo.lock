@@ -696,6 +696,7 @@ dependencies = [
  "serde_norway",
  "signal-hook",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

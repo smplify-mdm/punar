@@ -1,9 +1,9 @@
-//! Read-only installer discovery and planning.
+//! Installer discovery, destructive-plan construction, bounded secret intake,
+//! and secret-free status reporting.
 //!
-//! Nothing in this module writes a block device.  It turns kernel/udev
-//! observations plus a signed release manifest into the complete object a
-//! person can confirm.  The later `install.apply` milestone must re-read the
-//! physical identity in that object before its first write.
+//! Nothing in this module writes a block device yet. The public
+//! `install.apply` method stays absent until the fixed transaction can carry a
+//! verified plan through partition, encrypt, write, re-read, boot, and seed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
@@ -14,14 +14,16 @@ use std::sync::{Arc, Mutex};
 use punar_common::install::{
     InstallApplyParams, InstallDiskIdentity, InstallEncryption, InstallPartitionPlan,
     InstallPayloadPlan, InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryMode,
-    InstallTarget, InstallTargetPartition, InstallTargetsResult, canonical_json,
+    InstallStatusResult, InstallTarget, InstallTargetPartition, InstallTargetsResult,
+    canonical_json,
 };
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
 };
 use thiserror::Error;
+use zeroize::Zeroizing;
 
-use crate::util::sha256_hex;
+use crate::util::{sha256_hex, write_atomic};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -41,6 +43,8 @@ const DATA_MINIMUM: u64 = 16 * GIB;
 const TARGET_DISK_BYTES: u64 = 128_000_000_000;
 const GPT_LBAS: u64 = 34;
 const PLAN_REGISTRY_LIMIT: usize = 16;
+const PASSPHRASE_MAX_BYTES: usize = 4096;
+const OOBE_ANSWERS_MAX_BYTES: usize = 1024 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -58,6 +62,7 @@ pub struct InstallerSources {
     pub release_manifest_path: PathBuf,
     pub release_signature_path: PathBuf,
     pub release_keys_dir: PathBuf,
+    pub status_path: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
     /// against `release_keys_dir` and leaves this `None`.
     pub release_manifest_override: Option<ReleaseManifest>,
@@ -78,6 +83,7 @@ impl Default for InstallerSources {
             release_manifest_path: PathBuf::from("/run/punar/install/release.json"),
             release_signature_path: PathBuf::from("/run/punar/install/release.json.sig"),
             release_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
+            status_path: PathBuf::from("/run/punar/install.json"),
             release_manifest_override: None,
             architecture_override: None,
             boot_platform_override: None,
@@ -107,6 +113,25 @@ impl InstallError {
 pub struct Installer {
     sources: InstallerSources,
     plans: Arc<Mutex<PlanRegistry>>,
+    status: Arc<Mutex<InstallStatusResult>>,
+}
+
+/// Non-serializable, non-debuggable apply inputs duplicated from descriptors
+/// owned by the authenticated peer. Both buffers zeroize on every return
+/// path, including validation and child-process failures.
+pub struct InstallApplyInputs {
+    passphrase: Option<Zeroizing<Vec<u8>>>,
+    oobe_answers: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl InstallApplyInputs {
+    pub fn passphrase(&self) -> Option<&[u8]> {
+        self.passphrase.as_deref().map(Vec::as_slice)
+    }
+
+    pub fn oobe_answers(&self) -> Option<&[u8]> {
+        self.oobe_answers.as_deref().map(Vec::as_slice)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -153,7 +178,26 @@ impl Installer {
         Self {
             sources,
             plans: Arc::new(Mutex::new(PlanRegistry::default())),
+            status: Arc::new(Mutex::new(InstallStatusResult::idle())),
         }
+    }
+
+    pub fn status(&self) -> InstallStatusResult {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Publish the initial idle state only in a live environment. Later
+    /// transaction transitions use this same atomic writer, so the shell's
+    /// FileView never observes a partial JSON document.
+    pub fn initialize_status_file(&self) -> Result<(), InstallError> {
+        if let Some(parent) = self.sources.status_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut bytes = serde_json::to_vec(&self.status())
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        bytes.push(b'\n');
+        write_atomic(&self.sources.status_path, &bytes, 0o644)?;
+        Ok(())
     }
 
     pub fn targets(&self) -> Result<InstallTargetsResult, InstallError> {
@@ -373,6 +417,35 @@ impl Installer {
         Ok(cached)
     }
 
+    /// Duplicate and consume the caller's bounded descriptor inputs without
+    /// ever putting their bytes in IPC JSON, argv, environment variables or
+    /// loggable error values. Call only after [`Self::preflight_apply`].
+    #[cfg(target_os = "linux")]
+    pub fn read_apply_inputs(
+        &self,
+        peer_pid: Option<i32>,
+        params: &InstallApplyParams,
+    ) -> Result<InstallApplyInputs, InstallError> {
+        validate_apply_params(params)?;
+        let passphrase = params
+            .passphrase_fd
+            .map(|fd| read_peer_descriptor(peer_pid, fd, PASSPHRASE_MAX_BYTES, "passphrase"))
+            .transpose()?;
+        let oobe_answers = params
+            .oobe_answers_fd
+            .map(|fd| read_peer_descriptor(peer_pid, fd, OOBE_ANSWERS_MAX_BYTES, "OOBE answers"))
+            .transpose()?;
+        if let Some(bytes) = &oobe_answers {
+            std::str::from_utf8(bytes).map_err(|_| {
+                InstallError::Invalid("the OOBE answers descriptor is not valid UTF-8".into())
+            })?;
+        }
+        Ok(InstallApplyInputs {
+            passphrase,
+            oobe_answers,
+        })
+    }
+
     fn architecture(&self) -> Architecture {
         self.sources.architecture_override.unwrap_or_else(|| {
             if std::env::consts::ARCH == "aarch64" {
@@ -534,6 +607,57 @@ impl Installer {
         }
         Ok(disks)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_peer_descriptor(
+    peer_pid: Option<i32>,
+    descriptor: u32,
+    maximum: usize,
+    kind: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, InstallError> {
+    use rustix::process::{Pid, PidfdFlags, PidfdGetfdFlags, pidfd_getfd, pidfd_open};
+
+    let pid = peer_pid
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| InstallError::Invalid(format!("the {kind} descriptor has no live peer")))?;
+    let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(|error| {
+        InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+    })?;
+    let foreign_fd = i32::try_from(descriptor)
+        .map_err(|_| InstallError::Invalid(format!("the {kind} descriptor is out of range")))?;
+    let owned = pidfd_getfd(&pidfd, foreign_fd, PidfdGetfdFlags::empty()).map_err(|error| {
+        InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+    })?;
+    read_descriptor_file(File::from(owned), maximum, kind)
+}
+
+fn read_descriptor_file(
+    mut file: File,
+    maximum: usize,
+    kind: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, InstallError> {
+    if !file.metadata()?.file_type().is_file() {
+        return Err(InstallError::Invalid(format!(
+            "the {kind} descriptor must refer to a regular file"
+        )));
+    }
+
+    let mut bytes = Zeroizing::new(Vec::with_capacity(maximum.min(4096)));
+    file.by_ref()
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() {
+        return Err(InstallError::Invalid(format!(
+            "the {kind} descriptor is empty"
+        )));
+    }
+    if bytes.len() > maximum {
+        return Err(InstallError::Invalid(format!(
+            "the {kind} descriptor exceeds the {maximum}-byte limit"
+        )));
+    }
+    Ok(bytes)
 }
 
 fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
@@ -965,6 +1089,7 @@ mod tests {
                 manifest.boot_platform,
                 manifest.version
             );
+            let status_path = root.join("install-status.json");
             Self {
                 root,
                 sources: InstallerSources {
@@ -972,6 +1097,7 @@ mod tests {
                     dev_root: dev,
                     udev_data_root: udev,
                     mountinfo_path: mountinfo,
+                    status_path,
                     release_manifest_override: Some(manifest),
                     architecture_override: Some(Architecture::X86_64),
                     boot_platform_override: Some(BootPlatform::Uefi),
@@ -1083,6 +1209,27 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_intake_reads_exact_bounded_bytes_without_logging_them() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("secret.memfd-fixture");
+        fs::write(&path, b"correct horse battery staple").unwrap();
+        let bytes = read_descriptor_file(File::open(&path).unwrap(), 64, "test secret").unwrap();
+        assert_eq!(bytes.as_slice(), b"correct horse battery staple");
+
+        let error = match read_descriptor_file(File::open(&path).unwrap(), 8, "test secret") {
+            Err(error) => error,
+            Ok(_) => panic!("an oversized descriptor was accepted"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("8-byte limit"));
+        assert!(!message.contains("correct horse"));
+
+        let empty = fixture.root.join("empty");
+        fs::write(&empty, b"").unwrap();
+        assert!(read_descriptor_file(File::open(empty).unwrap(), 64, "test secret").is_err());
+    }
+
+    #[test]
     fn partition_parenting_handles_sd_nvme_and_mmc_names() {
         let disks = vec![
             "sda".into(),
@@ -1094,6 +1241,34 @@ mod tests {
         assert_eq!(parent_disk("sdaa2", &disks), Some("sdaa"));
         assert_eq!(parent_disk("nvme0n1p3", &disks), Some("nvme0n1"));
         assert_eq!(parent_disk("mmcblk0p4", &disks), Some("mmcblk0"));
+    }
+
+    #[test]
+    fn live_status_starts_idle_and_is_published_atomically_at_0644() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let installer = fixture.installer();
+        installer.initialize_status_file().unwrap();
+        let bytes = fs::read(&fixture.sources.status_path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        let status: InstallStatusResult = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, InstallStatusResult::idle());
+        assert_eq!(
+            fs::metadata(&fixture.sources.status_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert!(
+            fs::read_dir(&fixture.root).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("tmp"))
+        );
     }
 
     #[test]

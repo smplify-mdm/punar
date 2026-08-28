@@ -76,6 +76,7 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("schemas/encryption/examples/recovery-envelope*", "schemas/encryption/recovery-envelope.json"),
     ("schemas/encryption/examples/tenant-recovery-key*", "schemas/encryption/tenant-recovery-key.json"),
     ("schemas/install/examples/install-plan*", "schemas/install/plan.json"),
+    ("schemas/install/examples/install-status*", "schemas/install/status.json"),
     ("schemas/network/examples/network-zone*", "schemas/network/network-zone.json"),
     ("schemas/network/examples/project-network-policy*", "schemas/network/project-network-policy.json"),
     ("schemas/policy/examples/ai-policy-*", "schemas/policy/ai-policy.json"),

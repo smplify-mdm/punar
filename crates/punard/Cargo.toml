@@ -26,8 +26,11 @@ thiserror = { workspace = true }
 # Justifications for both live at the workspace [workspace.dependencies] table:
 # rustix = SO_PEERCRED + pre-listen socket setup without unsafe;
 # signal-hook = safe SIGTERM handling for graceful shutdown.
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
 signal-hook = { workspace = true }
+# Installer passphrases and the optional first-boot passthrough are consumed
+# from peer-owned descriptors and zeroized as soon as their transaction ends.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # M10: the remote-query suite runs against a real punar-mock-smplify

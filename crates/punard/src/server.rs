@@ -366,6 +366,11 @@ impl Daemon {
         )
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let installer = Installer::new(cfg.installer_sources.clone());
+        if cfg.live_mode {
+            installer
+                .initialize_status_file()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
         let audit = AuditWriter::open(&cfg.audit_path)?;
         // Group ownership (root:punar) is the daemon's job, not the
         // writer's; meaningful only when running as root (tests are not).
@@ -984,7 +989,7 @@ impl Inner {
     fn dispatch(&self, peer: &Peer, request: &Request) -> Result<Value, IpcError> {
         if matches!(
             request.method,
-            Method::InstallTargets | Method::InstallPlan(_)
+            Method::InstallTargets | Method::InstallPlan(_) | Method::InstallStatus
         ) && !self.cfg.live_mode
         {
             return Err(install_unknown_on_installed(request.method.name()));
@@ -1024,6 +1029,7 @@ impl Inner {
                 .map(to_value)
                 .map_err(install_targets_ipc_error),
             Method::InstallPlan(params) => self.handle_install_plan(peer, params),
+            Method::InstallStatus => Ok(to_value(self.installer.status())),
         }
     }
 

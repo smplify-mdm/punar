@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "state": "idle",
+  "phases": [
+    { "phase": "verify_release", "state": "pending" },
+    { "phase": "partition", "state": "pending" },
+    { "phase": "encrypt", "state": "pending" },
+    { "phase": "format", "state": "pending" },
+    { "phase": "write_slot_a", "state": "pending" },
+    { "phase": "re_read", "state": "pending" },
+    { "phase": "boot", "state": "pending" },
+    { "phase": "seed", "state": "pending" },
+    { "phase": "verify_installed", "state": "pending" }
+  ]
+}

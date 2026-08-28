@@ -325,9 +325,18 @@ size, both GPT edges and signed release before a mutating executor may start.
 Tests cover a same-sized physical-disk swap, a changed GPT edge and device-node
 re-enumeration, each with the target byte-identical across refusal. The public
 `install.apply` method still remains deliberately unregistered until its
-transaction exists, so this slice remains unable to write a byte. Secret-FD
-intake, the recovery gate, partition/encrypt/write/re-read/boot/seed executor,
-ISO assembly and the unattended VM lane are still next.
+transaction exists, so this slice remains unable to write a byte. The live-only
+`install.status` read side now exposes the same secret-free fixed nine-phase
+state through IPC and an atomically replaced, world-readable
+`/run/punar/install.json`; installed mode neither serves the method nor creates
+the file. Apply-secret intake is also bounded and zeroizing: `punard` duplicates
+the human root peer's passphrase and optional OOBE descriptors with
+`pidfd_getfd`, never accepting secret bytes in JSON, argv, environment, status,
+errors or audit. Unit and cross-architecture daemon tests are green; the live
+installer VM still owes the kernel-privilege proof because ordinary container
+seccomp blocks `pidfd_getfd`. The recovery gate,
+partition/encrypt/write/re-read/boot/seed executor, ISO assembly and the
+unattended VM lane are still next.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

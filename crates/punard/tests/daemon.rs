@@ -235,6 +235,7 @@ fn configure_empty_live_installer(cfg: &mut DaemonConfig, dir: &Path) {
     cfg.installer_sources.dev_root = devices;
     cfg.installer_sources.udev_data_root = udev;
     cfg.installer_sources.mountinfo_path = mountinfo;
+    cfg.installer_sources.status_path = dir.join("install.json");
 }
 
 fn assert_schema_shaped(event: &Value) {
@@ -1197,6 +1198,7 @@ fn installer_methods_are_unknown_on_an_installed_system() {
                 "recovery_mode": "personal_copy"
             })),
         ),
+        ("install.status", None),
     ] {
         let response = daemon.call(method, params);
         assert_eq!(response["error"]["code"], "unknown_method", "{method}");
@@ -1215,6 +1217,10 @@ fn live_installer_targets_are_read_only_and_plan_refusals_are_audited() {
     let targets = daemon.call("install.targets", None);
     assert_eq!(targets["result"]["v"], 1);
     assert_eq!(targets["result"]["targets"], json!([]));
+    let status = daemon.call("install.status", None);
+    assert_eq!(status["result"]["state"], "idle");
+    assert_eq!(status["result"]["phases"].as_array().unwrap().len(), 9);
+    assert!(daemon.dir.join("install.json").exists());
 
     let plan = daemon.call(
         "install.plan",

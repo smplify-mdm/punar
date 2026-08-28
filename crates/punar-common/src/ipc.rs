@@ -781,11 +781,14 @@ pub enum Method {
     /// `install.plan` — root-only, live-only and audited. It computes a
     /// disk-bound plan but cannot write a byte.
     InstallPlan(InstallPlanParams),
+    /// `install.status` — live-environment read side of the atomic installer
+    /// progress document. Never carries passphrases or recovery material.
+    InstallStatus,
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 25] = [
+    pub const NAMES: [&'static str; 26] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -811,6 +814,7 @@ impl Method {
         "apps.remove",
         "install.targets",
         "install.plan",
+        "install.status",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -842,6 +846,7 @@ impl Method {
             Method::AppsRemove(_) => "apps.remove",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
+            Method::InstallStatus => "install.status",
         }
     }
 
@@ -893,6 +898,7 @@ impl Method {
             | Method::AppsRemove(_) => false,
             Method::InstallTargets => false,
             Method::InstallPlan(_) => true,
+            Method::InstallStatus => false,
         }
     }
 
@@ -908,7 +914,8 @@ impl Method {
             | Method::ApprovalsList
             | Method::PrivilegeStatus
             | Method::AppsList
-            | Method::InstallTargets => return None,
+            | Method::InstallTargets
+            | Method::InstallStatus => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
@@ -992,6 +999,9 @@ impl Method {
                 Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
             }
             "install.plan" => Self::parse_required_params(method, params).map(Method::InstallPlan),
+            "install.status" => {
+                Self::expect_no_params(method, params).map(|()| Method::InstallStatus)
+            }
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -2000,6 +2010,7 @@ mod tests {
                 encryption: crate::install::InstallEncryption::Luks2,
                 recovery_mode: crate::install::InstallRecoveryMode::PersonalCopy,
             }),
+            Method::InstallStatus,
         ];
         assert_eq!(
             methods.len(),
@@ -2176,6 +2187,7 @@ mod tests {
             "reconcile",
             "apps.list",
             "install.targets",
+            "install.status",
         ] {
             let ok =
                 Request::parse_json_line(&format!(r#"{{"v":1,"id":"1","method":"{method}"}}"#))

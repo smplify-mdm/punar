@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/install/status.json",
+  "title": "Punar installation status",
+  "description": "The secret-free read side shared by install.status and /run/punar/install.json.",
+  "type": "object",
+  "required": ["v", "state", "phases"],
+  "properties": {
+    "v": { "const": 1 },
+    "state": {
+      "enum": ["idle", "running", "awaiting", "succeeded", "failed"]
+    },
+    "plan_token": { "$ref": "#/$defs/digest" },
+    "disk": { "$ref": "#/$defs/device" },
+    "phase": { "$ref": "#/$defs/phase" },
+    "awaiting": {
+      "enum": ["recovery_key_ack", "organization_escrow_receipt"]
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "prefixItems": [
+        { "$ref": "#/$defs/verify_release" },
+        { "$ref": "#/$defs/partition" },
+        { "$ref": "#/$defs/encrypt" },
+        { "$ref": "#/$defs/format" },
+        { "$ref": "#/$defs/write_slot_a" },
+        { "$ref": "#/$defs/re_read" },
+        { "$ref": "#/$defs/boot" },
+        { "$ref": "#/$defs/seed" },
+        { "$ref": "#/$defs/verify_installed" }
+      ]
+    },
+    "failure": { "$ref": "#/$defs/failure" }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "idle" } }, "required": ["state"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["plan_token"] },
+            { "required": ["disk"] },
+            { "required": ["phase"] },
+            { "required": ["awaiting"] },
+            { "required": ["failure"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["running", "awaiting", "failed"] } }, "required": ["state"] },
+      "then": { "required": ["plan_token", "disk", "phase"] }
+    },
+    {
+      "if": { "properties": { "state": { "const": "awaiting" } }, "required": ["state"] },
+      "then": { "required": ["awaiting"] },
+      "else": { "not": { "required": ["awaiting"] } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "failed" } }, "required": ["state"] },
+      "then": { "required": ["failure"] },
+      "else": { "not": { "required": ["failure"] } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "succeeded" } }, "required": ["state"] },
+      "then": { "required": ["plan_token", "disk"] }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "device": {
+      "type": "string",
+      "pattern": "^/dev/[A-Za-z0-9._-]+$",
+      "maxLength": 128
+    },
+    "phase": {
+      "enum": [
+        "verify_release",
+        "partition",
+        "encrypt",
+        "format",
+        "write_slot_a",
+        "re_read",
+        "boot",
+        "seed",
+        "verify_installed"
+      ]
+    },
+    "phase_progress": {
+      "type": "object",
+      "required": ["phase", "state"],
+      "properties": {
+        "phase": { "$ref": "#/$defs/phase" },
+        "state": { "enum": ["pending", "running", "waiting", "complete", "failed"] },
+        "completed_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 1 },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "additionalProperties": false,
+      "dependentRequired": {
+        "completed_bytes": ["total_bytes"],
+        "total_bytes": ["completed_bytes"]
+      },
+      "if": {
+        "anyOf": [
+          { "required": ["completed_bytes"] },
+          { "required": ["total_bytes"] }
+        ]
+      },
+      "then": { "properties": { "phase": { "const": "write_slot_a" } } }
+    },
+    "verify_release": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "verify_release" } } }
+      ]
+    },
+    "partition": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "partition" } } }
+      ]
+    },
+    "encrypt": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "encrypt" } } }
+      ]
+    },
+    "format": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "format" } } }
+      ]
+    },
+    "write_slot_a": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "write_slot_a" } } }
+      ]
+    },
+    "re_read": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "re_read" } } }
+      ]
+    },
+    "boot": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "boot" } } }
+      ]
+    },
+    "seed": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "seed" } } }
+      ]
+    },
+    "verify_installed": {
+      "allOf": [
+        { "$ref": "#/$defs/phase_progress" },
+        { "properties": { "phase": { "const": "verify_installed" } } }
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "required": ["message", "disk_state", "next_step"],
+      "properties": {
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "disk_state": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "next_step": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -186,6 +186,127 @@ pub struct InstallApplyParams {
     pub unattended: bool,
 }
 
+/// Overall state exposed by `install.status` and `/run/punar/install.json`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallOverallState {
+    Idle,
+    Running,
+    Awaiting,
+    Succeeded,
+    Failed,
+}
+
+/// The nine executor phases. The two verification phases are distinct on the
+/// wire so a failure can say whether release trust or the installed result
+/// failed, while the surface may label both simply “verify”.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+    VerifyRelease,
+    Partition,
+    Encrypt,
+    Format,
+    WriteSlotA,
+    ReRead,
+    Boot,
+    Seed,
+    VerifyInstalled,
+}
+
+impl InstallPhase {
+    pub const ALL: [Self; 9] = [
+        Self::VerifyRelease,
+        Self::Partition,
+        Self::Encrypt,
+        Self::Format,
+        Self::WriteSlotA,
+        Self::ReRead,
+        Self::Boot,
+        Self::Seed,
+        Self::VerifyInstalled,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhaseState {
+    Pending,
+    Running,
+    Waiting,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallAwaiting {
+    RecoveryKeyAck,
+    OrganizationEscrowReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InstallPhaseProgress {
+    pub phase: InstallPhase,
+    pub state: InstallPhaseState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InstallFailure {
+    pub message: String,
+    pub disk_state: String,
+    pub next_step: String,
+}
+
+/// Read-only installer state. Result structs intentionally tolerate unknown
+/// fields so an older shell can watch a newer daemon without breaking.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InstallStatusResult {
+    pub v: u8,
+    pub state: InstallOverallState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<InstallPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting: Option<InstallAwaiting>,
+    pub phases: Vec<InstallPhaseProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<InstallFailure>,
+}
+
+impl InstallStatusResult {
+    pub fn idle() -> Self {
+        Self {
+            v: 1,
+            state: InstallOverallState::Idle,
+            plan_token: None,
+            disk: None,
+            phase: None,
+            awaiting: None,
+            phases: InstallPhase::ALL
+                .into_iter()
+                .map(|phase| InstallPhaseProgress {
+                    phase,
+                    state: InstallPhaseState::Pending,
+                    completed_bytes: None,
+                    total_bytes: None,
+                    detail: None,
+                })
+                .collect(),
+            failure: None,
+        }
+    }
+}
+
 /// Deterministic JSON used by the installer confirmation token.
 ///
 /// Objects are recursively sorted by Unicode code point, arrays retain their
@@ -245,6 +366,19 @@ mod tests {
                 serde_json::from_value::<InstallApplyParams>(Value::Object(object)).is_err(),
                 "{forbidden}"
             );
+        }
+    }
+
+    #[test]
+    fn idle_status_has_the_fixed_nine_phase_order_and_no_secret_field() {
+        let value = serde_json::to_value(InstallStatusResult::idle()).unwrap();
+        assert_eq!(value["state"], "idle");
+        assert_eq!(value["phases"].as_array().unwrap().len(), 9);
+        assert_eq!(value["phases"][0]["phase"], "verify_release");
+        assert_eq!(value["phases"][8]["phase"], "verify_installed");
+        let text = serde_json::to_string(&value).unwrap();
+        for forbidden in ["passphrase", "recovery_key", "password", "account"] {
+            assert!(!text.contains(forbidden), "{forbidden}");
         }
     }
 }

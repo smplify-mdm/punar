@@ -208,6 +208,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.remove` | **human, personal device only** | yes | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
+| `install.status` | any connected peer, **live environment only** | no | no |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -716,6 +717,24 @@ passphrase and optional OOBE passthrough, never their bytes. **The public
 mutating `install.apply` method is not registered in this slice**: exposing a
 method that stopped after preflight would claim an installer that does not
 exist. There is no `install.exec`, script, hook or caller-supplied command/path.
+
+### 5.18 `install.status`
+
+Params: none. Read-only, unaudited and live-only. The result is the same
+secret-free object written atomically at `0644` to
+`/run/punar/install.json`; the shell watches the file with `FileView`, while
+typed clients use this method. Both begin in `state: "idle"` with the fixed
+nine-phase order `verify_release`, `partition`, `encrypt`, `format`,
+`write_slot_a`, `re_read`, `boot`, `seed`, `verify_installed`. Only
+`write_slot_a` may carry `completed_bytes` and `total_bytes`, because it is the
+only phase with a truthful denominator. The recovery pauses are expressed as
+`state: "awaiting"` plus `awaiting: "recovery_key_ack"` or
+`"organization_escrow_receipt"`.
+
+The object validates against `schemas/install/status.json`. It has no field
+for a passphrase, recovery key, account, answer contents, process id, command,
+or path other than the confirmed target device. An installed system returns
+`unknown_method` and does not publish this live status file.
 
 ## 6. Audit contract (spec section 53)
 
