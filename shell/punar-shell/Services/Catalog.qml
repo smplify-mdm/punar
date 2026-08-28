@@ -58,8 +58,15 @@ Singleton {
             return 80;
         if (name.indexOf(q) !== -1 || id.indexOf(q) !== -1)
             return 60;
-        var context = String(app.category || "") + " " + String(app.summary || "");
-        return context.toLowerCase().indexOf(q) !== -1 ? 30 : -1;
+        var keywords = Array.isArray(app.keywords) ? app.keywords.join(" ") : "";
+        var context = (id + " " + name + " " + String(app.category || "") + " "
+            + String(app.summary || "") + " " + keywords).toLowerCase();
+        var terms = q.split(/\s+/);
+        for (var i = 0; i < terms.length; i++) {
+            if (context.indexOf(terms[i]) === -1)
+                return -1;
+        }
+        return 30;
     }
 
     function search(query: string, limit: int): var {
@@ -89,6 +96,16 @@ Singleton {
                 return root.entries[i];
         }
         return null;
+    }
+
+    function webOnly(app: var): bool {
+        if (app === null || app === undefined || !Array.isArray(app.sources) || app.sources.length === 0)
+            return false;
+        for (var i = 0; i < app.sources.length; i++) {
+            if (String(app.sources[i].kind) !== "web")
+                return false;
+        }
+        return true;
     }
 
     // Icons are signed-image content and must resolve locally. The schema and

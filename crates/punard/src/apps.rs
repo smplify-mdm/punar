@@ -74,6 +74,8 @@ struct App {
     #[serde(default)]
     featured: bool,
     category: String,
+    #[serde(default)]
+    keywords: Vec<String>,
     summary: String,
     trust_tier: String,
     license: String,
@@ -208,11 +210,21 @@ impl AppManager {
             .apps
             .iter()
             .filter(|app| {
-                needle.is_empty()
-                    || app.id.contains(&needle)
-                    || app.name.to_ascii_lowercase().contains(&needle)
-                    || app.summary.to_ascii_lowercase().contains(&needle)
-                    || app.category.contains(&needle)
+                if needle.is_empty() {
+                    return true;
+                }
+                let searchable = format!(
+                    "{} {} {} {} {}",
+                    app.id,
+                    app.name,
+                    app.category,
+                    app.summary,
+                    app.keywords.join(" ")
+                )
+                .to_ascii_lowercase();
+                needle
+                    .split_ascii_whitespace()
+                    .all(|term| searchable.contains(term))
             })
             .filter_map(|app| self.summary(app).ok())
             .collect();
@@ -554,6 +566,21 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                 app.id
             )));
         }
+        if app.keywords.len() > 16
+            || app.keywords.iter().any(|keyword| {
+                keyword.is_empty()
+                    || keyword.len() > 40
+                    || keyword.trim() != keyword
+                    || !keyword.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_alphanumeric() || (index > 0 && b" .+#_-".contains(&byte))
+                    })
+            })
+        {
+            return Err(AppError::InvalidCatalog(format!(
+                "app {:?} has invalid search keywords",
+                app.id
+            )));
+        }
         for source in &app.sources {
             if let Source::Flatpak {
                 remote,
@@ -777,6 +804,7 @@ mod tests {
             "apps": [{
                 "id": "spotify", "name": "Spotify", "icon": "spotify.svg",
                 "featured": true, "category": "media",
+                "keywords": ["music", "audio", "podcasts"],
                 "summary": "Music", "trustTier": "community", "license": "proprietary",
                 "publisher": "flathub", "bundledUpdater": "disabled-by-packaging",
                 "disclosures": [],
@@ -845,6 +873,28 @@ mod tests {
         assert_eq!(result["app"]["source"], "web");
         assert_eq!(result["app"]["action"], "open");
         assert!(result["app"].get("inspection").is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn catalog_search_matches_keywords_category_and_multiple_terms() {
+        let (dir, bin, digest) = fixture("unused");
+        let catalog = write_catalog(&dir, &digest);
+        let manager = AppManager::load(Some(&catalog), bin)
+            .unwrap()
+            .with_arch("aarch64");
+
+        for query in ["audio", "media", "spotify podcasts"] {
+            let result = manager.catalog(None, Some(query)).unwrap();
+            assert_eq!(result["apps"].as_array().unwrap().len(), 1, "{query}");
+            assert_eq!(result["apps"][0]["id"], "spotify", "{query}");
+        }
+        assert!(
+            manager.catalog(None, Some("spotify browser")).unwrap()["apps"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

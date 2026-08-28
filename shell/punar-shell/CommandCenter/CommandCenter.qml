@@ -630,7 +630,9 @@ DeferredSurfaceBase {
             "glyph": Apps.glyphFor(String(app.name || app.id)),
             "icon": Catalog.iconSource(app),
             "name": String(app.name),
-            "meta": "Application(" + String(app.id) + ") · on demand",
+            "meta": "Application(" + String(app.id) + ") · "
+                + (Catalog.webOnly(app) ? "official web app" : "installable")
+                + " · " + String(app.category || "application"),
             "cap": true,
             "kind": "catalog-app",
             "state": "shipped",

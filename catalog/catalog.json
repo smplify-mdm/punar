@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "catalogVersion": "2026.08.28.1",
-  "generatedAt": "2026-08-28T05:00:00Z",
+  "catalogVersion": "2026.08.28.2",
+  "generatedAt": "2026-08-28T23:00:00Z",
   "remotes": [
     {
       "id": "flathub",
@@ -16,6 +16,7 @@
       "icon": "telegram.svg",
       "featured": true,
       "category": "communication",
+      "keywords": ["messaging", "chat", "calls", "teams"],
       "summary": "Fast messaging, voice calls, group conversations, and file sharing across your devices.",
       "trustTier": "community",
       "license": "free",
@@ -56,6 +57,7 @@
       "icon": "firefox.svg",
       "featured": true,
       "category": "browsers",
+      "keywords": ["web", "internet", "browser", "privacy"],
       "summary": "An independent, open-source browser with strong privacy controls and broad web compatibility.",
       "trustTier": "community",
       "license": "free",
@@ -91,11 +93,74 @@
       ]
     },
     {
+      "id": "chatgpt",
+      "name": "ChatGPT",
+      "icon": "chatgpt.svg",
+      "featured": true,
+      "category": "productivity",
+      "keywords": ["AI", "assistant", "coding", "writing", "research", "OpenAI"],
+      "summary": "OpenAI’s official web application for writing, research, coding, analysis, and general AI assistance.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "upstream",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:official-web",
+          "text": "Punar opens OpenAI’s official ChatGPT web application in Chromium app mode. No native Linux package is installed."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Requests and files you submit leave this device for OpenAI’s service under your account and service settings."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "web",
+          "architectures": ["x86_64", "aarch64"],
+          "url": "https://chatgpt.com/",
+          "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "icon": "claude.svg",
+      "featured": true,
+      "category": "productivity",
+      "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic"],
+      "summary": "Anthropic’s official web application for writing, research, coding, analysis, and general AI assistance.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "upstream",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:official-web",
+          "text": "Punar opens Anthropic’s official Claude web application in Chromium app mode. No native Linux package is installed."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Requests and files you submit leave this device for Anthropic’s service under your account and service settings."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "web",
+          "architectures": ["x86_64", "aarch64"],
+          "url": "https://claude.ai/",
+          "browser": "chromium"
+        }
+      ]
+    },
+    {
       "id": "spotify",
       "name": "Spotify",
       "icon": "spotify.svg",
       "featured": true,
       "category": "media",
+      "keywords": ["music", "audio", "podcasts", "work"],
       "summary": "Music and podcasts while you work. The native desktop client is offered where its publisher provides Linux binaries; the web player is the ARM64 fallback.",
       "trustTier": "community",
       "license": "proprietary",
@@ -136,6 +201,7 @@
       "icon": "element.svg",
       "featured": true,
       "category": "communication",
+      "keywords": ["messaging", "chat", "matrix", "secure"],
       "summary": "Secure team messaging and video calls built on the open Matrix communication network.",
       "trustTier": "community",
       "license": "free",
@@ -176,6 +242,7 @@
       "icon": "slack.svg",
       "featured": true,
       "category": "communication",
+      "keywords": ["messaging", "chat", "teams", "work"],
       "summary": "Workplace messaging, channels, huddles, and team collaboration. ARM64 devices use Slack in Chromium app mode.",
       "trustTier": "community",
       "license": "proprietary",
@@ -216,6 +283,7 @@
       "icon": "discord.svg",
       "featured": true,
       "category": "communication",
+      "keywords": ["messaging", "chat", "voice", "community"],
       "summary": "Community messaging, voice, and video. ARM64 devices use Discord in Chromium app mode.",
       "trustTier": "community",
       "license": "proprietary",

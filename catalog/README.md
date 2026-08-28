@@ -11,12 +11,21 @@ runtime result, never publisher copy. It also contains no application payload:
 the base image ships only Flatpak itself, this catalog, and Flathub's signed
 remote descriptor. Apps and runtimes are fetched on demand into shared `/var`.
 
-The first browseable catalog release contains Telegram, Firefox, Spotify,
-Element, Slack, and Discord. Telegram, Firefox, and Element have separately
-pinned x86_64 and ARM64 Flatpak sources. Spotify, Slack, and Discord use pinned
-native Flatpaks on x86_64 and an explicitly labelled Chromium web-app fallback
-on ARM64 where their publishers do not provide a native Linux payload. Punar
-never labels a web fallback as a native installation.
+The current browseable catalog contains Telegram, Firefox, ChatGPT, Claude,
+Spotify, Element, Slack, and Discord. Telegram, Firefox, and Element have
+separately pinned x86_64 and ARM64 Flatpak sources. Spotify, Slack, and Discord
+use pinned native Flatpaks on x86_64 and an explicitly labelled Chromium
+web-app fallback on ARM64 where their publishers do not provide a native Linux
+payload. ChatGPT and Claude use their official web applications on both
+architectures; they are clearly labelled as web apps and disclose that data is
+sent to their cloud services. Punar never labels a web fallback as a native
+installation.
+
+Search is offline and deterministic. It matches every query term against the
+catalog id, display name, summary, category, and curated keywords. That makes
+queries such as `Claude`, `ChatGPT`, `AI assistant`, `coding`, and
+`productivity` discover the expected entries without turning a search box into
+an unbounded package-execution surface.
 
 `icons/` contains local identity marks shown by the shell. The schema and
 `punard` accept basename-only SVG names; image staging copies those files beside

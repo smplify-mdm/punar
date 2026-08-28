@@ -152,7 +152,9 @@ Item {
             Meta {
                 width: parent.width
                 text: tile.catalogApp
-                    ? String(tile.appData.category || "application") + " · inspect & install"
+                    ? (Catalog.webOnly(tile.appData)
+                        ? String(tile.appData.category || "application") + " · official web app"
+                        : String(tile.appData.category || "application") + " · inspect & install")
                     : "Installed · open"
                 color: Theme.shellInk3
                 elide: Text.ElideRight
@@ -171,7 +173,7 @@ Item {
                     anchors.centerIn: parent
                     font.pixelSize: 8
                     color: tile.selected || tile.hovered ? Theme.shellSurface : Theme.shellFg
-                    text: tile.catalogApp ? "View" : "Open"
+                    text: tile.catalogApp && !Catalog.webOnly(tile.appData) ? "View" : "Open"
                 }
             }
         }

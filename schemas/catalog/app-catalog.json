@@ -90,6 +90,12 @@
         "icon": {"type": "string", "pattern": "^[A-Za-z0-9._-]+\\.svg$"},
         "featured": {"type": "boolean"},
         "category": {"enum": ["browsers", "communication", "editors", "graphics", "media", "productivity", "terminals", "utilities"]},
+        "keywords": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 40, "pattern": "^[A-Za-z0-9][A-Za-z0-9 .+#_-]*$"},
+          "maxItems": 16,
+          "uniqueItems": true
+        },
         "summary": {"type": "string", "minLength": 1, "maxLength": 240},
         "trustTier": {"enum": ["curated", "community"]},
         "license": {"enum": ["free", "mixed", "proprietary"]},

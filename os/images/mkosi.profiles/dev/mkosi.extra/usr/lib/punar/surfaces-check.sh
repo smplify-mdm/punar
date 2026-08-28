@@ -146,7 +146,7 @@ systemcontrol_models_ready() {
             and (.sub | contains(" installed · ") and contains(" available · catalog "))
             and any(.rows[]; .tag == "Installed")
             and ([.rows[] | select(.tag == "Available") | .name] | sort
-                == ["Discord", "Element", "Firefox", "Slack", "Spotify", "Telegram"])
+                == ["ChatGPT", "Claude", "Discord", "Element", "Firefox", "Slack", "Spotify", "Telegram"])
             and any(.actions[]; .hotkey == "O" and .kind == "applicationBrowser")' \
             /run/punar/surfaces-systemcontrol-applications.json >/dev/null 2>&1
 }
@@ -367,7 +367,7 @@ for t in commandcenter systemcontrol notifications shortcuts aipanel overview; d
     # The dedicated application library is an on-demand mode of Command
     # Center, not a second resident store process. Exercise its typed IPC
     # entry and export a frame so CI proves the responsive browse component
-    # actually instantiated with the signed six-app catalog.
+    # actually instantiated with the signed eight-app catalog.
     if [ "${t}" = "commandcenter" ]; then
         browse_result="$(ipc commandcenter applications | tr -d '\r\n\"')"
         check_eq "command center opens the application library" "applications" "${browse_result}"
