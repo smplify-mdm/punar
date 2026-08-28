@@ -229,9 +229,9 @@
 #                          fixed 10 min + 5 min measurement
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
-#                          — must also cover the in-guest M2..M10 exercises,
-#                          which run between the RAM result and the export
-#                          (default: 4200 hardware, 7800 TCG)
+#                          — must also cover the isolated surface-cost and
+#                          M2..M10 exercises, which run between the RAM result
+#                          and the export (default: 4200 hardware, 9600 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
 #                          (default: os/images/out/desktop-proof)
 #   PUNAR_QEMU_ARCH        x86_64 or arm64; inferred from an *arm64* image
@@ -440,8 +440,10 @@ else
     DEFAULT_BOOT_TIMEOUT=1200
     DEFAULT_DESKTOP_TIMEOUT=3600
     DEFAULT_RAM_TIMEOUT=2400
-    # TCG: the in-guest M2 exercise before the export is the slow part
-    # (window spawns, quickshell relaunch — bounded at 25 min in-guest),
+    # TCG: the isolated surface-cost exercise is bounded at 45 min so all
+    # 6 surfaces x 3 fresh Quickshell processes can complete without KVM,
+    # followed by the M2 exercise (window spawns, quickshell relaunch —
+    # bounded at 25 min in-guest),
     # plus the M3 exercise (bounded 10 min), the M4 drift demo (375 s
     # wall clock — timer firings are wall-clock even under TCG), the
     # M5 enrollment exercise (bounded 15 min in-guest), the M6
@@ -458,7 +460,7 @@ else
     # exercise (bounded 15 min in-guest; its 300 s detection-timer wait is
     # wall clock, so it costs the same under TCG, and the quickshell/grim
     # round trips and the mock enroll/unenroll cycle are the slow parts).
-    DEFAULT_EXPORT_TIMEOUT=7800
+    DEFAULT_EXPORT_TIMEOUT=9600
     warn "native KVM/HVF unavailable for ${ARCH}: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"

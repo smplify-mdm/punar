@@ -56,6 +56,7 @@ pub mod backends;
 pub mod capability;
 pub mod device;
 pub mod enroll;
+pub mod install;
 pub mod policy;
 pub mod server;
 pub mod state;

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -74,6 +75,7 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("schemas/encryption/examples/escrow-receipt*", "schemas/encryption/escrow-receipt.json"),
     ("schemas/encryption/examples/recovery-envelope*", "schemas/encryption/recovery-envelope.json"),
     ("schemas/encryption/examples/tenant-recovery-key*", "schemas/encryption/tenant-recovery-key.json"),
+    ("schemas/install/examples/install-plan*", "schemas/install/plan.json"),
     ("schemas/network/examples/network-zone*", "schemas/network/network-zone.json"),
     ("schemas/network/examples/project-network-policy*", "schemas/network/project-network-policy.json"),
     ("schemas/policy/examples/ai-policy-*", "schemas/policy/ai-policy.json"),
@@ -141,6 +143,23 @@ MANIFEST: list[tuple[str, str | None]] = [
 ]
 
 DOC_SUFFIXES = {".json", ".yaml", ".yml"}
+
+
+def semantic_error(instance, schema_rel: str) -> str | None:
+    """Cross-field invariants JSON Schema cannot express."""
+    if schema_rel != "schemas/install/plan.json":
+        return None
+    try:
+        canonical = json.dumps(
+            instance["plan"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        expected = hashlib.sha256(canonical).hexdigest()
+        actual = instance["plan_token"]
+    except (KeyError, TypeError, UnicodeEncodeError):
+        return None  # The structural validator reports the useful error.
+    if actual != expected:
+        return f"plan_token is {actual!r}; sha256(canonical_json(plan)) is {expected}"
+    return None
 
 
 def load_doc(path: Path):
@@ -229,6 +248,13 @@ def validate_one(document: Path, schema: Path) -> int:
         for e in doc_errors:
             print(f"[FAIL] {document} vs {schema}: {e.json_path}: {e.message[:300]}")
         return 1
+    try:
+        schema_rel = rel(schema.resolve())
+    except ValueError:
+        schema_rel = ""
+    if semantic := semantic_error(instance, schema_rel):
+        print(f"[FAIL] {document} vs {schema}: {semantic}")
+        return 1
     print(f"[PASS] {document} validates against {schema}")
     return 0
 
@@ -309,15 +335,20 @@ def main() -> int:
             continue
         doc_count += 1
         errors = sorted(validator.iter_errors(instance), key=lambda e: e.json_path)
+        semantic = semantic_error(instance, schema_rel)
         if expect_invalid:
             if errors:
                 report(True, label, f"fails as expected: {errors[0].json_path}: {errors[0].message[:120]}")
+            elif semantic:
+                report(True, label, f"fails as expected: {semantic}")
             else:
                 report(False, label, "expected to FAIL validation but passed")
         else:
             if errors:
                 first = errors[0]
                 report(False, label, f"{first.json_path}: {first.message[:300]} (schema {schema_rel})")
+            elif semantic:
+                report(False, label, semantic)
             else:
                 report(True, label)
 

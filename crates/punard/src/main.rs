@@ -183,6 +183,9 @@ fn run(args: RunArgs) -> ExitCode {
         })
         .unwrap_or_else(|| PathBuf::from(punard::agentd::DEFAULT_AGENTD_SOCKET));
     let cfg = DaemonConfig::new(args.socket, args.state_dir, args.audit_file);
+    let live_mode = std::fs::read_to_string("/proc/cmdline")
+        .map(|cmdline| punard::install::live_mode_from_cmdline(&cmdline))
+        .unwrap_or(false);
     let cfg = DaemonConfig {
         group: args.group,
         control_plane_socket,
@@ -194,6 +197,7 @@ fn run(args: RunArgs) -> ExitCode {
         device_class_override: args.device_class_override,
         app_catalog_path: Some(args.app_catalog),
         flatpak_bin: args.flatpak_bin,
+        live_mode,
         ..cfg
     };
 

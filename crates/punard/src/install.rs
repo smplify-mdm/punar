@@ -1,0 +1,1099 @@
+//! Read-only installer discovery and planning.
+//!
+//! Nothing in this module writes a block device.  It turns kernel/udev
+//! observations plus a signed release manifest into the complete object a
+//! person can confirm.  The later `install.apply` milestone must re-read the
+//! physical identity in that object before its first write.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use punar_common::install::{
+    InstallDiskIdentity, InstallEncryption, InstallPartitionPlan, InstallPayloadPlan, InstallPlan,
+    InstallPlanParams, InstallPlanResult, InstallRecoveryMode, InstallTarget,
+    InstallTargetPartition, InstallTargetsResult, canonical_json,
+};
+use punar_common::update::{
+    Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
+};
+use thiserror::Error;
+
+use crate::util::sha256_hex;
+
+pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
+pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
+pub const ROOT_B_PARTUUID: &str = "2b1b91a9-cf2c-4e9c-a723-5ec997971662";
+pub const DATA_PARTUUID: &str = "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9";
+
+const ESP_TYPE_GUID: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+const X86_ROOT_TYPE_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
+const ARM_ROOT_TYPE_GUID: &str = "b921b045-1df0-41c3-af44-4c6f280d3fae";
+const DATA_TYPE_GUID: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+const ANSWERS_LABEL: &str = "PUNAR_ANSWERS";
+const GIB: u64 = 1024 * 1024 * 1024;
+const ALIGNMENT: u64 = 1024 * 1024;
+const ESP_SIZE: u64 = GIB;
+const ROOT_SIZE: u64 = 8 * GIB;
+const DATA_MINIMUM: u64 = 16 * GIB;
+const TARGET_DISK_BYTES: u64 = 128_000_000_000;
+const GPT_LBAS: u64 = 34;
+
+const PUNAR_PARTUUIDS: [&str; 4] = [
+    ESP_PARTUUID,
+    ROOT_A_PARTUUID,
+    ROOT_B_PARTUUID,
+    DATA_PARTUUID,
+];
+
+#[derive(Clone, Debug)]
+pub struct InstallerSources {
+    pub sys_class_block: PathBuf,
+    pub dev_root: PathBuf,
+    pub udev_data_root: PathBuf,
+    pub mountinfo_path: PathBuf,
+    pub release_manifest_path: PathBuf,
+    pub release_signature_path: PathBuf,
+    pub release_keys_dir: PathBuf,
+    /// Test-only seam. Production always verifies exact manifest bytes
+    /// against `release_keys_dir` and leaves this `None`.
+    pub release_manifest_override: Option<ReleaseManifest>,
+    /// Cross-architecture test seam; production derives the compiled target.
+    pub architecture_override: Option<Architecture>,
+    /// Raspberry Pi media selects this explicitly when its live profile is
+    /// assembled. UEFI is the production default for the current ISO.
+    pub boot_platform_override: Option<BootPlatform>,
+}
+
+impl Default for InstallerSources {
+    fn default() -> Self {
+        Self {
+            sys_class_block: PathBuf::from("/sys/class/block"),
+            dev_root: PathBuf::from("/dev"),
+            udev_data_root: PathBuf::from("/run/udev/data"),
+            mountinfo_path: PathBuf::from("/proc/self/mountinfo"),
+            release_manifest_path: PathBuf::from("/run/punar/install/release.json"),
+            release_signature_path: PathBuf::from("/run/punar/install/release.json.sig"),
+            release_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
+            release_manifest_override: None,
+            architecture_override: None,
+            boot_platform_override: None,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum InstallError {
+    #[error("installer refused the request: {0}")]
+    Refused(String),
+    #[error("installer parameters are invalid: {0}")]
+    Invalid(String),
+    #[error("installer release verification failed: {0}")]
+    Trust(String),
+    #[error("installer discovery failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl InstallError {
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, Self::Refused(_) | Self::Invalid(_))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Installer {
+    sources: InstallerSources,
+}
+
+#[derive(Clone, Debug)]
+struct ObservedDisk {
+    target: InstallTarget,
+    protected: bool,
+}
+
+/// The install surface exists only when this exact UKI command-line token is
+/// present. Substrings and alternate values do not enable it.
+pub fn live_mode_from_cmdline(cmdline: &str) -> bool {
+    cmdline
+        .split_ascii_whitespace()
+        .any(|word| word == "punar.live=1")
+}
+
+impl Installer {
+    pub fn new(sources: InstallerSources) -> Self {
+        Self { sources }
+    }
+
+    pub fn targets(&self) -> Result<InstallTargetsResult, InstallError> {
+        let mut targets = self
+            .observe_disks()?
+            .into_iter()
+            .filter(|disk| !disk.protected)
+            .map(|disk| disk.target)
+            .collect::<Vec<_>>();
+        targets.sort_by(|a, b| a.device.cmp(&b.device));
+        Ok(InstallTargetsResult {
+            v: 1,
+            minimum_disk_bytes: minimum_disk_bytes(512),
+            targets,
+        })
+    }
+
+    pub fn plan(&self, params: &InstallPlanParams) -> Result<InstallPlanResult, InstallError> {
+        validate_answers(params)?;
+        let disks = self.observe_disks()?;
+        let observed = disks
+            .iter()
+            .find(|disk| disk.target.device == params.disk)
+            .ok_or_else(|| {
+                InstallError::Invalid(
+                    "disk must exactly match a device returned by install.targets".into(),
+                )
+            })?;
+        if observed.protected {
+            return Err(InstallError::Refused(
+                "the selected disk carries the live system or PUNAR_ANSWERS and cannot be erased"
+                    .into(),
+            ));
+        }
+        if !observed.target.eligible {
+            return Err(InstallError::Refused(
+                observed
+                    .target
+                    .ineligible_reason
+                    .clone()
+                    .unwrap_or_else(|| "the selected disk is not installable".into()),
+            ));
+        }
+
+        for disk in disks
+            .iter()
+            .filter(|disk| disk.target.device != params.disk)
+        {
+            if disk
+                .target
+                .partitions
+                .iter()
+                .any(|partition| partition.partuuid.as_deref().is_some_and(is_punar_partuuid))
+            {
+                return Err(InstallError::Refused(format!(
+                    "{} already carries a Punar partition; detach the other Punar disk before installing",
+                    disk.target.device
+                )));
+            }
+        }
+
+        let serial = observed.target.serial.clone().ok_or_else(|| {
+            InstallError::Refused(
+                "the selected disk exposes no stable serial number, so Punar cannot bind the confirmation to physical hardware"
+                    .into(),
+            )
+        })?;
+        let manifest = self.release_manifest()?;
+        let architecture = self.architecture();
+        let boot_platform = self.boot_platform();
+        if manifest.architecture != architecture || manifest.boot_platform != boot_platform {
+            return Err(InstallError::Trust(format!(
+                "signed release target is {}/{}, but this live environment is {}/{}",
+                manifest.architecture, manifest.boot_platform, architecture, boot_platform
+            )));
+        }
+
+        let disk_path = device_path(&self.sources.dev_root, &params.disk)?;
+        let existing_gpt_sha256 = gpt_edge_sha256(
+            &disk_path,
+            observed.target.size_bytes,
+            observed.target.logical_sector_bytes,
+        )?;
+        let (partitions, data_bytes) = partition_plan(
+            observed.target.size_bytes,
+            observed.target.logical_sector_bytes,
+            architecture,
+            params.encryption,
+        )?;
+
+        let mut warnings = Vec::new();
+        if observed.target.size_bytes < TARGET_DISK_BYTES {
+            warnings.push(
+                "This disk is below Punar's 128 GB minimum target. Punar will install, but this capacity has not completed bare-hardware qualification."
+                    .into(),
+            );
+        }
+        if observed.target.partitions.iter().any(|partition| {
+            partition.label.as_deref() == Some("PUNAR-DATA")
+                || partition.filesystem.as_deref() == Some("crypto_LUKS")
+        }) {
+            warnings.push(
+                "The selected disk already contains Punar data or encrypted data; installation destroys it and does not provide repair-mode preservation."
+                    .into(),
+            );
+        }
+        debug_assert!(data_bytes >= DATA_MINIMUM);
+
+        let plan = InstallPlan {
+            schema_version: 1,
+            architecture: architecture.to_string(),
+            boot_platform: boot_platform.to_string(),
+            disk: InstallDiskIdentity {
+                device: observed.target.device.clone(),
+                model: observed.target.model.clone(),
+                serial,
+                wwn: observed.target.wwn.clone(),
+                size_bytes: observed.target.size_bytes,
+                logical_sector_bytes: observed.target.logical_sector_bytes,
+                existing_gpt_sha256,
+            },
+            keymap: params.keymap.clone(),
+            encryption: params.encryption,
+            recovery_mode: params.recovery_mode,
+            payload: InstallPayloadPlan {
+                release_id: manifest.release_id,
+                filename: manifest.payload.filename,
+                digest_sha256: manifest.payload.digest_sha256,
+                compressed_size_bytes: manifest.payload.size_bytes,
+                uncompressed_size_bytes: manifest.payload.uncompressed_size_bytes,
+            },
+            partitions,
+            data_subvolumes: vec!["@var".into(), "@home".into(), "@var-tmp".into()],
+            warnings,
+        };
+        let plan_token = sha256_hex(
+            &canonical_json(&plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        Ok(InstallPlanResult {
+            v: 1,
+            plan,
+            plan_token,
+        })
+    }
+
+    fn architecture(&self) -> Architecture {
+        self.sources.architecture_override.unwrap_or_else(|| {
+            if std::env::consts::ARCH == "aarch64" {
+                Architecture::Aarch64
+            } else {
+                Architecture::X86_64
+            }
+        })
+    }
+
+    fn boot_platform(&self) -> BootPlatform {
+        self.sources
+            .boot_platform_override
+            .unwrap_or(BootPlatform::Uefi)
+    }
+
+    fn release_manifest(&self) -> Result<ReleaseManifest, InstallError> {
+        if let Some(manifest) = &self.sources.release_manifest_override {
+            manifest
+                .validate()
+                .map_err(|error| InstallError::Trust(error.to_string()))?;
+            return Ok(manifest.clone());
+        }
+        let document = fs::read(&self.sources.release_manifest_path)?;
+        let signature = fs::read(&self.sources.release_signature_path)?;
+        let keys = ReleaseKeySet::load_dir(&self.sources.release_keys_dir)
+            .map_err(|error| InstallError::Trust(error.to_string()))?;
+        verify_release_manifest(&document, &signature, &keys)
+            .map_err(|error| InstallError::Trust(error.to_string()))
+    }
+
+    fn observe_disks(&self) -> Result<Vec<ObservedDisk>, InstallError> {
+        let mounted = protected_block_devices(&self.sources)?;
+        let mut entries =
+            fs::read_dir(&self.sources.sys_class_block)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        let names = entries
+            .iter()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>();
+        let disk_names = names
+            .iter()
+            .filter(|name| {
+                !is_pseudo_disk(name)
+                    && !self
+                        .sources
+                        .sys_class_block
+                        .join(name)
+                        .join("partition")
+                        .exists()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut partitions_by_disk: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in &names {
+            if !self
+                .sources
+                .sys_class_block
+                .join(name)
+                .join("partition")
+                .exists()
+            {
+                continue;
+            }
+            if let Some(parent) = parent_disk(name, &disk_names) {
+                partitions_by_disk
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+
+        let mut disks = Vec::new();
+        for name in disk_names {
+            let root = self.sources.sys_class_block.join(&name);
+            let sectors = read_u64(root.join("size")).unwrap_or(0);
+            let logical_sector_bytes = read_u64(root.join("queue/logical_block_size"))
+                .filter(|value| valid_sector_size(*value))
+                .unwrap_or(512);
+            let size_bytes = sectors.checked_mul(512).unwrap_or(0);
+            let udev = udev_properties(&root, &self.sources.udev_data_root);
+            let dev_id = read_trimmed(root.join("dev"));
+            let read_only = read_u64(root.join("ro")).unwrap_or(1) != 0;
+            let removable = read_u64(root.join("removable")).unwrap_or(0) != 0;
+            let model = first_hardware_text([
+                read_trimmed(root.join("device/model")),
+                udev.get("ID_MODEL").cloned(),
+            ]);
+            let serial = first_hardware_text([
+                read_trimmed(root.join("device/serial")),
+                udev.get("ID_SERIAL_SHORT").cloned(),
+                udev.get("ID_SERIAL").cloned(),
+            ]);
+            let wwn = first_hardware_text([
+                read_trimmed(root.join("device/wwid")),
+                udev.get("ID_WWN").cloned(),
+            ]);
+
+            let mut partitions = Vec::new();
+            let mut protected = dev_id.as_ref().is_some_and(|id| mounted.contains(id));
+            for partition_name in partitions_by_disk.get(&name).into_iter().flatten() {
+                let partition_root = self.sources.sys_class_block.join(partition_name);
+                let partition_udev = udev_properties(&partition_root, &self.sources.udev_data_root);
+                let partition_dev_id = read_trimmed(partition_root.join("dev"));
+                protected |= partition_dev_id
+                    .as_ref()
+                    .is_some_and(|id| mounted.contains(id));
+                let label = partition_udev.get("ID_FS_LABEL").cloned();
+                protected |= label.as_deref() == Some(ANSWERS_LABEL);
+                partitions.push(InstallTargetPartition {
+                    number: read_u64(partition_root.join("partition")).unwrap_or(0) as u32,
+                    device: format!("/dev/{partition_name}"),
+                    start_bytes: read_u64(partition_root.join("start"))
+                        .and_then(|value| value.checked_mul(512))
+                        .unwrap_or(0),
+                    size_bytes: read_u64(partition_root.join("size"))
+                        .and_then(|value| value.checked_mul(512))
+                        .unwrap_or(0),
+                    filesystem: partition_udev.get("ID_FS_TYPE").cloned(),
+                    label,
+                    partuuid: partition_udev
+                        .get("ID_PART_ENTRY_UUID")
+                        .map(|value| value.to_ascii_lowercase()),
+                    type_guid: partition_udev
+                        .get("ID_PART_ENTRY_TYPE")
+                        .map(|value| value.to_ascii_lowercase()),
+                });
+            }
+            partitions.sort_by_key(|partition| partition.number);
+
+            let required = minimum_disk_bytes(logical_sector_bytes);
+            let ineligible_reason = if read_only {
+                Some("the disk is read-only".to_string())
+            } else if size_bytes < required {
+                Some(format!(
+                    "Punar needs 33 GiB plus partition metadata ({required} bytes), and this disk has {size_bytes} bytes. 17 GiB is the operating system and its rollback copy; 16 GiB is the floor for user data."
+                ))
+            } else {
+                None
+            };
+            disks.push(ObservedDisk {
+                target: InstallTarget {
+                    device: format!("/dev/{name}"),
+                    model,
+                    serial,
+                    wwn,
+                    size_bytes,
+                    logical_sector_bytes,
+                    removable,
+                    partition_table: udev.get("ID_PART_TABLE_TYPE").cloned(),
+                    eligible: ineligible_reason.is_none(),
+                    ineligible_reason,
+                    partitions,
+                },
+                protected,
+            });
+        }
+        Ok(disks)
+    }
+}
+
+fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
+    if params.keymap.is_empty()
+        || params.keymap.len() > 64
+        || !params
+            .keymap
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_+-".contains(&byte))
+    {
+        return Err(InstallError::Invalid(
+            "keymap must be one 1–64 character XKB token".into(),
+        ));
+    }
+    match (params.encryption, params.recovery_mode) {
+        (InstallEncryption::None, InstallRecoveryMode::None)
+        | (InstallEncryption::Luks2, InstallRecoveryMode::PersonalCopy)
+        | (InstallEncryption::Luks2, InstallRecoveryMode::OrganizationEscrow) => Ok(()),
+        (InstallEncryption::None, _) => Err(InstallError::Invalid(
+            "an unencrypted plan cannot create or escrow an encryption recovery key".into(),
+        )),
+        (InstallEncryption::Luks2, InstallRecoveryMode::None) => Err(InstallError::Invalid(
+            "an encrypted plan requires personal_copy or organization_escrow recovery".into(),
+        )),
+    }
+}
+
+fn partition_plan(
+    disk_bytes: u64,
+    sector_bytes: u64,
+    architecture: Architecture,
+    encryption: InstallEncryption,
+) -> Result<(Vec<InstallPartitionPlan>, u64), InstallError> {
+    if !valid_sector_size(sector_bytes) {
+        return Err(InstallError::Invalid(
+            "the disk logical-sector size is unsupported".into(),
+        ));
+    }
+    let first = align_up(GPT_LBAS * sector_bytes, ALIGNMENT)
+        .ok_or_else(|| InstallError::Invalid("disk geometry overflow".into()))?;
+    let usable_end = disk_bytes
+        .checked_sub(GPT_LBAS * sector_bytes)
+        .map(|value| align_down(value, ALIGNMENT))
+        .ok_or_else(|| InstallError::Refused("disk is too small for a GPT".into()))?;
+    let root_a = first + ESP_SIZE;
+    let root_b = root_a + ROOT_SIZE;
+    let data = root_b + ROOT_SIZE;
+    let data_size = usable_end.checked_sub(data).ok_or_else(|| {
+        InstallError::Refused("disk is too small for Punar's fixed A/B layout".into())
+    })?;
+    if data_size < DATA_MINIMUM {
+        return Err(InstallError::Refused(format!(
+            "Punar needs 33 GiB plus partition metadata ({} bytes), and this disk has {disk_bytes} bytes. 17 GiB is the operating system and its rollback copy; 16 GiB is the floor for user data.",
+            minimum_disk_bytes(sector_bytes)
+        )));
+    }
+    let root_type = match architecture {
+        Architecture::X86_64 => X86_ROOT_TYPE_GUID,
+        Architecture::Aarch64 => ARM_ROOT_TYPE_GUID,
+    };
+    Ok((
+        vec![
+            partition(
+                1,
+                "PUNAR-ESP",
+                ESP_TYPE_GUID,
+                ESP_PARTUUID,
+                first,
+                ESP_SIZE,
+                Some("vfat"),
+                false,
+            ),
+            partition(
+                2,
+                "PUNAR-ROOT-A",
+                root_type,
+                ROOT_A_PARTUUID,
+                root_a,
+                ROOT_SIZE,
+                Some("ext4"),
+                false,
+            ),
+            partition(
+                3,
+                "PUNAR-ROOT-B",
+                root_type,
+                ROOT_B_PARTUUID,
+                root_b,
+                ROOT_SIZE,
+                None,
+                false,
+            ),
+            partition(
+                4,
+                "PUNAR-DATA",
+                DATA_TYPE_GUID,
+                DATA_PARTUUID,
+                data,
+                data_size,
+                Some("btrfs"),
+                encryption == InstallEncryption::Luks2,
+            ),
+        ],
+        data_size,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn partition(
+    number: u32,
+    name: &str,
+    type_guid: &str,
+    partuuid: &str,
+    offset_bytes: u64,
+    size_bytes: u64,
+    filesystem: Option<&str>,
+    encrypted: bool,
+) -> InstallPartitionPlan {
+    InstallPartitionPlan {
+        number,
+        name: name.into(),
+        type_guid: type_guid.into(),
+        partuuid: partuuid.into(),
+        offset_bytes,
+        size_bytes,
+        filesystem: filesystem.map(str::to_string),
+        encrypted,
+    }
+}
+
+fn minimum_disk_bytes(sector_bytes: u64) -> u64 {
+    let start = align_up(GPT_LBAS * sector_bytes, ALIGNMENT).unwrap_or(ALIGNMENT);
+    start.saturating_add(ESP_SIZE + 2 * ROOT_SIZE + DATA_MINIMUM + GPT_LBAS * sector_bytes)
+}
+
+fn align_up(value: u64, alignment: u64) -> Option<u64> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value / alignment * alignment)
+}
+
+fn align_down(value: u64, alignment: u64) -> u64 {
+    value / alignment * alignment
+}
+
+fn valid_sector_size(value: u64) -> bool {
+    (512..=65_536).contains(&value) && value.is_power_of_two()
+}
+
+fn is_punar_partuuid(value: &str) -> bool {
+    PUNAR_PARTUUIDS
+        .iter()
+        .any(|expected| value.eq_ignore_ascii_case(expected))
+}
+
+fn is_pseudo_disk(name: &str) -> bool {
+    ["loop", "ram", "zram", "dm-", "md", "sr", "fd"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+fn parent_disk<'a>(partition: &str, disks: &'a [String]) -> Option<&'a str> {
+    disks
+        .iter()
+        .filter(|disk| partition.starts_with(disk.as_str()))
+        .filter(|disk| {
+            let suffix = &partition[disk.len()..];
+            (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+                || (suffix.starts_with('p')
+                    && suffix.len() > 1
+                    && suffix[1..].bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .max_by_key(|disk| disk.len())
+        .map(String::as_str)
+}
+
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_u64(path: impl AsRef<Path>) -> Option<u64> {
+    read_trimmed(path)?.parse().ok()
+}
+
+fn first_hardware_text<const N: usize>(values: [Option<String>; N]) -> Option<String> {
+    values.into_iter().flatten().find(|value| {
+        !value.is_empty()
+            && value.len() <= 256
+            && !value.chars().any(|character| character.is_control())
+    })
+}
+
+fn udev_properties(sys_root: &Path, udev_data_root: &Path) -> BTreeMap<String, String> {
+    let Some(dev) = read_trimmed(sys_root.join("dev")) else {
+        return BTreeMap::new();
+    };
+    let Ok(content) = fs::read_to_string(udev_data_root.join(format!("b{dev}"))) else {
+        return BTreeMap::new();
+    };
+    content
+        .lines()
+        .filter_map(|line| line.strip_prefix("E:"))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct MountRecord {
+    device: String,
+    mount_point: String,
+}
+
+fn mount_records(path: &Path) -> Result<Vec<MountRecord>, std::io::Error> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(content
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let device = fields.nth(2)?;
+            let mount_point = fields.nth(1)?;
+            let mut parts = device.split(':');
+            let valid =
+            matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if a.bytes().all(|v| v.is_ascii_digit()) && b.bytes().all(|v| v.is_ascii_digit()))
+            ;
+            valid.then(|| MountRecord {
+                device: device.to_string(),
+                mount_point: unescape_mountinfo(mount_point),
+            })
+        })
+        .collect())
+}
+
+/// Protect direct mounts and their block ancestry. A live EROFS commonly
+/// mounts through dm-verity or a loop whose backing file lives on the USB
+/// partition; offering only the top pseudo device would still expose the
+/// physical medium. This closure walks `slaves/` and loop backing-file mount
+/// ownership until no new major:minor id appears.
+fn protected_block_devices(sources: &InstallerSources) -> Result<BTreeSet<String>, std::io::Error> {
+    let mounts = mount_records(&sources.mountinfo_path)?;
+    let mut protected = mounts
+        .iter()
+        .map(|record| record.device.clone())
+        .collect::<BTreeSet<_>>();
+    let entries = fs::read_dir(&sources.sys_class_block)?.collect::<Result<Vec<_>, _>>()?;
+    loop {
+        let mut changed = false;
+        for entry in &entries {
+            let root = entry.path();
+            let Some(device) = read_trimmed(root.join("dev")) else {
+                continue;
+            };
+            if !protected.contains(&device) {
+                continue;
+            }
+            if let Ok(slaves) = fs::read_dir(root.join("slaves")) {
+                for slave in slaves.flatten() {
+                    if let Some(slave_device) =
+                        read_trimmed(sources.sys_class_block.join(slave.file_name()).join("dev"))
+                    {
+                        changed |= protected.insert(slave_device);
+                    }
+                }
+            }
+            if entry.file_name().to_string_lossy().starts_with("loop") {
+                if let Some(backing_file) = read_trimmed(root.join("loop/backing_file")) {
+                    let backing_file = if backing_file.starts_with('/') {
+                        backing_file
+                    } else {
+                        format!("/{backing_file}")
+                    };
+                    if let Some(owner) = mounts
+                        .iter()
+                        .filter(|record| path_belongs_to(&backing_file, &record.mount_point))
+                        .max_by_key(|record| record.mount_point.len())
+                    {
+                        changed |= protected.insert(owner.device.clone());
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(protected)
+}
+
+fn path_belongs_to(path: &str, mount_point: &str) -> bool {
+    mount_point == "/"
+        || path == mount_point
+        || path
+            .strip_prefix(mount_point)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn unescape_mountinfo(value: &str) -> String {
+    value
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+fn device_path(dev_root: &Path, device: &str) -> Result<PathBuf, InstallError> {
+    let name = device.strip_prefix("/dev/").ok_or_else(|| {
+        InstallError::Invalid("disk must be the /dev node returned by install.targets".into())
+    })?;
+    if name.is_empty()
+        || name.contains('/')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(InstallError::Invalid(
+            "disk contains an invalid device-node name".into(),
+        ));
+    }
+    Ok(dev_root.join(name))
+}
+
+fn gpt_edge_sha256(
+    path: &Path,
+    size_bytes: u64,
+    sector_bytes: u64,
+) -> Result<String, InstallError> {
+    if !valid_sector_size(sector_bytes) {
+        return Err(InstallError::Invalid(
+            "the disk logical-sector size is unsupported".into(),
+        ));
+    }
+    let edge_bytes = GPT_LBAS
+        .checked_mul(sector_bytes)
+        .ok_or_else(|| InstallError::Invalid("disk geometry overflow".into()))?;
+    if size_bytes < edge_bytes * 2 {
+        return Err(InstallError::Refused(
+            "disk is too small for GPT metadata".into(),
+        ));
+    }
+    let mut file = File::open(path)?;
+    let mut edges = vec![0_u8; (edge_bytes * 2) as usize];
+    file.read_exact(&mut edges[..edge_bytes as usize])?;
+    file.seek(SeekFrom::Start(size_bytes - edge_bytes))?;
+    file.read_exact(&mut edges[edge_bytes as usize..])?;
+    Ok(sha256_hex(&edges))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+        sources: InstallerSources,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "punar-install-test-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::SeqCst)
+            ));
+            let sys = root.join("sys");
+            let dev = root.join("dev");
+            let udev = root.join("udev");
+            fs::create_dir_all(&sys).unwrap();
+            fs::create_dir_all(&dev).unwrap();
+            fs::create_dir_all(&udev).unwrap();
+            let mountinfo = root.join("mountinfo");
+            fs::write(&mountinfo, "").unwrap();
+            let mut manifest: ReleaseManifest = serde_json::from_str(include_str!(
+                "../../../fixtures/update/valid/release-manifest.json"
+            ))
+            .unwrap();
+            manifest.architecture = Architecture::X86_64;
+            manifest.boot_platform = BootPlatform::Uefi;
+            manifest.release_id = format!(
+                "{}-{}-{}-{}-{}",
+                manifest.image_id,
+                manifest.channel,
+                manifest.architecture,
+                manifest.boot_platform,
+                manifest.version
+            );
+            Self {
+                root,
+                sources: InstallerSources {
+                    sys_class_block: sys,
+                    dev_root: dev,
+                    udev_data_root: udev,
+                    mountinfo_path: mountinfo,
+                    release_manifest_override: Some(manifest),
+                    architecture_override: Some(Architecture::X86_64),
+                    boot_platform_override: Some(BootPlatform::Uefi),
+                    ..InstallerSources::default()
+                },
+            }
+        }
+
+        fn add_disk(&self, name: &str, major: u32, size_bytes: u64, serial: &str) {
+            let sys = self.sources.sys_class_block.join(name);
+            fs::create_dir_all(sys.join("queue")).unwrap();
+            fs::create_dir_all(sys.join("device")).unwrap();
+            fs::write(sys.join("size"), format!("{}\n", size_bytes / 512)).unwrap();
+            fs::write(sys.join("queue/logical_block_size"), "512\n").unwrap();
+            fs::write(sys.join("dev"), format!("{major}:0\n")).unwrap();
+            fs::write(sys.join("ro"), "0\n").unwrap();
+            fs::write(sys.join("removable"), "0\n").unwrap();
+            fs::write(sys.join("device/model"), "Punar Test Disk\n").unwrap();
+            fs::write(sys.join("device/serial"), format!("{serial}\n")).unwrap();
+            fs::write(
+                self.sources.udev_data_root.join(format!("b{major}:0")),
+                "E:ID_PART_TABLE_TYPE=gpt\n",
+            )
+            .unwrap();
+            let disk = File::create(self.sources.dev_root.join(name)).unwrap();
+            disk.set_len(size_bytes).unwrap();
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn add_partition(
+            &self,
+            disk: &str,
+            number: u32,
+            major: u32,
+            minor: u32,
+            label: Option<&str>,
+            partuuid: Option<&str>,
+            filesystem: Option<&str>,
+        ) {
+            let separator = if disk.as_bytes().last().is_some_and(u8::is_ascii_digit) {
+                "p"
+            } else {
+                ""
+            };
+            let name = format!("{disk}{separator}{number}");
+            let sys = self.sources.sys_class_block.join(&name);
+            fs::create_dir_all(&sys).unwrap();
+            fs::write(sys.join("partition"), format!("{number}\n")).unwrap();
+            fs::write(sys.join("start"), "2048\n").unwrap();
+            fs::write(sys.join("size"), "2048\n").unwrap();
+            fs::write(sys.join("dev"), format!("{major}:{minor}\n")).unwrap();
+            let mut properties = String::new();
+            if let Some(label) = label {
+                properties.push_str(&format!("E:ID_FS_LABEL={label}\n"));
+            }
+            if let Some(uuid) = partuuid {
+                properties.push_str(&format!("E:ID_PART_ENTRY_UUID={uuid}\n"));
+            }
+            if let Some(filesystem) = filesystem {
+                properties.push_str(&format!("E:ID_FS_TYPE={filesystem}\n"));
+            }
+            fs::write(
+                self.sources
+                    .udev_data_root
+                    .join(format!("b{major}:{minor}")),
+                properties,
+            )
+            .unwrap();
+        }
+
+        fn installer(&self) -> Installer {
+            Installer::new(self.sources.clone())
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn encrypted_params(disk: &str) -> InstallPlanParams {
+        InstallPlanParams {
+            disk: disk.into(),
+            keymap: "us".into(),
+            encryption: InstallEncryption::Luks2,
+            recovery_mode: InstallRecoveryMode::PersonalCopy,
+        }
+    }
+
+    #[test]
+    fn partition_parenting_handles_sd_nvme_and_mmc_names() {
+        let disks = vec![
+            "sda".into(),
+            "sdaa".into(),
+            "nvme0n1".into(),
+            "mmcblk0".into(),
+        ];
+        assert_eq!(parent_disk("sda1", &disks), Some("sda"));
+        assert_eq!(parent_disk("sdaa2", &disks), Some("sdaa"));
+        assert_eq!(parent_disk("nvme0n1p3", &disks), Some("nvme0n1"));
+        assert_eq!(parent_disk("mmcblk0p4", &disks), Some("mmcblk0"));
+    }
+
+    #[test]
+    fn exact_layout_is_aligned_and_keeps_the_data_floor() {
+        let size = 128_000_000_000;
+        let (partitions, data) =
+            partition_plan(size, 512, Architecture::X86_64, InstallEncryption::Luks2).unwrap();
+        assert_eq!(partitions.len(), 4);
+        assert!(
+            partitions
+                .iter()
+                .all(|part| part.offset_bytes % ALIGNMENT == 0)
+        );
+        assert!(data >= DATA_MINIMUM);
+        assert_eq!(partitions[1].type_guid, X86_ROOT_TYPE_GUID);
+        assert!(partitions[3].encrypted);
+    }
+
+    #[test]
+    fn minimum_layout_refuses_one_byte_too_small() {
+        let minimum = minimum_disk_bytes(512);
+        assert!(
+            partition_plan(
+                minimum - 1,
+                512,
+                Architecture::Aarch64,
+                InstallEncryption::None
+            )
+            .is_err()
+        );
+        let (parts, _) =
+            partition_plan(minimum, 512, Architecture::Aarch64, InstallEncryption::None).unwrap();
+        assert_eq!(parts[1].type_guid, ARM_ROOT_TYPE_GUID);
+    }
+
+    #[test]
+    fn invalid_encryption_recovery_combinations_are_refused() {
+        let params = InstallPlanParams {
+            disk: "/dev/vda".into(),
+            keymap: "us".into(),
+            encryption: InstallEncryption::None,
+            recovery_mode: InstallRecoveryMode::PersonalCopy,
+        };
+        assert!(validate_answers(&params).is_err());
+    }
+
+    #[test]
+    fn live_mode_requires_the_exact_kernel_token() {
+        assert!(live_mode_from_cmdline("quiet punar.live=1 console=ttyS0"));
+        for value in ["", "punar.live=0", "xpunar.live=1", "punar.live=1x"] {
+            assert!(!live_mode_from_cmdline(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn targets_exclude_boot_and_answer_media_but_report_small_disks() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        fixture.add_disk("vdb", 253, 64 * 1024 * 1024, "LIVE-MEDIA");
+        fixture.add_partition("vdb", 1, 253, 1, Some("PUNAR_INSTALL"), None, Some("vfat"));
+        let dm = fixture.sources.sys_class_block.join("dm-0");
+        fs::create_dir_all(dm.join("slaves/vdb1")).unwrap();
+        fs::write(dm.join("dev"), "240:0\n").unwrap();
+        fs::write(dm.join("size"), "2048\n").unwrap();
+        fixture.add_disk("vdc", 254, 64 * 1024 * 1024, "ANSWERS");
+        fixture.add_partition("vdc", 1, 254, 1, Some(ANSWERS_LABEL), None, Some("vfat"));
+        fixture.add_disk("vdd", 255, 20 * GIB, "TOO-SMALL");
+        fs::write(
+            &fixture.sources.mountinfo_path,
+            "24 1 240:0 / /run/live rw - erofs /dev/dm-0 rw\n",
+        )
+        .unwrap();
+
+        let result = fixture.installer().targets().unwrap();
+        let devices = result
+            .targets
+            .iter()
+            .map(|target| target.device.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(devices, ["/dev/vda", "/dev/vdd"]);
+        assert!(result.targets[0].eligible);
+        assert!(!result.targets[1].eligible);
+        assert!(
+            result.targets[1]
+                .ineligible_reason
+                .as_deref()
+                .unwrap()
+                .contains("17 GiB")
+        );
+    }
+
+    #[test]
+    fn plan_token_binds_both_gpt_edges_and_the_full_plan() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let installer = fixture.installer();
+        let first = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        assert_eq!(
+            first.plan_token,
+            sha256_hex(&canonical_json(&first.plan).unwrap())
+        );
+        assert_eq!(first.plan.partitions.len(), 4);
+        assert_eq!(first.plan.disk.serial, "TARGET-128G");
+
+        let mut disk = File::options()
+            .write(true)
+            .open(fixture.sources.dev_root.join("vda"))
+            .unwrap();
+        disk.seek(SeekFrom::End(-1)).unwrap();
+        disk.write_all(&[0x5a]).unwrap();
+        drop(disk);
+        let changed = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        assert_ne!(
+            first.plan.disk.existing_gpt_sha256,
+            changed.plan.disk.existing_gpt_sha256
+        );
+        assert_ne!(first.plan_token, changed.plan_token);
+    }
+
+    #[test]
+    fn foreign_punar_disk_is_refused_but_target_reinstall_is_allowed() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        fixture.add_disk("vdb", 253, 128_000_000_000, "OTHER-128G");
+        fixture.add_partition(
+            "vdb",
+            1,
+            253,
+            1,
+            Some("PUNAR-ESP"),
+            Some(ESP_PARTUUID),
+            Some("vfat"),
+        );
+        let error = fixture
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap_err();
+        assert!(error.to_string().contains("/dev/vdb"));
+
+        let reinstall = Fixture::new();
+        reinstall.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        reinstall.add_partition(
+            "vda",
+            4,
+            252,
+            4,
+            Some("PUNAR-DATA"),
+            Some(DATA_PARTUUID),
+            Some("crypto_LUKS"),
+        );
+        let result = reinstall
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap();
+        assert!(
+            result
+                .plan
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("already contains"))
+        );
+    }
+}

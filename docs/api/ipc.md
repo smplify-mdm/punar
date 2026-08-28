@@ -206,6 +206,8 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.list` | any connected peer | no | no |
 | `apps.install` | **human, personal device only** | yes | always |
 | `apps.remove` | **human, personal device only** | yes | always |
+| `install.targets` | any connected peer, **live environment only** | no | no |
+| `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -655,6 +657,60 @@ catalog, removal is fixed-argv and absence is verified. Audit action is
 `system.remove_package`; web sources have no local package and return
 `conflict` rather than pretending to remove browser data.
 
+### 5.16 `install.targets`
+
+Params: none. Read-only and not audited. This method exists only when the
+daemon read the exact `punar.live=1` token from `/proc/cmdline`; an installed
+system returns `unknown_method` with `details.mode: "installed"`.
+
+The result enumerates physical candidate disks from `/sys/class/block`, with
+model, serial, WWN when present, byte size, logical-sector size, partition
+table and observed partitions/filesystems. A disk below the real 33 GiB plus
+GPT/alignment floor remains visible with `eligible: false` and the full
+17 GiB OS + 16 GiB data-floor arithmetic. The following never appear:
+
+- any disk or partition backing a current mount (the live boot medium);
+- any disk carrying a filesystem labelled `PUNAR_ANSWERS`;
+- loop, ram, zram, device-mapper, md, optical and floppy pseudo targets.
+
+The implementation is discovery only. It opens no target device for writing.
+
+### 5.17 `install.plan`
+
+Strict params:
+
+```json
+{"disk":"/dev/vda","keymap":"us","encryption":"luks2",
+ "recovery_mode":"personal_copy"}
+```
+
+`disk` must exactly match a device returned by `install.targets`; it is not an
+arbitrary filesystem path. `encryption` is `luks2` or `none`.
+`recovery_mode` is `personal_copy`, `organization_escrow`, or `none`, with
+strict valid combinations (encrypted installs require a recovery lane;
+unencrypted installs cannot claim one).
+
+Root-only, non-mutating, and audited as `action: "install.plan"`,
+`resource: "system_disk"`. Before returning a plan, punard:
+
+1. re-observes every disk and refuses protected targets;
+2. refuses a Punar PARTUUID on a *different* disk while allowing the selected
+   disk to carry one for a legitimate reinstall;
+3. verifies the exact release-manifest bytes against a trusted Ed25519 release
+   key and requires its architecture/boot platform to match the live image;
+4. reads the first and last 34 logical sectors and binds their SHA-256, the
+   serial, optional WWN, size and device node inside the plan;
+5. returns the four fixed partitions, byte offsets/sizes, filesystems,
+   encryption decision, data subvolumes and signed payload digest.
+
+The response validates against `schemas/install/plan.json`. `plan_token` is
+SHA-256 over compact, recursively key-sorted JSON of the nested `plan` object
+(the `jq -cS` JSON bytes, excluding jq's trailing newline). A change to either
+GPT edge or any plan field changes
+the token. The future `install.apply` must re-read the bound identity before
+its first write; **that mutating method is not implemented in this slice**.
+There is no `install.exec`, script, hook or caller-supplied command/path.
+
 ## 6. Audit contract (spec section 53)
 
 - File: `/var/log/punar/audit.jsonl` — one `AuditEvent` JSON object per line,
@@ -713,6 +769,12 @@ catalog, removal is fixed-argv and absence is verified. Audit action is
   `"unreachable"` joins the open `result` string set — no schema change.
   The device token is `Redacted` by type: no audit event can contain it.
   Read methods (`enroll.status`) remain unaudited.
+- **Installer planning addition:** `install.plan` is audited even though it
+  is read-only, because it is the first attributable step of a destructive
+  workflow. Its resource is `system_disk`; success is `success`, a safety or
+  validation refusal is `refused`, and discovery/trust I/O is `failure`.
+  `install.targets` remains unaudited. Neither event shape can carry a
+  passphrase, recovery key, partition bytes, or arbitrary caller payload.
 - **Honest attribution limit (M4):** reconcile runs triggered by
   `punard-reconcile.timer` arrive through `punarctl` as uid 0, so their
   events carry `user_id: "root"`, `source: "human"` — the daemon sees only

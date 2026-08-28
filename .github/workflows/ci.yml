@@ -370,7 +370,10 @@ jobs:
   arm64-image:
     name: arm64-image (native build + desktop M2..M10 gate)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 135
+    # ARM runners do not consistently expose KVM. The full 6-surface x
+    # 3-sample Quickshell cost instrument takes ~38 minutes under TCG before
+    # M2..M10; leave enough job headroom to upload failure evidence too.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 

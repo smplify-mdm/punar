@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/install/plan.json",
+  "title": "Punar installation plan result",
+  "description": "The complete, disk-bound result of install.plan. plan_token is SHA-256 over compact recursively key-sorted JSON of the nested plan object (the jq -cS JSON bytes excluding jq's trailing newline).",
+  "type": "object",
+  "required": ["v", "plan", "plan_token"],
+  "properties": {
+    "v": { "const": 1 },
+    "plan": { "$ref": "#/$defs/plan" },
+    "plan_token": { "$ref": "#/$defs/digest" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "device": {
+      "type": "string",
+      "pattern": "^/dev/[A-Za-z0-9._-]+$",
+      "maxLength": 128
+    },
+    "plan": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "architecture",
+        "boot_platform",
+        "disk",
+        "keymap",
+        "encryption",
+        "recovery_mode",
+        "payload",
+        "partitions",
+        "data_subvolumes",
+        "warnings"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "architecture": { "enum": ["x86_64", "aarch64"] },
+        "boot_platform": { "enum": ["uefi", "raspberry_pi"] },
+        "disk": { "$ref": "#/$defs/disk" },
+        "keymap": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_+\\-]+$"
+        },
+        "encryption": { "enum": ["luks2", "none"] },
+        "recovery_mode": {
+          "enum": ["personal_copy", "organization_escrow", "none"]
+        },
+        "payload": { "$ref": "#/$defs/payload" },
+        "partitions": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/partition" }
+        },
+        "data_subvolumes": {
+          "const": ["@var", "@home", "@var-tmp"]
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "disk": {
+      "type": "object",
+      "required": [
+        "device",
+        "serial",
+        "size_bytes",
+        "logical_sector_bytes",
+        "existing_gpt_sha256"
+      ],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "serial": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "wwn": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "size_bytes": { "type": "integer", "minimum": 35434546176 },
+        "logical_sector_bytes": {
+          "enum": [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+        },
+        "existing_gpt_sha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "release_id",
+        "filename",
+        "digest_sha256",
+        "compressed_size_bytes",
+        "uncompressed_size_bytes"
+      ],
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 192,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "digest_sha256": { "$ref": "#/$defs/digest" },
+        "compressed_size_bytes": { "type": "integer", "minimum": 1 },
+        "uncompressed_size_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "partition": {
+      "type": "object",
+      "required": [
+        "number",
+        "name",
+        "type_guid",
+        "partuuid",
+        "offset_bytes",
+        "size_bytes",
+        "encrypted"
+      ],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "name": {
+          "enum": ["PUNAR-ESP", "PUNAR-ROOT-A", "PUNAR-ROOT-B", "PUNAR-DATA"]
+        },
+        "type_guid": { "$ref": "#/$defs/uuid" },
+        "partuuid": { "$ref": "#/$defs/uuid" },
+        "offset_bytes": { "type": "integer", "minimum": 1048576 },
+        "size_bytes": { "type": "integer", "minimum": 1073741824 },
+        "filesystem": { "enum": ["vfat", "ext4", "btrfs"] },
+        "encrypted": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -10,10 +10,13 @@ Description=Punar isolated shell-surface construction and PSS measurement (CI)
 [Service]
 Type=oneshot
 User=punar
-# 5 surfaces x 3 fresh processes. Each healthy KVM sample takes ~8 s; the
-# generous bound covers cold QML compilation and the 45 s openlayer failure
-# path without letting a broken probe hold the full desktop gate forever.
-TimeoutStartSec=15min
+# 6 surfaces x 3 fresh processes. Each healthy KVM sample takes ~8 s, but
+# AArch64 TCG takes roughly two minutes per fresh Quickshell process. The
+# previous 15-minute bound killed a healthy native-ARM image midway through
+# sample 8/18 when GitHub's ARM runner exposed no KVM device. Forty-five
+# minutes covers the observed ~38-minute emulated path plus cold-QML slack,
+# while every individual readiness/open/close wait remains tightly bounded.
+TimeoutStartSec=45min
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/lib/punar/surface-cost-check.sh

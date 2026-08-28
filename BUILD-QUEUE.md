@@ -307,6 +307,19 @@ which removes the disk-layout prerequisite but does not make it an installer.
 The missing installer blocks hardware testing, which blocks 9 of the
 `user-blocked.md` items.
 
+The first headless installer slice is now implemented and locally verified on
+both ARM64 and x86_64: `install.targets` is live-mode-only read discovery, and
+`install.plan` is a root-only, audited, non-mutating plan bound to the disk
+serial, optional WWN, byte size and SHA-256 of its first/last 34 LBAs. The plan
+contains the complete four-partition x86_64 or ARM64 layout and signed payload
+identity; its recursively canonical JSON token changes when either GPT edge or
+any field changes. Tests cover dm-backed boot-media exclusion, the answer-disk
+exclusion, the 33 GiB arithmetic, reinstall-on-target versus foreign-Punar
+refusal, strict live-mode gating, root authorization and audit outcomes. The
+result schema is `schemas/install/plan.json`. This remains deliberately unable
+to write a byte: `install.apply`, recovery-key wiring, ISO assembly and the
+unattended VM install lane are still next.
+
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
 typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that
@@ -328,8 +341,10 @@ AI, and updates belong after the usable desktop. The backend still owes a
 transactional account create, password secrecy, a real greeter/logout/login
 loop, A/B persistence, negative scans, and rollback-on-failure proof.
 
-**Known defect already found in the design:** `install.targets` excluded the
-boot medium but **not** the answers disk — a data-loss hazard. Check it.
+**Closed design defect:** `install.targets` now excludes both the mounted live
+medium (including block-device `slaves/` ancestry) and every device carrying
+`PUNAR_ANSWERS`. The fake-sysfs test exercises both directions; keep it when
+the ISO lane adds real media.
 
 ### 6.2 `punarctl app`, Flatpak, and the Chrome command
 `docs/design/third-party-apps.md`, `app-catalog.md`.

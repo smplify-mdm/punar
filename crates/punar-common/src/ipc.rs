@@ -50,6 +50,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::install::InstallPlanParams;
 use thiserror::Error;
 
 use crate::approval::{
@@ -773,11 +775,17 @@ pub enum Method {
     /// `apps.remove` — remove the native package for one catalog id. Human
     /// only and always audited.
     AppsRemove(AppsRemoveParams),
+    /// `install.targets` — live-environment disk discovery. Read-only; the
+    /// daemon makes it `unknown_method` on an installed system.
+    InstallTargets,
+    /// `install.plan` — root-only, live-only and audited. It computes a
+    /// disk-bound plan but cannot write a byte.
+    InstallPlan(InstallPlanParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 23] = [
+    pub const NAMES: [&'static str; 25] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -801,6 +809,8 @@ impl Method {
         "apps.list",
         "apps.install",
         "apps.remove",
+        "install.targets",
+        "install.plan",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -830,6 +840,8 @@ impl Method {
             Method::AppsList => "apps.list",
             Method::AppsInstall(_) => "apps.install",
             Method::AppsRemove(_) => "apps.remove",
+            Method::InstallTargets => "install.targets",
+            Method::InstallPlan(_) => "install.plan",
         }
     }
 
@@ -879,6 +891,8 @@ impl Method {
             | Method::AppsList
             | Method::AppsInstall(_)
             | Method::AppsRemove(_) => false,
+            Method::InstallTargets => false,
+            Method::InstallPlan(_) => true,
         }
     }
 
@@ -893,7 +907,8 @@ impl Method {
             | Method::EnrollStop
             | Method::ApprovalsList
             | Method::PrivilegeStatus
-            | Method::AppsList => return None,
+            | Method::AppsList
+            | Method::InstallTargets => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
@@ -907,6 +922,7 @@ impl Method {
             Method::AppsCatalog(p) => serde_json::to_value(p),
             Method::AppsInstall(p) => serde_json::to_value(p),
             Method::AppsRemove(p) => serde_json::to_value(p),
+            Method::InstallPlan(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -972,6 +988,10 @@ impl Method {
             "apps.list" => Self::expect_no_params(method, params).map(|()| Method::AppsList),
             "apps.install" => Self::parse_required_params(method, params).map(Method::AppsInstall),
             "apps.remove" => Self::parse_required_params(method, params).map(Method::AppsRemove),
+            "install.targets" => {
+                Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
+            }
+            "install.plan" => Self::parse_required_params(method, params).map(Method::InstallPlan),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -1973,6 +1993,13 @@ mod tests {
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
             }),
+            Method::InstallTargets,
+            Method::InstallPlan(InstallPlanParams {
+                disk: "/dev/vda".to_string(),
+                keymap: "us".to_string(),
+                encryption: crate::install::InstallEncryption::Luks2,
+                recovery_mode: crate::install::InstallRecoveryMode::PersonalCopy,
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -2020,6 +2047,7 @@ mod tests {
                     // `Method::requires_root`).
                     | "approvals.create"
                     | "approvals.consume"
+                    | "install.plan"
             );
             assert_eq!(method.requires_root(), expected, "{}", method.name());
         }
@@ -2142,7 +2170,13 @@ mod tests {
 
     #[test]
     fn no_params_methods_accept_absent_or_empty_params_only() {
-        for method in ["status", "capabilities.list", "reconcile", "apps.list"] {
+        for method in [
+            "status",
+            "capabilities.list",
+            "reconcile",
+            "apps.list",
+            "install.targets",
+        ] {
             let ok =
                 Request::parse_json_line(&format!(r#"{{"v":1,"id":"1","method":"{method}"}}"#))
                     .unwrap();
@@ -2176,6 +2210,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn install_plan_params_carry_no_executable_or_layout_fields() {
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"install.plan","params":{"disk":"/dev/vda","keymap":"us","encryption":"luks2","recovery_mode":"personal_copy"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::InstallPlan(InstallPlanParams { disk, keymap, .. })
+                if disk == "/dev/vda" && keymap == "us"
+        ));
+        for forbidden in ["command", "script", "hook", "offset_bytes"] {
+            let line = format!(
+                r#"{{"v":1,"id":"1","method":"install.plan","params":{{"disk":"/dev/vda","keymap":"us","encryption":"luks2","recovery_mode":"personal_copy","{forbidden}":"evil"}}}}"#
+            );
+            let reject = Request::parse_json_line(&line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
+        }
     }
 
     #[test]

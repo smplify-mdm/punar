@@ -71,6 +71,7 @@ mod capability;
 mod decision;
 mod descriptor;
 pub mod device;
+pub mod install;
 pub mod ipc;
 pub mod ledger;
 pub mod principal;

@@ -221,6 +221,22 @@ const AUDIT_REQUIRED_KEYS: [&str; 12] = [
     "result",
 ];
 
+fn configure_empty_live_installer(cfg: &mut DaemonConfig, dir: &Path) {
+    let block = dir.join("sys-block");
+    let devices = dir.join("dev-block");
+    let udev = dir.join("udev-data");
+    fs::create_dir_all(&block).unwrap();
+    fs::create_dir_all(&devices).unwrap();
+    fs::create_dir_all(&udev).unwrap();
+    let mountinfo = dir.join("mountinfo");
+    fs::write(&mountinfo, "").unwrap();
+    cfg.live_mode = true;
+    cfg.installer_sources.sys_class_block = block;
+    cfg.installer_sources.dev_root = devices;
+    cfg.installer_sources.udev_data_root = udev;
+    cfg.installer_sources.mountinfo_path = mountinfo;
+}
+
 fn assert_schema_shaped(event: &Value) {
     let obj = event.as_object().unwrap();
     for key in AUDIT_REQUIRED_KEYS {
@@ -1165,4 +1181,88 @@ fn a_denied_call_from_inside_an_agent_scope_is_attributed_to_that_session() {
     assert_eq!(events[1]["source"], "human");
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn installer_methods_are_unknown_on_an_installed_system() {
+    let daemon = TestDaemon::start_as_root();
+    for (method, params) in [
+        ("install.targets", None),
+        (
+            "install.plan",
+            Some(json!({
+                "disk": "/dev/vda",
+                "keymap": "us",
+                "encryption": "luks2",
+                "recovery_mode": "personal_copy"
+            })),
+        ),
+    ] {
+        let response = daemon.call(method, params);
+        assert_eq!(response["error"]["code"], "unknown_method", "{method}");
+        assert_eq!(response["error"]["details"]["mode"], "installed");
+    }
+}
+
+#[test]
+fn live_installer_targets_are_read_only_and_plan_refusals_are_audited() {
+    let daemon = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer::root()),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        configure_empty_live_installer,
+    );
+    let targets = daemon.call("install.targets", None);
+    assert_eq!(targets["result"]["v"], 1);
+    assert_eq!(targets["result"]["targets"], json!([]));
+
+    let plan = daemon.call(
+        "install.plan",
+        Some(json!({
+            "disk": "/dev/vda",
+            "keymap": "us",
+            "encryption": "luks2",
+            "recovery_mode": "personal_copy"
+        })),
+    );
+    assert_eq!(plan["error"]["code"], "invalid_params");
+    assert_eq!(plan["error"]["details"]["disk_changed"], false);
+    let event = daemon
+        .audit_lines()
+        .into_iter()
+        .find(|event| event["action"] == "install.plan")
+        .unwrap();
+    assert_eq!(event["resource"], "system_disk");
+    assert_eq!(event["result"], "refused");
+}
+
+#[test]
+fn live_install_plan_is_root_only_before_disk_discovery() {
+    let daemon = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        configure_empty_live_installer,
+    );
+    let response = daemon.call(
+        "install.plan",
+        Some(json!({
+            "disk": "/dev/vda",
+            "keymap": "us",
+            "encryption": "luks2",
+            "recovery_mode": "personal_copy"
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied");
+    let event = daemon
+        .audit_lines()
+        .into_iter()
+        .find(|event| event["action"] == "install.plan")
+        .unwrap();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["result"], "denied");
 }

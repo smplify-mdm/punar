@@ -468,15 +468,21 @@ and generic ARM64 image build/boot. The responsive six-app library itself is
 x86 runtime-proven in run 33146409332; its ARM Flatpak detail correction and
 the two unrelated runtime-gate corrections remain pending follow-up CI.
 
+**Real and locally architecture-tested, pending its first pushed CI:** the
+headless installer discovery/plan boundary. It can list safe candidate disks
+and return a schema-validated, signed-release, physical-disk-bound A/B plan;
+it cannot partition, encrypt, copy a payload or make boot media yet.
+
 **Real but SIMULATED and labelled everywhere:** Secure Boot, TPM/measured boot,
 the Smplify control plane (`punar-mock-smplify`), identity providers, the
 private relay. Anything dashed in the design language is here by construction.
 
-**Not built:** bare-metal installer media and install flow, a broad catalog and
-broad-filesystem consent path, execution trust, generic user-defined web-app
-install and browser contexts (M11), network policy and relay (M12), and physical
-Raspberry Pi boot/peripheral/fault-injection proof. Generic QEMU ARM64 and A/B
-partition/update primitives are real; they are not Pi support.
+**Not built:** bare-metal installer media and the mutating install flow, a
+broad catalog and broad-filesystem consent path, execution trust, generic
+user-defined web-app install and browser contexts (M11), network policy and
+relay (M12), and physical Raspberry Pi boot/peripheral/fault-injection proof.
+Generic QEMU ARM64 and A/B partition/update primitives are real; they are not
+Pi support.
 
 **Untested by CI:** networking — the gate runs the VM with `-nic none`, so DHCP
 and resolved were reasoned about and first exercised by a human. Wi-Fi *is*
@@ -523,6 +529,11 @@ tested, using `mac80211_hwsim` to simulate hardware.
 - **A vacuity guard is worth writing.** An M10 assertion read an ownership
   index *after* the purge that removes those rows; the guard refused to pass
   rather than silently testing nothing.
+- **Size process-isolation gates for the slowest supported accelerator.** Run
+  33193257180 booted ARM64, completed M2–M10 and exported a healthy partial
+  surface-cost report, but the 15-minute unit ceiling killed sample 8/18 under
+  AArch64 TCG. The dev-only unit now allows 45 minutes, the parent 150 minutes,
+  and the ARM job 180 minutes; per-operation waits remain narrowly bounded.
 
 ---
 

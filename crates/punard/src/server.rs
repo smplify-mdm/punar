@@ -58,6 +58,7 @@ use crate::enroll::{
     compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
     save_enrollment, write_status_summary,
 };
+use crate::install::{InstallError, Installer, InstallerSources};
 use crate::policy::{
     EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
 };
@@ -180,6 +181,12 @@ pub struct DaemonConfig {
     /// Cross-architecture integration-test seam. Production always leaves
     /// this unset and uses the compiled target architecture.
     pub app_arch_override: Option<String>,
+    /// Installer methods are registered only in a UKI carrying the exact
+    /// `punar.live=1` command-line token. Installed systems leave this false.
+    pub live_mode: bool,
+    /// Read-only block/release inputs. All paths are injectable for contract
+    /// tests; no installer operation accepts a path from its caller.
+    pub installer_sources: InstallerSources,
 }
 
 impl DaemonConfig {
@@ -210,6 +217,8 @@ impl DaemonConfig {
             app_catalog_path: None,
             flatpak_bin: PathBuf::from("/usr/bin/flatpak"),
             app_arch_override: None,
+            live_mode: false,
+            installer_sources: InstallerSources::default(),
         }
     }
 }
@@ -324,6 +333,7 @@ struct Inner {
     /// Flatpak has its own transaction lock, but serializing at the typed
     /// API also makes our inspect→mutate→verify chain indivisible.
     app_mutation: Mutex<()>,
+    installer: Installer,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -355,6 +365,7 @@ impl Daemon {
             cfg.app_arch_override.as_deref(),
         )
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let installer = Installer::new(cfg.installer_sources.clone());
         let audit = AuditWriter::open(&cfg.audit_path)?;
         // Group ownership (root:punar) is the daemon's job, not the
         // writer's; meaningful only when running as root (tests are not).
@@ -470,6 +481,7 @@ impl Daemon {
                 slot_freed: Condvar::new(),
                 apps,
                 app_mutation: Mutex::new(()),
+                installer,
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
@@ -841,6 +853,41 @@ fn app_ipc_error(error: AppError) -> IpcError {
     )
 }
 
+fn install_unknown_on_installed(method: &str) -> IpcError {
+    IpcError::with_details(
+        ErrorCode::UnknownMethod,
+        format!(
+            "The method {method:?} does not exist on an installed Punar system. Installer methods are registered only by a signed live environment carrying punar.live=1. Next step: boot the Punar installation medium."
+        ),
+        json!({ "method": method, "mode": "installed" }),
+    )
+}
+
+fn install_ipc_error(error: InstallError) -> IpcError {
+    let code = match error {
+        InstallError::Refused(_) | InstallError::Invalid(_) => ErrorCode::InvalidParams,
+        InstallError::Trust(_) => ErrorCode::VerifyFailed,
+        InstallError::Io(_) => ErrorCode::Internal,
+    };
+    IpcError::with_details(
+        code,
+        format!(
+            "The installation plan was not accepted: {error}. No disk bytes were changed. Next step: refresh disk targets and correct the named condition before trying again."
+        ),
+        json!({ "component": "installer", "disk_changed": false }),
+    )
+}
+
+fn install_targets_ipc_error(error: InstallError) -> IpcError {
+    IpcError::with_details(
+        ErrorCode::Internal,
+        format!(
+            "Punar could not inspect the available installation disks: {error}. No disk bytes were changed. Next step: reconnect the installation media or storage device, then refresh the disk list."
+        ),
+        json!({ "component": "installer_discovery", "disk_changed": false }),
+    )
+}
+
 impl Inner {
     fn log_audit(&self, event: AuditEvent) {
         match self.audit.lock().unwrap().append(&event) {
@@ -935,6 +982,13 @@ impl Inner {
     /// already answered with `unknown_method` by the parse pipeline (SPEC
     /// sections 10, 60: no generic execution method exists, ever).
     fn dispatch(&self, peer: &Peer, request: &Request) -> Result<Value, IpcError> {
+        if matches!(
+            request.method,
+            Method::InstallTargets | Method::InstallPlan(_)
+        ) && !self.cfg.live_mode
+        {
+            return Err(install_unknown_on_installed(request.method.name()));
+        }
         match &request.method {
             Method::Status => Ok(to_value(self.handle_status())),
             Method::CapabilitiesList => {
@@ -964,6 +1018,63 @@ impl Inner {
             Method::AppsList => self.handle_apps_list(),
             Method::AppsInstall(params) => self.handle_apps_install(peer, params),
             Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
+            Method::InstallTargets => self
+                .installer
+                .targets()
+                .map(to_value)
+                .map_err(install_targets_ipc_error),
+            Method::InstallPlan(params) => self.handle_install_plan(peer, params),
+        }
+    }
+
+    fn handle_install_plan(
+        &self,
+        peer: &Peer,
+        params: &punar_common::install::InstallPlanParams,
+    ) -> Result<Value, IpcError> {
+        const ACTION: &str = "install.plan";
+        const RESOURCE: &str = "system_disk";
+        let actor = self.actor_of(peer);
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                RESOURCE,
+            ));
+            return Err(IpcError::denied_needs_root(
+                "installation planning",
+                Some(RESOURCE),
+                "run the installer through its privileged local service",
+            ));
+        }
+        match self.installer.plan(params) {
+            Ok(plan) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    AuditOutcome::Success,
+                ));
+                Ok(to_value(plan))
+            }
+            Err(error) => {
+                let mut event = AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                );
+                if error.is_refusal() {
+                    event.result = "refused".into();
+                }
+                self.log_audit(event);
+                Err(install_ipc_error(error))
+            }
         }
     }
 
