@@ -1073,9 +1073,12 @@ before `format` and `/run/punar/install.json` gains
 `phase: "encrypt", awaiting: "recovery_key_ack"`. The surface renders the key —
 large, monospace, eight groups, QR beside it — and enables `Continue` only
 when two randomly chosen groups have been typed back. Acknowledgement is a
-second typed call, `install.recovery_ack {plan_token, groups}`; the same
-`plan_token`, so the acknowledgement is bound to the same object as the
-confirmation. Nothing before this point is destructive-in-the-new-sense
+second typed call, `install.recovery_ack {plan_token, groups_fd}`; the two
+groups live in a sealed anonymous memfd, never in JSON. The same `plan_token`
+binds the acknowledgement to the same object as the confirmation. The full
+key and challenge indices travel only over the one-way pipe/Unix socket named
+by `install.apply.recovery_output_fd`; neither can appear in a result or status
+document. Nothing before this point is destructive-in-the-new-sense
 (§6.5.1's table: at `encrypt` the old data is already gone, so the gate is not
 a last chance to back out — it is a last chance to *keep the key*), and
 nothing after it proceeds without it.
@@ -1258,8 +1261,9 @@ proposes; the owners of `ipc.md` and `schemas/` decide.
   being non-mutating**, for the same reason `update.check` is: it is the
   first observable step of an install, and a trail that begins at `apply`
   cannot explain what the device was asked to do.
-- **`install.apply`** takes `{plan_token, disk, passphrase_fd, keymap,
-  seed, oobe_answers_fd, unattended}` — **and no `account` object, because
+- **`install.apply`** takes `{plan_token, disk, passphrase_fd,
+  recovery_output_fd, keymap, seed, oobe_answers_fd, unattended}` — **and no
+  `account` object, because
   the installer creates no account** (§6.4). It **refuses any token that is
   not the hash of a plan produced in this boot for this disk**
   (`invalid_params`, I36b). No free-form parameters: no partition sizes, no
@@ -1271,6 +1275,9 @@ proposes; the owners of `ipc.md` and `schemas/` decide.
   Both input descriptors must be sealed anonymous memfds; ordinary files and
   unsealed memory files are refused. This makes “no secret on disk” an
   enforced admission rule rather than a promise the UI is expected to keep.
+  `recovery_output_fd` is different by direction and accepts only a pipe or
+  Unix socket; a regular file is refused so the one-time disclosure cannot be
+  redirected to persistent storage by accident.
 - **`install.status`** is the read side of `/run/punar/install.json`.
 
 There is **no** `install.exec`, no `install.script`, no `install.chroot`,

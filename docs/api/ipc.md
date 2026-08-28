@@ -718,7 +718,13 @@ passphrase and optional OOBE passthrough, never their bytes. Each input must
 be an anonymous memfd sealed against writes, growth and shrinkage; a normal
 file is refused, so the descriptor mechanism cannot quietly persist a secret
 to disk. The daemon rewinds the duplicated open description before applying
-its 4 KiB passphrase or 1 MiB OOBE bound. **The public
+its 4 KiB passphrase or 1 MiB OOBE bound. Personal recovery additionally
+requires `recovery_output_fd`, which must be a pipe or Unix socket; the full
+key and two challenge indices travel only there. The paired acknowledgement
+type is `{plan_token, groups_fd}`, where `groups_fd` is another sealed memfd,
+so even the two challenged key groups stay out of IPC JSON. The in-memory gate
+has no timeout/default-continue and consumes a confirmation only for the exact
+plan token. **The public
 mutating `install.apply` method is not registered in this slice**: exposing a
 method that stopped after preflight would claim an installer that does not
 exist. There is no `install.exec`, script, hook or caller-supplied command/path.

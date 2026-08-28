@@ -170,9 +170,11 @@ pub struct InstallSeedParams {
 /// Strict params for `install.apply`.
 ///
 /// Secret material is deliberately absent. `passphrase_fd` and
-/// `oobe_answers_fd` name descriptors held open by the authenticated peer;
-/// the daemon duplicates and consumes them without placing their bytes in a
-/// request, process argument, environment variable, result, or audit event.
+/// `oobe_answers_fd` name sealed anonymous-memory descriptors held open by
+/// the authenticated peer. `recovery_output_fd` names a one-way pipe or Unix
+/// socket used only for the personal recovery disclosure. The daemon
+/// duplicates them without placing secret bytes in a request, process
+/// argument, environment variable, result, status document, or audit event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallApplyParams {
@@ -180,11 +182,23 @@ pub struct InstallApplyParams {
     pub disk: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passphrase_fd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_output_fd: Option<u32>,
     pub keymap: String,
     pub seed: InstallSeedParams,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oobe_answers_fd: Option<u32>,
     pub unattended: bool,
+}
+
+/// Human confirmation for the personal recovery-key gate. The two challenged
+/// groups are themselves key material, so even this acknowledgement carries
+/// only a sealed-memory descriptor number on the JSON wire.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRecoveryAckParams {
+    pub plan_token: String,
+    pub groups_fd: u32,
 }
 
 /// Overall state exposed by `install.status` and `/run/punar/install.json`.
@@ -354,6 +368,7 @@ mod tests {
             "plan_token": "0".repeat(64),
             "disk": "/dev/vda",
             "passphrase_fd": 3,
+            "recovery_output_fd": 4,
             "keymap": "us",
             "seed": {"locale": "C.UTF-8"},
             "unattended": false
@@ -365,6 +380,24 @@ mod tests {
             object.insert(forbidden.into(), Value::String("secret".into()));
             assert!(
                 serde_json::from_value::<InstallApplyParams>(Value::Object(object)).is_err(),
+                "{forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_ack_has_only_a_plan_token_and_descriptor_number() {
+        let value = serde_json::json!({
+            "plan_token": "0".repeat(64),
+            "groups_fd": 5
+        });
+        let params: InstallRecoveryAckParams = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(params.groups_fd, 5);
+        for forbidden in ["first_group", "second_group", "groups", "recovery_key"] {
+            let mut object = value.as_object().unwrap().clone();
+            object.insert(forbidden.into(), Value::String("secret".into()));
+            assert!(
+                serde_json::from_value::<InstallRecoveryAckParams>(Value::Object(object)).is_err(),
                 "{forbidden}"
             );
         }

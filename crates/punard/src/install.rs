@@ -9,17 +9,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use punar_common::install::{
     InstallApplyParams, InstallDiskIdentity, InstallEncryption, InstallPartitionPlan,
-    InstallPayloadPlan, InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryMode,
-    InstallStatusResult, InstallTarget, InstallTargetPartition, InstallTargetsResult,
-    canonical_json,
+    InstallPayloadPlan, InstallPlan, InstallPlanParams, InstallPlanResult,
+    InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult, InstallTarget,
+    InstallTargetPartition, InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_release_manifest,
 };
+use punar_recovery::{PersonalRecoveryConfirmation, PersonalRecoveryView, SecretRecoveryKey};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -45,6 +46,7 @@ const GPT_LBAS: u64 = 34;
 const PLAN_REGISTRY_LIMIT: usize = 16;
 const PASSPHRASE_MAX_BYTES: usize = 4096;
 const OOBE_ANSWERS_MAX_BYTES: usize = 1024 * 1024;
+const RECOVERY_GROUPS_MAX_BYTES: usize = 64;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -109,11 +111,12 @@ impl InstallError {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Installer {
     sources: InstallerSources,
     plans: Arc<Mutex<PlanRegistry>>,
     status: Arc<Mutex<InstallStatusResult>>,
+    recovery: Arc<RecoveryGate>,
 }
 
 /// Non-serializable, non-debuggable apply inputs duplicated from descriptors
@@ -121,12 +124,17 @@ pub struct Installer {
 /// path, including validation and child-process failures.
 pub struct InstallApplyInputs {
     passphrase: Option<Zeroizing<Vec<u8>>>,
+    recovery_output: Option<File>,
     oobe_answers: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl InstallApplyInputs {
     pub fn passphrase(&self) -> Option<&[u8]> {
         self.passphrase.as_deref().map(Vec::as_slice)
+    }
+
+    pub fn recovery_output_mut(&mut self) -> Option<&mut File> {
+        self.recovery_output.as_mut()
     }
 
     pub fn oobe_answers(&self) -> Option<&[u8]> {
@@ -138,6 +146,26 @@ impl InstallApplyInputs {
 struct PlanRegistry {
     order: VecDeque<String>,
     plans: BTreeMap<String, InstallPlan>,
+}
+
+#[derive(Default)]
+struct RecoveryGate {
+    state: Mutex<RecoveryGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+enum RecoveryGateState {
+    #[default]
+    Idle,
+    Personal {
+        plan_token: String,
+        view: PersonalRecoveryView,
+    },
+    Confirmed {
+        plan_token: String,
+        confirmation: PersonalRecoveryConfirmation,
+    },
 }
 
 impl PlanRegistry {
@@ -179,6 +207,7 @@ impl Installer {
             sources,
             plans: Arc::new(Mutex::new(PlanRegistry::default())),
             status: Arc::new(Mutex::new(InstallStatusResult::idle())),
+            recovery: Arc::new(RecoveryGate::default()),
         }
     }
 
@@ -402,6 +431,19 @@ impl Installer {
             }
             _ => {}
         }
+        match (cached.recovery_mode, params.recovery_output_fd) {
+            (InstallRecoveryMode::PersonalCopy, None) => {
+                return Err(InstallError::Invalid(
+                    "a personal recovery install requires recovery_output_fd".into(),
+                ));
+            }
+            (InstallRecoveryMode::OrganizationEscrow | InstallRecoveryMode::None, Some(_)) => {
+                return Err(InstallError::Invalid(
+                    "recovery_output_fd is available only for personal recovery".into(),
+                ));
+            }
+            _ => {}
+        }
 
         let refreshed = self.compute_plan(&InstallPlanParams {
             disk: params.disk.clone(),
@@ -432,6 +474,13 @@ impl Installer {
             .passphrase_fd
             .map(|fd| read_peer_descriptor(peer_pid, fd, PASSPHRASE_MAX_BYTES, "passphrase"))
             .transpose()?;
+        let recovery_output = params
+            .recovery_output_fd
+            .map(|fd| {
+                duplicate_peer_descriptor(peer_pid, fd, "recovery output")
+                    .and_then(validate_recovery_output_file)
+            })
+            .transpose()?;
         let oobe_answers = params
             .oobe_answers_fd
             .map(|fd| read_peer_descriptor(peer_pid, fd, OOBE_ANSWERS_MAX_BYTES, "OOBE answers"))
@@ -443,8 +492,168 @@ impl Installer {
         }
         Ok(InstallApplyInputs {
             passphrase,
+            recovery_output,
             oobe_answers,
         })
+    }
+
+    /// Arm the personal recovery checkpoint and disclose the key only through
+    /// the caller-provided non-serializing sink. The gate is installed only
+    /// after the sink accepts the complete key and challenge tuple.
+    pub fn begin_personal_recovery(
+        &self,
+        plan_token: &str,
+        recovery_key: SecretRecoveryKey,
+        recovery_keyslot: u8,
+        disclose: impl FnOnce(&str, [u8; 2]) -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
+        validate_plan_token(plan_token)?;
+        let mut state = self.recovery.state.lock().unwrap();
+        if !matches!(*state, RecoveryGateState::Idle) {
+            return Err(InstallError::Refused(
+                "a recovery confirmation is already active".into(),
+            ));
+        }
+        let view = recovery_key
+            .into_personal_view(recovery_keyslot)
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        disclose(view.recovery_key_text(), view.confirmation_groups())?;
+        *state = RecoveryGateState::Personal {
+            plan_token: plan_token.to_string(),
+            view,
+        };
+        self.recovery.changed.notify_all();
+        Ok(())
+    }
+
+    /// Consume the two challenged recovery groups from a sealed peer memfd.
+    /// Neither group is returned, serialized, or included in an error.
+    #[cfg(target_os = "linux")]
+    pub fn acknowledge_personal_recovery(
+        &self,
+        peer_pid: Option<i32>,
+        params: &InstallRecoveryAckParams,
+    ) -> Result<(), InstallError> {
+        validate_plan_token(&params.plan_token)?;
+        validate_descriptor_number(params.groups_fd, "groups_fd")?;
+        let groups = read_peer_descriptor(
+            peer_pid,
+            params.groups_fd,
+            RECOVERY_GROUPS_MAX_BYTES,
+            "recovery confirmation",
+        )?;
+        self.acknowledge_personal_recovery_bytes(&params.plan_token, &groups)
+    }
+
+    fn acknowledge_personal_recovery_bytes(
+        &self,
+        plan_token: &str,
+        groups: &[u8],
+    ) -> Result<(), InstallError> {
+        let text = std::str::from_utf8(groups).map_err(|_| {
+            InstallError::Invalid("the recovery confirmation is not valid UTF-8".into())
+        })?;
+        let mut values = text.split_ascii_whitespace();
+        let first = values.next().ok_or_else(|| {
+            InstallError::Invalid("the recovery confirmation must contain two groups".into())
+        })?;
+        let second = values.next().ok_or_else(|| {
+            InstallError::Invalid("the recovery confirmation must contain two groups".into())
+        })?;
+        if values.next().is_some() {
+            return Err(InstallError::Invalid(
+                "the recovery confirmation must contain exactly two groups".into(),
+            ));
+        }
+
+        let mut state = self.recovery.state.lock().unwrap();
+        let current = std::mem::take(&mut *state);
+        match current {
+            RecoveryGateState::Personal {
+                plan_token: expected,
+                mut view,
+            } if expected == plan_token => {
+                if let Err(error) = view.confirm_groups(first, second) {
+                    *state = RecoveryGateState::Personal {
+                        plan_token: expected,
+                        view,
+                    };
+                    return Err(InstallError::Invalid(error.to_string()));
+                }
+                let confirmation = view
+                    .finish()
+                    .map_err(|error| InstallError::Invalid(error.to_string()))?;
+                *state = RecoveryGateState::Confirmed {
+                    plan_token: expected,
+                    confirmation,
+                };
+                self.recovery.changed.notify_all();
+                Ok(())
+            }
+            other => {
+                *state = other;
+                Err(InstallError::Invalid(
+                    "no personal recovery checkpoint matches this plan_token".into(),
+                ))
+            }
+        }
+    }
+
+    /// Wait without a timeout: proceeding by default would create an
+    /// encrypted device whose owner may not hold its recovery key.
+    pub fn wait_for_personal_recovery(
+        &self,
+        plan_token: &str,
+    ) -> Result<PersonalRecoveryConfirmation, InstallError> {
+        validate_plan_token(plan_token)?;
+        let mut state = self.recovery.state.lock().unwrap();
+        loop {
+            match &*state {
+                RecoveryGateState::Personal {
+                    plan_token: expected,
+                    ..
+                } if expected == plan_token => {
+                    state = self.recovery.changed.wait(state).unwrap();
+                }
+                RecoveryGateState::Confirmed {
+                    plan_token: expected,
+                    ..
+                } if expected == plan_token => {
+                    let RecoveryGateState::Confirmed { confirmation, .. } =
+                        std::mem::take(&mut *state)
+                    else {
+                        unreachable!()
+                    };
+                    return Ok(confirmation);
+                }
+                _ => {
+                    return Err(InstallError::Invalid(
+                        "no personal recovery checkpoint matches this plan_token".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Abandon an active checkpoint on transaction failure. Dropping the
+    /// view zeroizes the only in-memory owner of the recovery key.
+    pub fn cancel_personal_recovery(&self, plan_token: &str) {
+        let mut state = self.recovery.state.lock().unwrap();
+        let matches = match &*state {
+            RecoveryGateState::Personal {
+                plan_token: expected,
+                ..
+            }
+            | RecoveryGateState::Confirmed {
+                plan_token: expected,
+                ..
+            } => expected == plan_token,
+            RecoveryGateState::Idle => false,
+        };
+        if matches {
+            *state = RecoveryGateState::Idle;
+            self.recovery.changed.notify_all();
+        }
     }
 
     fn architecture(&self) -> Architecture {
@@ -617,6 +826,16 @@ fn read_peer_descriptor(
     maximum: usize,
     kind: &'static str,
 ) -> Result<Zeroizing<Vec<u8>>, InstallError> {
+    let file = duplicate_peer_descriptor(peer_pid, descriptor, kind)?;
+    read_secret_descriptor_file(file, maximum, kind)
+}
+
+#[cfg(target_os = "linux")]
+fn duplicate_peer_descriptor(
+    peer_pid: Option<i32>,
+    descriptor: u32,
+    kind: &'static str,
+) -> Result<File, InstallError> {
     use rustix::process::{Pid, PidfdFlags, PidfdGetfdFlags, pidfd_getfd, pidfd_open};
 
     let pid = peer_pid
@@ -630,7 +849,7 @@ fn read_peer_descriptor(
     let owned = pidfd_getfd(&pidfd, foreign_fd, PidfdGetfdFlags::empty()).map_err(|error| {
         InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
     })?;
-    read_secret_descriptor_file(File::from(owned), maximum, kind)
+    Ok(File::from(owned))
 }
 
 #[cfg(target_os = "linux")]
@@ -654,6 +873,19 @@ fn read_secret_descriptor_file(
     }
     file.seek(SeekFrom::Start(0))?;
     read_descriptor_file(file, maximum, kind)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_recovery_output_file(file: File) -> Result<File, InstallError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let file_type = file.metadata()?.file_type();
+    if !file_type.is_fifo() && !file_type.is_socket() {
+        return Err(InstallError::Invalid(
+            "the recovery output descriptor must be a pipe or Unix socket".into(),
+        ));
+    }
+    Ok(file)
 }
 
 fn read_descriptor_file(
@@ -710,24 +942,14 @@ fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
 }
 
 fn validate_apply_params(params: &InstallApplyParams) -> Result<(), InstallError> {
-    if params.plan_token.len() != 64
-        || !params
-            .plan_token
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(InstallError::Invalid(
-            "plan_token must be one lowercase SHA-256 digest".into(),
-        ));
-    }
+    validate_plan_token(&params.plan_token)?;
     for (name, fd) in [
         ("passphrase_fd", params.passphrase_fd),
+        ("recovery_output_fd", params.recovery_output_fd),
         ("oobe_answers_fd", params.oobe_answers_fd),
     ] {
-        if fd.is_some_and(|value| !(3..=1_048_575).contains(&value)) {
-            return Err(InstallError::Invalid(format!(
-                "{name} must name a non-standard descriptor held by the calling process"
-            )));
+        if let Some(fd) = fd {
+            validate_descriptor_number(fd, name)?;
         }
     }
     let locale = params.seed.locale.as_str();
@@ -740,6 +962,28 @@ fn validate_apply_params(params: &InstallApplyParams) -> Result<(), InstallError
         return Err(InstallError::Invalid(
             "seed.locale must be one 1–64 character locale token".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_plan_token(plan_token: &str) -> Result<(), InstallError> {
+    if plan_token.len() != 64
+        || !plan_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(InstallError::Invalid(
+            "plan_token must be one lowercase SHA-256 digest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_descriptor_number(descriptor: u32, name: &str) -> Result<(), InstallError> {
+    if !(3..=1_048_575).contains(&descriptor) {
+        return Err(InstallError::Invalid(format!(
+            "{name} must name a non-standard descriptor held by the calling process"
+        )));
     }
     Ok(())
 }
@@ -1217,6 +1461,7 @@ mod tests {
             plan_token: plan.plan_token.clone(),
             disk: plan.plan.disk.device.clone(),
             passphrase_fd: Some(3),
+            recovery_output_fd: Some(4),
             keymap: plan.plan.keymap.clone(),
             seed: punar_common::install::InstallSeedParams {
                 locale: "C.UTF-8".into(),
@@ -1282,6 +1527,93 @@ mod tests {
         .unwrap();
         let bytes = read_secret_descriptor_file(file, 64, "test secret").unwrap();
         assert_eq!(bytes.as_slice(), b"correct horse battery staple");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_disclosure_accepts_only_a_pipe_or_unix_socket() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let fixture = Fixture::new();
+        let disk_file = fixture.root.join("recovery-output");
+        fs::write(&disk_file, b"").unwrap();
+        let error = match validate_recovery_output_file(
+            File::options().write(true).open(&disk_file).unwrap(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a disk-backed recovery disclosure was accepted"),
+        };
+        assert!(error.to_string().contains("pipe or Unix socket"));
+
+        let (writer, _reader) = UnixStream::pair().unwrap();
+        let owned: OwnedFd = writer.into();
+        assert!(validate_recovery_output_file(File::from(owned)).is_ok());
+    }
+
+    #[test]
+    fn personal_recovery_gate_is_plan_bound_and_has_no_default_continue() {
+        const KEY: &str = "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
+
+        let fixture = Fixture::new();
+        let installer = fixture.installer();
+        let token = "a".repeat(64);
+        let mut disclosure = None;
+        installer
+            .begin_personal_recovery(
+                &token,
+                SecretRecoveryKey::parse(KEY).unwrap(),
+                1,
+                |key, groups| {
+                    disclosure = Some((key.to_string(), groups));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let (displayed, groups) = disclosure.unwrap();
+        assert_eq!(displayed, KEY);
+        let parts = displayed.split('-').collect::<Vec<_>>();
+        let answer = format!(
+            "{} {}",
+            parts[usize::from(groups[0] - 1)],
+            parts[usize::from(groups[1] - 1)]
+        );
+
+        let wrong_token = "b".repeat(64);
+        assert!(
+            installer
+                .acknowledge_personal_recovery_bytes(&wrong_token, answer.as_bytes())
+                .is_err()
+        );
+        assert!(
+            installer
+                .acknowledge_personal_recovery_bytes(&token, b"wrong groups")
+                .is_err()
+        );
+        installer
+            .acknowledge_personal_recovery_bytes(&token, answer.as_bytes())
+            .unwrap();
+        let confirmation = installer.wait_for_personal_recovery(&token).unwrap();
+        assert_eq!(confirmation.recovery_keyslot, 1);
+        assert!(confirmation.confirmed);
+        assert!(installer.wait_for_personal_recovery(&token).is_err());
+    }
+
+    #[test]
+    fn abandoning_personal_recovery_removes_the_checkpoint() {
+        const KEY: &str = "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
+
+        let fixture = Fixture::new();
+        let installer = fixture.installer();
+        let token = "c".repeat(64);
+        installer
+            .begin_personal_recovery(&token, SecretRecoveryKey::parse(KEY).unwrap(), 2, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        installer.cancel_personal_recovery(&token);
+        assert!(installer.wait_for_personal_recovery(&token).is_err());
     }
 
     #[test]

@@ -361,6 +361,15 @@ creates LUKS2+btrfs data, and opens it with the piped key. `punard` can
 therefore own a bounded verified slot write without storing either the secret
 or an 8 GiB raw payload on the live filesystem.
 
+The personal recovery checkpoint is now a plan-bound in-memory state machine:
+the full key and random challenge indices may leave it only through an output
+pipe/Unix socket, the two answers return through a sealed memfd, wrong groups
+or a different plan token cannot consume the gate, and there is deliberately
+no timeout/default-continue. Cancellation drops the only
+`PersonalRecoveryView` and zeroizes the key. The state machine and strict wire
+types are unit-proven; executor/status/audit wiring and the live
+descriptor-duplication proof remain before the methods are registered.
+
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a
 typed 256-bit `systemd-recovery` keyslot and opened the filesystem with that
