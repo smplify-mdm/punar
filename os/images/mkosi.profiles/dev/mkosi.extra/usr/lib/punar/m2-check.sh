@@ -158,9 +158,9 @@ active_field()  { hyprctl -j activewindow  2>/dev/null | jq -r "$1"; }
 ws_field()      { hyprctl -j workspaces    2>/dev/null | jq -r ".[] | select(.id == $1) | $2"; }
 layout_option() { hyprctl -j getoption general:layout 2>/dev/null | jq -r .str; }
 
-ws1_count_at_least() {
+ws1_foot_count_at_least() {
     hyprctl -j clients | jq -e --argjson n "$1" \
-        '[ .[] | select(.workspace.id == 1) ] | length >= $n'
+        '[ .[] | select(.workspace.id == 1 and (.class == "foot" or .initialClass == "foot")) ] | length >= $n'
 }
 
 # --- 1. three foot windows on workspace 1, staggered -------------------------
@@ -169,13 +169,13 @@ n=0
 while [ "${n}" -lt 3 ]; do
     n=$((n + 1))
     hyprctl dispatch "hl.dsp.exec_cmd('foot')" >/dev/null 2>&1
-    if ! wait_for 120 ws1_count_at_least "${n}"; then
+    if ! wait_for 120 ws1_foot_count_at_least "${n}"; then
         note "FAIL foot window ${n} did not appear on workspace 1 within 120s"
         FAILED=1
     fi
 done
-count="$(hyprctl -j clients | jq '[ .[] | select(.workspace.id == 1) ] | length')"
-check_eq "clients on workspace 1 after 3 spawns" 3 "${count}"
+count="$(hyprctl -j clients | jq '[ .[] | select(.workspace.id == 1 and (.class == "foot" or .initialClass == "foot")) ] | length')"
+check_eq "Foot clients on workspace 1 after 3 spawns" 3 "${count}"
 
 # --- 2. layout presets (milestone-2.md §4 mapping) ---------------------------
 # focus → master, stack → monocle, then balanced → dwindle (the default

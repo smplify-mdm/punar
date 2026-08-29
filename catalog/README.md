@@ -19,11 +19,13 @@ graphical troubleshooting; Apostrophe covers Markdown editing and preview;
 KeePassXC is the first security utility. Each of these additions has separately
 pinned x86_64 and ARM64 sources.
 
-Spotify, Slack, and Discord use pinned native Flatpaks on x86_64 and an
-explicitly labelled Chromium web-app fallback on ARM64 where their publishers
-do not provide a native Linux payload. ChatGPT and Claude have distinct
-official web and native preview/beta entries on both architectures. Punar never
-labels a web fallback as a native installation.
+Slack uses Slack's official, digest-pinned Debian payload on x86_64; Punar
+extracts it scriptlessly and launches it with an isolated app home. Spotify and
+Discord use pinned native Flatpaks on x86_64. All three have an explicitly
+labelled Chromium web-app fallback on ARM64 where their publishers do not
+provide a native Linux payload. ChatGPT and Claude have distinct official web
+and native preview/beta entries on both architectures. Punar never labels a web
+fallback as a native installation.
 
 Search is offline and deterministic. It matches every query term against the
 catalog id, display name, summary, category, and curated keywords. That makes
@@ -37,6 +39,12 @@ the device's trust decision. Punar prefers publisher-verified entries where
 available, records community packaging explicitly, admits only reviewed app
 ids, and freezes the selected commit and metadata digest into the signed OS
 catalog. See `CURATION.md` for admission and refresh policy.
+
+Snapcraft is a useful discovery source, but Punar does not install `snapd` or
+expose the unrestricted Snap Store by default. Snap packages have their own
+confinement and refresh policy, which must not silently bypass Punar's signed
+catalog or governed update channel. See `CURATION.md` for the compatibility
+gate.
 
 `icons/` contains local identity marks shown by the shell. The schema and
 `punard` accept basename-only SVG or PNG names; image staging copies those files

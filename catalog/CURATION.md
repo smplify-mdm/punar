@@ -36,6 +36,26 @@ Popularity can nominate an application for review; it cannot bypass review.
 Enterprise policy may further allow or deny catalog identities, and a personal
 device remains free to choose among the entries admitted by the OS release.
 
+## Snapcraft compatibility gate
+
+[Snapcraft](https://snapcraft.io/) is a useful discovery source, not a default
+Punar trust root. Punar does not currently ship `snapd` or expose an unbounded
+Snap Store because that would add a second privileged package daemon and a
+second application-update authority. Snap's default automatic refresh cadence
+([four checks per day](https://snapcraft.io/docs/how-to-guides/manage-snaps/manage-updates/))
+would also move application versions independently of the Punar release
+channel unless it were explicitly governed.
+
+A future optional compatibility layer must prove all of the following before
+admission: only reviewed publisher identities are shown; the exact Snap
+revision and assertions are recorded; [strict confinement and every connected
+interface](https://snapcraft.io/docs/explanation/security/snap-confinement/)
+are displayed before install; classic confinement is never silently accepted;
+refreshes obey personal or enrolled-device Punar policy; and idle
+CPU, memory, disk, and boot impact remain within the product budgets. Until
+then, Punar's signed finite catalog can use Snapcraft to discover candidates
+without installing from it directly.
+
 ## Categories
 
 - **AI:** assistants and native AI clients.

@@ -1,9 +1,10 @@
 # Reviewed from the pinned Debian 20260820T000000Z ARM64 release root on
-# 2026-08-27. Includes system and user unit wants under /usr and /etc.
+# 2026-08-29. Includes system and user unit wants under /usr and /etc.
 # Deliberately absent: rootful/user Podman APIs and lifecycle timers,
-# netavark helpers, nftables.service (punard owns the ruleset), Foot server,
-# PipeWire filter-chain, systemd-homed, tty1 getty, dpkg backup timer, and
-# systemd-networkd-wait-online. The four systemd-boot links are Debian's
+# netavark helpers, nftables.service (punard owns the ruleset), UDisks direct
+# graphical-target enablement (D-Bus activation remains available), Foot
+# server, PipeWire filter-chain, systemd-homed, tty1 getty, dpkg backup timer,
+# and systemd-networkd-wait-online. The four systemd-boot links are Debian's
 # reviewed boot-manager integration for loader refresh, random seeding,
 # failure-state cleanup, and the privileged bootctl socket.
 etc/systemd/system/multi-user.target.wants/e2scrub_reap.service -> /usr/lib/systemd/system/e2scrub_reap.service
@@ -71,6 +72,7 @@ usr/lib/systemd/system/multi-user.target.wants/getty.target -> ../getty.target
 usr/lib/systemd/system/multi-user.target.wants/iwd.service -> ../iwd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-agentd.service -> ../punar-agentd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-identity-materialize.service -> ../punar-identity-materialize.service
+usr/lib/systemd/system/multi-user.target.wants/punar-netd.service -> ../punar-netd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-secrets.service -> ../punar-secrets.service
 usr/lib/systemd/system/multi-user.target.wants/punard-reconcile.timer -> ../punard-reconcile.timer
 usr/lib/systemd/system/multi-user.target.wants/punard.service -> ../punard.service

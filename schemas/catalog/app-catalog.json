@@ -95,7 +95,7 @@
         },
         "url": {
           "type": "string",
-          "pattern": "^https://(persistent\\.oaistatic\\.com/codex-app-prod/linux/deb/|downloads\\.claude\\.ai/claude-desktop/apt/stable/pool/main/)"
+          "pattern": "^https://(persistent\\.oaistatic\\.com/codex-app-prod/linux/deb/|downloads\\.claude\\.ai/claude-desktop/apt/stable/pool/main/|downloads\\.slack-edge\\.com/desktop-releases/linux/x64/)"
         },
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "byteSize": {"type": "integer", "minimum": 1, "maximum": 629145600},

@@ -1389,6 +1389,9 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                     .starts_with("https://persistent.oaistatic.com/codex-app-prod/linux/deb/")
                     || url.starts_with(
                         "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/",
+                    )
+                    || url.starts_with(
+                        "https://downloads.slack-edge.com/desktop-releases/linux/x64/",
                     );
                 let normalized_payload = normalize_archive_path(payload_root);
                 let normalized_executable = normalize_archive_path(executable);

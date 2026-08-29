@@ -154,7 +154,12 @@ DeferredSurfaceBase {
             SurfaceTiming.begin("windowactions");
         hideTimer.stop();
         root.resetTarget();
-        root.windowVisible = true;
+        // Keep the layer surface hidden until activewindow has been
+        // snapshotted. An exclusive layer-shell keyboard surface becomes the
+        // compositor's active focus as soon as it is mapped; mapping first
+        // made `hyprctl -j activewindow` observe the overlay instead of the
+        // application the user intended to manage.
+        root.windowVisible = false;
         root.open = true;
 
         if (snapshotProc.running)
@@ -165,6 +170,7 @@ DeferredSurfaceBase {
         } catch (e) {
             root.phase = "failed";
             root.failure = "Window details are unavailable. Nothing was changed.";
+            root.windowVisible = true;
         }
     }
 
@@ -213,6 +219,7 @@ DeferredSurfaceBase {
         if (parsed === null || typeof parsed !== "object") {
             root.phase = "failed";
             root.failure = "The compositor returned no readable window details. Nothing was changed.";
+            root.windowVisible = true;
             return;
         }
 
@@ -220,6 +227,7 @@ DeferredSurfaceBase {
         if (!/^0x[0-9a-fA-F]+$/.test(address)) {
             root.phase = "empty";
             root.failure = "No application window is focused.";
+            root.windowVisible = true;
             return;
         }
 
@@ -231,6 +239,7 @@ DeferredSurfaceBase {
         root.targetApp = app === "" ? "Application" : app;
         root.targetTitle = typeof parsed.title === "string" ? parsed.title.trim() : "";
         root.phase = "ready";
+        root.windowVisible = true;
     }
 
     function closeWindow(): void {

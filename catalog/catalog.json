@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "catalogVersion": "2026.08.28.4",
-  "generatedAt": "2026-08-29T04:00:00Z",
+  "catalogVersion": "2026.08.28.5",
+  "generatedAt": "2026-08-29T05:40:00Z",
   "remotes": [
     {
       "id": "flathub",
@@ -356,32 +356,40 @@
       "icon": "slack.svg",
       "featured": true,
       "category": "communication",
-      "keywords": ["messaging", "chat", "teams", "work"],
-      "summary": "Workplace messaging, channels, huddles, and team collaboration. ARM64 devices use Slack in Chromium app mode.",
-      "trustTier": "community",
+      "keywords": ["messaging", "chat", "teams", "work", "native", "huddles"],
+      "summary": "Slack’s official Linux beta desktop client for messaging, channels, huddles, and team collaboration. ARM64 devices use a clearly labelled web fallback.",
+      "trustTier": "curated",
       "license": "proprietary",
-      "publisher": "flathub",
+      "publisher": "upstream",
       "bundledUpdater": "disabled-by-packaging",
       "disclosures": [
         {
-          "id": "publisher:community",
-          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Slack."
+          "id": "source:official-package",
+          "text": "Downloaded directly from Slack. Punar verifies the promoted package digest and Debian identity, extracts only the app payload, and never runs the package’s maintainer scripts."
         },
         {
           "id": "platform:x86-only",
-          "text": "Slack currently publishes its Linux desktop client only for x86_64. ARM64 devices use Slack in Chromium app mode."
+          "text": "Slack currently publishes its Linux desktop client only for x86_64. ARM64 devices open Slack in Chromium app mode and are never told that the web fallback is native."
+        },
+        {
+          "id": "platform:beta",
+          "text": "Slack labels its Linux desktop client beta. Punar promotes only reviewed package bytes, but upstream Linux features may differ from Slack on macOS or Windows."
         }
       ],
       "sources": [
         {
-          "kind": "flatpak",
+          "kind": "vendor_deb",
           "architectures": ["x86_64"],
-          "remote": "flathub",
-          "appId": "com.slack.Slack",
-          "ref": "app/com.slack.Slack/x86_64/stable",
-          "commit": "5bae401d6799cc1a5ecff8ff3645225797aa724a1db7b4fbfd69b1ec8a7d398d",
-          "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "b1e5eb708e9d069b8a3e4dff42962725524bb3525a5b603b7dbd877f167d1ae6"
+          "url": "https://downloads.slack-edge.com/desktop-releases/linux/x64/4.51.191/slack-desktop-4.51.191-amd64.deb",
+          "sha256": "572474596216b635b69c4a72b42176a1d4d66f99e49e6267861aecdf3f79c1ed",
+          "byteSize": 94954230,
+          "packageName": "slack-desktop",
+          "version": "4.51.191",
+          "dataMember": "data.tar.xz",
+          "payloadRoot": "./usr/lib/slack",
+          "executable": "usr/lib/slack/slack",
+          "iconPath": "./usr/share/pixmaps/slack.png",
+          "desktopId": "punar-slack"
         },
         {
           "kind": "web",
