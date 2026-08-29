@@ -74,6 +74,7 @@ pub mod device;
 pub mod install;
 pub mod ipc;
 pub mod ledger;
+pub mod network;
 pub mod principal;
 pub mod query;
 mod redacted;

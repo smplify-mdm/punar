@@ -1,0 +1,393 @@
+//! Bounded, fixed-argument execution of nftables transactions.
+//!
+//! Generated rules are handed to `/usr/bin/nft -f <file>` through a
+//! root-owned `0600` file. There is no shell, user-controlled argv, stdin
+//! program, or shared temporary directory at this privilege boundary.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use thiserror::Error;
+
+static NEXT_TRANSACTION: AtomicU64 = AtomicU64::new(1);
+const OUTPUT_LIMIT: u64 = 64 * 1024;
+const PROBE_TABLE: &str = "punar-net-probe";
+
+#[derive(Debug, Error)]
+pub enum ExecError {
+    #[error("nft binary path {0:?} is not absolute")]
+    RelativeBinary(PathBuf),
+    #[error("transaction directory {0:?} is not a real directory")]
+    UnsafeDirectory(PathBuf),
+    #[error("transaction directory {path:?} is owned by uid {actual}, expected {expected}")]
+    WrongOwner {
+        path: PathBuf,
+        actual: u32,
+        expected: u32,
+    },
+    #[error("transaction directory {path:?} is writable by group or others (mode {mode:o})")]
+    UnsafeMode { path: PathBuf, mode: u32 },
+    #[error("transaction file operation failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("nft transaction timed out after {0:?}")]
+    Timeout(Duration),
+    #[error("nft rejected the transaction: {0}")]
+    Rejected(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnforcementCapability {
+    Available,
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct NftExecutor {
+    nft_bin: PathBuf,
+    transaction_dir: PathBuf,
+    trusted_uid: u32,
+    timeout: Duration,
+}
+
+impl NftExecutor {
+    /// Production executor. `/var/lib/punar/network` is provisioned
+    /// `0750 root:punar`; every transaction file is additionally `0600`.
+    pub fn production() -> Self {
+        Self {
+            nft_bin: PathBuf::from("/usr/bin/nft"),
+            transaction_dir: PathBuf::from("/var/lib/punar/network"),
+            trusted_uid: 0,
+            timeout: Duration::from_secs(8),
+        }
+    }
+
+    pub fn new(
+        nft_bin: PathBuf,
+        transaction_dir: PathBuf,
+        trusted_uid: u32,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            nft_bin,
+            transaction_dir,
+            trusted_uid,
+            timeout,
+        }
+    }
+
+    pub fn apply(&self, ruleset: &str) -> Result<CommandResult, ExecError> {
+        if !self.nft_bin.is_absolute() {
+            return Err(ExecError::RelativeBinary(self.nft_bin.clone()));
+        }
+        validate_directory(&self.transaction_dir, self.trusted_uid)?;
+        let files = TransactionFiles::create(&self.transaction_dir)?;
+        {
+            let mut input = files.open_input()?;
+            input.write_all(ruleset.as_bytes())?;
+            input.flush()?;
+        }
+        let stdout = files.open_stdout()?;
+        let stderr = files.open_stderr()?;
+        let mut child = Command::new(&self.nft_bin)
+            .arg("-f")
+            .arg(&files.input)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()?;
+        let status = wait_bounded(&mut child, self.timeout)?;
+        let result = CommandResult {
+            success: status.success(),
+            stdout: read_bounded(&files.stdout)?,
+            stderr: read_bounded(&files.stderr)?,
+        };
+        Ok(result)
+    }
+
+    pub fn apply_checked(&self, ruleset: &str) -> Result<(), ExecError> {
+        let result = self.apply(ruleset)?;
+        if result.success {
+            Ok(())
+        } else {
+            let reason = result.stderr.trim();
+            Err(ExecError::Rejected(if reason.is_empty() {
+                "nft exited nonzero without an error message".to_string()
+            } else {
+                reason.to_string()
+            }))
+        }
+    }
+
+    /// Prove that this nft/kernel pair accepts cgroup-v2 socket matching.
+    /// The throwaway table is created and destroyed inside one transaction,
+    /// so success leaves no live policy behind.
+    pub fn probe_cgroup_v2(&self) -> EnforcementCapability {
+        let ruleset = format!(
+            "destroy table inet {PROBE_TABLE}\n\
+             table inet {PROBE_TABLE} {{\n\
+               chain probe {{\n\
+                 type filter hook output priority filter - 11; policy accept;\n\
+                 socket cgroupv2 level 1 \"user.slice\" counter\n\
+               }}\n\
+             }}\n\
+             destroy table inet {PROBE_TABLE}\n"
+        );
+        match self.apply_checked(&ruleset) {
+            Ok(()) => EnforcementCapability::Available,
+            Err(error) => EnforcementCapability::Unavailable {
+                reason: error.to_string(),
+            },
+        }
+    }
+}
+
+fn validate_directory(path: &Path, trusted_uid: u32) -> Result<(), ExecError> {
+    let metadata = fs::symlink_metadata(path).map_err(ExecError::Io)?;
+    if !metadata.file_type().is_dir() {
+        return Err(ExecError::UnsafeDirectory(path.to_path_buf()));
+    }
+    if metadata.uid() != trusted_uid {
+        return Err(ExecError::WrongOwner {
+            path: path.to_path_buf(),
+            actual: metadata.uid(),
+            expected: trusted_uid,
+        });
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(ExecError::UnsafeMode {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+fn wait_bounded(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<ExitStatus, ExecError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ExecError::Timeout(timeout));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn read_bounded(path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(OUTPUT_LIMIT)
+        .read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[derive(Debug)]
+struct TransactionFiles {
+    input: PathBuf,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl TransactionFiles {
+    fn create(directory: &Path) -> io::Result<Self> {
+        for _ in 0..8 {
+            let id = NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed);
+            let stem = format!(".punar-netd-txn-{}-{id}", std::process::id());
+            let files = Self {
+                input: directory.join(format!("{stem}.nft")),
+                stdout: directory.join(format!("{stem}.stdout")),
+                stderr: directory.join(format!("{stem}.stderr")),
+            };
+            match open_exclusive(&files.input) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(files);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a unique nft transaction file",
+        ))
+    }
+
+    fn open_input(&self) -> io::Result<File> {
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.input)
+    }
+
+    fn open_stdout(&self) -> io::Result<File> {
+        open_exclusive(&self.stdout)
+    }
+
+    fn open_stderr(&self) -> io::Result<File> {
+        open_exclusive(&self.stderr)
+    }
+}
+
+impl Drop for TransactionFiles {
+    fn drop(&mut self) {
+        for path in [&self.input, &self.stdout, &self.stderr] {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn open_exclusive(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    fn fixture(script: &str) -> (PathBuf, PathBuf, u32) {
+        let root = std::env::temp_dir().join(format!(
+            "punar-netd-nft-exec-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let transaction_dir = root.join("transactions");
+        fs::create_dir_all(&transaction_dir).unwrap();
+        fs::set_permissions(&transaction_dir, fs::Permissions::from_mode(0o750)).unwrap();
+        let binary = root.join("fake-nft");
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let uid = fs::symlink_metadata(&transaction_dir).unwrap().uid();
+        (binary, transaction_dir, uid)
+    }
+
+    #[test]
+    fn transaction_uses_only_fixed_f_argv_and_root_private_file() {
+        let script = r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+cp "$2" "$0.rules"
+stat -c '%a' "$2" > "$0.mode"
+"#;
+        let (binary, directory, uid) = fixture(script);
+        let executor = NftExecutor::new(
+            binary.clone(),
+            directory.clone(),
+            uid,
+            Duration::from_secs(1),
+        );
+        executor
+            .apply_checked("table inet punar-net { chain egress { } }\n")
+            .unwrap();
+        let args = fs::read_to_string(binary.with_file_name("fake-nft.args")).unwrap();
+        let lines: Vec<_> = args.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "-f");
+        assert!(lines[1].starts_with(directory.to_str().unwrap()));
+        assert_eq!(
+            fs::read_to_string(binary.with_file_name("fake-nft.mode"))
+                .unwrap()
+                .trim(),
+            "600"
+        );
+        assert_eq!(
+            fs::read_to_string(binary.with_file_name("fake-nft.rules")).unwrap(),
+            "table inet punar-net { chain egress { } }\n"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn nonzero_and_timeout_are_failures_not_successes() {
+        let (binary, directory, uid) = fixture("#!/bin/sh\necho refused >&2\nexit 9\n");
+        let executor = NftExecutor::new(binary.clone(), directory, uid, Duration::from_secs(1));
+        assert!(matches!(
+            executor.apply_checked("bad"),
+            Err(ExecError::Rejected(reason)) if reason == "refused"
+        ));
+        fs::write(&binary, "#!/bin/sh\nsleep 1\n").unwrap();
+        assert!(matches!(
+            NftExecutor::new(
+                binary.clone(),
+                binary.parent().unwrap().join("transactions"),
+                uid,
+                Duration::from_millis(20),
+            )
+            .apply_checked("slow"),
+            Err(ExecError::Timeout(_))
+        ));
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn writable_or_wrong_owner_directory_is_refused_before_spawn() {
+        let (binary, directory, uid) = fixture("#!/bin/sh\nexit 0\n");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let executor = NftExecutor::new(
+            binary.clone(),
+            directory.clone(),
+            uid,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(
+            executor.apply("x"),
+            Err(ExecError::UnsafeMode { .. })
+        ));
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o750)).unwrap();
+        let wrong = NftExecutor::new(binary.clone(), directory, uid + 1, Duration::from_secs(1));
+        assert!(matches!(
+            wrong.apply("x"),
+            Err(ExecError::WrongOwner { .. })
+        ));
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn capability_probe_is_ephemeral_and_reports_failure_honestly() {
+        let script = r#"#!/bin/sh
+cp "$2" "$0.rules"
+"#;
+        let (binary, directory, uid) = fixture(script);
+        let executor = NftExecutor::new(binary.clone(), directory, uid, Duration::from_secs(1));
+        assert_eq!(executor.probe_cgroup_v2(), EnforcementCapability::Available);
+        let rules = fs::read_to_string(binary.with_file_name("fake-nft.rules")).unwrap();
+        assert!(rules.contains("socket cgroupv2 level 1 \"user.slice\" counter"));
+        assert!(rules.ends_with("destroy table inet punar-net-probe\n"));
+        fs::write(&binary, "#!/bin/sh\necho unsupported >&2\nexit 1\n").unwrap();
+        assert!(matches!(
+            executor.probe_cgroup_v2(),
+            EnforcementCapability::Unavailable { reason } if reason.contains("unsupported")
+        ));
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+}

@@ -1,14 +1,24 @@
-//! `punar-netd` — network policy and relay orchestration service (SPEC
-//! section 11.7).
+//! `punar-netd` — project network policy, local network observability, and
+//! relay orchestration (SPEC sections 33–37; Milestone 12).
 //!
-//! Future role: project-aware network policy (SPEC section 36), local
-//! network observability (SPEC section 37), and orchestration of the native
-//! private relay and enterprise private networking (SPEC sections 33–35).
-//!
-//! Milestone 0 status: intentionally empty. The network privacy prototype is
-//! a Milestone 12 deliverable (SPEC section 76). No stub logic is provided,
-//! so nothing here can be mistaken for a working implementation.
+//! The first implemented seam is deliberately below every UI and daemon
+//! claim: [`policy`] parses the two user-authored policy sources and resolves
+//! disagreement restrictively; [`nft`] turns a closed set of validated zone,
+//! CIDR, session, and cgroup types into one deterministic nftables table.
+//! [`nft_exec`] is the only installation boundary: bounded direct execution
+//! with fixed argv and a private transaction file. Keeping generation pure
+//! makes the dangerous properties—deny-before-allow, log-before-unlimited-
+//! reject, zone-before-loopback, residual-last, and table-name partitioning—
+//! unit-testable independently of that root-only boundary.
 
 #![forbid(unsafe_code)]
 
-// Intentionally empty module tree until Milestone 12.
+pub mod agentd;
+pub mod model;
+pub mod nft;
+pub mod nft_exec;
+pub mod observe;
+pub mod policy;
+pub mod project;
+pub mod runtime;
+pub mod view;

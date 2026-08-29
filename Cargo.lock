@@ -608,6 +608,13 @@ dependencies = [
 [[package]]
 name = "punar-netd"
 version = "0.1.0"
+dependencies = [
+ "punar-common",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror",
+]
 
 [[package]]
 name = "punar-onboard"
