@@ -16,9 +16,9 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The next catalog revision adds Claude and ChatGPT as clearly labelled official web apps, with category/keyword-aware offline discovery and cloud-data disclosures; local contract, QML, and ARM runtime verification are in progress. Connected ARM/HVF testing found and locally proved the Flatpak 1.18 `active` revision-column correction; follow-up CI is pending. Generic user-defined web-app install/context support remains M11 work. |
-| 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
-| 20 | display local network activity | M12, unbuilt |
+| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Real Wayland launches remain `COMPATIBILITY TESTING` until the dual-architecture runtime gate passes. Generic user-defined web-app install/context support remains M11 work. |
+| 19 | enforce project network rule | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Typed zone/policy evaluation, nftables rendering, daemon/CLI/image integration and event-driven managed-session reconciliation are implemented and pass the Linux unit/clippy stage. |
+| 20 | display local network activity | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Privacy-bounded connection observation and truthful CLI projections are implemented; current milestone images still need the complete runtime exercise. |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
 | 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
@@ -50,6 +50,17 @@ These conveniences inherit Punar's non-negotiable security floor: reviewed and
 digest-bound supply, sandboxing, secret-broker use, explicit network effects,
 least privilege, auditability, and fail-closed negative tests. No developer or
 onboarding mode may bypass those controls.
+
+ChatGPT Desktop and Claude Desktop now have official Linux packages for both
+x86_64 and ARM64, but neither vendor officially supports Arch/Punar; Anthropic
+explicitly directs Arch users to its CLI. Keep the existing official web apps
+as universal fallbacks. Native entries now have an on-demand, digest-pinned,
+scriptless installation backend and remain a compatibility work item until the
+dependency, Wayland, containment, update/rollback, removal, and real
+dual-architecture runtime gates in
+`docs/design/workstation-activation.md` pass. Never merge web/native/CLI into
+one installed state, and never label an extracted vendor package as formally
+supported by its vendor.
 
 The profile direction is bounded in `docs/design/profiles.md`. A profile is a
 real identity, storage, secret, process, network, peripheral, and policy
@@ -484,15 +495,30 @@ locally like our smplify deployment and other VMs."*
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
 implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
-eight common apps, including clearly labelled official web entries for Claude
-and ChatGPT. Native sources are commit- and metadata-digest-pinned per
-architecture; unsupported ARM64 publisher clients use labelled Chromium web
-fallbacks. Spotify's path is proven on a clean ARM64 release VM and the
+22 reviewed app identities, including clearly labelled official web entries and
+separate native preview/beta entries for Claude and ChatGPT. Flatpak sources
+are commit- and metadata-digest-pinned per architecture; unsupported ARM64
+publisher clients use labelled Chromium web fallbacks. Vendor Debian sources
+are downloaded only on demand, bound to an exact architecture/size/digest,
+extracted without control scripts or privileged mode bits, registered through
+a Punar-owned desktop entry, and launched with an isolated app home. This
+backend is contract-tested; its real native UI remains in compatibility
+testing until both architecture gates pass. The catalog now has explicit AI,
+Developer, Diagnostics, Writing, Security, Browser, Communication, and Media
+categories. Its first developer set includes VSCodium, Dev Toolbox, DBeaver,
+HTTPie, Postman, Meld, and Podman Desktop; Logs, Mission Center, Wireshark,
+Apostrophe, and KeePassXC cover troubleshooting, Markdown, and credentials.
+The base desktop now also carries Geany, Files/Thunar with GVfs SMB, and a
+small cross-architecture CLI troubleshooting set. Static/schema/QML gates are
+green; the newly expanded catalog, editor launcher, and file-manager behavior
+remain **local only until the next x86_64 and ARM64 VM gates pass**. Spotify's path is proven on a clean ARM64 release VM and the
 expanded library passed its x86 runtime surface in run 33146409332. Connected
 ARM/HVF testing then proved the corrected Firefox native-detail path, including
 its pinned source and verified permissions; follow-up CI is pending. Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
-remain open. M12 is still designed and unbuilt; it closes DoD items 19 and 20.
+remain open. M12's core, daemon/CLI/image integration and event-driven
+reconciliation are locally green; its full in-VM enforcement/observation proof
+still closes DoD items 19 and 20.
 The private relay is `user-blocked.md` item 6 and is the largest item on that
 list.
 

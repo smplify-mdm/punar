@@ -624,7 +624,8 @@ jq_check "every entry carries a real count, an ordered first/last seen, and a NA
      and (.detail.entries | all(.count >= 1))
      and (.detail.entries | all(.first_seen <= .last_seen))
      and ([.detail.entries[].evidence]
-          - ["cgroup_scope","audit_event","workspace_bind","adapter_metadata"]
+          - ["cgroup_scope","audit_event","workspace_bind","adapter_metadata",
+             "detection_scan"]
           | length == 0)'
 jq_check "the retention window is stated, and an ACTIVE session's clock has not started" \
     "${RUN_DIR}/m8-access.json" \

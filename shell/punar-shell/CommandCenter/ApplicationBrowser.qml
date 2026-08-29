@@ -20,11 +20,14 @@ Item {
 
     property string query: ""
     property int currentIndex: 0
+    property string selectedCategory: "all"
     signal launchRequested(var entry)
     signal catalogRequested(string id)
 
-    readonly property var installedEntries: Apps.search(root.query, 0)
+    readonly property var installedEntries: root.query.trim() !== "" || root.selectedCategory === "all"
+        ? Apps.search(root.query, 0) : []
     readonly property var availableEntries: root.availableCatalog(root.query)
+    readonly property var categoryEntries: Catalog.categories()
     readonly property var items: root.buildItems()
     readonly property int tileWidth: {
         var usable = Math.max(0, root.width - 32);
@@ -41,7 +44,10 @@ Item {
         var source = Catalog.search(query, 0);
         var out = [];
         for (var i = 0; i < source.length; i++) {
-            if (!Apps.catalogAppInstalled(source[i]))
+            var inCategory = String(query).trim() !== ""
+                || root.selectedCategory === "all"
+                || String(source[i].category) === root.selectedCategory;
+            if (inCategory && !Apps.catalogAppInstalled(source[i]))
                 out.push(source[i]);
         }
         return out;
@@ -75,6 +81,10 @@ Item {
     }
 
     onItemsChanged: root.currentIndex = root.items.length > 0 ? 0 : -1
+    onQueryChanged: {
+        if (root.query.trim() !== "")
+            root.selectedCategory = "all";
+    }
 
     component Meta: Text {
         font.family: Theme.fontMono
@@ -153,8 +163,8 @@ Item {
                 width: parent.width
                 text: tile.catalogApp
                     ? (Catalog.webOnly(tile.appData)
-                        ? String(tile.appData.category || "application") + " · official web app"
-                        : String(tile.appData.category || "application") + " · inspect & install")
+                        ? Catalog.categoryLabel(String(tile.appData.category)) + " · official web app"
+                        : Catalog.categoryLabel(String(tile.appData.category)) + " · inspect & install")
                     : "Installed · open"
                 color: Theme.shellInk3
                 elide: Text.ElideRight
@@ -187,6 +197,41 @@ Item {
         }
     }
 
+    component CategoryButton: Rectangle {
+        id: categoryButton
+
+        required property string categoryId
+        required property string categoryLabel
+        readonly property bool active: root.selectedCategory === categoryButton.categoryId
+        readonly property bool hovered: categoryMouse.containsMouse
+
+        width: categoryText.implicitWidth + 24
+        height: 30
+        radius: Theme.radiusTag
+        color: categoryButton.active ? Theme.shellFg
+            : (categoryButton.hovered ? Theme.shellMuted : Theme.shellSurface)
+        border.width: Theme.hairline
+        border.color: categoryButton.active || categoryButton.hovered ? Theme.shellFg : Theme.shellBorder
+
+        Meta {
+            id: categoryText
+            anchors.centerIn: parent
+            text: categoryButton.categoryLabel
+            color: categoryButton.active ? Theme.shellSurface : Theme.shellFg
+        }
+
+        MouseArea {
+            id: categoryMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                root.selectedCategory = categoryButton.categoryId;
+                root.currentIndex = root.items.length > 0 ? 0 : -1;
+            }
+        }
+    }
+
     Flickable {
         anchors.fill: parent
         contentHeight: browserColumn.implicitHeight + 28
@@ -211,7 +256,9 @@ Item {
 
                     Text {
                         width: parent.width
-                        text: root.query.trim() === "" ? "Applications" : "Search results"
+                        text: root.query.trim() !== "" ? "Search results"
+                            : (root.selectedCategory === "all" ? "Applications"
+                                : Catalog.categoryLabel(root.selectedCategory) + " applications")
                         font.family: Theme.fontSans
                         font.pixelSize: 21
                         font.weight: 600
@@ -220,7 +267,9 @@ Item {
                     }
                     Text {
                         width: parent.width
-                        text: "Open what is installed or inspect a verified source before adding it."
+                        text: root.selectedCategory === "all"
+                            ? "Open what is installed or inspect permissions before adding reviewed software."
+                            : "Reviewed tools in this category. Type at any time to search the entire catalog."
                         font.family: Theme.fontSans
                         font.pixelSize: 12
                         color: Theme.shellInk2
@@ -234,6 +283,27 @@ Item {
                     text: root.width < 540
                         ? root.installedEntries.length + " here · " + root.availableEntries.length + " more"
                         : root.installedEntries.length + " installed · " + root.availableEntries.length + " available"
+                }
+            }
+
+            Flow {
+                width: parent.width
+                spacing: 8
+                visible: root.query.trim() === ""
+                height: visible ? childrenRect.height : 0
+
+                CategoryButton {
+                    categoryId: "all"
+                    categoryLabel: "All"
+                }
+
+                Repeater {
+                    model: root.categoryEntries
+                    delegate: CategoryButton {
+                        required property var modelData
+                        categoryId: String(modelData.id)
+                        categoryLabel: String(modelData.label)
+                    }
                 }
             }
 
@@ -264,7 +334,9 @@ Item {
 
             Meta {
                 visible: root.availableEntries.length > 0
-                text: root.query.trim() === "" ? "Recommended for Punar" : "Available matches"
+                text: root.query.trim() !== "" ? "Available matches"
+                    : (root.selectedCategory === "all" ? "Recommended for Punar"
+                        : Catalog.categoryLabel(root.selectedCategory) + " · " + root.availableEntries.length)
                 topPadding: root.installedEntries.length > 0 ? 12 : 8
             }
 

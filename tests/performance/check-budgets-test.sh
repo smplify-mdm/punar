@@ -15,7 +15,7 @@ UNIT_DIR="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/syst
 # cpu.stat/io.stat are not portable assumptions unless accounting is explicit
 # on each measured service. One architecture exposed the controllers through a
 # parent while another did not; pin the unit contract so that cannot regress.
-for service in punard.service punar-agentd.service punar-secrets.service; do
+for service in punard.service punar-agentd.service punar-secrets.service punar-netd.service; do
     grep -qx 'CPUAccounting=yes' "${UNIT_DIR}/${service}" \
         || { echo "FAIL: ${service} does not enable CPUAccounting" >&2; exit 1; }
     grep -qx 'IOAccounting=yes' "${UNIT_DIR}/${service}" \

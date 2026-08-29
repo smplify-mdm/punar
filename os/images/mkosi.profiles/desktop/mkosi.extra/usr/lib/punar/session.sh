@@ -19,6 +19,14 @@ case "${LANG:-}" in
 esac
 export LANG
 
+# Desktop entries generated for verified on-demand vendor applications live
+# in a mutable, world-readable product directory rather than the signed root
+# slot. Preserve both Flatpak export directories and any administrator-provided
+# XDG data path so every supported install source appears in one live index.
+punar_user_data="${XDG_DATA_HOME:-${HOME}/.local/share}"
+XDG_DATA_DIRS="${punar_user_data}/flatpak/exports/share:/var/lib/flatpak/exports/share:/var/lib/punar-applications:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export XDG_DATA_DIRS
+
 # Installed by the image staging step.
 # shellcheck disable=SC1091
 . /usr/lib/punar/punar-graphics-env.sh

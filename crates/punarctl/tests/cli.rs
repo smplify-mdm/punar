@@ -844,29 +844,19 @@ fn policy_verbs_need_the_daemon_and_exit_5_without_it() {
 }
 
 // ---------------------------------------------------------------------------
-// Remaining stubs
+// Remaining unscheduled surface
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unimplemented_verbs_keep_their_milestone_stubs() {
+fn update_keeps_its_honest_unscheduled_stub() {
     let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
-    for (args, expected) in [
-        // `agents list` / `agents inspect` are real since M7 and
-        // `agents access` / `privacy ledger` / `privacy purge` since M8
-        // (below). `privacy connections` stays reserved — and says which
-        // milestone will make it real rather than going silently missing.
-        (vec!["privacy", "connections"], "Milestone 12"),
-        (vec!["relay", "status"], "Milestone 12"),
-        (vec!["update", "status"], "not scheduled"),
-    ] {
-        let output = run(&missing, &args);
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
-        assert!(
-            stderr(&output).contains(expected),
-            "{args:?} stderr: {}",
-            stderr(&output)
-        );
-    }
+    let output = run(&missing, &["update", "status"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("not scheduled"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2222,18 +2212,195 @@ fn privacy_purge_prints_what_it_deleted_and_the_audit_boundary() {
     assert_eq!(value, fixture_ledger_purge());
 }
 
+fn fixture_network_status() -> Value {
+    json!({
+        "enforcement": {"state": "available", "installed_sessions": 1},
+        "relay": {"mode": "direct", "simulated": false, "hops": []},
+        "dns_protection": {"state": "not_configured", "milestone": "phase_2"},
+        "observation": {
+            "transport": "tcp", "udp_quic": "not_observed",
+            "content_inspection": false, "dns_logging": false
+        }
+    })
+}
+
+fn fixture_connections() -> Value {
+    json!({
+        "scanned_at": "2026-08-28T23:45:00Z",
+        "enforcement": "available",
+        "relay": {"mode": "direct", "simulated": false, "hops": []},
+        "dns_protection": {"state": "not_configured", "milestone": "phase_2"},
+        "transport": "tcp",
+        "limitations": ["UDP and QUIC are not observed"],
+        "processes": [{
+            "name": "claude", "pid_class": "agent", "governed": true,
+            "session": {"id": "agt_4f21c09ab3e1", "project": "atlas"},
+            "connections": [{
+                "destination": "198.51.100.10", "name": "Acme Dev API",
+                "zone": "corp_dev", "category": "corporate", "route": "direct",
+                "state": "established"
+            }]
+        }]
+    })
+}
+
+fn fixture_zones() -> Value {
+    json!([
+        {"name": "corp_dev", "display_name": "Corporate development",
+         "description": "Reviewed development services", "kind": "corporate",
+         "relay_mode": "enterprise_route"},
+        {"name": "internet", "display_name": "Internet", "kind": "internet",
+         "relay_mode": "direct"}
+    ])
+}
+
+fn fixture_network_policy() -> Value {
+    json!({
+        "project_id": "atlas",
+        "rules": [
+            {"zone": "corp_dev", "decision": "allow", "bound_by": "both",
+             "manifest_decision": "allow", "policy_decision": "allow"},
+            {"zone": "internet", "decision": "deny", "bound_by": "manifest",
+             "manifest_decision": "deny", "policy_decision": null}
+        ],
+        "container_network": {"mode": "none", "reason": "project residual denies internet"}
+    })
+}
+
+fn fixture_network_explain() -> Value {
+    json!({
+        "what": "Network access to zone corp_dev is allow.",
+        "why": "The effective decision is the strictest project value.",
+        "who": "Managed AI sessions in project atlas.",
+        "which_policy": ["/home/punar/atlas/.punar/network-policy.json",
+                         "/home/punar/atlas/.punar/manifest.yaml"],
+        "can_you_change_it": "Edit the project documents; organization policy may only restrict.",
+        "next_step": "punarctl network policy atlas",
+        "decision": "allow", "zone": "corp_dev", "project": "atlas",
+        "enforcement": {"state": "available", "installed_sessions": 1}
+    })
+}
+
+fn fixture_network_apply() -> Value {
+    json!({"installed_sessions": 1, "skipped_sessions": [], "warnings": []})
+}
+
+fn fixture_private_relay() -> Value {
+    json!({
+        "mode": "private_relay", "simulated": true,
+        "hops": [
+            {"role": "ingress", "knows": ["client_identity", "connect_time"]},
+            {"role": "egress", "knows": ["destination", "connect_time"]}
+        ],
+        "property_claimed": "no single hop holds both client identity and destination",
+        "property_not_held": "both hops are the same process on the same device",
+        "real_relay_milestone": "phase_2"
+    })
+}
+
+fn netd_respond(request: &Value) -> Result<Value, Value> {
+    assert_eq!(request["v"], json!(1));
+    match request["method"].as_str().unwrap() {
+        "network.status" => Ok(fixture_network_status()),
+        "network.connections" => Ok(fixture_connections()),
+        "network.zones" => Ok(fixture_zones()),
+        "network.policy" => {
+            assert_eq!(request["params"], json!({"project": "atlas"}));
+            Ok(fixture_network_policy())
+        }
+        "network.explain" => {
+            assert_eq!(
+                request["params"],
+                json!({"project": "atlas", "zone": "corp_dev"})
+            );
+            Ok(fixture_network_explain())
+        }
+        "network.apply" => {
+            assert_eq!(request["params"], json!({"project": "atlas"}));
+            Ok(fixture_network_apply())
+        }
+        "relay.status" => Ok(fixture_private_relay()),
+        "relay.set" => {
+            assert_eq!(request["params"], json!({"mode": "private_relay"}));
+            Ok(fixture_private_relay())
+        }
+        other => Err(json!({
+            "code": "unknown_method", "message": format!("unknown {other}")
+        })),
+    }
+}
+
+fn run_netd(args: &[&str]) -> Output {
+    let netd = start_mock_with(netd_respond);
+    let punard = start_mock();
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", punard)
+        .env("PUNAR_NETD_SOCKET", netd)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
 #[test]
-fn privacy_connections_names_its_milestone_instead_of_going_missing() {
-    let agentd = start_agentd_mock();
-    let output = run_agents(&agentd, &["privacy", "connections"]);
-    assert_eq!(output.status.code(), Some(1));
-    let text = stderr(&output);
-    assert!(text.contains("punar-netd"), "{text}");
-    assert!(text.contains("Milestone 12"), "{text}");
-    assert!(
-        text.contains("Next step: punarctl privacy ledger"),
-        "{text}"
+fn network_privacy_and_relay_are_real_netd_surfaces() {
+    for (args, expected) in [
+        (vec!["network", "status"], "no packet or payload inspection"),
+        (vec!["network", "zones"], "MEMBERSHIP IS CIDR-ONLY"),
+        (vec!["network", "policy", "atlas"], "STRICTEST SOURCE WINS"),
+        (
+            vec!["network", "explain", "atlas", "corp_dev"],
+            "Managed AI sessions in project atlas",
+        ),
+        (
+            vec!["network", "apply", "atlas"],
+            "KERNEL NETWORK POLICY RECONCILED",
+        ),
+        (
+            vec!["privacy", "connections"],
+            "NO PORTS · NO LOCAL ADDRESSES",
+        ),
+        (vec!["relay", "status"], "SIMULATED"),
+        (
+            vec!["relay", "set", "private_relay"],
+            "packet path remains direct",
+        ),
+    ] {
+        let output = run_netd(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stdout(&output).contains(expected),
+            "{args:?}: {}",
+            stdout(&output)
+        );
+    }
+
+    let output = run_netd(&["--json", "privacy", "connections"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_str::<Value>(stdout(&output).trim()).unwrap(),
+        fixture_connections()
     );
+}
+
+#[test]
+fn privacy_connections_names_netd_when_the_owner_is_missing() {
+    let missing = std::env::temp_dir().join("punarctl-no-netd-here.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["privacy", "connections"])
+        .env("PUNAR_NETD_SOCKET", missing)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert_eq!(output.status.code(), Some(5));
+    let text = stderr(&output);
+    assert!(text.contains("systemctl status punar-netd"), "{text}");
+    assert!(!text.contains("systemctl status punar-agentd"), "{text}");
 }
 
 /// Routing (contract section 12): `ledger.purge` lives on the agentd

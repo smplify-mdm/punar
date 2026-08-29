@@ -7,8 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap = { workspace = true }
 punar-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
+signal-hook = { workspace = true }

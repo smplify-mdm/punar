@@ -1,0 +1,7 @@
+{
+  "name": "corp_dev",
+  "display_name": "Development network",
+  "description": "Organization development services supplied by reviewed site policy.",
+  "kind": "corporate",
+  "relay_mode": "enterprise_route"
+}

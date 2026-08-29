@@ -17,17 +17,18 @@ Item {
     signal actionRequested()
 
     readonly property bool ready: root.phase === "ready"
-    readonly property bool nativeSource: root.record !== null && root.record.source === "flatpak"
+    readonly property bool nativeSource: root.record !== null && (root.record.source === "flatpak" || root.record.source === "vendor_deb")
+    readonly property bool vendorSource: root.record !== null && root.record.source === "vendor_deb"
     readonly property bool webSource: root.record !== null && root.record.source === "web"
     readonly property bool installed: root.record !== null && root.record.installed === true
     readonly property var inspection: root.record !== null && root.record.inspection ? root.record.inspection : null
-    readonly property bool verified: root.inspection !== null && root.inspection.verified === true
+    readonly property bool verified: root.inspection !== null && (root.inspection.verified === true || (root.inspection.pinned === true && root.inspection.verified_on_install === true))
     readonly property string containment: root.verified ? String(root.inspection.containment || "unknown") : ""
     readonly property var permissions: root.verified && Array.isArray(root.inspection.permissions) ? root.inspection.permissions : []
     readonly property var disclosures: root.record !== null && Array.isArray(root.record.disclosures) ? root.record.disclosures : []
 
     // The action is deliberately outside the scrolling permission body. A
-    // long Flatpak permission set must never push Install/Open below the
+    // long native permission set must never push Install/Open below the
     // panel edge or leave Enter acting on an invisible control.
     implicitHeight: Math.min(380, content.implicitHeight + 28 + actionBar.height)
 
@@ -139,7 +140,7 @@ Item {
                     Meta {
                         id: sourceMeta
                         anchors.centerIn: parent
-                        text: root.webSource ? "Web app · browser" : "Flatpak · native"
+                        text: root.webSource ? "Web app · browser" : (root.vendorSource ? "Vendor package · native" : "Flatpak · native")
                     }
                 }
 
@@ -165,11 +166,11 @@ Item {
                     radius: Theme.radiusTag
                     color: Theme.shellSurface
                     border.width: Theme.hairline
-                    border.color: root.containment === "sandboxed" ? Theme.shellBorder : Theme.shellStatusBad
+                    border.color: (root.containment === "sandboxed" || root.containment === "hardened_native") ? Theme.shellBorder : Theme.shellStatusBad
                     Meta {
                         id: containmentMeta
                         anchors.centerIn: parent
-                        color: root.containment === "sandboxed" ? Theme.shellInk3 : Theme.shellStatusBad
+                        color: (root.containment === "sandboxed" || root.containment === "hardened_native") ? Theme.shellInk3 : Theme.shellStatusBad
                         text: root.containment
                     }
                 }
@@ -178,7 +179,7 @@ Item {
             Meta {
                 width: parent.width
                 visible: root.nativeSource && root.verified
-                text: "Permissions · verified metadata"
+                text: root.vendorSource ? "Access · Punar install policy" : "Permissions · verified metadata"
                 topPadding: 2
             }
 
@@ -260,6 +261,8 @@ Item {
                         return "Open web app ↵";
                     if (root.installed)
                         return "Open ↵";
+                    if (root.vendorSource)
+                        return "Download & install ↵";
                     return "Install ↵";
                 }
             }

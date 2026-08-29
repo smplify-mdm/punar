@@ -1,0 +1,36 @@
+[Unit]
+Description=Punar per-principal network policy and privacy view
+Wants=punar-agentd.service
+After=punar-agentd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punar-netd run
+Restart=on-failure
+CPUAccounting=yes
+IOAccounting=yes
+
+# Root owns the one nftables table, but the capability set is closed to the
+# two operations the daemon needs: installing policy and reading process-owned
+# attribution files. It has no internet address family and no data-plane proxy.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+# Policy compilation reads active users' project documents. Read-only home
+# access is the narrow truthful boundary; ProtectHome=yes would make the
+# advertised project policy impossible to enforce.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadWritePaths=/run/punar-netd /var/lib/punar/network /var/log/punar
+StandardOutput=journal
+StandardError=journal

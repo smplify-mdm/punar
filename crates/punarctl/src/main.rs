@@ -79,24 +79,6 @@ use serde_json::{Value, json};
 use crate::fmt::Style;
 use crate::ipc::{CallError, Client, Target};
 
-/// A SPEC section 76 milestone that will make a stubbed command real.
-struct Milestone {
-    number: u8,
-    name: &'static str,
-}
-
-impl std::fmt::Display for Milestone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Milestone {} ({})", self.number, self.name)
-    }
-}
-
-/// Milestone 12 — network privacy prototype: observability, relay.
-const M12_NETWORK_PRIVACY: Milestone = Milestone {
-    number: 12,
-    name: "network privacy prototype",
-};
-
 #[derive(Parser)]
 #[command(
     name = "punarctl",
@@ -108,10 +90,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Path to the control socket, or the daemon name `punard` /
-    /// `agentd` (defaults: /run/punard/punard.sock, and
-    /// /run/punar-agentd/agentd.sock for the `agents.*` verbs; env
-    /// PUNARD_SOCKET / PUNAR_AGENTD_SOCKET).
+    /// Path to a control socket, or `punard`, `agentd`, `secrets`, or `netd`.
+    /// Without this flag each method uses its owning daemon and environment
+    /// override (PUNARD_SOCKET / PUNAR_AGENTD_SOCKET /
+    /// PUNAR_SECRETS_SOCKET / PUNAR_NETD_SOCKET).
     #[arg(long, global = true, value_name = "PATH")]
     socket: Option<PathBuf>,
 
@@ -177,6 +159,11 @@ enum Command {
     Privacy {
         #[command(subcommand)]
         command: PrivacyCommand,
+    },
+    /// Inspect or apply per-project network policy.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
     },
     /// Inspect private relay state.
     Relay {
@@ -254,7 +241,7 @@ enum AppCommand {
         /// Catalog id, such as `spotify`.
         id: String,
     },
-    /// Remove the native package. User data is left to Flatpak policy.
+    /// Remove the native package. Per-user application data is preserved.
     Remove {
         /// Catalog id, such as `spotify`.
         id: String,
@@ -469,9 +456,40 @@ enum PrivacyCommand {
 }
 
 #[derive(Subcommand)]
-enum RelayCommand {
-    /// Show private relay status.
+enum NetworkCommand {
+    /// Show enforcement capability and privacy-observation boundaries.
     Status,
+    /// List the closed set of policy zones known to this device.
+    Zones,
+    /// Show the effective network policy for one active managed project.
+    Policy {
+        /// Project id from `punarctl agents list`.
+        project: String,
+    },
+    /// Explain one effective project/zone decision and its policy sources.
+    Explain {
+        /// Project id from `punarctl agents list`.
+        project: String,
+        /// Zone id from `punarctl network zones`.
+        zone: String,
+    },
+    /// Reconcile active managed sessions into the kernel nftables table.
+    Apply {
+        /// Optional project citation for the audited apply trigger. The daemon
+        /// always reconciles all live sessions atomically.
+        project: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelayCommand {
+    /// Show the selected route model and whether it is simulated.
+    Status,
+    /// Select direct routing or the explicitly simulated private-relay model.
+    Set {
+        #[arg(value_parser = ["direct", "private_relay"])]
+        mode: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -523,12 +541,6 @@ enum EnrollCommand {
         #[arg(long)]
         yes: bool,
     },
-}
-
-/// Print the one-line stub notice for `invocation` and exit nonzero.
-fn stub(invocation: &str, milestone: &Milestone) -> ExitCode {
-    eprintln!("punarctl {invocation}: not implemented until {milestone}");
-    ExitCode::FAILURE
 }
 
 /// The masthead context hostname for verbs whose result carries none.
@@ -632,16 +644,23 @@ fn app_install(
             });
         }
     };
-    if app.get("source").and_then(Value::as_str) != Some("flatpak") {
+    let source = app.get("source").and_then(Value::as_str);
+    if !matches!(source, Some("flatpak" | "vendor_deb")) {
         eprintln!(
             "{} has no native package for this architecture. Next step: `punarctl app open {id}` opens its curated web app.",
             app.get("name").and_then(Value::as_str).unwrap_or(id)
         );
         return ExitCode::FAILURE;
     }
-    let shown_digest = app
-        .pointer("/inspection/metadata_sha256")
-        .and_then(Value::as_str);
+    let shown_digest = match source {
+        Some("flatpak") => app
+            .pointer("/inspection/metadata_sha256")
+            .and_then(Value::as_str),
+        Some("vendor_deb") => app
+            .pointer("/inspection/package_sha256")
+            .and_then(Value::as_str),
+        _ => None,
+    };
     let digest = match (confirmed, shown_digest) {
         (Some(value), Some(shown)) if value == shown => value,
         (Some(_), Some(_)) => {
@@ -759,6 +778,15 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
             command.args(["run", "--system", app_id]);
             command
         }
+        Some("vendor_deb") => match vendor_app_command(app, id) {
+            Ok(command) => command,
+            Err(why) => {
+                eprintln!(
+                    "The application could not start.\nWhy: {why}.\nNext step: reinstall it from the application library."
+                );
+                return ExitCode::FAILURE;
+            }
+        },
         _ => {
             return fail(&CallError::Protocol {
                 why: "the application source is not supported by this client".to_string(),
@@ -779,6 +807,201 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, String> {
+    if app.get("installed").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "{} is not installed",
+            app.get("name").and_then(Value::as_str).unwrap_or(id)
+        ));
+    }
+    if id.is_empty()
+        || id.len() > 64
+        || !id.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'-')
+        })
+    {
+        return Err("the catalog id is unsafe".to_string());
+    }
+    let executable = app
+        .get("launch_executable")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the verified native package has no launcher".to_string())?;
+    let app_root = PathBuf::from(format!("/var/lib/punar-apps/{id}/current"));
+    let executable_path = Path::new(executable);
+    if !executable_path.is_absolute()
+        || !executable_path.starts_with(app_root.join("usr/lib"))
+        || !executable_path.is_file()
+    {
+        return Err("the installed launcher path is outside its application payload".to_string());
+    }
+    let relative_executable = executable_path
+        .strip_prefix(&app_root)
+        .map_err(|_| "the installed launcher path is invalid".to_string())?;
+    let sandbox_executable = Path::new("/app").join(relative_executable);
+
+    let host_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "HOME is not an absolute path".to_string())?;
+    let app_home = host_home
+        .join(".local/share/punar-apps")
+        .join(id)
+        .join("home");
+    for relative in [".config", ".cache", ".local/share", "Downloads"] {
+        std::fs::create_dir_all(app_home.join(relative))
+            .map_err(|error| format!("could not prepare the isolated app home: {error}"))?;
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| valid_runtime_dir(path))
+        .ok_or_else(|| "the desktop runtime directory is unavailable".to_string())?;
+    let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
+    if wayland_display.is_empty()
+        || !wayland_display
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("the Wayland display name is unsafe".to_string());
+    }
+
+    let mut command = std::process::Command::new("/usr/bin/bwrap");
+    command.args([
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/bin",
+        "/bin",
+        "--ro-bind-try",
+        "/sbin",
+        "/sbin",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--ro-bind",
+        "/sys",
+        "/sys",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/run",
+        "--dir",
+        "/run/user",
+    ]);
+    command
+        .arg("--dir")
+        .arg("/home")
+        .arg("--bind")
+        .arg(&app_home)
+        .arg("/home/punar")
+        .arg("--ro-bind")
+        .arg(&app_root)
+        .arg("/app")
+        .args([
+            "--setenv",
+            "HOME",
+            "/home/punar",
+            "--setenv",
+            "XDG_CONFIG_HOME",
+            "/home/punar/.config",
+            "--setenv",
+            "XDG_CACHE_HOME",
+            "/home/punar/.cache",
+            "--setenv",
+            "XDG_DATA_HOME",
+            "/home/punar/.local/share",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "XDG_SESSION_TYPE",
+            "wayland",
+            "--setenv",
+            "XDG_CURRENT_DESKTOP",
+            "Hyprland",
+            "--setenv",
+            "QT_QPA_PLATFORM",
+            "wayland",
+        ])
+        .arg("--setenv")
+        .arg("XDG_RUNTIME_DIR")
+        .arg(&runtime)
+        .arg("--setenv")
+        .arg("WAYLAND_DISPLAY")
+        .arg(&wayland_display);
+    command.arg("--dir").arg(&runtime);
+    let runtime_paths = [
+        runtime.join(&wayland_display),
+        runtime.join("bus"),
+        runtime.join("pulse"),
+        runtime.join("pipewire-0"),
+        runtime.join("pipewire-0-manager"),
+    ];
+    for path in runtime_paths.iter().filter(|path| path.exists()) {
+        command.arg("--bind").arg(path).arg(path);
+    }
+    if runtime.join("bus").exists() {
+        command
+            .arg("--setenv")
+            .arg("DBUS_SESSION_BUS_ADDRESS")
+            .arg(format!("unix:path={}/bus", runtime.display()));
+    }
+    for key in ["LANG", "LC_ALL"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.arg("--setenv").arg(key).arg(value);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        command.args(["--dir", "/dev/dri"]);
+        for path in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("renderD"))
+            })
+        {
+            command.arg("--dev-bind").arg(&path).arg(&path);
+        }
+    }
+    command
+        .arg("--chdir")
+        .arg("/home/punar")
+        .arg("--")
+        .arg(sandbox_executable)
+        .arg("--no-sandbox");
+    Ok(command)
+}
+
+fn valid_runtime_dir(path: &Path) -> bool {
+    let Some(value) = path.to_str() else {
+        return false;
+    };
+    let Some(uid) = value.strip_prefix("/run/user/") else {
+        return false;
+    };
+    !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()) && path.is_dir()
 }
 
 /// Fetch one `agents.access` result per listed session, best effort.
@@ -1887,18 +2110,60 @@ fn main() -> ExitCode {
                     })
                 }
                 PrivacyCommand::Connections => {
-                    // Reserved honestly: the verb is in SPEC section 11.2,
-                    // and nothing on this device observes network
-                    // destinations until punar-netd (M12). Naming the
-                    // milestone beats a silent absence.
-                    eprintln!("{}", views::privacy_connections_notice());
-                    ExitCode::FAILURE
+                    let netd = Client::for_target(Target::Netd, socket.as_deref());
+                    let hostname = local_hostname();
+                    rpc(&netd, json, "network.connections", None, |v| {
+                        views::privacy_connections(&style, v, &hostname)
+                    })
                 }
             }
         }
-        Command::Relay { command } => match command {
-            RelayCommand::Status => stub("relay status", &M12_NETWORK_PRIVACY),
-        },
+        Command::Network { command } => {
+            let netd = Client::for_target(Target::Netd, socket.as_deref());
+            let hostname = local_hostname();
+            match command {
+                NetworkCommand::Status => rpc(&netd, json, "network.status", None, |v| {
+                    views::network_status(&style, v, &hostname)
+                }),
+                NetworkCommand::Zones => rpc(&netd, json, "network.zones", None, |v| {
+                    views::network_zones(&style, v, &hostname)
+                }),
+                NetworkCommand::Policy { project } => rpc(
+                    &netd,
+                    json,
+                    "network.policy",
+                    Some(json!({"project": project})),
+                    |v| views::network_policy(&style, v, &hostname),
+                ),
+                NetworkCommand::Explain { project, zone } => rpc(
+                    &netd,
+                    json,
+                    "network.explain",
+                    Some(json!({"project": project, "zone": zone})),
+                    |v| views::network_explain(&style, v, &hostname),
+                ),
+                NetworkCommand::Apply { project } => {
+                    let params = project.map(|project| json!({"project": project}));
+                    rpc(&netd, json, "network.apply", params, |v| {
+                        views::network_apply(&style, v, &hostname)
+                    })
+                }
+            }
+        }
+        Command::Relay { command } => {
+            let netd = Client::for_target(Target::Netd, socket.as_deref());
+            let hostname = local_hostname();
+            match command {
+                RelayCommand::Status => rpc(&netd, json, "relay.status", None, |v| {
+                    views::relay_status(&style, v, &hostname)
+                }),
+                RelayCommand::Set { mode } => {
+                    rpc(&netd, json, "relay.set", Some(json!({"mode": mode})), |v| {
+                        views::relay_status(&style, v, &hostname)
+                    })
+                }
+            }
+        }
         Command::Update { command } => match command {
             UpdateCommand::Status => {
                 // Retargeted while touched (M3 plan section 10): update

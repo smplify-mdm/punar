@@ -21,6 +21,7 @@ Singleton {
     readonly property string devIconDir: Quickshell.shellDir + "/../../catalog/icons"
     property var document: ({ "apps": [] })
     readonly property var entries: root.document && Array.isArray(root.document.apps) ? root.document.apps : []
+    readonly property var categoryOrder: ["ai", "developer", "diagnostics", "writing", "files", "security", "browsers", "communication", "media", "graphics", "productivity", "utilities"]
 
     FileView {
         id: catalogFile
@@ -98,6 +99,37 @@ Singleton {
         return null;
     }
 
+    function categoryLabel(category: string): string {
+        var labels = {
+            "ai": "AI",
+            "developer": "Developer",
+            "diagnostics": "Diagnostics",
+            "writing": "Writing",
+            "files": "Files",
+            "security": "Security",
+            "browsers": "Browsers",
+            "communication": "Communication",
+            "media": "Media",
+            "graphics": "Graphics",
+            "productivity": "Productivity",
+            "utilities": "Utilities"
+        };
+        return labels[String(category)] || String(category || "Applications");
+    }
+
+    function categories(): var {
+        var present = ({});
+        for (var i = 0; i < root.entries.length; i++)
+            present[String(root.entries[i].category || "")] = true;
+        var out = [];
+        for (var k = 0; k < root.categoryOrder.length; k++) {
+            var id = root.categoryOrder[k];
+            if (present[id] === true)
+                out.push({ "id": id, "label": root.categoryLabel(id) });
+        }
+        return out;
+    }
+
     function webOnly(app: var): bool {
         if (app === null || app === undefined || !Array.isArray(app.sources) || app.sources.length === 0)
             return false;
@@ -115,7 +147,7 @@ Singleton {
         if (app === null || app === undefined)
             return "";
         var name = String(app.icon || "");
-        if (!/^[A-Za-z0-9._-]+\.svg$/.test(name))
+        if (!/^[A-Za-z0-9._-]+\.(svg|png)$/.test(name))
             return "";
         var base = catalogFile.path === root.installedPath ? root.installedIconDir : root.devIconDir;
         return "file://" + base + "/" + name;

@@ -17,10 +17,11 @@ pragma ComponentBehavior: Bound
 //      No hardcoded argv, no assumption that chromium is present: a
 //      machine with only Firefox resolves to Firefox, and a machine with
 //      no browser at all resolves to null and the command center says so.
-//   3. LAUNCH. `launch(entry)` calls `DesktopEntry.execute()` — Quickshell
-//      parses the `Exec` key itself and spawns the argv. THE SHELL NEVER
-//      BUILDS A SHELL STRING (spec §10, §12.2; D-003 register: "the
-//      command center never generates a shell string").
+//   3. LAUNCH. Quickshell parses the desktop file's `Exec` key into argv.
+//      GUI entries use `DesktopEntry.execute()`; `Terminal=true` entries pass
+//      that argv to Punar's Foot adapter because freedesktop leaves terminal
+//      selection to the desktop environment. THE SHELL NEVER BUILDS A SHELL
+//      STRING (spec §10, §12.2; D-003 register).
 //
 // A SINGLETON, like every other type in Services/: the index has no
 // per-instance state and every surface that ever wants to launch something
@@ -79,6 +80,12 @@ Singleton {
         var id = root.bareId(entry);
         if (id === "foot" || id === "footclient" || id === "foot-server")
             return "Terminal";
+        if (id === "nvim")
+            return "Neovim (Terminal)";
+        if (id === "geany")
+            return "Text Editor (Geany)";
+        if (id === "thunar")
+            return "Files";
         return String(entry && entry.name ? entry.name : "Application");
     }
 
@@ -140,6 +147,9 @@ Singleton {
         for (var i = 0; i < sources.length; i++) {
             var appId = String(sources[i].appId || "").toLowerCase();
             if (appId !== "" && root.entryById(appId) !== null)
+                return true;
+            var desktopId = String(sources[i].desktopId || "").toLowerCase();
+            if (desktopId !== "" && root.entryById(desktopId) !== null)
                 return true;
         }
         return false;
@@ -244,6 +254,20 @@ Singleton {
         if (entry === null || entry === undefined)
             return false;
         try {
+            if (entry.runInTerminal === true) {
+                var terminalCommand = ["/usr/lib/punar/punar-terminal-app.sh"];
+                var workingDirectory = String(entry.workingDirectory || "");
+                if (workingDirectory !== "")
+                    terminalCommand.push("--working-directory", workingDirectory);
+                terminalCommand.push("--");
+                var argv = entry.command || [];
+                if (argv.length === 0)
+                    return false;
+                for (var i = 0; i < argv.length; i++)
+                    terminalCommand.push(String(argv[i]));
+                Quickshell.execDetached(terminalCommand);
+                return true;
+            }
             entry.execute();
         } catch (e) {
             console.warn("punar-shell: launch failed for", entry.id, e);

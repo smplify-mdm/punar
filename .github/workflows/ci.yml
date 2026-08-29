@@ -274,8 +274,10 @@ jobs:
             os/modules/desktop/hypr/punar-layout.sh \
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
+            os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/layout-script-test.sh \
+            tests/desktop/terminal-app-test.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
@@ -298,6 +300,9 @@ jobs:
 
       - name: Test native Lua layout switching
         run: ./tests/desktop/layout-script-test.sh
+
+      - name: Test terminal application launching
+        run: ./tests/desktop/terminal-app-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all

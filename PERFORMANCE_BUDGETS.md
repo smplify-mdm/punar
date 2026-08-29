@@ -182,9 +182,11 @@ at the 10-minute mark, and the reported value is the mean over the window
   (`punard.service`, `punar-agentd.service`, ...). Membership is determined
   from the unit's cgroup (`/sys/fs/cgroup/.../cgroup.procs`), never by
   process-name matching.
-- Units summed **as of M9**: `punard.service` (M3), `punar-agentd.service`
-  (M7) and `punar-secrets.service` (M9 — the credential broker, a separate
-  daemon by decision: `docs/development/milestone-9.md` §3.1). The in-guest
+- Units summed **as of M12**: `punard.service` (M3), `punar-agentd.service`
+  (M7), `punar-secrets.service` (M9 — the credential broker, a separate
+  daemon by decision: `docs/development/milestone-9.md` §3.1), and
+  `punar-netd.service` (M12 — per-principal nftables policy and on-demand TCP
+  observation, target ≤ 6 MB PSS). The in-guest
   sampler (`/usr/lib/punar/idle-ram.sh`) walks that list
   and emits one combined `PUNAR_SERVICES_RSS_MB`; a unit whose cgroup is
   missing or empty makes the whole value `absent`, which
@@ -196,7 +198,8 @@ at the 10-minute mark, and the reported value is the mean over the window
   each make this budget say something untrue; if the total ever crowds the
   target, the honest responses in order are to report the number, trim the
   new daemon, and only then reconsider the topology
-  (`docs/development/milestone-9.md` §11).
+  (`docs/development/milestone-9.md` §11,
+  `docs/development/milestone-12.md` §12).
 - Cross-check metric: systemd cgroup accounting —
   `systemctl show -p MemoryCurrent <unit>` (i.e. cgroup v2
   `memory.current`), summed across the same units. This includes kernel-side

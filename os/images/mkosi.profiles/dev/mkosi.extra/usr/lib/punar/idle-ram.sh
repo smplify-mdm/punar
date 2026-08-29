@@ -16,7 +16,7 @@ SAMPLE_INTERVAL="${PUNAR_RAM_SAMPLE_INTERVAL:-10}"
 RUN_DIR=/run/punar
 EXPORT_PORT=/dev/virtio-ports/punar.export
 RUNTIME_REPORT="${RUN_DIR}/runtime-report.txt"
-PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service"
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service"
 
 mkdir -p "${RUN_DIR}"
 : > "${RUNTIME_REPORT}"
@@ -251,8 +251,8 @@ echo "PUNAR_RAM_MEAN_MB=${mean} PUNAR_RAM_MAX_MB=${max}"
 # matching. The env var name says RSS (fixed consumer contract); the VALUE is
 # summed PSS, stated wherever it is reported.
 #
-# M7 grew the unit list honestly (punar-agentd.service) and M9 grows it
-# again: punar-secrets.service is a THIRD resident daemon, so it is summed
+# M7 grew the unit list honestly (punar-agentd.service), M9 added the
+# credential broker, and M12 adds punar-netd. All four resident daemons are summed
 # into the SAME single number the budget is judged against (spec 6.2 budgets
 # the services total, not per-daemon; thresholds unchanged — target 100 MB,
 # MVP ceiling 150 MB). Adding a daemon and quietly leaving it out of the sum

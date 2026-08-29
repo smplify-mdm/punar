@@ -13,6 +13,7 @@ mkosi.profiles/desktop/mkosi.extra/etc/xdg/
 mkosi.profiles/desktop/mkosi.extra/etc/chromium-flags.conf
 mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-layout.sh
 mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-scratchpad.sh
+mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-terminal-app.sh
 mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-graphics-env.sh
 mkosi.profiles/desktop/mkosi.extra/etc/fonts/
 mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/
@@ -20,6 +21,7 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/shell/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/theme/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/catalog/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/fixtures/
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/network/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/
 mkosi.profiles/dev/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/dev/mkosi.extra/usr/bin/

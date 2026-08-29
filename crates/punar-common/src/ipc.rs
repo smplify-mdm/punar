@@ -769,7 +769,7 @@ pub enum Method {
     AppsCatalog(AppsCatalogParams),
     /// `apps.list` — installed state for catalog applications. Read.
     AppsList,
-    /// `apps.install` — a typed, catalog-bound Flatpak install. Human only;
+    /// `apps.install` — a typed, catalog-bound native install. Human only;
     /// its source, commit and metadata digest are not caller-controlled.
     AppsInstall(AppsInstallParams),
     /// `apps.remove` — remove the native package for one catalog id. Human

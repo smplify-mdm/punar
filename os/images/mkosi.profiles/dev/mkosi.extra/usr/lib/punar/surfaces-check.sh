@@ -842,6 +842,65 @@ else
     FAILED=1
 fi
 
+# A graphical editor, a terminal editor, and the file manager are product
+# paths, not merely packages in the image. Exercise the same command-center
+# query + Enter route used above so a broken Terminal=true adapter or desktop
+# entry cannot pass the image build unnoticed.
+geany_row="$(ipc commandcenter query geany | tr -d '\r\n\"')"
+check_eq "command center finds the graphical text editor" "app · Launch(geany)" "${geany_row}"
+geany_result="$(ipc commandcenter run | tr -d '\r\n\"')"
+check_eq "command center launches the graphical text editor" "app · Launch(geany)" "${geany_result}"
+geany_client() {
+    hyprctl -j clients 2>/dev/null \
+        | jq -e 'any(.[]; .class | ascii_downcase | test("geany"))'
+}
+if wait_for 90 geany_client; then
+    note "ok   graphical text editor window appeared"
+    hyprctl dispatch "hl.dsp.focus({ window = 'class:^(geany|Geany)$' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+else
+    note "FAIL Geany was selected in Command Center but no editor window appeared"
+    FAILED=1
+fi
+
+foot_count() {
+    hyprctl -j clients 2>/dev/null \
+        | jq '[.[] | select(.class | ascii_downcase | test("foot"))] | length'
+}
+foot_before="$(foot_count)"
+nvim_row="$(ipc commandcenter query nvim | tr -d '\r\n\"')"
+check_eq "command center finds Neovim as a terminal editor" "app · Launch(nvim)" "${nvim_row}"
+nvim_result="$(ipc commandcenter run | tr -d '\r\n\"')"
+check_eq "command center routes Neovim through a terminal" "app · Launch(nvim)" "${nvim_result}"
+nvim_client() {
+    [ "$(foot_count)" -gt "${foot_before}" ]
+}
+if wait_for 90 nvim_client; then
+    note "ok   Neovim opened in a new Foot window"
+    hyprctl dispatch "hl.dsp.focus({ window = 'class:^(foot|Foot)$' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+else
+    note "FAIL Neovim was selected in Command Center but no terminal window appeared"
+    FAILED=1
+fi
+
+files_row="$(ipc commandcenter query thunar | tr -d '\r\n\"')"
+check_eq "command center finds the file manager" "app · Launch(thunar)" "${files_row}"
+files_result="$(ipc commandcenter run | tr -d '\r\n\"')"
+check_eq "command center launches the file manager" "app · Launch(thunar)" "${files_result}"
+files_client() {
+    hyprctl -j clients 2>/dev/null \
+        | jq -e 'any(.[]; .class | ascii_downcase | test("thunar"))'
+}
+if wait_for 90 files_client; then
+    note "ok   Files window appeared"
+    hyprctl dispatch "hl.dsp.focus({ window = 'class:^(thunar|Thunar)$' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+else
+    note "FAIL Files was selected in Command Center but no file-manager window appeared"
+    FAILED=1
+fi
+
 # --- group 6: the SYSTEM can open a link, not just a human ------------------
 # xdg-open is what a notification action, a terminal URL activation or the
 # command center's "open" verb calls. Both halves are asserted because either
@@ -859,6 +918,9 @@ for scheme in x-scheme-handler/https x-scheme-handler/http text/html; do
     check_eq "default handler for ${scheme}" "chromium.desktop" "${handler}"
 done
 
+directory_handler="$(xdg-mime query default inode/directory 2>/dev/null | tr -d '[:space:]')"
+check_eq "default handler for directories" "thunar.desktop" "${directory_handler}"
+
 # The handler must name a desktop entry that EXISTS. xdg-open fails through a
 # dangling handler silently, which looks identical to having no default at all.
 if [ -f /usr/share/applications/chromium.desktop ]; then
@@ -867,6 +929,15 @@ else
     note "FAIL chromium.desktop missing — the default handler is dangling"
     FAILED=1
 fi
+
+for entry in geany.desktop nvim.desktop thunar.desktop; do
+    if [ -f "/usr/share/applications/${entry}" ]; then
+        note "ok   ${entry} present at /usr/share/applications"
+    else
+        note "FAIL ${entry} missing — Command Center would expose a dead product path"
+        FAILED=1
+    fi
+done
 
 # --- group 7: UNMANAGED-FIRST — no org chrome on an unenrolled device -------
 # DESIGN_LANGUAGE.md section 8: enrollment adds chrome, it never restructures a

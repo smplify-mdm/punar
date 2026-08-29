@@ -74,7 +74,7 @@ the canonical window fixed in
 - window: **5 minutes**, sampled every **10 s** (30 samples); report mean
   and max;
 - per service: `cpu.stat usage_usec` and `io.stat wbytes` deltas from the
-  `punard`, `punar-agentd`, and `punar-secrets` systemd cgroups;
+  `punard`, `punar-agentd`, `punar-secrets`, and `punar-netd` systemd cgroups;
 - periodic work: the persistent, low-priority `punar-background.slice`
   accumulates timer-triggered reconcile and agent-discovery work even though
   their individual oneshot cgroups disappear between samples;

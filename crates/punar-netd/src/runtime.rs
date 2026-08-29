@@ -17,7 +17,8 @@ use crate::nft_exec::{EnforcementCapability, ExecError, NftExecutor};
 use crate::observe::{ObserveError, observe};
 use crate::policy::{PolicyError, index_zones, parse_zone_memberships};
 use crate::project::{ProjectLocator, deny_all};
-use crate::view::{ConnectionReport, ViewError, build_report};
+use crate::relay::{RelayError, RelayStatus, RelayStore};
+use crate::view::{ProcessView, ViewError, build_report};
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -37,8 +38,12 @@ pub enum RuntimeError {
     View(#[from] ViewError),
     #[error("network policy enforcement is unavailable: {0}")]
     EnforcementUnavailable(String),
+    #[error("no active managed session names project {0:?}")]
+    ProjectNotActive(String),
     #[error("connection side-file write failed: {0}")]
     SideFile(io::Error),
+    #[error(transparent)]
+    Relay(#[from] RelayError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -54,6 +59,38 @@ pub struct ApplyResult {
     pub installed_sessions: usize,
     pub skipped_sessions: Vec<SkippedSessionView>,
     pub warnings: Vec<ApplyWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTransitionKind {
+    Attached,
+    Detached,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTransition {
+    pub kind: SessionTransitionKind,
+    pub session_id: String,
+    pub project: String,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileResult {
+    pub applied: ApplyResult,
+    pub transitions: Vec<SessionTransition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledSession {
+    project: String,
+    cgroup_path: String,
+}
+
+struct AppliedState {
+    result: ApplyResult,
+    sessions: BTreeMap<String, InstalledSession>,
+    skipped: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,6 +116,25 @@ pub struct EnforcementStatus {
     pub installed_sessions: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DnsProtectionStatus {
+    pub state: &'static str,
+    pub milestone: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectionsResult {
+    pub scanned_at: String,
+    pub enforcement: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforcement_reason: Option<String>,
+    pub relay: RelayStatus,
+    pub dns_protection: DnsProtectionStatus,
+    pub transport: &'static str,
+    pub limitations: Vec<&'static str>,
+    pub processes: Vec<ProcessView>,
+}
+
 pub struct Runtime {
     pub zones: BTreeMap<String, ZoneDefinition>,
     pub memberships: BTreeMap<String, ZoneMembership>,
@@ -87,8 +143,11 @@ pub struct Runtime {
     nft: NftExecutor,
     proc_root: PathBuf,
     connections_file: PathBuf,
+    relay: RelayStore,
     capability: EnforcementCapability,
     last_apply: Option<ApplyResult>,
+    last_apply_error: Option<String>,
+    installed_sessions: BTreeMap<String, InstalledSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,27 +156,49 @@ pub struct NetworkData {
     pub memberships: BTreeMap<String, ZoneMembership>,
 }
 
+pub struct RuntimeInputs {
+    pub data: NetworkData,
+    pub agentd: AgentdClient,
+    pub projects: ProjectLocator,
+    pub nft: NftExecutor,
+    pub proc_root: PathBuf,
+    pub connections_file: PathBuf,
+    pub relay: RelayStore,
+}
+
 impl Runtime {
-    pub fn new(
-        zones: BTreeMap<String, ZoneDefinition>,
-        memberships: BTreeMap<String, ZoneMembership>,
-        agentd: AgentdClient,
-        projects: ProjectLocator,
-        nft: NftExecutor,
-        proc_root: PathBuf,
-        connections_file: PathBuf,
-    ) -> Self {
-        let capability = nft.probe_cgroup_v2();
+    pub fn production() -> Result<Self, RuntimeError> {
+        let data = load_network_data(
+            Path::new("/usr/share/punar/network/zones"),
+            Path::new("/usr/share/punar/network/zone-members.json"),
+        )?;
+        let relay = RelayStore::open(PathBuf::from("/var/lib/punar/network/relay.json"))?;
+        Ok(Self::new(RuntimeInputs {
+            data,
+            agentd: AgentdClient::production(),
+            projects: ProjectLocator::production(),
+            nft: NftExecutor::production(),
+            proc_root: PathBuf::from("/proc"),
+            connections_file: PathBuf::from(punar_common::network::CONNECTIONS_PATH),
+            relay,
+        }))
+    }
+
+    pub fn new(inputs: RuntimeInputs) -> Self {
+        let capability = inputs.nft.probe_cgroup_v2();
         Self {
-            zones,
-            memberships,
-            agentd,
-            projects,
-            nft,
-            proc_root,
-            connections_file,
+            zones: inputs.data.zones,
+            memberships: inputs.data.memberships,
+            agentd: inputs.agentd,
+            projects: inputs.projects,
+            nft: inputs.nft,
+            proc_root: inputs.proc_root,
+            connections_file: inputs.connections_file,
+            relay: inputs.relay,
             capability,
             last_apply: None,
+            last_apply_error: None,
+            installed_sessions: BTreeMap::new(),
         }
     }
 
@@ -126,13 +207,18 @@ impl Runtime {
             .last_apply
             .as_ref()
             .map_or(0, |result| result.installed_sessions);
-        match &self.capability {
-            EnforcementCapability::Available => EnforcementStatus {
+        match (&self.capability, &self.last_apply_error) {
+            (EnforcementCapability::Available, None) => EnforcementStatus {
                 state: "available",
                 reason: None,
                 installed_sessions,
             },
-            EnforcementCapability::Unavailable { reason } => EnforcementStatus {
+            (EnforcementCapability::Available, Some(reason)) => EnforcementStatus {
+                state: "unavailable",
+                reason: Some(reason.clone()),
+                installed_sessions: 0,
+            },
+            (EnforcementCapability::Unavailable { reason }, _) => EnforcementStatus {
                 state: "unavailable",
                 reason: Some(reason.clone()),
                 installed_sessions: 0,
@@ -141,24 +227,70 @@ impl Runtime {
     }
 
     pub fn apply(&mut self) -> Result<ApplyResult, RuntimeError> {
+        self.reconcile().map(|result| result.applied)
+    }
+
+    /// Re-read authoritative agent state, atomically replace the nft table,
+    /// and report only transitions that actually reached the kernel.
+    pub fn reconcile(&mut self) -> Result<ReconcileResult, RuntimeError> {
+        match self.apply_inner() {
+            Ok(state) => {
+                let transitions =
+                    session_transitions(&self.installed_sessions, &state.sessions, &state.skipped);
+                self.last_apply = Some(state.result.clone());
+                self.last_apply_error = None;
+                self.installed_sessions = state.sessions;
+                Ok(ReconcileResult {
+                    applied: state.result,
+                    transitions,
+                })
+            }
+            Err(error) => {
+                self.last_apply_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_inner(&self) -> Result<AppliedState, RuntimeError> {
         if let EnforcementCapability::Unavailable { reason } = &self.capability {
             return Err(RuntimeError::EnforcementUnavailable(reason.clone()));
         }
         let snapshot = self.agentd.snapshot()?;
+        let skipped_reasons = snapshot
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.session_id.clone(), skipped.reason.clone()))
+            .collect();
         let (bindings, warnings) =
             compile_bindings(&snapshot, &self.zones, &self.memberships, &self.projects);
         let ruleset = render_table(true, &self.zones, &self.memberships, &bindings)?;
         self.nft.apply_checked(&ruleset)?;
+        let next = bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.session_id.clone(),
+                    InstalledSession {
+                        project: binding.project_id.clone(),
+                        cgroup_path: binding.cgroup_path.clone(),
+                    },
+                )
+            })
+            .collect();
         let result = ApplyResult {
             installed_sessions: bindings.len(),
             skipped_sessions: snapshot.skipped.into_iter().map(Into::into).collect(),
             warnings,
         };
-        self.last_apply = Some(result.clone());
-        Ok(result)
+        Ok(AppliedState {
+            result,
+            sessions: next,
+            skipped: skipped_reasons,
+        })
     }
 
-    pub fn connections(&self) -> Result<ConnectionReport, RuntimeError> {
+    pub fn connections(&self) -> Result<ConnectionsResult, RuntimeError> {
         let snapshot = self.agentd.snapshot()?;
         let observation = observe(&self.proc_root)?;
         let report = build_report(
@@ -167,14 +299,28 @@ impl Runtime {
             &self.memberships,
             &snapshot.sessions,
         )?;
-        write_report_if_changed(&self.connections_file, &report).map_err(RuntimeError::SideFile)?;
-        Ok(report)
+        let enforcement = self.enforcement_status();
+        let result = ConnectionsResult {
+            scanned_at: report.scanned_at,
+            enforcement: enforcement.state,
+            enforcement_reason: enforcement.reason,
+            relay: self.relay.status(),
+            dns_protection: DnsProtectionStatus {
+                state: "not_configured",
+                milestone: "phase_2",
+            },
+            transport: report.transport,
+            limitations: report.limitations,
+            processes: report.processes,
+        };
+        write_report_if_changed(&self.connections_file, &result).map_err(RuntimeError::SideFile)?;
+        Ok(result)
     }
 
     pub fn status_json(&self) -> Value {
         json!({
             "enforcement": self.enforcement_status(),
-            "relay": {"mode": "direct", "simulated": false},
+            "relay": self.relay.status(),
             "dns_protection": {"state": "not_configured", "milestone": "phase_2"},
             "observation": {
                 "transport": "tcp",
@@ -184,6 +330,119 @@ impl Runtime {
             }
         })
     }
+
+    pub fn relay_status(&self) -> RelayStatus {
+        self.relay.status()
+    }
+
+    pub fn set_relay(
+        &mut self,
+        mode: punar_common::network::RelayPreference,
+    ) -> Result<RelayStatus, RuntimeError> {
+        Ok(self.relay.set(mode)?)
+    }
+
+    pub fn zones_json(&self) -> Value {
+        serde_json::to_value(self.zones.values().collect::<Vec<_>>())
+            .expect("zone definitions serialize infallibly")
+    }
+
+    pub fn policy_json(&self, project: &str) -> Result<Value, RuntimeError> {
+        let snapshot = self.agentd.snapshot()?;
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.project_id == project)
+            .ok_or_else(|| RuntimeError::ProjectNotActive(project.to_string()))?;
+        let loaded = self.projects.load(session, &self.zones).map_err(|error| {
+            RuntimeError::Data(format!("project {project:?} could not compile: {error}"))
+        })?;
+        serde_json::to_value(loaded.compiled).map_err(|error| RuntimeError::Data(error.to_string()))
+    }
+
+    pub fn explain_json(&self, project: &str, zone: &str) -> Result<Value, RuntimeError> {
+        let snapshot = self.agentd.snapshot()?;
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.project_id == project)
+            .ok_or_else(|| RuntimeError::ProjectNotActive(project.to_string()))?;
+        let loaded = self.projects.load(session, &self.zones).map_err(|error| {
+            RuntimeError::Data(format!("project {project:?} could not compile: {error}"))
+        })?;
+        let rule = loaded
+            .compiled
+            .rule(zone)
+            .ok_or_else(|| RuntimeError::Data(format!("zone {zone:?} does not exist")))?;
+        Ok(json!({
+            "what": format!("Network access to zone {zone} is {}.", rule.decision),
+            "why": format!("The effective decision is the strictest value from the project manifest and route policy (bound by {:?}).", rule.bound_by),
+            "who": format!("Managed AI sessions in project {project}."),
+            "which_policy": [
+                loaded.policy_path.display().to_string(),
+                loaded.manifest_path.display().to_string()
+            ],
+            "can_you_change_it": "Edit the project documents; organization policy may only further restrict access.",
+            "next_step": format!("punarctl network policy {project}"),
+            "decision": rule.decision,
+            "zone": zone,
+            "project": project,
+            "enforcement": self.enforcement_status()
+        }))
+    }
+}
+
+fn session_transitions(
+    previous: &BTreeMap<String, InstalledSession>,
+    next: &BTreeMap<String, InstalledSession>,
+    skipped: &BTreeMap<String, String>,
+) -> Vec<SessionTransition> {
+    let mut transitions = Vec::new();
+    for (session_id, old) in previous {
+        match next.get(session_id) {
+            None => transitions.push(SessionTransition {
+                kind: SessionTransitionKind::Detached,
+                session_id: session_id.clone(),
+                project: old.project.clone(),
+                reason: if skipped
+                    .get(session_id)
+                    .is_some_and(|reason| reason.contains("not in its registered managed scope"))
+                {
+                    "cgroup_left"
+                } else {
+                    "session_ended"
+                },
+            }),
+            Some(current)
+                if old.cgroup_path != current.cgroup_path || old.project != current.project =>
+            {
+                transitions.push(SessionTransition {
+                    kind: SessionTransitionKind::Detached,
+                    session_id: session_id.clone(),
+                    project: old.project.clone(),
+                    reason: "session_rebound",
+                });
+                transitions.push(SessionTransition {
+                    kind: SessionTransitionKind::Attached,
+                    session_id: session_id.clone(),
+                    project: current.project.clone(),
+                    reason: "session_attached",
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (session_id, current) in next {
+        if !previous.contains_key(session_id) {
+            transitions.push(SessionTransition {
+                kind: SessionTransitionKind::Attached,
+                session_id: session_id.clone(),
+                project: current.project.clone(),
+                reason: "session_attached",
+            });
+        }
+    }
+    transitions
 }
 
 pub fn load_network_data(
@@ -277,7 +536,7 @@ fn compile_bindings(
 /// Persist only when the semantic connection set changes. `scanned_at` is
 /// intentionally excluded from the comparison: an unchanged refresh is not
 /// a disk-write event.
-pub fn write_report_if_changed(path: &Path, report: &ConnectionReport) -> io::Result<bool> {
+pub fn write_report_if_changed<T: Serialize>(path: &Path, report: &T) -> io::Result<bool> {
     let next = serde_json::to_value(report).expect("connection report serializes infallibly");
     let next_semantic = semantic_report(next.clone());
     if let Ok(previous) = fs::read_to_string(path)
@@ -376,6 +635,49 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn lifecycle_diff_is_closed_and_cgroup_escape_is_explicit() {
+        let previous = BTreeMap::from([(
+            "agt_old".to_string(),
+            InstalledSession {
+                project: "atlas".to_string(),
+                cgroup_path: "/user.slice/punar-agent-agt_old.scope".to_string(),
+            },
+        )]);
+        let next = BTreeMap::from([(
+            "agt_new".to_string(),
+            InstalledSession {
+                project: "forge".to_string(),
+                cgroup_path: "/user.slice/punar-agent-agt_new.scope".to_string(),
+            },
+        )]);
+        let skipped = BTreeMap::from([(
+            "agt_old".to_string(),
+            "the root process is not in its registered managed scope".to_string(),
+        )]);
+
+        let transitions = session_transitions(&previous, &next, &skipped);
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[0].kind, SessionTransitionKind::Detached);
+        assert_eq!(transitions[0].reason, "cgroup_left");
+        assert_eq!(transitions[0].project, "atlas");
+        assert_eq!(transitions[1].kind, SessionTransitionKind::Attached);
+        assert_eq!(transitions[1].reason, "session_attached");
+        assert_eq!(transitions[1].project, "forge");
+    }
+
+    #[test]
+    fn unchanged_installed_session_has_no_lifecycle_event() {
+        let installed = BTreeMap::from([(
+            "agt_same".to_string(),
+            InstalledSession {
+                project: "atlas".to_string(),
+                cgroup_path: "/user.slice/punar-agent-agt_same.scope".to_string(),
+            },
+        )]);
+        assert!(session_transitions(&installed, &installed, &BTreeMap::new()).is_empty());
     }
 
     fn session(root: &Path) -> (ManagedSession, ProjectLocator) {

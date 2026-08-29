@@ -530,12 +530,15 @@ DeferredSurfaceBase {
             return;
         }
         var inspection = root.appRecord.inspection;
-        if (source !== "flatpak" || !inspection || inspection.verified !== true || inspection.containment !== "sandboxed") {
+        var flatpakReady = source === "flatpak" && inspection && inspection.verified === true && inspection.containment === "sandboxed";
+        var vendorReady = source === "vendor_deb" && inspection && inspection.pinned === true
+            && inspection.verified_on_install === true && inspection.containment === "hardened_native";
+        if (!flatpakReady && !vendorReady) {
             root.appFailure = "This package needs a security review before Punar can install it.";
             root.appPhase = "failed";
             return;
         }
-        var digest = String(inspection.metadata_sha256 || "");
+        var digest = String(flatpakReady ? (inspection.metadata_sha256 || "") : (inspection.package_sha256 || ""));
         if (digest.length !== 64) {
             root.appFailure = "The verified metadata digest is missing.";
             root.appPhase = "failed";

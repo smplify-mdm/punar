@@ -1,0 +1,7 @@
+{
+  "name": "corp_prod",
+  "display_name": "Production",
+  "description": "Organization production services supplied by reviewed site policy.",
+  "kind": "production",
+  "relay_mode": "enterprise_route"
+}

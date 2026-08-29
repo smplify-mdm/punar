@@ -18,10 +18,11 @@ Command Center or System Control. Skipping it changes no capability.
 2. **Choose, do not bundle.** The signed image keeps only the small primitives
    already justified by the developer baseline. Editors, graphical API clients,
    AI products, and overlay-network clients are installed on demand.
-3. **Names describe different products.** `Claude` is an official cloud web
-   app; `Claude Code` is a local coding-agent client. `ChatGPT` is a web app;
-   an OpenAI coding agent is listed under its own product name. The UI never
-   collapses either pair into one installed state.
+3. **Names describe different products and delivery forms.** `Claude Web`,
+   `Claude Desktop`, and `Claude Code CLI` are distinct entries. `ChatGPT Web`,
+   `ChatGPT Desktop`, and an OpenAI coding-agent CLI are distinct entries. The
+   UI never collapses a web app, desktop package, or coding agent into one
+   installed state.
 4. **Architecture is a gate.** A source is offered only when the catalog has a
    reviewed source for the observed architecture. Official web apps may be the
    honest ARM fallback; an x86 binary is never presented as installable on a
@@ -51,16 +52,56 @@ sections and a persistent **Finish later** action.
 The first group is labelled **AI assistants and coding tools**, not simply
 “AI agents.” It can include:
 
-- official ChatGPT and Claude web apps;
+- official ChatGPT and Claude web apps, plus their native desktop clients only
+  where the vendor package has passed Punar's architecture, dependency,
+  Wayland, update, sandbox, and removal gates;
 - reviewed Claude Code, Gemini CLI, Codex, or other agent installers when a
   persistent, signature-verifiable source exists for this architecture;
 - Cursor and other editors through the normal Editors catalog category;
 - a **No AI tools** choice that installs nothing and is treated as complete.
 
-Cards say `WEB APP`, `EDITOR`, or `CODING AGENT` beside the product name. An
-installed coding agent still creates no session: a session appears in the AI
-panel only after the user explicitly launches it in a project. Authentication
-is performed in the vendor's own flow; Punar does not collect vendor tokens.
+Cards say `WEB APP`, `DESKTOP APP`, `EDITOR`, or `CODING AGENT` beside the
+product name. When both forms exist, the detail page offers **Open web app** and
+**Install native preview** as separate actions with separate state. An installed
+coding agent still creates no session: a session appears in the AI panel only
+after the user explicitly launches it in a project. Authentication is performed
+in the vendor's own flow; Punar does not collect vendor tokens.
+
+### Native AI desktop compatibility gate
+
+As of 2026-08-28, both vendors publish x86_64 and ARM64 Linux packages, but
+neither officially supports an Arch-derived distribution. OpenAI publishes
+`.deb` packages for Ubuntu/Debian and `.rpm` packages for Fedora, calls the
+Linux client a preview, and says other distributions may work without formal
+support. Anthropic publishes an apt/`.deb` path for Ubuntu/Debian and explicitly
+directs Fedora and Arch users to the Claude Code CLI. Punar therefore keeps the
+web apps universally available and must not imply that a vendor supports Punar.
+
+A native entry can graduate from `COMPATIBILITY TESTING` to `AVAILABLE` only
+after all of these pass on x86_64 and ARM64:
+
+- the artifact is downloaded from the vendor's documented origin, bound to an
+  immutable digest promoted through Punar's signed catalog, and any signing
+  chain the vendor publishes is verified during that promotion;
+- installation does not execute an unreviewed Debian/RPM maintainer script or
+  register an uncontrolled rolling repository on the host;
+- every declared shared-library and portal dependency exists in the pinned
+  Punar release, native Wayland and XWayland fallback are exercised, and
+  resize/side-by-side, file chooser, URL handler, notification, and screen-share
+  behavior is tested;
+- the app is confined to its reviewed filesystem, device, secret, and network
+  authority; a vendor brand is not a sandbox bypass;
+- updates are promoted through Punar's stable/dev/edge channels, rollback is
+  possible, and the vendor's bundled updater is disabled or proven unable to
+  escape the pin;
+- remove deletes the package integration while preserving or separately
+  offering deletion of user data, and observed installed state becomes false.
+
+Claude Cowork is a separate capability: the vendor documents KVM, QEMU,
+`virtiofsd`, `/dev/kvm`, and `/dev/vhost-vsock` requirements. Punar never adds a
+user to the `kvm` group as a side effect of installing Claude Desktop. Enabling
+Cowork requires a reviewed virtualization/device grant and is unavailable on a
+nested or Raspberry Pi configuration that cannot prove those prerequisites.
 
 ### 2. Connect securely
 
@@ -139,8 +180,8 @@ Empty states are truthful and actionable:
 2. Finish later dismisses the guide permanently until explicitly reopened.
 3. Search and guide results are identical for the same signed catalog and
    architecture; unsupported sources have no actionable install button.
-4. Web app, editor, and coding-agent labels cannot be confused in accessibility
-   text or visuals.
+4. Web app, desktop app, editor, and coding-agent labels cannot be confused in
+   accessibility text, visuals, install state, search results, or removal.
 5. Every action opens its real review/permission step and observed state updates
    only after backend verification succeeds.
 6. WireGuard/Tailscale/relay routes, DNS effects, service ownership, and cloud
@@ -157,7 +198,9 @@ Empty states are truthful and actionable:
 
 Linux and ARM availability changes. Catalog maintainers re-check the official
 vendor source at every pin rather than copying this document's date into an
-eternal support claim: [Claude Code setup](https://code.claude.com/docs/en/setup),
+eternal support claim: [ChatGPT Desktop on Linux](https://learn.chatgpt.com/docs/linux/linux-app),
+[Claude Desktop on Linux](https://code.claude.com/docs/en/desktop-linux),
+[Claude Code setup](https://code.claude.com/docs/en/setup),
 [Gemini CLI](https://github.com/google-gemini/gemini-cli),
 [Cursor downloads](https://www.cursor.com/downloads),
 [Tailscale for Linux](https://tailscale.com/download/linux), and

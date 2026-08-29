@@ -1,0 +1,7 @@
+{
+  "name": "internet",
+  "display_name": "Internet",
+  "description": "Public internet egress not assigned to a narrower reviewed zone.",
+  "kind": "internet",
+  "relay_mode": "direct"
+}

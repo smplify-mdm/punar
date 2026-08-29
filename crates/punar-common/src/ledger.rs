@@ -506,7 +506,7 @@ pub struct LedgerSummary {
 // The internal record (docs/api/ipc.md section 13.1)
 // ---------------------------------------------------------------------------
 
-/// Which owned mediation point proved an entry. Four values, closed —
+/// Which owned mediation point proved an entry. Five values, closed —
 /// there is no `inferred`, no `traced`, no `heuristic`: M8 derives the
 /// ledger only from points Punar already terminates (SPEC 1.14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

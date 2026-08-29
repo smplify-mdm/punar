@@ -623,6 +623,21 @@ The x86_64 native result includes `app_id`, `installed`, and:
 If the remote metadata differs, no detail card claiming verified containment
 is returned: the method fails `verify_failed`.
 
+A separately named native vendor package (`chatgpt-desktop` or
+`claude-desktop`) reports the package identity that will be verified during
+installation. `pinned` is not a claim that bytes have already been downloaded:
+
+```json
+{"app":{"id":"chatgpt-desktop","source":"vendor_deb","installed":false,
+ "version":"26.825.32147","download_bytes":409931742,
+ "inspection":{"pinned":true,"verified_on_install":true,
+  "package_sha256":"<64 hex>","containment":"hardened_native",
+  "permissions":["Network access","Isolated app home",...]}}}
+```
+
+Web, vendor desktop and coding-agent CLI identities never share installed
+state. Punar does not claim that either vendor formally supports Punar.
+
 ### 5.13 `apps.list`
 
 Params: none. Read-only, any connected peer, not audited. Returns each catalog
@@ -638,10 +653,20 @@ Params:
 ```
 
 The digest is the value shown by the calling app card. Under a single daemon
-transaction lock, punard re-inspects the exact pinned commit and requires the
-catalog digest, caller-confirmed digest and observed digest to agree. It then
-installs with a fixed Flatpak argv and verifies the resulting commit. No
-request field can supply a remote, ref, commit, executable or option.
+transaction lock, a Flatpak install re-inspects the exact pinned commit and
+requires the catalog digest, caller-confirmed digest and observed digest to
+agree before fixed-argv installation and resulting-commit verification.
+
+For `vendor_deb`, the same field confirms the signed-catalog package digest.
+punard downloads only from the catalog's closed vendor origin, enforces exact
+byte size and SHA-256, extracts only `data.tar.xz` into a root-owned staging
+tree, rejects unsafe paths/file types/symlinks, clears setuid/setgid bits, and
+generates its own desktop entry. Debian control archives and maintainer scripts
+are never executed, and no vendor repository is registered. The launcher uses
+Bubblewrap with a read-only system/app payload, isolated writable app home,
+empty temporary directory, dropped capabilities and only the desktop runtime,
+display/audio, GPU and network surfaces declared in the inspection card. No
+request field can supply a URL, remote, ref, digest, executable or option.
 
 The call is allowed only for a human-attributed peer on a personal device.
 Agent-attributed calls are denied and audited. Enrolled devices fail closed
@@ -653,8 +678,10 @@ personal catalog from bypassing managed software policy. Audit action is
 ### 5.15 `apps.remove`
 
 Params: `{"id":"spotify"}`. Same human/personal authorization and
-serialization as install. The Flatpak application id is resolved from the
-catalog, removal is fixed-argv and absence is verified. Audit action is
+serialization as install. A Flatpak application id is resolved from the
+catalog and removal is fixed-argv/verified. A vendor package removes only the
+catalog-owned payload and desktop entry; its per-user isolated home is retained
+for explicit data deletion or reinstall. Audit action is
 `system.remove_package`; web sources have no local package and return
 `conflict` rather than pretending to remove browser data.
 
@@ -2589,3 +2616,98 @@ Rules:
 - There is **no** `quiet` or do-not-disturb field. DND is shell-local
   state in M10, so `punar-agentd` cannot know about it and does not
   invent a flag it could not fill (spec 1.22).
+
+---
+
+## 21. Sibling contract (M12): `punar-netd` network policy and privacy view
+
+```text
+/run/punar-netd/                  0750 root:punar
+/run/punar-netd/netd.sock         0660 root:punar
+/run/punar-netd/connections.json  0640 root:punar
+/var/lib/punar/network/           0700 root:root
+```
+
+The framing and envelopes are sections 2–4 unchanged. The daemon has only
+`AF_UNIX` and `AF_NETLINK`; it never opens an internet socket, proxies a
+connection, resolves a name, captures a packet, or reads a payload. It owns
+only the nftables table `inet punar-net`; `inet punar-base` remains punard's
+table and must not be read-modify-written by netd.
+
+### 21.1 Closed method table
+
+| Method | Params | Admitted peer | Effect |
+|---|---|---|---|
+| `network.status` | absent | any | Enforcement capability and observation limits |
+| `network.connections` | absent | any | One bounded, on-demand `/proc/net/tcp{,6}` pass |
+| `network.zones` | absent | any | Root-owned zone definitions |
+| `network.policy` | `{"project":"atlas"}` | any | Effective strictest-wins active-project policy |
+| `network.explain` | `{"project":"atlas","zone":"corp_prod"}` | any | What/why/who/source/change/next-step explanation |
+| `network.apply` | absent or `{"project":"atlas"}` | **root** | Atomic reconcile of every live managed session |
+| `relay.status` | absent | any | Selected route model and honesty fields |
+| `relay.set` | `{"mode":"direct"}` or `private_relay` | console owner or root | Persist the personal preference |
+
+`network.apply.project` is an audited trigger citation, not a partial apply:
+the daemon always regenerates all authoritative live bindings in one nftables
+transaction. `enterprise_route` is zone data and is not accepted by
+`relay.set` on a personal device.
+
+`network.capture`, `network.inspect`, `network.export`, `system.exec`, and
+`shell.run` do not exist. They return `unknown_method`; this is a probeable
+privacy and execution boundary, not a missing feature hidden by the client.
+
+### 21.2 Policy and enforcement
+
+For each known zone:
+
+```text
+effective = strictest(project manifest, project network policy)
+deny > approval_required > allow
+absent from both = deny
+```
+
+Zone membership is canonical, non-overlapping CIDR data supplied by root-owned
+site configuration. A hostname, DNS answer, SNI value, process name, pid, or
+user claim never establishes zone membership or managed-session attribution.
+Attribution comes from `agents.list` plus exact cgroup-v2 scope reproof. A
+missing or invalid project document installs deny-all for that live session and
+returns a warning; an unavailable enforcement backend is never reported as
+available. Processes outside managed agent cgroups are unchanged.
+
+The generated chain order is security-significant: explicit zone sets first,
+then loopback/link-local, then the project's internet residual; a rate-limited
+deny log precedes an unconditional reject. The limiter never guards the reject.
+
+### 21.3 Connection result and privacy boundary
+
+```json
+{"scanned_at":"2026-08-28T23:45:00Z",
+ "enforcement":"available",
+ "relay":{"mode":"direct","simulated":false},
+ "dns_protection":{"state":"not_configured","milestone":"phase_2"},
+ "transport":"tcp",
+ "limitations":["UDP and QUIC are not observed"],
+ "processes":[
+   {"name":"claude","pid_class":"agent","governed":true,
+    "session":{"id":"agt_4f21c09ab3e1","project":"atlas"},
+    "connections":[
+      {"destination":"198.51.100.10","name":"Reviewed site label",
+       "zone":"corp_dev","category":"corporate","route":"direct",
+       "state":"established"}]}]}
+```
+
+The serializable result has no local address, local or remote port, uid, pid,
+cgroup path, command line, DNS query/history, SNI, URL, packet, or payload.
+`name` is present only when the trusted zone-membership file supplied a label
+for that exact address. The observer retains no timer and no history. The side
+file is rewritten only when its semantic result changes; `scanned_at` alone
+does not cause a disk write.
+
+### 21.4 Relay honesty
+
+`direct` is the real packet path. `private_relay` is an explicitly simulated
+two-role model in M12 and produces the identical direct packet path. Its result
+must carry `simulated: true`, the limited knowledge claimed for each role,
+`property_not_held` explaining that both roles remain one local process under
+one operator, and `real_relay_milestone: "phase_2"`. No surface may shorten
+that to “protected” or imply independent trust boundaries exist.

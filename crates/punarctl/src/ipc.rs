@@ -20,8 +20,7 @@ use serde_json::Value;
 pub const DEFAULT_SOCKET: &str = "/run/punard/punard.sock";
 
 /// The sibling `punar-agentd` socket (contract section 10.1): `agents.*`
-/// lives there, everything else stays on punard's socket. One CLI, two
-/// daemons, one envelope.
+/// lives there. One CLI, several least-privilege daemons, one envelope.
 pub const AGENTD_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
 
 /// The third socket (M9, contract section 16.1): the secret broker
@@ -29,6 +28,11 @@ pub const AGENTD_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
 /// with no state directory at all is the strongest available form of the
 /// "never written to disk" promise (milestone-9.md section 3.1).
 pub const SECRETS_SOCKET: &str = "/run/punar-secrets/secrets.sock";
+
+/// The fourth control-plane socket (M12): network policy enforcement and
+/// bounded, on-demand connection observation. Keeping this below punard means
+/// the general control daemon never needs `CAP_NET_ADMIN`.
+pub const NETD_SOCKET: &str = punar_common::network::NETD_SOCKET_PATH;
 
 /// Method-name prefixes that route to [`AGENTD_SOCKET`] (contract section
 /// 10.5: these names auto-route, even under `debug rpc`).
@@ -62,9 +66,11 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// raised to 90 s — for that one verb only.
 pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A live Flatpak metadata inspection may contact the configured remote.
+/// A live Flatpak metadata inspection may contact the configured remote;
+/// vendor-package detail remains local and verifies bytes during install.
 pub const APP_INSPECT_TIMEOUT: Duration = Duration::from_secs(45);
-/// A first Flatpak install may fetch a platform runtime; keep the budget
+/// A first Flatpak or vendor-package install may fetch a large payload/runtime;
+/// keep the budget
 /// bounded but human-sized for slow links.
 pub const APP_MUTATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -316,6 +322,8 @@ pub enum Target {
     Agentd,
     /// M9 (contract section 16): the secret broker.
     Secrets,
+    /// M12: per-principal network policy and privacy observation.
+    Netd,
 }
 
 impl Target {
@@ -333,6 +341,8 @@ impl Target {
             Target::Agentd
         } else if method.starts_with(CREDENTIAL_METHOD_PREFIX) {
             Target::Secrets
+        } else if method.starts_with("network.") || method.starts_with("relay.") {
+            Target::Netd
         } else {
             Target::Punard
         }
@@ -343,6 +353,7 @@ impl Target {
             Target::Punard => PathBuf::from(DEFAULT_SOCKET),
             Target::Agentd => PathBuf::from(AGENTD_SOCKET),
             Target::Secrets => PathBuf::from(SECRETS_SOCKET),
+            Target::Netd => PathBuf::from(NETD_SOCKET),
         }
     }
 
@@ -351,6 +362,7 @@ impl Target {
             Target::Punard => "PUNARD_SOCKET",
             Target::Agentd => "PUNAR_AGENTD_SOCKET",
             Target::Secrets => "PUNAR_SECRETS_SOCKET",
+            Target::Netd => "PUNAR_NETD_SOCKET",
         }
     }
 
@@ -360,6 +372,7 @@ impl Target {
             Target::Punard => "punard",
             Target::Agentd => "punar-agentd",
             Target::Secrets => "punar-secrets",
+            Target::Netd => "punar-netd",
         }
     }
 
@@ -374,8 +387,8 @@ impl Target {
 /// Resolve the socket for `target`: an explicit `--socket` wins, then the
 /// per-daemon environment override, then the contract default.
 ///
-/// `--socket` also accepts the three daemon **names** rather than a path
-/// (`--socket agentd`, `--socket secrets`), which is how the section 74.4
+/// `--socket` also accepts the four daemon **names** rather than a path
+/// (`--socket agentd`, `--socket secrets`, `--socket netd`), which is how the section 74.4
 /// negative probes target a sibling socket without a second flag: a path
 /// with no separator that names a daemon is a name, not a path — no file
 /// can be addressed as a bare `agentd` anyway (a relative socket path
@@ -385,6 +398,7 @@ pub fn resolve_socket(target: Target, flag: Option<&Path>) -> PathBuf {
         Some("agentd") => Target::Agentd.socket_from_env_or_default(),
         Some("punard") => Target::Punard.socket_from_env_or_default(),
         Some("secrets") => Target::Secrets.socket_from_env_or_default(),
+        Some("netd") => Target::Netd.socket_from_env_or_default(),
         _ => match flag {
             Some(path) => path.to_path_buf(),
             None => target.socket_from_env_or_default(),
@@ -536,15 +550,18 @@ mod tests {
         assert!(!message.contains("EPERM"));
     }
 
-    /// Routing (contract section 10.5): `agents.*` belongs to the sibling
-    /// daemon, every other method to punard — and the unreachable error
-    /// names the unit the operator should actually check.
+    /// Routing (contract sections 10.5 and 18): sibling-owned method families
+    /// reach the correct socket, and the unreachable error names the unit the
+    /// operator should actually check.
     #[test]
     fn agents_methods_route_to_the_sibling_socket() {
         assert_eq!(Target::of_method("agents.list"), Target::Agentd);
         assert_eq!(Target::of_method("agents.bogus"), Target::Agentd);
         assert_eq!(Target::of_method("status"), Target::Punard);
         assert_eq!(Target::of_method("admin.query"), Target::Punard);
+        assert_eq!(Target::of_method("network.status"), Target::Netd);
+        assert_eq!(Target::of_method("network.capture"), Target::Netd);
+        assert_eq!(Target::of_method("relay.status"), Target::Netd);
 
         let agentd = Client::for_target(Target::Agentd, None);
         assert_eq!(agentd.socket, PathBuf::from(AGENTD_SOCKET));
@@ -579,6 +596,13 @@ mod tests {
             message.contains("systemctl status punar-secrets"),
             "{message}"
         );
+
+        let netd = Client::for_target(Target::Netd, None);
+        assert_eq!(netd.socket, PathBuf::from(NETD_SOCKET));
+        let message = netd
+            .connect_error(&io::Error::from(io::ErrorKind::NotFound))
+            .message();
+        assert!(message.contains("systemctl status punar-netd"), "{message}");
     }
 
     /// The M9 gate error is not a failure: it carries the machine data the
@@ -630,6 +654,10 @@ mod tests {
         assert_eq!(
             resolve_socket(Target::Punard, Some(Path::new("secrets"))),
             PathBuf::from(SECRETS_SOCKET)
+        );
+        assert_eq!(
+            resolve_socket(Target::Punard, Some(Path::new("netd"))),
+            PathBuf::from(NETD_SOCKET)
         );
         assert_eq!(
             resolve_socket(Target::Agentd, Some(Path::new("/tmp/x.sock"))),

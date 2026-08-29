@@ -108,12 +108,14 @@ stage_desktop_extra() {
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
            "${extra}/usr/share/punar/theme" \
+           "${extra}/usr/share/punar/network" \
            "${extra}/usr/share/punar/fixtures" \
            "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
+             "${extra}/usr/share/punar/network/zones" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
              "${dev_extra}/usr/share/punar/fixtures/projects/atlas"
 
@@ -129,11 +131,14 @@ stage_desktop_extra() {
     # usr/lib/punar directory.
     rm -f "${extra}/usr/lib/punar/punar-layout.sh" \
           "${extra}/usr/lib/punar/punar-scratchpad.sh" \
+          "${extra}/usr/lib/punar/punar-terminal-app.sh" \
           "${extra}/usr/lib/punar/punar-graphics-env.sh"
     install -m 0755 "${mod}/hypr/punar-layout.sh" \
         "${extra}/usr/lib/punar/punar-layout.sh"
     install -m 0755 "${mod}/hypr/punar-scratchpad.sh" \
         "${extra}/usr/lib/punar/punar-scratchpad.sh"
+    install -m 0755 "${mod}/hypr/punar-terminal-app.sh" \
+        "${extra}/usr/lib/punar/punar-terminal-app.sh"
     install -m 0755 "${mod}/hypr/punar-graphics-env.sh" \
         "${extra}/usr/lib/punar/punar-graphics-env.sh"
     # foot system-wide config (first-found-wins; overwrites the packaged
@@ -221,6 +226,17 @@ stage_desktop_extra() {
         "${extra}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
     install -m 0644 "${REPO_ROOT}"/catalog/icons/*.svg \
         "${extra}/usr/share/punar/catalog/icons/"
+    install -m 0644 "${REPO_ROOT}"/catalog/icons/*.png \
+        "${extra}/usr/share/punar/catalog/icons/"
+
+    # M12 network policy data. Zone definitions are product vocabulary;
+    # membership is site data and deliberately starts empty. A missing CIDR
+    # for a blocked zone makes punar-netd fall back to deny-all for the
+    # affected managed session rather than pretending a name is enforceable.
+    install -m 0644 "${REPO_ROOT}"/crates/punar-netd/data/zones/*.json \
+        "${extra}/usr/share/punar/network/zones/"
+    install -m 0644 "${REPO_ROOT}/crates/punar-netd/data/zone-members.json" \
+        "${extra}/usr/share/punar/network/zone-members.json"
 
     # M9: the two data files the approval gate and the credential broker
     # read at runtime (milestone-9.md §5.2, §6.1). Staged for exactly the
@@ -282,12 +298,13 @@ stage_punar_binaries() {
     # the vendor-level wants symlink shipped in the extra tree; its socket
     # and state directories come from tmpfiles.d/punar-agentd.conf.
     # punar-secrets is the M9 credential broker (milestone-9.md §3.1, SPEC
-    # section 11.4) — the THIRD always-on daemon, same vendor-wants pattern,
+    # section 11.4) — the third always-on daemon, same vendor-wants pattern,
     # socket directory from tmpfiles.d/punar-secrets.conf and NO state
     # directory at all (that absence is the milestone's central promise).
     # It is counted honestly in the services-RSS gate: idle-ram.sh sums all
-    # three service cgroups into the one PUNAR_SERVICES_RSS_MB the budget is
-    # judged against (PERFORMANCE_BUDGETS.md §2.3).
+    # punar-netd is M12's fourth least-privilege daemon. It owns only the
+    # punar-net nftables table and the bounded on-demand network view.
+    # idle-ram.sh counts all four service cgroups in the one services budget.
     echo "==> Building Punar product services, onboarding and CLIs + dev mock (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
@@ -295,7 +312,8 @@ stage_punar_binaries() {
                 CARGO_TARGET_DIR="${cargo_target}" \
                 cargo build --release --locked \
                     -p punard -p punarctl -p punar-env -p punar-agentd \
-                    -p punar-secrets -p punar-onboard -p punar-mock-smplify
+                    -p punar-secrets -p punar-netd -p punar-onboard \
+                    -p punar-mock-smplify
     )
 
     echo "==> Staging product binaries into ${extra}/usr/bin and the mock into ${dev_extra}/usr/bin"
@@ -306,6 +324,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-env" \
         "${cargo_target}/release/punar-agentd" \
         "${cargo_target}/release/punar-secrets" \
+        "${cargo_target}/release/punar-netd" \
         "${cargo_target}/release/punar-onboard" \
         "${cargo_target}/release/punar-onboardd" \
         "${cargo_target}/release/punar-greet" \

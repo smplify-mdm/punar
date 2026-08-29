@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "zones": {
+    "corp_dev": {"cidrs": [], "names": {}},
+    "corp_prod": {"cidrs": [], "names": {}},
+    "privileged_db": {"cidrs": [], "names": {}}
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "privileged_db",
+  "display_name": "Privileged data",
+  "description": "Highly sensitive services supplied by reviewed site policy.",
+  "kind": "privileged"
+}

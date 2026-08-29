@@ -163,19 +163,19 @@ TPM/measured boot, the Smplify control plane (a local mock), identity
 providers, and the private relay. Anything drawn with a dashed stroke in the
 design language is in this category by construction.
 
-**Real and locally release-VM proven, with the expanded canonical CI gate in
-progress:** first-run onboarding; the signed local application catalog;
+**Real and locally release-VM proven, with the newly expanded canonical CI gate
+pending:** first-run onboarding; the signed local application catalog;
 `punarctl app` inspection and typed install actions; Command Center and System
 Control discovery; and Spotify's architecture-aware x86_64 Flatpak / ARM64 web
-fallback. The current image source now offers Telegram, Firefox, ChatGPT,
-Claude, Spotify, Element, Slack, and Discord in one searchable responsive
-library. Claude and ChatGPT are official web applications on both architectures
-and are labelled accordingly. Searches include names, summaries, categories,
-and curated keywords, so `AI assistant` and `coding` find both entries. It is
-still a small approved catalog, not an unbounded live Flathub search.
+fallback. The current image source now offers 22 reviewed identities in one
+searchable, categorized library, including developer, API-testing, diagnostics,
+Markdown, container, and credential tools. The source and QML gates are green;
+the additions made after the last release-VM proof are not a runtime claim
+until the next x86_64 and ARM64 image gates pass. It remains a finite approved
+catalog, not an unbounded live Flathub search.
 
-**Not built at all:** a broad third-party catalog (including the Google Chrome
-install command), execution trust / the Gatekeeper-class
+**Not built at all:** an unbounded third-party package browser (including the
+Google Chrome install command), execution trust / the Gatekeeper-class
 exec gate, generic user-defined web apps and browser contexts (the remaining
 Milestone 11 work), network policy and the relay (Milestone 12), and the real
 update/rollback state machine. Each is designed in `docs/design/`; none is

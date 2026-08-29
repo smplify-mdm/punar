@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "catalogVersion": "2026.08.28.2",
-  "generatedAt": "2026-08-28T23:00:00Z",
+  "catalogVersion": "2026.08.28.4",
+  "generatedAt": "2026-08-29T04:00:00Z",
   "remotes": [
     {
       "id": "flathub",
@@ -97,7 +97,7 @@
       "name": "ChatGPT",
       "icon": "chatgpt.svg",
       "featured": true,
-      "category": "productivity",
+      "category": "ai",
       "keywords": ["AI", "assistant", "coding", "writing", "research", "OpenAI"],
       "summary": "OpenAI’s official web application for writing, research, coding, analysis, and general AI assistance.",
       "trustTier": "curated",
@@ -128,7 +128,7 @@
       "name": "Claude",
       "icon": "claude.svg",
       "featured": true,
-      "category": "productivity",
+      "category": "ai",
       "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic"],
       "summary": "Anthropic’s official web application for writing, research, coding, analysis, and general AI assistance.",
       "trustTier": "curated",
@@ -151,6 +151,120 @@
           "architectures": ["x86_64", "aarch64"],
           "url": "https://claude.ai/",
           "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "chatgpt-desktop",
+      "name": "ChatGPT Desktop (preview)",
+      "icon": "chatgpt.svg",
+      "featured": true,
+      "category": "ai",
+      "keywords": ["AI", "assistant", "coding", "writing", "research", "OpenAI", "native", "desktop"],
+      "summary": "OpenAI’s native Linux preview, downloaded on demand and installed without granting its package scripts control of Punar.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "upstream",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "source:official-package",
+          "text": "Downloaded directly from OpenAI. Punar verifies the promoted package digest and extracts only the app payload; Debian maintainer scripts are not run."
+        },
+        {
+          "id": "platform:compatibility",
+          "text": "This is an upstream preview. OpenAI does not list Punar as a supported distribution, so Punar validates each promoted build independently."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Requests and files you submit leave this device for OpenAI’s service under your account and service settings."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "vendor_deb",
+          "architectures": ["x86_64"],
+          "url": "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_amd64.deb",
+          "sha256": "986d38b690dd0310933ce61175b09c27434001f4e114332bb0f7b6ffdc3ca406",
+          "byteSize": 409931742,
+          "packageName": "chatgpt",
+          "version": "26.825.32147",
+          "dataMember": "data.tar.xz",
+          "payloadRoot": "./usr/lib/chatgpt",
+          "executable": "usr/lib/chatgpt/ChatGPT",
+          "iconPath": "./usr/share/pixmaps/chatgpt.png",
+          "desktopId": "punar-chatgpt-desktop"
+        },
+        {
+          "kind": "vendor_deb",
+          "architectures": ["aarch64"],
+          "url": "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_arm64.deb",
+          "sha256": "1775f7b19b768664d0697c544ebddb7514f74cf559df9146e498ac023f254925",
+          "byteSize": 386319826,
+          "packageName": "chatgpt",
+          "version": "26.825.32147",
+          "dataMember": "data.tar.xz",
+          "payloadRoot": "./usr/lib/chatgpt",
+          "executable": "usr/lib/chatgpt/ChatGPT",
+          "iconPath": "./usr/share/pixmaps/chatgpt.png",
+          "desktopId": "punar-chatgpt-desktop"
+        }
+      ]
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop (beta)",
+      "icon": "claude.svg",
+      "featured": true,
+      "category": "ai",
+      "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic", "native", "desktop", "Cowork"],
+      "summary": "Anthropic’s native Linux beta, downloaded on demand and installed without granting its package scripts control of Punar.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "upstream",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "source:official-package",
+          "text": "Downloaded directly from Anthropic. Punar verifies the repository-published digest and extracts only the app payload; Debian maintainer scripts are not run."
+        },
+        {
+          "id": "platform:compatibility",
+          "text": "This is an upstream beta. Anthropic directs Arch users to its CLI, so Punar validates each desktop build independently before catalog promotion."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Requests and files you submit leave this device for Anthropic’s service under your account and service settings."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "vendor_deb",
+          "architectures": ["x86_64"],
+          "url": "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_1.40609.0_amd64.deb",
+          "sha256": "a96e96ff8eb4d4d7ffa785aba7fc23f8684b12ac83ed2ef4060f0f09f4177a98",
+          "byteSize": 166561632,
+          "packageName": "claude-desktop",
+          "version": "1.40609.0",
+          "dataMember": "data.tar.xz",
+          "payloadRoot": "./usr/lib/claude-desktop",
+          "executable": "usr/lib/claude-desktop/claude-desktop",
+          "iconPath": "./usr/share/icons/hicolor/256x256/apps/claude-desktop.png",
+          "desktopId": "punar-claude-desktop"
+        },
+        {
+          "kind": "vendor_deb",
+          "architectures": ["aarch64"],
+          "url": "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_1.40609.0_arm64.deb",
+          "sha256": "c97e1aa0cd49437054b161bced1fea2ebfae60453e616d5b73524a9146421773",
+          "byteSize": 159481816,
+          "packageName": "claude-desktop",
+          "version": "1.40609.0",
+          "dataMember": "data.tar.xz",
+          "payloadRoot": "./usr/lib/claude-desktop",
+          "executable": "usr/lib/claude-desktop/claude-desktop",
+          "iconPath": "./usr/share/icons/hicolor/256x256/apps/claude-desktop.png",
+          "desktopId": "punar-claude-desktop"
         }
       ]
     },
@@ -315,6 +429,426 @@
           "architectures": ["aarch64"],
           "url": "https://discord.com/app",
           "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "vscodium",
+      "name": "VSCodium",
+      "icon": "vscodium.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["code", "editor", "IDE", "VS Code", "programming", "git"],
+      "summary": "A telemetry-free build of the VS Code editor for programming, debugging, extensions, and source control.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "com.vscodium.codium", "ref": "app/com.vscodium.codium/x86_64/stable",
+          "commit": "af803cf102996f7f250ee90983eac1c5f2c1260c7dae3acf33b7ac78b35b05f0",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "7d1fcb6a17a1d9eb65aa46dcb0d2a38336cafedfd4b1570bf7cd6e3e86c2ff83"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "com.vscodium.codium", "ref": "app/com.vscodium.codium/aarch64/stable",
+          "commit": "25db4a819df41ed1586c07baaaf0b0fdcd1d8eda588c881befc318b723afd455",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "7572d34fbec998c101d0e828049a6fe3f55b4a8e91b35a06cce3c76982c2acaa"
+        }
+      ]
+    },
+    {
+      "id": "dev-toolbox",
+      "name": "Dev Toolbox",
+      "icon": "dev-toolbox.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["JSON", "YAML", "regex", "hash", "formatter", "converter", "developer"],
+      "summary": "Focused utilities for formatting data, testing regular expressions, generating hashes, and common development conversions.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "me.iepure.devtoolbox", "ref": "app/me.iepure.devtoolbox/x86_64/stable",
+          "commit": "75355bc0570868a3033741d2555b0f55159531043a0c308c64514c6a23322b36",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "929f743e71cf5e27a86b6d965eb02da0c9c6b5699b1bb6823b06613262b50d97"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "me.iepure.devtoolbox", "ref": "app/me.iepure.devtoolbox/aarch64/stable",
+          "commit": "8f688d20ec83ee63020475325648f65ebd8d6105d4ab603af87a9c1cc9bb4c27",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "fdec8dee3dfa56b78f27ef2ce48740479ca6d73d3f76c798873629e6bde50661"
+        }
+      ]
+    },
+    {
+      "id": "dbeaver-community",
+      "name": "DBeaver Community",
+      "icon": "dbeaver.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["database", "SQL", "PostgreSQL", "MySQL", "SQLite", "developer"],
+      "summary": "A graphical database client for browsing, querying, and administering popular SQL databases.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by DBeaver Corporation. Punar verifies its exact signed metadata before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "io.dbeaver.DBeaverCommunity", "ref": "app/io.dbeaver.DBeaverCommunity/x86_64/stable",
+          "commit": "4bf9ae215d7d2f9dc4d791fdb1a3bd9a89ea87105049ba30ed463fce90aff22b",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "56375aa2b8e1b4f267927d4223d75536f4dbc2a94f7a3bd6209fec7926e45815"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "io.dbeaver.DBeaverCommunity", "ref": "app/io.dbeaver.DBeaverCommunity/aarch64/stable",
+          "commit": "6bda1c4dead888b4560640d6d635b5b32eab63d8a5fc5d4fbf925aa5057438b5",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "78ed28b6fc54473025baae608cd3520a6d0bbb827f92b3422bc9c770dbc8bc56"
+        }
+      ]
+    },
+    {
+      "id": "httpie",
+      "name": "HTTPie",
+      "icon": "httpie.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["REST", "API", "HTTP", "GraphQL", "testing", "requests"],
+      "summary": "A graphical HTTP client for building, organizing, and testing REST, GraphQL, and other web API requests.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by HTTPie. Inspect its network and file permissions before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "io.httpie.Httpie", "ref": "app/io.httpie.Httpie/x86_64/stable",
+          "commit": "3fe346d678fc275b4f9ab415951b79eaefd4e61daf34d6e781e8271e3dd6570f",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "1000ad4c19178ef7203edb6f350990e3c4277d0260f19cf07bf165e145de0f3a"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "io.httpie.Httpie", "ref": "app/io.httpie.Httpie/aarch64/stable",
+          "commit": "96bf9cf0ba7caeed5eb5a80e023c002dc0f9236fc14d82ea90e0501787b5e3ef",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "4b8673c16e9cdb995c65a186cb72b90e196f3a76bc17c9a474dffc321c83105e"
+        }
+      ]
+    },
+    {
+      "id": "postman",
+      "name": "Postman",
+      "icon": "postman.png",
+      "featured": false,
+      "category": "developer",
+      "keywords": ["REST", "API", "HTTP", "GraphQL", "testing", "collections"],
+      "summary": "A widely used API platform for sending requests, organizing collections, documenting services, and running tests.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by Postman. Punar verifies its exact signed metadata before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "com.getpostman.Postman", "ref": "app/com.getpostman.Postman/x86_64/stable",
+          "commit": "503cba34a182fb372083a013bc4638c909b02a8aba187430b8fadb0f388ba1a6",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "bd8db9be546c6a84b1ba0f5a57c1967516a4540230d223408bfbb8a85c066753"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "com.getpostman.Postman", "ref": "app/com.getpostman.Postman/aarch64/stable",
+          "commit": "abf7939a9749a648bbc5de8209ef4ac25df636de80b48fb42ff893f17f741eb4",
+          "runtime": "org.freedesktop.Platform/aarch64/24.08",
+          "metadataSha256": "aac1e648ced790bc4c94137ba4b16dac34fae2de192d64bbdbf50719d2138bb1"
+        }
+      ]
+    },
+    {
+      "id": "mission-center",
+      "name": "Mission Center",
+      "icon": "mission-center.png",
+      "featured": true,
+      "category": "diagnostics",
+      "keywords": ["system monitor", "CPU", "memory", "disk", "network", "GPU", "processes"],
+      "summary": "A clear system monitor for CPU, memory, disks, networking, GPUs, applications, and individual processes.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:system-observation",
+          "text": "System monitoring requires broader process, device, and host access than an ordinary application; review the live permission list before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "io.missioncenter.MissionCenter", "ref": "app/io.missioncenter.MissionCenter/x86_64/stable",
+          "commit": "98dd962a3249d6d51682698040ef88f60bf415f497acee625c836be35c5158eb",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "07b5c37689df6c9c97cee0ae8d255c8de2b92bb31ef3307e11ab54c29e282440"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "io.missioncenter.MissionCenter", "ref": "app/io.missioncenter.MissionCenter/aarch64/stable",
+          "commit": "990f5e01720df5f30c9754d35dba95f5c23155de78acb4a337980aa33f2f1ead",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "ebc70172c97a50ed05b8211e9d7c35d00eb1de91eedb315527b34b0f395b2f65"
+        }
+      ]
+    },
+    {
+      "id": "gnome-logs",
+      "name": "Logs",
+      "icon": "gnome-logs.png",
+      "featured": true,
+      "category": "diagnostics",
+      "keywords": ["logs", "journal", "systemd", "events", "errors", "debug", "troubleshooting"],
+      "summary": "A searchable graphical viewer for systemd journal events, grouped into useful hardware, application, security, and system views.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:system-logs",
+          "text": "Reading host system logs can expose sensitive diagnostic data. Punar shows the requested host access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "org.gnome.Logs", "ref": "app/org.gnome.Logs/x86_64/stable",
+          "commit": "277b582eb8747d48a5192e4daabaab6e6f165422f8d6ec3f1055a816fc46fffc",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "153a5b7e2a02cffe938b11d5db39248dfc91d121e6887800fe023743db39fcaf"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "org.gnome.Logs", "ref": "app/org.gnome.Logs/aarch64/stable",
+          "commit": "fe8cc84bfbbad5158fd5b908b08b15c130efdcf363ed81cd53200030a0539d23",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "5beaf299c06b816ed733d7c52aabd880c0a3f6f9dd436841bd1d56f80089f791"
+        }
+      ]
+    },
+    {
+      "id": "apostrophe",
+      "name": "Apostrophe",
+      "icon": "apostrophe.png",
+      "featured": true,
+      "category": "writing",
+      "keywords": ["Markdown", "preview", "writing", "notes", "editor", "export"],
+      "summary": "A focused Markdown editor with live preview, document statistics, spell checking, and export tools.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "org.gnome.gitlab.somas.Apostrophe", "ref": "app/org.gnome.gitlab.somas.Apostrophe/x86_64/stable",
+          "commit": "522ff389b5bf48c4fc4f825ba1c9a7cab797d23f851e2d777db0db9339b1817c",
+          "runtime": "org.gnome.Platform/x86_64/49",
+          "metadataSha256": "19a5f5fd0a83d16ae7552a20764042d93c420e92972c8e0ad9478e01bf6f79e7"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "org.gnome.gitlab.somas.Apostrophe", "ref": "app/org.gnome.gitlab.somas.Apostrophe/aarch64/stable",
+          "commit": "8dc4c804e615251b4fc1eebc09a7423b64991ad0922d8ea2ea034c1bac712409",
+          "runtime": "org.gnome.Platform/aarch64/49",
+          "metadataSha256": "676c4c69b3c3a7a149f92945672cc4c8db48ff12d24548e64d4462f47acac31c"
+        }
+      ]
+    },
+    {
+      "id": "meld",
+      "name": "Meld",
+      "icon": "meld.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["diff", "merge", "git", "compare", "files", "directories"],
+      "summary": "A visual diff and merge tool for comparing files, directories, and version-controlled working copies.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "org.gnome.meld", "ref": "app/org.gnome.meld/x86_64/stable",
+          "commit": "7449737ec00ed01bcd2c2db6940a5b2c5e6aca1dbe12aaf620b062d3d51a607b",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "63fe6a023258e8b07a412672ee057ca5ee4ff478722bdda5bfa7929a1421467f"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "org.gnome.meld", "ref": "app/org.gnome.meld/aarch64/stable",
+          "commit": "14f7de0eb98af8ec0d2504c3059e2c35be768f336d7d6f3704e86ba9eb84340c",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "55f223f70595794ebc730c535923759f5802fd32e67294c6f6a394e1c98c3db8"
+        }
+      ]
+    },
+    {
+      "id": "keepassxc",
+      "name": "KeePassXC",
+      "icon": "keepassxc.png",
+      "featured": true,
+      "category": "security",
+      "keywords": ["password", "vault", "credentials", "security", "offline", "TOTP"],
+      "summary": "An offline-first password manager for encrypted KeePass vaults, passkeys, TOTP codes, and browser integration.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "data:credential-vault",
+          "text": "This application handles credential vaults. Review file and browser-integration access carefully before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "org.keepassxc.KeePassXC", "ref": "app/org.keepassxc.KeePassXC/x86_64/stable",
+          "commit": "c6c60a9c0b105ac68672b3eefbca498f8fcd820887c2182009a2013f63713cf3",
+          "runtime": "org.kde.Platform/x86_64/5.15-25.08",
+          "metadataSha256": "04b60905f10d9e5c948e20ecff6ffd2ffa400157e601170c1cb72bfe5fcaa957"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "org.keepassxc.KeePassXC", "ref": "app/org.keepassxc.KeePassXC/aarch64/stable",
+          "commit": "98c53b1a133023e76cf504c482f2af61208c789535514afca1ca785465604c8f",
+          "runtime": "org.kde.Platform/aarch64/5.15-25.08",
+          "metadataSha256": "22ea0a49feb85201599cb28d642bbfc87be78a5cf8f0ab6616ac5400ec3a7174"
+        }
+      ]
+    },
+    {
+      "id": "podman-desktop",
+      "name": "Podman Desktop",
+      "icon": "podman-desktop.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": ["containers", "Podman", "Kubernetes", "images", "developer", "Docker"],
+      "summary": "A graphical companion for building, running, and inspecting containers, images, pods, and local Kubernetes environments.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:container-engine",
+          "text": "Container management requires access to the user’s Podman socket and development files; inspect the live permission list before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "io.podman_desktop.PodmanDesktop", "ref": "app/io.podman_desktop.PodmanDesktop/x86_64/stable",
+          "commit": "947d359aa5d117c100f19e659be197a48519f9d57dd89f8b6d7d742d06317517",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "f5ef05242820c9aec15b4434b294e88d8627c34aaeda605f3593147170bc8d6d"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "io.podman_desktop.PodmanDesktop", "ref": "app/io.podman_desktop.PodmanDesktop/aarch64/stable",
+          "commit": "f6647a68867ad349af07aea0a1a5fc1cf53f4dca9d5cd6f633039083255d894a",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "76638c8e50fcd1f0108d08788cccc3e70f6c0138ab0256bb8cfa5c9d4e22c6c6"
+        }
+      ]
+    },
+    {
+      "id": "wireshark",
+      "name": "Wireshark",
+      "icon": "wireshark.png",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": ["network", "packets", "capture", "protocol", "debug", "security", "traffic"],
+      "summary": "A protocol analyzer for inspecting packet captures and troubleshooting complex network behavior.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:packet-capture",
+          "text": "Live packet capture is privileged and can expose sensitive traffic. Punar shows device and host access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
+          "appId": "org.wireshark.Wireshark", "ref": "app/org.wireshark.Wireshark/x86_64/stable",
+          "commit": "e36b94cebe57ebe91b695d969e83ec1fc99e116e249c565459fd612f6103e3db",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "2660eff177383a40b32c877edcff12e1b749b4dda7528df706d75fbbb1f4b0dd"
+        },
+        {
+          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
+          "appId": "org.wireshark.Wireshark", "ref": "app/org.wireshark.Wireshark/aarch64/stable",
+          "commit": "f9464de23ce8fa27685b7832e977f3c0b52a3c8b9286df12a3786f8a1ff87830",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "efc4322931a95ecda553225045f740135cec143ae23298e6d646c0da586293ab"
         }
       ]
     }

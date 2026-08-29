@@ -56,6 +56,10 @@ CATALOG = REPO / "catalog"
 # heuristics). Validated in place so the file the image ships is the file the
 # schema checked -- no copy to drift.
 STAGED_AGENTS = REPO / "os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents"
+# M12 source-of-truth data staged to /usr/share/punar/network by the image
+# build. Zone vocabulary is contract-validated; CIDR membership is an internal
+# v1 data input whose stricter cross-field parser lives in punar-netd.
+STAGED_NETWORK = REPO / "crates/punar-netd/data"
 
 # ---------------------------------------------------------------------------
 # MANIFEST: (glob over repo-relative posix path, schema repo-relative path).
@@ -138,6 +142,9 @@ MANIFEST: list[tuple[str, str | None]] = [
     # crates/punar-agentd/data by scripts/container-build.sh -- the daemon
     # compiles the same file in as its fallback, so the two cannot drift.
     ("os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/agents/process-classes.json", None),
+    # --- M12 staged runtime network data -----------------------------------
+    ("crates/punar-netd/data/zones/*.json", "schemas/network/network-zone.json"),
+    ("crates/punar-netd/data/zone-members.json", None),
     # --- seed data: fixtures/projects/atlas/ (its README.md table) ----------
     ("fixtures/projects/atlas/project-environment.yaml", "schemas/project/project-environment.json"),
     ("fixtures/projects/atlas/project-network-policy.json", "schemas/network/project-network-policy.json"),
@@ -312,6 +319,7 @@ def main() -> int:
         [p for p in SCHEMAS.rglob("examples/*") if p.suffix in DOC_SUFFIXES]
         + [p for p in FIXTURES.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
         + [p for p in STAGED_AGENTS.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
+        + [p for p in STAGED_NETWORK.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
         + [p for p in CATALOG.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
     )
     for dp in doc_paths:

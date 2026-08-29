@@ -14,6 +14,7 @@ CI diff them against the design tokens.
 | `foot/` | `foot.ini` | `/etc/xdg/foot/foot.ini` |
 | `chromium/` | `chromium-flags.conf` | `/etc/chromium-flags.conf` |
 | `chromium/` | `mimeapps.list` | `/etc/xdg/mimeapps.list` |
+| `hypr/` | `punar-terminal-app.sh` | `/usr/lib/punar/punar-terminal-app.sh` |
 | `fonts/` | `instrument-sans/*` (2 variable TTFs + OFL.txt) | `/usr/share/fonts/punar/instrument-sans/` |
 | `fonts/` | `geist-mono/*` (3 static TTFs + OFL.txt) | `/usr/share/fonts/punar/geist-mono/` |
 | `fonts/` | `50-punar-fonts.conf` | `/etc/fonts/conf.d/50-punar-fonts.conf` |
@@ -91,7 +92,19 @@ Resolution order is `$XDG_CONFIG_HOME/mimeapps.list`, then each
 browser **outranks** this file. A dangling desktop id here fails *open* —
 `xdg-open` falls through rather than erroring, which looks identical to having
 no default — so the check asserts the resolved handler and the existence of
-`chromium.desktop` on the running system.
+`chromium.desktop` on the running system. The same file now declares
+`thunar.desktop` for `inode/directory`; the image ships Thunar plus GVfs and
+the SMB backend, so graphical local folders and `smb://` shares are a default
+workstation capability rather than a catalog prerequisite.
+
+## Terminal application adapter (`hypr/punar-terminal-app.sh`)
+
+Freedesktop entries can declare `Terminal=true`. Quickshell parses their
+`Exec` argv but does not choose a terminal emulator for them, so treating such
+an entry like a GUI program made Neovim appear clickable while opening no
+visible window. The adapter preserves the parsed argv, honors the entry's
+working directory, tries the session's warm `footclient`, and falls back to a
+standalone `foot` process. It never constructs or evaluates a shell string.
 
 ## Fonts (`fonts/`)
 

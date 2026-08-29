@@ -11,26 +11,37 @@ runtime result, never publisher copy. It also contains no application payload:
 the base image ships only Flatpak itself, this catalog, and Flathub's signed
 remote descriptor. Apps and runtimes are fetched on demand into shared `/var`.
 
-The current browseable catalog contains Telegram, Firefox, ChatGPT, Claude,
-Spotify, Element, Slack, and Discord. Telegram, Firefox, and Element have
-separately pinned x86_64 and ARM64 Flatpak sources. Spotify, Slack, and Discord
-use pinned native Flatpaks on x86_64 and an explicitly labelled Chromium
-web-app fallback on ARM64 where their publishers do not provide a native Linux
-payload. ChatGPT and Claude use their official web applications on both
-architectures; they are clearly labelled as web apps and disclose that data is
-sent to their cloud services. Punar never labels a web fallback as a native
-installation.
+The current browseable catalog contains 22 reviewed identities across AI,
+Developer, Diagnostics, Writing, Security, Browsers, Communication, and Media.
+The developer set includes VSCodium, Dev Toolbox, DBeaver Community, HTTPie,
+Postman, Meld, and Podman Desktop. Logs, Mission Center, and Wireshark cover
+graphical troubleshooting; Apostrophe covers Markdown editing and preview;
+KeePassXC is the first security utility. Each of these additions has separately
+pinned x86_64 and ARM64 sources.
+
+Spotify, Slack, and Discord use pinned native Flatpaks on x86_64 and an
+explicitly labelled Chromium web-app fallback on ARM64 where their publishers
+do not provide a native Linux payload. ChatGPT and Claude have distinct
+official web and native preview/beta entries on both architectures. Punar never
+labels a web fallback as a native installation.
 
 Search is offline and deterministic. It matches every query term against the
 catalog id, display name, summary, category, and curated keywords. That makes
-queries such as `Claude`, `ChatGPT`, `AI assistant`, `coding`, and
-`productivity` discover the expected entries without turning a search box into
-an unbounded package-execution surface.
+queries such as `Claude`, `ChatGPT`, `AI assistant`, `REST API`, `Markdown`,
+`logs`, and `developer` discover the expected entries without turning a search
+box into an unbounded package-execution surface. The browse UI also exposes the
+same taxonomy as category controls; typing always searches the whole catalog.
+
+Flathub AppStream is the upstream discovery and graphical metadata source, not
+the device's trust decision. Punar prefers publisher-verified entries where
+available, records community packaging explicitly, admits only reviewed app
+ids, and freezes the selected commit and metadata digest into the signed OS
+catalog. See `CURATION.md` for admission and refresh policy.
 
 `icons/` contains local identity marks shown by the shell. The schema and
-`punard` accept basename-only SVG names; image staging copies those files beside
-the catalog. Installed application icons still come from their freedesktop
-desktop entries, not this directory.
+`punard` accept basename-only SVG or PNG names; image staging copies those files
+beside the catalog. Installed application icons still come from their
+freedesktop desktop entries, not this directory.
 
 Run `tools/verify-app-catalog.sh` during a catalog refresh. It builds a clean
 temporary Flatpak user installation from the committed remote descriptor,

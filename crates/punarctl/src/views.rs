@@ -11,7 +11,7 @@
 //! — now exists and renders; org rows still never render before
 //! enrollment.
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::fmt::{self, Row, Slot, Style};
@@ -1894,19 +1894,622 @@ pub fn privacy_purge(
     Ok(out)
 }
 
-/// `punarctl privacy connections` — reserved, and honest about it. The
-/// verb is in SPEC section 11.2 and a user who finds the `privacy` noun
-/// will type it, so it answers in the section 73 voice instead of going
-/// silently missing.
-pub fn privacy_connections_notice() -> String {
-    concat!(
-        "Local network observability is not available yet.\n",
-        "Why: nothing on this device observes network destinations — punar-netd arrives in ",
-        "Milestone 12 (network privacy prototype), and Punar does not guess at data it does ",
-        "not mediate.\n",
-        "Next step: punarctl privacy ledger",
-    )
-    .to_string()
+#[derive(Deserialize)]
+struct NetworkEnforcement {
+    state: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    installed_sessions: usize,
+}
+
+#[derive(Deserialize)]
+struct RelayView {
+    mode: String,
+    simulated: bool,
+    #[serde(default)]
+    hops: Vec<RelayHopView>,
+    #[serde(default)]
+    property_claimed: Option<String>,
+    #[serde(default)]
+    property_not_held: Option<String>,
+    #[serde(default)]
+    real_relay_milestone: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RelayHopView {
+    role: String,
+    #[serde(default)]
+    knows: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DnsProtectionView {
+    state: String,
+    milestone: String,
+}
+
+#[derive(Deserialize)]
+struct ObservationView {
+    transport: String,
+    udp_quic: String,
+    content_inspection: bool,
+    dns_logging: bool,
+}
+
+#[derive(Deserialize)]
+struct NetworkStatusView {
+    enforcement: NetworkEnforcement,
+    relay: RelayView,
+    dns_protection: DnsProtectionView,
+    observation: ObservationView,
+}
+
+fn plain_enum(value: &str) -> String {
+    value.replace('_', " ")
+}
+
+fn bool_word(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+pub fn network_status(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let status: NetworkStatusView = parse(result)?;
+    let enforcement_slot = if status.enforcement.state == "available" {
+        Slot::Ok
+    } else {
+        Slot::Bad
+    };
+    let relay_slot = if status.relay.simulated {
+        Slot::Warn
+    } else {
+        Slot::Neutral
+    };
+    let mut out = fmt::masthead(style, "Network", &personal_context(hostname));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Enforcement",
+                &status.enforcement.state,
+                enforcement_slot,
+                status.enforcement.reason.as_deref().unwrap_or(
+                    "kernel nftables · per managed cgroup · outside processes unchanged",
+                ),
+            ),
+            Row::new(
+                "Sessions",
+                &status.enforcement.installed_sessions.to_string(),
+                Slot::Neutral,
+                "active managed session policies installed",
+            ),
+            Row::new(
+                "Observation",
+                &status.observation.transport,
+                Slot::Neutral,
+                "on demand · current kernel sockets only",
+            ),
+            Row::new(
+                "UDP / QUIC",
+                &plain_enum(&status.observation.udp_quic),
+                Slot::Neutral,
+                "not inferred from TCP",
+            ),
+            Row::new(
+                "Content",
+                bool_word(status.observation.content_inspection),
+                Slot::Neutral,
+                "no packet or payload inspection",
+            ),
+            Row::new(
+                "DNS logging",
+                bool_word(status.observation.dns_logging),
+                Slot::Neutral,
+                "no DNS history recorded",
+            ),
+            Row::new(
+                "Relay",
+                &plain_enum(&status.relay.mode),
+                relay_slot,
+                if status.relay.simulated {
+                    "simulated model · packet path remains direct"
+                } else {
+                    "direct packet path"
+                },
+            ),
+            Row::new(
+                "DNS protection",
+                &plain_enum(&status.dns_protection.state),
+                Slot::Neutral,
+                &format!(
+                    "planned for {}",
+                    plain_enum(&status.dns_protection.milestone)
+                ),
+            ),
+        ],
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Punar records neither ports nor local addresses · punarctl privacy connections",
+    ));
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ZoneView {
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    kind: String,
+    #[serde(default)]
+    relay_mode: Option<String>,
+}
+
+pub fn network_zones(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let zones: Vec<ZoneView> = parse(result)?;
+    let mut out = fmt::masthead(style, "Network zones", &personal_context(hostname));
+    let rows = zones
+        .iter()
+        .map(|zone| {
+            let detail = [
+                Some(plain_enum(&zone.kind)),
+                zone.relay_mode
+                    .as_deref()
+                    .map(|mode| format!("route {}", plain_enum(mode))),
+                zone.description.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+            Row::new(
+                &zone.name,
+                zone.display_name.as_deref().unwrap_or(&zone.name),
+                Slot::Neutral,
+                &detail,
+            )
+        })
+        .collect::<Vec<_>>();
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "Membership is CIDR-only · names appear only when trusted zone data supplies them",
+    ));
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct PolicyView {
+    project_id: String,
+    rules: Vec<PolicyRuleView>,
+    container_network: ContainerNetworkView,
+}
+
+#[derive(Deserialize)]
+struct PolicyRuleView {
+    zone: String,
+    decision: String,
+    bound_by: String,
+    #[serde(default)]
+    manifest_decision: Option<String>,
+    #[serde(default)]
+    policy_decision: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContainerNetworkView {
+    mode: String,
+    reason: String,
+}
+
+pub fn network_policy(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let policy: PolicyView = parse(result)?;
+    let mut out = fmt::masthead(
+        style,
+        "Network policy",
+        &format!("{} · {}", hostname, policy.project_id),
+    );
+    let rows = policy
+        .rules
+        .iter()
+        .map(|rule| {
+            let sources = match (&rule.manifest_decision, &rule.policy_decision) {
+                (Some(manifest), Some(policy)) => format!(
+                    "manifest {} · project policy {} · bound by {}",
+                    plain_enum(manifest),
+                    plain_enum(policy),
+                    plain_enum(&rule.bound_by)
+                ),
+                (Some(manifest), None) => format!(
+                    "manifest {} · bound by {}",
+                    plain_enum(manifest),
+                    plain_enum(&rule.bound_by)
+                ),
+                (None, Some(policy)) => format!(
+                    "project policy {} · bound by {}",
+                    plain_enum(policy),
+                    plain_enum(&rule.bound_by)
+                ),
+                (None, None) => format!("bound by {}", plain_enum(&rule.bound_by)),
+            };
+            Row::new(
+                &rule.zone,
+                &plain_enum(&rule.decision),
+                decision_slot(&rule.decision),
+                &sources,
+            )
+        })
+        .collect::<Vec<_>>();
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::rows(
+        style,
+        &[Row::new(
+            "Container",
+            &plain_enum(&policy.container_network.mode),
+            Slot::Neutral,
+            &policy.container_network.reason,
+        )],
+    ));
+    out.push_str(&fmt::note(
+        style,
+        "Strictest source wins · an absent rule denies · sudo punarctl network apply",
+    ));
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ExplainView {
+    what: String,
+    why: String,
+    who: String,
+    which_policy: Vec<String>,
+    can_you_change_it: String,
+    next_step: String,
+    decision: String,
+    zone: String,
+    project: String,
+    enforcement: NetworkEnforcement,
+}
+
+pub fn network_explain(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let explain: ExplainView = parse(result)?;
+    let mut out = fmt::masthead(
+        style,
+        "Network explain",
+        &format!("{} · {}", hostname, explain.project),
+    );
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Decision",
+                &plain_enum(&explain.decision),
+                decision_slot(&explain.decision),
+                &format!("zone {}", explain.zone),
+            ),
+            Row::new("What", "", Slot::Neutral, &explain.what),
+            Row::new("Why", "", Slot::Neutral, &explain.why),
+            Row::new("Who", "", Slot::Neutral, &explain.who),
+            Row::new(
+                "Policies",
+                "",
+                Slot::Neutral,
+                &explain.which_policy.join(" · "),
+            ),
+            Row::new("Change", "", Slot::Neutral, &explain.can_you_change_it),
+            Row::new(
+                "Enforcement",
+                &explain.enforcement.state,
+                if explain.enforcement.state == "available" {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                explain
+                    .enforcement
+                    .reason
+                    .as_deref()
+                    .unwrap_or("kernel policy available"),
+            ),
+        ],
+    ));
+    out.push_str(&fmt::note(
+        style,
+        &format!("Next step · {}", explain.next_step),
+    ));
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ApplyView {
+    installed_sessions: usize,
+    #[serde(default)]
+    skipped_sessions: Vec<SkippedSessionView>,
+    #[serde(default)]
+    warnings: Vec<ApplyWarningView>,
+}
+
+#[derive(Deserialize)]
+struct SkippedSessionView {
+    session_id: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct ApplyWarningView {
+    session_id: String,
+    project: String,
+    fallback: String,
+    reason: String,
+}
+
+pub fn network_apply(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let applied: ApplyView = parse(result)?;
+    let mut out = fmt::masthead(style, "Network apply", &personal_context(hostname));
+    out.push_str(&fmt::rows(
+        style,
+        &[Row::new(
+            "Installed",
+            &applied.installed_sessions.to_string(),
+            Slot::Ok,
+            "managed session policies in one nftables transaction",
+        )],
+    ));
+    for warning in &applied.warnings {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                &warning.project,
+                &plain_enum(&warning.fallback),
+                Slot::Warn,
+                &format!("{} · {}", warning.session_id, warning.reason),
+            )],
+        ));
+    }
+    for skipped in &applied.skipped_sessions {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                &skipped.session_id,
+                "skipped",
+                Slot::Warn,
+                &skipped.reason,
+            )],
+        ));
+    }
+    out.push_str(&fmt::verdict(
+        style,
+        if applied.warnings.is_empty() && applied.skipped_sessions.is_empty() {
+            Slot::Ok
+        } else {
+            Slot::Warn
+        },
+        "✓ Kernel network policy reconciled",
+    ));
+    Ok(out)
+}
+
+pub fn relay_status(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let relay: RelayView = parse(result)?;
+    let mut out = fmt::masthead(style, "Relay", &personal_context(hostname));
+    out.push_str(&fmt::rows(
+        style,
+        &[Row::new(
+            "Mode",
+            &plain_enum(&relay.mode),
+            if relay.simulated {
+                Slot::Warn
+            } else {
+                Slot::Neutral
+            },
+            if relay.simulated {
+                "simulated model · packet path remains direct"
+            } else {
+                "direct packet path"
+            },
+        )],
+    ));
+    for hop in &relay.hops {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                &hop.role,
+                "knows",
+                Slot::Neutral,
+                &hop.knows
+                    .iter()
+                    .map(|v| plain_enum(v))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            )],
+        ));
+    }
+    if let Some(claim) = &relay.property_claimed {
+        out.push_str(&fmt::note(style, claim));
+    }
+    if let Some(not_held) = &relay.property_not_held {
+        out.push_str(&fmt::verdict(
+            style,
+            Slot::Warn,
+            &format!("Simulated · {not_held}"),
+        ));
+    }
+    if let Some(milestone) = &relay.real_relay_milestone {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "Independent relay trust boundaries · {}",
+                plain_enum(milestone)
+            ),
+        ));
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ConnectionsView {
+    scanned_at: String,
+    enforcement: String,
+    #[serde(default)]
+    enforcement_reason: Option<String>,
+    relay: RelayView,
+    dns_protection: DnsProtectionView,
+    transport: String,
+    #[serde(default)]
+    limitations: Vec<String>,
+    #[serde(default)]
+    processes: Vec<NetworkProcessView>,
+}
+
+#[derive(Deserialize)]
+struct NetworkProcessView {
+    name: String,
+    pid_class: String,
+    #[serde(default)]
+    session: Option<NetworkSessionView>,
+    governed: bool,
+    #[serde(default)]
+    connections: Vec<NetworkConnectionView>,
+}
+
+#[derive(Deserialize)]
+struct NetworkSessionView {
+    id: String,
+    project: String,
+}
+
+#[derive(Deserialize)]
+struct NetworkConnectionView {
+    destination: String,
+    #[serde(default)]
+    name: Option<String>,
+    zone: String,
+    category: String,
+    route: String,
+    state: String,
+}
+
+/// `punarctl privacy connections` — a bounded, on-demand TCP view. The wire
+/// types deliberately contain no local address, port, uid, pid, cgroup, DNS
+/// history, or packet content, so this renderer cannot accidentally expose it.
+pub fn privacy_connections(
+    style: &Style,
+    result: &Value,
+    hostname: &str,
+) -> Result<String, String> {
+    let connections: ConnectionsView = parse(result)?;
+    let mut out = fmt::masthead(style, "Connections", &personal_context(hostname));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Scanned",
+                "",
+                Slot::Neutral,
+                &fmt::timestamp(&connections.scanned_at),
+            ),
+            Row::new(
+                "Enforcement",
+                &connections.enforcement,
+                if connections.enforcement == "available" {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                connections
+                    .enforcement_reason
+                    .as_deref()
+                    .unwrap_or("per managed cgroup"),
+            ),
+            Row::new(
+                "Transport",
+                &connections.transport,
+                Slot::Neutral,
+                "current sockets · on demand",
+            ),
+            Row::new(
+                "Relay",
+                &plain_enum(&connections.relay.mode),
+                if connections.relay.simulated {
+                    Slot::Warn
+                } else {
+                    Slot::Neutral
+                },
+                if connections.relay.simulated {
+                    "simulated · actual packet path direct"
+                } else {
+                    "direct"
+                },
+            ),
+            Row::new(
+                "DNS protection",
+                &plain_enum(&connections.dns_protection.state),
+                Slot::Neutral,
+                &format!(
+                    "planned for {}",
+                    plain_enum(&connections.dns_protection.milestone)
+                ),
+            ),
+        ],
+    ));
+    if connections.processes.is_empty() {
+        out.push_str(&fmt::note(style, "No current TCP connections observed"));
+    }
+    for process in &connections.processes {
+        let context = process.session.as_ref().map_or_else(
+            || format!("{} · unmanaged", plain_enum(&process.pid_class)),
+            |session| format!("{} · {}", session.project, session.id),
+        );
+        out.push_str(&fmt::section(
+            style,
+            &process.name,
+            &format!(
+                "{} · {}",
+                if process.governed {
+                    "governed"
+                } else {
+                    "not governed"
+                },
+                context
+            ),
+        ));
+        if process.connections.is_empty() {
+            out.push_str(&fmt::note(style, "No current TCP connections"));
+        }
+        let rows = process
+            .connections
+            .iter()
+            .map(|connection| {
+                Row::new(
+                    connection
+                        .name
+                        .as_deref()
+                        .unwrap_or(&connection.destination),
+                    &plain_enum(&connection.state),
+                    Slot::Neutral,
+                    &format!(
+                        "{} · {} · {} · {}",
+                        connection.destination,
+                        plain_enum(&connection.zone),
+                        plain_enum(&connection.category),
+                        plain_enum(&connection.route)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        out.push_str(&fmt::rows(style, &rows));
+    }
+    for limitation in &connections.limitations {
+        out.push_str(&fmt::note(style, limitation));
+    }
+    out.push_str(&fmt::note(
+        style,
+        "No ports · no local addresses · no payloads · no DNS history · no export method",
+    ));
+    Ok(out)
 }
 
 /// `punarctl agents list` — one row per session and per detection:
@@ -3399,7 +4002,13 @@ pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<Strin
         ),
     ];
     if let Some(inspection) = app.get("inspection").and_then(Value::as_object) {
-        if inspection.get("verified").and_then(Value::as_bool) == Some(true) {
+        let flatpak_verified = inspection.get("verified").and_then(Value::as_bool) == Some(true);
+        let vendor_pinned = inspection.get("pinned").and_then(Value::as_bool) == Some(true)
+            && inspection
+                .get("verified_on_install")
+                .and_then(Value::as_bool)
+                == Some(true);
+        if flatpak_verified || vendor_pinned {
             let containment = inspection
                 .get("containment")
                 .and_then(Value::as_str)
@@ -3407,22 +4016,28 @@ pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<Strin
             rows.push(Row::new(
                 "Containment",
                 containment,
-                if containment == "sandboxed" {
+                if matches!(containment, "sandboxed" | "hardened_native") {
                     Slot::Ok
                 } else {
                     Slot::Bad
                 },
-                "computed from the pinned Flatpak metadata",
+                if flatpak_verified {
+                    "computed from the pinned Flatpak metadata"
+                } else {
+                    "Punar wrapper · isolated home · package verified before extraction"
+                },
             ));
-            rows.push(Row::new(
-                "Runtime",
-                inspection
-                    .get("runtime")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-                Slot::Neutral,
-                "",
-            ));
+            if flatpak_verified {
+                rows.push(Row::new(
+                    "Runtime",
+                    inspection
+                        .get("runtime")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                    Slot::Neutral,
+                    "",
+                ));
+            }
         }
     }
     out.push_str(&fmt::rows(style, &rows));
@@ -3446,10 +4061,15 @@ pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<Strin
     }
     if let Some(digest) = app
         .get("inspection")
-        .and_then(|v| v.get("metadata_sha256"))
+        .and_then(|v| v.get("metadata_sha256").or_else(|| v.get("package_sha256")))
         .and_then(Value::as_str)
     {
-        out.push_str(&fmt::note(style, &format!("Metadata sha256 · {digest}")));
+        let label = if source == "vendor_deb" {
+            "Package sha256"
+        } else {
+            "Metadata sha256"
+        };
+        out.push_str(&fmt::note(style, &format!("{label} · {digest}")));
     }
     Ok(out)
 }

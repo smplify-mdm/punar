@@ -56,5 +56,11 @@ install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
 # cross-distribution /usr/bin contract.
 ln -sfn /usr/sbin/nft /usr/bin/nft
 
+# Debian renames these binaries to avoid historical package-name collisions.
+# Punar exposes the cross-distribution command names developers expect while
+# retaining Debian's signed packages as the only payload source.
+ln -sfn /usr/bin/fdfind /usr/bin/fd
+ln -sfn /usr/bin/batcat /usr/bin/bat
+
 fc-cache --system-only -f \
     || echo "warning: fc-cache failed; runtime scan will cover it" >&2
