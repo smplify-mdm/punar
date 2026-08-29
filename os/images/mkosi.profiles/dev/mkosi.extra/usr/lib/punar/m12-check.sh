@@ -371,11 +371,12 @@ AF="$(systemctl show punar-netd.service -p RestrictAddressFamilies --value 2>/de
 DENY="$(systemctl show punar-netd.service -p IPAddressDeny --value 2>/dev/null)"
 CAPS="$(systemctl show punar-netd.service -p CapabilityBoundingSet --value 2>/dev/null)"
 AF_NORMALIZED="$(printf '%s\n' "${AF}" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | paste -sd ' ' -)"
+DENY_NORMALIZED="$(printf '%s\n' "${DENY}" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | paste -sd ' ' -)"
 check_eq "netd sandbox admits only AF_UNIX and AF_NETLINK" \
     "AF_NETLINK AF_UNIX" "${AF_NORMALIZED:-absent}"
-case "${DENY}" in
-    *any*|*0.0.0.0/0*::/0*) note "ok   netd has IPAddressDeny=any (systemd-normalized)" ;;
-    *) note "FAIL netd lacks IPAddressDeny=any (${DENY:-absent})"; FAILED=1 ;;
+case "${DENY_NORMALIZED}" in
+    any|"0.0.0.0/0 ::/0") note "ok   netd has IPAddressDeny=any (systemd-normalized)" ;;
+    *) note "FAIL netd lacks exact IPAddressDeny=any set (${DENY:-absent})"; FAILED=1 ;;
 esac
 case " ${CAPS} " in
     *" CAP_SYS_PTRACE "*|*" cap_sys_ptrace "*)
