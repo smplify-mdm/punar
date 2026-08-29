@@ -51,6 +51,18 @@ digest-bound supply, sandboxing, secret-broker use, explicit network effects,
 least privilege, auditability, and fail-closed negative tests. No developer or
 onboarding mode may bypass those controls.
 
+The profile direction is bounded in `docs/design/profiles.md`. A profile is a
+real identity, storage, secret, process, network, peripheral, and policy
+boundary—not a theme or a same-user preset. Device encryption, verified boot,
+kernel updates, and the hardware trust floor remain device-scoped; separately
+keyed profile storage and managed-profile enrollment may narrow that foundation
+without acquiring authority over personal profiles. Time and event rules
+suggest activation by default, never unlock unattended, and must survive
+spoofing, replay, conflict, expiry, recovery, and power-loss tests. Home Hub is
+defined as a resource-bounded service profile with no access to human profiles.
+Do not publish profile schemas or portal APIs until the encryption, namespace,
+seat-isolation, BYOD-disclosure, and Raspberry Pi resource spikes pass.
+
 ---
 
 ## 1. Immediately
