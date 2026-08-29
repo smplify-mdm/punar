@@ -33,6 +33,7 @@ RUN printf 'Server=https://archive.archlinux.org/repos/${SNAP}/\$repo/os/\$arch\
       > /etc/pacman.d/mirrorlist \\
  && sed -i 's/^SigLevel.*/SigLevel = Never/' /etc/pacman.conf \\
  && echo 'DisableSandbox' >> /etc/pacman.conf \\
+ && echo 'DisableDownloadTimeout' >> /etc/pacman.conf \\
  && pacman -Sy --noconfirm --needed qt6-declarative qt6-svg quickshell \\
  && pacman -Scc --noconfirm
 CONTAINERFILE
