@@ -21,8 +21,9 @@
 //!   detect known agents running outside the managed runtime (`observed`)
 //!   and suspected agentic processes (`unknown`) on demand, and publish a
 //!   summary for the AI panel.
-//! - **Does not**: enforce anything. Authority rows are display-level and
-//!   carry their `declared · M9/M12` labels (SPEC section 1.22). There is
+//! - **Does not**: itself enforce the authority rows it stores. Each row
+//!   carries its current enforcement state (SPEC section 1.22); managed
+//!   network scopes are enforced by `punar-netd`. There is
 //!   no continuous detection, alerting, or response (Milestone 10), and
 //!   detection is a heuristic that says *suspected*, never certain (SPEC
 //!   section 23).
@@ -35,9 +36,8 @@
 //! already owns (the scope cgroup, the audit stream, the workspace grant,
 //! registry metadata): no eBPF, no fanotify, no ptrace, no `LD_PRELOAD`,
 //! and no filesystem or network tracing anywhere (SPEC 1.14). The
-//! categories with no producer yet — network destinations (M12), MCP
-//! servers (M9+), credential classes (M9) — are rendered as *not yet
-//! observed* rather than invented (SPEC 1.22).
+//! categories with no producer yet are rendered as *not yet observed*
+//! rather than invented (SPEC 1.22).
 //!
 //! # Milestone 10: periodic detection and the local alert
 //!

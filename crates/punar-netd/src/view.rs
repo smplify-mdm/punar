@@ -11,7 +11,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::model::{
-    ModelError, RelayMode, ZoneDefinition, ZoneMembership, validate_cgroup_path,
+    ModelError, RelayMode, ZoneDefinition, ZoneKind, ZoneMembership, validate_cgroup_path,
     validate_project_id, validate_session_id, validate_user_name,
 };
 use crate::observe::{Observation, TcpState};
@@ -28,6 +28,10 @@ pub enum ViewError {
     DuplicateCgroup(String),
     #[error("managed cgroup paths {left:?} and {right:?} overlap")]
     OverlappingCgroups { left: String, right: String },
+    #[error("kernel cgroup id {0} appears on more than one managed session")]
+    DuplicateCgroupId(u64),
+    #[error("socket path and kernel cgroup id resolve to different managed sessions")]
+    ConflictingAttribution,
     #[error("zone map key {key:?} does not match definition name {name:?}")]
     ZoneKeyMismatch { key: String, name: String },
     #[error("zone membership references unknown zone {0:?}")]
@@ -43,6 +47,7 @@ pub struct ManagedSession {
     pub user: String,
     pub process_id: u32,
     pub cgroup_path: String,
+    pub cgroup_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,6 +75,16 @@ pub struct ConnectionView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeniedView {
+    pub zone: String,
+    pub kind: ZoneKind,
+    pub attempts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_destination: Option<IpAddr>,
+    pub explain: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessView {
     pub name: String,
     pub pid_class: ProcessClass,
@@ -77,6 +92,9 @@ pub struct ProcessView {
     pub session: Option<SessionView>,
     pub governed: bool,
     pub connections: Vec<ConnectionView>,
+    pub denied: Vec<DeniedView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -101,11 +119,23 @@ pub fn build_report(
 
     let mut processes = Vec::with_capacity(observation.processes.len());
     for process in observation.processes {
-        let session = process.cgroup_path.as_deref().and_then(|path| {
+        let path_session = process.cgroup_path.as_deref().and_then(|path| {
             sessions
                 .iter()
                 .find(|session| within(path, &session.cgroup_path))
         });
+        let id_session = process.cgroup_id.and_then(|id| {
+            sessions
+                .iter()
+                .find(|session| session.cgroup_id == Some(id))
+        });
+        let session = match (path_session, id_session) {
+            (Some(left), Some(right)) if left.session_id != right.session_id => {
+                return Err(ViewError::ConflictingAttribution);
+            }
+            (Some(session), _) | (None, Some(session)) => Some(session),
+            (None, None) => None,
+        };
         let mut connections = process
             .connections
             .into_iter()
@@ -136,6 +166,8 @@ pub fn build_report(
             }),
             governed: session.is_some(),
             connections,
+            denied: Vec::new(),
+            note: None,
         });
     }
     processes.sort_by(|left, right| {
@@ -214,6 +246,7 @@ fn validate_inputs(
 
     let mut ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
+    let mut cgroup_ids = BTreeSet::new();
     for session in sessions {
         validate_session_id(&session.session_id)?;
         validate_project_id(&session.project_id)?;
@@ -227,6 +260,11 @@ fn validate_inputs(
         }
         if !paths.insert(session.cgroup_path.clone()) {
             return Err(ViewError::DuplicateCgroup(session.cgroup_path.clone()));
+        }
+        if let Some(id) = session.cgroup_id
+            && (id == 0 || !cgroup_ids.insert(id))
+        {
+            return Err(ViewError::DuplicateCgroupId(id));
         }
     }
     let paths: Vec<_> = paths.into_iter().collect();
@@ -296,6 +334,7 @@ mod tests {
             user: "punar".into(),
             process_id: 42,
             cgroup_path: "/user.slice/punar-agent-4f21.scope".into(),
+            cgroup_id: Some(31337),
         }];
         (zones, memberships, sessions)
     }
@@ -312,6 +351,7 @@ mod tests {
                 pid: Some(43),
                 uid: 1000,
                 cgroup_path: Some("/user.slice/punar-agent-4f21.scope/child".into()),
+                cgroup_id: Some(31337),
                 connections: vec![Connection {
                     destination: "10.20.0.7".parse().unwrap(),
                     state: TcpState::Established,
@@ -344,6 +384,7 @@ mod tests {
                 pid: Some(900),
                 uid: 1000,
                 cgroup_path: Some("/user.slice/app-chromium.scope".into()),
+                cgroup_id: Some(90001),
                 connections: vec![Connection {
                     destination: "151.101.1.69".parse().unwrap(),
                     state: TcpState::Established,
@@ -368,6 +409,7 @@ mod tests {
         let mut nested = sessions[0].clone();
         nested.session_id = "agt_other".into();
         nested.cgroup_path.push_str("/child");
+        nested.cgroup_id = Some(31338);
         sessions.push(nested);
         let observation = Observation {
             scanned_at: "now".into(),
@@ -379,5 +421,33 @@ mod tests {
             build_report(observation, &zones, &memberships, &sessions),
             Err(ViewError::OverlappingCgroups { .. })
         ));
+    }
+
+    #[test]
+    fn kernel_cgroup_id_governs_when_cross_user_proc_fds_are_hidden() {
+        let (zones, memberships, sessions) = inputs();
+        let observation = Observation {
+            scanned_at: "2026-08-29T00:00:00Z".into(),
+            transport: "tcp",
+            limitations: vec![],
+            processes: vec![ProcessConnections {
+                name: "unknown".into(),
+                pid: None,
+                uid: 1000,
+                cgroup_path: None,
+                cgroup_id: Some(31337),
+                connections: vec![Connection {
+                    destination: "10.20.0.7".parse().unwrap(),
+                    state: TcpState::Established,
+                }],
+            }],
+        };
+        let report = build_report(observation, &zones, &memberships, &sessions).unwrap();
+        assert!(report.processes[0].governed);
+        assert_eq!(report.processes[0].pid_class, ProcessClass::Agent);
+        assert_eq!(
+            report.processes[0].session.as_ref().unwrap().id,
+            "agt_4f21c09ab3e1"
+        );
     }
 }

@@ -118,7 +118,7 @@ not drift from it:
 | combined first-party service PSS > ceiling | 150 MB | `::error::`, job **fails** |
 | combined first-party service PSS > target | 100 MB | `::warning::`, job passes |
 | any first-party cgroup idle CPU ≥ ceiling | 0.50% of one CPU | `::error::`, job **fails** |
-| combined first-party writes > ceiling | 65,536 B / 5 min | `::error::`, job **fails** |
+| combined first-party writes > ceiling | 98,304 B / 5 min | `::error::`, job **fails** |
 | any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
 | whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
 

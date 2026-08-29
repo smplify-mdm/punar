@@ -9,7 +9,7 @@
 //! The ledger is **derived from mediation points Punar already owns**.
 //! There is no eBPF, no fanotify, no ptrace, no `LD_PRELOAD`, no
 //! audit-subsystem rule, and no filesystem or network interception
-//! anywhere in this module tree. Four sources, and nothing else:
+//! anywhere in this module tree. Five sources, and nothing else:
 //!
 //! | | Source | Category it feeds |
 //! |---|---|---|
@@ -17,12 +17,11 @@
 //! | **B** | audit events tagged with this `agent_session_id` ([`tail`]) | Level-4 event references |
 //! | **C** | the managed launch's realized workspace grant | `repositories`, `directory_zones` |
 //! | **D** | adapter / registry metadata | identity, the session's own root process |
+//! | **E** | a bounded aggregate pushed by `punar-netd` ([`Ledger::network`]) | `network_destinations` |
 //!
-//! `network_destinations`, `mcp_servers` and `credential_classes` have
-//! **no producer in M8** and are reported as empty arrays *plus* a
-//! [`punar_common::ledger::not_yet_observed`] row naming the milestone
-//! that ships the producer. Inventing them would be spec 1.22 fraud; the
-//! honest empty is the deliverable.
+//! `mcp_servers` still has no producer and is reported as an empty array
+//! plus a [`punar_common::ledger::not_yet_observed`] row naming the
+//! owning milestone. Inventing it would be spec 1.22 fraud.
 //!
 //! # No timers, anywhere (spec 6.3)
 //!
@@ -52,7 +51,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use punar_common::agent::{AgentClassification, AgentStatus};
+use punar_common::agent::{
+    AgentClassification, AgentStatus, LedgerNetworkParams, LedgerNetworkResult,
+};
 use punar_common::ledger::{
     AgentsAccessResult, DETECTION_RETENTION_DAYS, Evidence, LEDGER_RECORD_VERSION,
     LEDGER_RETENTION_DAYS, LedgerFingerprint, LedgerIndex, LedgerPurgeResult, LedgerRecord,
@@ -676,6 +677,114 @@ impl LedgerEngine {
         self.flush_dirty(now) || drained
     }
 
+    /// Merge one absolute destination batch from the root-owned network
+    /// mediation service. The producer may retry freely: counts are merged
+    /// monotonically rather than added, so an interrupted IPC response can
+    /// never inflate a user's history.
+    ///
+    /// Every destination crosses [`ResourceClass`] here, at the data owner.
+    /// A netd bug therefore cannot persist a port, URL, path, whitespace, or
+    /// other free text merely because the transport peer is privileged. The
+    /// separate `zone` field is validated as a directory-zone-shaped class
+    /// and discarded; the ledger stores only the reached destination.
+    pub fn ingest_network(&self, params: &LedgerNetworkParams, now: &str) -> LedgerNetworkResult {
+        let mut valid = Vec::with_capacity(params.destinations.len());
+        let mut result = LedgerNetworkResult {
+            accepted: 0,
+            rejected: 0,
+        };
+        for row in &params.destinations {
+            let destination =
+                ResourceClass::new(ResourceCategory::NetworkDestinations, &row.destination);
+            let zone = ResourceClass::new(ResourceCategory::DirectoryZones, &row.zone);
+            match (destination, zone) {
+                (Ok(destination), Ok(_)) => {
+                    valid.push((row, destination));
+                    result.accepted += 1;
+                }
+                _ => result.rejected += 1,
+            }
+        }
+
+        if valid.is_empty() {
+            return result;
+        }
+
+        let mut active_found = false;
+        let mut active_changed = false;
+        {
+            let mut state = self.state.lock().unwrap();
+            if state
+                .index
+                .row(&params.session_id)
+                .is_some_and(|row| row.is_tombstone())
+            {
+                // The purge floor wins over a late or retried producer.
+                result.rejected += result.accepted;
+                result.accepted = 0;
+                return result;
+            }
+            if let Some(active) = state.active.get_mut(&params.session_id) {
+                active_found = true;
+                for (row, destination) in &valid {
+                    active_changed |= active.record.observe_absolute(
+                        ResourceCategory::NetworkDestinations,
+                        destination.clone(),
+                        row.count,
+                        Evidence::NetdAggregate,
+                        &row.first_seen,
+                        &row.last_seen,
+                    );
+                }
+                if active_changed {
+                    active.record.updated_at = now.to_string();
+                    active.dirty = true;
+                }
+            }
+        }
+        if active_changed {
+            self.flush(std::slice::from_ref(&params.session_id), now);
+            return result;
+        }
+        if active_found {
+            return result;
+        }
+
+        // Ended ledgers live only on disk. Load and rewrite at most once for
+        // the whole batch; a no-op retry performs no write.
+        let Some(mut record) = self.store.load_record(&params.session_id) else {
+            result.rejected += result.accepted;
+            result.accepted = 0;
+            return result;
+        };
+        let mut changed = false;
+        for (row, destination) in valid {
+            changed |= record.observe_absolute(
+                ResourceCategory::NetworkDestinations,
+                destination,
+                row.count,
+                Evidence::NetdAggregate,
+                &row.first_seen,
+                &row.last_seen,
+            );
+        }
+        if changed {
+            record.updated_at = now.to_string();
+            if let Err(error) = self.store.write_record(&record) {
+                eprintln!(
+                    "punar-agentd: could not merge network evidence for {}: {error}",
+                    params.session_id
+                );
+                result.rejected += result.accepted;
+                result.accepted = 0;
+                return result;
+            }
+            self.state.lock().unwrap().index.upsert(index_row(&record));
+            self.write_index(now);
+        }
+        result
+    }
+
     /// Drain only — the cheap path a ledger read takes when it does not
     /// need a fresh cgroup sample.
     pub fn drain_audit(&self, now: &str) -> bool {
@@ -1265,6 +1374,7 @@ mod tests {
     use crate::testsupport::{
         fake_process, fixture_cgroup_scope, fixture_proc, kill_process, managed_cgroup, temp_dir,
     };
+    use punar_common::agent::{LedgerNetworkDestination, LedgerNetworkSource};
     use punar_common::audit::AuditWriter;
     use punar_common::ledger::{LedgerSummary, SecurityEventType};
     use punar_common::{AuditEvent, Decision, PrincipalKind};
@@ -1565,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_ledger_aggregates_the_four_owned_sources() {
+    fn a_session_ledger_aggregates_its_owned_sources() {
         let h = harness("ledger-aggregate");
         spawn(&h.proc_root, 2143, "punar-mock-agent");
         spawn(&h.proc_root, 2200, "git");
@@ -1630,7 +1740,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["workspace"]
         );
-        // The three categories with no producer stay honestly empty.
+        // This unit fixture has no network observation or credential
+        // request, while MCP still has no producer.
         assert!(summary.resources.network_destinations.is_empty());
         assert!(summary.resources.mcp_servers.is_empty());
         assert!(summary.resources.credential_classes.is_empty());
@@ -1643,10 +1754,75 @@ mod tests {
             SecurityEventType::DeniedAccess
         );
 
-        // Every evidence value is one of the four owned mediation points.
+        // Every evidence value is one of the five owned mediation points.
         for entry in &record.entries {
             assert!(Evidence::ALL.contains(&entry.evidence));
         }
+    }
+
+    #[test]
+    fn network_aggregates_are_absolute_private_and_retry_safe() {
+        let h = harness("ledger-network");
+        spawn(&h.proc_root, 2143, "punar-mock-agent");
+        let scope = fixture_cgroup_scope(&h.dir.join("cgroup"), SESSION, &[2143], Some(1));
+        let facts = facts(Some(scope));
+        h.engine.begin_session(&facts, "2026-08-29T00:00:00Z");
+
+        let mut params = LedgerNetworkParams {
+            session_id: SESSION.to_string(),
+            destinations: vec![LedgerNetworkDestination {
+                destination: "dev-api".to_string(),
+                zone: "corp_dev".to_string(),
+                count: 3,
+                first_seen: "2026-08-29T00:00:01Z".to_string(),
+                last_seen: "2026-08-29T00:00:03Z".to_string(),
+            }],
+            source: LedgerNetworkSource::NetdAggregate,
+        };
+        assert_eq!(
+            h.engine.ingest_network(&params, "2026-08-29T00:00:04Z"),
+            LedgerNetworkResult {
+                accepted: 1,
+                rejected: 0
+            }
+        );
+        h.engine.ingest_network(&params, "2026-08-29T00:00:05Z");
+        let first = h
+            .engine
+            .record_of(SESSION)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.category == ResourceCategory::NetworkDestinations)
+            .unwrap();
+        assert_eq!(first.count, 3, "an identical retry is idempotent");
+        assert_eq!(first.evidence, Evidence::NetdAggregate);
+
+        params.destinations[0].count = 5;
+        params.destinations[0].last_seen = "2026-08-29T00:00:08Z".to_string();
+        h.engine.ingest_network(&params, "2026-08-29T00:00:09Z");
+        let record = h.engine.record_of(SESSION).unwrap();
+        let row = record
+            .entries
+            .iter()
+            .find(|entry| entry.category == ResourceCategory::NetworkDestinations)
+            .unwrap();
+        assert_eq!(row.count, 5);
+        assert_eq!(row.last_seen, "2026-08-29T00:00:08Z");
+        let bytes = serde_json::to_string(&record).unwrap();
+        for forbidden in ["9418", "http://", "/home/", "payload", "cmdline"] {
+            assert!(!bytes.contains(forbidden), "{forbidden}: {bytes}");
+        }
+
+        params.destinations[0].destination = "https://dev-api:9418/path".to_string();
+        assert_eq!(
+            h.engine.ingest_network(&params, "2026-08-29T00:00:10Z"),
+            LedgerNetworkResult {
+                accepted: 0,
+                rejected: 1
+            }
+        );
+        let _ = std::fs::remove_dir_all(&h.dir);
     }
 
     /// The count is *distinct processes observed alive*, not a sample

@@ -1,0 +1,3 @@
+producer: punar-netd -> ledger.network -> punar-agentd
+evidence: netd_aggregate
+privacy: bounded destination class; no port, payload, path, or URL

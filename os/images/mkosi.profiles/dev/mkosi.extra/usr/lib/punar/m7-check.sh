@@ -31,10 +31,9 @@
 # NEW socket.
 #
 # Honesty notes (spec 1.22):
-#   - Every authority row asserted here is a DECLARATION carrying its own
-#     `declared · M9` / `declared · M12` label. M7 enforces none of it; the
-#     assertions check that the labels are present, never that access was
-#     blocked.
+#   - Every authority row carries its current enforcement state. Network
+#     rows are enforced for managed agent scopes by punar-netd; this check
+#     verifies the label while M12 proves the actual packet decision.
 #   - Detection is a heuristic. The fixture is a real process installed by
 #     this script for the detector to find; a match proves the pattern
 #     mechanism works, not that detection is complete. Every rendered word
@@ -333,7 +332,7 @@ grep_row "authority block cites the personal policy (unmanaged-first)" \
 # declaration that names the milestone still owed. Pinning M9/M12 here was a
 # future-milestone placeholder in a check script, and three of the six
 # recorded regressions of this class had exactly that shape.
-ENFORCE_RE='(applied( \(bind mount\))?|enforced|declared · (M[0-9]+[+]?|enforced( M[0-9]+)?|applied))'
+ENFORCE_RE='(applied( \(bind mount\))?|enforced( \(agent scope\))?|declared · (M[0-9]+[+]?|enforced( M[0-9]+)?|applied))'
 grep_re "filesystem row states where its declaration stands" \
     "${LAUNCH_OUT}" "^ +filesystem +project +read_write +${ENFORCE_RE}$"
 grep_re "network row states where its declaration stands" \

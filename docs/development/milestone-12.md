@@ -1,4 +1,4 @@
-# Milestone 12 — Network privacy prototype: design plan
+# Milestone 12 — Network privacy prototype
 
 Spec authority: section 76 Milestone 12 ("Deliver local network
 observability, project-route policy, relay abstraction, and simulated or
@@ -26,9 +26,8 @@ Binding prior contracts, not relitigated:
 change one byte of either**, §4.1); `schemas/ai-agent/ledger-summary.json`
 (**SHIPPED — M8 Decision 0 still holds; M12 does not change one byte**,
 §8); `schemas/project/project-environment.json` `permissions.network`;
-`docs/api/ipc.md` §1–§16 (the wire contract through M9; M12's additions
-are **proposed** in §11 of this document and land in ipc.md at
-implementation time); `docs/development/milestone-3.md` §4.1 (the
+`docs/api/ipc.md` §1–§16 (including the implemented M12 additions
+specified in §11 of this document); `docs/development/milestone-3.md` §4.1 (the
 vendored `table inet punar-base` ruleset and the fixed-argv `nft`
 backend), `milestone-4.md` (layered policy, reconcile, drift),
 `milestone-6.md` §5.3 (`--network none`, declared-not-enforced),
@@ -37,8 +36,7 @@ attribution, adapters/data-files-as-data, the mock agent, the check
 mechanics), `milestone-8.md` (the four-source evidence model, the
 privacy-as-types rule, the `not_yet_observed[]` discipline),
 `milestone-9.md` / `milestone-10.md` (approvals/secrets and shadow-AI /
-remote query — **being implemented concurrently; M12 touches none of
-their files**), `docs/design/mockups/privacy-panel.html` (**Plate D-006 —
+remote query), `docs/design/mockups/privacy-panel.html` (**Plate D-006 —
 the acceptance reference for this milestone**),
 `docs/design/DESIGN_LANGUAGE.md` §7 (stroke semantics: dashed = outside
 the current production claim) and §8 (unmanaged-first).
@@ -90,7 +88,7 @@ no traffic, changes no packet path, and is drawn dashed (DESIGN_LANGUAGE
 
 ## 1. Scope
 
-**In:** `crates/punar-netd` becomes a real bin crate — a third resident
+**In:** `crates/punar-netd` becomes a real bin crate — a fourth resident
 daemon (§3); zone data and project route policy compiled into an
 effective decision (§4); **real per-agent-session egress enforcement** via
 a netd-owned nftables table matched on the session's cgroup (§5);
@@ -100,10 +98,10 @@ rate-limited deny logs (§7); `network_destinations` and
 `production_access` becoming observed in the M8 ledger (§8); the relay
 abstraction with a simulated dual-hop model (§9); the D-006 privacy panel
 (`PUNAR+P`) and `punarctl privacy connections` / `relay status` /
-`network policy|zones|explain` (§10); the proposed IPC/audit/data
+`network policy|zones|explain` (§10); the implemented IPC/audit/data
 contracts (§11); `m12-check` + boot-test phase + `punar-m12.png` (§13);
 the stale-assertion sweep the honesty law requires (§14); the services
-RSS gate growing to a third daemon (§12).
+RSS gate growing to a fourth daemon (§12).
 
 **Out (documented, never silently dropped):** any real relay, ingress or
 egress hop, or VPN of any kind (Phase 2 — spec 77 lists "real dual-hop
@@ -127,7 +125,7 @@ join); SNI, DNS or payload inspection **in any milestone, ever** (§7.5).
 
 | # | Decision |
 |---|---|
-| 1 | **`punar-netd` is a separate daemon**, exactly as spec 11.7 lists it, on the `punar-agentd` precedent (M7 decision 1). Socket `/run/punar-netd/netd.sock`, `0660 root:punar`, inside a root-owned `0750 root:punar` directory. Consequence: a **third** resident service in the spec 6.2 budget; target ≤ 6 MB RSS; `idle-ram.sh`'s `PUNAR_SERVICE_UNITS` must gain `punar-netd.service` or the gate silently stops measuring the daemon it was written for. §3, §12. |
+| 1 | **`punar-netd` is a separate daemon**, exactly as spec 11.7 lists it, on the `punar-agentd` precedent (M7 decision 1). Socket `/run/punar-netd/netd.sock`, `0660 root:punar`, inside a root-owned `0750 root:punar` directory. Consequence: a **fourth** resident service in the spec 6.2 budget; target ≤ 6 MB RSS; `idle-ram.sh`'s `PUNAR_SERVICE_UNITS` must gain `punar-netd.service` or the gate silently stops measuring the daemon it was written for. §3, §12. |
 | 2 | **Table ownership is partitioned by table name, and that is the whole conflict-resolution story.** punard owns `table inet punar-base` (device firewall posture, M3 §4.1). punar-netd owns `table inet punar-net` (per-principal egress policy). Neither daemon ever reads, writes or destroys the other's table. Two tables at the same hook compose safely in nftables: a drop in either is final. §5.1. |
 | 3 | **The enforcement primitive is `socket cgroupv2` matching in an nftables output chain.** For each managed agent session, netd emits a jump keyed on the session's **actual** scope cgroup path (read from `/proc/<pid>/cgroup` — the same kernel-attested chain M7/M8 verify, never a hardcoded layout) into a per-session chain of zone rules ending in the project's residual decision. This is real kernel enforcement, needs no new package, no forwarding, no address allocation, and no change to the M6/M7 launch path. §5.2. |
 | 4 | **Deny is `reject`, not `drop`, and logging is split from enforcement.** `reject with icmpx type admin-prohibited` fails a `connect()` immediately instead of hanging it (spec 73: a restriction must be legible, and a 130-second timeout is not legible). The rate limiter goes on a **separate log-only rule** ahead of the reject rule — putting `limit rate` on the reject rule itself would make the enforcement fail **open** under flood. §5.3. |
@@ -139,7 +137,7 @@ join); SNI, DNS or payload inspection **in any milestone, ever** (§7.5).
 | 10 | **Full-table regeneration on every change, one `nft -f` transaction** (`destroy table` + full definition in one file — the M3 idempotence pattern). One code path, atomic, no partial-ruleset window. Counters reset on regeneration, so **netd carries the running totals in its own aggregate** and treats kernel counters as deltas. §5.3. |
 | 11 | **Enforcement is capability-probed at startup and fails LOUD, not open.** netd loads a probe table using `socket cgroupv2`; if the kernel or build does not support it, netd sets `enforcement: unavailable`, renders `POLICY DECLARED · ENFORCEMENT UNAVAILABLE` on every surface, audits it once, and **claims nothing**. §5.7. |
 | 12 | **The container path enforces DENY by construction and cannot grant ALLOW.** `punar-env` derives podman's `--network` from effective policy: an all-deny project gets `--network none` (unchanged bytes, now *derived* rather than blanket), and any-allow project **also** gets `--network none` because the image ships no `passt`/`slirp4netns` — labeled `ALLOW DECLARED · connectivity Phase 2`. Honest and true; no faked connectivity. §6. |
-| 13 | **Observability sources are exactly four** (§7.1): nftables counters; rate-limited nftables **deny** logs; `/proc/net/tcp{,6}` joined to pids via `/proc/<pid>/fd` inodes; cgroup→session/project attribution from M7. No `ss` output parsing (the M3 anti-`hostnamectl` rule), no eBPF, no pcap, no conntrack flow table. §7. |
+| 13 | **Observability uses bounded kernel metadata only** (§7.1): nftables counters; rate-limited nftables **deny** logs; `/proc/net/tcp{,6}` socket rows; Linux `NETLINK_SOCK_DIAG` cgroup ids joined to the known cgroup-v2 scope; and best-effort pid/name enrichment when ordinary procfs permissions allow it. No `CAP_SYS_PTRACE`, `ss` output parsing (the M3 anti-`hostnamectl` rule), eBPF, pcap, or conntrack flow table. §7. |
 | 14 | **Observation passes are on-demand, and M12 adds no timer at all.** Passes run on: panel open/refresh, CLI invocation, session attach/detach, and policy apply. `scanned_at` is rendered so the user knows the view's age. `connections.json` is rewritten **only when the connection set changes** (M10 decision 4 verbatim). Idle write rate 0 B/s, idle CPU 0%. §7.3, §12. |
 | 15 | **SNI inspection and DNS query logging are REJECTED, permanently and by name.** Reading a TLS ClientHello is content inspection of the connection payload (spec 37 forbids it by default; Punar forbids it outright). A DNS query log is a browsing history (spec 21.2's never-record spirit). The honest path to real hostnames is a first-party resolver with aggregate-only retention — Phase 2, named, not smuggled in. §7.5. |
 | 16 | **The relay is an abstraction plus a SIMULATED model, never a data path.** All three modes (`direct` / `private_relay` / `enterprise_route` — the shipped `network-zone.json` enum) produce the **same packet path** in M12. Putting a userspace proxy on every connection would contradict spec 45 (native primitives, not resident agents), add a failure mode to all traffic, and make the `SIMULATED` label *more* misleading, not less. §9.1. |
@@ -184,8 +182,8 @@ values (`schemas/capability/`). A capability whose value is "the set of
 currently attached agent sessions" is not a desired state; it is runtime.
 The capability registry stays for the things M4 reconciles.
 
-**Cost, stated:** a third daemon, a third socket, a third unit, and a
-third row in the RSS gate. §12 carries the numbers.
+**Cost, stated:** a fourth daemon, a fourth socket, a fourth unit, and a
+fourth row in the RSS gate. §12 carries the numbers.
 
 ### 3.2 Shape
 
@@ -211,8 +209,10 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
 `AF_NETLINK` is required because the `nft` child talks to nftables over
 netlink; `AF_INET`/`AF_INET6` are absent, so **netd cannot open a network
 socket**, and neither can any child it spawns. `CAP_DAC_READ_SEARCH` is
-for reading `/proc/<pid>/fd` across users (the socket-inode join, §7.2) —
-read-only, and narrower than running unconfined as root.
+limited to reading validated project policy documents and other read-only
+inputs. It is **not** sufficient for cross-user `/proc/<pid>/fd` reads on
+Linux and is not claimed to be; managed attribution uses the kernel cgroup id
+from `sock_diag` (§7.2), without `CAP_SYS_PTRACE`.
 
 This is why decision 7 (CIDR-only zones) is not a limitation to be
 engineered around later by "just adding a resolver to netd": doing so
@@ -592,14 +592,16 @@ values.
 
 ## 7. Observability without tracing (decision 13)
 
-### 7.1 The four sources
+### 7.1 The bounded sources
 
 | # | Source | Owned since | Produces | Cost |
 |---|---|---|---|---|
 | A | **nftables counters** in `punar-net`, read with `nft -j list table inet punar-net` (fixed argv) | M12 | per (session, zone, decision) packet/byte totals — including denial totals | one `nft` invocation per pass |
 | B | **Rate-limited nftables `log` on DENY rules only**, read from the journal on demand (`journalctl -k -o json --since <last>`) | M12 | the destination address of *refused* attempts | bounded by the kernel's own 5/minute limiter |
-| C | **`/proc/net/tcp`, `/proc/net/tcp6`** joined to pids via inode → `/proc/<pid>/fd` | kernel | live connection tuples: process, local/remote address, state | one pass over two files + one `readlink` sweep, on demand only |
-| D | **cgroup → session/project attribution** — `/proc/<pid>/cgroup` matched against `punar-agent-<id>.scope`, plus the authoritative `agents.list` join | M7 §5.1, M8 §4.1 | which AI session, which project, which agent identity | one small read per candidate pid |
+| C | **`/proc/net/tcp`, `/proc/net/tcp6`** | kernel | live TCP socket inode, remote address and state; local addresses and ports are parsing-only and never serialize | one pass over two files, on demand only |
+| D | **Linux `NETLINK_SOCK_DIAG` / `INET_DIAG_CGROUP_ID`** joined to the inode of the authoritative cgroup-v2 directory | kernel + M7 §5.1 | which managed scope owns the socket, even when cross-user fd links are hidden | two bounded local netlink dumps per pass (IPv4 + IPv6) |
+| E | **Best-effort `/proc/<pid>/fd` inode join plus `/proc/<pid>/cgroup`** | kernel | a display name/pid class for same-credential or otherwise-readable processes | stops when every candidate inode visible to the daemon is resolved; never required for managed attribution |
+| F | **Authoritative `agents.list` join** | M7 §5.1, M8 §4.1 | session id, project and agent identity for the kernel-attested cgroup | one local authenticated UDS read |
 
 Nothing else. Specifically **not**: eBPF (spec 77 lists it as Phase 2
 "where justified" — M12 does not need it and therefore is not justified);
@@ -610,12 +612,19 @@ device-wide UDP flow table edges toward the browsing-history problem for
 zero added answer); parsing `ss` output (the M3 anti-`hostnamectl` rule:
 Punar reads kernel files, it does not scrape CLI text).
 
-### 7.2 The socket→process join
+### 7.2 The socket→managed-scope join
 
 `/proc/net/tcp{,6}` gives, per socket: local address:port, remote
-address:port, state, uid, **inode**. The inode → pid map comes from
-walking `/proc/<pid>/fd` and reading `socket:[<inode>]` link targets —
-which is exactly what `ss -p` does, done directly.
+address:port, state, uid, and **inode**. A `NETLINK_SOCK_DIAG` dump returns
+`INET_DIAG_CGROUP_ID` for the same inode. The cgroup-v2 filesystem inode of
+the already authenticated `punar-agent-<id>.scope` is that kernel id, so the
+join is direct and cannot be forged by the observed process. This fixes an
+important Linux boundary: `CAP_DAC_READ_SEARCH` does not bypass the ptrace
+credential check on another user's `/proc/<pid>/fd` symlinks. Punar does not
+add `CAP_SYS_PTRACE` to work around that boundary.
+
+The `/proc/<pid>/fd` walk remains best-effort enrichment for human-readable
+process rows. It is never the authorization or managed-attribution source.
 
 Bounds, because an unbounded `/proc` walk is how a "lightweight" OS gets
 heavy:
@@ -625,11 +634,12 @@ heavy:
 - Sockets in states Punar does not render (`TIME_WAIT`, `SYN_RECV`) are
   filtered before the fd walk, so the walk is proportional to live
   connections, not to socket-table size.
-- The walk stops early once every candidate inode is resolved.
-- A pid whose fds cannot be read (raced exit, or a process of another
-  user with `hidepid`) yields a row attributed to `unknown` rather than
-  a dropped row — an unattributed connection is information, and hiding
-  it would make the panel quietly incomplete.
+- The walk stops early once every candidate inode visible to it is resolved.
+- A pid whose fds cannot be read (raced exit, another user, or `hidepid`)
+  can still be attributed to a managed session by kernel cgroup id. If neither
+  source resolves it, the row remains `unknown` rather than being dropped —
+  an unattributed connection is information, and hiding it would make the
+  panel quietly incomplete.
 
 ### 7.3 Passes are on-demand (decision 14, spec 6.3)
 
@@ -727,7 +737,7 @@ method, one evidence value, one classify arm.
 
 ### 8.2 The contract
 
-**`ledger.network` on the agentd socket, root peer only** (proposed wire
+**`ledger.network` on the agentd socket, root peer only** (implemented wire
 text in §11.2):
 
 ```json
@@ -1448,29 +1458,29 @@ that is the whole point of changing them.
 
 ## 16. Verification status (spec 1.22)
 
-**This document is a design plan. Nothing in it has been built, and no
-claim below rests on a run that has not happened.**
+**Implementation and the clean ARM64 runtime proof are complete locally. This
+milestone is not marked verified until a fresh x86_64 image and canonical
+dual-architecture CI also emit `PUNAR_M12_OK`.**
 
-- No `punar-netd` binary exists — `crates/punar-netd` is a lib stub.
-- No `punar-net` nftables table has ever been installed on any image.
-- `m12-check.sh` does not exist; **no `PUNAR_M12_OK` exists anywhere**;
-  `punar-m12.png` has never been taken.
-- The enforcement mechanism (§5.2) rests on `socket cgroupv2` matching,
-  which is **asserted from the nftables documentation and not yet
-  exercised on the pinned image**. Decision 11 exists precisely because
-  that assertion could be wrong on this kernel build, and group 2 of the
-  check is the thing that will find out. If the probe fails, the correct
-  outcome is a red check and a rewritten §5, not a softened claim.
-- The `bash /dev/tcp` client (§13.2) is assumed available in Arch's
-  `bash`; group 8's control probe is deliberately structured so that if
-  it is not, the check fails loudly instead of passing vacuously.
-- `git daemon --init-timeout=0` holding a connection open, and
-  `git daemon` binding two `--listen` addresses, are **asserted from the
-  git documentation and not verified on the image**; the implementation
-  must verify both before the check depends on them, and fall back to a
-  single listener plus two zone `/32`s pointed at the same address if
-  the double-listen does not hold.
-- Everything in §14 is a **prediction** of which assertions will go
-  stale, made by reading the current check scripts. The implementation
-  must re-derive the list from the tree it actually edits, because M9,
-  M10 and M11 are moving those files concurrently.
+- The `punar-netd` binary, systemd hardening, typed IPC, nft transaction
+  generator, bounded observation, deny-log parser, agent-ledger bridge,
+  relay model, CLI verbs, Privacy panel, and `PUNAR+P` binding are present.
+- Host verification is green: Rust formatting, full-workspace clippy with
+  warnings denied, full-workspace tests from a clean target directory,
+  schema/fixture validation, pinned shellcheck, and QML lint.
+- The exact 2026-08-29 ARM64 image, SHA-256
+  `62081fb3a5d7fbf58115c35d5b04a5eb6957caf5d101ebe0089eba85612c14c9`,
+  emitted `PUNAR_M12_OK` with 66 assertions. The three-way loopback probe,
+  kernel socket-to-cgroup attribution across the user boundary, counters,
+  audit/ledger privacy join, malformed-data fail-safe, missing-table self-heal,
+  service confinement (including no `CAP_SYS_PTRACE`), closed method table and
+  panel screenshot all passed.
+- `m12-check.sh` hard-gates the real three-way loopback probe,
+  counters, audit/ledger privacy join, malformed-data fail-safe, missing-table
+  self-heal, service confinement, closed method table, and panel screenshot.
+- **Not yet claimed:** x86_64 parity, canonical CI, real internet/VPN/relay
+  behavior, physical NICs, Raspberry Pi firmware/peripherals, or an
+  escape-proof per-session network namespace. The loopback proof establishes
+  policy, attachment, enforcement, attribution, observation and the ledger
+  join only; any failed assertion in the remaining lanes stays red rather than
+  becoming a softened claim.

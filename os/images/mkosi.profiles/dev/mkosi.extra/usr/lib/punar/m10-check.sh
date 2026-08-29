@@ -708,42 +708,42 @@ if [ -n "${DETECTION_ID}" ] && [ "${DETECTION_ID}" != "null" ]; then
     jq_check "the Level-4 unknown_ai_execution reference is attached, with an evt_ id" \
         "${RUN_DIR}/m10-detection-summary.json" \
         '[.security_events[] | select(.event_type == "unknown_ai_execution" and (.event_id | test("^evt_")))] | length >= 1'
-    # The two PERMANENT limitations of an unmanaged ledger (section 6.3):
+    # The three PERMANENT limitations of an unmanaged ledger (section 6.3):
     # nothing granted this process a workspace and /proc/<pid>/cwd is never
-    # read, and punar-secrets mediates managed sessions only. No milestone
-    # ships these, so they are pinned deliberately — including the `none`
-    # sentinel, because "permanently unobservable" and "arriving later" are
-    # exactly the two things a surface must not render alike.
-    jq_check "repositories and credential classes are EMPTY and named as PERMANENT limitations (milestone \"none\"), not as pending producers" \
+    # read; punar-secrets mediates managed sessions only; and M12 netd binds
+    # policy/observation to a Punar-launched cgroup rather than ambient traffic
+    # from an unmanaged detection. No milestone ships those missing joins, so
+    # they are pinned deliberately — including the `none` sentinel, because
+    # "permanently unobservable" and "arriving later" must not render alike.
+    jq_check "repositories, credential classes and network destinations are EMPTY and named as PERMANENT limitations (milestone \"none\"), not as pending producers" \
         "${RUN_DIR}/m10-access.json" \
         '((.summary.resources.repositories | length) == 0)
          and ((.summary.resources.credential_classes | length) == 0)
+         and ((.summary.resources.network_destinations | length) == 0)
          and ([.not_yet_observed[]
                | select(.level == 3 and (.category == "repositories"
-                                         or .category == "credential_classes"))]
-              | (length == 2)
+                                         or .category == "credential_classes"
+                                         or .category == "network_destinations"))]
+              | (length == 3)
                 and all(.milestone == "none" and ((.reason | length) > 0)))'
-    # The two whose producer status can still move. The branch is chosen by
-    # the device, never by a milestone literal: today neither ledger producer
-    # is installed, so each must be EMPTY and NAMED; the day one lands, this
-    # flips on its own to demanding the stale honesty row be deleted. That
-    # flip is precisely the edit M10 had to make by hand for
-    # `unknown_ai_execution`, and that no check caught.
-    for category in network_destinations mcp_servers; do
-        if producer_present "${category}"; then
-            jq_check "${category}: its ledger producer is installed here, so the honesty row must be gone" \
+    # MCP is the remaining category whose producer status can move. The branch
+    # is chosen by the device, never by a milestone literal: today it is not
+    # installed, so the category must be EMPTY and NAMED; the day a gateway
+    # lands, this flips on its own to demand that the stale row be deleted.
+    category=mcp_servers
+    if producer_present "${category}"; then
+        jq_check "${category}: its ledger producer is installed here, so the honesty row must be gone" \
                 "${RUN_DIR}/m10-access.json" \
                 '.not_yet_observed | any(.category == "'"${category}"'") | not'
-        else
-            jq_check "${category}: no ledger producer on this device, so the detection ledger shows NOTHING and names an owning milestone" \
+    else
+        jq_check "${category}: no ledger producer on this device, so the detection ledger shows NOTHING and names an owning milestone" \
                 "${RUN_DIR}/m10-access.json" \
                 '((.summary.resources["'"${category}"'"] // []) | length) == 0
                  and (.not_yet_observed | any(.level == 3
                         and .category == "'"${category}"'"
                         and (.milestone | test("^(none|M[0-9]+[+]?(/M[0-9]+[+]?)*)$"))
                         and (.reason | length) > 0))'
-        fi
-    done
+    fi
     # And the rule the rows above are instances of, over the whole Level-3
     # register: a category is named IF AND ONLY IF it is genuinely empty.
     # Forward, this is spec 1.22 — an unlabelled empty array reads on a

@@ -6,12 +6,14 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use punar_common::agent::{
     AGENTD_SOCKET_PATH, AgentMethod, AgentRequest, AgentStatus, AgentsListResult,
+    LedgerNetworkParams, LedgerNetworkResult,
 };
 use punar_common::ipc::{Response, ResponseBody};
 use thiserror::Error;
@@ -34,7 +36,7 @@ pub enum AgentdError {
     EmptyResponse,
     #[error("punar-agentd returned malformed protocol data: {0}")]
     Protocol(String),
-    #[error("punar-agentd refused agents.list with {code}: {message}")]
+    #[error("punar-agentd refused the typed request with {code}: {message}")]
     Refused { code: String, message: String },
 }
 
@@ -75,6 +77,26 @@ impl AgentdClient {
     }
 
     pub fn snapshot(&self) -> Result<SessionSnapshot, AgentdError> {
+        let result: AgentsListResult = self.call(AgentMethod::List, "agents")?;
+        Ok(snapshot_from_list(result, &self.proc_root))
+    }
+
+    /// Publish an absolute, privacy-bounded destination aggregate. The
+    /// agentd socket independently enforces root peer credentials and its
+    /// ResourceClass boundary; this typed client is not an authorization
+    /// shortcut.
+    pub fn publish_network(
+        &self,
+        params: LedgerNetworkParams,
+    ) -> Result<LedgerNetworkResult, AgentdError> {
+        self.call(AgentMethod::LedgerNetwork(params), "network")
+    }
+
+    fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: AgentMethod,
+        suffix: &str,
+    ) -> Result<T, AgentdError> {
         let stream =
             UnixStream::connect(&self.socket).map_err(|source| AgentdError::Transport {
                 stage: "connect",
@@ -83,8 +105,8 @@ impl AgentdClient {
         let _ = stream.set_read_timeout(Some(self.timeout));
         let _ = stream.set_write_timeout(Some(self.timeout));
         let request = AgentRequest {
-            id: format!("netd-{}-agents", std::process::id()),
-            method: AgentMethod::List,
+            id: format!("netd-{}-{suffix}", std::process::id()),
+            method,
         };
         let mut writer = &stream;
         writer
@@ -105,12 +127,11 @@ impl AgentdClient {
         {
             return Err(AgentdError::EmptyResponse);
         }
-        let result = decode_list_response(&line)?;
-        Ok(snapshot_from_list(result, &self.proc_root))
+        decode_response(&line)
     }
 }
 
-fn decode_list_response(line: &str) -> Result<AgentsListResult, AgentdError> {
+fn decode_response<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, AgentdError> {
     let response = Response::parse_json_line(line)
         .map_err(|error| AgentdError::Protocol(error.to_string()))?;
     if response.v != punar_common::ipc::PROTOCOL_VERSION {
@@ -151,6 +172,7 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
                 project_id: record.project,
                 user: record.user,
                 process_id: record.process_id,
+                cgroup_id: cgroup_id(proc_root, &cgroup_path),
                 cgroup_path,
             })
         })();
@@ -165,6 +187,17 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
     sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     skipped.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     SessionSnapshot { sessions, skipped }
+}
+
+fn cgroup_id(proc_root: &Path, cgroup_path: &str) -> Option<u64> {
+    if proc_root != Path::new("/proc") {
+        return None;
+    }
+    let relative = cgroup_path.strip_prefix('/')?;
+    fs::metadata(Path::new("/sys/fs/cgroup").join(relative))
+        .ok()
+        .map(|metadata| metadata.ino())
+        .filter(|id| *id != 0)
 }
 
 /// Read the live unified-cgroup path for `pid` and require one path component
@@ -287,16 +320,22 @@ mod tests {
     fn typed_success_and_error_frames_are_distinguished() {
         let result = serde_json::to_value(list(record())).unwrap();
         let response = Response::result("netd-1", result).to_json_line();
-        assert_eq!(decode_list_response(&response).unwrap().sessions.len(), 1);
+        assert_eq!(
+            decode_response::<AgentsListResult>(&response)
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
         let response = Response::error(
             Some("netd-1".into()),
             punar_common::ipc::IpcError::new(punar_common::ipc::ErrorCode::Denied, "not allowed"),
         )
         .to_json_line();
         assert!(matches!(
-            decode_list_response(&response),
+            decode_response::<AgentsListResult>(&response),
             Err(AgentdError::Refused { code, .. }) if code == "denied"
         ));
-        assert!(decode_list_response(&json!({"v": 1}).to_string()).is_err());
+        assert!(decode_response::<AgentsListResult>(&json!({"v": 1}).to_string()).is_err());
     }
 }

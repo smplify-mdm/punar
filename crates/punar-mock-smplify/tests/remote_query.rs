@@ -162,9 +162,9 @@ fn inventory_answer(query_id: &str) -> Value {
                             "classification": "unknown", "suspected": true,
                             "zone": "downloads", "first_seen": "2026-08-25T13:59:41Z",
                             "live": true}],
-            "not_yet_observed": [{"level": 3, "category": "network_destinations",
-                                  "milestone": "M12",
-                                  "reason": "punar-netd does not exist"}]
+            "not_yet_observed": [{"level": 3, "category": "mcp_servers",
+                                  "milestone": "M11+",
+                                  "reason": "no tool or MCP gateway mediates MCP traffic yet"}]
         },
         "audit_event_id": "evt_610"
     })

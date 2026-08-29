@@ -65,8 +65,8 @@ legible. Wherever the only honest evidence is a human, M13 says so and
 writes the runbook step instead of inventing an assertion that looks like
 proof (§4.6, §3.4).
 
-**Law 3 — M13 adds no daemon.** Three resident daemons exist (`punard`,
-`punar-agentd`, `punar-secrets`), M12 proposes a fourth (`punar-netd`),
+**Law 3 — M13 adds no daemon.** Four resident daemons exist (`punard`,
+`punar-agentd`, `punar-secrets`, `punar-netd`); M12 added the fourth,
 and the services budget is 100 MB. A polish milestone that grows the
 resident set while claiming to cut RAM is arguing with itself. Every M13
 surface is a shell layer, a `punarctl` verb, a one-shot, or a capability
@@ -180,8 +180,8 @@ memory.
 | 16 | approval-gate a host action | M9 | `m9-check.sh` group 4 + `Approval/ApprovalOverlay.qml` (D-003), `qs ipc call approval open`; boot-test phase 11 + 11b (host re-validates the exported approval against `schemas/audit/approval.json`) | **IMPLEMENTED — NOT YET RUN** | No in-VM run: `PUNAR_M9_OK` exists nowhere. Host gates green (`cargo test` 719/0, qmllint 12 files clean). |
 | 17 | issue short-lived mock Dev credential | M9 | `m9-check.sh` groups 6–9, including the redaction sweep over the export tar, audit trail, ledger files and every Punar process's `/proc/*/environ` and `/proc/*/cmdline` | **IMPLEMENTED — NOT YET RUN** | Same run gap. The redaction sweep is the milestone's headline assertion and has never executed. |
 | 18 | deny Prod credential | M9 | `m9-check.sh` group 6 (`aws_prod` refusal + section-73 explanation + audit event) | **IMPLEMENTED — NOT YET RUN** | Same run gap. |
-| 19 | enforce project network rule | M12 | `m12-check.sh` groups 2–6 (planned): `nft` table partition, `socket cgroupv2` match, allow/deny probes from inside a live agent scope | **PLANNED** | `crates/punar-netd` is a lib stub. No `punar-net` nftables table has ever been installed. M6's declared network block is **still declared-not-enforced**, and M12's own §16 says the `socket cgroupv2` mechanism is asserted from documentation and not yet exercised on the pinned image. |
-| 20 | display local network activity | M12 | `m12-check.sh` groups 11–13 + the D-006 panel on `PUNAR+P`, `punar-m12.png` (planned) | **PLANNED** | Same. M8's ledger row still reads `NOT YET OBSERVED · MILESTONE 12` on every surface. |
+| 19 | enforce project network rule | M12 | `m12-check.sh` groups 2–6: `nft` table partition, `socket cgroupv2` match, allow/deny probes from inside a live agent scope plus the identical out-of-scope same-user control | **IMPLEMENTED — CLEAN VM PROOF PENDING** | `punar-netd` is a real daemon and the hard runtime gate exists. Host gates pass; no clean x86_64/ARM64 `PUNAR_M12_OK` is claimed yet. |
+| 20 | display local network activity | M12 | `m12-check.sh` observation/privacy groups + the D-006 panel on `PUNAR+P`, `punar-m12.png` | **IMPLEMENTED — CLEAN VM PROOF PENDING** | Connection aggregation, deny audit, AI-ledger ingestion and the panel are implemented. The clean-image gate and screenshot remain the evidence required to call them verified. |
 | 21 | detect an unknown/unmanaged AI fixture | M7 (detection) / M10 (alert) | `m7-check.sh`: the `foo-agent` fixture is found and classified `UNKNOWN · SUSPECTED` by the on-demand scan — run 32868450695 | **PROVEN IN CI** † | The *detection* is proven. **Periodic** detection (240 s timer), the D-009 local alert card and its dismissal/DND behavior are M10 — **PLANNED**, no code. The demo beat needs the alert, not just the scan. §3.4. |
 | 22 | allow authorized Smplify query of that local AI metadata | M10 | `m10-check.sh` (planned): device-pull on the sync piggyback, four scopes, three-way intersection, out-of-scope refusal recorded in `queries.jsonl` | **PLANNED** | No code. Authorization is mock roles from a fixture by design (real RBAC/IdP is Phase 2). |
 | 23 | remediate firewall drift | M4 | `m4-check.sh`, 29 assertions incl. the timer-driven drift-remediation demo — `PUNAR_M4_OK`, run 32849448721 | **PROVEN IN CI** | Nothing. The *graphical* display of the remediation is beat 11 and lands with System Control (§7.2). |

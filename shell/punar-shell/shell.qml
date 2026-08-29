@@ -30,7 +30,7 @@ pragma ComponentBehavior: Bound
 // `qs -p /usr/share/punar/shell ipc call <target> <method>`; every target
 // name is unique, verified by `qs ipc show` and by grep over the tree):
 //   bar · commandcenter · overview · windowactions · aipanel · approval · alerts
-//   systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
+//   privacypanel · systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
 //   wallpaper
 //
 // CROSS-SURFACE SIGNALS ARE WIRED HERE AND NOWHERE ELSE. No surface
@@ -49,6 +49,7 @@ import "CommandCenter"
 import "Lock"
 import "Notifications"
 import "Overview"
+import "PrivacyPanel"
 import "Services"
 import "Shortcuts"
 import "SystemControl"
@@ -431,6 +432,46 @@ ShellRoot {
         }
         function residency(): string {
             return aiPanelSurface.residency();
+        }
+    }
+
+    // PUNAR+P — local network visibility without content inspection
+    // (M12, Plate D-006). The surface is unloaded at rest; opening it runs
+    // one on-demand netd pass and then follows the root-owned side file.
+    DeferredSurface {
+        id: privacyPanelSurface
+        surfaceName: "privacypanel"
+        sourceComponent: PrivacyPanel {}
+    }
+
+    IpcHandler {
+        target: "privacypanel"
+
+        function toggle(): void {
+            privacyPanelSurface.toggleSurface();
+        }
+        function open(): void {
+            privacyPanelSurface.openSurface();
+        }
+        function close(): void {
+            privacyPanelSurface.closeSurface();
+        }
+        function state(): string {
+            return privacyPanelSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("privacypanel");
+        }
+        function residency(): string {
+            return privacyPanelSurface.residency();
+        }
+        function rows(): string {
+            var surface = privacyPanelSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcRows();
+            privacyPanelSurface.releaseIfClosed();
+            return result;
         }
     }
 

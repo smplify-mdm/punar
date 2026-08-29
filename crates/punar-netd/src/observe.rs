@@ -3,9 +3,11 @@
 //! This is intentionally not a tracer: no eBPF, packet capture, DNS log,
 //! SNI inspection, conntrack walk, or command-output scraping. A pass reads
 //! `/proc/net/tcp{,6}`, resolves candidate socket inodes through
-//! `/proc/<pid>/fd`, and stops once every candidate is attributed. Ports and
-//! local addresses are parsing details and are absent from the serializable
-//! result by construction.
+//! `/proc/<pid>/fd` when ordinary permissions allow it. On the real Linux
+//! runtime, `NETLINK_SOCK_DIAG` supplies the kernel cgroup id independently;
+//! that is the authoritative managed-session join when another user's fd
+//! links are intentionally hidden. Ports and local addresses are parsing
+//! details and are absent from the serializable result by construction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -26,6 +28,8 @@ pub enum ObserveError {
         line: usize,
         reason: String,
     },
+    #[error("kernel socket attribution failed: {0}")]
+    KernelAttribution(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,6 +67,7 @@ struct LiveSocket {
     state: TcpState,
     uid: u32,
     inode: u64,
+    cgroup_id: Option<u64>,
     // Parsed to validate the kernel row and identify a real peer, but never
     // copied into any serializable type (M12 privacy contract).
     _local_port: u16,
@@ -81,6 +86,7 @@ pub struct ProcessConnections {
     pub pid: Option<u32>,
     pub uid: u32,
     pub cgroup_path: Option<String>,
+    pub cgroup_id: Option<u64>,
     pub connections: Vec<Connection>,
 }
 
@@ -100,10 +106,22 @@ struct Owner {
 }
 
 pub fn observe(proc_root: &Path) -> Result<Observation, ObserveError> {
-    observe_at(proc_root, punar_common::time::utc_now_rfc3339())
+    observe_inner(
+        proc_root,
+        punar_common::time::utc_now_rfc3339(),
+        proc_root == Path::new("/proc"),
+    )
 }
 
 pub fn observe_at(proc_root: &Path, scanned_at: String) -> Result<Observation, ObserveError> {
+    observe_inner(proc_root, scanned_at, false)
+}
+
+fn observe_inner(
+    proc_root: &Path,
+    scanned_at: String,
+    use_kernel_cgroups: bool,
+) -> Result<Observation, ObserveError> {
     let mut sockets = Vec::new();
     sockets.extend(parse_table(
         &read_required(&proc_root.join("net/tcp"))?,
@@ -115,12 +133,24 @@ pub fn observe_at(proc_root: &Path, scanned_at: String) -> Result<Observation, O
     )?);
     sockets.sort_by_key(|socket| (socket.uid, socket.inode));
 
+    #[cfg(target_os = "linux")]
+    if use_kernel_cgroups {
+        let cgroups = crate::socket_diag::tcp_cgroup_ids()
+            .map_err(|error| ObserveError::KernelAttribution(error.to_string()))?;
+        for socket in &mut sockets {
+            socket.cgroup_id = cgroups.get(&socket.inode).copied();
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = use_kernel_cgroups;
+
     let candidates: BTreeSet<u64> = sockets.iter().map(|socket| socket.inode).collect();
     let owners = resolve_owners(proc_root, &candidates);
-    let mut grouped: BTreeMap<(Option<u32>, u32), ProcessConnections> = BTreeMap::new();
+    let mut grouped: BTreeMap<(Option<u32>, u32, Option<u64>), ProcessConnections> =
+        BTreeMap::new();
     for socket in sockets {
         let owner = owners.get(&socket.inode);
-        let key = (owner.map(|owner| owner.pid), socket.uid);
+        let key = (owner.map(|owner| owner.pid), socket.uid, socket.cgroup_id);
         let row = grouped.entry(key).or_insert_with(|| ProcessConnections {
             name: owner
                 .map(|owner| owner.name.clone())
@@ -128,6 +158,7 @@ pub fn observe_at(proc_root: &Path, scanned_at: String) -> Result<Observation, O
             pid: owner.map(|owner| owner.pid),
             uid: socket.uid,
             cgroup_path: owner.and_then(|owner| owner.cgroup_path.clone()),
+            cgroup_id: socket.cgroup_id,
             connections: Vec::new(),
         });
         row.connections.push(Connection {
@@ -210,6 +241,7 @@ fn parse_table(input: &str, family: AddressFamily) -> Result<Vec<LiveSocket>, Ob
             state,
             uid,
             inode,
+            cgroup_id: None,
             _local_port: local_port,
             _remote_port: remote_port,
         });

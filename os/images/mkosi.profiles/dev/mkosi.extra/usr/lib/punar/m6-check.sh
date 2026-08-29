@@ -267,15 +267,15 @@ grep_row "status workspace row (applied bind mount)" "${RUN_DIR}/m6-status.txt" 
 # permissions row below matches THIS, not a milestone number, so the day
 # punar-netd or the broker relabels a row, the edit is here and not in six
 # assertions (docs/development/checks-conventions.md).
-ENFORCE_RE='(applied( \(bind mount\))?|enforced|declared · (enforced( M[0-9]+)?|applied|not realized in M[0-9]+))'
+ENFORCE_RE='(applied( \(bind mount\))?|enforced( \(agent scope\)( · container: deny only)?)?|declared · (enforced( M[0-9]+)?|applied|not realized in M[0-9]+))'
 
 # Milestone-agnostic: the row must say the container is isolated AND state
 # where the declared zones stand — a milestone while enforcement is pending,
 # or plain "enforced" once punar-netd lands. Pinning "M12" here would fail
 # the day M12 ships, for a change that is correct.
-grep_re "status network row (isolated, and the enforcement status of the declared zones is stated)" \
+grep_re "status network row states the deny-only container boundary" \
     "${RUN_DIR}/m6-status.txt" \
-    '^Network +isolated \(M[0-9]+\) · declared zones enforced( M[0-9]+)?$'
+    '^Network +(none · deny enforced · allow declared \(Phase 2\)|isolated \(M[0-9]+\) · declared zones enforced( M[0-9]+)?)$'
 grep_row "toolchains declared header" "${RUN_DIR}/m6-status.txt" \
     "TOOLCHAINS · DECLARED"
 grep_row "toolchain node 24 verbatim" "${RUN_DIR}/m6-status.txt" \

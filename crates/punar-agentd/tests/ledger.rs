@@ -416,7 +416,12 @@ fn access_returns_the_schema_exact_summary_and_its_siblings() {
     // would be asserting a snapshot rather than the rule.
     assert!(!honest.is_empty());
     assert!(honest.iter().all(|(_, milestone)| !milestone.is_empty()));
-    assert!(honest.contains(&("network_destinations", "M12")));
+    assert!(
+        !honest
+            .iter()
+            .any(|(category, _)| *category == "network_destinations"),
+        "M12 shipped the managed-session network producer"
+    );
     // M9 re-milestoned this rather than leaving it promising M9+: the
     // milestone shipped a credential broker, not a tool gateway.
     assert!(honest.contains(&("mcp_servers", "M11+")));

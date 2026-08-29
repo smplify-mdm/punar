@@ -59,7 +59,7 @@ pub struct Session {
     /// Executable path observed at registration, when one was readable.
     pub executable: Option<String>,
     /// What the launcher displayed (spec section 27 step 10) — display
-    /// data, labeled `declared · M9/M12` by whoever renders it.
+    /// data carrying the current enforcement state for every row.
     pub authority: Option<AuthoritySummary>,
     /// Peer uid that registered the session; `None` for sessions replayed
     /// from disk whose recorded user name no longer resolves. `agents.end`

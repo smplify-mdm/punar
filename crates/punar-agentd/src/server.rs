@@ -62,10 +62,10 @@ use punar_common::agent::{
     AgentsAccessParams, AgentsEndParams, AgentsEndResult, AgentsGetParams, AgentsGetResult,
     AgentsListResult, AgentsRegisterParams, AgentsRegisterResult, AgentsScanParams,
     AlertsDismissParams, AlertsDismissResult, AlertsListParams, AlertsListResult,
-    DETECTIONS_INDEX_PATH, DETECTIONS_JSONL_PATH, LedgerPurgeParams, ListedSession, PurgeScope,
-    REGISTRY_JSONL_PATH, RegistryRecord, SCAN_STALE_AFTER_SECS, SUSPECTED_SIGNATURES_PATH,
-    ScanTrigger, SessionRow, agent_name_ok, session_id_ok, validate_authority_summary,
-    validate_registry_record,
+    DETECTIONS_INDEX_PATH, DETECTIONS_JSONL_PATH, LedgerNetworkParams, LedgerPurgeParams,
+    ListedSession, PurgeScope, REGISTRY_JSONL_PATH, RegistryRecord, SCAN_STALE_AFTER_SECS,
+    SUSPECTED_SIGNATURES_PATH, ScanTrigger, SessionRow, agent_name_ok, session_id_ok,
+    validate_authority_summary, validate_registry_record,
 };
 use punar_common::audit::{AGENT_SESSION_NONE, AuditWriter, PROJECT_ID_SYSTEM};
 use punar_common::ipc::{
@@ -107,6 +107,8 @@ pub const ACTION_REAP: &str = "agents.reap";
 pub const ACTION_SCAN: &str = "agents.scan";
 /// M8 (docs/api/ipc.md section 12.6): the user deleted a ledger.
 pub const ACTION_LEDGER_PURGE: &str = "ledger.purge";
+/// M12: root-only destination-aggregate bridge from `punar-netd`.
+pub const ACTION_LEDGER_NETWORK: &str = "ledger.network";
 /// M8: one event per retention **batch**, never one per file (spec 6.4).
 pub const ACTION_LEDGER_PRUNE: &str = "ledger.prune";
 /// M8: root read a ledger it does not own — the seed of Milestone 10's
@@ -661,6 +663,7 @@ impl Inner {
             AgentMethod::Scan(params) => Ok(self.handle_scan(peer, params)),
             AgentMethod::Access(params) => self.handle_access(peer, params),
             AgentMethod::Purge(params) => self.handle_purge(peer, params),
+            AgentMethod::LedgerNetwork(params) => self.handle_ledger_network(peer, params),
             AgentMethod::AlertsList(params) => Ok(self.handle_alerts_list(params)),
             AgentMethod::AlertsDismiss(params) => self.handle_alerts_dismiss(peer, params),
             AgentMethod::QueryAnswer(params) => self.handle_query_answer(peer, params),
@@ -1001,6 +1004,59 @@ impl Inner {
             RESULT_PURGED,
         );
         self.publish_summary();
+        Ok(to_value(result))
+    }
+
+    /// `ledger.network` — accept a privacy-bounded absolute aggregate from
+    /// the root-owned network mediation service, and nobody else.
+    fn handle_ledger_network(
+        &self,
+        peer: &Peer,
+        params: &LedgerNetworkParams,
+    ) -> Result<Value, IpcError> {
+        if !peer.is_root() {
+            self.audit_ledger(
+                peer,
+                ACTION_LEDGER_NETWORK,
+                &params.session_id,
+                &params.session_id,
+                Decision::Deny,
+                "denied",
+            );
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "Writing network evidence was denied: only the root-owned punar-netd mediation service may contribute this aggregate. Policy: local OS default — a user process or AI agent cannot forge another principal's history. Next step: use `punarctl privacy connections` to read the local view; there is no user-facing ledger write command.",
+                json!({"session_id": params.session_id}),
+            ));
+        }
+        if !self.ledger.knows(&params.session_id) {
+            return Err(IpcError::with_details(
+                ErrorCode::NotFound,
+                format!(
+                    "No AI Access Ledger exists for {:?}; network evidence was not held for an unregistered principal. Next step: let the managed launch register before retrying.",
+                    params.session_id
+                ),
+                json!({"session_id": params.session_id}),
+            ));
+        }
+        let now = utc_now_rfc3339();
+        let result = self.ledger.ingest_network(params, &now);
+        if result.accepted > 0 {
+            self.publish_ledger_view();
+        }
+        if result.rejected > 0 {
+            // The destination itself is intentionally absent: a rejection
+            // may have been a URL or path, and the audit trail is not
+            // purgeable. Record the producer failure, never its payload.
+            self.audit_ledger(
+                peer,
+                ACTION_LEDGER_NETWORK,
+                &params.session_id,
+                &params.session_id,
+                Decision::Deny,
+                "privacy_type_rejected",
+            );
+        }
         Ok(to_value(result))
     }
 
@@ -1701,9 +1757,9 @@ impl Inner {
     }
 
     /// Level 2 — the organization's own policy, read back. Display-level
-    /// authority rows carry their `declared · M9/M12` enforcement labels
-    /// unchanged: an administrator must not be told that something is
-    /// enforced when it is declared (spec 1.22).
+    /// authority rows carry their current enforcement labels unchanged:
+    /// an administrator must not be told that something is enforced when
+    /// it is only declared, or vice versa (spec 1.22).
     fn project_authority(&self, narrow: Option<&str>, now: &str) -> (Value, RecordCounts) {
         let registry = self.registry.lock().unwrap();
         let mut sessions = Vec::new();

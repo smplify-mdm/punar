@@ -1,0 +1,9 @@
+[Unit]
+Description=Punar M12 network enforcement and privacy exercise (CI)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m12-check.sh

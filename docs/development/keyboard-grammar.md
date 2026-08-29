@@ -185,6 +185,19 @@ and moves the M2 assistant scratchpad to `PUNAR+SHIFT+A` (the pad has no
 pre-spawned client; the panel is the milestone's headline surface). Both
 binds on one chord is not an option — Hyprland fires every match.
 
+### Privacy panel (Plate D-006 · M12)
+
+```text
+PUNAR + P                    Privacy and network activity (punar-shell IPC
+                             target `privacypanel`; ↑/↓ walk processes,
+                             Enter expands, R refreshes, Escape closes)
+```
+
+The panel runs one local, on-demand TCP observation pass and renders the
+root-owned result. Policy-denial destinations remain local live-view data;
+the persistent audit trail records only the denied zone. Features that are
+not enforcement paths yet remain visibly marked as inactive.
+
 ### Project overview (spec §14.2, Plate D-007)
 
 ```text

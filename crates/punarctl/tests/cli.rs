@@ -1070,9 +1070,9 @@ fn fixture_agent_get(session_id: &str) -> Option<Value> {
                 {"zone": "filesystem.project", "decision": "read_write",
                  "enforcement": "declared · M9"},
                 {"zone": "network.internet", "decision": "allow",
-                 "enforcement": "declared · M12"},
+                 "enforcement": "enforced (agent scope)"},
                 {"zone": "network.corp_prod", "decision": "deny",
-                 "enforcement": "declared · M12"},
+                 "enforcement": "enforced (agent scope)"},
                 {"zone": "credentials.aws_dev", "decision": "request",
                  "enforcement": "declared · M9"}
             ]
@@ -1093,7 +1093,7 @@ fn fixture_agents_access() -> Value {
             "resources": {
                 "repositories": ["atlas"],
                 "directory_zones": ["workspace"],
-                "network_destinations": [],
+                "network_destinations": ["127.0.0.9"],
                 "mcp_servers": [],
                 "credential_classes": [],
                 "process_classes": ["agent", "git", "shell"]
@@ -1122,26 +1122,15 @@ fn fixture_agents_access() -> Value {
                  "evidence": "cgroup_scope"},
                 {"category": "process_classes", "resource_class": "agent", "count": 1,
                  "first_seen": "2026-08-27T09:58:40Z", "last_seen": "2026-08-27T10:00:02Z",
-                 "evidence": "cgroup_scope"}
+                 "evidence": "cgroup_scope"},
+                {"category": "network_destinations", "resource_class": "127.0.0.9", "count": 1,
+                 "first_seen": "2026-08-27T09:59:00Z", "last_seen": "2026-08-27T10:00:02Z",
+                 "evidence": "netd_aggregate"}
             ]
         },
         "not_yet_observed": [
-            {"level": 3, "category": "network_destinations", "milestone": "M12",
-             "reason": "punar-netd does not exist yet"},
-            {"level": 3, "category": "mcp_servers", "milestone": "M9+",
-             "reason": "no tool/MCP gateway mediates MCP traffic yet"},
-            {"level": 3, "category": "credential_classes", "milestone": "M9",
-             "reason": "punar-secrets is the producer of credential.request events"},
-            {"level": 4, "category": "credential_request", "milestone": "M9",
-             "reason": "no credential producer exists yet"},
-            {"level": 4, "category": "policy_bypass_attempt", "milestone": "M9",
-             "reason": "approval gates arrive with M9"},
-            {"level": 4, "category": "production_access", "milestone": "M12",
-             "reason": "no network mediation exists yet"},
-            {"level": 4, "category": "sensitive_resource_access", "milestone": "M9/M12",
-             "reason": "no mediation point observes sensitive zones yet"},
-            {"level": 4, "category": "unknown_ai_execution", "milestone": "M10",
-             "reason": "a detected unmanaged process has no registered session"}
+            {"level": 3, "category": "mcp_servers", "milestone": "M11+",
+             "reason": "no tool/MCP gateway mediates MCP traffic yet"}
         ],
         "retention": {"days": 14, "active": true},
         "privacy": {
@@ -1556,15 +1545,15 @@ fn agents_inspect_renders_authority_then_the_real_ledger_register() {
     assert!(text.contains("POLICY · PERSONAL DEFAULTS"), "{text}");
     assert!(text.contains("FILESYSTEM.PROJECT"), "{text}");
     assert!(text.contains("READ_WRITE"), "{text}");
-    // Every authority row wears its enforcement milestone (SPEC 1.22).
-    for line in text
-        .lines()
-        .filter(|l| l.starts_with("NETWORK.") || l.starts_with("CREDENTIALS."))
-    {
+    // Every authority row wears its current enforcement state (SPEC 1.22).
+    for line in text.lines().filter(|l| l.starts_with("NETWORK.")) {
+        assert!(line.contains("enforced (agent scope)"), "{line}");
+    }
+    for line in text.lines().filter(|l| l.starts_with("CREDENTIALS.")) {
         assert!(line.contains("declared · M"), "{line}");
     }
     assert!(
-        text.contains("NOTHING HERE IS ENFORCED IN MILESTONE 7"),
+        text.contains("NETWORK AUTHORITY IS ENFORCED FOR MANAGED AGENT SCOPES"),
         "{text}"
     );
 
@@ -1785,25 +1774,23 @@ fn agents_access_renders_the_ledger_register_with_counts_and_honest_gaps() {
         "{text}"
     );
 
-    // Empty is never silent: each unobserved category names its milestone.
-    assert!(
-        text.contains("NOT YET OBSERVED · M12") && text.contains("NETWORK DESTINATIONS"),
-        "{text}"
-    );
+    // M12's bounded network aggregate renders as observed, with no port.
+    assert!(text.contains("NETWORK DESTINATIONS"), "{text}");
+    assert!(text.contains("127.0.0.9"), "{text}");
+    assert!(text.contains("netd aggregate"), "{text}");
     assert!(text.contains("MCP SERVERS"), "{text}");
-    assert!(text.contains("NOT YET OBSERVED · M9+"), "{text}");
+    assert!(text.contains("NOT YET OBSERVED · M11+"), "{text}");
     assert!(text.contains("CREDENTIAL CLASSES"), "{text}");
-    assert!(text.contains("punar-netd does not exist yet"), "{text}");
 
     // Level 4: the event reference, and where the payload actually lives.
     assert!(text.contains("SECURITY EVENTS · LEVEL 4"), "{text}");
     assert!(text.contains("DENIED ACCESS"), "{text}");
     assert!(text.contains("evt_502"), "{text}");
     assert!(text.contains("PUNARCTL AUDIT TAIL"), "{text}");
-    // The five Level-4 categories with no producer are named too — all
-    // seven accounted for, including the unknown-agent one M10 owns.
-    assert!(text.contains("CREDENTIAL REQUEST (M9)"), "{text}");
-    assert!(text.contains("UNKNOWN AI EXECUTION (M10)"), "{text}");
+    // Produced Level-4 categories with no event are facts, not pending
+    // promises; only the event that occurred is rendered.
+    assert!(!text.contains("CREDENTIAL REQUEST (M9)"), "{text}");
+    assert!(!text.contains("PRODUCTION ACCESS (M12)"), "{text}");
 
     // Retention + the section 24.2 guarantee.
     assert!(text.contains("14 days after the session ends"), "{text}");

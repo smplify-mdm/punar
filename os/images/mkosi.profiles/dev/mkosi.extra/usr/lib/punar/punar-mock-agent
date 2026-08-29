@@ -22,6 +22,13 @@
 # derived from the same two mediation points as in production — the scope
 # cgroup and the audit stream — never from anything this script declares
 # about itself.
+#
+# M12 addition: PUNAR_MOCK_AGENT_NET=1 is another dev/CI-only evidence
+# switch. The script blocks on a pre-created FIFO until the check has proved
+# that punar-netd attached this cgroup, then a Bash child holds one allowed
+# loopback TCP connection open and records the exit/time of an identical
+# denied probe. The addresses and port are fixed test fixtures; no product
+# behavior reads this result file.
 
 set -u
 
@@ -104,6 +111,50 @@ if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
     else
         echo "Children: privilege.request refused for an AI agent (the Level-4 evidence)"
     fi
+fi
+
+# Real loopback network evidence for the M12 in-VM gate. Opt-in only; the
+# production adapter never sets this variable and the two listener addresses
+# exist only in the dev image's zone-membership overlay.
+if [ "${PUNAR_MOCK_AGENT_NET:-0}" = "1" ]; then
+    NET_FIFO=".punar-agent-net-go"
+    echo "Network: PUNAR_MOCK_AGENT_NET=1 (dev/CI loopback evidence generation)"
+    if [ ! -p "./$NET_FIFO" ]; then
+        echo "Network: required coordination FIFO ./$NET_FIFO is absent" >&2
+        exit 70
+    fi
+    # A blocking read is the synchronization primitive: no polling and no
+    # chance for the probe to race ahead of cgroup policy attachment.
+    IFS= read -r _net_signal < "./$NET_FIFO"
+    /bin/bash -c '
+        umask 077
+        result=.punar-agent-net-results
+        ready=.punar-agent-net-ready
+        tmp="${result}.tmp.$$"
+        allow_code=0
+        exec 9<>/dev/tcp/127.0.0.9/9418 || allow_code=$?
+        deny_start=$(date +%s%N)
+        deny_code=0
+        timeout 2 /bin/bash -c "exec 8<>/dev/tcp/127.0.0.7/9418" \
+            >/dev/null 2>&1 || deny_code=$?
+        deny_end=$(date +%s%N)
+        deny_ms=$(( (deny_end - deny_start) / 1000000 ))
+        {
+            printf "allow_code=%s\n" "$allow_code"
+            printf "deny_code=%s\n" "$deny_code"
+            printf "deny_ms=%s\n" "$deny_ms"
+            printf "allow_destination=127.0.0.9\n"
+            printf "deny_destination=127.0.0.7\n"
+        } > "$tmp"
+        mv -f "$tmp" "$result"
+        : > "$ready"
+        if [ "$allow_code" -eq 0 ]; then
+            # fd 9 is inherited, keeping the ESTABLISHED socket observable.
+            sleep infinity &
+            wait $!
+        fi
+        exit "$allow_code"
+    ' &
 fi
 
 echo "Waiting for SIGTERM/SIGINT — end this session with: systemctl --user stop <scope>"

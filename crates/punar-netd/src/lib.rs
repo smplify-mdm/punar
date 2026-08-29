@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agentd;
+pub mod deny;
 pub mod model;
 pub mod nft;
 pub mod nft_exec;
@@ -24,6 +25,8 @@ pub mod project;
 pub mod relay;
 pub mod runtime;
 pub mod server;
+#[cfg(target_os = "linux")]
+mod socket_diag;
 mod util;
 pub mod view;
 pub mod watch;

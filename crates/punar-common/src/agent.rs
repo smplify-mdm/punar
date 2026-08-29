@@ -561,10 +561,9 @@ pub fn validate_registry_record(record: &RegistryRecord) -> Result<(), Vec<Strin
 // ---------------------------------------------------------------------------
 
 /// One authority row as displayed at launch: a zone, a spec-section-20
-/// decision word, and the enforcement label. All display strings — M7
-/// authority is **display-level only** and every rendering carries its
-/// `declared · M9/M12` label (spec section 1.22); enforcement arrives in
-/// M9 (credentials/approvals) and M12 (network).
+/// decision word, and its current enforcement label. The decision and
+/// enforcement state travel together so a renderer cannot turn a
+/// declaration into an apparent grant (spec section 1.22).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityRow {
@@ -636,6 +635,52 @@ pub struct AgentsRegisterParams {
 #[serde(deny_unknown_fields)]
 pub struct AgentsAccessParams {
     pub session_id: String,
+}
+
+/// One privacy-bounded network aggregate contributed by `punar-netd`.
+///
+/// `destination` is deliberately separate from `zone`: agentd validates it
+/// through the ledger's [`crate::ledger::ResourceClass`] boundary, where a
+/// port, URL, path, whitespace, or IPv6 literal containing `:` is
+/// unrepresentable. There is no field for a local address, payload, DNS
+/// query, command line, or process id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerNetworkDestination {
+    pub destination: String,
+    pub zone: String,
+    pub count: u64,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+/// Closed producer identity for [`LedgerNetworkParams`]. A caller cannot
+/// claim an arbitrary evidence source and thereby make the ledger overstate
+/// how an observation was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerNetworkSource {
+    NetdAggregate,
+}
+
+/// `ledger.network` params (Milestone 12): an absolute, per-session
+/// aggregate published by the root-owned network mediation service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerNetworkParams {
+    pub session_id: String,
+    pub destinations: Vec<LedgerNetworkDestination>,
+    pub source: LedgerNetworkSource,
+}
+
+/// Result of one root-only network-ledger ingestion batch. A rejected row
+/// means the privacy type refused the destination; it is never silently
+/// truncated into a different identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerNetworkResult {
+    pub accepted: u64,
+    pub rejected: u64,
 }
 
 /// `ledger.purge` params (docs/api/ipc.md section 12.3): **exactly one**
@@ -713,6 +758,9 @@ pub enum AgentMethod {
     /// section 24.2). Owner or root, always audited, and it does **not**
     /// touch the audit trail.
     Purge(LedgerPurgeParams),
+    /// `ledger.network` — root-only aggregate ingestion from `punar-netd`.
+    /// It carries no executable value and cannot represent packet content.
+    LedgerNetwork(LedgerNetworkParams),
     /// `query.answer` — one administrator question the device **fetched**
     /// (M10, spec sections 24.1, 51). **Root peer only**: the only caller
     /// is `punard`, the courier. The data owner re-evaluates
@@ -738,7 +786,7 @@ const RESERVED_LEDGER_PREFIX: &str = "ledger.";
 
 impl AgentMethod {
     /// All wire method names, contract-table order.
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 12] = [
         "agents.list",
         "agents.get",
         "agents.register",
@@ -746,6 +794,7 @@ impl AgentMethod {
         "agents.scan",
         "agents.access",
         "ledger.purge",
+        "ledger.network",
         "alerts.list",
         "alerts.dismiss",
         "query.answer",
@@ -764,6 +813,7 @@ impl AgentMethod {
             AgentMethod::Scan(_) => "agents.scan",
             AgentMethod::Access(_) => "agents.access",
             AgentMethod::Purge(_) => "ledger.purge",
+            AgentMethod::LedgerNetwork(_) => "ledger.network",
             AgentMethod::AlertsList(_) => "alerts.list",
             AgentMethod::AlertsDismiss(_) => "alerts.dismiss",
             AgentMethod::QueryAnswer(_) => "query.answer",
@@ -781,6 +831,7 @@ impl AgentMethod {
             AgentMethod::End(p) => serde_json::to_value(p),
             AgentMethod::Access(p) => serde_json::to_value(p),
             AgentMethod::Purge(p) => serde_json::to_value(p),
+            AgentMethod::LedgerNetwork(p) => serde_json::to_value(p),
             AgentMethod::AlertsList(p) => serde_json::to_value(p),
             AgentMethod::AlertsDismiss(p) => serde_json::to_value(p),
             AgentMethod::QueryAnswer(p) => serde_json::to_value(p),
@@ -832,6 +883,34 @@ impl AgentMethod {
                     ));
                 }
                 Ok(AgentMethod::Purge(parsed))
+            }
+            "ledger.network" => {
+                let parsed: LedgerNetworkParams = Self::parse_required_params(method, params)?;
+                if !session_id_ok(&parsed.session_id) {
+                    return Err(Self::invalid_params(
+                        method,
+                        "session_id must match ^agt_[A-Za-z0-9]+$",
+                    ));
+                }
+                if parsed.destinations.len() > crate::ledger::MAX_CLASSES_PER_CATEGORY {
+                    return Err(Self::invalid_params(
+                        method,
+                        "destinations exceeds the bounded ledger category capacity",
+                    ));
+                }
+                if parsed.destinations.iter().any(|row| {
+                    row.count == 0
+                        || row.zone.is_empty()
+                        || !crate::time::is_rfc3339_timestamp(&row.first_seen)
+                        || !crate::time::is_rfc3339_timestamp(&row.last_seen)
+                        || row.first_seen > row.last_seen
+                }) {
+                    return Err(Self::invalid_params(
+                        method,
+                        "every destination requires a non-empty zone, positive count, and an ordered observation window",
+                    ));
+                }
+                Ok(AgentMethod::LedgerNetwork(parsed))
             }
             unknown if unknown.starts_with(RESERVED_LEDGER_PREFIX) => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
@@ -1402,6 +1481,33 @@ mod tests {
         ] {
             let err = AgentMethod::from_wire("ledger.purge", Some(ambiguous.clone())).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{ambiguous}");
+        }
+
+        let network = json!({
+            "session_id": "agt_4f21c09ab3e1",
+            "destinations": [{
+                "destination": "dev-api",
+                "zone": "corp_dev",
+                "count": 3,
+                "first_seen": "2026-08-29T00:00:00Z",
+                "last_seen": "2026-08-29T00:01:00Z"
+            }],
+            "source": "netd_aggregate"
+        });
+        let parsed = AgentMethod::from_wire("ledger.network", Some(network.clone())).unwrap();
+        assert_eq!(parsed.name(), "ledger.network");
+        assert_eq!(parsed.params_value().unwrap(), network);
+        for invalid in [
+            json!({"session_id":"agt_1","destinations":[],"source":"other"}),
+            json!({"session_id":"agt_1","destinations":[{"destination":"x","zone":"corp_dev","count":0,"first_seen":"2026-08-29T00:00:00Z","last_seen":"2026-08-29T00:00:00Z"}],"source":"netd_aggregate"}),
+            json!({"session_id":"agt_1","destinations":[{"destination":"x","zone":"corp_dev","count":1,"first_seen":"later","last_seen":"earlier"}],"source":"netd_aggregate"}),
+        ] {
+            assert_eq!(
+                AgentMethod::from_wire("ledger.network", Some(invalid))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams
+            );
         }
     }
 

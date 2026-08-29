@@ -89,9 +89,9 @@
 #        generated deterministically (fifo-blocked shell + git, plus one
 #        short-lived capability call punard denies), the scope cgroup read
 #        straight from /sys/fs/cgroup, the schema-exact `agents.access`
-#        summary with honest not-yet-observed rows for network destinations
-#        (M12), MCP servers (M9+) and credential classes (M9), the Level-4
-#        denial joined to the audit trail BY EVENT ID, the privacy
+#        summary with honest not-yet-observed rows for producers absent from
+#        the image (MCP M11+ after M12), the Level-4 denial joined to the
+#        audit trail BY EVENT ID, the privacy
 #        regression asserting no path/argv/comm ever reached disk, the
 #        counts-only agents.list fingerprint, the panel screenshot, the
 #        14-day retention deadline, an owner purge and its tombstone, the
@@ -209,7 +209,8 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2..M10_FAIL fails here.
+#   are the exception: a delivered PUNAR_M2..M10_FAIL or PUNAR_M12_FAIL
+#   fails here.
 #
 # KVM is used when /dev/kvm is present, accessible and native to the guest
 # architecture; native Apple Silicon ARM64 uses HVF. Otherwise the test
@@ -230,7 +231,7 @@
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
 #                          — must also cover the isolated surface-cost and
-#                          M2..M10 exercises, which run between the RAM result
+#                          M2..M10 and M12 exercises, which run between the RAM result
 #                          and the export (default: 4200 hardware, 9600 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
 #                          (default: os/images/out/desktop-proof)
@@ -676,6 +677,10 @@ run_desktop() {
           "${PROOF_DIR}"/m10-*.jsonl \
           "${PROOF_DIR}"/m10-*.txt \
           "${PROOF_DIR}/punar-m10.png" \
+          "${PROOF_DIR}/m12-report.txt" \
+          "${PROOF_DIR}"/m12-*.json \
+          "${PROOF_DIR}"/m12-*.txt \
+          "${PROOF_DIR}/punar-m12.png" \
           "${PROOF_DIR}/serial.log"
 
     # VM shape per PERFORMANCE_BUDGETS.md §5.1 (minimum target: 4 vCPU, 8 GB)
@@ -795,7 +800,8 @@ run_desktop() {
                      m7-report.txt punar-m7.png \
                      m8-report.txt punar-m8.png \
                      m9-report.txt punar-m9.png \
-                     m10-report.txt punar-m10.png; do
+                     m10-report.txt punar-m10.png \
+                     m12-report.txt punar-m12.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
                 fi
@@ -843,7 +849,8 @@ run_desktop() {
                      "${guest_dir}"/m8-*.json "${guest_dir}"/m8-*.txt \
                      "${guest_dir}"/m9-*.json "${guest_dir}"/m9-*.txt \
                      "${guest_dir}"/m10-*.json "${guest_dir}"/m10-*.jsonl \
-                     "${guest_dir}"/m10-*.txt; do
+                     "${guest_dir}"/m10-*.txt \
+                     "${guest_dir}"/m12-*.json "${guest_dir}"/m12-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
                 fi
@@ -1293,6 +1300,36 @@ run_desktop() {
         exit 1
     else
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
+    fi
+
+    # Phase 13: M12 per-cgroup egress and privacy gate. The guest proves an
+    # allowed socket, a fast rejected socket, and the identical same-user
+    # out-of-scope control against real listeners; then joins the kernel
+    # counters to the local view, destination-free audit record, purgeable
+    # ledger aggregate, fail-safe reload, self-heal, and the PUNAR+P panel.
+    local m12_report="${PROOF_DIR}/m12-report.txt"
+    if [ -f "${m12_report}" ]; then
+        if grep -q 'PUNAR_M12_FAIL' "${m12_report}"; then
+            echo "error: M12 exercise reported PUNAR_M12_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m12_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M12_OK' "${m12_report}"; then
+            echo "==> M12 exercise: PUNAR_M12_OK ($(grep -c '^ok' "${m12_report}" || true) assertions passed)"
+        else
+            echo "error: m12-report.txt carries no PUNAR_M12_OK/PUNAR_M12_FAIL verdict" >&2
+            tail -n 20 "${m12_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M12_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M12 exercise reported PUNAR_M12_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M12_OK' "${SERIAL_LOG}"; then
+        echo "==> M12 exercise: PUNAR_M12_OK (verdict from serial console)"
+    elif [ "${HARDWARE_ACCEL}" -eq 1 ]; then
+        echo "error: no m12-report.txt and no M12 verdict on serial — the M12 exercise did not run" >&2
+        exit 1
+    else
+        echo "==> M12 exercise: no report under TCG (informational only; emulated runs are not M12-gated)"
     fi
 
     # Phase 12d: wireless verdict. A primary development machine is a laptop,

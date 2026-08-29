@@ -1057,7 +1057,7 @@ agent process is running in its scope. Params:
    {"zone": "filesystem.project", "decision": "read_write",
     "enforcement": "declared · M9"},
    {"zone": "network.internet", "decision": "allow",
-    "enforcement": "declared · M12"}
+    "enforcement": "enforced (agent scope)"}
  ]}}
 ```
 
@@ -1110,15 +1110,16 @@ table. Periodic detection ships as a systemd timer calling
 `punarctl agents scan --trigger timer` through this same socket — still
 no timer inside the daemon.
 
-### 10.3 Authority is display-level in M7
+### 10.3 Authority carries its current enforcement state
 
 The `authority` object is what the launcher showed the user (spec
-section 27 step 10): manifest-declared decisions with their enforcement
-milestone labels, plus `policy_citation` — `"personal-defaults"` on an
+section 27 step 10): manifest-declared decisions with their current
+enforcement labels, plus `policy_citation` — `"personal-defaults"` on an
 unenrolled device, the org policy id (hero demo: `"eng-ai-v3"`) while
-enrolled, sourced from `/run/punar/status.json` (section 9). Nothing in
-M7 enforces these rows (M9/M12), and no surface may render them without
-their labels (spec section 1.22). It is stored in memory and
+enrolled, sourced from `/run/punar/status.json` (section 9). Managed
+host-agent network rows say `enforced (agent scope)`; project containers
+remain `--network none` and therefore deny-only. No surface may erase
+that boundary (spec section 1.22). The object is stored in memory and
 `agents.json` only — `registry.jsonl` lines remain schema-exact.
 
 ### 10.4 Audit additions (same file, shared writer)
@@ -1241,7 +1242,7 @@ Result:
     "resources": {
       "repositories": ["atlas"],
       "directory_zones": ["workspace"],
-      "network_destinations": [],
+      "network_destinations": ["127.0.0.9"],
       "mcp_servers": [],
       "credential_classes": [],
       "process_classes": ["agent", "git", "shell"]
@@ -1264,26 +1265,15 @@ Result:
        "evidence": "workspace_bind"},
       {"category": "process_classes", "resource_class": "git", "count": 2,
        "first_seen": "2026-08-27T09:58:44Z", "last_seen": "2026-08-27T10:00:02Z",
-       "evidence": "cgroup_scope"}
+       "evidence": "cgroup_scope"},
+      {"category": "network_destinations", "resource_class": "127.0.0.9", "count": 1,
+       "first_seen": "2026-08-27T09:59:00Z", "last_seen": "2026-08-27T10:00:02Z",
+       "evidence": "netd_aggregate"}
     ]
   },
   "not_yet_observed": [
-    {"level": 3, "category": "network_destinations", "milestone": "M12",
-     "reason": "punar-netd does not exist yet; no owned mediation point observes network destinations"},
-    {"level": 3, "category": "mcp_servers", "milestone": "M9+",
-     "reason": "no tool/MCP gateway mediates MCP traffic yet (spec section 26)"},
-    {"level": 3, "category": "credential_classes", "milestone": "M9",
-     "reason": "punar-secrets is the producer of credential.request events (spec section 29)"},
-    {"level": 4, "category": "credential_request", "milestone": "M9",
-     "reason": "no credential producer exists yet"},
-    {"level": 4, "category": "policy_bypass_attempt", "milestone": "M9",
-     "reason": "approval gates arrive with M9"},
-    {"level": 4, "category": "production_access", "milestone": "M12",
-     "reason": "no network mediation exists yet"},
-    {"level": 4, "category": "sensitive_resource_access", "milestone": "M9/M12",
-     "reason": "no mediation point observes sensitive zones yet"},
-    {"level": 4, "category": "unknown_ai_execution", "milestone": "M10",
-     "reason": "the audit event exists, but a detected unmanaged process has no registered session, so in M8 it attaches to no ledger"}
+    {"level": 3, "category": "mcp_servers", "milestone": "M11+",
+     "reason": "no tool or MCP gateway mediates MCP traffic yet (spec section 26)"}
   ],
   "retention": {"days": 14, "active": true},
   "privacy": {
@@ -1306,8 +1296,8 @@ Result:
   no seventh category exists. `resource_class` values can never contain
   `/`, `:` or whitespace (enforced by the daemon's `ResourceClass`
   newtype, not by review). `evidence` is one of `cgroup_scope`,
-  `audit_event`, `workspace_bind`, `adapter_metadata` and, since M10,
-  `detection_scan` — the mediation point that proved the entry. The M10
+  `audit_event`, `workspace_bind`, `adapter_metadata`, `detection_scan`,
+  and `netd_aggregate` — the mediation point that proved the entry. The M10
   value was added rather than folded into `adapter_metadata` because
   this enum exists to say *how we know*, and a detection was never
   launched: there is no adapter and no registration behind it, only the
@@ -1320,12 +1310,15 @@ Result:
 - **Empty is not "none happened".** A category that is empty **and**
   listed in `not_yet_observed` means *no mediation point observes it
   yet*; no surface may render it without that label (spec section 1.22).
-- **`not_yet_observed` moves between milestones, in both directions,
-  and the example above is an M8 snapshot.** A row leaves when its
+- **`not_yet_observed` moves between milestones, in both directions.**
+  A row leaves when its
   producer ships (`credential_classes`, `credential_request` and
   `policy_bypass_attempt` left in M9; `unknown_ai_execution` left in
   M10 — §17.6), and a row is re-milestoned when the honest date moves
-  (`mcp_servers` M9+ → M11+). **Since M10 the list is also
+  (`mcp_servers` M9+ → M11+). M12 removes
+  `network_destinations`, `production_access`, and
+  `sensitive_resource_access` because their mediation points now exist.
+  **Since M10 the list is also
   classification-aware**: an unmanaged detection's gains `repositories`
   and `credential_classes` with `milestone: "none"` — permanent
   limitations for a process Punar never launched, not pending

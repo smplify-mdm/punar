@@ -506,7 +506,7 @@ pub struct LedgerSummary {
 // The internal record (docs/api/ipc.md section 13.1)
 // ---------------------------------------------------------------------------
 
-/// Which owned mediation point proved an entry. Five values, closed —
+/// Which owned mediation point proved an entry. Six values, closed —
 /// there is no `inferred`, no `traced`, no `heuristic`: M8 derives the
 /// ledger only from points Punar already terminates (SPEC 1.14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -533,15 +533,21 @@ pub enum Evidence {
     /// passes is never seen) is stated on every surface that claims
     /// continuous detection.
     DetectionScan,
+    /// An absolute, per-session destination aggregate supplied by the
+    /// root-owned `punar-netd` mediation service (Milestone 12). This is
+    /// not packet tracing: the producer contributes only a validated
+    /// destination class, a count, and an observation window.
+    NetdAggregate,
 }
 
 impl Evidence {
-    pub const ALL: [Evidence; 5] = [
+    pub const ALL: [Evidence; 6] = [
         Evidence::CgroupScope,
         Evidence::AuditEvent,
         Evidence::WorkspaceBind,
         Evidence::AdapterMetadata,
         Evidence::DetectionScan,
+        Evidence::NetdAggregate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -551,6 +557,7 @@ impl Evidence {
             Evidence::WorkspaceBind => "workspace_bind",
             Evidence::AdapterMetadata => "adapter_metadata",
             Evidence::DetectionScan => "detection_scan",
+            Evidence::NetdAggregate => "netd_aggregate",
         }
     }
 }
@@ -704,6 +711,71 @@ impl LedgerRecord {
             count: increment,
             first_seen: now.to_string(),
             last_seen: now.to_string(),
+            evidence,
+        });
+        true
+    }
+
+    /// Merge an absolute aggregate without double-counting a producer that
+    /// retries the same batch. `count` is a monotonically non-decreasing
+    /// total for this `(session, category, class, evidence)` tuple; the
+    /// observation window is widened but never narrowed.
+    ///
+    /// This is the network-ledger ingestion primitive. It is deliberately
+    /// separate from [`Self::observe`], whose `increment` semantics are
+    /// correct for audit events and new processes but would inflate a
+    /// destination every time netd retried after an interrupted response.
+    pub fn observe_absolute(
+        &mut self,
+        category: ResourceCategory,
+        class: ResourceClass,
+        count: u64,
+        evidence: Evidence,
+        first_seen: &str,
+        last_seen: &str,
+    ) -> bool {
+        if count == 0 || first_seen.is_empty() || last_seen.is_empty() || first_seen > last_seen {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.category == category
+                && entry.resource_class == class
+                && entry.evidence == evidence
+        }) {
+            let before = (
+                entry.count,
+                entry.first_seen.clone(),
+                entry.last_seen.clone(),
+            );
+            entry.count = entry.count.max(count);
+            if first_seen < entry.first_seen.as_str() {
+                entry.first_seen = first_seen.to_string();
+            }
+            if last_seen > entry.last_seen.as_str() {
+                entry.last_seen = last_seen.to_string();
+            }
+            return before
+                != (
+                    entry.count,
+                    entry.first_seen.clone(),
+                    entry.last_seen.clone(),
+                );
+        }
+        let distinct = self
+            .entries
+            .iter()
+            .filter(|entry| entry.category == category)
+            .count();
+        if distinct >= MAX_CLASSES_PER_CATEGORY {
+            self.truncated = true;
+            return false;
+        }
+        self.entries.push(LedgerEntry {
+            category,
+            resource_class: class,
+            count,
+            first_seen: first_seen.to_string(),
+            last_seen: last_seen.to_string(),
             evidence,
         });
         true
@@ -997,7 +1069,7 @@ pub struct NotYetObserved {
     pub reason: String,
 }
 
-/// The canonical, complete not-yet-observed set as of Milestone 9.
+/// The canonical, complete not-yet-observed set after Milestone 12.
 ///
 /// Naming a producerless category — with the milestone and the reason —
 /// is the difference between an honest empty array and a lie by omission
@@ -1036,6 +1108,12 @@ pub struct NotYetObserved {
 /// event, and that is not an absent producer: a managed session is by
 /// construction not an unknown AI execution. See
 /// [`not_yet_observed_for`] for the per-classification set.
+///
+/// **Milestone 12 removes three more rows because their producers
+/// shipped**: the root-only `ledger.network` bridge supplies bounded
+/// `network_destinations`, and destination-free `network.deny` audit
+/// events supply `production_access` and `sensitive_resource_access`.
+/// `mcp_servers` is now the only globally pending category.
 pub fn not_yet_observed() -> Vec<NotYetObserved> {
     let row = |level: u8, category: &str, milestone: &str, reason: &str| NotYetObserved {
         level,
@@ -1043,36 +1121,13 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
         milestone: milestone.to_string(),
         reason: reason.to_string(),
     };
-    vec![
-        row(
-            3,
-            ResourceCategory::NetworkDestinations.as_str(),
-            "M12",
-            "punar-netd enforces project network policy and owns a bounded local connection \
-             view, but those observations are not yet joined into the AI access ledger; M6 \
-             containers run with --network none",
-        ),
-        row(
-            3,
-            ResourceCategory::McpServers.as_str(),
-            "M11+",
-            "no tool or MCP gateway mediates MCP traffic yet (spec section 26); Milestone 9 \
+    vec![row(
+        3,
+        ResourceCategory::McpServers.as_str(),
+        "M11+",
+        "no tool or MCP gateway mediates MCP traffic yet (spec section 26); Milestone 9 \
              shipped the credential broker, not a tool gateway",
-        ),
-        row(
-            4,
-            SecurityEventType::ProductionAccess.as_str(),
-            "M12",
-            "punar-netd mediates project networking, but production-zone transitions are not \
-             yet joined into the AI access ledger",
-        ),
-        row(
-            4,
-            SecurityEventType::SensitiveResourceAccess.as_str(),
-            "M12",
-            "no mediation point observes sensitive zones yet",
-        ),
-    ]
+    )]
 }
 
 /// The not-yet-observed set for one session, by **classification**
@@ -1089,6 +1144,9 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
 ///   so an unmanaged agent's credential use may never be observable by
 ///   this mechanism at all. That is a permanent limitation, not a
 ///   pending milestone, and the row says so.
+/// - `network_destinations` — `punar-netd` attributes only a cgroup-bound
+///   managed session. It does not infer an unmanaged process's destination
+///   history from ambient machine traffic.
 ///
 /// `directory_zones` is **not** listed: an unknown ledger does carry one
 /// zone — the class of where the *executable* lives ([`ZONE_DOWNLOADS`]
@@ -1120,6 +1178,14 @@ pub fn not_yet_observed_for(classification: AgentClassification) -> Vec<NotYetOb
         reason: "punar-secrets mediates managed sessions only, so an unmanaged agent's \
                  credential use may never be observable by this mechanism at all — an \
                  honest permanent limitation, not a pending producer"
+            .to_string(),
+    });
+    rows.push(NotYetObserved {
+        level: 3,
+        category: ResourceCategory::NetworkDestinations.as_str().to_string(),
+        milestone: "none".to_string(),
+        reason: "punar-netd attributes destinations only to a registered managed cgroup; it does \
+                 not infer an unmanaged process's network history from ambient machine traffic"
             .to_string(),
     });
     rows
@@ -1770,16 +1836,10 @@ mod tests {
             .filter(|r| r.level == 3)
             .map(|r| r.category.as_str())
             .collect();
-        // M9 shipped punar-secrets, so `credential_classes` left this
-        // list. `mcp_servers` was re-milestoned M9+ -> M11+ rather than
-        // left promising a milestone that does not own it.
-        assert_eq!(level3, vec!["network_destinations", "mcp_servers"]);
-        let network_row = rows
-            .iter()
-            .find(|row| row.category == "network_destinations")
-            .unwrap();
-        assert!(network_row.reason.contains("not yet joined"));
-        assert!(!network_row.reason.contains("does not exist"));
+        // M9 shipped punar-secrets and M12 joined netd's bounded
+        // destination aggregate, so both categories left this global
+        // list. `mcp_servers` remains honest about its missing producer.
+        assert_eq!(level3, vec!["mcp_servers"]);
         assert_eq!(
             rows.iter()
                 .find(|r| r.category == "mcp_servers")
@@ -1792,13 +1852,10 @@ mod tests {
             .filter(|r| r.level == 4)
             .map(|r| r.category.as_str())
             .collect();
-        // M10 shipped the unknown-agent ledger, so `unknown_ai_execution`
-        // left this list for the same reason `credential_classes` left it
-        // in M9: a category with a producer is not "not yet observed".
-        assert_eq!(
-            level4,
-            vec!["production_access", "sensitive_resource_access"]
-        );
+        // M10 shipped the unknown-agent ledger; M12 shipped production and
+        // privileged-zone denial producers. A produced category is not
+        // "not yet observed", so the global Level-4 list is now empty.
+        assert!(level4.is_empty());
         // The invariant this test actually exists for: **all seven**
         // Level-4 categories are accounted for — each either has a
         // producer or is named here with a milestone. None is quietly
@@ -1813,6 +1870,8 @@ mod tests {
                     | SecurityEventType::PrivilegeRequest
                     | SecurityEventType::CredentialRequest
                     | SecurityEventType::PolicyBypassAttempt
+                    | SecurityEventType::ProductionAccess
+                    | SecurityEventType::SensitiveResourceAccess
                     // M10: the detection pass itself
                     // (`crate::ledger` consumers see it through
                     // `punar_agentd::ledger::tail::classify`).
@@ -1834,7 +1893,7 @@ mod tests {
     /// than a managed session's, because it has strictly fewer sources
     /// (milestone-10.md section 6.3).
     #[test]
-    fn an_unmanaged_ledger_names_the_two_sources_it_can_never_have() {
+    fn an_unmanaged_ledger_names_the_sources_it_can_never_have() {
         let base = not_yet_observed();
         for classification in [AgentClassification::Unknown, AgentClassification::Observed] {
             let rows = not_yet_observed_for(classification);
@@ -1842,15 +1901,21 @@ mod tests {
             let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
             assert!(categories.contains(&"repositories"), "{categories:?}");
             assert!(categories.contains(&"credential_classes"), "{categories:?}");
+            assert!(
+                categories.contains(&"network_destinations"),
+                "{categories:?}"
+            );
             // `directory_zones` is NOT listed: an unknown ledger does
             // carry one — the zone class of where the executable lives.
             assert!(!categories.contains(&"directory_zones"), "{categories:?}");
             // The two extra rows are permanent limitations, not pending
             // producers, and they say so rather than promising a date.
-            for row in rows
-                .iter()
-                .filter(|r| r.category == "repositories" || r.category == "credential_classes")
-            {
+            for row in rows.iter().filter(|r| {
+                matches!(
+                    r.category.as_str(),
+                    "repositories" | "credential_classes" | "network_destinations"
+                )
+            }) {
                 assert_eq!(row.milestone, "none", "{row:?}");
                 assert!(!row.reason.is_empty());
             }

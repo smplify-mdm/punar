@@ -4,6 +4,7 @@
 //! root-owned `0600` file. There is no shell, user-controlled argv, stdin
 //! program, or shared temporary directory at this privilege boundary.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -39,6 +40,8 @@ pub enum ExecError {
     Timeout(Duration),
     #[error("nft rejected the transaction: {0}")]
     Rejected(String),
+    #[error("nft returned an invalid counter document: {0}")]
+    InvalidCounterDocument(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +134,75 @@ impl NftExecutor {
         }
     }
 
+    /// Read only the named counters from netd's own table. The argv is
+    /// fixed, output is bounded by the same private-file mechanism as a
+    /// transaction, and unknown nft JSON objects are never interpreted as
+    /// policy state.
+    pub fn query_named_counters(&self) -> Result<BTreeMap<String, u64>, ExecError> {
+        if !self.nft_bin.is_absolute() {
+            return Err(ExecError::RelativeBinary(self.nft_bin.clone()));
+        }
+        validate_directory(&self.transaction_dir, self.trusted_uid)?;
+        let files = TransactionFiles::create(&self.transaction_dir)?;
+        let stdout = files.open_stdout()?;
+        let stderr = files.open_stderr()?;
+        let mut child = Command::new(&self.nft_bin)
+            .args(["-j", "list", "table", "inet", "punar-net"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()?;
+        let status = wait_bounded(&mut child, self.timeout)?;
+        let stdout = read_bounded(&files.stdout)?;
+        let stderr = read_bounded(&files.stderr)?;
+        if !status.success() {
+            // The table does not exist before the first successful apply.
+            // That is an empty observation, not an enforcement failure.
+            if stderr.contains("No such file") || stderr.contains("does not exist") {
+                return Ok(BTreeMap::new());
+            }
+            return Err(ExecError::Rejected(if stderr.trim().is_empty() {
+                "nft counter query exited nonzero without an error message".to_string()
+            } else {
+                stderr.trim().to_string()
+            }));
+        }
+        parse_named_counters(&stdout)
+    }
+
+    /// Whether netd's owned table currently exists. This is a fixed-argv,
+    /// bounded health read used by on-demand connection passes to repair a
+    /// table removed behind the daemon's back. It never inspects or touches
+    /// punard's `punar-base` table.
+    pub fn table_exists(&self) -> Result<bool, ExecError> {
+        if !self.nft_bin.is_absolute() {
+            return Err(ExecError::RelativeBinary(self.nft_bin.clone()));
+        }
+        validate_directory(&self.transaction_dir, self.trusted_uid)?;
+        let files = TransactionFiles::create(&self.transaction_dir)?;
+        let stdout = files.open_stdout()?;
+        let stderr = files.open_stderr()?;
+        let mut child = Command::new(&self.nft_bin)
+            .args(["-j", "list", "table", "inet", "punar-net"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()?;
+        let status = wait_bounded(&mut child, self.timeout)?;
+        let stderr = read_bounded(&files.stderr)?;
+        if status.success() {
+            return Ok(true);
+        }
+        if stderr.contains("No such file") || stderr.contains("does not exist") {
+            return Ok(false);
+        }
+        Err(ExecError::Rejected(if stderr.trim().is_empty() {
+            "nft table health query exited nonzero without an error message".to_string()
+        } else {
+            stderr.trim().to_string()
+        }))
+    }
+
     /// Prove that this nft/kernel pair accepts cgroup-v2 socket matching.
     /// The throwaway table is created and destroyed inside one transaction,
     /// so success leaves no live policy behind.
@@ -152,6 +224,52 @@ impl NftExecutor {
             },
         }
     }
+}
+
+fn parse_named_counters(input: &str) -> Result<BTreeMap<String, u64>, ExecError> {
+    let document: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| ExecError::InvalidCounterDocument(error.to_string()))?;
+    let rows = document
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ExecError::InvalidCounterDocument("missing nftables array".into()))?;
+    let mut counters = BTreeMap::new();
+    for row in rows {
+        let Some(counter) = row.get("counter").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        if counter.get("family").and_then(serde_json::Value::as_str) != Some("inet")
+            || counter.get("table").and_then(serde_json::Value::as_str) != Some("punar-net")
+        {
+            continue;
+        }
+        let Some(name) = counter.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !valid_counter_name(name) {
+            return Err(ExecError::InvalidCounterDocument(format!(
+                "unsafe named counter {name:?}"
+            )));
+        }
+        let packets = counter
+            .get("packets")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                ExecError::InvalidCounterDocument(format!(
+                    "counter {name:?} has no unsigned packet total"
+                ))
+            })?;
+        counters.insert(name.to_string(), packets);
+    }
+    Ok(counters)
+}
+
+fn valid_counter_name(name: &str) -> bool {
+    name.starts_with("c_")
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn validate_directory(path: &Path, trusted_uid: u32) -> Result<(), ExecError> {
@@ -389,5 +507,61 @@ cp "$2" "$0.rules"
             EnforcementCapability::Unavailable { reason } if reason.contains("unsupported")
         ));
         fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn counter_query_uses_fixed_argv_and_accepts_only_our_named_counters() {
+        let script = r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+printf '%s\n' '{"nftables":[{"metainfo":{"json_schema_version":1}},{"counter":{"family":"inet","name":"c_4f21_internet_allow","table":"punar-net","packets":7,"bytes":511}},{"counter":{"family":"inet","name":"ignored","table":"other","packets":99,"bytes":1}}]}'
+"#;
+        let (binary, directory, uid) = fixture(script);
+        let executor = NftExecutor::new(binary.clone(), directory, uid, Duration::from_secs(1));
+        assert_eq!(
+            executor.query_named_counters().unwrap(),
+            BTreeMap::from([("c_4f21_internet_allow".to_string(), 7)])
+        );
+        assert_eq!(
+            fs::read_to_string(binary.with_file_name("fake-nft.args")).unwrap(),
+            "-j\nlist\ntable\ninet\npunar-net\n"
+        );
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn table_health_read_distinguishes_absent_from_query_failure() {
+        let (binary, directory, uid) = fixture("#!/bin/sh\nexit 0\n");
+        let executor = NftExecutor::new(
+            binary.clone(),
+            directory.clone(),
+            uid,
+            Duration::from_secs(1),
+        );
+        assert!(executor.table_exists().unwrap());
+        fs::write(
+            &binary,
+            "#!/bin/sh\necho 'No such file or directory' >&2\nexit 1\n",
+        )
+        .unwrap();
+        assert!(!executor.table_exists().unwrap());
+        fs::write(&binary, "#!/bin/sh\necho permission-refused >&2\nexit 1\n").unwrap();
+        assert!(matches!(
+            executor.table_exists(),
+            Err(ExecError::Rejected(reason)) if reason == "permission-refused"
+        ));
+        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn counter_parser_refuses_statement_material_and_bad_packet_types() {
+        for body in [
+            r#"{"nftables":[{"counter":{"family":"inet","table":"punar-net","name":"c_ok;flush","packets":1}}]}"#,
+            r#"{"nftables":[{"counter":{"family":"inet","table":"punar-net","name":"c_ok","packets":"1"}}]}"#,
+        ] {
+            assert!(matches!(
+                parse_named_counters(body),
+                Err(ExecError::InvalidCounterDocument(_))
+            ));
+        }
     }
 }

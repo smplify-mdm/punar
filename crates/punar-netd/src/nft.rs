@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use thiserror::Error;
 
 use crate::model::{
-    Cidr, Decision, ModelError, ZoneDefinition, ZoneMembership, validate_cgroup_path,
+    Cidr, Decision, ModelError, ZoneDefinition, ZoneKind, ZoneMembership, validate_cgroup_path,
     validate_session_id,
 };
 use crate::policy::CompiledProject;
@@ -49,6 +49,40 @@ pub struct SessionBinding {
     pub project_id: String,
     pub cgroup_path: String,
     pub policy: CompiledProject,
+}
+
+/// The closed semantic identity of one generated named counter. Runtime
+/// observation joins nft JSON to this table; it never reverse-parses an nft
+/// identifier into a session or zone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterBinding {
+    pub name: String,
+    pub zone: String,
+    pub kind: ZoneKind,
+    pub decision: Decision,
+}
+
+pub fn counter_bindings(
+    zones: &BTreeMap<String, ZoneDefinition>,
+    session: &SessionBinding,
+) -> Result<Vec<CounterBinding>, NftError> {
+    session.validate(zones)?;
+    session
+        .policy
+        .rules
+        .iter()
+        .map(|rule| {
+            let zone = zones
+                .get(&rule.zone)
+                .ok_or_else(|| NftError::UnknownPolicyZone(rule.zone.clone()))?;
+            Ok(CounterBinding {
+                name: counter_name(session.tag(), &rule.zone, rule.decision),
+                zone: rule.zone.clone(),
+                kind: zone.kind,
+                decision: rule.decision,
+            })
+        })
+        .collect()
 }
 
 impl SessionBinding {
@@ -175,15 +209,10 @@ fn render_counters(output: &mut String, sessions: &[SessionBinding]) {
     for session in sessions {
         let tag = session.tag();
         for rule in &session.policy.rules {
-            let suffix = if rule.zone == "internet" {
-                "residual"
-            } else {
-                &rule.zone
-            };
             writeln!(
                 output,
-                "  counter c_{tag}_{suffix}_{} {{ }}",
-                enforcement_word(rule.decision)
+                "  counter {} {{ }}",
+                counter_name(tag, &rule.zone, rule.decision)
             )
             .unwrap();
         }
@@ -246,7 +275,7 @@ fn render_session_chain(
         .policy
         .rule("internet")
         .ok_or_else(|| NftError::MissingInternetRule(session.session_id.clone()))?;
-    let counter = format!("c_{tag}_residual_{}", enforcement_word(residual.decision));
+    let counter = counter_name(tag, "internet", residual.decision);
     if residual.decision == Decision::Allow {
         writeln!(output, "    counter name {counter} accept").unwrap();
     } else {
@@ -273,7 +302,7 @@ fn render_zone_rules(
     };
     let has_v4 = members.cidrs.iter().any(|cidr| cidr.is_v4());
     let has_v6 = members.cidrs.iter().any(|cidr| !cidr.is_v4());
-    let counter = format!("c_{tag}_{zone}_{}", enforcement_word(decision));
+    let counter = counter_name(tag, zone, decision);
     for (family, suffix, present) in [("ip", "v4", has_v4), ("ip6", "v6", has_v6)] {
         if !present {
             continue;
@@ -312,6 +341,11 @@ fn enforcement_word(decision: Decision) -> &'static str {
         Decision::Allow => "allow",
         Decision::ApprovalRequired | Decision::Deny => "deny",
     }
+}
+
+fn counter_name(tag: &str, zone: &str, decision: Decision) -> String {
+    let zone = if zone == "internet" { "residual" } else { zone };
+    format!("c_{tag}_{zone}_{}", enforcement_word(decision))
 }
 
 fn join_cidrs(cidrs: &[Cidr]) -> String {

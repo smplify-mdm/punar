@@ -271,11 +271,12 @@ pub fn render_launch(s: &Session) -> String {
         ));
     }
 
-    // Steps 6–8 of the SPEC section 27 flow are not configured in M7, and
-    // say so rather than being quietly skipped.
-    out.push_str("\nNETWORK · DECLARED · enforcement M12 · this session uses your own network\n");
+    // Keep the host-agent/container boundary explicit. Managed host-agent
+    // sessions are attached to punar-netd policy by cgroup; project
+    // containers remain --network none and therefore deny-only.
+    out.push_str("\nNETWORK · ENFORCED · agent scope · container: deny only\n");
     out.push_str("CREDENTIALS · DECLARED · M9 secret broker · nothing is brokered in M7\n");
-    out.push_str("TOOLS · M9+ · no tool gateway mediates this session yet\n");
+    out.push_str("TOOLS · M11+ · no tool gateway mediates this session yet\n");
     out
 }
 
@@ -343,7 +344,7 @@ pub fn render_launch_json(s: &Session, classification: AgentClassification) -> V
             "rows": rows,
         },
         "enforcement": {
-            "authority": "display-level in M7 · credentials M9 · network M12",
+            "authority": "network enforced (agent scope) · credentials M9",
             "ledger": "M8",
         },
     })
@@ -784,16 +785,16 @@ mod tests {
              \n\
              AUTHORITY · WHAT IT MAY ACCESS · POLICY · PERSONAL DEFAULTS\n\
              \x20 filesystem  project      read_write   declared · M9\n\
-             \x20 network     internet     allow        declared · M12\n\
-             \x20 network     corp_dev     allow        declared · M12\n\
-             \x20 network     corp_prod    deny         declared · M12\n\
+             \x20 network     internet     allow        enforced (agent scope)\n\
+             \x20 network     corp_dev     allow        enforced (agent scope)\n\
+             \x20 network     corp_prod    deny         enforced (agent scope)\n\
              \x20 credentials github       allow        declared · M9\n\
              \x20 credentials aws_dev      request      declared · M9\n\
              \x20 credentials aws_prod     deny         declared · M9\n\
              \n\
-             NETWORK · DECLARED · enforcement M12 · this session uses your own network\n\
+             NETWORK · ENFORCED · agent scope · container: deny only\n\
              CREDENTIALS · DECLARED · M9 secret broker · nothing is brokered in M7\n\
-             TOOLS · M9+ · no tool gateway mediates this session yet\n",
+             TOOLS · M11+ · no tool gateway mediates this session yet\n",
             "─".repeat(RULE_WIDTH)
         );
         assert_eq!(out, expected);
@@ -889,13 +890,14 @@ mod tests {
         assert_eq!(v["authority"]["policy_citation"], "personal-defaults");
         assert_eq!(v["authority"]["rows"][0]["zone"], "filesystem.project");
         assert_eq!(v["authority"]["rows"][0]["enforcement"], "declared · M9");
+        assert_eq!(
+            v["authority"]["rows"][1]["enforcement"],
+            "enforced (agent scope)"
+        );
         assert_eq!(v["enforcement"]["ledger"], "M8");
         // No row may be published without its enforcement label.
         for row in v["authority"]["rows"].as_array().unwrap() {
-            assert!(
-                row["enforcement"].as_str().unwrap().starts_with("declared"),
-                "{row}"
-            );
+            assert!(!row["enforcement"].as_str().unwrap().is_empty(), "{row}");
         }
     }
 

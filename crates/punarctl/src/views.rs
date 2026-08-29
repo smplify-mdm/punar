@@ -2373,6 +2373,10 @@ struct NetworkProcessView {
     governed: bool,
     #[serde(default)]
     connections: Vec<NetworkConnectionView>,
+    #[serde(default)]
+    denied: Vec<NetworkDeniedView>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2390,6 +2394,16 @@ struct NetworkConnectionView {
     category: String,
     route: String,
     state: String,
+}
+
+#[derive(Deserialize)]
+struct NetworkDeniedView {
+    zone: String,
+    kind: String,
+    attempts: u64,
+    #[serde(default)]
+    last_destination: Option<String>,
+    explain: String,
 }
 
 /// `punarctl privacy connections` — a bounded, on-demand TCP view. The wire
@@ -2476,8 +2490,14 @@ pub fn privacy_connections(
                 context
             ),
         ));
-        if process.connections.is_empty() {
-            out.push_str(&fmt::note(style, "No current TCP connections"));
+        if process.connections.is_empty() && process.denied.is_empty() {
+            out.push_str(&fmt::note(
+                style,
+                process
+                    .note
+                    .as_deref()
+                    .unwrap_or("No current TCP connections"),
+            ));
         }
         let rows = process
             .connections
@@ -2501,6 +2521,28 @@ pub fn privacy_connections(
             })
             .collect::<Vec<_>>();
         out.push_str(&fmt::rows(style, &rows));
+        let denied = process
+            .denied
+            .iter()
+            .map(|denial| {
+                Row::new(
+                    &denial.zone,
+                    &format!("DENIED · {}", denial.attempts),
+                    Slot::Bad,
+                    &format!(
+                        "{}{} · {}",
+                        plain_enum(&denial.kind),
+                        denial
+                            .last_destination
+                            .as_deref()
+                            .map(|destination| format!(" · last {destination}"))
+                            .unwrap_or_default(),
+                        denial.explain
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        out.push_str(&fmt::rows(style, &denied));
     }
     for limitation in &connections.limitations {
         out.push_str(&fmt::note(style, limitation));
@@ -2717,8 +2759,8 @@ pub fn agent_inspect(
             }
             out.push_str(&fmt::note(
                 style,
-                "Declared authority · nothing here is enforced in Milestone 7 \
-                 (credentials M9 · network M12)",
+                "Network authority is enforced for managed agent scopes · \
+                 credential labels state their own enforcement status",
             ));
         }
         None if s.suspected => out.push_str(&fmt::note(style, DETECTION_NOTE)),
@@ -4172,18 +4214,18 @@ mod tests {
                 "security_events": []
             },
             "not_yet_observed": [
-                {"level": 3, "category": "network_destinations", "milestone": "M12",
-                 "reason": "punar-netd does not exist yet"}
+                {"level": 3, "category": "mcp_servers", "milestone": "M11+",
+                 "reason": "no tool or MCP gateway mediates MCP traffic yet"}
             ],
             "retention": {"days": 14, "active": true}
         });
         let text = agent_access(&style, &result).unwrap();
         // Named producer-less category: pending, with its milestone.
-        let network = text
+        let mcp = text
             .lines()
-            .find(|l| l.starts_with("NETWORK DESTINATIONS"))
+            .find(|l| l.starts_with("MCP SERVERS"))
             .unwrap_or_default();
-        assert!(network.contains("NOT YET OBSERVED · M12"), "{text}");
+        assert!(mcp.contains("NOT YET OBSERVED · M11+"), "{text}");
         // Unnamed empty category: an honest "none recorded", never a
         // borrowed milestone from another row.
         let repositories = text
@@ -4191,7 +4233,7 @@ mod tests {
             .find(|l| l.starts_with("REPOSITORIES"))
             .unwrap_or_default();
         assert!(repositories.contains("NONE RECORDED"), "{text}");
-        assert!(!repositories.contains("M12"), "{text}");
+        assert!(!repositories.contains("M11+"), "{text}");
         // No process rows: no sampling qualifier claiming a count exists.
         assert!(!text.contains("SHORT-LIVED CHILDREN"), "{text}");
     }

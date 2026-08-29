@@ -1,12 +1,11 @@
 //! The authority summary a managed launch displays (SPEC section 20;
 //! docs/api/ipc.md section 10.3; milestone-7.md section 5.1 step 3).
 //!
-//! **Display-level in Milestone 7, and every row says so.** The rows are
-//! the manifest's declared `permissions` block — the user's own
-//! declaration — each carrying the milestone that will *enforce* it (M9
-//! for credentials and filesystem approvals, M12 for network). Nothing in
-//! M7 enforces them, and no surface may render them without the label
-//! (SPEC 1.22).
+//! The rows are the manifest's declared `permissions` block — the user's
+//! own declaration — and each carries its current enforcement state.
+//! Network rows are enforced for a managed host-agent scope by
+//! `punar-netd`; container networking remains deny-only. No surface may
+//! render a decision without that boundary (SPEC 1.22).
 //!
 //! Authority always cites a named source (design language section 8):
 //! `personal-defaults` on an unenrolled device, the organization's policy
@@ -39,7 +38,7 @@ pub const ORGANIZATION_POLICY: &str = "organization-policy";
 /// Enforcement labels, per permission category (ipc.md section 10.3's
 /// example rows carry exactly these strings).
 const ENFORCEMENT_FILESYSTEM: &str = "declared · M9";
-const ENFORCEMENT_NETWORK: &str = "declared · M12";
+const ENFORCEMENT_NETWORK: &str = "enforced (agent scope)";
 const ENFORCEMENT_CREDENTIALS: &str = "declared · M9";
 
 /// The enrollment facts this module reads. Lenient by contract (section 9:
@@ -215,9 +214,12 @@ mod tests {
         assert_eq!(by_zone("filesystem.project").decision, "read_write");
         assert_eq!(by_zone("network.corp_prod").decision, "deny");
         assert_eq!(by_zone("credentials.aws_dev").decision, "request");
-        // Every row, without exception, wears its enforcement milestone.
-        assert!(s.rows.iter().all(|r| r.enforcement.starts_with("declared")));
-        assert_eq!(by_zone("network.internet").enforcement, "declared · M12");
+        // Every row, without exception, wears its current enforcement state.
+        assert!(s.rows.iter().all(|r| !r.enforcement.is_empty()));
+        assert_eq!(
+            by_zone("network.internet").enforcement,
+            "enforced (agent scope)"
+        );
         assert_eq!(by_zone("credentials.github").enforcement, "declared · M9");
         assert_eq!(by_zone("filesystem.project").enforcement, "declared · M9");
     }

@@ -1,0 +1,3 @@
+producer: punar-netd audit network.deny -> punar-agentd audit tail
+classification: audit result denied_privileged
+privacy: event reference only; destination omitted from audit

@@ -119,10 +119,9 @@ pub const MUTATING_ACTION_PREFIXES: [&str; 1] = ["enroll."];
 ///    `detected` matches — the matching `cleared` transition is the same
 ///    execution ending, not a second execution.
 ///
-/// The two remaining enum values — `production_access` (M12) and
-/// `sensitive_resource_access` (M12) — have no producer here and are
-/// reported in [`punar_common::ledger::not_yet_observed`] instead of
-/// being quietly absent: five of the seven are live, two are pending.
+/// M12 adds the two zone-kind classifications below. All seven event
+/// types now have producers; a session carries only the references that
+/// actually occurred.
 pub fn classify(event: &AuditEvent) -> Option<SecurityEventType> {
     if event.action == APPROVAL_RESOLVE_ACTION && event.decision == Decision::Deny {
         return Some(SecurityEventType::PolicyBypassAttempt);
@@ -130,6 +129,18 @@ pub fn classify(event: &AuditEvent) -> Option<SecurityEventType> {
     if event.action == crate::server::ACTION_SCAN && event.result == crate::server::RESULT_DETECTED
     {
         return Some(SecurityEventType::UnknownAiExecution);
+    }
+    // AuditEvent is the shipped exact 12-field schema: there is no
+    // `zone_kind` field to add without breaking it. Netd therefore records
+    // the zone name in `resource` and a closed, destination-free kind in
+    // `result`. Classification reads only that kind; the destination never
+    // enters the non-purgeable audit stream.
+    if event.action == NETWORK_DENY_ACTION && event.decision == Decision::Deny {
+        return Some(match event.result.as_str() {
+            NETWORK_DENIED_PRODUCTION => SecurityEventType::ProductionAccess,
+            NETWORK_DENIED_PRIVILEGED => SecurityEventType::SensitiveResourceAccess,
+            _ => SecurityEventType::DeniedAccess,
+        });
     }
     if event.decision == Decision::Deny {
         return Some(SecurityEventType::DeniedAccess);
@@ -152,6 +163,13 @@ pub const APPROVAL_RESOLVE_ACTION: &str = "approval.resolve";
 /// The `punar-secrets` audit action that carries a credential class in
 /// `resource` (docs/api/ipc.md section 16.3).
 pub const CREDENTIAL_REQUEST_ACTION: &str = "credential.request";
+
+/// M12 audit vocabulary. `resource` is the zone name; these result values
+/// carry its privacy classification without widening the shipped audit
+/// schema or storing a destination host.
+pub const NETWORK_DENY_ACTION: &str = "network.deny";
+pub const NETWORK_DENIED_PRODUCTION: &str = "denied_production";
+pub const NETWORK_DENIED_PRIVILEGED: &str = "denied_privileged";
 
 /// The Level-3 `credential_classes` contribution of one audit event, if
 /// it has one (milestone-9.md section 9.2).
@@ -513,6 +531,20 @@ mod tests {
             classify(&event("evt_2", "agt_a", "agents.register", Decision::Deny)),
             Some(SecurityEventType::DeniedAccess)
         );
+        let mut production = event("evt_2p", "agt_a", NETWORK_DENY_ACTION, Decision::Deny);
+        production.resource = Some("corp_prod".to_string());
+        production.result = NETWORK_DENIED_PRODUCTION.to_string();
+        assert_eq!(
+            classify(&production),
+            Some(SecurityEventType::ProductionAccess)
+        );
+        production.result = NETWORK_DENIED_PRIVILEGED.to_string();
+        assert_eq!(
+            classify(&production),
+            Some(SecurityEventType::SensitiveResourceAccess)
+        );
+        production.result = "denied".to_string();
+        assert_eq!(classify(&production), Some(SecurityEventType::DeniedAccess));
         // 2. An allowed mutation is a privilege request.
         for action in [
             "capabilities.set",

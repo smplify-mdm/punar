@@ -5,9 +5,9 @@
 //! color only on the state word, **no org rows ever** (unmanaged-first —
 //! an environment manifest is the user's declaration).
 //!
-//! Every DECLARED block carries its enforcement milestone, in the human
-//! view and in the `--json` object alike, so no consumer can scrape a
-//! value and drop the honesty label (SPEC 1.22).
+//! Every permission block carries its current enforcement state, in the
+//! human view and in the `--json` object alike, so no consumer can scrape
+//! a value and drop the honesty label (SPEC 1.22).
 
 use std::env;
 use std::io::IsTerminal;
@@ -109,7 +109,7 @@ pub fn render_human(d: &StatusData, style: &Style) -> String {
     out.push_str(&workspace_line(d));
     out.push('\n');
     out.push_str(&pad("Network", LABEL_W));
-    out.push_str("isolated (M6) · declared zones enforced M12\n");
+    out.push_str("none · deny enforced · allow declared (Phase 2)\n");
 
     // Toolchains — declared, reported, not installed (M6 plan section 5.5).
     out.push_str("\nTOOLCHAINS · DECLARED · provisioning arrives with the network story\n");
@@ -148,7 +148,7 @@ pub fn render_human(d: &StatusData, style: &Style) -> String {
             "network",
             zone,
             decision.as_str(),
-            "declared · enforced M12",
+            "enforced (agent scope) · container: deny only",
             zone_w,
             value_w,
         ));
@@ -276,7 +276,7 @@ pub fn render_json(d: &StatusData) -> Value {
         "ai": { "agents": m.ai.agents },
         "permissions": serde_json::to_value(&m.permissions).expect("permissions serialize"),
         "enforcement": {
-            "network": "M12",
+            "network": "enforced",
             "credentials": "M9",
             "ai": "M7",
         },
@@ -315,7 +315,7 @@ mod tests {
              {}\n\
              Environment   devcontainer · running · punar-env-atlas\n\
              Workspace     /home/punar/atlas → /workspace · read_write (applied · bind mount)\n\
-             Network       isolated (M6) · declared zones enforced M12\n\
+             Network       none · deny enforced · allow declared (Phase 2)\n\
              \n\
              TOOLCHAINS · DECLARED · provisioning arrives with the network story\n\
              \x20 node        24\n\
@@ -329,9 +329,9 @@ mod tests {
              \n\
              PERMISSIONS · DECLARED · enforcement milestones per row\n\
              \x20 filesystem  project      read_write   applied (bind mount)\n\
-             \x20 network     internet     allow        declared · enforced M12\n\
-             \x20 network     corp_dev     allow        declared · enforced M12\n\
-             \x20 network     corp_prod    deny         declared · enforced M12\n\
+             \x20 network     internet     allow        enforced (agent scope) · container: deny only\n\
+             \x20 network     corp_dev     allow        enforced (agent scope) · container: deny only\n\
+             \x20 network     corp_prod    deny         enforced (agent scope) · container: deny only\n\
              \x20 credentials github       allow        declared · enforced M9\n\
              \x20 credentials aws_dev      request      declared · enforced M9\n\
              \x20 credentials aws_prod     deny         declared · enforced M9\n",
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(v["permissions"]["filesystem"]["project"], "read_write");
         assert_eq!(v["permissions"]["network"]["corp_prod"], "deny");
         assert_eq!(v["permissions"]["credentials"]["aws_dev"], "request");
-        assert_eq!(v["enforcement"]["network"], "M12");
+        assert_eq!(v["enforcement"]["network"], "enforced");
         assert_eq!(v["enforcement"]["credentials"], "M9");
         assert_eq!(v["enforcement"]["ai"], "M7");
     }

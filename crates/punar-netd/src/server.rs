@@ -20,12 +20,13 @@ use serde_json::{Value, json};
 
 use crate::peer::{Peer, PeerSource};
 use crate::runtime::{
-    ReconcileResult, Runtime, RuntimeError, SessionTransition, SessionTransitionKind,
+    DenialEvent, ReconcileResult, Runtime, RuntimeError, SessionTransition, SessionTransitionKind,
 };
 use crate::util::{lookup_gid, username_or_uid};
 use crate::watch;
 
 pub const ACTION_NETWORK_APPLY: &str = "network.apply";
+pub const ACTION_NETWORK_DENY: &str = "network.deny";
 pub const ACTION_RELAY_SET: &str = "relay.set";
 pub const DEVICE_ID_UNKNOWN: &str = "dev_unknown";
 
@@ -328,16 +329,25 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> io::Result<()
 
 impl Inner {
     fn reconcile_from_signal(&self) -> Result<(), RuntimeError> {
-        let (outcome, should_observe) = {
+        let (outcome, should_observe, pass_denials) = {
             let mut runtime = self.runtime.lock().unwrap();
             let outcome = runtime.reconcile()?;
             let should_observe = !outcome.transitions.is_empty();
-            if should_observe && let Err(error) = runtime.connections() {
-                eprintln!("punar-netd: transition observation failed: {error}");
-            }
-            (outcome, should_observe)
+            let pass_denials = if should_observe {
+                match runtime.connections() {
+                    Ok(pass) => pass.denial_events,
+                    Err(error) => {
+                        eprintln!("punar-netd: transition observation failed: {error}");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            (outcome, should_observe, pass_denials)
         };
         self.audit_transitions(&outcome);
+        self.audit_network_denials(outcome.denial_events.iter().chain(pass_denials.iter()));
         if should_observe {
             eprintln!(
                 "punar-netd: reconciled {} managed-session transition(s)",
@@ -360,17 +370,41 @@ impl Inner {
         }
     }
 
+    fn audit_network_denials<'a>(&self, events: impl IntoIterator<Item = &'a DenialEvent>) {
+        let actor = AuditActor::daemon();
+        let mut audit = self.audit.lock().unwrap();
+        for denial in events {
+            // Audit is deliberately destination-free because it is not
+            // user-purgeable. Zone + closed kind are sufficient for the
+            // Level-4 ledger reference and the policy explanation.
+            let mut event =
+                AuditEvent::denial(&self.device_id, &actor, ACTION_NETWORK_DENY, &denial.zone);
+            event.agent_session_id = Some(denial.session_id.clone());
+            event.project_id = Some(denial.project.clone());
+            event.result = match denial.kind {
+                crate::model::ZoneKind::Production => "denied_production",
+                crate::model::ZoneKind::Privileged => "denied_privileged",
+                crate::model::ZoneKind::Internet | crate::model::ZoneKind::Corporate => "denied",
+            }
+            .to_string();
+            if let Err(error) = audit.append(&event) {
+                eprintln!("punar-netd: could not audit network denial: {error}");
+            }
+        }
+    }
+
     fn dispatch(&self, peer: Peer, request: &NetworkRequest) -> Result<Value, IpcError> {
         match &request.method {
             NetworkMethod::Status => Ok(self.runtime.lock().unwrap().status_json()),
             NetworkMethod::Connections => {
-                let result = self
+                let pass = self
                     .runtime
                     .lock()
                     .unwrap()
                     .connections()
                     .map_err(runtime_error)?;
-                serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+                self.audit_network_denials(pass.denial_events.iter());
+                serde_json::to_value(pass.result).map_err(|error| internal(error.to_string()))
             }
             NetworkMethod::Zones => Ok(self.runtime.lock().unwrap().zones_json()),
             NetworkMethod::Policy(params) => self
@@ -397,9 +431,33 @@ impl Inner {
                     ));
                 }
                 let resource = params.project.as_deref().unwrap_or("all");
-                let result = self.runtime.lock().unwrap().reconcile();
+                let (result, pass_denials) = {
+                    let mut runtime = self.runtime.lock().unwrap();
+                    let result = runtime.reconcile();
+                    let pass_denials = if result.is_ok() {
+                        // Applying policy is one of M12's explicit on-demand
+                        // observation triggers. Enforcement has already
+                        // reached the kernel at this point, so a failed
+                        // display/ledger refresh stays loud in the journal
+                        // without falsely reporting that the nft transaction
+                        // itself failed.
+                        match runtime.connections() {
+                            Ok(pass) => pass.denial_events,
+                            Err(error) => {
+                                eprintln!("punar-netd: post-apply observation failed: {error}");
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    (result, pass_denials)
+                };
                 if let Ok(outcome) = &result {
                     self.audit_transitions(outcome);
+                    self.audit_network_denials(
+                        outcome.denial_events.iter().chain(pass_denials.iter()),
+                    );
                 }
                 self.audit_outcome(
                     peer,
@@ -641,7 +699,11 @@ mod tests {
         std::fs::create_dir_all(&transaction_dir).unwrap();
         std::fs::set_permissions(&transaction_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
         let nft = root.join("nft");
-        std::fs::write(&nft, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &nft,
+            "#!/bin/sh\nif [ \"$1\" = -j ]; then printf '%s\\n' '{\"nftables\":[]}'; fi\nexit 0\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&nft, std::fs::Permissions::from_mode(0o755)).unwrap();
         let trusted = std::fs::metadata(&transaction_dir).unwrap();
         let trusted_uid = trusted.uid();
@@ -673,6 +735,8 @@ mod tests {
             proc_root: root.join("proc"),
             connections_file: root.join("run/connections.json"),
             relay: RelayStore::open(root.join("state/relay.json")).unwrap(),
+            deny_log: None,
+            status_file: root.join("status.json"),
         });
         let socket = root.join("run/netd.sock");
         let audit = root.join("audit.jsonl");

@@ -19,10 +19,10 @@ assertions, 122 desktop-surface assertions, 5 wireless-posture assertions and
 | # | DoD item | Status |
 |---|---|---|
 | 7 | launch browser / **web app** | **EXPANDED ARM64 GATE PROVEN LOCALLY; CANONICAL CI PENDING:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The 2026-08-29 clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` added the responsive icon-led library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app install/context support remains M11 work. |
-| 19 | enforce project network rule | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Typed zone/policy evaluation, nftables rendering, daemon/CLI/image integration and event-driven managed-session reconciliation are implemented and pass the Linux unit/clippy stage. |
-| 20 | display local network activity | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Privacy-bounded connection observation and truthful CLI projections are implemented; current milestone images still need the complete runtime exercise. |
+| 19 | enforce project network rule | **CLEAN ARM64 VM GATE PROVEN LOCALLY; X86_64 + CANONICAL CI PENDING.** The exact 2026-08-29 candidate emitted `PUNAR_M12_OK` with 66 assertions: a same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This is generic UEFI/QEMU ARM64 evidence, not internet, VPN, Raspberry Pi or physical-NIC evidence. |
+| 20 | display local network activity | **CLEAN ARM64 VM GATE PROVEN LOCALLY; X86_64 + CANONICAL CI PENDING.** The same exact-image gate joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. The screenshot and report exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
-| 3 | remain within idle budget | 1322 MB x86 KVM / 1211 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
+| 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -173,7 +173,7 @@ machine.
 
 Native runs hard-fail when any first-party cgroup reaches 0.50% of one CPU;
 TCG numeric breaches remain labeled/warn-only. The latest DHCP-connected
-Apple-HVF ARM64 candidate measured 1211/1218 MB RAM, 27 MB across all four
+Apple-HVF ARM64 candidate measured 1210/1213 MB RAM, 24 MB across all four
 service cgroups, 0.00% maximum first-party CPU and 73,728 first-party write
 bytes. The immediately preceding image measured 1200/1205 MB, 26 MB service
 PSS and 0.01% maximum first-party CPU. A native x86 KVM window also measured 73,728 bytes
@@ -522,9 +522,10 @@ expanded library passed its x86 runtime surface in run 33146409332. Connected
 ARM/HVF testing then proved the corrected Firefox native-detail path, including
 its pinned source and verified permissions; follow-up CI is pending. Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
-remain open. M12's core, daemon/CLI/image integration and event-driven
-reconciliation are locally green; its full in-VM enforcement/observation proof
-still closes DoD items 19 and 20.
+remain open. M12's implementation, daemon/CLI/image integration and event-driven
+reconciliation are host-green; its real `m12-check` is now staged as a hard
+boot-test gate, but the full clean-image enforcement/observation run still must
+close DoD items 19 and 20 before either is called verified.
 The private relay is `user-blocked.md` item 6 and is the largest item on that
 list.
 

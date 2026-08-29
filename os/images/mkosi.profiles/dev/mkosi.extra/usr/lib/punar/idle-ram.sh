@@ -479,7 +479,7 @@ systemctl start punar-m8-check.service \
 # built — which is exactly where this line puts it.
 #
 # The services-RSS sample far above already closed, and punar-secrets was
-# resident for it (it is in PUNAR_SERVICE_UNITS), so the third daemon is in
+# resident for it (it is in PUNAR_SERVICE_UNITS), so the credential daemon is in
 # the budget number rather than hiding behind this window. The agent runs in
 # its own punar-agent-<id>.scope under the user manager, not in a service
 # cgroup, so it perturbs neither gate.
@@ -519,6 +519,13 @@ systemctl start punar-m9-check.service \
 # (tools/boot-test.sh) parses it.
 systemctl start punar-m10-check.service \
     || echo "punar: idle-ram: punar-m10-check.service failed to start" >&2
+
+# M12 network/privacy exercise: strictly after every earlier AI-ledger test
+# has torn down its managed session, and still before the single artifact
+# export. The idle RAM and combined service-PSS windows already closed; the
+# resident punar-netd daemon itself was included in both measurements above.
+systemctl start punar-m12-check.service \
+    || echo "punar: idle-ram: punar-m12-check.service failed to start" >&2
 
 # Artifact export (milestone-1.md §9): tar /run/punar, base64 it onto the
 # dedicated virtio-serial channel between sentinel lines. QEMU captures the

@@ -202,7 +202,7 @@ fn register_params(session: &str, pid: u32) -> Value {
                 {"zone": "filesystem.project", "decision": "read_write",
                  "enforcement": "declared · M9"},
                 {"zone": "network.internet", "decision": "allow",
-                 "enforcement": "declared · M12"}
+                 "enforcement": "enforced (agent scope)"}
             ]
         }
     })
@@ -296,7 +296,10 @@ fn a_managed_session_lives_and_ends() {
     let authority = &got["session"]["authority"];
     assert_eq!(authority["policy_citation"], "personal-defaults");
     assert_eq!(authority["rows"][0]["enforcement"], "declared · M9");
-    assert_eq!(authority["rows"][1]["enforcement"], "declared · M12");
+    assert_eq!(
+        authority["rows"][1]["enforcement"],
+        "enforced (agent scope)"
+    );
 
     // The panel file exists, cites the policy, and counts the session.
     let summary = daemon.agents_json();
@@ -813,23 +816,23 @@ fn the_launcher_authority_block_is_bounded_printable_and_labelled_asserted() {
             "a terminal escape in a decision word",
             json!({"zone": "network.internet",
                    "decision": "\u{1b}[32mallow\u{1b}[0m",
-                   "enforcement": "declared · M12"}),
+                   "enforcement": "enforced (agent scope)"}),
         ),
         (
             "a newline that forges a second row",
             json!({"zone": "network.internet\nfilesystem.home",
                    "decision": "allow",
-                   "enforcement": "declared · M12"}),
+                   "enforcement": "enforced (agent scope)"}),
         ),
         (
             "a file path where a zone class belongs",
             json!({"zone": "x".repeat(400),
                    "decision": "allow",
-                   "enforcement": "declared · M12"}),
+                   "enforcement": "enforced (agent scope)"}),
         ),
         (
             "a blank field",
-            json!({"zone": "", "decision": "allow", "enforcement": "declared · M12"}),
+            json!({"zone": "", "decision": "allow", "enforcement": "enforced (agent scope)"}),
         ),
     ];
     for (label, row) in probes {

@@ -1,6 +1,6 @@
 //! Event-driven coordinator for policy apply and on-demand observation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -11,14 +11,18 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::agentd::{AgentdClient, AgentdError, SessionSnapshot, SkippedSession};
-use crate::model::{Decision, ZoneDefinition, ZoneMembership};
-use crate::nft::{NftError, SessionBinding, render_table};
+use crate::deny::DenyLogReader;
+use punar_common::agent::{LedgerNetworkDestination, LedgerNetworkParams, LedgerNetworkSource};
+use punar_common::ledger::{ResourceCategory, ResourceClass};
+
+use crate::model::{Decision, ZoneDefinition, ZoneKind, ZoneMembership};
+use crate::nft::{CounterBinding, NftError, SessionBinding, counter_bindings, render_table};
 use crate::nft_exec::{EnforcementCapability, ExecError, NftExecutor};
 use crate::observe::{ObserveError, observe};
 use crate::policy::{PolicyError, index_zones, parse_zone_memberships};
 use crate::project::{ProjectLocator, deny_all};
 use crate::relay::{RelayError, RelayStatus, RelayStore};
-use crate::view::{ProcessView, ViewError, build_report};
+use crate::view::{DeniedView, ProcessClass, ProcessView, SessionView, ViewError, build_report};
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -79,18 +83,21 @@ pub struct SessionTransition {
 pub struct ReconcileResult {
     pub applied: ApplyResult,
     pub transitions: Vec<SessionTransition>,
+    pub denial_events: Vec<DenialEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstalledSession {
     project: String,
     cgroup_path: String,
+    counters: Vec<CounterBinding>,
 }
 
 struct AppliedState {
     result: ApplyResult,
     sessions: BTreeMap<String, InstalledSession>,
     skipped: BTreeMap<String, String>,
+    denial_events: Vec<DenialEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,19 +142,60 @@ pub struct ConnectionsResult {
     pub processes: Vec<ProcessView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenialEvent {
+    pub session_id: String,
+    pub project: String,
+    pub zone: String,
+    pub kind: ZoneKind,
+}
+
+pub struct ConnectionPass {
+    pub result: ConnectionsResult,
+    pub denial_events: Vec<DenialEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DestinationKey {
+    session_id: String,
+    destination: String,
+    zone: String,
+}
+
+#[derive(Debug, Clone)]
+struct DestinationTotal {
+    count: u64,
+    first_seen: String,
+    last_seen: String,
+}
+
 pub struct Runtime {
     pub zones: BTreeMap<String, ZoneDefinition>,
     pub memberships: BTreeMap<String, ZoneMembership>,
+    data_source: Option<NetworkDataSource>,
     agentd: AgentdClient,
     projects: ProjectLocator,
     nft: NftExecutor,
     proc_root: PathBuf,
     connections_file: PathBuf,
     relay: RelayStore,
+    deny_log: Option<DenyLogReader>,
+    status_file: PathBuf,
     capability: EnforcementCapability,
     last_apply: Option<ApplyResult>,
     last_apply_error: Option<String>,
     installed_sessions: BTreeMap<String, InstalledSession>,
+    counter_carry: BTreeMap<String, u64>,
+    reported_denials: BTreeMap<String, u64>,
+    last_denied_destinations: BTreeMap<(String, String), std::net::IpAddr>,
+    active_destinations: BTreeSet<DestinationKey>,
+    destination_totals: BTreeMap<DestinationKey, DestinationTotal>,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkDataSource {
+    zones_dir: PathBuf,
+    membership_file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -164,16 +212,23 @@ pub struct RuntimeInputs {
     pub proc_root: PathBuf,
     pub connections_file: PathBuf,
     pub relay: RelayStore,
+    pub deny_log: Option<DenyLogReader>,
+    pub status_file: PathBuf,
 }
 
 impl Runtime {
     pub fn production() -> Result<Self, RuntimeError> {
-        let data = load_network_data(
-            Path::new("/usr/share/punar/network/zones"),
-            Path::new("/usr/share/punar/network/zone-members.json"),
-        )?;
+        let source = NetworkDataSource {
+            zones_dir: PathBuf::from("/usr/share/punar/network/zones"),
+            membership_file: PathBuf::from("/usr/share/punar/network/zone-members.json"),
+        };
+        let data = load_network_data(&source.zones_dir, &source.membership_file)?;
         let relay = RelayStore::open(PathBuf::from("/var/lib/punar/network/relay.json"))?;
-        Ok(Self::new(RuntimeInputs {
+        let deny_log = DenyLogReader::production();
+        if let Err(error) = deny_log.initialize() {
+            eprintln!("punar-netd: deny-log cursor initialization unavailable: {error}");
+        }
+        let mut runtime = Self::new(RuntimeInputs {
             data,
             agentd: AgentdClient::production(),
             projects: ProjectLocator::production(),
@@ -181,7 +236,11 @@ impl Runtime {
             proc_root: PathBuf::from("/proc"),
             connections_file: PathBuf::from(punar_common::network::CONNECTIONS_PATH),
             relay,
-        }))
+            deny_log: Some(deny_log),
+            status_file: PathBuf::from("/run/punar/status.json"),
+        });
+        runtime.data_source = Some(source);
+        Ok(runtime)
     }
 
     pub fn new(inputs: RuntimeInputs) -> Self {
@@ -189,16 +248,24 @@ impl Runtime {
         Self {
             zones: inputs.data.zones,
             memberships: inputs.data.memberships,
+            data_source: None,
             agentd: inputs.agentd,
             projects: inputs.projects,
             nft: inputs.nft,
             proc_root: inputs.proc_root,
             connections_file: inputs.connections_file,
             relay: inputs.relay,
+            deny_log: inputs.deny_log,
+            status_file: inputs.status_file,
             capability,
             last_apply: None,
             last_apply_error: None,
             installed_sessions: BTreeMap::new(),
+            counter_carry: BTreeMap::new(),
+            reported_denials: BTreeMap::new(),
+            last_denied_destinations: BTreeMap::new(),
+            active_destinations: BTreeSet::new(),
+            destination_totals: BTreeMap::new(),
         }
     }
 
@@ -243,6 +310,7 @@ impl Runtime {
                 Ok(ReconcileResult {
                     applied: state.result,
                     transitions,
+                    denial_events: state.denial_events,
                 })
             }
             Err(error) => {
@@ -252,32 +320,87 @@ impl Runtime {
         }
     }
 
-    fn apply_inner(&self) -> Result<AppliedState, RuntimeError> {
+    fn apply_inner(&mut self) -> Result<AppliedState, RuntimeError> {
         if let EnforcementCapability::Unavailable { reason } = &self.capability {
             return Err(RuntimeError::EnforcementUnavailable(reason.clone()));
         }
+        // Stage policy data afresh on every explicit or event-driven apply.
+        // The live copy changes only after the complete replacement reaches
+        // nftables, so a malformed edit cannot erase the last enforced table
+        // or leak partially validated state into the privacy view.
+        let staged_data = self
+            .data_source
+            .as_ref()
+            .map(|source| load_network_data(&source.zones_dir, &source.membership_file))
+            .transpose()?;
+        let zones = staged_data.as_ref().map_or(&self.zones, |data| &data.zones);
+        let memberships = staged_data
+            .as_ref()
+            .map_or(&self.memberships, |data| &data.memberships);
         let snapshot = self.agentd.snapshot()?;
         let skipped_reasons = snapshot
             .skipped
             .iter()
             .map(|skipped| (skipped.session_id.clone(), skipped.reason.clone()))
             .collect();
-        let (bindings, warnings) =
-            compile_bindings(&snapshot, &self.zones, &self.memberships, &self.projects);
-        let ruleset = render_table(true, &self.zones, &self.memberships, &bindings)?;
-        self.nft.apply_checked(&ruleset)?;
-        let next = bindings
+        let (bindings, warnings) = compile_bindings(&snapshot, zones, memberships, &self.projects);
+        let ruleset = render_table(true, zones, memberships, &bindings)?;
+        let next: BTreeMap<_, _> = bindings
             .iter()
             .map(|binding| {
-                (
+                Ok((
                     binding.session_id.clone(),
                     InstalledSession {
                         project: binding.project_id.clone(),
                         cgroup_path: binding.cgroup_path.clone(),
+                        counters: counter_bindings(zones, binding)?,
                     },
-                )
+                ))
             })
+            .collect::<Result<_, NftError>>()?;
+
+        // A detach is the final flush point. Publish while the old kernel
+        // table is still intact: if agentd is unavailable, returning here
+        // preserves enforcement rather than deleting the session chain and
+        // then discovering its purgeable aggregate could not be delivered.
+        let detached: Vec<String> = self
+            .installed_sessions
+            .keys()
+            .filter(|session_id| !next.contains_key(*session_id))
+            .cloned()
             .collect();
+        for session_id in &detached {
+            self.publish_destinations(session_id)?;
+        }
+
+        // Full-table replacement resets named counters. Capture the kernel
+        // totals first, but fold them into memory only after the atomic nft
+        // transaction succeeds; a rejected transaction must not double-count
+        // on the next reconcile.
+        let kernel_before = self.nft.query_named_counters()?;
+        let (_, denial_events) = collect_denials(
+            &self.installed_sessions,
+            &self.counter_carry,
+            &kernel_before,
+            &mut self.reported_denials,
+        );
+        self.nft.apply_checked(&ruleset)?;
+        if let Some(data) = staged_data {
+            self.zones = data.zones;
+            self.memberships = data.memberships;
+        }
+        for (name, packets) in kernel_before {
+            let total = self.counter_carry.entry(name).or_default();
+            *total = total.saturating_add(packets);
+        }
+        for session_id in detached {
+            self.active_destinations
+                .retain(|key| key.session_id != session_id);
+            self.destination_totals
+                .retain(|key, _| key.session_id != session_id);
+            self.last_denied_destinations
+                .retain(|(id, _), _| id != &session_id);
+        }
         let result = ApplyResult {
             installed_sessions: bindings.len(),
             skipped_sessions: snapshot.skipped.into_iter().map(Into::into).collect(),
@@ -287,18 +410,63 @@ impl Runtime {
             result,
             sessions: next,
             skipped: skipped_reasons,
+            denial_events,
         })
     }
 
-    pub fn connections(&self) -> Result<ConnectionsResult, RuntimeError> {
+    pub fn connections(&mut self) -> Result<ConnectionPass, RuntimeError> {
+        // A read never rewrites a healthy table, but it is also the
+        // user-visible self-heal trigger. If an external actor removed our
+        // table, rebuild from authoritative sessions before claiming the
+        // connection view is governed.
+        if !self.nft.table_exists()? {
+            self.reconcile()?;
+        }
         let snapshot = self.agentd.snapshot()?;
         let observation = observe(&self.proc_root)?;
-        let report = build_report(
+        let mut report = build_report(
             observation,
             &self.zones,
             &self.memberships,
             &snapshot.sessions,
         )?;
+        let kernel = self.nft.query_named_counters()?;
+        let (mut denials, denial_events) = collect_denials(
+            &self.installed_sessions,
+            &self.counter_carry,
+            &kernel,
+            &mut self.reported_denials,
+        );
+        if let Some(reader) = &self.deny_log {
+            match reader.read_new() {
+                Ok(records) => {
+                    for record in records {
+                        self.last_denied_destinations
+                            .insert((record.session_id, record.zone), record.destination);
+                    }
+                    for (session_id, view) in &mut denials {
+                        for row in &mut view.rows {
+                            row.last_destination = self
+                                .last_denied_destinations
+                                .get(&(session_id.clone(), row.zone.clone()))
+                                .copied();
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("punar-netd: deny-log observation unavailable: {error}");
+                    report
+                        .limitations
+                        .push("denied_destination_log_unavailable");
+                }
+            }
+        }
+        attach_denials(&mut report.processes, denials);
+        ensure_system_rows(&mut report.processes, device_is_enrolled(&self.status_file));
+        let changed_sessions = self.refresh_destinations(&report.processes, &report.scanned_at);
+        for session_id in changed_sessions {
+            self.publish_destinations(&session_id)?;
+        }
         let enforcement = self.enforcement_status();
         let result = ConnectionsResult {
             scanned_at: report.scanned_at,
@@ -314,7 +482,85 @@ impl Runtime {
             processes: report.processes,
         };
         write_report_if_changed(&self.connections_file, &result).map_err(RuntimeError::SideFile)?;
-        Ok(result)
+        Ok(ConnectionPass {
+            result,
+            denial_events,
+        })
+    }
+
+    fn refresh_destinations(
+        &mut self,
+        processes: &[ProcessView],
+        observed_at: &str,
+    ) -> BTreeSet<String> {
+        let mut current = BTreeSet::new();
+        for process in processes {
+            let Some(session) = &process.session else {
+                continue;
+            };
+            for connection in &process.connections {
+                if connection.state != crate::observe::TcpState::Established {
+                    continue;
+                }
+                let destination = ledger_destination(connection);
+                let key = DestinationKey {
+                    session_id: session.id.clone(),
+                    destination,
+                    zone: connection.zone.clone(),
+                };
+                current.insert(key);
+            }
+        }
+
+        let mut changed_sessions = BTreeSet::new();
+        for key in current.difference(&self.active_destinations) {
+            let total = self
+                .destination_totals
+                .entry(key.clone())
+                .or_insert_with(|| DestinationTotal {
+                    count: 0,
+                    first_seen: observed_at.to_string(),
+                    last_seen: observed_at.to_string(),
+                });
+            total.count = total.count.saturating_add(1);
+            total.last_seen = observed_at.to_string();
+            changed_sessions.insert(key.session_id.clone());
+        }
+        for key in self.active_destinations.difference(&current) {
+            changed_sessions.insert(key.session_id.clone());
+        }
+        self.active_destinations = current;
+        changed_sessions
+    }
+
+    fn publish_destinations(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let destinations = self
+            .destination_totals
+            .iter()
+            .filter(|(key, _)| key.session_id == session_id)
+            .map(|(key, total)| LedgerNetworkDestination {
+                destination: key.destination.clone(),
+                zone: key.zone.clone(),
+                count: total.count,
+                first_seen: total.first_seen.clone(),
+                last_seen: total.last_seen.clone(),
+            })
+            .collect::<Vec<_>>();
+        if destinations.is_empty() {
+            return Ok(());
+        }
+        let result = self.agentd.publish_network(LedgerNetworkParams {
+            session_id: session_id.to_string(),
+            destinations,
+            source: LedgerNetworkSource::NetdAggregate,
+        })?;
+        if result.rejected > 0 {
+            return Err(RuntimeError::Data(format!(
+                "agentd rejected {} privacy-bounded destination row(s) for {session_id}",
+                result.rejected
+            )));
+        }
+        Ok(())
     }
 
     pub fn status_json(&self) -> Value {
@@ -390,6 +636,177 @@ impl Runtime {
             "enforcement": self.enforcement_status()
         }))
     }
+}
+
+#[derive(Debug)]
+struct DeniedSessionView {
+    project: String,
+    rows: Vec<DeniedView>,
+}
+
+fn collect_denials(
+    sessions: &BTreeMap<String, InstalledSession>,
+    carry: &BTreeMap<String, u64>,
+    kernel: &BTreeMap<String, u64>,
+    reported: &mut BTreeMap<String, u64>,
+) -> (BTreeMap<String, DeniedSessionView>, Vec<DenialEvent>) {
+    let mut views = BTreeMap::new();
+    let mut events = Vec::new();
+    for (session_id, session) in sessions {
+        let mut rows = Vec::new();
+        for binding in session
+            .counters
+            .iter()
+            .filter(|binding| binding.decision.blocks())
+        {
+            let attempts = carry
+                .get(&binding.name)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(kernel.get(&binding.name).copied().unwrap_or(0));
+            if attempts == 0 {
+                continue;
+            }
+            let previous = reported.get(&binding.name).copied().unwrap_or(0);
+            if attempts > previous {
+                events.push(DenialEvent {
+                    session_id: session_id.clone(),
+                    project: session.project.clone(),
+                    zone: binding.zone.clone(),
+                    kind: binding.kind,
+                });
+                reported.insert(binding.name.clone(), attempts);
+            }
+            rows.push(DeniedView {
+                zone: binding.zone.clone(),
+                kind: binding.kind,
+                attempts,
+                last_destination: None,
+                explain: format!(
+                    "punarctl network explain {} {}",
+                    session.project, binding.zone
+                ),
+            });
+        }
+        rows.sort_by(|left, right| left.zone.cmp(&right.zone));
+        if !rows.is_empty() {
+            views.insert(
+                session_id.clone(),
+                DeniedSessionView {
+                    project: session.project.clone(),
+                    rows,
+                },
+            );
+        }
+    }
+    (views, events)
+}
+
+fn attach_denials(
+    processes: &mut Vec<ProcessView>,
+    mut denials: BTreeMap<String, DeniedSessionView>,
+) {
+    for process in processes.iter_mut() {
+        let Some(session) = &process.session else {
+            continue;
+        };
+        if let Some(view) = denials.remove(&session.id) {
+            process.denied = view.rows;
+        }
+    }
+    for (session_id, view) in denials {
+        processes.push(ProcessView {
+            name: "managed-agent".to_string(),
+            pid_class: ProcessClass::Agent,
+            session: Some(SessionView {
+                id: session_id,
+                project: view.project,
+            }),
+            governed: true,
+            connections: Vec::new(),
+            denied: view.rows,
+            note: None,
+        });
+    }
+    processes.sort_by(|left, right| {
+        (
+            !left.governed,
+            left.name.as_str(),
+            left.session.as_ref().map(|session| session.id.as_str()),
+        )
+            .cmp(&(
+                !right.governed,
+                right.name.as_str(),
+                right.session.as_ref().map(|session| session.id.as_str()),
+            ))
+    });
+}
+
+fn ensure_system_rows(processes: &mut Vec<ProcessView>, enrolled: bool) {
+    if !processes.iter().any(|process| process.name == "punard") {
+        processes.push(ProcessView {
+            name: "punard".to_string(),
+            pid_class: ProcessClass::Application,
+            session: None,
+            governed: false,
+            connections: Vec::new(),
+            denied: Vec::new(),
+            note: Some(if enrolled {
+                "no current TCP connections observed".to_string()
+            } else {
+                "no connections · nothing to report home".to_string()
+            }),
+        });
+    }
+    if !processes.iter().any(|process| process.name == "punar-netd") {
+        processes.push(ProcessView {
+            name: "punar-netd".to_string(),
+            pid_class: ProcessClass::Application,
+            session: None,
+            governed: false,
+            connections: Vec::new(),
+            denied: Vec::new(),
+            note: Some("0 connections · cannot open one (AF_INET denied)".to_string()),
+        });
+    }
+    processes.sort_by(|left, right| {
+        (
+            !left.governed,
+            left.name.as_str(),
+            left.session.as_ref().map(|session| session.id.as_str()),
+        )
+            .cmp(&(
+                !right.governed,
+                right.name.as_str(),
+                right.session.as_ref().map(|session| session.id.as_str()),
+            ))
+    });
+}
+
+fn device_is_enrolled(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|value| value.get("enrolled").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn ledger_destination(connection: &crate::view::ConnectionView) -> String {
+    let candidates = [
+        connection.name.clone(),
+        match connection.destination {
+            std::net::IpAddr::V4(address) => Some(address.to_string()),
+            std::net::IpAddr::V6(_) => None,
+        },
+        Some(connection.zone.clone()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| {
+            ResourceClass::new(ResourceCategory::NetworkDestinations, candidate).is_ok()
+        })
+        .expect("a validated zone name is a valid destination class")
 }
 
 fn session_transitions(
@@ -644,6 +1061,7 @@ mod tests {
             InstalledSession {
                 project: "atlas".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_old.scope".to_string(),
+                counters: Vec::new(),
             },
         )]);
         let next = BTreeMap::from([(
@@ -651,6 +1069,7 @@ mod tests {
             InstalledSession {
                 project: "forge".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_new.scope".to_string(),
+                counters: Vec::new(),
             },
         )]);
         let skipped = BTreeMap::from([(
@@ -675,6 +1094,7 @@ mod tests {
             InstalledSession {
                 project: "atlas".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_same.scope".to_string(),
+                counters: Vec::new(),
             },
         )]);
         assert!(session_transitions(&installed, &installed, &BTreeMap::new()).is_empty());
@@ -694,6 +1114,7 @@ mod tests {
                 user: "punar".into(),
                 process_id: 42,
                 cgroup_path: "/user.slice/punar-agent-agt_1.scope".into(),
+                cgroup_id: None,
             },
             ProjectLocator::new(passwd),
         )
@@ -767,6 +1188,7 @@ mod tests {
                 pid: Some(42),
                 uid: 1000,
                 cgroup_path: Some(session.cgroup_path.clone()),
+                cgroup_id: session.cgroup_id,
                 connections: vec![Connection {
                     destination: "10.30.0.7".parse().unwrap(),
                     state: TcpState::Established,

@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "zones": {
+    "corp_dev": {
+      "cidrs": [
+        "127.0.0.9/32"
+      ],
+      "names": {}
+    },
+    "corp_prod": {
+      "cidrs": [
+        "127.0.0.7/32"
+      ],
+      "names": {}
+    },
+    "privileged_db": {
+      "cidrs": [
+        "127.0.0.8/32"
+      ],
+      "names": {}
+    }
+  }
+}

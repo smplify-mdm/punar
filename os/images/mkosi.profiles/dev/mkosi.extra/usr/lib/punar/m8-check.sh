@@ -889,12 +889,24 @@ jq_check "detections get NO ledger field (an unmanaged process has no session to
 # --- 11. the AI panel: the D-005 ledger register -----------------------------
 check_eq "the panel's ledger view is 0640 root:punar in the ROOT-owned runtime dir" \
     "640 root punar" "$(stat -c '%a %U %G' "${LEDGER_RUNTIME}" 2>/dev/null)"
-jq_check "the runtime view names this session and is literally the agents.access rows" \
-    "${RUN_DIR}/m8-ledger-runtime.json" \
-    ".v == 1 and (.sessions | any(.summary.session_id == \"${SID}\"
-       and (.summary.resources.process_classes | index(\"git\")) != null
-       and (.not_yet_observed | length) >= 3
-       and (.privacy.local_only == true)))"
+# Compare the stable row, not a milestone-dependent count. Producer rows leave
+# `not_yet_observed` as their mediation points ship (M12 leaves only MCP for a
+# managed session), and observation timestamps can advance between the side
+# file publication and this explicit socket read. Everything else must be the
+# same document the panel consumes.
+if jq -e --slurpfile expected "${RUN_DIR}/m8-access.json" --arg sid "${SID}" '
+        def stable:
+            del(.summary.generated_at)
+            | (.detail.entries[]? |= del(.last_seen));
+        .v == 1
+        and ([.sessions[] | select(.summary.session_id == $sid) | stable]
+             == [($expected[0] | stable)])
+    ' "${RUN_DIR}/m8-ledger-runtime.json" >/dev/null 2>&1; then
+    note "ok   the runtime view carries the same stable agents.access row for this session"
+else
+    note "FAIL the runtime view and agents.access disagree for ${SID}"
+    FAILED=1
+fi
 as_punar qs -p /usr/share/punar/shell ipc call aipanel open >/dev/null 2>&1
 check_true "qs ipc call aipanel open (the PUNAR+A surface)" "$?"
 sleep 2
