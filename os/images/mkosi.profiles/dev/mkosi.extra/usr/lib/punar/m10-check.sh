@@ -165,10 +165,15 @@ audit_count() {
 # them and a probe would be the wrong question.
 unit_installed() { [ -f "/usr/lib/systemd/system/$1" ]; }
 
-mediation_present() {
+ledger_producer_present() {
+    [ -f "/usr/share/punar/ledger-producers/$1" ]
+}
+
+producer_present() {
     case "$1" in
-        # M12: punar-netd is the network mediation point. Absent today.
-        network_destinations) unit_installed punar-netd.service ;;
+        # punar-netd's privacy connection view is not itself an AI-ledger
+        # producer. The row leaves only when the explicit agentd bridge ships.
+        network_destinations) ledger_producer_present "$1" ;;
         # M11+: no tool/MCP gateway is named yet; these are the candidate
         # unit names, so the probe answers correctly the day one lands.
         mcp_servers)
@@ -719,18 +724,18 @@ if [ -n "${DETECTION_ID}" ] && [ "${DETECTION_ID}" != "null" ]; then
               | (length == 2)
                 and all(.milestone == "none" and ((.reason | length) > 0)))'
     # The two whose producer status can still move. The branch is chosen by
-    # the device, never by a milestone literal: today neither mediation point
+    # the device, never by a milestone literal: today neither ledger producer
     # is installed, so each must be EMPTY and NAMED; the day one lands, this
     # flips on its own to demanding the stale honesty row be deleted. That
     # flip is precisely the edit M10 had to make by hand for
     # `unknown_ai_execution`, and that no check caught.
     for category in network_destinations mcp_servers; do
-        if mediation_present "${category}"; then
-            jq_check "${category}: its mediation point is installed here, so the honesty row must be gone" \
+        if producer_present "${category}"; then
+            jq_check "${category}: its ledger producer is installed here, so the honesty row must be gone" \
                 "${RUN_DIR}/m10-access.json" \
                 '.not_yet_observed | any(.category == "'"${category}"'") | not'
         else
-            jq_check "${category}: no mediation point on this device, so the detection ledger shows NOTHING and names an owning milestone" \
+            jq_check "${category}: no ledger producer on this device, so the detection ledger shows NOTHING and names an owning milestone" \
                 "${RUN_DIR}/m10-access.json" \
                 '((.summary.resources["'"${category}"'"] // []) | length) == 0
                  and (.not_yet_observed | any(.level == 3

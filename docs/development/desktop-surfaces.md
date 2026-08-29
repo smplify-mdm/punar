@@ -626,7 +626,8 @@ already runs, and the tools they shell out to (`wpctl`, `hyprctl`,
 
 **The daemon RSS gate does not move — at all.** `idle-ram.sh` computes
 `PUNAR_SERVICES_RSS_MB` as summed PSS over the cgroups of
-`punard.service punar-agentd.service punar-secrets.service`. This work
+`punard.service`, `punar-agentd.service`, `punar-secrets.service`, and
+`punar-netd.service`. This work
 adds **no daemon**: the notification server, the wallpaper, the lock and
 the settings panel are all QML inside `punar-shell`, which is a *user*
 process and is not in that sum. That gate is untouched by construction.

@@ -53,11 +53,14 @@ device**, never by a milestone literal:
 
 ```sh
 unit_installed() { [ -f "/usr/lib/systemd/system/$1" ]; }
+ledger_producer_present() {
+    [ -f "/usr/share/punar/ledger-producers/$1" ]
+}
 
 producer_present() {
     case "$1" in
         credential_classes|credential_request) unit_installed punar-secrets.service ;;
-        network_destinations|production_access) unit_installed punar-netd.service ;;
+        network_destinations|production_access) ledger_producer_present "$1" ;;
         unknown_ai_execution)                   unit_installed punar-agentd-scan.timer ;;
         *) return 1 ;;
     esac
@@ -78,10 +81,15 @@ mediation point must say so, because on a surface an unlabelled empty array
 reads as *"this did not happen"*.
 
 The **reverse** direction is what makes it survive fulfilment, and it is the
-half everybody forgets. The day `punar-netd` is installed, the assertion
-stops accepting the `network_destinations` honesty row and starts *demanding
-its deletion* — which is exactly the edit M10 had to make by hand for
-`unknown_ai_execution`, and exactly the edit no check asked for.
+half everybody forgets. A systemd unit proves that a daemon is installed; it
+does **not** prove that the daemon feeds this particular data product.
+`punar-netd`, for example, owns the privacy-connections view before its
+observations are joined into the AI ledger. A reviewed ledger bridge stages
+`/usr/share/punar/ledger-producers/<category>` alongside its integration
+tests. Only then does the assertion stop accepting that category's honesty
+row and start *demanding its deletion*. This is exactly the edit M10 had to
+make by hand for `unknown_ai_execution`, and exactly the edit no check asked
+for.
 
 Milestone tokens are matched as a **shape**, never as a value:
 

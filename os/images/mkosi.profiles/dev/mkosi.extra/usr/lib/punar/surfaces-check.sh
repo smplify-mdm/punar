@@ -142,11 +142,19 @@ systemcontrol_models_ready() {
         && jq -e '.explains | length > 0
             and all(.[]; .stateKey == "Drift" and .compliance == "Matches")' \
             /run/punar/surfaces-systemcontrol-firewall.json >/dev/null 2>&1 \
-        && jq -e '.title == "Applications"
+        && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json '.title == "Applications"
             and (.sub | contains(" installed · ") and contains(" available · catalog "))
             and any(.rows[]; .tag == "Installed")
-            and ([.rows[] | select(.tag == "Available") | .name] | sort
-                == ["ChatGPT", "Claude", "Discord", "Element", "Firefox", "Slack", "Spotify", "Telegram"])
+            # Every catalog product must be represented by either its
+            # installed row or its available row. Derive this from the signed
+            # image catalog: pinning the original eight names made the gate
+            # report a healthy expanded developer catalog as a UI failure.
+            and ([.rows[].name] as $shown
+                | all($catalog[0].apps[].name; . as $name
+                    | $shown | index($name) != null))
+            and ([.rows[] | select(.tag == "Available") | .name] as $available
+                | all($available[]; . as $name
+                    | any($catalog[0].apps[]; .name == $name)))
             and any(.actions[]; .hotkey == "O" and .kind == "applicationBrowser")' \
             /run/punar/surfaces-systemcontrol-applications.json >/dev/null 2>&1
 }

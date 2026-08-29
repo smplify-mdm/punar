@@ -79,7 +79,8 @@ stage_punar_binaries() {
             CARGO_TARGET_DIR="${cargo_target}" \
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
-                -p punar-secrets -p punar-onboard -p punar-mock-smplify
+                -p punar-secrets -p punar-netd -p punar-onboard \
+                -p punar-mock-smplify
     )
 
     install -d "${extra}/usr/bin"
@@ -89,6 +90,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-env" \
         "${cargo_target}/release/punar-agentd" \
         "${cargo_target}/release/punar-secrets" \
+        "${cargo_target}/release/punar-netd" \
         "${cargo_target}/release/punar-onboard" \
         "${cargo_target}/release/punar-onboardd" \
         "${cargo_target}/release/punar-greet" \
@@ -99,7 +101,7 @@ stage_punar_binaries() {
 
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
-        punar-onboard punar-onboardd punar-greet; do
+        punar-netd punar-onboard punar-onboardd punar-greet; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2
@@ -111,6 +113,11 @@ stage_punar_binaries() {
         echo "error: punar-mock-smplify is not an AArch64 binary" >&2
         exit 1
     }
+
+    "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
+        "${extra}" "${dev_extra}" \
+        "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra" \
+        "${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra" AArch64
 }
 
 # Assemble the M6 offline base from Debian's pinned static BusyBox. This is

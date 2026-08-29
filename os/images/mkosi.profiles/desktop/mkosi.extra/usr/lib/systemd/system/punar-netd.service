@@ -7,6 +7,9 @@ After=punar-agentd.service
 Type=simple
 ExecStart=/usr/bin/punar-netd run
 Restart=on-failure
+# Keep UID 0 for the closed nftables capability set, but create the local
+# control socket in the stable human-admission group without CAP_CHOWN.
+Group=punar
 CPUAccounting=yes
 IOAccounting=yes
 

@@ -12,15 +12,17 @@ mistakes that each cost a full CI cycle.
 ## 0. The finish line
 
 Spec §80 defines done as: a clean VM can do 26 things. **20 of the 26 are
-already demonstrated** by the 760 green assertions. The genuinely open ones:
+already demonstrated** by the latest ARM64 candidate's 713 milestone
+assertions, 122 desktop-surface assertions, 5 wireless-posture assertions and
+15 isolated surface-cost checks. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Real Wayland launches remain `COMPATIBILITY TESTING` until the dual-architecture runtime gate passes. Generic user-defined web-app install/context support remains M11 work. |
+| 7 | launch browser / **web app** | **EXPANDED ARM64 GATE PROVEN LOCALLY; CANONICAL CI PENDING:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The 2026-08-29 clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` added the responsive icon-led library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app install/context support remains M11 work. |
 | 19 | enforce project network rule | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Typed zone/policy evaluation, nftables rendering, daemon/CLI/image integration and event-driven managed-session reconciliation are implemented and pass the Linux unit/clippy stage. |
 | 20 | display local network activity | **M12 CORE LOCALLY GREEN; VM GATE PENDING.** Privacy-bounded connection observation and truthful CLI projections are implemented; current milestone images still need the complete runtime exercise. |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
-| 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
+| 3 | remain within idle budget | 1322 MB x86 KVM / 1211 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
 | 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -162,7 +164,7 @@ explicit `shortcuts reload` remain the only invalidation paths.
 ### 2.4 Stabilized-idle CPU and writes — runtime-proven and gated
 
 The existing RAM service now snapshots cgroup v2 CPU and write counters at the
-boundaries of the same full 300-second window. It covers all three resident
+boundaries of the same full 300-second window. It covers all four resident
 daemons plus the timer-triggered reconcile and agent-scan work accumulated in
 a persistent `punar-background.slice`. The slice has CPU/I/O weight 10 against
 systemd's default 100, so periodic OS work yields under compiler, editor,
@@ -170,23 +172,26 @@ container or test contention without being artificially capped on an idle
 machine.
 
 Native runs hard-fail when any first-party cgroup reaches 0.50% of one CPU;
-TCG numeric breaches remain labeled/warn-only. Two DHCP-connected Apple-HVF
-ARM64 windows measured 1205/1210 MB mean RAM, 1213 MB max, 18 MB combined
-service PSS, 0.00–0.01% maximum first-party CPU, and exactly 8,192 first-party
-write bytes each. A later native x86 KVM window measured 73,728 bytes across
-three durability-synced reconcile audit batches; the cross-filesystem ceiling
-is therefore 98,304 bytes/five minutes, reserving one quarter of the ceiling
-without hiding a sustained writer. Whole-guest writes remain context because they include the
-journal, filesystem metadata and non-Punar services. Missing counters,
-connected-idle facts or live zram fail on every accelerator.
+TCG numeric breaches remain labeled/warn-only. The latest DHCP-connected
+Apple-HVF ARM64 candidate measured 1211/1218 MB RAM, 27 MB across all four
+service cgroups, 0.00% maximum first-party CPU and 73,728 first-party write
+bytes. The immediately preceding image measured 1200/1205 MB, 26 MB service
+PSS and 0.01% maximum first-party CPU. A native x86 KVM window also measured 73,728 bytes
+across three durability-synced reconcile audit batches; the cross-filesystem
+ceiling is therefore 98,304 bytes/five minutes, reserving one quarter of the
+ceiling without hiding a sustained writer. Whole-guest writes remain context
+because they include the journal, filesystem metadata and non-Punar services.
+Missing counters, connected-idle facts or live zram fail on every accelerator.
 
-The first x86 KVM run of that gate correctly failed: all three service cgroups
-were alive, but `cpu.stat`/`io.stat` were not exposed because the units had
-implicitly inherited controller enablement on ARM. `CPUAccounting=yes` and
+The first x86 KVM run of that gate correctly failed: the then-current three
+service cgroups were alive, but `cpu.stat`/`io.stat` were not exposed because
+the units had implicitly inherited controller enablement on ARM.
+`CPUAccounting=yes` and
 `IOAccounting=yes` are now explicit on `punard`, `punar-agentd` and
-`punar-secrets`, a host contract test pins all six lines, and raw start/end
-counter snapshots join the CI evidence. Native x86 confirmation is pending the
-next run; no x86 CPU/write result is claimed before it.
+`punar-secrets`; M12 applies the same accounting contract to `punar-netd`. A
+host contract test pins the unit settings, and raw start/end counter snapshots
+join the CI evidence. Native ARM64 and x86 confirmation now exist; emulated
+TCG measurements remain labelled separately.
 
 ---
 
@@ -256,18 +261,18 @@ The minimal image booted AA64 systemd-boot → Debian kernel
 HVF.
 
 The same lane now builds a complete ARM64 desktop image: shared shell
-and service content, Debian package/account/PAM and Chromium adapters, six
+and service content, Debian package/account/PAM and Chromium adapters, nine
 native AArch64 Rust binaries, and a digest-verified ARM64 offline OCI base.
 The latest exact image is
-`c2d39a395f1f2ea2a908e12d86e30d73c8cb6943a7a7b3f6d14e28473f02c1e1`.
+`08ae9697a6d414487b402b1f004d0f9017e627c758484037d6237771c8d7e2f2`.
 On its fresh connected 8-GiB / 4-vCPU Apple-HVF proof, the usable desktop marker
-arrived in **18 s** and all **707 M2–M10 assertions**, **103 shell-surface
-assertions**, **15 isolated surface-cost samples**, the live zram/network
-checks, and host schema replays passed. This includes the full app lifecycle,
-firewall, policy, enrollment, container, AI/privacy, expiring approval and
-detection exercises. The M2 graphics policy also recognizes Debian's live
-`virtio_pci` spelling and has fake-sysfs coverage for virtual, AMD, Intel and
-Raspberry Pi VC4 cases.
+arrived in **16 s** and all **713 M2–M10 assertions**, **122 shell-surface
+assertions**, **5 wireless-posture assertions**, **15 isolated surface-cost
+samples**, the live zram/network checks, and host schema replays passed. This
+includes the full app lifecycle, firewall, policy, enrollment, container,
+AI/privacy, expiring approval and detection exercises. The M2 graphics policy
+also recognizes Debian's live `virtio_pci` spelling and has fake-sysfs
+coverage for virtual, AMD, Intel and Raspberry Pi VC4 cases.
 
 The final 2026-08-27 release rebuild adds the signed-catalog application path
 without preinstalling third-party payloads and makes every discovery path
@@ -510,8 +515,9 @@ HTTPie, Postman, Meld, and Podman Desktop; Logs, Mission Center, Wireshark,
 Apostrophe, and KeePassXC cover troubleshooting, Markdown, and credentials.
 The base desktop now also carries Geany, Files/Thunar with GVfs SMB, and a
 small cross-architecture CLI troubleshooting set. Static/schema/QML gates are
-green; the newly expanded catalog, editor launcher, and file-manager behavior
-remain **local only until the next x86_64 and ARM64 VM gates pass**. Spotify's path is proven on a clean ARM64 release VM and the
+green; the expanded catalog, editor launcher, and file-manager behavior passed
+the clean local ARM64 VM gate on 2026-08-29 and remain pending in canonical CI.
+Spotify's path is proven on a clean ARM64 release VM and the
 expanded library passed its x86 runtime surface in run 33146409332. Connected
 ARM/HVF testing then proved the corrected Firefox native-detail path, including
 its pinned source and verified permissions; follow-up CI is pending. Generic web-app

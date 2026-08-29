@@ -749,7 +749,7 @@ run_desktop() {
     if wait_for_pattern "${SERIAL_LOG}" "${services_rss_regex}" 120 "services-RSS line (PUNAR_SERVICES_RSS_MB)"; then
         services_rss="$(grep -aoE "${services_rss_regex}" "${SERIAL_LOG}" | tail -n 1)"
         services_rss="${services_rss#PUNAR_SERVICES_RSS_MB=}"
-        echo "==> Services RSS from guest (summed PSS, punard + punar-agentd + punar-secrets cgroups): ${services_rss} MB"
+        echo "==> Services RSS from guest (summed PSS, punard + punar-agentd + punar-secrets + punar-netd cgroups): ${services_rss} MB"
     else
         warn "desktop-test: no PUNAR_SERVICES_RSS_MB line after the RAM result (pre-M3 guest image?); recording 'missing'"
     fi
@@ -834,6 +834,7 @@ run_desktop() {
             # asserted in-guest by m9-check group 9 against this very tar,
             # which is why the exercise runs before the export.
             for f in "${guest_dir}"/m2-*.json "${guest_dir}"/m3-*.json \
+                     "${guest_dir}"/surfaces-systemcontrol-*.json \
                      "${guest_dir}"/m4-*.json "${guest_dir}"/m5-*.json \
                      "${guest_dir}"/m5-*.jsonl "${guest_dir}"/m5-*.txt \
                      "${guest_dir}"/m6-*.json "${guest_dir}"/m6-*.txt \
@@ -866,8 +867,8 @@ run_desktop() {
         echo "# PUNAR_DESKTOP_OK_HOST_SECS is host wall clock from qemu start to the marker —"
         echo "# an informational boot-to-desktop proxy (budgets §2.6), not a measured boot metric."
         echo "# PUNAR_SERVICES_RSS_MB is the summed PSS (smaps_rollup) of the pids in EVERY"
-        echo "# Punar service cgroup at stabilized idle — punard.service, punar-agentd.service"
-        echo "# and punar-secrets.service (PERFORMANCE_BUDGETS.md §2.3; the variable name keeps"
+        echo "# Punar service cgroup at stabilized idle — punard.service, punar-agentd.service,"
+        echo "# punar-secrets.service and punar-netd.service (PERFORMANCE_BUDGETS.md §2.3; the variable name keeps"
         echo "# RSS as the fixed consumer contract, the value is summed PSS)."
         echo "PUNAR_RAM_MEAN_MB=${ram_mean}"
         echo "PUNAR_RAM_MAX_MB=${ram_max}"

@@ -104,8 +104,14 @@ DeferredSurfaceBase {
     }
 
     function show(): void {
-        if (!root.open)
+        if (!root.open) {
             SurfaceTiming.begin("commandcenter");
+            // Prepare the lazy window before making it visible. Resetting from
+            // onVisibleChanged races an IPC query issued in the same event-loop
+            // turn: the query is set, visibility catches up, then the handler
+            // silently replaces it with the empty/default Chromium row.
+            win.prepareOpen();
+        }
         hideTimer.stop();
         root.windowVisible = true;
         root.open = true;
@@ -960,8 +966,18 @@ DeferredSurfaceBase {
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
+        function prepareOpen(): void {
+            queryInput.text = "";
+            list.currentIndex = win.results.length > 0 ? 0 : -1;
+        }
+
         function setQuery(text: string): void {
             queryInput.text = text;
+            // ListView model propagation may complete after this IPC method
+            // returns. Keep the selected action tied to the top result that
+            // query() reports, rather than retaining an index from the prior
+            // model until the next frame.
+            list.currentIndex = win.results.length > 0 ? 0 : -1;
             root.appBrowse = false;
             root.explainPath = "";
             root.appId = "";
@@ -982,10 +998,8 @@ DeferredSurfaceBase {
         }
 
         onVisibleChanged: {
-            if (win.visible) {
-                queryInput.text = "";
+            if (win.visible)
                 queryInput.forceActiveFocus();
-            }
         }
 
         // Live models this result set is derived from. Listed explicitly so

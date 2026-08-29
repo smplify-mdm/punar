@@ -266,6 +266,7 @@ jobs:
             os/images/mkosi.finalize \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
+            tests/images/check-staged-service-executables.sh \
             tests/images/check-repart-layout.sh \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \

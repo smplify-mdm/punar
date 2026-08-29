@@ -332,6 +332,10 @@ stage_punar_binaries() {
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
         "${dev_extra}/usr/bin/"
+
+    "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
+        "${extra}" "${dev_extra}" "${extra}" "${dev_extra}" \
+        'Advanced Micro Devices X86-64'
 }
 
 reset_staged_binaries() {

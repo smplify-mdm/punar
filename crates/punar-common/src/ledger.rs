@@ -681,6 +681,14 @@ impl LedgerRecord {
             }
             return true;
         }
+        // A zero increment means "this already-counted process was seen
+        // again". If its classifier changed between the registry observation
+        // and the cgroup sample, there is no existing row to refresh. Do not
+        // materialize a fictional zero-count class; the original counted row
+        // remains the honest observation.
+        if increment == 0 {
+            return true;
+        }
         let distinct = self
             .entries
             .iter()
@@ -1040,8 +1048,9 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
             3,
             ResourceCategory::NetworkDestinations.as_str(),
             "M12",
-            "punar-netd does not exist yet; no owned mediation point observes network \
-             destinations, and M6 containers run with --network none",
+            "punar-netd enforces project network policy and owns a bounded local connection \
+             view, but those observations are not yet joined into the AI access ledger; M6 \
+             containers run with --network none",
         ),
         row(
             3,
@@ -1054,7 +1063,8 @@ pub fn not_yet_observed() -> Vec<NotYetObserved> {
             4,
             SecurityEventType::ProductionAccess.as_str(),
             "M12",
-            "no network mediation exists yet",
+            "punar-netd mediates project networking, but production-zone transitions are not \
+             yet joined into the AI access ledger",
         ),
         row(
             4,
@@ -1633,6 +1643,24 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_increment_refresh_never_creates_a_zero_count_class() {
+        let mut record = populated_record();
+        assert!(record.observe(
+            ResourceCategory::ProcessClasses,
+            class(ResourceCategory::ProcessClasses, "agent"),
+            0,
+            Evidence::CgroupScope,
+            "2026-08-27T10:05:00Z",
+        ));
+        assert!(
+            record
+                .entries
+                .iter()
+                .all(|entry| entry.count > 0 && entry.resource_class.as_str() != "agent")
+        );
+    }
+
+    #[test]
     fn the_per_category_bound_truncates_rather_than_lying() {
         let mut record = populated_record();
         for n in 0..MAX_CLASSES_PER_CATEGORY + 4 {
@@ -1746,6 +1774,12 @@ mod tests {
         // list. `mcp_servers` was re-milestoned M9+ -> M11+ rather than
         // left promising a milestone that does not own it.
         assert_eq!(level3, vec!["network_destinations", "mcp_servers"]);
+        let network_row = rows
+            .iter()
+            .find(|row| row.category == "network_destinations")
+            .unwrap();
+        assert!(network_row.reason.contains("not yet joined"));
+        assert!(!network_row.reason.contains("does not exist"));
         assert_eq!(
             rows.iter()
                 .find(|r| r.category == "mcp_servers")

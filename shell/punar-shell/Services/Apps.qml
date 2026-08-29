@@ -186,21 +186,27 @@ Singleton {
 
     // Relevance score for one entry against a lowercased query.
     // -1 means "no match"; higher is better. The ladder is deliberately
-    // coarse — name matches always beat metadata matches, so the row the
-    // reader meant is the row the selection starts on.
+    // coarse — an exact product id beats a fuzzy display-name match, while an
+    // exact display name remains strongest. This keeps helper entries such as
+    // `thunar-settings` from shadowing the actual `thunar` application.
     function score(entry: var, q: string): int {
         if (q === "")
             return 10;
         var name = root.displayName(entry).toLowerCase();
         if (name === q)
             return 100;
+        var id = root.bareId(entry);
+        if (id === q)
+            return 90;
         if (name.indexOf(q) === 0)
             return 80;
         if (name.indexOf(" " + q) !== -1)
             return 60;
+        if (id.indexOf(q) === 0)
+            return 50;
         if (name.indexOf(q) !== -1)
             return 45;
-        if (root.bareId(entry).indexOf(q) !== -1)
+        if (id.indexOf(q) !== -1)
             return 35;
         // The command the entry runs is part of its identity: `nvim` must
         // reach Neovim even though the string is not inside "neovim".

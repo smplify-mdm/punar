@@ -29,7 +29,9 @@
 # HONESTY NOTES (spec 1.22), all of which the assertions enforce rather than
 # merely assert around:
 #   - network_destinations and mcp_servers are EMPTY and are required to be
-#     named in `not_yet_observed[]` with their milestone (M12 / M11+). An
+#     named in `not_yet_observed[]` with their milestone (M12 / M11+). The
+#     network row remains because punar-netd's separate privacy view is not
+#     yet joined into this ledger, not because the daemon is absent. An
 #     empty category that is not labelled is a FAIL here, because on a
 #     surface it would read as "did not happen".
 #   - M9 AMENDMENT: credential_classes, credential_request and
@@ -70,6 +72,8 @@ CTL=/usr/bin/punarctl
 ENV_BIN=/usr/bin/punar-env
 AGENTD_UNIT=punar-agentd.service
 AGENTD_SOCK=/run/punar-agentd/agentd.sock
+NETD_UNIT=punar-netd.service
+NETD_SOCK=/run/punar-netd/netd.sock
 LEDGER_DIR=/var/lib/punar/agents/ledger
 LEDGER_INDEX="${LEDGER_DIR}/index.json"
 LEDGER_RUNTIME=/run/punar-agentd/ledger.json
@@ -181,6 +185,15 @@ audit_count() {
 # tests that own `not_yet_observed()` are what do.
 unit_installed() { [ -f "/usr/lib/systemd/system/$1" ]; }
 
+# A daemon merely existing is not proof that it produces a category in this
+# ledger. In particular, punar-netd currently owns the separate privacy
+# connections view; punar-agentd does not yet ingest its observations. The
+# marker is staged only with that explicit bridge, so the check cannot turn a
+# service unit into fictional ledger coverage.
+ledger_producer_present() {
+    [ -f "/usr/share/punar/ledger-producers/$1" ]
+}
+
 producer_present() {
     case "$1" in
         # Sampled from the session scope cgroup by punar-agentd (source A).
@@ -189,15 +202,11 @@ producer_present() {
         directory_zones|repositories) [ -x "${ENV_BIN}" ] ;;
         # M9: punar-secrets is the credential mediation point.
         credential_classes|credential_request) unit_installed punar-secrets.service ;;
-        # M12: punar-netd is the network mediation point. Absent today.
-        # `sensitive_resource_access` rides the same probe because M12 owns
-        # the mediation that would observe a sensitive zone too. That is a
-        # PROXY, and a coarse one: if M12 lands punar-netd without zone
-        # mediation, this flips early and the group below fails loudly with
-        # the category named, which is a one-line fix here — the opposite of
-        # a stale row passing in silence.
+        # punar-netd owns a separate connection view today. These rows leave
+        # the honesty set only when a reviewed punar-agentd bridge stages the
+        # matching ledger-producer marker.
         network_destinations|production_access|sensitive_resource_access)
-            unit_installed punar-netd.service ;;
+            ledger_producer_present "$1" ;;
         # M11+: no tool/MCP gateway is named yet; these are the candidate
         # unit names, so the probe answers correctly the day one lands.
         mcp_servers)
@@ -256,6 +265,10 @@ as_punar() {
 # --- 1. preflight: daemon, ledger store, class table -------------------------
 check_eq "punar-agentd.service is active" "active" \
     "$(systemctl is-active "${AGENTD_UNIT}" 2>&1)"
+check_eq "punar-netd.service is active" "active" \
+    "$(systemctl is-active "${NETD_UNIT}" 2>&1)"
+check_eq "punar-netd socket mode/owner admits the session user" \
+    "660 root punar" "$(stat -c '%a %U %G' "${NETD_SOCK}" 2>/dev/null)"
 check_eq "ledger store mode/owner (root-only: a rewritable ledger is not evidence)" \
     "700 root root" "$(stat -c '%a %U %G' "${LEDGER_DIR}" 2>/dev/null)"
 jq_check "process-class table parses and maps the classes this image can supply" \
@@ -441,10 +454,11 @@ jq_check "the repository is the project NAME from the workspace grant (no git re
 # The forward direction is the M8 rule: an empty category with no mediation
 # point must SAY so, because on a surface an unlabelled empty array reads as
 # "did not happen". The reverse direction is the M9 amendment, and it is what
-# makes this survive fulfilment: the day punar-netd is installed, this
-# assertion stops accepting the `network_destinations` row and demands it be
-# deleted — which is exactly the change M10 had to make by hand for
-# `unknown_ai_execution`, and exactly the change no check caught.
+# makes this survive fulfilment: the day the explicit punar-netd-to-agentd
+# ledger bridge is installed, this assertion stops accepting the
+# `network_destinations` row and demands it be deleted — which is exactly the
+# change M10 had to make by hand for `unknown_ai_execution`, and exactly the
+# change no check caught.
 #
 # `milestone` is a token — `M12`, `M11+` — or the sentinel `none`, which
 # M10's unmanaged ledgers use for a limitation that is permanent rather than
@@ -482,11 +496,11 @@ jq_check "every Level-3 category is accounted for: labelled if and only if this 
 # unknown_ai_execution amendment made automatic instead of manual.
 for category in credential_classes mcp_servers network_destinations; do
     if producer_present "${category}"; then
-        jq_check "${category}: its mediation point is installed here, so an empty array is a FACT and the honesty row must be gone" \
+        jq_check "${category}: its ledger producer is installed here, so an empty array is a FACT and the honesty row must be gone" \
             "${RUN_DIR}/m8-access.json" \
             '.not_yet_observed | any(.category == "'"${category}"'") | not'
     else
-        jq_check "${category}: no mediation point on this device, so it is EMPTY and names an owning milestone" \
+        jq_check "${category}: no ledger producer on this device, so it is EMPTY and names an owning milestone" \
             "${RUN_DIR}/m8-access.json" \
             '((.summary.resources["'"${category}"'"] // []) | length) == 0
              and (.not_yet_observed | any(.level == 3
@@ -530,7 +544,7 @@ jq_check "credential_classes is empty because this session asked for none" \
 #
 # The biconditional is the half that survives fulfilment AND keeps the old
 # assertion's strength. Forward: an unproduced category may not go missing —
-# deleting the `production_access` row while punar-netd is still absent fails
+# deleting the `production_access` row while its AI-ledger producer is absent fails
 # here, exactly as it failed under the pinned set. Reverse: a produced
 # category may not go on claiming it has none — which is the M10 edit,
 # demanded automatically instead of discovered by a red CI run.
@@ -582,7 +596,7 @@ for category in credential_request policy_bypass_attempt production_access \
                     and (.reason | length) > 0)'
     fi
 done
-note "info the seven Level-4 categories are accounted for by a rule, not by a snapshot of the pending set. denied_access and privilege_request are produced HERE (groups 7 and 8). credential_request and policy_bypass_attempt are produced by punar-secrets and the approval refusal, and m9-check exercises both. unknown_ai_execution is produced by a detection's own bounded ledger, and m10-check exercises it. The branch above is chosen by which mediation unit is installed on this device, never by a milestone literal, so it flips on its own the day a producer lands. Residual risk, stated plainly: a producer that ships under a unit name producer_present does not know reads here as absent, and a stale honesty row would then still pass. No shell check can close that; the punar-common unit tests that own not_yet_observed() are what do."
+note "info the seven Level-4 categories are accounted for by a rule, not by a snapshot of the pending set. denied_access and privilege_request are produced HERE (groups 7 and 8). credential_request and policy_bypass_attempt are produced by punar-secrets and the approval refusal, and m9-check exercises both. unknown_ai_execution is produced by a detection's own bounded ledger, and m10-check exercises it. The branch above is chosen by producer evidence installed on this device, never by a milestone literal, so it flips on its own the day a producer lands. Cross-daemon ledger bridges require an explicit ledger-producer marker rather than treating a service unit as proof; the punar-common tests remain the source of truth for the actual not_yet_observed set."
 # The same rule, one layer up: the RENDERED surface. The jq assertions above
 # prove the document is honest; this proves the honesty survives rendering.
 # A row that reaches a human as a bare "Not yet observed" with no milestone
@@ -1008,7 +1022,21 @@ jq_check "the purged result carries purged_at and empty resources, not an error"
 # because the restart is an artifact of the TEST, not of the design (the real
 # trigger is startup / agents.scan / agents.end, all event-driven, no timer).
 GHOST=agt_ffffffff0001
-systemctl stop "${AGENTD_UNIT}" >/dev/null 2>&1
+old_agentd_pid="$(systemctl show -p MainPID --value "${AGENTD_UNIT}" 2>/dev/null)"
+systemctl stop "${AGENTD_UNIT}" > "${RUN_DIR}/m8-agentd-stop.txt" 2>&1
+check_true "punar-agentd stopped cleanly before the retention injection" "$?"
+waited=0
+while [ "${waited}" -lt 60 ]; do
+    if [ "$(systemctl is-active "${AGENTD_UNIT}" 2>&1)" = "inactive" ] \
+            && [ ! -S "${AGENTD_SOCK}" ]; then
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+check_eq "punar-agentd is inactive and its socket is gone before files are injected" \
+    "inactive no-socket" \
+    "$(systemctl is-active "${AGENTD_UNIT}" 2>&1) $([ -S "${AGENTD_SOCK}" ] && echo socket || echo no-socket)"
 BACKDATED="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
 cat > "${LEDGER_DIR}/${GHOST}.json" <<EOF
 {"v":1,"session_id":"${GHOST}","agent":"claude-code","user":"punar",
@@ -1033,12 +1061,13 @@ jq --arg id "${GHOST}" --arg at "${BACKDATED}" \
    && mv "${LEDGER_INDEX}.new" "${LEDGER_INDEX}"
 chmod 0640 "${LEDGER_INDEX}"
 prune_before="$(audit_count '.action == "ledger.prune" and .result == "expired"')"
-systemctl start "${AGENTD_UNIT}" >/dev/null 2>&1
+systemctl start "${AGENTD_UNIT}" > "${RUN_DIR}/m8-agentd-start.txt" 2>&1
+check_true "punar-agentd start accepted after the retention injection" "$?"
 # Wait on the unit AND the socket: `systemctl stop` can leave a stale
 # socket inode behind, so the file existing is not by itself proof the
 # daemon is back.
 waited=0
-while [ "${waited}" -lt 30 ]; do
+while [ "${waited}" -lt 60 ]; do
     if [ "$(systemctl is-active "${AGENTD_UNIT}" 2>&1)" = "active" ] \
             && [ -S "${AGENTD_SOCK}" ] \
             && as_punar "${CTL}" --json agents list >/dev/null 2>&1; then
@@ -1050,8 +1079,20 @@ done
 note "info punar-agentd was restarted once, deliberately: the ledger index is held in memory, so a synthetic backdated row written underneath a running daemon would be overwritten on its next flush. The restart is an artifact of the TEST — the real prune triggers are startup, agents.scan and agents.end, all event-driven, no timer (milestone-8.md §6.3)."
 check_eq "punar-agentd is back after the injection restart" "active" \
     "$(systemctl is-active "${AGENTD_UNIT}" 2>&1)"
+new_agentd_pid="$(systemctl show -p MainPID --value "${AGENTD_UNIT}" 2>/dev/null)"
+if [ -n "${new_agentd_pid}" ] && [ "${new_agentd_pid}" != "0" ] \
+        && [ "${new_agentd_pid}" != "${old_agentd_pid}" ]; then
+    note "ok   punar-agentd really restarted (${old_agentd_pid} -> ${new_agentd_pid}); the injected index was reloaded"
+else
+    note "FAIL punar-agentd did not get a new MainPID (${old_agentd_pid:-unknown} -> ${new_agentd_pid:-unknown}); retention injection would only test stale memory"
+    FAILED=1
+fi
 as_punar "${CTL}" --json agents scan >/dev/null 2>&1
-sleep 1
+waited=0
+while [ "${waited}" -lt 10 ] && [ -e "${LEDGER_DIR}/${GHOST}.json" ]; do
+    sleep 1
+    waited=$((waited + 1))
+done
 if [ -e "${LEDGER_DIR}/${GHOST}.json" ]; then
     note "FAIL the 30-day-old ledger survived a prune pass — retention is not enforced"
     FAILED=1
@@ -1131,7 +1172,7 @@ fi
 
 # --- 17. stated gaps (spec 1.22) ---------------------------------------------
 note "info cross-user denial (user B may neither read nor purge user A's ledger) is NOT proven in-VM: this image has one interactive user and no tool to forge peer credentials, by design. It is proven by punar-agentd's host integration tests with the fixed-Peer harness (tests/ledger.rs), the same honest-gap pattern m7-check used for the peer-credential denial path."
-note "info group 6 does not assert WHICH categories are unobservable — it asserts the RULE, in both directions, against the mediation units actually installed on this device (the produced sets are printed above as info lines, so the report says which world it ran in). An empty array with no producer must be LABELLED, which is what keeps it from reading as 'did not happen'; an empty array WITH a producer must NOT be labelled, which is what stops a shipped milestone being quietly denied. Credential classes are the second case since M9: punar-secrets exists and this session simply asked for no credential, so its honesty row must be gone — m9-check asserts the row's contents fill in for a session that does use one. The milestone numbers themselves live in punar_common::ledger::not_yet_observed and in its unit tests; this file deliberately contains none."
+note "info group 6 does not assert WHICH categories are unobservable — it asserts the RULE, in both directions, against producer evidence installed on this device (the produced sets are printed above as info lines, so the report says which world it ran in). An empty array with no producer must be LABELLED, which is what keeps it from reading as 'did not happen'; an empty array WITH a producer must NOT be labelled, which is what stops a shipped milestone being quietly denied. Credential classes are the second case since M9: punar-secrets exists and this session simply asked for no credential, so its honesty row must be gone — m9-check asserts the row's contents fill in for a session that does use one. The milestone numbers themselves live in punar_common::ledger::not_yet_observed and in its unit tests; this file deliberately contains none."
 note "info process classes are sampled at scan points. A child that lives and dies between two passes is missed, and process_peak is peak CONCURRENT pids, never a spawn total. Spawn-accurate history would need exactly the broad tracing SPEC 1.14 forbids."
 
 # --- verdict -----------------------------------------------------------------

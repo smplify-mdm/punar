@@ -1,6 +1,7 @@
 //! Bounded NDJSON Unix-socket server for the closed network method table.
 
 use std::io::{self, BufReader, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,10 +118,13 @@ impl Daemon {
 
     pub fn spawn(self) -> io::Result<DaemonHandle> {
         let inner = self.inner;
-        let listener = bind_with_perms(
-            &inner.cfg.socket_path,
-            lookup_gid(&inner.cfg.group_file, &inner.cfg.group),
-        )?;
+        let gid = lookup_gid(&inner.cfg.group_file, &inner.cfg.group).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("admission group {:?} does not exist", inner.cfg.group),
+            )
+        })?;
+        let listener = bind_with_perms(&inner.cfg.socket_path, gid)?;
         let accept_inner = Arc::clone(&inner);
         let accept_thread = std::thread::Builder::new()
             .name("punar-netd-accept".into())
@@ -184,7 +188,7 @@ fn read_device_id(path: &Path) -> String {
         .unwrap_or_else(|| DEVICE_ID_UNKNOWN.to_string())
 }
 
-fn bind_with_perms(path: &Path, gid: Option<u32>) -> io::Result<UnixListener> {
+fn bind_with_perms(path: &Path, gid: u32) -> io::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt;
 
     use rustix::net::{AddressFamily, SocketType, bind, listen, socket};
@@ -192,9 +196,7 @@ fn bind_with_perms(path: &Path, gid: Option<u32>) -> io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-        if let Some(gid) = gid {
-            let _ = std::os::unix::fs::chown(parent, Some(0), Some(gid));
-        }
+        require_group(parent, gid)?;
     }
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -204,11 +206,27 @@ fn bind_with_perms(path: &Path, gid: Option<u32>) -> io::Result<UnixListener> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     bind(&fd, &address)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    if let Some(gid) = gid {
-        let _ = std::os::unix::fs::chown(path, Some(0), Some(gid));
-    }
+    require_group(path, gid)?;
     listen(&fd, 16)?;
     Ok(UnixListener::from(fd))
+}
+
+fn require_group(path: &Path, expected_gid: u32) -> io::Result<()> {
+    let actual_gid = std::fs::metadata(path)?.gid();
+    if actual_gid != expected_gid {
+        std::os::unix::fs::chown(path, None, Some(expected_gid))?;
+    }
+    let actual_gid = std::fs::metadata(path)?.gid();
+    if actual_gid != expected_gid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} has gid {actual_gid}, expected admission gid {expected_gid}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn accept_loop(inner: Arc<Inner>, listener: UnixListener) {
@@ -625,7 +643,9 @@ mod tests {
         let nft = root.join("nft");
         std::fs::write(&nft, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&nft, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let trusted_uid = std::fs::metadata(&transaction_dir).unwrap().uid();
+        let trusted = std::fs::metadata(&transaction_dir).unwrap();
+        let trusted_uid = trusted.uid();
+        let trusted_gid = trusted.gid();
         let passwd = root.join("passwd");
         let group = root.join("group");
         std::fs::write(
@@ -633,7 +653,7 @@ mod tests {
             format!("punar:x:1000:1000:Punar:{}:/bin/bash\n", root.display()),
         )
         .unwrap();
-        std::fs::write(&group, "punar:x:998:punar\n").unwrap();
+        std::fs::write(&group, format!("punar:x:{trusted_gid}:punar\n")).unwrap();
         let zones = index_zones(vec![ZoneDefinition {
             name: "internet".into(),
             display_name: Some("Internet".into()),
@@ -686,6 +706,11 @@ mod tests {
             std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o660
         );
+        assert_eq!(
+            std::fs::metadata(socket.parent().unwrap()).unwrap().gid(),
+            trusted_gid
+        );
+        assert_eq!(std::fs::metadata(&socket).unwrap().gid(), trusted_gid);
         let mut stream = UnixStream::connect(&socket).unwrap();
         let status = call(&mut stream, "1", "network.status", None);
         assert_eq!(status["result"]["enforcement"]["state"], "available");

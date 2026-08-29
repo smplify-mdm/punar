@@ -31,7 +31,8 @@ Type=oneshot
 #   180 s  managed session launch + child-process generation
 #    12 s  panel open settle + screenshot
 #    60 s  teardown wait after the scope stops
-#    30 s  punar-agentd socket wait after the retention-injection restart
+#   120 s  bounded stop + socket wait around the retention-injection restart
+#    10 s  bounded visibility wait for the pruned record under slow TCG I/O
 #   ~30 s  a few dozen RPCs, jq passes and greps
 # ~5 min of bounded waiting in the worst case. 15 min is the same generous
 # headroom M7 uses for TCG-emulated CI runs, where the quickshell IPC round
