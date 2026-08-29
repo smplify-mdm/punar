@@ -77,16 +77,18 @@ morphs into a short receipt:
 ```text
 You're ready, alice
 
-RECOVERY CODE                     COPY
+LOCAL ACCOUNT RECOVERY CODE       COPY
 7K3M2-R9…-8Q1JH
-Save this somewhere off the device. It is shown once.
+Save this off the device. It can reset this local sign-in; it does not unlock
+drive encryption. Shown once.
 
                                   ENTER DESKTOP  ↵
 ```
 
 The transition is the only flourish: 300 ms, one opacity/vertical movement,
-then the desktop. Reduced-motion mode makes it instant. A recovery code is an
-output of account creation, never another question.
+then the desktop. Reduced-motion mode makes it instant. The local-account
+recovery code is an output of account creation, never another question and
+never a substitute for the installer's separately scoped disk recovery key.
 
 ## Interaction rules
 

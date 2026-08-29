@@ -1268,7 +1268,7 @@ Scope {
                                     spacing: 8
 
                                     Meta {
-                                        text: "Recovery code"
+                                        text: "Local account recovery code"
                                         color: Theme.shellInk3
                                     }
                                     Text {
@@ -1280,12 +1280,12 @@ Scope {
                                         font.weight: 600
                                         font.letterSpacing: Theme.tracking(16, 0.08)
                                         color: Theme.shellFg
-                                        Accessible.name: "Recovery code " + panel.recoveryCode
-                                        Accessible.description: "Shown once. Save it somewhere off this device."
+                                        Accessible.name: "Local account recovery code " + panel.recoveryCode
+                                        Accessible.description: "Shown once. It can reset this local sign-in and does not unlock drive encryption."
                                     }
                                     Text {
                                         width: parent.width
-                                        text: "Save this somewhere off the device. It is shown once."
+                                        text: "Save this off the device. It can reset this local sign-in; it does not unlock drive encryption. Shown once."
                                         wrapMode: Text.Wrap
                                         font.family: Theme.fontSans
                                         font.pixelSize: 12
