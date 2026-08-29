@@ -56,6 +56,12 @@ question. Their defaults are already safe:
 - network, timezone, enrollment, appearance, and accessibility remain
   discoverable in System Control after the desktop is usable.
 
+After the desktop is usable, a separate, dismissible **Set up your
+workstation** guide may help the user choose AI tools, secure connectivity,
+project environments, or REST API testing. It is optional, performs only real
+catalog-backed actions, and never adds questions or fabricated state to this
+account-creation flow. See `workstation-activation.md`.
+
 The three closing facts describe this setup transaction, not every future
 network action an installed app can take. In particular, the interface does
 not claim that "nothing leaves this machine": a browser can use the network

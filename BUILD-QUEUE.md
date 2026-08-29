@@ -16,7 +16,7 @@ already demonstrated** by the 760 green assertions. The genuinely open ones:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. Connected ARM/HVF testing found and locally proved the Flatpak 1.18 `active` revision-column correction; follow-up CI is pending. Generic user-defined web-app install/context support remains M11 work. |
+| 7 | launch browser / **web app** | **LOCALLY PROVEN on clean ARM64 release VM (2026-08-27); EXPANDED GATE IN PROGRESS:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` adds a responsive icon-led application library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The next catalog revision adds Claude and ChatGPT as clearly labelled official web apps, with category/keyword-aware offline discovery and cloud-data disclosures; local contract, QML, and ARM runtime verification are in progress. Connected ARM/HVF testing found and locally proved the Flatpak 1.18 `active` revision-column correction; follow-up CI is pending. Generic user-defined web-app install/context support remains M11 work. |
 | 19 | enforce project network rule | M12, unbuilt (`punar-netd` is a 14-line stub) |
 | 20 | display local network activity | M12, unbuilt |
 | 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
@@ -39,6 +39,17 @@ unshipped.
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
 configuration syntax and must not leak back into the shell or user guides.
+
+The optional first-desktop activation direction is now explicit in
+`docs/design/workstation-activation.md`: keep account creation to its three
+values, then offer a dismissible, truthful path to reviewed AI tools,
+WireGuard/Tailscale or an actually available Smplify relay, isolated project
+environments, and REST API testing. Nothing is installed, registered, or
+shown as active until the user takes a real action and the backend verifies it.
+These conveniences inherit Punar's non-negotiable security floor: reviewed and
+digest-bound supply, sandboxing, secret-broker use, explicit network effects,
+least privilege, auditability, and fail-closed negative tests. No developer or
+onboarding mode may bypass those controls.
 
 ---
 
@@ -461,7 +472,8 @@ locally like our smplify deployment and other VMs."*
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
 implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
-six common apps. Native sources are commit- and metadata-digest-pinned per
+eight common apps, including clearly labelled official web entries for Claude
+and ChatGPT. Native sources are commit- and metadata-digest-pinned per
 architecture; unsupported ARM64 publisher clients use labelled Chromium web
 fallbacks. Spotify's path is proven on a clean ARM64 release VM and the
 expanded library passed its x86 runtime surface in run 33146409332. Connected
