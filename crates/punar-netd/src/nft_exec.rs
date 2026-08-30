@@ -393,7 +393,7 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
-    fn fixture(script: &str) -> (PathBuf, PathBuf, u32) {
+    fn transaction_fixture() -> (PathBuf, u32) {
         let root = std::env::temp_dir().join(format!(
             "punar-netd-nft-exec-{}-{}",
             std::process::id(),
@@ -402,10 +402,16 @@ mod tests {
         let transaction_dir = root.join("transactions");
         fs::create_dir_all(&transaction_dir).unwrap();
         fs::set_permissions(&transaction_dir, fs::Permissions::from_mode(0o750)).unwrap();
+        let uid = fs::symlink_metadata(&transaction_dir).unwrap().uid();
+        (transaction_dir, uid)
+    }
+
+    fn fixture(script: &str) -> (PathBuf, PathBuf, u32) {
+        let (transaction_dir, uid) = transaction_fixture();
+        let root = transaction_dir.parent().unwrap();
         let binary = root.join("fake-nft");
         fs::write(&binary, script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-        let uid = fs::symlink_metadata(&transaction_dir).unwrap().uid();
         (binary, transaction_dir, uid)
     }
 
@@ -447,24 +453,32 @@ stat -c '%a' "$2" > "$0.mode"
 
     #[test]
     fn nonzero_and_timeout_are_failures_not_successes() {
-        let (binary, directory, uid) = fixture("#!/bin/sh\necho refused >&2\nexit 9\n");
-        let executor = NftExecutor::new(binary.clone(), directory, uid, Duration::from_secs(1));
+        // `/bin/sh -f <transaction>` is a stable test double for the fixed
+        // `nft -f <transaction>` argv. Keeping the executable immutable
+        // removes executable-creation and rewrite timing from this assertion;
+        // only this test's transaction contents are shell syntax.
+        let (directory, uid) = transaction_fixture();
+        let executor = NftExecutor::new(
+            PathBuf::from("/bin/sh"),
+            directory.clone(),
+            uid,
+            Duration::from_secs(1),
+        );
         assert!(matches!(
-            executor.apply_checked("bad"),
+            executor.apply_checked("echo refused >&2\nexit 9\n"),
             Err(ExecError::Rejected(reason)) if reason == "refused"
         ));
-        fs::write(&binary, "#!/bin/sh\nsleep 1\n").unwrap();
         assert!(matches!(
             NftExecutor::new(
-                binary.clone(),
-                binary.parent().unwrap().join("transactions"),
+                PathBuf::from("/bin/sh"),
+                directory.clone(),
                 uid,
                 Duration::from_millis(20),
             )
-            .apply_checked("slow"),
+            .apply_checked("sleep 1\n"),
             Err(ExecError::Timeout(_))
         ));
-        fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+        fs::remove_dir_all(directory.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -501,12 +515,20 @@ cp "$2" "$0.rules"
         let rules = fs::read_to_string(binary.with_file_name("fake-nft.rules")).unwrap();
         assert!(rules.contains("socket cgroupv2 level 1 \"user.slice\" counter"));
         assert!(rules.ends_with("destroy table inet punar-net-probe\n"));
-        fs::write(&binary, "#!/bin/sh\necho unsupported >&2\nexit 1\n").unwrap();
+        let (failure_binary, failure_directory, failure_uid) =
+            fixture("#!/bin/sh\necho unsupported >&2\nexit 1\n");
         assert!(matches!(
-            executor.probe_cgroup_v2(),
+            NftExecutor::new(
+                failure_binary.clone(),
+                failure_directory,
+                failure_uid,
+                Duration::from_secs(1),
+            )
+            .probe_cgroup_v2(),
             EnforcementCapability::Unavailable { reason } if reason.contains("unsupported")
         ));
         fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+        fs::remove_dir_all(failure_binary.parent().unwrap()).unwrap();
     }
 
     #[test]
