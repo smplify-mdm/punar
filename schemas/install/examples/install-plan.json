@@ -74,5 +74,33 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "70d834d0a5d234adba171c4a6746561c5ad2ce7c9684a650cab322d89ceee554"
+  "plan_token": "70d834d0a5d234adba171c4a6746561c5ad2ce7c9684a650cab322d89ceee554",
+  "hardware_report": {
+    "v": 1,
+    "generated_at": "2026-08-30T18:45:00Z",
+    "architecture": "x86_64",
+    "kernel_release": "6.18.4-punar1-1",
+    "overall": "full",
+    "graphics_usable": true,
+    "disk_below_minimum_target": false,
+    "bare_hardware_qualified": false,
+    "devices": [
+      {
+        "bus": "pci",
+        "address": "0000:00:01.0",
+        "function": "graphics",
+        "display_name": "PCI 1af4:1050",
+        "modalias": "pci:v00001AF4d00001050sv00000000",
+        "vendor_id": "1af4",
+        "device_id": "1050",
+        "class_id": "030000",
+        "driver": "virtio_gpu",
+        "claiming_modules": ["virtio_gpu"],
+        "requested_firmware": [],
+        "missing_firmware": [],
+        "coverage": "full",
+        "reason": "driver_bound"
+      }
+    ]
+  }
 }

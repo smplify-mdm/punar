@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/install/hardware-report.json",
+  "title": "Punar installer hardware report",
+  "description": "Bounded, privacy-minimized evidence from the live kernel. This is not a physical hardware qualification claim.",
+  "type": "object",
+  "required": [
+    "v",
+    "generated_at",
+    "architecture",
+    "kernel_release",
+    "overall",
+    "graphics_usable",
+    "disk_below_minimum_target",
+    "bare_hardware_qualified",
+    "devices"
+  ],
+  "properties": {
+    "v": { "const": 1 },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "architecture": { "enum": ["x86_64", "aarch64"] },
+    "kernel_release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._+\\-]+$"
+    },
+    "overall": { "$ref": "#/$defs/coverage" },
+    "graphics_usable": { "type": "boolean" },
+    "disk_below_minimum_target": { "type": "boolean" },
+    "bare_hardware_qualified": {
+      "const": false,
+      "description": "May change only after the exact model passes the published physical test matrix."
+    },
+    "devices": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/device" }
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "graphics_usable": { "const": true } },
+        "required": ["graphics_usable"]
+      },
+      "then": {
+        "properties": {
+          "devices": {
+            "contains": {
+              "type": "object",
+              "required": ["function", "driver", "coverage"],
+              "properties": {
+                "function": { "const": "graphics" },
+                "driver": { "$ref": "#/$defs/module" },
+                "coverage": { "enum": ["full", "partial"] }
+              }
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "coverage": { "enum": ["full", "partial", "unsupported"] },
+    "module": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8,
+      "pattern": "^[0-9a-f]+$"
+    },
+    "firmware": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[!-~]+$"
+    },
+    "device": {
+      "type": "object",
+      "required": [
+        "bus",
+        "address",
+        "function",
+        "display_name",
+        "claiming_modules",
+        "requested_firmware",
+        "missing_firmware",
+        "coverage",
+        "reason"
+      ],
+      "properties": {
+        "bus": { "enum": ["pci", "usb", "platform"] },
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "function": {
+          "enum": ["graphics", "network", "storage", "input", "audio", "bluetooth", "other"]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "modalias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[!-~]+$"
+        },
+        "vendor_id": { "$ref": "#/$defs/identifier" },
+        "device_id": { "$ref": "#/$defs/identifier" },
+        "class_id": { "$ref": "#/$defs/identifier" },
+        "driver": { "$ref": "#/$defs/module" },
+        "claiming_modules": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/module" }
+        },
+        "requested_firmware": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/firmware" }
+        },
+        "missing_firmware": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/firmware" }
+        },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "reason": {
+          "enum": [
+            "driver_bound",
+            "firmware_missing",
+            "driver_unbound",
+            "no_module_claim",
+            "modalias_unavailable",
+            "module_metadata_unavailable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

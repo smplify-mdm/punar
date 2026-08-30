@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "generated_at": "2026-08-30T18:45:00Z",
+  "architecture": "x86_64",
+  "kernel_release": "6.18.4-punar1-1",
+  "overall": "unsupported",
+  "graphics_usable": false,
+  "disk_below_minimum_target": false,
+  "bare_hardware_qualified": true,
+  "devices": []
+}

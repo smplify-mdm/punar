@@ -18,10 +18,11 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use punar_common::install::{
     InstallApplyParams, InstallAwaiting, InstallBootArtifactPlan, InstallDiskIdentity,
-    InstallEncryption, InstallFailure, InstallOverallState, InstallPartitionPlan,
-    InstallPayloadPlan, InstallPhase, InstallPhaseState, InstallPlan, InstallPlanParams,
-    InstallPlanResult, InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult,
-    InstallTarget, InstallTargetPartition, InstallTargetsResult, canonical_json,
+    InstallEncryption, InstallFailure, InstallHardwareCoverage, InstallHardwareReport,
+    InstallOverallState, InstallPartitionPlan, InstallPayloadPlan, InstallPhase, InstallPhaseState,
+    InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryAckParams,
+    InstallRecoveryMode, InstallStatusResult, InstallTarget, InstallTargetPartition,
+    InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
     Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
@@ -32,6 +33,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::hardware::{HardwareSources, observe_install_hardware};
 use crate::util::{hex, random_alnum, random_hex, sha256_hex, write_atomic, write_atomic_synced};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
@@ -63,6 +65,7 @@ const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
 const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const HARDWARE_REPORT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -88,6 +91,7 @@ pub struct InstallerSources {
     pub bootctl_path: PathBuf,
     pub repart_definitions_root: PathBuf,
     pub repart_runtime_root: PathBuf,
+    pub hardware: HardwareSources,
     /// Test-only seam. Production always verifies exact manifest bytes
     /// against `release_keys_dir` and leaves this `None`.
     pub release_manifest_override: Option<ReleaseManifest>,
@@ -112,6 +116,10 @@ pub struct InstallerSources {
     /// 2 read-only for the final installed-system check.
     #[cfg(test)]
     pub mounted_root_override: Option<PathBuf>,
+    /// Unit-test-only evidence. Production always observes the running
+    /// kernel, sysfs, module aliases and firmware tree.
+    #[cfg(test)]
+    pub hardware_report_override: Option<InstallHardwareReport>,
 }
 
 impl Default for InstallerSources {
@@ -132,6 +140,7 @@ impl Default for InstallerSources {
             bootctl_path: PathBuf::from("/usr/bin/bootctl"),
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),
+            hardware: HardwareSources::default(),
             release_manifest_override: None,
             architecture_override: None,
             boot_platform_override: None,
@@ -143,6 +152,8 @@ impl Default for InstallerSources {
             mounted_data_override: None,
             #[cfg(test)]
             mounted_root_override: None,
+            #[cfg(test)]
+            hardware_report_override: None,
         }
     }
 }
@@ -175,6 +186,8 @@ pub struct Installer {
     /// verification compares the re-opened filesystem against this value,
     /// not merely against another serialization of caller inputs.
     seed_digest: Arc<Mutex<Option<String>>>,
+    /// Digest of the exact hardware evidence written beside the seed.
+    hardware_report_digest: Arc<Mutex<Option<String>>>,
 }
 
 /// Non-serializable, non-debuggable apply inputs duplicated from descriptors
@@ -292,6 +305,7 @@ impl Installer {
             status: Arc::new(Mutex::new(InstallStatusResult::idle())),
             recovery: Arc::new(RecoveryGate::default()),
             seed_digest: Arc::new(Mutex::new(None)),
+            hardware_report_digest: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -352,6 +366,7 @@ impl Installer {
             Ok(next)
         })?;
         *self.seed_digest.lock().unwrap() = None;
+        *self.hardware_report_digest.lock().unwrap() = None;
         Ok(())
     }
 
@@ -860,6 +875,21 @@ impl Installer {
         let mut seed_bytes =
             serde_json::to_vec(&seed).map_err(|error| InstallError::Invalid(error.to_string()))?;
         seed_bytes.push(b'\n');
+        let hardware_report =
+            self.observe_hardware_report(plan.disk.size_bytes < TARGET_DISK_BYTES)?;
+        if !hardware_report.graphics_usable {
+            return Err(InstallError::Refused(
+                "the usable graphics driver disappeared before installed-state seeding".into(),
+            ));
+        }
+        let mut hardware_report_bytes = serde_json::to_vec(&hardware_report)
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        hardware_report_bytes.push(b'\n');
+        if hardware_report_bytes.len() > HARDWARE_REPORT_MAX_BYTES {
+            return Err(InstallError::Refused(
+                "the hardware report exceeds its fixed installed-state limit".into(),
+            ));
+        }
 
         let data = self.mount_data_volume(plan, inputs, &token, false)?;
         let lib_dir = data.path().join("lib");
@@ -885,6 +915,11 @@ impl Installer {
         if let Some(answers) = inputs.oobe_answers() {
             write_new_synced_exact(&install_dir.join("oobe-answers.json"), answers, 0o600)?;
         }
+        write_new_synced_exact(
+            &punar_dir.join("hardware-report.json"),
+            &hardware_report_bytes,
+            0o644,
+        )?;
         write_new_synced_exact(&install_dir.join("seed.json"), &seed_bytes, 0o644)?;
 
         let filesystem = File::open(data.path())?;
@@ -892,6 +927,7 @@ impl Installer {
         drop(filesystem);
         data.finish()?;
         *self.seed_digest.lock().unwrap() = Some(sha256_hex(&seed_bytes));
+        *self.hardware_report_digest.lock().unwrap() = Some(sha256_hex(&hardware_report_bytes));
         self.enter_phase(InstallPhase::VerifyInstalled)
     }
 
@@ -921,6 +957,12 @@ impl Installer {
             .unwrap()
             .clone()
             .ok_or_else(|| InstallError::Invalid("no seed identity is active".into()))?;
+        let expected_hardware_report_digest = self.hardware_report_digest.lock().unwrap().clone();
+        let Some(expected_hardware_report_digest) = expected_hardware_report_digest else {
+            return Err(InstallError::Invalid(
+                "no hardware-report identity is active".into(),
+            ));
+        };
 
         let data = self.mount_data_volume(plan, inputs, &token, true)?;
         let manifest = self.release_manifest_for_plan(plan)?;
@@ -930,6 +972,7 @@ impl Installer {
             params,
             inputs,
             &expected_seed_digest,
+            &expected_hardware_report_digest,
             &format!("{}-{}", manifest.image_id, manifest.version),
         )?;
         data.finish()?;
@@ -944,6 +987,7 @@ impl Installer {
 
         self.complete_transaction_status()?;
         *self.seed_digest.lock().unwrap() = None;
+        *self.hardware_report_digest.lock().unwrap() = None;
         Ok(())
     }
 
@@ -1251,6 +1295,39 @@ impl Installer {
         })
     }
 
+    fn observe_hardware_report(
+        &self,
+        disk_below_minimum_target: bool,
+    ) -> Result<InstallHardwareReport, InstallError> {
+        #[cfg(test)]
+        if let Some(mut report) = self.sources.hardware_report_override.clone() {
+            report.disk_below_minimum_target = disk_below_minimum_target;
+            report.bare_hardware_qualified = false;
+            Self::require_bounded_hardware_report(&report)?;
+            return Ok(report);
+        }
+
+        let report = observe_install_hardware(
+            &self.sources.hardware,
+            &self.architecture().to_string(),
+            disk_below_minimum_target,
+        )
+        .map_err(InstallError::Io)?;
+        Self::require_bounded_hardware_report(&report)?;
+        Ok(report)
+    }
+
+    fn require_bounded_hardware_report(report: &InstallHardwareReport) -> Result<(), InstallError> {
+        let bytes =
+            serde_json::to_vec(report).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        if bytes.len().saturating_add(1) > HARDWARE_REPORT_MAX_BYTES {
+            return Err(InstallError::Refused(
+                "the hardware report exceeds its fixed installed-state limit".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn plan(&self, params: &InstallPlanParams) -> Result<InstallPlanResult, InstallError> {
         let result = self.compute_plan(params)?;
         self.plans
@@ -1337,6 +1414,15 @@ impl Installer {
             params.encryption,
         )?;
 
+        let hardware_report =
+            self.observe_hardware_report(observed.target.size_bytes < TARGET_DISK_BYTES)?;
+        if !hardware_report.graphics_usable {
+            return Err(InstallError::Refused(
+                "no graphics device has a matching, bound kernel driver; this desktop image cannot be installed on the selected hardware"
+                    .into(),
+            ));
+        }
+
         let mut warnings = Vec::new();
         if observed.target.size_bytes < TARGET_DISK_BYTES {
             warnings.push(
@@ -1352,6 +1438,17 @@ impl Installer {
                 "The selected disk already contains Punar data or encrypted data; installation destroys it and does not provide repair-mode preservation."
                     .into(),
             );
+        }
+        match hardware_report.overall {
+            InstallHardwareCoverage::Full => {}
+            InstallHardwareCoverage::Partial => warnings.push(
+                "Some detected hardware has a matching kernel module but is unbound or missing requested firmware. Review the hardware report before installing."
+                    .into(),
+            ),
+            InstallHardwareCoverage::Unsupported => warnings.push(
+                "Some detected hardware has no matching kernel module. Review the hardware report before installing; this is not a physical qualification claim."
+                    .into(),
+            ),
         }
         debug_assert!(data_bytes >= DATA_MINIMUM);
 
@@ -1396,6 +1493,7 @@ impl Installer {
             v: 1,
             plan,
             plan_token,
+            hardware_report,
         })
     }
 
@@ -2805,6 +2903,7 @@ fn verify_installed_seed(
     params: &InstallApplyParams,
     inputs: &InstallApplyInputs,
     expected_seed_digest: &str,
+    expected_hardware_report_digest: &str,
     expected_image_version: &str,
 ) -> Result<(), InstallError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -2873,6 +2972,33 @@ fn verify_installed_seed(
     {
         return Err(InstallError::Trust(
             "the installed device id is invalid".into(),
+        ));
+    }
+
+    let hardware_path = punar_dir.join("hardware-report.json");
+    let hardware_bytes = read_bounded_regular(
+        &hardware_path,
+        HARDWARE_REPORT_MAX_BYTES,
+        "installed hardware report",
+    )?;
+    verify_installed_file_mode(&hardware_path, 0o644)?;
+    if sha256_hex(&hardware_bytes) != expected_hardware_report_digest {
+        return Err(InstallError::Trust(
+            "the installed hardware report changed between its durable write and read-only verification"
+                .into(),
+        ));
+    }
+    let hardware: InstallHardwareReport = serde_json::from_slice(&hardware_bytes)
+        .map_err(|_| InstallError::Trust("the installed hardware report is invalid".into()))?;
+    if hardware.v != 1
+        || hardware.architecture != plan.architecture
+        || !punar_common::time::is_rfc3339_timestamp(&hardware.generated_at)
+        || !hardware.graphics_usable
+        || hardware.disk_below_minimum_target != (plan.disk.size_bytes < TARGET_DISK_BYTES)
+        || hardware.bare_hardware_qualified
+    {
+        return Err(InstallError::Trust(
+            "the installed hardware report does not match the confirmed installation".into(),
         ));
     }
 
@@ -3552,6 +3678,32 @@ mod tests {
                     release_manifest_override: Some(manifest),
                     architecture_override: Some(Architecture::X86_64),
                     boot_platform_override: Some(BootPlatform::Uefi),
+                    hardware_report_override: Some(InstallHardwareReport {
+                        v: 1,
+                        generated_at: "2026-08-30T00:00:00Z".into(),
+                        architecture: "x86_64".into(),
+                        kernel_release: "test-kernel".into(),
+                        overall: InstallHardwareCoverage::Full,
+                        graphics_usable: true,
+                        disk_below_minimum_target: false,
+                        bare_hardware_qualified: false,
+                        devices: vec![punar_common::install::InstallHardwareDevice {
+                            bus: punar_common::install::InstallHardwareBus::Pci,
+                            address: "0000:00:01.0".into(),
+                            function: punar_common::install::InstallHardwareFunction::Graphics,
+                            display_name: "Fixture graphics".into(),
+                            modalias: Some("pci:v00001AF4d00001050".into()),
+                            vendor_id: Some("1af4".into()),
+                            device_id: Some("1050".into()),
+                            class_id: Some("030000".into()),
+                            driver: Some("virtio_gpu".into()),
+                            claiming_modules: vec!["virtio_gpu".into()],
+                            requested_firmware: Vec::new(),
+                            missing_firmware: Vec::new(),
+                            coverage: InstallHardwareCoverage::Full,
+                            reason: punar_common::install::InstallHardwareReason::DriverBound,
+                        }],
+                    }),
                     ..InstallerSources::default()
                 },
             }
@@ -4263,6 +4415,9 @@ mod tests {
         );
         assert_eq!(first.plan.partitions.len(), 4);
         assert_eq!(first.plan.disk.serial, "TARGET-128G");
+        assert!(first.hardware_report.graphics_usable);
+        assert!(!first.hardware_report.disk_below_minimum_target);
+        assert!(!first.hardware_report.bare_hardware_qualified);
         assert_eq!(
             first.plan.payload.uncompressed_digest_sha256,
             "4444444444444444444444444444444444444444444444444444444444444444"
@@ -4296,6 +4451,24 @@ mod tests {
             changed.plan.disk.existing_gpt_sha256
         );
         assert_ne!(first.plan_token, changed.plan_token);
+    }
+
+    #[test]
+    fn plan_refuses_missing_graphics_without_writing_the_target() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let before = first_mib(&fixture.sources.dev_root.join("vda"));
+        let report = fixture.sources.hardware_report_override.as_mut().unwrap();
+        report.overall = InstallHardwareCoverage::Unsupported;
+        report.graphics_usable = false;
+        report.devices.clear();
+
+        let error = fixture
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap_err();
+        assert!(error.to_string().contains("no graphics device"));
+        assert_eq!(before, first_mib(&fixture.sources.dev_root.join("vda")));
     }
 
     #[test]
@@ -4507,14 +4680,20 @@ mod tests {
             Some(InstallPhase::VerifyInstalled)
         );
         let seed_path = data.join("lib/punar/install/seed.json");
+        let hardware_path = data.join("lib/punar/hardware-report.json");
         let seed: InstallSeedDocument =
             serde_json::from_slice(&fs::read(&seed_path).unwrap()).unwrap();
+        let hardware: InstallHardwareReport =
+            serde_json::from_slice(&fs::read(&hardware_path).unwrap()).unwrap();
         assert_eq!(seed.v, 1);
         assert_eq!(seed.locale, "C.UTF-8");
         assert_eq!(seed.keymap, "us");
         assert!(punar_common::time::is_rfc3339_timestamp(&seed.installed_at));
         assert!(seed.disk_encrypted);
         assert_eq!(seed.disk_recovery.mode, InstallRecoveryMode::PersonalCopy);
+        assert_eq!(hardware.architecture, "x86_64");
+        assert!(hardware.graphics_usable);
+        assert!(!hardware.bare_hardware_qualified);
         assert_eq!(
             fs::read(data.join("lib/punar/install/oobe-answers.json")).unwrap(),
             answers
@@ -4529,6 +4708,10 @@ mod tests {
         );
         assert_eq!(
             fs::metadata(&seed_path).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(&hardware_path).unwrap().permissions().mode() & 0o7777,
             0o644
         );
         assert_eq!(
@@ -4639,6 +4822,18 @@ mod tests {
         );
 
         fs::remove_file(data.join("lib/punar/install/oobe-answers.json")).unwrap();
+        let hardware_path = data.join("lib/punar/hardware-report.json");
+        let original_hardware = fs::read(&hardware_path).unwrap();
+        let mut changed_hardware = original_hardware.clone();
+        changed_hardware.push(b' ');
+        fs::write(&hardware_path, changed_hardware).unwrap();
+        let error = installer
+            .verify_installed_system(&result.plan, &params, &inputs)
+            .unwrap_err();
+        assert!(error.to_string().contains("hardware report changed"));
+        assert_eq!(installer.status().state, InstallOverallState::Running);
+        fs::write(&hardware_path, original_hardware).unwrap();
+
         let seed_path = data.join("lib/punar/install/seed.json");
         let mut seed = fs::read(&seed_path).unwrap();
         seed.push(b' ');

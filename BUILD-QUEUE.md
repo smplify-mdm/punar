@@ -414,8 +414,13 @@ answer drift before success. Its no-NVRAM/digest/phase, fixed cryptsetup argv,
 secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
 privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
 Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
-hardware-report/audit handoff, ISO assembly and the unattended VM lane are
-still next.
+the audit handoff, ISO assembly and the unattended VM lane are still next. The
+hardware-report handoff is now closed in code and contract: PCI, USB and ARM
+platform devices are classified from modalias/module binding and fixed-argv
+firmware metadata; no serial/MAC/user data is collected; no usable graphics is
+a blocker; partial/unsupported devices are warnings; and the fresh report is
+durably written, digest-bound and read-only verified beside the seed while
+physical qualification remains explicitly false.
 
 The executor's compressed-versus-written identity ambiguity is closed before
 its first write: the signed release manifest now binds both the downloaded
@@ -497,9 +502,13 @@ memory, enforces plan fields, owner/modes and OOBE presence, and refuses
 tampering or an unrequested answer file. Native ARM64 unit tests prove the
 fixed unlock/close argv, secret absence from argv, exact seed content/modes,
 successful closure and both refusal paths. Organization recovery-receipt
-orchestration, Raspberry Pi boot, hardware-report generation/copy, audit
-wiring, live mount proof and live descriptor-duplication proof still remain
-before `install.apply` is registered.
+orchestration, Raspberry Pi boot, audit wiring, live mount proof and live
+descriptor-duplication proof still remain before `install.apply` is
+registered. Hardware reporting is no longer in that remainder: its bounded
+PCI/USB/platform observer, ARM-aware categories, strict schema, plan-time
+graphics blocker/warnings, privacy exclusions, installed-state copy and exact
+read-only digest verification are locally green on ARM64 and cross-check on
+x86_64.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

@@ -739,12 +739,25 @@ Root-only, non-mutating, and audited as `action: "install.plan"`,
    digest/size, the signed uncompressed-slot digest/size, and the signed boot
    artifact kind, filename, digest and size. The latter binds either the UKI
    or Raspberry Pi boot filesystem into the same confirmation token.
+6. walks PCI, USB and ARM platform devices, resolves each modalias against the
+   running kernel's bounded `modules.alias`, checks the bound driver and its
+   fixed-argv `modinfo` firmware requirements, and returns a privacy-minimized
+   `hardware_report` conforming to
+   `schemas/install/hardware-report.json`. No serial number, MAC address or
+   user data exists in that object. No usable bound graphics driver is an
+   install refusal; partial or unsupported non-graphics devices become a
+   visible plan warning rather than a fabricated support claim.
 
 The response validates against `schemas/install/plan.json`. `plan_token` is
 SHA-256 over compact, recursively key-sorted JSON of the nested `plan` object
 (the `jq -cS` JSON bytes, excluding jq's trailing newline). A change to either
 GPT edge or any plan field changes
-the token. The internal zero-write apply preflight now keeps a bounded token
+the token. The detailed `hardware_report` is deliberately adjacent evidence,
+not an input to a disk-erasure authorization; its partial/unsupported summary
+is copied into `plan.warnings` and therefore is token-bound. The seed phase
+observes hardware again, writes that fresh report to
+`/var/lib/punar/hardware-report.json`, and verifies its exact durable digest
+after a read-only reopen. The internal zero-write apply preflight now keeps a bounded token
 registry for this daemon boot and re-reads the serial, WWN, size,
 logical-sector size, both GPT edges and signed release. Only an exact match may
 reach the future executor, and failed revalidation cannot silently register a

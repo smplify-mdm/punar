@@ -1336,17 +1336,22 @@ assessment-aware loader configuration, calls `syncfs`, and must unmount before
 entering `seed`. The seed executor derives and unlocks partition 4 with one
 fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
 creates a random machine id, random device id, private Punar state directory,
-the advisory seed and the optional byte-identical OOBE passthrough. The seed is
-written last. It then unmounts and reopens `@var` read-only, compares the exact
-seed digest retained only in daemon memory, validates plan fields, ownership,
-modes and OOBE bytes, and reopens root slot A read-only before it may publish
-success. Unit tests prove exact unlock/close argv, secret absence from argv,
-the seed shape/modes, successful closure and tamper/unrequested-answer refusal.
+the advisory seed, a bounded privacy-minimized hardware report and the optional
+byte-identical OOBE passthrough. The report walks PCI, USB and ARM platform
+devices, resolves modaliases against the running kernel, checks bound modules
+and requested firmware, and permanently keeps
+`bare_hardware_qualified: false`; kernel evidence cannot impersonate a physical
+test matrix. The seed is written last. The executor then unmounts and reopens
+`@var` read-only, compares the exact seed and hardware-report digests retained
+only in daemon memory, validates plan fields, ownership, modes and OOBE bytes,
+and reopens root slot A read-only before it may publish success. Unit tests
+prove exact unlock/close argv, secret absence from argv, hardware classification
+and privacy bounds, the seed/report shapes and modes, successful closure and
+tamper/unrequested-answer refusal.
 The privileged real-vfat, LUKS and btrfs mounts still need the live installer
 VM gate. Organization receipt orchestration, Raspberry Pi boot-filesystem
-installation, hardware-report generation/copy, the integrated audit path and
-public descriptor orchestration remain unimplemented, so this checkpoint is
-not an installability claim.
+installation, the integrated audit path and public descriptor orchestration
+remain unimplemented, so this checkpoint is not an installability claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
@@ -1628,6 +1633,13 @@ route around.
 The report is written to `/var/lib/punar/hardware-report.json` at the `seed`
 phase and rendered in System Control → SYSTEM, so **the machine keeps its
 own honest coverage record** and a support conversation starts from a fact.
+The implementation bounds the alias, device, firmware and serialized-report
+sizes; invokes only fixed-argv `modinfo`; rejects a missing usable graphics
+binding before confirmation; returns the selected-disk report beside
+`install.plan`; and writes a fresh report during `seed`. Final verification
+reopens that file read-only and compares its exact durable digest before an
+installation may become `succeeded`. The remaining proof is the privileged
+installer VM and then the published physical matrix—not another parser.
 
 ### 9.4 The honesty paragraph
 
@@ -1747,7 +1759,7 @@ untested — a seam is exactly where a property gets dropped by both sides.
 | # | Assertion |
 |---|---|
 | I29 | The installed system contains **no login-capable account**: every entry in the merged `passwd`/`shadow` view has a locked or absent authenticator, `id punar` fails, and `root` reports `L`. **An install that produced a usable account would fail here** — the negative form of the requirement, which is the form that can be checked. |
-| I30 | `/var/lib/punar` exists, is `0700 root:root`, and is on the `/var` mount; `/var/lib/punar/install/seed.json` validates against `onboarding.md` §4.3's shape, `diskEncrypted` is `true` for both encrypted lanes and `false` for the opt-out lane, and `diskRecovery.mode` is exactly `personal_copy`, `organization_escrow`, or `none` as appropriate. When an `oobe-answers.json` was supplied it is present and **byte-identical** to the file the answer disk carried. |
+| I30 | `/var/lib/punar` exists, is `0700 root:root`, and is on the `/var` mount; `/var/lib/punar/install/seed.json` validates against `onboarding.md` §4.3's shape, `diskEncrypted` is `true` for both encrypted lanes and `false` for the opt-out lane, and `diskRecovery.mode` is exactly `personal_copy`, `organization_escrow`, or `none` as appropriate. `/var/lib/punar/hardware-report.json` validates against its schema, contains no serial/MAC/user data, keeps `bare_hardware_qualified: false`, and is byte-identical to the digest retained before the read-only reopen. When an `oobe-answers.json` was supplied it is present and **byte-identical** to the file the answer disk carried. |
 | I31 | **The seam works end to end.** With `seed.json` in place, first boot runs (no `first-boot.json` marker exists for any user, because no user exists), its Account stage creates the account, and **that account then logs in** — `su - <user>` on the serial console succeeds. This assertion is `onboarding.md`'s check invoked from the install lane rather than a second implementation of it, so a change on either side of the seam breaks it exactly once. |
 | I32 | The keymap chosen at install is **pre-selected** on first boot's stage 01, labelled `from install`, and a **missing or corrupt `seed.json` degrades to the defaults with no error shown** — the advisory-not-authority rule, tested in its failing direction, which is the direction that matters. |
 

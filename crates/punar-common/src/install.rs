@@ -91,6 +91,93 @@ pub struct InstallTargetsResult {
     pub targets: Vec<InstallTarget>,
 }
 
+/// Offline support posture for one observed device and for the report as a
+/// whole. `partial` is deliberately distinct from `unsupported`: a driver
+/// may exist while firmware or binding evidence is incomplete.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallHardwareCoverage {
+    Full,
+    Partial,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallHardwareBus {
+    Pci,
+    Usb,
+    Platform,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallHardwareFunction {
+    Graphics,
+    Network,
+    Storage,
+    Input,
+    Audio,
+    Bluetooth,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallHardwareReason {
+    DriverBound,
+    FirmwareMissing,
+    DriverUnbound,
+    NoModuleClaim,
+    ModaliasUnavailable,
+    ModuleMetadataUnavailable,
+}
+
+/// One kernel-observed device. No serial number, MAC address, network
+/// destination or user data belongs in this report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallHardwareDevice {
+    pub bus: InstallHardwareBus,
+    pub address: String,
+    pub function: InstallHardwareFunction,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    pub claiming_modules: Vec<String>,
+    pub requested_firmware: Vec<String>,
+    pub missing_firmware: Vec<String>,
+    pub coverage: InstallHardwareCoverage,
+    pub reason: InstallHardwareReason,
+}
+
+/// Result returned before destructive confirmation. The seed phase observes
+/// the same bounded evidence again and writes that fresh report into installed
+/// shared state, then verifies its exact durable bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallHardwareReport {
+    pub v: u8,
+    pub generated_at: String,
+    pub architecture: String,
+    pub kernel_release: String,
+    pub overall: InstallHardwareCoverage,
+    pub graphics_usable: bool,
+    pub disk_below_minimum_target: bool,
+    /// Remains false until this exact model has passed the published physical
+    /// hardware matrix. Kernel binding is not a qualification claim.
+    pub bare_hardware_qualified: bool,
+    pub devices: Vec<InstallHardwareDevice>,
+}
+
 /// The physical identity inside the hashed plan.  `install.apply` will
 /// re-read all of it immediately before its first write.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -172,6 +259,10 @@ pub struct InstallPlanResult {
     pub v: u8,
     pub plan: InstallPlan,
     pub plan_token: String,
+    /// Live-kernel evidence captured for the selected target before the user
+    /// authorizes the destructive plan. It is not a physical qualification
+    /// claim and is deliberately outside the hashed disk plan.
+    pub hardware_report: InstallHardwareReport,
 }
 
 /// The only caller-provided seed value. All other seed fields are derived by

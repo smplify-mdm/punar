@@ -4,11 +4,14 @@
   "title": "Punar installation plan result",
   "description": "The complete, disk-bound result of install.plan. plan_token is SHA-256 over compact recursively key-sorted JSON of the nested plan object (the jq -cS JSON bytes excluding jq's trailing newline).",
   "type": "object",
-  "required": ["v", "plan", "plan_token"],
+  "required": ["v", "plan", "plan_token", "hardware_report"],
   "properties": {
     "v": { "const": 1 },
     "plan": { "$ref": "#/$defs/plan" },
-    "plan_token": { "$ref": "#/$defs/digest" }
+    "plan_token": { "$ref": "#/$defs/digest" },
+    "hardware_report": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/install/hardware-report.json"
+    }
   },
   "additionalProperties": false,
   "$defs": {

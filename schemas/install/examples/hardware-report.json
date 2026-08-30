@@ -1,0 +1,37 @@
+{
+  "v": 1,
+  "generated_at": "2026-08-30T18:45:00Z",
+  "architecture": "aarch64",
+  "kernel_release": "6.18.4-punar1-1",
+  "overall": "partial",
+  "graphics_usable": true,
+  "disk_below_minimum_target": true,
+  "bare_hardware_qualified": false,
+  "devices": [
+    {
+      "bus": "platform",
+      "address": "gpu",
+      "function": "graphics",
+      "display_name": "PLATFORM gpu",
+      "modalias": "of:NgpuT(null)Cbrcm,bcm2712-v3d",
+      "driver": "v3d",
+      "claiming_modules": ["v3d"],
+      "requested_firmware": [],
+      "missing_firmware": [],
+      "coverage": "full",
+      "reason": "driver_bound"
+    },
+    {
+      "bus": "platform",
+      "address": "mmc0",
+      "function": "storage",
+      "display_name": "PLATFORM mmc0",
+      "modalias": "of:NmmcT(null)Cbrcm,bcm2712-sdhci",
+      "claiming_modules": ["sdhci_iproc"],
+      "requested_firmware": [],
+      "missing_firmware": [],
+      "coverage": "partial",
+      "reason": "driver_unbound"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "generated_at": "2026-08-30T18:45:00Z",
+  "architecture": "aarch64",
+  "kernel_release": "6.18.4-punar1-1",
+  "overall": "unsupported",
+  "graphics_usable": false,
+  "disk_below_minimum_target": true,
+  "bare_hardware_qualified": false,
+  "devices": [
+    {
+      "bus": "usb",
+      "address": "1-1",
+      "function": "other",
+      "display_name": "USB device",
+      "serial": "must-never-appear",
+      "claiming_modules": [],
+      "requested_firmware": [],
+      "missing_firmware": [],
+      "coverage": "unsupported",
+      "reason": "modalias_unavailable"
+    }
+  ]
+}
