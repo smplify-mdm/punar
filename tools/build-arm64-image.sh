@@ -61,6 +61,14 @@ docker run --rm --privileged \
     "${BUILDER_TAG}" \
     ./tests/images/repart-spike.sh
 
+echo "==> Proving native Raspberry Pi boot-filesystem assembly (synthetic inputs)"
+docker run --rm \
+    --platform linux/arm64 \
+    --volume "${REPO_ROOT}:/work" \
+    --workdir /work \
+    "${BUILDER_TAG}" \
+    ./tests/images/raspberry-pi-bootfs-test.sh
+
 echo "==> Running native ARM64 mkosi (${PUNAR_BUILD_MODE})"
 docker run --rm --privileged \
     --platform linux/arm64 \

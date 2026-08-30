@@ -266,6 +266,7 @@ jobs:
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
+            tools/build-raspberry-pi-bootfs.sh \
             tools/update-rollback-test-arm64.sh \
             tools/test-release-onboarding-arm64.sh \
             tools/demo-arm64-vm.sh \
@@ -280,6 +281,7 @@ jobs:
             tests/images/check-repart-layout.sh \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
+            tests/images/raspberry-pi-bootfs-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \

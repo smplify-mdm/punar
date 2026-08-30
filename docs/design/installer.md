@@ -357,6 +357,22 @@ the fixed aarch64 boot contract. Boot B stays an inactive filesystem until a
 verified update writes the complete B boot/root pair. This is software-path
 component proof, not Raspberry Pi hardware qualification.
 
+`tools/build-raspberry-pi-bootfs.sh` now provides the matching build-side
+primitive. It creates a 256 MiB raw FAT32 image (well inside the 1 GiB boot
+partition), fixes the volume id, writes the exact A/tryboot-B selectors and
+Pi 4/Pi 5 KMS configuration, and copies only a bounded kernel/initramfs plus
+the pinned board DTBs, overlays and vendor boot files. The official
+`raspberrypi/firmware` tag, commit, critical-file digests, board-assets tree
+and `6.18.46-v8+` module tree are pinned in
+`os/images/raspberry-pi/firmware.env`. Assembly refuses a changed kernel,
+firmware tree, or root payload whose module tree is not byte-for-byte the one
+paired with `kernel8.img`; it then reopens the FAT image with mtools and runs
+read-only `fsck.vfat`. The fast fixture test is part of the native ARM builder,
+and the real pinned snapshot was assembled locally. The release-root overlay,
+matching initramfs generation, signed install-manifest connection and runtime
+boot remain the next boundary; this primitive alone is not a shippable Pi
+image or hardware evidence.
+
 Inside the data partition (4 on UEFI, 5 on Raspberry Pi), three subvolumes are
 mounted as three separate mounts:
 
@@ -1400,10 +1416,12 @@ returning the plan token: an audit I/O failure is reported with
 `disk_changed: false`, rather than being discovered after destructive work.
 The privileged real-vfat, LUKS and btrfs mounts still need the live installer
 VM gate. Raspberry Pi boot-filesystem installation is now component-proven as
-the bounded raw-write/reread/read-only-validation primitive above; production
-bootfs assembly, public descriptor orchestration, the unattended lane and
-real-board fault injection remain unimplemented, so this checkpoint is not an
-installability or Raspberry Pi support claim.
+the bounded raw-write/reread/read-only-validation primitive above, and its
+build-side FAT assembly/pin validator now exists. Root-payload module staging,
+matching initramfs generation, signed install-manifest wiring, public
+descriptor orchestration, the unattended lane and real-board fault injection
+remain unimplemented, so this checkpoint is not an installability or
+Raspberry Pi support claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No

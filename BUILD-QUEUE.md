@@ -347,13 +347,18 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    canonical. The current Arch image remains the regression baseline until
    that crossing is runtime-proven; two production substrates are not
    accepted.
-3. Generate the signed raw Pi bootfs and connect it to the now-implemented
-   five-partition installer adapter. The adapter already plans
+3. Connect the new raw Pi bootfs builder to a signed installer bundle. The
+   builder now pins the official firmware commit plus critical and tree
+   digests, requires the exact matching root-module tree, creates and reopens
+   a bounded FAT image, and is fail-closed under its synthetic ARM test. The
+   installer adapter already plans
    boot-A/root-A/boot-B/root-B/shared-data, selects partition 5 for LUKS/data,
    writes and physically rereads the bootfs, mounts it read-only, and rejects
-   unsafe `autoboot.txt`, `cmdline.txt` or kernel/initramfs contracts. Complete
-   the inactive-pair update state machine and label all software proof as
-   non-hardware evidence.
+   unsafe `autoboot.txt`, `cmdline.txt` or kernel/initramfs contracts. Still
+   generate the matching initramfs after staging the pinned modules into an
+   install-root-A payload, bind both artifacts into the signed manifest, and
+   complete the inactive-pair update state machine. Label all software proof
+   as non-hardware evidence.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
@@ -425,9 +430,16 @@ image is bounded to boot A, fsynced, physically reread, mounted read-only and
 validated for ordinary-A/tryboot-B plus boot-A/root-A pairing before `seed`.
 The plan/schema/repart source now carries the exact five-partition layout, and
 the LUKS/seed path derives data as partition 5 rather than assuming UEFI's
-partition 4. Production Pi bootfs assembly, trusted enrollment/token sourcing
-in public server orchestration, ISO assembly and the unattended VM lane are
-still next. The
+partition 4. The build-side raw FAT primitive now pins an official
+`raspberrypi/firmware` commit, critical boot-file and complete board/module
+tree digests; assembles the exact selectors, Pi 4/5 DTBs/overlays,
+`kernel8.img` and caller-supplied initramfs; verifies that the root payload
+contains the identical module tree; reopens the result; and rejects kernel or
+module drift in the native ARM builder test. The real pinned tree also
+assembled locally. Staging that module tree into root A, generating its
+matching initramfs and connecting both outputs to the signed install manifest
+remain open, as do trusted enrollment/token sourcing in public server
+orchestration, ISO assembly and the unattended VM lane. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
 firmware metadata; no serial/MAC/user data is collected; no usable graphics is
