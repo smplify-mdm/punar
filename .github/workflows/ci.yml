@@ -267,6 +267,9 @@ jobs:
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
+            tools/build-raspberry-pi-install-bundle.sh \
+            tools/fetch-raspberry-pi-firmware.sh \
+            tools/stage-raspberry-pi-root.sh \
             tools/update-rollback-test-arm64.sh \
             tools/test-release-onboarding-arm64.sh \
             tools/demo-arm64-vm.sh \

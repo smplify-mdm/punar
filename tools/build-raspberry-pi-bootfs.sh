@@ -120,6 +120,23 @@ tree_digest() {
     )
 }
 
+module_payload_digest() {
+    local root="$1"
+    (
+        cd "${root}"
+        find . -type f \
+            \( -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.xz' \
+                -o -name '*.ko.zst' \) -print0 \
+            | sort -z \
+            | while IFS= read -r -d '' file; do
+                printf '%s\0' "${file}"
+                sha256sum "${file}" | awk '{print $1}'
+            done \
+            | sha256sum \
+            | awk '{print $1}'
+    )
+}
+
 verify_digest "${BOOT}/kernel8.img" "${PUNAR_RPI_KERNEL_SHA256}" "kernel8.img"
 verify_digest "${BOOT}/start4.elf" "${PUNAR_RPI_START4_SHA256}" "start4.elf"
 verify_digest "${BOOT}/fixup4.dat" "${PUNAR_RPI_FIXUP4_SHA256}" "fixup4.dat"
@@ -129,9 +146,18 @@ verify_digest "${BOOT}/LICENCE.broadcom" "${PUNAR_RPI_LICENCE_SHA256}" \
 source_modules_digest="$(tree_digest "${SOURCE_MODULES}" .)"
 [ "${source_modules_digest}" = "${PUNAR_RPI_MODULES_TREE_SHA256}" ] \
     || die "firmware kernel modules do not match the pinned tree digest"
-root_modules_digest="$(tree_digest "${ROOT_MODULES}" .)"
-[ "${root_modules_digest}" = "${PUNAR_RPI_MODULES_TREE_SHA256}" ] \
-    || die "root payload does not contain the exact pinned kernel modules"
+source_payload_digest="$(module_payload_digest "${SOURCE_MODULES}")"
+root_payload_digest="$(module_payload_digest "${ROOT_MODULES}")"
+[ "${root_payload_digest}" = "${source_payload_digest}" ] \
+    || die "root payload does not contain the exact pinned loadable modules"
+[ -n "$(find "${ROOT_MODULES}" -type f \
+    \( -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.xz' \
+        -o -name '*.ko.zst' \) -print -quit)" ] \
+    || die "root payload contains no loadable modules"
+for module_index in modules.dep modules.dep.bin modules.alias modules.alias.bin; do
+    [ -s "${ROOT_MODULES}/${module_index}" ] \
+        || die "root payload is missing generated ${module_index}"
+done
 
 board_assets_digest="$({
     find "${BOOT}" -maxdepth 1 -type f \

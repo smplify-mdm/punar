@@ -410,9 +410,27 @@ mod tests {
         let (transaction_dir, uid) = transaction_fixture();
         let root = transaction_dir.parent().unwrap();
         let binary = root.join("fake-nft");
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&binary, script);
         (binary, transaction_dir, uid)
+    }
+
+    // A few ARM overlayfs runners have returned ETXTBSY when a just-closed
+    // writable inode is immediately executed. Publish the test double the
+    // same safe way production software is updated: fully write and fsync an
+    // unreferenced inode, set its final mode, then rename it into place. This
+    // also makes the table-health rewrites race-free with process teardown.
+    fn write_executable(path: &Path, script: &str) {
+        let staged = path.with_extension("staged");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&staged)
+            .unwrap();
+        file.write_all(script.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        fs::rename(staged, path).unwrap();
     }
 
     #[test]
@@ -560,13 +578,12 @@ printf '%s\n' '{"nftables":[{"metainfo":{"json_schema_version":1}},{"counter":{"
             Duration::from_secs(1),
         );
         assert!(executor.table_exists().unwrap());
-        fs::write(
+        write_executable(
             &binary,
             "#!/bin/sh\necho 'No such file or directory' >&2\nexit 1\n",
-        )
-        .unwrap();
+        );
         assert!(!executor.table_exists().unwrap());
-        fs::write(&binary, "#!/bin/sh\necho permission-refused >&2\nexit 1\n").unwrap();
+        write_executable(&binary, "#!/bin/sh\necho permission-refused >&2\nexit 1\n");
         assert!(matches!(
             executor.table_exists(),
             Err(ExecError::Rejected(reason)) if reason == "permission-refused"

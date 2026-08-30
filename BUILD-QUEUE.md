@@ -239,7 +239,7 @@ proved the complete path on the image.
 
 ---
 
-## 5. arm64 / Raspberry Pi — generic desktop proven locally; CI and Pi remain
+## 5. arm64 / Raspberry Pi — install artifacts proven; physical Pi remains
 
 **ADR-005 is Accepted for implementation: Debian, tracking pinned sid.** Not
 testing — testing was measured 36 days behind on Chromium and structurally
@@ -332,9 +332,10 @@ not configurable at the pinned toolchain. Promotion therefore signs the exact
 artifact and makes no bit-for-bit reproducibility claim.
 
 **Scope boundary:** these results prove QEMU's generic ARM `virt` platform,
-the A/B layout, inactive-slot apply, and a healthy counted boot being blessed.
-They do not prove Raspberry Pi firmware/peripherals, a real GPU, Secure Boot,
-an installer, or any physical ARM machine. Automatic fallback is now proven
+the A/B layout, inactive-slot apply, a healthy counted boot being blessed, and
+the native Pi install-artifact software path described below. They do not prove
+Raspberry Pi firmware/peripherals, a real GPU, Secure Boot, public installer
+orchestration, or any physical ARM machine. Automatic fallback is now proven
 on a disposable persistent copy by the four-boot ARM64 gate and by canonical
 ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091).
 
@@ -347,18 +348,20 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    canonical. The current Arch image remains the regression baseline until
    that crossing is runtime-proven; two production substrates are not
    accepted.
-3. Connect the new raw Pi bootfs builder to a signed installer bundle. The
-   builder now pins the official firmware commit plus critical and tree
-   digests, requires the exact matching root-module tree, creates and reopens
-   a bounded FAT image, and is fail-closed under its synthetic ARM test. The
-   installer adapter already plans
-   boot-A/root-A/boot-B/root-B/shared-data, selects partition 5 for LUKS/data,
-   writes and physically rereads the bootfs, mounts it read-only, and rejects
-   unsafe `autoboot.txt`, `cmdline.txt` or kernel/initramfs contracts. Still
-   generate the matching initramfs after staging the pinned modules into an
-   install-root-A payload, bind both artifacts into the signed manifest, and
-   complete the inactive-pair update state machine. Label all software proof
-   as non-hardware evidence.
+3. **Install-artifact component completed locally 2026-08-30.** The builder
+   pins the official firmware commit plus critical and tree digests; stages
+   all 1,909 byte-identical loadable modules into release root A; regenerates
+   and inspects its dependency indexes; creates the matching dracut initramfs;
+   and binds the 8 GiB root-A payload plus a reopened 256 MiB FAT boot-A image
+   into the canonical signed manifest. Version `2026.08.30.3` independently
+   reproduced raw-root SHA-256
+   `dd1cc4c2e9a9531e0cbb123714c87ed5eb77a34ff1661d2a8990eb72f663e997`
+   and bootfs SHA-256
+   `186ebd9a3e0a81e6980a4dbf53115fbc47338d8ab16040f04262eff0115d952c`,
+   passed ext4/FAT checks, and verified its ephemeral Ed25519 signature and
+   both artifact digests. This is verified software-path evidence, not a
+   production signature or booted-Pi claim. Next wire public apply
+   orchestration and complete the inactive boot/root-pair update state machine.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
@@ -434,12 +437,14 @@ partition 4. The build-side raw FAT primitive now pins an official
 `raspberrypi/firmware` commit, critical boot-file and complete board/module
 tree digests; assembles the exact selectors, Pi 4/5 DTBs/overlays,
 `kernel8.img` and caller-supplied initramfs; verifies that the root payload
-contains the identical module tree; reopens the result; and rejects kernel or
-module drift in the native ARM builder test. The real pinned tree also
-assembled locally. Staging that module tree into root A, generating its
-matching initramfs and connecting both outputs to the signed install manifest
-remain open, as do trusted enrollment/token sourcing in public server
-orchestration, ISO assembly and the unattended VM lane. The
+contains identical loadable modules plus regenerated dependency indexes;
+reopens the result; and rejects kernel or module drift in the native ARM
+builder test. The full local install-bundle proof now stages the pinned tree
+into release root A, generates and inspects the matching dracut initramfs,
+builds boot A, checks both filesystems, and signs/verifies the canonical
+manifest and both artifacts. Production key custody, trusted enrollment/token
+sourcing in public server orchestration, ISO assembly, inactive-pair updates
+and the unattended VM lane remain open. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
 firmware metadata; no serial/MAC/user data is collected; no usable graphics is

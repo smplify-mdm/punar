@@ -37,6 +37,7 @@ RUN printf '%s\n' \
         erofs-utils \
         cpio \
         zstd \
+        git \
         cargo \
         rustc \
         ca-certificates \

@@ -1,6 +1,6 @@
 # The Punar Installer — design
 
-**Status:** design plan · partition-layout foundation implemented 2026-08-27
+**Status:** design plan · partition foundation and Pi install-artifact pipeline implemented 2026-08-30
 **Spec authority:** §66 (installation), §65 (first-boot UX), §44.2 (disk
 encryption), §44.1 (boot), §49 (enrollment chain), §48 (JIT privilege),
 §5.1/§5.3 (target hardware), §12 (keyboard-first), §60 (hard safety
@@ -17,9 +17,10 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 > has ever installed it.** The UEFI four-partition and native Raspberry Pi
 > five-partition A/B layouts below now build as plan-bound definition sets.
 > Generic UEFI images boot in ARM64 VMs, and the internal installer can plan,
-> write and verify both boot adapters; public apply orchestration, a generated
-> Pi bootfs, encryption-on-the-built-image, update swap and physical-device
-> claims remain open. The purpose here is
+> write and verify both boot adapters. A real pinned Pi bootfs and matching
+> root-A payload now build and verify as an ephemerally signed install bundle;
+> public apply orchestration, production signing, encryption-on-the-built-image,
+> update swap and physical-device claims remain open. The purpose here is
 > still to make the first real install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones
 > building.
@@ -357,21 +358,31 @@ the fixed aarch64 boot contract. Boot B stays an inactive filesystem until a
 verified update writes the complete B boot/root pair. This is software-path
 component proof, not Raspberry Pi hardware qualification.
 
-`tools/build-raspberry-pi-bootfs.sh` now provides the matching build-side
+`tools/build-raspberry-pi-bootfs.sh` provides the matching build-side
 primitive. It creates a 256 MiB raw FAT32 image (well inside the 1 GiB boot
 partition), fixes the volume id, writes the exact A/tryboot-B selectors and
 Pi 4/Pi 5 KMS configuration, and copies only a bounded kernel/initramfs plus
 the pinned board DTBs, overlays and vendor boot files. The official
 `raspberrypi/firmware` tag, commit, critical-file digests, board-assets tree
 and `6.18.46-v8+` module tree are pinned in
-`os/images/raspberry-pi/firmware.env`. Assembly refuses a changed kernel,
-firmware tree, or root payload whose module tree is not byte-for-byte the one
-paired with `kernel8.img`; it then reopens the FAT image with mtools and runs
-read-only `fsck.vfat`. The fast fixture test is part of the native ARM builder,
-and the real pinned snapshot was assembled locally. The release-root overlay,
-matching initramfs generation, signed install-manifest connection and runtime
-boot remain the next boundary; this primitive alone is not a shippable Pi
-image or hardware evidence.
+`os/images/raspberry-pi/firmware.env`. Assembly refuses a changed kernel or
+firmware tree, or a root payload whose loadable-module paths and bytes differ
+from the tree paired with `kernel8.img`. `depmod`-derived indexes are required
+and nonempty but intentionally need not byte-match the vendor copy. The builder
+then reopens the FAT image with mtools and runs read-only `fsck.vfat`.
+
+`tools/stage-raspberry-pi-root.sh` and
+`tools/build-raspberry-pi-install-bundle.sh` close the component connection:
+they extract release root A, stage the pinned `6.18.46-v8+` modules, regenerate
+the indexes, create and inspect a non-host-specific dracut initramfs, assemble
+boot A, check ext4 and FAT, compress root A, and bind both artifact identities
+into the ordinary target-bound release manifest. The local `2026.08.30.3`
+proof verified an 8 GiB root containing 1,909 exact loadable modules, a
+20,713,546-byte root/boot-identical initramfs, and a 256 MiB bootfs with Pi 4
+and Pi 5 assets. It independently reproduced manifest digests and verified an
+ephemeral Ed25519 signature. Production key custody, public apply, inactive
+boot/root-pair update, runtime boot and physical qualification remain the next
+boundaries; this is not yet a shippable Pi image or hardware evidence.
 
 Inside the data partition (4 on UEFI, 5 on Raspberry Pi), three subvolumes are
 mounted as three separate mounts:

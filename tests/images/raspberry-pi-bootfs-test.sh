@@ -25,8 +25,16 @@ printf 'fixture overlay map\n' > "${WORK}/firmware/boot/overlays/overlay_map.dtb
 printf 'fixture pi4 kms\n' > "${WORK}/firmware/boot/overlays/vc4-kms-v3d-pi4.dtbo"
 printf 'fixture pi5 kms\n' > "${WORK}/firmware/boot/overlays/vc4-kms-v3d-pi5.dtbo"
 printf 'fixture dependency\n' > "${WORK}/firmware/modules/fixture-v8+/modules.dep"
+printf 'fixture binary dependency\n' \
+    > "${WORK}/firmware/modules/fixture-v8+/modules.dep.bin"
+printf 'fixture alias\n' > "${WORK}/firmware/modules/fixture-v8+/modules.alias"
+printf 'fixture binary alias\n' \
+    > "${WORK}/firmware/modules/fixture-v8+/modules.alias.bin"
 printf 'fixture module\n' > "${WORK}/firmware/modules/fixture-v8+/fixture.ko"
 cp -a "${WORK}/firmware/modules/fixture-v8+/." "${WORK}/root-modules/"
+# depmod is expected to regenerate these derived indexes in the install root;
+# they need to be present and nonempty, but do not byte-match the vendor copy.
+printf 'regenerated root dependency\n' > "${WORK}/root-modules/modules.dep"
 printf 'fixture initramfs\n' > "${WORK}/initramfs8"
 
 digest() {
@@ -100,6 +108,20 @@ if PUNAR_RPI_PIN_FILE="${WORK}/fixture.env" \
     exit 1
 fi
 [ ! -e "${WORK}/tampered.img" ]
+printf 'fixture kernel\n' > "${WORK}/firmware/boot/kernel8.img"
+
+cp -a "${WORK}/root-modules" "${WORK}/missing-index-modules"
+rm "${WORK}/missing-index-modules/modules.alias.bin"
+if PUNAR_RPI_PIN_FILE="${WORK}/fixture.env" \
+    PUNAR_RPI_BOOTFS_BYTES=$((64 * 1024 * 1024)) \
+    "${REPO_ROOT}/tools/build-raspberry-pi-bootfs.sh" \
+    "${WORK}/firmware" "${WORK}/initramfs8" \
+    "${WORK}/missing-index-modules" \
+    "${WORK}/missing-index.img" >/dev/null 2>&1; then
+    echo "error: root payload without a module alias index was accepted" >&2
+    exit 1
+fi
+[ ! -e "${WORK}/missing-index.img" ]
 
 printf 'root-only drift\n' >> "${WORK}/root-modules/fixture.ko"
 if PUNAR_RPI_PIN_FILE="${WORK}/fixture.env" \
