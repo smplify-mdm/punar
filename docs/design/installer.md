@@ -376,13 +376,21 @@ then reopens the FAT image with mtools and runs read-only `fsck.vfat`.
 they extract release root A, stage the pinned `6.18.46-v8+` modules, regenerate
 the indexes, create and inspect a non-host-specific dracut initramfs, assemble
 boot A, check ext4 and FAT, compress root A, and bind both artifact identities
-into the ordinary target-bound release manifest. The local `2026.08.30.3`
-proof verified an 8 GiB root containing 1,909 exact loadable modules, a
+into the ordinary target-bound release manifest. The local `2026.08.30.4`
+proof, built from commit `708384d29076a384d7f707803b3a03b55a5f4e32`,
+verified an 8 GiB root containing 1,909 exact loadable modules, a
 20,713,546-byte root/boot-identical initramfs, and a 256 MiB bootfs with Pi 4
-and Pi 5 assets. It independently reproduced manifest digests and verified an
-ephemeral Ed25519 signature. Production key custody, public apply, inactive
-boot/root-pair update, runtime boot and physical qualification remain the next
-boundaries; this is not yet a shippable Pi image or hardware evidence.
+and Pi 5 assets. Its independent read-only mount audit reproduced raw-root
+SHA-256
+`780d679b4ee241d126a837d489ba94dbea11f69fab0f3ea462fbad731dd09827`,
+compressed-payload SHA-256
+`a77791001fce5cb3fe3e6e62f25e8dfa246b6d768fb2881fd7b894f36467d42b`,
+and bootfs SHA-256
+`5a1cbb4c7dd9bb6836c653617ac5030e355f8bf17791c9ce4bc5427b22d80391`,
+then verified the ephemeral Ed25519 signature. Production key custody, public
+apply, inactive boot/root-pair update, runtime boot and physical qualification
+remain the next boundaries; this is not yet a shippable Pi image or hardware
+evidence.
 
 Inside the data partition (4 on UEFI, 5 on Raspberry Pi), three subvolumes are
 mounted as three separate mounts:

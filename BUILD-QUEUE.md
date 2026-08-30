@@ -353,15 +353,20 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    all 1,909 byte-identical loadable modules into release root A; regenerates
    and inspects its dependency indexes; creates the matching dracut initramfs;
    and binds the 8 GiB root-A payload plus a reopened 256 MiB FAT boot-A image
-   into the canonical signed manifest. Version `2026.08.30.3` independently
+   into the canonical signed manifest. Version `2026.08.30.4`, built from
+   commit `708384d29076a384d7f707803b3a03b55a5f4e32`, independently
    reproduced raw-root SHA-256
-   `dd1cc4c2e9a9531e0cbb123714c87ed5eb77a34ff1661d2a8990eb72f663e997`
+   `780d679b4ee241d126a837d489ba94dbea11f69fab0f3ea462fbad731dd09827`,
+   compressed-payload SHA-256
+   `a77791001fce5cb3fe3e6e62f25e8dfa246b6d768fb2881fd7b894f36467d42b`,
    and bootfs SHA-256
-   `186ebd9a3e0a81e6980a4dbf53115fbc47338d8ab16040f04262eff0115d952c`,
-   passed ext4/FAT checks, and verified its ephemeral Ed25519 signature and
-   both artifact digests. This is verified software-path evidence, not a
-   production signature or booted-Pi claim. Next wire public apply
-   orchestration and complete the inactive boot/root-pair update state machine.
+   `5a1cbb4c7dd9bb6836c653617ac5030e355f8bf17791c9ce4bc5427b22d80391`.
+   The independent audit mounted both artifacts read-only, counted all 1,909
+   loadable modules, proved the root and boot initramfs copies identical, and
+   verified the ephemeral Ed25519 signature. This is verified software-path
+   evidence, not a production signature or booted-Pi claim. Next wire public
+   apply orchestration and complete the inactive boot/root-pair update state
+   machine.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
