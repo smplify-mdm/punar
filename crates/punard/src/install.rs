@@ -2,10 +2,11 @@
 //! and secret-free status reporting.
 //!
 //! The internal executor now owns release verification, fixed-layout disk
-//! preparation, bounded slot-A writing, a physical re-read, and UEFI boot
-//! installation. The public `install.apply` method stays absent until the
-//! same fixed transaction can also seed the shared filesystem and verify the
-//! installed result. A half-installer is not an install API.
+//! preparation, bounded slot-A writing, a physical re-read, UEFI boot
+//! installation, shared-state seeding and read-only final verification. The
+//! public `install.apply` method stays absent until the transaction also owns
+//! the hardware report, audit handoff, managed-recovery orchestration and the
+//! Raspberry Pi boot path. A half-installer is not an install API.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
@@ -31,7 +32,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::util::{hex, sha256_hex, write_atomic, write_atomic_synced};
+use crate::util::{hex, random_alnum, random_hex, sha256_hex, write_atomic, write_atomic_synced};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -103,6 +104,14 @@ pub struct InstallerSources {
     /// the safe in-process mount syscall path.
     #[cfg(test)]
     pub mounted_esp_override: Option<PathBuf>,
+    /// Unit-test-only mounted `@var` subvolume. Production always derives,
+    /// unlocks and mounts partition 4 itself.
+    #[cfg(test)]
+    pub mounted_data_override: Option<PathBuf>,
+    /// Unit-test-only mounted root slot A. Production always mounts partition
+    /// 2 read-only for the final installed-system check.
+    #[cfg(test)]
+    pub mounted_root_override: Option<PathBuf>,
 }
 
 impl Default for InstallerSources {
@@ -130,6 +139,10 @@ impl Default for InstallerSources {
             allow_regular_target_for_tests: false,
             #[cfg(test)]
             mounted_esp_override: None,
+            #[cfg(test)]
+            mounted_data_override: None,
+            #[cfg(test)]
+            mounted_root_override: None,
         }
     }
 }
@@ -158,6 +171,10 @@ pub struct Installer {
     plans: Arc<Mutex<PlanRegistry>>,
     status: Arc<Mutex<InstallStatusResult>>,
     recovery: Arc<RecoveryGate>,
+    /// Digest of the exact seed bytes written by this boot. Final
+    /// verification compares the re-opened filesystem against this value,
+    /// not merely against another serialization of caller inputs.
+    seed_digest: Arc<Mutex<Option<String>>>,
 }
 
 /// Non-serializable, non-debuggable apply inputs duplicated from descriptors
@@ -209,6 +226,24 @@ enum RecoveryGateState {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstallSeedDocument {
+    v: u8,
+    locale: String,
+    keymap: String,
+    installed_at: String,
+    image_version: String,
+    disk_encrypted: bool,
+    disk_recovery: InstallSeedRecovery,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallSeedRecovery {
+    mode: InstallRecoveryMode,
+}
+
 impl PlanRegistry {
     fn insert(&mut self, token: String, plan: InstallPlan) {
         if self.plans.contains_key(&token) {
@@ -256,6 +291,7 @@ impl Installer {
             plans: Arc::new(Mutex::new(PlanRegistry::default())),
             status: Arc::new(Mutex::new(InstallStatusResult::idle())),
             recovery: Arc::new(RecoveryGate::default()),
+            seed_digest: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -314,7 +350,9 @@ impl Installer {
             write.completed_bytes = Some(0);
             write.total_bytes = Some(root_slot_bytes);
             Ok(next)
-        })
+        })?;
+        *self.seed_digest.lock().unwrap() = None;
+        Ok(())
     }
 
     /// Advance to exactly the next named phase. Skipping or moving backward
@@ -484,6 +522,7 @@ impl Installer {
         if let Some(plan_token) = failed_plan_token {
             self.cancel_personal_recovery(&plan_token);
         }
+        *self.seed_digest.lock().unwrap() = None;
         Ok(())
     }
 
@@ -775,6 +814,139 @@ impl Installer {
         }
     }
 
+    /// Seed only persistent, device-scoped state into the freshly created
+    /// `@var` subvolume. Account identity is intentionally absent: it belongs
+    /// to first boot. The optional OOBE document is copied byte-for-byte and
+    /// `seed.json` is the last file written, so a pre-seed failure remains the
+    /// documented "write nothing" case.
+    #[cfg(target_os = "linux")]
+    pub fn seed_installed_system(
+        &self,
+        plan: &InstallPlan,
+        params: &InstallApplyParams,
+        inputs: &InstallApplyInputs,
+    ) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::Seed)?;
+        validate_apply_params(params)?;
+        let token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        if params.plan_token != token
+            || params.disk != plan.disk.device
+            || params.keymap != plan.keymap
+        {
+            return Err(InstallError::Invalid(
+                "the seed request is not bound to the active installation plan".into(),
+            ));
+        }
+        if inputs.oobe_answers().is_some() != params.oobe_answers_fd.is_some() {
+            return Err(InstallError::Invalid(
+                "the OOBE answer descriptor was not consumed exactly once".into(),
+            ));
+        }
+
+        let manifest = self.release_manifest_for_plan(plan)?;
+        let seed = InstallSeedDocument {
+            v: 1,
+            locale: params.seed.locale.clone(),
+            keymap: plan.keymap.clone(),
+            installed_at: punar_common::time::utc_now_rfc3339(),
+            image_version: format!("{}-{}", manifest.image_id, manifest.version),
+            disk_encrypted: plan.encryption == InstallEncryption::Luks2,
+            disk_recovery: InstallSeedRecovery {
+                mode: plan.recovery_mode,
+            },
+        };
+        let mut seed_bytes =
+            serde_json::to_vec(&seed).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        seed_bytes.push(b'\n');
+
+        let data = self.mount_data_volume(plan, inputs, &token, false)?;
+        let lib_dir = data.path().join("lib");
+        ensure_directory_exact(&lib_dir, 0o755)?;
+        let punar_dir = lib_dir.join("punar");
+        ensure_directory_exact(&punar_dir, 0o700)?;
+        let install_dir = punar_dir.join("install");
+        ensure_directory_exact(&install_dir, 0o700)?;
+
+        let dbus_dir = lib_dir.join("dbus");
+        ensure_directory_exact(&dbus_dir, 0o755)?;
+        write_new_synced_exact(
+            &dbus_dir.join("machine-id"),
+            format!("{}\n", random_hex(16)?).as_bytes(),
+            0o444,
+        )?;
+        write_new_synced_exact(
+            &punar_dir.join("device-id"),
+            format!("dev_{}\n", random_alnum(10)?).as_bytes(),
+            0o600,
+        )?;
+
+        if let Some(answers) = inputs.oobe_answers() {
+            write_new_synced_exact(&install_dir.join("oobe-answers.json"), answers, 0o600)?;
+        }
+        write_new_synced_exact(&install_dir.join("seed.json"), &seed_bytes, 0o644)?;
+
+        let filesystem = File::open(data.path())?;
+        rustix::fs::syncfs(&filesystem).map_err(rustix_install_io)?;
+        drop(filesystem);
+        data.finish()?;
+        *self.seed_digest.lock().unwrap() = Some(sha256_hex(&seed_bytes));
+        self.enter_phase(InstallPhase::VerifyInstalled)
+    }
+
+    /// Re-open both mutable and immutable installed filesystems read-only and
+    /// compare their durable contents to the active plan and to the exact
+    /// seed bytes written by this daemon boot. Only this method may publish a
+    /// succeeded installation.
+    #[cfg(target_os = "linux")]
+    pub fn verify_installed_system(
+        &self,
+        plan: &InstallPlan,
+        params: &InstallApplyParams,
+        inputs: &InstallApplyInputs,
+    ) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::VerifyInstalled)?;
+        let token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        if params.plan_token != token || params.disk != plan.disk.device {
+            return Err(InstallError::Invalid(
+                "final verification is not bound to the active installation plan".into(),
+            ));
+        }
+        let expected_seed_digest = self
+            .seed_digest
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| InstallError::Invalid("no seed identity is active".into()))?;
+
+        let data = self.mount_data_volume(plan, inputs, &token, true)?;
+        let manifest = self.release_manifest_for_plan(plan)?;
+        verify_installed_seed(
+            data.path(),
+            plan,
+            params,
+            inputs,
+            &expected_seed_digest,
+            &format!("{}-{}", manifest.image_id, manifest.version),
+        )?;
+        data.finish()?;
+
+        let root = self.mount_root_slot_a(plan, &token)?;
+        require_bounded_regular_file(
+            &root.path().join("usr/lib/systemd/system/punard.service"),
+            1024 * 1024,
+            "installed punard service",
+        )?;
+        root.finish()?;
+
+        self.complete_transaction_status()?;
+        *self.seed_digest.lock().unwrap() = None;
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     fn install_uefi_boot_artifact(
         &self,
@@ -867,6 +1039,124 @@ impl Installer {
             return Err(rustix_install_io(error));
         }
         Ok(MountedEsp::mounted(path))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_data_volume(
+        &self,
+        plan: &InstallPlan,
+        inputs: &InstallApplyInputs,
+        token: &str,
+        read_only: bool,
+    ) -> Result<MountedData, InstallError> {
+        match (plan.encryption, inputs.passphrase()) {
+            (InstallEncryption::Luks2, Some(passphrase)) if !passphrase.is_empty() => {}
+            (InstallEncryption::Luks2, _) => {
+                return Err(InstallError::Invalid(
+                    "mounting encrypted install data requires the active passphrase descriptor"
+                        .into(),
+                ));
+            }
+            (InstallEncryption::None, None) => {}
+            (InstallEncryption::None, Some(_)) => {
+                return Err(InstallError::Invalid(
+                    "an unencrypted install must not retain a passphrase descriptor".into(),
+                ));
+            }
+        }
+        #[cfg(test)]
+        if let Some(path) = &self.sources.mounted_data_override {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(InstallError::Refused(
+                    "the test data override is not a directory".into(),
+                ));
+            }
+            return Ok(MountedData::borrowed(path.clone()));
+        }
+
+        let partition = partition_device_path(&self.sources.dev_root, &plan.disk.device, 4)?;
+        validate_repart_target(&partition, false)?;
+        let mapping = if plan.encryption == InstallEncryption::Luks2 {
+            let passphrase = inputs
+                .passphrase()
+                .expect("encrypted passphrase validated above");
+            Some(open_luks_mapping(
+                &self.sources.cryptsetup_path,
+                &self.sources.dev_root,
+                &partition,
+                token,
+                passphrase,
+            )?)
+        } else {
+            None
+        };
+        let source = mapping
+            .as_ref()
+            .map(|mapping| mapping.path.as_path())
+            .unwrap_or(partition.as_path());
+        validate_repart_target(source, false)?;
+
+        let path = self
+            .sources
+            .repart_runtime_root
+            .join(format!("data-{token}"));
+        create_private_directory(&path)?;
+        let mut flags = rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW;
+        if read_only {
+            flags |= rustix::mount::MountFlags::RDONLY;
+        }
+        if let Err(error) = rustix::mount::mount(
+            source,
+            &path,
+            "btrfs",
+            flags,
+            Some(c"subvol=@var,compress=zstd:1,noatime"),
+        ) {
+            let _ = fs::remove_dir(&path);
+            drop(mapping);
+            return Err(rustix_install_io(error));
+        }
+        Ok(MountedData::mounted(path, mapping))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_root_slot_a(
+        &self,
+        plan: &InstallPlan,
+        token: &str,
+    ) -> Result<MountedFilesystem, InstallError> {
+        #[cfg(test)]
+        if let Some(path) = &self.sources.mounted_root_override {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(InstallError::Refused(
+                    "the test root override is not a directory".into(),
+                ));
+            }
+            return Ok(MountedFilesystem::borrowed(path.clone()));
+        }
+
+        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        validate_repart_target(&source, false)?;
+        let path = self
+            .sources
+            .repart_runtime_root
+            .join(format!("root-{token}"));
+        create_private_directory(&path)?;
+        let flags = rustix::mount::MountFlags::RDONLY
+            | rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW;
+        if let Err(error) =
+            rustix::mount::mount(&source, &path, "ext4", flags, None::<&std::ffi::CStr>)
+        {
+            let _ = fs::remove_dir(&path);
+            return Err(rustix_install_io(error));
+        }
+        Ok(MountedFilesystem::mounted(path))
     }
 
     fn require_transaction_phase(
@@ -1636,6 +1926,154 @@ impl Drop for MountedEsp {
 }
 
 #[cfg(target_os = "linux")]
+struct OpenedLuksMapping {
+    cryptsetup_path: PathBuf,
+    name: String,
+    path: PathBuf,
+    open: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl OpenedLuksMapping {
+    fn finish(mut self) -> Result<(), InstallError> {
+        if self.open {
+            close_luks_mapping(&self.cryptsetup_path, &self.name)?;
+            self.open = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OpenedLuksMapping {
+    fn drop(&mut self) {
+        if self.open {
+            let _ = close_luks_mapping(&self.cryptsetup_path, &self.name);
+            self.open = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct MountedData {
+    filesystem: MountedFilesystem,
+    mapping: Option<OpenedLuksMapping>,
+}
+
+#[cfg(target_os = "linux")]
+impl MountedData {
+    fn mounted(path: PathBuf, mapping: Option<OpenedLuksMapping>) -> Self {
+        Self {
+            filesystem: MountedFilesystem::mounted(path),
+            mapping,
+        }
+    }
+
+    #[cfg(test)]
+    fn borrowed(path: PathBuf) -> Self {
+        Self {
+            filesystem: MountedFilesystem::borrowed(path),
+            mapping: None,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.filesystem.path()
+    }
+
+    fn finish(mut self) -> Result<(), InstallError> {
+        if let Err(error) = self.filesystem.finish_inner() {
+            // Never close a device-mapper node that may still back a live
+            // mount. Leaking it until the transient live boot ends is safer
+            // than tearing storage out from under the VFS.
+            if let Some(mapping) = self.mapping.take() {
+                std::mem::forget(mapping);
+            }
+            return Err(error);
+        }
+        if let Some(mapping) = self.mapping.take() {
+            mapping.finish()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MountedData {
+    fn drop(&mut self) {
+        if self.filesystem.finish_inner().is_ok() {
+            if let Some(mapping) = self.mapping.take() {
+                drop(mapping);
+            }
+        } else if let Some(mapping) = self.mapping.take() {
+            std::mem::forget(mapping);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct MountedFilesystem {
+    path: PathBuf,
+    mounted: bool,
+    remove_directory: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl MountedFilesystem {
+    fn mounted(path: PathBuf) -> Self {
+        Self {
+            path,
+            mounted: true,
+            remove_directory: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn borrowed(path: PathBuf) -> Self {
+        Self {
+            path,
+            mounted: false,
+            remove_directory: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn finish(mut self) -> Result<(), InstallError> {
+        self.finish_inner()
+    }
+
+    fn finish_inner(&mut self) -> Result<(), InstallError> {
+        if self.mounted {
+            rustix::mount::unmount(&self.path, rustix::mount::UnmountFlags::empty())
+                .map_err(rustix_install_io)?;
+            self.mounted = false;
+        }
+        if self.remove_directory {
+            let _ = fs::remove_dir(&self.path);
+            self.remove_directory = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MountedFilesystem {
+    fn drop(&mut self) {
+        if self.mounted {
+            let _ = rustix::mount::unmount(&self.path, rustix::mount::UnmountFlags::empty());
+            self.mounted = false;
+        }
+        if self.remove_directory {
+            let _ = fs::remove_dir(&self.path);
+            self.remove_directory = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn rustix_install_io(error: rustix::io::Errno) -> InstallError {
     InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
 }
@@ -2048,6 +2486,90 @@ fn read_systemd_recovery_keyslot(binary: &Path, target: &Path) -> Result<u8, Ins
     Ok(*slots.iter().next().expect("one recovery keyslot exists"))
 }
 
+#[cfg(target_os = "linux")]
+fn open_luks_mapping(
+    binary: &Path,
+    dev_root: &Path,
+    target: &Path,
+    plan_token: &str,
+    passphrase: &[u8],
+) -> Result<OpenedLuksMapping, InstallError> {
+    validate_plan_token(plan_token)?;
+    if passphrase.is_empty() {
+        return Err(InstallError::Invalid(
+            "the LUKS passphrase descriptor is empty".into(),
+        ));
+    }
+    let name = format!("punar-install-data-{}", &plan_token[..16]);
+    run_cryptsetup_open(binary, target, &name, passphrase)?;
+    let path = dev_root.join("mapper").join(&name);
+    if let Err(error) = validate_repart_target(&path, false) {
+        let _ = close_luks_mapping(binary, &name);
+        return Err(error);
+    }
+    Ok(OpenedLuksMapping {
+        cryptsetup_path: binary.to_path_buf(),
+        name,
+        path,
+        open: true,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn run_cryptsetup_open(
+    binary: &Path,
+    target: &Path,
+    name: &str,
+    passphrase: &[u8],
+) -> Result<(), InstallError> {
+    let mut command = fixed_tool_command(binary);
+    command
+        .args(["open", "--type", "luks2", "--key-file=-"])
+        .arg(target)
+        .arg(name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| {
+            InstallError::Io(std::io::Error::other(
+                "cryptsetup did not provide its fixed unlock pipe",
+            ))
+        })
+        .and_then(|mut stdin| stdin.write_all(passphrase).map_err(InstallError::Io));
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup did not unlock the installed data volume",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn close_luks_mapping(binary: &Path, name: &str) -> Result<(), InstallError> {
+    let status = fixed_tool_command(binary)
+        .args(["close", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup did not close the installed data volume",
+        )));
+    }
+    Ok(())
+}
+
 fn fixed_tool_command(binary: &Path) -> Command {
     let mut command = Command::new(binary);
     command.env_clear().env(
@@ -2153,6 +2675,234 @@ fn read_descriptor_file(
         )));
     }
     Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_directory_exact(path: &Path, mode: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(InstallError::Refused(format!(
+                "{} is not an installed-system directory",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(mode).create(path)?;
+        }
+        Err(error) => return Err(InstallError::Io(error)),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.mode() & 0o7777 != mode
+        || metadata.uid() != expected_install_owner()
+        || metadata.gid() != expected_install_group()
+    {
+        return Err(InstallError::Refused(format!(
+            "{} does not have the required owner and mode",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+const fn expected_install_owner() -> u32 {
+    0
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+const fn expected_install_group() -> u32 {
+    0
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn expected_install_owner() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn expected_install_group() -> u32 {
+    rustix::process::getegid().as_raw()
+}
+
+#[cfg(target_os = "linux")]
+fn write_new_synced_exact(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(InstallError::Refused(format!(
+                "{} already exists on the freshly formatted target",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(InstallError::Io(error)),
+    }
+    // Start private even for the advisory seed, then widen explicitly after
+    // the atomic rename. This is independent of punard.service's umask.
+    write_atomic_synced(path, bytes, 0o600)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    let file = open_regular_nofollow(path, "installed seed artifact")?;
+    file.sync_all()?;
+    let metadata = file.metadata()?;
+    if metadata.mode() & 0o7777 != mode
+        || metadata.uid() != expected_install_owner()
+        || metadata.gid() != expected_install_group()
+    {
+        return Err(InstallError::Refused(format!(
+            "{} does not have the required owner and mode",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_bounded_regular(
+    path: &Path,
+    maximum: usize,
+    description: &str,
+) -> Result<Vec<u8>, InstallError> {
+    let mut file = open_regular_nofollow(path, description)?;
+    let mut bytes = Vec::with_capacity(maximum.min(4096));
+    Read::by_ref(&mut file)
+        .take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(InstallError::Refused(format!(
+            "{description} exceeds its fixed size limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_installed_file_mode(path: &Path, mode: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = open_regular_nofollow(path, "installed seed artifact")?.metadata()?;
+    if metadata.permissions().mode() & 0o7777 != mode
+        || metadata.uid() != expected_install_owner()
+        || metadata.gid() != expected_install_group()
+    {
+        return Err(InstallError::Refused(format!(
+            "{} does not have the required owner and mode",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_installed_seed(
+    var_root: &Path,
+    plan: &InstallPlan,
+    params: &InstallApplyParams,
+    inputs: &InstallApplyInputs,
+    expected_seed_digest: &str,
+    expected_image_version: &str,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let punar_dir = var_root.join("lib/punar");
+    let metadata = fs::symlink_metadata(&punar_dir)?;
+    if !metadata.file_type().is_dir()
+        || metadata.permissions().mode() & 0o7777 != 0o700
+        || metadata.uid() != expected_install_owner()
+        || metadata.gid() != expected_install_group()
+    {
+        return Err(InstallError::Refused(
+            "the installed Punar state directory has the wrong type, owner or mode".into(),
+        ));
+    }
+
+    let seed_path = punar_dir.join("install/seed.json");
+    let seed_bytes = read_bounded_regular(&seed_path, 4096, "installed seed")?;
+    verify_installed_file_mode(&seed_path, 0o644)?;
+    if sha256_hex(&seed_bytes) != expected_seed_digest {
+        return Err(InstallError::Trust(
+            "the installed seed changed between its durable write and read-only verification"
+                .into(),
+        ));
+    }
+    let seed: InstallSeedDocument = serde_json::from_slice(&seed_bytes)
+        .map_err(|_| InstallError::Trust("the installed seed is invalid".into()))?;
+    if seed.v != 1
+        || seed.locale != params.seed.locale
+        || seed.keymap != plan.keymap
+        || !punar_common::time::is_rfc3339_timestamp(&seed.installed_at)
+        || seed.image_version != expected_image_version
+        || seed.disk_encrypted != (plan.encryption == InstallEncryption::Luks2)
+        || seed.disk_recovery.mode != plan.recovery_mode
+    {
+        return Err(InstallError::Trust(
+            "the installed seed does not match the confirmed plan".into(),
+        ));
+    }
+
+    let machine_path = var_root.join("lib/dbus/machine-id");
+    let machine_id = read_bounded_regular(&machine_path, 33, "installed machine id")?;
+    verify_installed_file_mode(&machine_path, 0o444)?;
+    let machine_text = std::str::from_utf8(&machine_id).unwrap_or_default();
+    if machine_text.len() != 33
+        || !machine_text.ends_with('\n')
+        || !machine_text[..32]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(InstallError::Trust(
+            "the installed machine id is invalid".into(),
+        ));
+    }
+
+    let device_path = punar_dir.join("device-id");
+    let device_id = read_bounded_regular(&device_path, 64, "installed device id")?;
+    verify_installed_file_mode(&device_path, 0o600)?;
+    let device_text = std::str::from_utf8(&device_id).unwrap_or_default();
+    let device_token = device_text.strip_suffix('\n').unwrap_or_default();
+    if device_token.len() != 14
+        || !device_token.starts_with("dev_")
+        || !device_token[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(InstallError::Trust(
+            "the installed device id is invalid".into(),
+        ));
+    }
+
+    let answers_path = punar_dir.join("install/oobe-answers.json");
+    match inputs.oobe_answers() {
+        Some(expected) => {
+            let actual = read_bounded_regular(
+                &answers_path,
+                OOBE_ANSWERS_MAX_BYTES,
+                "installed OOBE answers",
+            )?;
+            verify_installed_file_mode(&answers_path, 0o600)?;
+            if actual != expected {
+                return Err(InstallError::Trust(
+                    "the installed OOBE answers are not byte-identical to their sealed input"
+                        .into(),
+                ));
+            }
+        }
+        None => match fs::symlink_metadata(&answers_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(InstallError::Trust(
+                    "the installed system contains unrequested OOBE answers".into(),
+                ));
+            }
+            Err(error) => return Err(InstallError::Io(error)),
+        },
+    }
+    Ok(())
 }
 
 const fn phase_index(phase: InstallPhase) -> usize {
@@ -2889,6 +3639,15 @@ mod tests {
         }
     }
 
+    fn unencrypted_params(disk: &str) -> InstallPlanParams {
+        InstallPlanParams {
+            disk: disk.into(),
+            keymap: "us".into(),
+            encryption: InstallEncryption::None,
+            recovery_mode: InstallRecoveryMode::None,
+        }
+    }
+
     fn apply_params(plan: &InstallPlanResult) -> InstallApplyParams {
         InstallApplyParams {
             plan_token: plan.plan_token.clone(),
@@ -2927,6 +3686,11 @@ mod tests {
             .unwrap();
         installer.enter_phase(InstallPhase::ReRead).unwrap();
         installer.enter_phase(InstallPhase::Boot).unwrap();
+    }
+
+    fn advance_status_to_seed(installer: &Installer, result: &InstallPlanResult) {
+        advance_status_to_boot(installer, result);
+        installer.enter_phase(InstallPhase::Seed).unwrap();
     }
 
     #[test]
@@ -3001,6 +3765,78 @@ mod tests {
         let (writer, _reader) = UnixStream::pair().unwrap();
         let owned: OwnedFd = writer.into();
         assert!(validate_recovery_output_file(File::from(owned)).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn data_unlock_and_close_use_fixed_argv_and_an_anonymous_secret_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let binary = fixture.root.join("cryptsetup");
+        let capture = fixture.root.join("cryptsetup-capture");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 capture='{}'\n\
+                 operation=\"$1\"\n\
+                 : > \"${{capture}}.${{operation}}.args\"\n\
+                 for argument in \"$@\"; do\n\
+                   printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.${{operation}}.args\"\n\
+                 done\n\
+                 printf '%s\\n' \"${{LC_ALL:-missing}}\" > \"${{capture}}.${{operation}}.locale\"\n\
+                 if [ \"${{operation}}\" = open ]; then cat > \"${{capture}}.secret\"; fi\n",
+                capture.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let passphrase = b"never in argv, logs or files outside this test seam";
+        run_cryptsetup_open(
+            &binary,
+            Path::new("/dev/vda4"),
+            "punar-install-data-0123456789abcdef",
+            passphrase,
+        )
+        .unwrap();
+        close_luks_mapping(&binary, "punar-install-data-0123456789abcdef").unwrap();
+
+        let open_args = fs::read_to_string(capture.with_extension("open.args")).unwrap();
+        assert_eq!(
+            open_args.lines().collect::<Vec<_>>(),
+            [
+                "open",
+                "--type",
+                "luks2",
+                "--key-file=-",
+                "/dev/vda4",
+                "punar-install-data-0123456789abcdef"
+            ]
+        );
+        assert!(
+            !open_args
+                .as_bytes()
+                .windows(passphrase.len())
+                .any(|window| window == passphrase)
+        );
+        assert_eq!(
+            fs::read(capture.with_extension("secret")).unwrap(),
+            passphrase
+        );
+        assert_eq!(
+            fs::read_to_string(capture.with_extension("close.args"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["close", "punar-install-data-0123456789abcdef"]
+        );
+        assert_eq!(
+            fs::read_to_string(capture.with_extension("open.locale"))
+                .unwrap()
+                .trim(),
+            "C"
+        );
     }
 
     #[test]
@@ -3630,6 +4466,188 @@ mod tests {
         assert!(error.to_string().contains("digest"));
         assert!(fs::read_dir(&esp).unwrap().next().is_none());
         assert_eq!(installer.status().phase, Some(InstallPhase::Boot));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seed_is_last_byte_exact_and_read_only_verified_before_success() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let data = fixture.root.join("mounted-var");
+        let root = fixture.root.join("mounted-root");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir_all(root.join("usr/lib/systemd/system")).unwrap();
+        fs::write(
+            root.join("usr/lib/systemd/system/punard.service"),
+            b"[Service]\nExecStart=/usr/bin/punard\n",
+        )
+        .unwrap();
+        fixture.sources.mounted_data_override = Some(data.clone());
+        fixture.sources.mounted_root_override = Some(root);
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        advance_status_to_seed(&installer, &result);
+        let answers = br#"{"v":1,"timezone":"Europe/Berlin"}"#;
+        let mut params = apply_params(&result);
+        params.oobe_answers_fd = Some(5);
+        let inputs = InstallApplyInputs {
+            passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
+            recovery_output: None,
+            oobe_answers: Some(Zeroizing::new(answers.to_vec())),
+        };
+
+        installer
+            .seed_installed_system(&result.plan, &params, &inputs)
+            .unwrap();
+        assert_eq!(
+            installer.status().phase,
+            Some(InstallPhase::VerifyInstalled)
+        );
+        let seed_path = data.join("lib/punar/install/seed.json");
+        let seed: InstallSeedDocument =
+            serde_json::from_slice(&fs::read(&seed_path).unwrap()).unwrap();
+        assert_eq!(seed.v, 1);
+        assert_eq!(seed.locale, "C.UTF-8");
+        assert_eq!(seed.keymap, "us");
+        assert!(punar_common::time::is_rfc3339_timestamp(&seed.installed_at));
+        assert!(seed.disk_encrypted);
+        assert_eq!(seed.disk_recovery.mode, InstallRecoveryMode::PersonalCopy);
+        assert_eq!(
+            fs::read(data.join("lib/punar/install/oobe-answers.json")).unwrap(),
+            answers
+        );
+        assert_eq!(
+            fs::metadata(data.join("lib/punar"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&seed_path).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(data.join("lib/punar/install/oobe-answers.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&seed_path).unwrap().uid(),
+            expected_install_owner()
+        );
+
+        installer
+            .verify_installed_system(&result.plan, &params, &inputs)
+            .unwrap();
+        assert_eq!(installer.status().state, InstallOverallState::Succeeded);
+        assert_eq!(installer.status().phase, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unencrypted_seed_states_no_encryption_and_retains_no_passphrase() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let data = fixture.root.join("mounted-var");
+        let root = fixture.root.join("mounted-root");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir_all(root.join("usr/lib/systemd/system")).unwrap();
+        fs::write(
+            root.join("usr/lib/systemd/system/punard.service"),
+            b"[Service]\nExecStart=/usr/bin/punard\n",
+        )
+        .unwrap();
+        fixture.sources.mounted_data_override = Some(data.clone());
+        fixture.sources.mounted_root_override = Some(root);
+
+        let installer = fixture.installer();
+        let result = installer.plan(&unencrypted_params("/dev/vda")).unwrap();
+        advance_status_to_seed(&installer, &result);
+        let mut params = apply_params(&result);
+        params.passphrase_fd = None;
+        params.recovery_output_fd = None;
+        let inputs = InstallApplyInputs {
+            passphrase: None,
+            recovery_output: None,
+            oobe_answers: None,
+        };
+        installer
+            .seed_installed_system(&result.plan, &params, &inputs)
+            .unwrap();
+        let seed: InstallSeedDocument =
+            serde_json::from_slice(&fs::read(data.join("lib/punar/install/seed.json")).unwrap())
+                .unwrap();
+        assert!(!seed.disk_encrypted);
+        assert_eq!(seed.disk_recovery.mode, InstallRecoveryMode::None);
+        installer
+            .verify_installed_system(&result.plan, &params, &inputs)
+            .unwrap();
+        assert_eq!(installer.status().state, InstallOverallState::Succeeded);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn final_verification_refuses_seed_tampering_and_unrequested_answers() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let data = fixture.root.join("mounted-var");
+        let root = fixture.root.join("mounted-root");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir_all(root.join("usr/lib/systemd/system")).unwrap();
+        fs::write(
+            root.join("usr/lib/systemd/system/punard.service"),
+            b"[Service]\nExecStart=/usr/bin/punard\n",
+        )
+        .unwrap();
+        fixture.sources.mounted_data_override = Some(data.clone());
+        fixture.sources.mounted_root_override = Some(root);
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        advance_status_to_seed(&installer, &result);
+        let params = apply_params(&result);
+        let inputs = InstallApplyInputs {
+            passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
+            recovery_output: None,
+            oobe_answers: None,
+        };
+        installer
+            .seed_installed_system(&result.plan, &params, &inputs)
+            .unwrap();
+
+        fs::write(
+            data.join("lib/punar/install/oobe-answers.json"),
+            br#"{"v":1}"#,
+        )
+        .unwrap();
+        let error = installer
+            .verify_installed_system(&result.plan, &params, &inputs)
+            .unwrap_err();
+        assert!(error.to_string().contains("unrequested OOBE answers"));
+        assert_eq!(installer.status().state, InstallOverallState::Running);
+        assert_eq!(
+            installer.status().phase,
+            Some(InstallPhase::VerifyInstalled)
+        );
+
+        fs::remove_file(data.join("lib/punar/install/oobe-answers.json")).unwrap();
+        let seed_path = data.join("lib/punar/install/seed.json");
+        let mut seed = fs::read(&seed_path).unwrap();
+        seed.push(b' ');
+        fs::write(seed_path, seed).unwrap();
+        let error = installer
+            .verify_installed_system(&result.plan, &params, &inputs)
+            .unwrap_err();
+        assert!(error.to_string().contains("seed changed"));
+        assert_eq!(installer.status().state, InstallOverallState::Running);
     }
 
     #[test]

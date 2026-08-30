@@ -387,8 +387,9 @@ current-boot token registry admits only plans returned by explicit
 size, both GPT edges and signed release before a mutating executor may start.
 Tests cover a same-sized physical-disk swap, a changed GPT edge and device-node
 re-enumeration, each with the target byte-identical across refusal. The public
-`install.apply` method still remains deliberately unregistered until its
-transaction exists, so this slice remains unable to write a byte. The live-only
+`install.apply` method still remains deliberately unregistered until every
+transaction branch is wired and audited, so no caller can start the internal
+destructive executor yet. The live-only
 `install.status` read side now exposes the same secret-free fixed nine-phase
 state through IPC and an atomically replaced, world-readable
 `/run/punar/install.json`; installed mode neither serves the method nor creates
@@ -405,11 +406,16 @@ verify/layout/recovery-enroll/write/re-read/UEFI-boot executor primitives now
 exist. The signed plan binds the exact boot artifact as well as the root
 payload, and the boot primitive re-verifies and atomically installs the
 uncounted first known-good UKI through `bootctl --no-variables`, syncs the ESP,
-and refuses to advance until it is unmounted. Its no-NVRAM/digest/phase tests
-are green; its privileged real-vfat mount still needs the live installer VM
-gate. Organization receipt orchestration, Raspberry Pi boot-filesystem
-installation, shared-state seeding, final installed-system verification, ISO
-assembly and the unattended VM lane are still next.
+and refuses to advance until it is unmounted. The seed/final-verification
+primitive now unlocks and mounts only the shared `@var` subvolume, writes the
+machine/device identities plus exact advisory seed/OOBE seam, reopens shared
+data and root A read-only, and refuses digest, plan, owner/mode and unexpected
+answer drift before success. Its no-NVRAM/digest/phase, fixed cryptsetup argv,
+secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
+privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
+Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
+hardware-report/audit handoff, ISO assembly and the unattended VM lane are
+still next.
 
 The executor's compressed-versus-written identity ambiguity is closed before
 its first write: the signed release manifest now binds both the downloaded
@@ -481,9 +487,19 @@ checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
 pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
-organization recovery-receipt orchestration, Raspberry Pi boot path,
-seed/final-verify executor half, audit wiring and live descriptor-duplication
-proof still remain before `install.apply` is registered.
+seed/final-verify executor half is now closed internally: partition 4 is
+unlocked through one fixed `cryptsetup` argv and anonymous passphrase pipe;
+only `@var` is mounted; random machine/device identities, a private Punar
+state directory, `seed.json` and an optional byte-identical OOBE passthrough
+are durably written; then both shared data and root slot A are reopened
+read-only before success. The verifier binds the exact seed digest in daemon
+memory, enforces plan fields, owner/modes and OOBE presence, and refuses
+tampering or an unrequested answer file. Native ARM64 unit tests prove the
+fixed unlock/close argv, secret absence from argv, exact seed content/modes,
+successful closure and both refusal paths. Organization recovery-receipt
+orchestration, Raspberry Pi boot, hardware-report generation/copy, audit
+wiring, live mount proof and live descriptor-duplication proof still remain
+before `install.apply` is registered.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

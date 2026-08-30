@@ -1314,8 +1314,9 @@ specification.
 | verify | post-install check | re-open read-only, compare against the plan |
 
 **Implementation checkpoint (2026-08-30).** The internal `punard` executor
-now implements the first seven rows through UEFI boot installation, while the
-public `install.apply` method remains deliberately absent. Disk preparation invokes
+now implements the fixed path through UEFI boot installation, shared-state
+seeding and read-only final verification, while the public `install.apply`
+method remains deliberately absent. Disk preparation invokes
 one fixed `systemd-repart` transaction for the partition/encrypt/format rows:
 it merges only the immutable base, LUKS2 and streaming layers, revalidates the
 plan at the destructive boundary, requires a block device, and provides the
@@ -1332,12 +1333,20 @@ that artifact before touching the target, mounts the derived ESP with
 `nodev,nosuid,noexec,nosymfollow`, invokes the fixed `bootctl --no-variables`
 path, copies and re-hashes the uncounted slot-A UKI, durably writes the
 assessment-aware loader configuration, calls `syncfs`, and must unmount before
-entering `seed`. Unit tests prove exact argv, absence of an NVRAM write flag,
-digest refusal before any ESP mutation, and the permanent initial filename.
-The privileged real-vfat mount still needs the live installer VM gate.
-Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
-seed, final verification and the integrated audit path remain unimplemented,
-so this checkpoint is not an installability claim.
+entering `seed`. The seed executor derives and unlocks partition 4 with one
+fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
+creates a random machine id, random device id, private Punar state directory,
+the advisory seed and the optional byte-identical OOBE passthrough. The seed is
+written last. It then unmounts and reopens `@var` read-only, compares the exact
+seed digest retained only in daemon memory, validates plan fields, ownership,
+modes and OOBE bytes, and reopens root slot A read-only before it may publish
+success. Unit tests prove exact unlock/close argv, secret absence from argv,
+the seed shape/modes, successful closure and tamper/unrequested-answer refusal.
+The privileged real-vfat, LUKS and btrfs mounts still need the live installer
+VM gate. Organization receipt orchestration, Raspberry Pi boot-filesystem
+installation, hardware-report generation/copy, the integrated audit path and
+public descriptor orchestration remain unimplemented, so this checkpoint is
+not an installability claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
