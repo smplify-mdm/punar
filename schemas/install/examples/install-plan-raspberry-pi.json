@@ -1,0 +1,112 @@
+{
+  "v": 1,
+  "plan": {
+    "schema_version": 1,
+    "architecture": "aarch64",
+    "boot_platform": "raspberry_pi",
+    "disk": {
+      "device": "/dev/mmcblk0",
+      "model": "Punar Pi Test Media",
+      "serial": "PUNAR-PI-128G",
+      "size_bytes": 128000000000,
+      "logical_sector_bytes": 512,
+      "existing_gpt_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "keymap": "us",
+    "encryption": "luks2",
+    "recovery_mode": "personal_copy",
+    "payload": {
+      "release_id": "punar-desktop-stable-aarch64-raspberry_pi-2026.08.30.1",
+      "filename": "slot.raw.zst",
+      "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "compressed_size_bytes": 912680550,
+      "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "uncompressed_size_bytes": 8589934592
+    },
+    "boot_artifact": {
+      "kind": "raspberry_pi_bootfs",
+      "filename": "punar-desktop-aarch64-rpi-boot-a.img",
+      "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 268435456
+    },
+    "partitions": [
+      {
+        "number": 1,
+        "name": "PUNAR-BOOT-A",
+        "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        "partuuid": "79115027-a3f0-43dc-a251-4a0c637b135f",
+        "offset_bytes": 1048576,
+        "size_bytes": 1073741824,
+        "filesystem": "vfat",
+        "encrypted": false
+      },
+      {
+        "number": 2,
+        "name": "PUNAR-ROOT-A",
+        "type_guid": "b921b045-1df0-41c3-af44-4c6f280d3fae",
+        "partuuid": "1beabfe0-9cb8-4b49-91ef-d372b845e7ea",
+        "offset_bytes": 1074790400,
+        "size_bytes": 8589934592,
+        "filesystem": "ext4",
+        "encrypted": false
+      },
+      {
+        "number": 3,
+        "name": "PUNAR-BOOT-B",
+        "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        "partuuid": "706d6f54-d8b9-4276-9f4f-f1ac379a482e",
+        "offset_bytes": 9664724992,
+        "size_bytes": 1073741824,
+        "filesystem": "vfat",
+        "encrypted": false
+      },
+      {
+        "number": 4,
+        "name": "PUNAR-ROOT-B",
+        "type_guid": "b921b045-1df0-41c3-af44-4c6f280d3fae",
+        "partuuid": "2b1b91a9-cf2c-4e9c-a723-5ec997971662",
+        "offset_bytes": 10738466816,
+        "size_bytes": 8589934592,
+        "encrypted": false
+      },
+      {
+        "number": 5,
+        "name": "PUNAR-DATA",
+        "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4",
+        "partuuid": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9",
+        "offset_bytes": 19328401408,
+        "size_bytes": 108671270912,
+        "filesystem": "btrfs",
+        "encrypted": true
+      }
+    ],
+    "data_subvolumes": ["@var", "@home", "@var-tmp"],
+    "warnings": []
+  },
+  "plan_token": "40e90bfb8799d80de1bf7f0c3a732bb4bac081458f83433148a836b5bccbf276",
+  "hardware_report": {
+    "v": 1,
+    "generated_at": "2026-08-30T18:45:00Z",
+    "architecture": "aarch64",
+    "kernel_release": "6.18.4-punar1-arm64",
+    "overall": "full",
+    "graphics_usable": true,
+    "disk_below_minimum_target": false,
+    "bare_hardware_qualified": false,
+    "devices": [
+      {
+        "bus": "platform",
+        "address": "gpu",
+        "function": "graphics",
+        "display_name": "Raspberry Pi VC4 graphics",
+        "modalias": "of:Nv3dT(null)Cbrcm,bcm2711-v3d",
+        "driver": "v3d",
+        "claiming_modules": ["v3d"],
+        "requested_firmware": [],
+        "missing_firmware": [],
+        "coverage": "full",
+        "reason": "driver_bound"
+      }
+    ]
+  }
+}

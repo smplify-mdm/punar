@@ -347,8 +347,13 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    canonical. The current Arch image remains the regression baseline until
    that crossing is runtime-proven; two production substrates are not
    accepted.
-3. Generate the Pi two-boot/two-root/shared-data layout and software-test the
-   state machine, labelled as QEMU evidence.
+3. Generate the signed raw Pi bootfs and connect it to the now-implemented
+   five-partition installer adapter. The adapter already plans
+   boot-A/root-A/boot-B/root-B/shared-data, selects partition 5 for LUKS/data,
+   writes and physically rereads the bootfs, mounts it read-only, and rejects
+   unsafe `autoboot.txt`, `cmdline.txt` or kernel/initramfs contracts. Complete
+   the inactive-pair update state machine and label all software proof as
+   non-hardware evidence.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
@@ -374,7 +379,8 @@ The first headless installer slice is now implemented and locally verified on
 both ARM64 and x86_64: `install.targets` is live-mode-only read discovery, and
 `install.plan` is a root-only, audited, non-mutating plan bound to the disk
 serial, optional WWN, byte size and SHA-256 of its first/last 34 LBAs. The plan
-contains the complete four-partition x86_64 or ARM64 layout and signed payload
+contains the complete four-partition UEFI or five-partition native Raspberry
+Pi layout and signed payload
 identity; its recursively canonical JSON token changes when either GPT edge or
 any field changes. Tests cover dm-backed boot-media exclusion, the answer-disk
 exclusion, the 33 GiB arithmetic, reinstall-on-target versus foreign-Punar
@@ -413,9 +419,14 @@ data and root A read-only, and refuses digest, plan, owner/mode and unexpected
 answer drift before success. Its no-NVRAM/digest/phase, fixed cryptsetup argv,
 secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
 privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
-The organization receipt gate is connected inside the executor; trusted
-enrollment/token sourcing in the public server orchestration, Raspberry Pi
-boot-filesystem installation, ISO assembly and the unattended VM lane are
+The organization receipt gate is connected inside the executor. The native
+Raspberry Pi boot-filesystem branch is also connected: its signed raw FAT
+image is bounded to boot A, fsynced, physically reread, mounted read-only and
+validated for ordinary-A/tryboot-B plus boot-A/root-A pairing before `seed`.
+The plan/schema/repart source now carries the exact five-partition layout, and
+the LUKS/seed path derives data as partition 5 rather than assuming UEFI's
+partition 4. Production Pi bootfs assembly, trusted enrollment/token sourcing
+in public server orchestration, ISO assembly and the unattended VM lane are
 still next. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
@@ -497,7 +508,7 @@ leaves status at `awaiting: organization_escrow_receipt`, refuses `format`, and
 retains the only key in memory for retry. The real dev/CI control plane and
 literal-secret negative assertions pass on native ARM64. Public apply remains
 absent until server-side orchestration supplies the trusted enrollment
-organization/token and every remaining boot branch is complete.
+organization/token and the complete descriptor boundary.
 
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
@@ -518,7 +529,8 @@ checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
 pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
-seed/final-verify executor half is now closed internally: partition 4 is
+seed/final-verify executor half is now closed internally: the platform-bound
+data partition (4 on UEFI, 5 on Raspberry Pi) is
 unlocked through one fixed `cryptsetup` argv and anonymous passphrase pipe;
 only `@var` is mounted; a random machine identity, the validated live device
 identity, a private Punar state directory, `seed.json` and an optional
@@ -529,8 +541,8 @@ memory, enforces plan fields, owner/modes and OOBE presence, and refuses
 tampering or an unrequested answer file. Native ARM64 unit tests prove the
 fixed unlock/close argv, secret absence from argv, exact seed content/modes,
 successful closure and both refusal paths. Public organization/enrollment
-orchestration, Raspberry Pi boot, live mount proof and live
-descriptor-duplication proof still remain before `install.apply` is
+orchestration, production Raspberry Pi bootfs assembly, live mount proof and
+live descriptor-duplication proof still remain before `install.apply` is
 registered. Hardware reporting is no longer in that remainder: its bounded
 PCI/USB/platform observer, ARM-aware categories, strict schema, plan-time
 graphics blocker/warnings, privacy exclusions, installed-state copy and exact

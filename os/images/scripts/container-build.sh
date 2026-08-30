@@ -119,6 +119,7 @@ stage_desktop_extra() {
              "${extra}/usr/share/punar/theme/themes" \
              "${extra}/usr/share/punar/network/zones" \
              "${extra}/usr/share/punar/repart.d/install" \
+             "${extra}/usr/share/punar/repart.d/install-raspberry-pi" \
              "${extra}/usr/share/punar/repart.d/install-encrypted" \
              "${extra}/usr/share/punar/repart.d/install-streaming" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
@@ -182,12 +183,15 @@ stage_desktop_extra() {
     # gate in Theme/ThemeContrast.qml runs against these exact bytes).
     cp -R "${themes}/." "${extra}/usr/share/punar/theme/themes/"
     # The internal installer executor accepts no caller-provided layout.
-    # Stage the three immutable definition layers it merges: the canonical
-    # A/B layout, the LUKS2 data overlay and the root-A streaming overlay.
+    # Stage the immutable definition layers it merges: the UEFI and native
+    # Raspberry Pi A/B layouts, the LUKS2 data overlay and root-A streaming
+    # overlay.
     # The eventual live profile inherits this same desktop tree, preventing a
     # second hand-maintained installer layout from drifting from image builds.
     install -m 0644 "${repart_src}/install/"*.conf \
         "${extra}/usr/share/punar/repart.d/install/"
+    install -m 0644 "${repart_src}/install-raspberry-pi/"*.conf \
+        "${extra}/usr/share/punar/repart.d/install-raspberry-pi/"
     install -m 0644 "${repart_src}/install-encrypted/"*.conf \
         "${extra}/usr/share/punar/repart.d/install-encrypted/"
     install -m 0644 "${repart_src}/install-streaming/"*.conf \

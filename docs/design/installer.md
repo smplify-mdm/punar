@@ -14,9 +14,12 @@ prerequisite), [`DESIGN_LANGUAGE.md`](DESIGN_LANGUAGE.md) §7/§8,
 Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 
 > **Punar has never booted on hardware, and nobody outside this repository
-> has ever installed it.** The four-partition A/B layout below now builds and
-> boots in a generic ARM64 VM; the installer, encryption-on-the-built-image,
-> update swap and physical-device claims remain designs. The purpose here is
+> has ever installed it.** The UEFI four-partition and native Raspberry Pi
+> five-partition A/B layouts below now build as plan-bound definition sets.
+> Generic UEFI images boot in ARM64 VMs, and the internal installer can plan,
+> write and verify both boot adapters; public apply orchestration, a generated
+> Pi bootfs, encryption-on-the-built-image, update swap and physical-device
+> claims remain open. The purpose here is
 > still to make the first real install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones
 > building.
@@ -322,8 +325,8 @@ and overclaiming a build step.
 
 ### 4.1 The table
 
-Four GPT partitions. Nothing else. No BIOS boot partition (UEFI is required
-per §44.1 and §5.1), no swap partition (§4.6), no recovery partition
+On UEFI, four GPT partitions. Nothing else. No BIOS boot partition (UEFI is
+required per §44.1 and §5.1), no swap partition (§4.6), no recovery partition
 (§4.5's honest limit).
 
 | # | Name | GPT type | PARTUUID | Size | Filesystem | Rolled back? |
@@ -333,7 +336,29 @@ per §44.1 and §5.1), no swap partition (§4.6), no recovery partition
 | 3 | `PUNAR-ROOT-B` | `4f68bce3-…` (root-x86-64) | fixed literal **B** | **8 GiB** | ext4 | yes, by swapping |
 | 4 | `PUNAR-DATA` | `0fc63daf-…` (linux-generic) | fixed literal | **remainder** | **LUKS2 → btrfs** | **never** |
 
-Inside partition 4, three subvolumes, mounted as three separate mounts:
+ADR-006's native Raspberry Pi adapter uses five GPT partitions because the Pi
+firmware needs a FAT partition for each root slot. It does not insert UEFI:
+
+| # | Name | GPT type | PARTUUID | Size | Filesystem | Pair |
+|---|---|---|---|---|---|---|
+| 1 | `PUNAR-BOOT-A` | ESP | `79115027-a3f0-43dc-a251-4a0c637b135f` | **1 GiB** | vfat | root A |
+| 2 | `PUNAR-ROOT-A` | root-arm64 | `1beabfe0-9cb8-4b49-91ef-d372b845e7ea` | **8 GiB** | ext4 | boot A |
+| 3 | `PUNAR-BOOT-B` | ESP | `706d6f54-d8b9-4276-9f4f-f1ac379a482e` | **1 GiB** | vfat | root B |
+| 4 | `PUNAR-ROOT-B` | root-arm64 | `2b1b91a9-cf2c-4e9c-a723-5ec997971662` | **8 GiB** | unformatted at install | boot B |
+| 5 | `PUNAR-DATA` | linux-generic | `21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9` | **remainder** | **LUKS2 → btrfs** | shared |
+
+The signed `raspberry_pi_bootfs` artifact is a raw, 4096-byte-aligned FAT
+filesystem image for boot A. The installer writes it through one verified
+descriptor, fsyncs, performs a post-write physical `O_DIRECT` digest reread,
+then mounts it read-only and refuses to proceed unless `autoboot.txt` selects
+partition 1 normally and partition 3 under `[tryboot]`; `cmdline.txt` binds
+only root A read-only; and `config.txt`, `kernel8.img`, and `initramfs8` satisfy
+the fixed aarch64 boot contract. Boot B stays an inactive filesystem until a
+verified update writes the complete B boot/root pair. This is software-path
+component proof, not Raspberry Pi hardware qualification.
+
+Inside the data partition (4 on UEFI, 5 on Raspberry Pi), three subvolumes are
+mounted as three separate mounts:
 
 | Subvolume | Mount | Why it is its own mount |
 |---|---|---|
@@ -346,7 +371,7 @@ nothing here changes them. `/efi` is a fifth mount. That makes **five
 non-tmpfs mounts** for assertion I15, and it makes execution-trust's V3
 true.
 
-**Why `linux-generic` and not the discoverable `var` type for partition 4.**
+**Why `linux-generic` and not the discoverable `var` type for the data partition.**
 systemd's `gpt-auto-generator` will only auto-mount a partition of type
 `var` whose partition UUID equals an HMAC of the machine-id — a rule this
 layout cannot satisfy, because the partition UUID is a fixed literal (§4.2)
@@ -361,7 +386,7 @@ point.
 ### 4.2 Fixed PARTUUIDs, and what they buy
 
 ADR-003 already requires *"fixed, literal, distinct PARTUUIDs"* for the two
-root slots. This design extends that to all four partitions, and the reason
+root slots. This design extends that to every platform partition, and the reason
 is a rule ADR-003 itself imposes:
 
 > *Punar-owned mutable `/etc` state becomes a capability output, never a
@@ -538,7 +563,15 @@ argument for this layout.
                    Subvolumes=/@var /@home /@var-tmp
 ```
 
-and two fixed overlay directories. `repart.d/install-encrypted/` contains a
+`os/images/repart.d/install-raspberry-pi/` is the parallel complete base set
+for `PUNAR-BOOT-A`, root A, `PUNAR-BOOT-B`, root B and data in that exact
+order. The shared encrypted-data and streaming-root overlays shadow its
+`50-data.conf` and `20-root-a.conf` by the same fixed filenames. The image
+staging script copies all four directories from this one committed source;
+the generated `mkosi.extra` copy remains gitignored.
+
+The two fixed overlay directories are shared by both base sets.
+`repart.d/install-encrypted/` contains a
 complete `50-data.conf` with `Encrypt=key-file`. It intentionally does not set
 `EncryptKDF=minimal`; that shortcut belongs only to V-REPART's random
 disposable test key, never to a person's passphrase.
@@ -1333,7 +1366,8 @@ that artifact before touching the target, mounts the derived ESP with
 `nodev,nosuid,noexec,nosymfollow`, invokes the fixed `bootctl --no-variables`
 path, copies and re-hashes the uncounted slot-A UKI, durably writes the
 assessment-aware loader configuration, calls `syncfs`, and must unmount before
-entering `seed`. The seed executor derives and unlocks partition 4 with one
+entering `seed`. The seed executor derives and unlocks the plan-bound data
+partition (4 on UEFI, 5 on Raspberry Pi) with one
 fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
 creates a random machine id, copies the validated live device identity so the
 installation and installed audit records have one subject, creates the private
@@ -1365,9 +1399,11 @@ requires the public unattended install lane.
 returning the plan token: an audit I/O failure is reported with
 `disk_changed: false`, rather than being discovered after destructive work.
 The privileged real-vfat, LUKS and btrfs mounts still need the live installer
-VM gate. Organization receipt orchestration, Raspberry Pi boot-filesystem
-installation and public descriptor orchestration
-remain unimplemented, so this checkpoint is not an installability claim.
+VM gate. Raspberry Pi boot-filesystem installation is now component-proven as
+the bounded raw-write/reread/read-only-validation primitive above; production
+bootfs assembly, public descriptor orchestration, the unattended lane and
+real-board fault injection remain unimplemented, so this checkpoint is not an
+installability or Raspberry Pi support claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
