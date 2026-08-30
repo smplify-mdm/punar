@@ -482,9 +482,22 @@ fi
 "${CTL}" agents access "${SID}" --json > "${RUN_DIR}/m12-access-ended.json" 2>&1
 jq_check "ended ledger retains the reached destination" "${RUN_DIR}/m12-access-ended.json" \
     '.summary.resources.network_destinations | index("127.0.0.9") != null'
-jq -c --arg sid "${SID}" \
-    'select(.action == "network.session_detach" and .agent_session_id == $sid and .project_id == "atlas" and .result == "success")' \
-    "${AUDIT}" 2>/dev/null | tail -n 1 > "${RUN_DIR}/m12-audit-detach.json"
+# The kernel table replacement deliberately precedes its success audit. The
+# chain poll above can therefore observe the committed nft transaction a few
+# milliseconds before the append-only writer publishes the corresponding
+# record. Wait for that post-enforcement record instead of making the gate
+# timing-dependent or asking the daemon to audit success before it is true.
+waited=0
+while [ "${waited}" -lt 30 ]; do
+    jq -c --arg sid "${SID}" \
+        'select(.action == "network.session_detach" and .agent_session_id == $sid and .project_id == "atlas" and .result == "success")' \
+        "${AUDIT}" 2>/dev/null | tail -n 1 > "${RUN_DIR}/m12-audit-detach.json"
+    if [ -s "${RUN_DIR}/m12-audit-detach.json" ]; then
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
 jq_check "detach is recorded without destination detail" "${RUN_DIR}/m12-audit-detach.json" \
     '.decision == "allow" and .resource == "session_ended"'
 
