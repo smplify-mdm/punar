@@ -29,6 +29,10 @@ use punar_common::audit::{
     AGENT_SESSION_NONE, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
     RESOURCE_CAPABILITY_REGISTRY, count_events, next_event_id, tail,
 };
+use punar_common::install::{
+    InstallApplyParams, InstallEncryption, InstallOverallState, InstallPhase,
+    InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult,
+};
 use punar_common::ipc::{
     ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
     ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams, AuditStatus,
@@ -58,7 +62,7 @@ use crate::enroll::{
     compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
     save_enrollment, write_status_summary,
 };
-use crate::install::{InstallError, Installer, InstallerSources};
+use crate::install::{InstallAuditEvents, InstallError, Installer, InstallerSources};
 use crate::policy::{
     ApplicationPolicyAction, ApplicationPolicyLayer, EffectiveDocument, Layer, compute_effective,
     evaluate_application_policy, load_policy_dir, write_effective_debug_copy,
@@ -95,6 +99,26 @@ impl<'a> EnrollGuard<'a> {
 }
 
 impl Drop for EnrollGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// RAII guard for the one destructive installer transaction admitted by a
+/// live boot. `install.status` and `install.recovery_ack` deliberately do not
+/// take this guard: they must remain responsive while `install.apply` blocks
+/// at the recovery checkpoint on another connection.
+struct InstallGuard<'a>(&'a AtomicBool);
+
+impl<'a> InstallGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| InstallGuard(flag))
+    }
+}
+
+impl Drop for InstallGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -330,6 +354,11 @@ struct Inner {
     /// Serializes `enroll.start`/`enroll.stop` without holding the state
     /// lock across the network + reconcile pipeline.
     enroll_in_progress: AtomicBool,
+    /// One destructive install per live boot. This is a compare-exchange
+    /// guard rather than a blocking mutex so a duplicate Apply receives an
+    /// immediate, truthful conflict while status and recovery acknowledgement
+    /// continue over separate connections.
+    install_in_progress: AtomicBool,
     shutdown: AtomicBool,
     active: Mutex<usize>,
     slot_freed: Condvar,
@@ -489,6 +518,7 @@ impl Daemon {
                 approvals: Mutex::new(approvals),
                 ai: Mutex::new(ai),
                 enroll_in_progress: AtomicBool::new(false),
+                install_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
                 slot_freed: Condvar::new(),
@@ -901,6 +931,72 @@ fn install_targets_ipc_error(error: InstallError) -> IpcError {
     )
 }
 
+fn install_apply_ipc_error(error: InstallError, disk_changed: bool) -> IpcError {
+    let code = match &error {
+        InstallError::Refused(_) | InstallError::Invalid(_) => ErrorCode::InvalidParams,
+        InstallError::Trust(_) => ErrorCode::VerifyFailed,
+        InstallError::Io(_) if disk_changed => ErrorCode::ApplyFailed,
+        InstallError::Io(_) => ErrorCode::Internal,
+    };
+    let disk_state = if disk_changed {
+        "The selected disk may be partially prepared and is not guaranteed to boot."
+    } else {
+        "No disk bytes were changed by the installer."
+    };
+    let next = if disk_changed {
+        "Restart from the signed Punar installation medium and begin the installation again."
+    } else {
+        "Correct the reported condition, refresh the plan, and try again."
+    };
+    IpcError::with_details(
+        code,
+        format!("The installation did not complete: {error}. {disk_state} Next step: {next}"),
+        json!({ "component": "installer", "disk_changed": disk_changed }),
+    )
+}
+
+fn install_status_disk_changed(status: &InstallStatusResult) -> bool {
+    matches!(
+        status.phase,
+        Some(
+            InstallPhase::Partition
+                | InstallPhase::Encrypt
+                | InstallPhase::Format
+                | InstallPhase::WriteSlotA
+                | InstallPhase::ReRead
+                | InstallPhase::Boot
+                | InstallPhase::Seed
+                | InstallPhase::VerifyInstalled
+        )
+    )
+}
+
+fn install_recovery_event(device_id: &str, actor: &AuditActor) -> AuditEvent {
+    let mut event = AuditEvent::action(
+        device_id,
+        actor,
+        "install.recovery_key",
+        "system_disk",
+        Decision::Allow,
+        AuditOutcome::Success,
+    );
+    event.result = "enrolled".into();
+    event
+}
+
+fn write_personal_recovery_disclosure(
+    output: &mut dyn Write,
+    recovery_key: &str,
+    challenge_groups: [u8; 2],
+) -> Result<(), InstallError> {
+    output.write_all(b"PUNAR-RECOVERY-V1\n")?;
+    output.write_all(recovery_key.as_bytes())?;
+    output.write_all(b"\n")?;
+    writeln!(output, "{} {}", challenge_groups[0], challenge_groups[1])?;
+    output.flush()?;
+    Ok(())
+}
+
 impl Inner {
     fn log_audit(&self, event: AuditEvent) {
         match self.audit.lock().unwrap().append(&event) {
@@ -1022,7 +1118,11 @@ impl Inner {
     fn dispatch(&self, peer: &Peer, request: &Request) -> Result<Value, IpcError> {
         if matches!(
             request.method,
-            Method::InstallTargets | Method::InstallPlan(_) | Method::InstallStatus
+            Method::InstallTargets
+                | Method::InstallPlan(_)
+                | Method::InstallApply(_)
+                | Method::InstallRecoveryAck(_)
+                | Method::InstallStatus
         ) && !self.cfg.live_mode
         {
             return Err(install_unknown_on_installed(request.method.name()));
@@ -1062,6 +1162,8 @@ impl Inner {
                 .map(to_value)
                 .map_err(install_targets_ipc_error),
             Method::InstallPlan(params) => self.handle_install_plan(peer, params),
+            Method::InstallApply(params) => self.handle_install_apply(peer, params),
+            Method::InstallRecoveryAck(params) => self.handle_install_recovery_ack(peer, params),
             Method::InstallStatus => Ok(to_value(self.installer.status())),
         }
     }
@@ -1113,6 +1215,310 @@ impl Inner {
                 }
                 self.log_audit(event);
                 Err(install_ipc_error(error))
+            }
+        }
+    }
+
+    /// Execute the closed, disk-bound installation transaction. The AI
+    /// attribution check intentionally precedes uid authorization: root
+    /// inside an agent scope is still an AI agent and may not reinstall the
+    /// machine. Descriptor reads and plan revalidation also precede the first
+    /// status transition, so every admission refusal leaves the target
+    /// byte-identical.
+    #[cfg(target_os = "linux")]
+    fn handle_install_apply(
+        &self,
+        peer: &Peer,
+        params: &InstallApplyParams,
+    ) -> Result<Value, IpcError> {
+        const ACTION: &str = "install.apply";
+        const RESOURCE: &str = "system_image";
+        let actor = self.actor_of(peer);
+        if self.agent_shaped_peer(peer, &actor).is_some() {
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &actor,
+                ACTION,
+                RESOURCE,
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "An AI agent may not erase a disk or install Punar, even when its process has uid 0.\n\
+                 Policy: os hard safety constraint — install.apply is reserved for the person at the device.\n\
+                 Next step: open the signed Punar installer and confirm the disk yourself.",
+                json!({
+                    "decision": "deny",
+                    "resource": RESOURCE,
+                    "policy_ids": ["os-hard-safety-constraint"],
+                    "disk_changed": false,
+                }),
+            ));
+        }
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                RESOURCE,
+            ));
+            return Err(IpcError::denied_needs_root(
+                "installation",
+                Some(RESOURCE),
+                "run the signed installer through its privileged local service",
+            ));
+        }
+        let Some(_guard) = InstallGuard::acquire(&self.install_in_progress) else {
+            return Err(IpcError::with_details(
+                ErrorCode::Conflict,
+                "An installation transaction is already active in this live boot. Next step: keep this window open and follow install.status; do not start a second disk writer.",
+                json!({ "component": "installer", "disk_changed": true }),
+            ));
+        };
+
+        match self.execute_install_apply(peer, params, &actor) {
+            Ok(events) => {
+                // The installed audit handoff already contains this exact
+                // terminal event and was byte-verified before success. Keep
+                // the live medium's copy too; an outage here cannot erase the
+                // durable installed record or turn a completed install into a
+                // fabricated failure.
+                self.log_audit(events.apply_success);
+                Ok(to_value(self.installer.status()))
+            }
+            Err(error) => {
+                let status = self.installer.status();
+                let disk_changed = install_status_disk_changed(&status);
+                if matches!(
+                    status.state,
+                    InstallOverallState::Running | InstallOverallState::Awaiting
+                ) && let Some(phase) = status.phase
+                {
+                    if let Err(status_error) = self.installer.fail_transaction_status(phase, &error)
+                    {
+                        eprintln!(
+                            "punard: could not publish the terminal installer failure: {status_error}"
+                        );
+                    }
+                }
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                ));
+                Err(install_apply_ipc_error(error, disk_changed))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_install_apply(
+        &self,
+        peer: &Peer,
+        params: &InstallApplyParams,
+        actor: &AuditActor,
+    ) -> Result<InstallAuditEvents, InstallError> {
+        if params.unattended {
+            return Err(InstallError::Refused(
+                "unattended installation is not admitted until the signed PUNAR_ANSWERS confirmation and recovery-output custody lane is complete".into(),
+            ));
+        }
+
+        let plan = self.installer.preflight_apply(params)?;
+        let organization = if plan.recovery_mode == InstallRecoveryMode::OrganizationEscrow {
+            let enrollment = self.enrollment.lock().unwrap().clone().ok_or_else(|| {
+                InstallError::Refused(
+                    "organization recovery requires an enrolled live environment".into(),
+                )
+            })?;
+            let token = self.device_token.lock().unwrap().clone().ok_or_else(|| {
+                InstallError::Refused(
+                    "organization recovery requires the enrolled device credential".into(),
+                )
+            })?;
+            Some((enrollment.org.id, token))
+        } else {
+            None
+        };
+        let mut inputs = self.installer.read_apply_inputs(peer.pid, params)?;
+
+        self.installer.start_transaction_status(
+            &params.plan_token,
+            &params.disk,
+            plan.payload.uncompressed_size_bytes,
+        )?;
+        self.installer.verify_release_payload(&plan)?;
+        self.installer.enter_phase(InstallPhase::Partition)?;
+        self.installer.prepare_disk_layout(&plan, &inputs)?;
+
+        let recovery_enrolled = match plan.recovery_mode {
+            InstallRecoveryMode::PersonalCopy => {
+                let (recovery_key, identity) =
+                    self.installer.enroll_recovery_key(&plan, &inputs)?;
+                let event = install_recovery_event(&self.device_id, actor);
+                self.log_install_event_required(event.clone())?;
+                let output = inputs.recovery_output_mut().ok_or_else(|| {
+                    InstallError::Invalid(
+                        "the personal recovery output descriptor was not retained".into(),
+                    )
+                })?;
+                self.installer.begin_personal_recovery(
+                    &params.plan_token,
+                    recovery_key,
+                    identity.recovery_keyslot,
+                    |text, groups| write_personal_recovery_disclosure(output, text, groups),
+                )?;
+                self.installer.await_recovery_status(
+                    punar_common::install::InstallAwaiting::RecoveryKeyAck,
+                )?;
+                self.installer
+                    .wait_for_personal_recovery(&params.plan_token)?;
+                self.installer.resume_recovery_status()?;
+                self.installer.enter_phase(InstallPhase::Format)?;
+                self.installer.enter_phase(InstallPhase::WriteSlotA)?;
+                Some(event)
+            }
+            InstallRecoveryMode::OrganizationEscrow => {
+                let (organization_id, device_token) = organization
+                    .as_ref()
+                    .expect("organization context was checked before destructive work");
+                let (recovery_key, identity) =
+                    self.installer.enroll_recovery_key(&plan, &inputs)?;
+                let event = install_recovery_event(&self.device_id, actor);
+                self.log_install_event_required(event.clone())?;
+                self.installer.begin_organization_recovery(
+                    &plan,
+                    &params.plan_token,
+                    organization_id,
+                    recovery_key,
+                    identity,
+                )?;
+                let client = ControlPlaneClient::new(self.cfg.control_plane_socket.clone());
+                loop {
+                    match self.installer.attempt_organization_recovery(
+                        &params.plan_token,
+                        &client,
+                        device_token,
+                    ) {
+                        Ok(_) => break,
+                        // Network/control-plane absence cannot become an
+                        // implicit continue and need not destroy an already
+                        // enrolled key. Keep the typed checkpoint alive and
+                        // retry at a quiet fixed cadence. Signature/binding
+                        // failures are trust failures and stop immediately.
+                        Err(InstallError::Io(_)) if !self.shutdown.load(Ordering::SeqCst) => {
+                            std::thread::sleep(Duration::from_secs(5));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                self.installer.enter_phase(InstallPhase::Format)?;
+                self.installer.enter_phase(InstallPhase::WriteSlotA)?;
+                Some(event)
+            }
+            InstallRecoveryMode::None => {
+                debug_assert_eq!(plan.encryption, InstallEncryption::None);
+                None
+            }
+        };
+
+        self.installer.write_slot_a(&plan)?;
+        self.installer.enter_phase(InstallPhase::ReRead)?;
+        self.installer.verify_written_slot_a(&plan)?;
+        self.installer.enter_phase(InstallPhase::Boot)?;
+        self.installer.install_boot_artifact(&plan)?;
+        self.installer
+            .seed_installed_system(&plan, params, &inputs)?;
+
+        let events = InstallAuditEvents {
+            recovery_enrolled,
+            apply_success: AuditEvent::action(
+                &self.device_id,
+                actor,
+                "install.apply",
+                "system_image",
+                Decision::Allow,
+                AuditOutcome::Success,
+            ),
+        };
+        self.installer
+            .verify_installed_system(&plan, params, &inputs, &events)?;
+        Ok(events)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_install_apply(
+        &self,
+        _peer: &Peer,
+        _params: &InstallApplyParams,
+    ) -> Result<Value, IpcError> {
+        Err(IpcError::with_details(
+            ErrorCode::Conflict,
+            "The destructive installer executor is available only in the signed Linux live environment.",
+            json!({ "component": "installer", "disk_changed": false }),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_install_recovery_ack(
+        &self,
+        peer: &Peer,
+        params: &InstallRecoveryAckParams,
+    ) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        let disk_changed = install_status_disk_changed(&self.installer.status());
+        if self.agent_shaped_peer(peer, &actor).is_some()
+            || authorize_mutation(peer) != Decision::Allow
+        {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "install.recovery_ack",
+                "system_disk",
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "Only the human-controlled privileged installer may acknowledge recovery-key custody. Next step: type the challenged groups in the installer window.",
+                json!({ "decision": "deny", "disk_changed": disk_changed }),
+            ));
+        }
+        self.installer
+            .acknowledge_personal_recovery(peer.pid, params)
+            .map_err(|error| install_apply_ipc_error(error, disk_changed))?;
+        Ok(json!({ "acknowledged": true }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_install_recovery_ack(
+        &self,
+        _peer: &Peer,
+        _params: &InstallRecoveryAckParams,
+    ) -> Result<Value, IpcError> {
+        Err(IpcError::with_details(
+            ErrorCode::Conflict,
+            "Recovery acknowledgement is available only in the signed Linux live environment.",
+            json!({ "component": "installer", "disk_changed": false }),
+        ))
+    }
+
+    /// Recovery enrollment happens after the disk has been repartitioned, so
+    /// losing this event is a hard transaction failure. The exact event is
+    /// retained and handed to final installed-audit verification as well.
+    fn log_install_event_required(&self, event: AuditEvent) -> Result<(), InstallError> {
+        match self.audit.lock().unwrap().append(&event) {
+            Ok(()) => {
+                self.audit_events.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("punard: FAILED to append required installer audit event: {error}");
+                Err(InstallError::Io(io::Error::other(
+                    "the required installer audit record could not be written",
+                )))
             }
         }
     }
@@ -2840,6 +3246,42 @@ mod tests {
         match read_line_bounded(&mut reader, 16).unwrap() {
             LineRead::Line(l) => assert_eq!(l, "after"),
             _ => panic!("expected the next line"),
+        }
+    }
+
+    #[test]
+    fn personal_recovery_disclosure_has_one_exact_pipe_grammar() {
+        let mut output = Vec::new();
+        write_personal_recovery_disclosure(
+            &mut output,
+            "aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh",
+            [2, 7],
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            b"PUNAR-RECOVERY-V1\naaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh\n2 7\n"
+        );
+    }
+
+    #[test]
+    fn installer_disk_change_claim_is_phase_conservative() {
+        let mut status = InstallStatusResult::idle();
+        assert!(!install_status_disk_changed(&status));
+        status.phase = Some(InstallPhase::VerifyRelease);
+        assert!(!install_status_disk_changed(&status));
+        for phase in [
+            InstallPhase::Partition,
+            InstallPhase::Encrypt,
+            InstallPhase::Format,
+            InstallPhase::WriteSlotA,
+            InstallPhase::ReRead,
+            InstallPhase::Boot,
+            InstallPhase::Seed,
+            InstallPhase::VerifyInstalled,
+        ] {
+            status.phase = Some(phase);
+            assert!(install_status_disk_changed(&status), "{phase:?}");
         }
     }
 

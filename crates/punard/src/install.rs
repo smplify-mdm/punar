@@ -1,12 +1,12 @@
 //! Installer discovery, destructive-plan construction, bounded secret intake,
 //! and secret-free status reporting.
 //!
-//! The internal executor now owns release verification, fixed-layout disk
-//! preparation, bounded slot-A writing, a physical re-read, UEFI boot
+//! The executor owns release verification, fixed-layout disk preparation,
+//! bounded slot-A writing, a physical re-read, both UEFI and Raspberry Pi boot
 //! installation, shared-state seeding, hardware/audit handoff and read-only
-//! final verification. The public `install.apply` method stays absent until
-//! the transaction also owns the complete descriptor/orchestration boundary.
-//! A half-installer is not an install API.
+//! final verification. `server` exposes it only through the attended,
+//! plan-bound `install.apply` and paired descriptor-only recovery acknowledgement;
+//! the unattended answer-disk lane remains separately gated.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;

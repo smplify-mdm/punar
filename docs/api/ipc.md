@@ -208,6 +208,8 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.remove` | **human, personal device only** | yes | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
+| `install.apply` | **root human only, live environment only** | yes | always (`success`, `denied`, `failure`) |
+| `install.recovery_ack` | **root human only, live environment only** | recovery checkpoint only | denials; successful custody is `install.recovery_key/enrolled` |
 | `install.status` | any connected peer, **live environment only** | no | no |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
@@ -757,10 +759,10 @@ not an input to a disk-erasure authorization; its partial/unsupported summary
 is copied into `plan.warnings` and therefore is token-bound. The seed phase
 observes hardware again, writes that fresh report to
 `/var/lib/punar/hardware-report.json`, and verifies its exact durable digest
-after a read-only reopen. The internal zero-write apply preflight now keeps a bounded token
-registry for this daemon boot and re-reads the serial, WWN, size,
+after a read-only reopen. The apply preflight keeps a bounded token registry
+for this daemon boot and re-reads the serial, WWN, size,
 logical-sector size, both GPT edges and signed release. Only an exact match may
-reach the future executor, and failed revalidation cannot silently register a
+reach the executor, and failed revalidation cannot silently register a
 new token. Its strict parameter type carries descriptor numbers for the
 passphrase and optional OOBE passthrough, never their bytes. Each input must
 be an anonymous memfd sealed against writes, growth and shrinkage; a normal
@@ -772,12 +774,56 @@ key and two challenge indices travel only there. The paired acknowledgement
 type is `{plan_token, groups_fd}`, where `groups_fd` is another sealed memfd,
 so even the two challenged key groups stay out of IPC JSON. The in-memory gate
 has no timeout/default-continue and consumes a confirmation only for the exact
-plan token. **The public
-mutating `install.apply` method is not registered in this slice**: exposing a
-method that stopped after preflight would claim an installer that does not
-exist. There is no `install.exec`, script, hook or caller-supplied command/path.
+plan token.
 
-### 5.18 `install.status`
+### 5.18 `install.apply` and `install.recovery_ack`
+
+`install.apply` is root-only, live-only and human-only. Agent attribution is
+checked before uid, descriptor duplication, release reads or disk access, so
+uid 0 inside `punar-agent-*.scope` is denied with `disk_changed: false`. One
+atomic guard admits one transaction per live boot while separate connections
+remain available for status and recovery acknowledgement.
+
+The strict apply object is:
+
+```json
+{"plan_token":"<64 lowercase hex>","disk":"/dev/vda",
+ "passphrase_fd":3,"recovery_output_fd":4,"keymap":"us",
+ "seed":{"locale":"C.UTF-8"},"oobe_answers_fd":5,"unattended":false}
+```
+
+Optional descriptors are omitted, not set to null. Punar validates the cached
+plan and freshly re-observed physical disk, then consumes the sealed memfds and
+starts the fixed transaction: verify release → partition/encrypt/format →
+write slot A → direct re-read → install the platform-bound boot artifact →
+seed → read-only final verification. There is no caller-selected path, argv,
+partition option or executable field.
+
+For personal recovery, `recovery_output_fd` receives exactly three newline-
+terminated records: the literal `PUNAR-RECOVERY-V1`, the eight-group recovery
+key, and two one-based challenge indices separated by one space. The original
+apply call then blocks. A second root-human connection sends
+`install.recovery_ack` with `{plan_token, groups_fd}`; `groups_fd` is a sealed
+memfd containing exactly the two challenged groups separated by ASCII
+whitespace. Success returns `{"acknowledged":true}`. No timeout or
+default-continue exists.
+
+For organization escrow, apply requires the live environment's persisted
+enrollment organization and redacted device credential, wraps the generated
+key locally, uploads ciphertext only, and does not cross `encrypt` until the
+exact signed receipt verifies. An unavailable control plane is retried at a
+quiet fixed cadence while status remains awaiting; a signature or binding
+failure stops rather than retrying a trust violation. `unattended:true` is
+currently refused before the transaction starts; the signed `PUNAR_ANSWERS`
+custody lane remains an explicit open gate rather than an implied feature.
+
+On success, the result is the terminal `install.status` object. Failures carry
+`disk_changed`; active failures atomically publish a secret-free terminal
+status and cancel any recovery gate. The installed audit is written and
+byte-verified before success. There is no `install.exec`, script, hook or
+caller-supplied command/path.
+
+### 5.19 `install.status`
 
 Params: none. Read-only, unaudited and live-only. The result is the same
 secret-free object written atomically at `0644` to

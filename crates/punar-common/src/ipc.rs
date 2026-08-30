@@ -51,7 +51,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::install::InstallPlanParams;
+use crate::install::{InstallApplyParams, InstallPlanParams, InstallRecoveryAckParams};
 use thiserror::Error;
 
 use crate::approval::{
@@ -781,6 +781,14 @@ pub enum Method {
     /// `install.plan` — root-only, live-only and audited. It computes a
     /// disk-bound plan but cannot write a byte.
     InstallPlan(InstallPlanParams),
+    /// `install.apply` — root-only, live-only, agent-denied and always
+    /// audited. Every destructive input is bound to a plan from this boot;
+    /// secret bytes travel only over validated descriptors.
+    InstallApply(InstallApplyParams),
+    /// `install.recovery_ack` — the root installer UI's second typed call.
+    /// It confirms two challenged personal-recovery groups through a sealed
+    /// descriptor while the original `install.apply` call remains blocked.
+    InstallRecoveryAck(InstallRecoveryAckParams),
     /// `install.status` — live-environment read side of the atomic installer
     /// progress document. Never carries passphrases or recovery material.
     InstallStatus,
@@ -788,7 +796,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 26] = [
+    pub const NAMES: [&'static str; 28] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -814,6 +822,8 @@ impl Method {
         "apps.remove",
         "install.targets",
         "install.plan",
+        "install.apply",
+        "install.recovery_ack",
         "install.status",
     ];
 
@@ -846,6 +856,8 @@ impl Method {
             Method::AppsRemove(_) => "apps.remove",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
+            Method::InstallApply(_) => "install.apply",
+            Method::InstallRecoveryAck(_) => "install.recovery_ack",
             Method::InstallStatus => "install.status",
         }
     }
@@ -897,7 +909,9 @@ impl Method {
             | Method::AppsInstall(_)
             | Method::AppsRemove(_) => false,
             Method::InstallTargets => false,
-            Method::InstallPlan(_) => true,
+            Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
+                true
+            }
             Method::InstallStatus => false,
         }
     }
@@ -930,6 +944,8 @@ impl Method {
             Method::AppsInstall(p) => serde_json::to_value(p),
             Method::AppsRemove(p) => serde_json::to_value(p),
             Method::InstallPlan(p) => serde_json::to_value(p),
+            Method::InstallApply(p) => serde_json::to_value(p),
+            Method::InstallRecoveryAck(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -999,6 +1015,12 @@ impl Method {
                 Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
             }
             "install.plan" => Self::parse_required_params(method, params).map(Method::InstallPlan),
+            "install.apply" => {
+                Self::parse_required_params(method, params).map(Method::InstallApply)
+            }
+            "install.recovery_ack" => {
+                Self::parse_required_params(method, params).map(Method::InstallRecoveryAck)
+            }
             "install.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallStatus)
             }
@@ -2010,6 +2032,24 @@ mod tests {
                 encryption: crate::install::InstallEncryption::Luks2,
                 recovery_mode: crate::install::InstallRecoveryMode::PersonalCopy,
             }),
+            Method::InstallApply(InstallApplyParams {
+                plan_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+                disk: "/dev/vda".into(),
+                passphrase_fd: Some(3),
+                recovery_output_fd: Some(4),
+                keymap: "us".into(),
+                seed: crate::install::InstallSeedParams {
+                    locale: "C.UTF-8".into(),
+                },
+                oobe_answers_fd: None,
+                unattended: false,
+            }),
+            Method::InstallRecoveryAck(InstallRecoveryAckParams {
+                plan_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+                groups_fd: 5,
+            }),
             Method::InstallStatus,
         ];
         assert_eq!(
@@ -2059,6 +2099,8 @@ mod tests {
                     | "approvals.create"
                     | "approvals.consume"
                     | "install.plan"
+                    | "install.apply"
+                    | "install.recovery_ack"
             );
             assert_eq!(method.requires_root(), expected, "{}", method.name());
         }
@@ -2242,6 +2284,44 @@ mod tests {
             let reject = Request::parse_json_line(&line).unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
         }
+    }
+
+    #[test]
+    fn install_apply_and_recovery_ack_are_strict_descriptor_only_methods() {
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"install.apply","params":{"plan_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disk":"/dev/vda","passphrase_fd":3,"recovery_output_fd":4,"keymap":"us","seed":{"locale":"C.UTF-8"},"unattended":false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::InstallApply(InstallApplyParams {
+                passphrase_fd: Some(3),
+                recovery_output_fd: Some(4),
+                ..
+            })
+        ));
+
+        for forbidden in ["passphrase", "recovery_key", "command", "script", "hook"] {
+            let line = format!(
+                r#"{{"v":1,"id":"1","method":"install.apply","params":{{"plan_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disk":"/dev/vda","passphrase_fd":3,"recovery_output_fd":4,"keymap":"us","seed":{{"locale":"C.UTF-8"}},"unattended":false,"{forbidden}":"secret"}}}}"#
+            );
+            let reject = Request::parse_json_line(&line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
+        }
+
+        let ack = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"install.recovery_ack","params":{"plan_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","groups_fd":5}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ack.method,
+            Method::InstallRecoveryAck(InstallRecoveryAckParams { groups_fd: 5, .. })
+        ));
+        let reject = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"install.recovery_ack","params":{"plan_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","groups_fd":5,"group":"abcd"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::InvalidParams);
     }
 
     #[test]

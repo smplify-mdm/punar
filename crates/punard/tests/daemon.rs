@@ -1374,6 +1374,25 @@ fn installer_methods_are_unknown_on_an_installed_system() {
                 "recovery_mode": "personal_copy"
             })),
         ),
+        (
+            "install.apply",
+            Some(json!({
+                "plan_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "disk": "/dev/vda",
+                "passphrase_fd": 3,
+                "recovery_output_fd": 4,
+                "keymap": "us",
+                "seed": {"locale": "C.UTF-8"},
+                "unattended": false
+            })),
+        ),
+        (
+            "install.recovery_ack",
+            Some(json!({
+                "plan_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "groups_fd": 5
+            })),
+        ),
         ("install.status", None),
     ] {
         let response = daemon.call(method, params);
@@ -1398,6 +1417,22 @@ fn live_installer_targets_are_read_only_and_plan_refusals_are_audited() {
     assert_eq!(status["result"]["phases"].as_array().unwrap().len(), 9);
     assert!(daemon.dir.join("install.json").exists());
 
+    let apply = daemon.call(
+        "install.apply",
+        Some(json!({
+            "plan_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disk": "/dev/vda",
+            "passphrase_fd": 3,
+            "recovery_output_fd": 4,
+            "keymap": "us",
+            "seed": {"locale": "C.UTF-8"},
+            "unattended": false
+        })),
+    );
+    assert_ne!(apply["error"]["code"], "unknown_method");
+    assert_eq!(apply["error"]["code"], "invalid_params");
+    assert_eq!(apply["error"]["details"]["disk_changed"], false);
+
     let plan = daemon.call(
         "install.plan",
         Some(json!({
@@ -1416,6 +1451,64 @@ fn live_installer_targets_are_read_only_and_plan_refusals_are_audited() {
         .unwrap();
     assert_eq!(event["resource"], "system_disk");
     assert_eq!(event["result"], "refused");
+}
+
+#[test]
+fn live_install_apply_denies_agent_attribution_before_descriptor_or_disk_access() {
+    let peer = Peer {
+        uid: 0,
+        gid: 0,
+        pid: Some(4242),
+    };
+    let daemon = TestDaemon::start_configured(
+        PeerSource::Fixed(peer),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            configure_empty_live_installer(cfg, dir);
+            let proc_root = dir.join("proc");
+            let process = proc_root.join("4242");
+            fs::create_dir_all(&process).unwrap();
+            fs::write(
+                process.join("cgroup"),
+                "0::/user.slice/punar-agent-agt_installtest.scope\n",
+            )
+            .unwrap();
+            cfg.proc_root = proc_root;
+        },
+    );
+    let response = daemon.call(
+        "install.apply",
+        Some(json!({
+            "plan_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disk": "/dev/vda",
+            "passphrase_fd": 999999,
+            "recovery_output_fd": 999998,
+            "keymap": "us",
+            "seed": {"locale": "C.UTF-8"},
+            "unattended": false
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(response["error"]["details"]["disk_changed"], false);
+    assert_eq!(
+        daemon.call("install.status", None)["result"]["state"],
+        "idle"
+    );
+    assert!(
+        fs::read_dir(daemon.dir.join("dev-block"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let event = daemon
+        .audit_lines()
+        .into_iter()
+        .find(|event| event["action"] == "install.apply")
+        .unwrap();
+    assert_eq!(event["source"], "ai_agent");
+    assert_eq!(event["agent_session_id"], "agt_installtest");
+    assert_eq!(event["decision"], "deny");
 }
 
 #[test]

@@ -406,9 +406,13 @@ current-boot token registry admits only plans returned by explicit
 size, both GPT edges and signed release before a mutating executor may start.
 Tests cover a same-sized physical-disk swap, a changed GPT edge and device-node
 re-enumeration, each with the target byte-identical across refusal. The public
-`install.apply` method still remains deliberately unregistered until every
-transaction branch is wired and audited, so no caller can start the internal
-destructive executor yet. The live-only
+`install.apply` and `install.recovery_ack` methods are now registered after the
+attended personal, organization-escrow and explicit unencrypted branches were
+wired to that executor and installed-audit handoff. Agent attribution is
+denied before uid, descriptors and disk access; one compare-exchange guard
+admits one writer while status and acknowledgement remain responsive on other
+connections. `unattended:true` is still refused before transaction start until
+the signed answer-disk custody lane exists. The live-only
 `install.status` read side now exposes the same secret-free fixed nine-phase
 state through IPC and an atomically replaced, world-readable
 `/run/punar/install.json`; installed mode neither serves the method nor creates
@@ -467,8 +471,9 @@ enrollment. `/var/log/punar/audit.jsonl` is durably written at `0640`, then the
 shared volume is unmounted, reopened
 read-only and compared byte-for-byte with owner/mode checks before install
 success. ARM64 tests prove the required three-event trail, secret-field
-refusal and post-write tamper refusal. This remains component proof until the
-public apply orchestration and unattended install lane exercise I35 end to end.
+refusal and post-write tamper refusal. The public attended orchestration is now
+locally proven at the typed boundary; the unattended install lane and full
+privileged installer VM still need to exercise I35 end to end.
 The origin is fail-closed too: `install.plan` does not return a usable token
 unless its success event has been durably appended, so a full/unwritable audit
 filesystem is discovered while the target disk is still byte-identical.
@@ -505,9 +510,9 @@ argv, passphrase absence from argv, byte delivery through the pipe, cleanup
 and phase ordering; a separate refusal test changes a GPT edge immediately
 before execution and proves the target remains byte-identical. The shipped
 definition layers are now staged into the shared desktop tree so a later live
-profile inherits the same source of truth as the direct images. The public
-method remains absent: this is real executor progress, not an installability
-claim.
+profile inherits the same source of truth as the direct images. The attended
+public method has since landed; full privileged install-VM proof remains the
+boundary before this becomes an installability claim.
 
 The same internal transaction now stops honestly in `encrypt` after the fixed
 repart operation and invokes pinned `systemd-cryptenroll --recovery-key` for
@@ -528,18 +533,19 @@ the HPKE envelope, and completes `encrypt` only after the exact signed receipt
 verifies. Unavailable escrow, a mismatched token, or any verification failure
 leaves status at `awaiting: organization_escrow_receipt`, refuses `format`, and
 retains the only key in memory for retry. The real dev/CI control plane and
-literal-secret negative assertions pass on native ARM64. Public apply remains
-absent until server-side orchestration supplies the trusted enrollment
-organization/token and the complete descriptor boundary.
+literal-secret negative assertions pass on native ARM64. Public apply now
+supplies the trusted persisted enrollment organization and redacted device
+credential before destructive work; the production transport/KMS boundary and
+privileged full-install proof remain open.
 
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
 pipe/Unix socket, the two answers return through a sealed memfd, wrong groups
 or a different plan token cannot consume the gate, and there is deliberately
 no timeout/default-continue. Cancellation drops the only
-`PersonalRecoveryView` and zeroizes the key. The state machine and strict wire
-types are unit-proven; public descriptor orchestration and the live
-descriptor-duplication proof remain before the methods are registered.
+`PersonalRecoveryView` and zeroizes the key. The state machine, strict wire
+types and public two-connection orchestration are unit/integration-proven; the
+live installer VM still owes the kernel-level `pidfd_getfd` proof.
 
 The executor-facing status coordinator is now implemented and locally green
 on ARM64 Linux across the full workspace. It serializes each transition under

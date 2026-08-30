@@ -19,8 +19,10 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 > Generic UEFI images boot in ARM64 VMs, and the internal installer can plan,
 > write and verify both boot adapters. A real pinned Pi bootfs and matching
 > root-A payload now build and verify as an ephemerally signed install bundle;
-> public apply orchestration, production signing, encryption-on-the-built-image,
-> update swap and physical-device claims remain open. The purpose here is
+> the attended public apply and recovery-ack orchestration is implemented and
+> locally proven on both architectures. Production signing,
+> encryption-on-the-built-image, the unattended answer lane, update swap and
+> physical-device claims remain open. The purpose here is
 > still to make the first real install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones
 > building.
@@ -756,7 +758,7 @@ the organization and policy. The envelope uses a reviewed standard
 public-key wrapping construction (HPKE, RFC 9180) and carries algorithm and key
 ids for rotation; no first-party encryption primitive is invented here.
 
-**Implemented seam (2026-08-27; not yet the installer):** `punar-recovery`
+**Implemented recovery path (2026-08-30):** `punar-recovery`
 normalizes the systemd key into a zeroizing, non-cloneable, non-serializable
 owner; provides the personal one-screen disclosure/Copy gate with two random
 group confirmations; and fixes the managed suite to RFC 9180
@@ -770,8 +772,10 @@ ciphertext-only server custody, a separately permissioned recovery release,
 mandatory structured reason and append-only release audit. Its complete HPKE
 keypair and asserted admin identities are public test fixtures; **production
 portal identity, step-up authorization and tenant KMS/HSM key custody remain
-unimplemented here.** The install service/UI still has to connect the proven
-LUKS pipe to these state machines.
+unimplemented here.** The attended `install.apply` path now connects the
+proven LUKS pipe to both state machines and obtains the organization identity
+and redacted device credential from persisted enrollment before disk writes.
+The graphical install service still needs the privileged live-VM exercise.
 
 **Late enrollment of an unencrypted device.** Cryptsetup supports in-place
 LUKS2 encryption, but its own contract requires a reliable backup and warns
@@ -1285,14 +1289,15 @@ recorded here rather than presented as a boundary it is not.
 
 ### 7.2 The typed surface
 
-Proposed additions to `ipc.md` §5's closed method table. This document
-proposes; the owners of `ipc.md` and `schemas/` decide.
+Implemented additions to `ipc.md` §5's closed method table. The wire contract
+and shared strict types are now authoritative for the attended lane.
 
 | Method | AuthZ | Mutating | Audited |
 |---|---|---|---|
 | `install.targets` | any connected peer | no | no |
 | `install.plan` | **root only**, live mode only | no | **yes** |
 | `install.apply` | **root only**, live mode only; agent-attributed peers take the M9 AI path first | yes | always |
+| `install.recovery_ack` | **root human only**, live mode only | recovery checkpoint only | denial; custody is the `install.recovery_key` event |
 | `install.status` | any connected peer | no | no |
 
 - **`install.targets`** enumerates block devices from `/sys/class/block`
@@ -1381,10 +1386,16 @@ specification.
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log to `/var/log/punar/audit.jsonl` (`0640 root:root` during install, reassigned to the runtime `punar` group at boot). **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
-**Implementation checkpoint (2026-08-30).** The internal `punard` executor
-now implements the fixed path through UEFI boot installation, shared-state
-seeding and read-only final verification, while the public `install.apply`
-method remains deliberately absent. Disk preparation invokes
+**Implementation checkpoint (2026-08-30).** `punard` now exposes the attended
+`install.apply` and paired `install.recovery_ack` methods over the same closed
+IPC table as the internal fixed executor. A compare-exchange guard admits one
+disk writer without blocking status or recovery acknowledgement on their own
+connections. AI attribution is denied before uid and before descriptors or
+disk access; root human admission then revalidates the boot-local plan and
+physical disk, consumes only sealed secret descriptors, and drives the exact
+nine-phase transaction through UEFI or Raspberry Pi boot installation,
+shared-state seeding, installed-audit handoff and read-only final verification.
+Disk preparation invokes
 one fixed `systemd-repart` transaction for the partition/encrypt/format rows:
 it merges only the immutable base, LUKS2 and streaming layers, revalidates the
 plan at the destructive boundary, requires a block device, and provides the
@@ -1428,8 +1439,11 @@ omit the recovery event), durably writes `/var/log/punar/audit.jsonl`, then
 unmounts and reopens `@var` read-only to compare every byte, owner and mode
 before success.
 Unit tests prove the three required installation events, secret-field refusal
-and post-write tamper refusal. This is internal component proof; I35 still
-requires the public unattended install lane.
+and post-write tamper refusal. Typed IPC and daemon integration tests prove the
+strict descriptor-only shapes, installed/live mode gate and that an
+agent-attributed uid-0 request is denied while status stays idle and the
+fixture disk tree stays byte-identical. I35 still requires the public
+unattended install lane and a full privileged install VM.
 `install.plan` also treats its success audit append as a precondition to
 returning the plan token: an audit I/O failure is reported with
 `disk_changed: false`, rather than being discovered after destructive work.
@@ -1437,10 +1451,10 @@ The privileged real-vfat, LUKS and btrfs mounts still need the live installer
 VM gate. Raspberry Pi boot-filesystem installation is now component-proven as
 the bounded raw-write/reread/read-only-validation primitive above, and its
 build-side FAT assembly/pin validator now exists. Root-payload module staging,
-matching initramfs generation, signed install-manifest wiring, public
-descriptor orchestration, the unattended lane and real-board fault injection
-remain unimplemented, so this checkpoint is not an installability or
-Raspberry Pi support claim.
+matching initramfs generation and signed install-manifest wiring are now
+proven by the release bundle. The unattended answer/custody lane, privileged
+full-install VM and real-board fault injection remain unimplemented, so this
+checkpoint is not yet an installability or Raspberry Pi support claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
