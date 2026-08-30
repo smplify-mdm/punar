@@ -60,7 +60,8 @@ use crate::enroll::{
 };
 use crate::install::{InstallError, Installer, InstallerSources};
 use crate::policy::{
-    EffectiveDocument, Layer, compute_effective, load_policy_dir, write_effective_debug_copy,
+    ApplicationPolicyAction, ApplicationPolicyLayer, EffectiveDocument, Layer, compute_effective,
+    evaluate_application_policy, load_policy_dir, write_effective_debug_copy,
 };
 use crate::state::{
     MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
@@ -291,6 +292,9 @@ struct Inner {
     /// documented limit (milestone-5.md section 5.1): the authoritative
     /// policy.d writer is the enrollment chain.
     org_layers: Mutex<Vec<Layer>>,
+    /// SPEC section 46 application lifecycle policy. Kept outside the scalar
+    /// capability map because required/denied are set-membership decisions.
+    application_policy: Mutex<Vec<ApplicationPolicyLayer>>,
     /// The merged effective document — in-memory truth, recomputed at
     /// startup and on every `capabilities.set`.
     effective: Mutex<EffectiveDocument>,
@@ -466,6 +470,7 @@ impl Daemon {
                 os_defaults,
                 preferences,
                 org_layers: Mutex::new(loaded.layers),
+                application_policy: Mutex::new(loaded.applications),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
                 device_id,
@@ -1135,6 +1140,21 @@ impl Inner {
             ));
         }
         if self.enrollment.lock().unwrap().is_some() {
+            let decision = {
+                let policy = self.application_policy.lock().unwrap();
+                evaluate_application_policy(
+                    &policy,
+                    id,
+                    if action == "system.remove_package" {
+                        ApplicationPolicyAction::Remove
+                    } else {
+                        ApplicationPolicyAction::Install
+                    },
+                )
+            };
+            if decision.allowed {
+                return Ok(actor);
+            }
             self.log_audit(AuditEvent::action(
                 &self.device_id,
                 &actor,
@@ -1143,10 +1163,47 @@ impl Inner {
                 Decision::Deny,
                 AuditOutcome::Denied,
             ));
+            let policy_id = decision
+                .provenance
+                .as_ref()
+                .map(|source| source.policy_id.as_str())
+                .unwrap_or("organization-application-policy");
+            let source_name = decision
+                .provenance
+                .as_ref()
+                .map(|source| source.source_name.as_str())
+                .unwrap_or("Organization application policy");
+            let reason = decision.reason.as_str();
+            let message = match decision.reason {
+                crate::policy::ApplicationPolicyReason::Required => format!(
+                    "{id} is required by {source_name}, so it cannot be uninstalled.\n\
+                     Policy: {policy_id} — applications.required.\n\
+                     Next step: contact your administrator if this requirement should change."
+                ),
+                crate::policy::ApplicationPolicyReason::Denied => format!(
+                    "{id} is blocked by {source_name}, so Punar did not install it.\n\
+                     Policy: {policy_id} — applications.denied.\n\
+                     Next step: contact your administrator to request an exception."
+                ),
+                crate::policy::ApplicationPolicyReason::UserInstallBlocked => format!(
+                    "Your organization does not allow optional application installs on this device.\n\
+                     Policy: {policy_id} — applications.allowUserInstall is false.\n\
+                     Next step: choose an organization-required application or contact your administrator."
+                ),
+                _ => "This enrolled device has no usable organization application policy, so Punar made no change.\n\
+                      Policy: fail closed — an enrolled device never falls back to personal install rules.\n\
+                      Next step: ask your administrator to publish an application policy."
+                    .to_string(),
+            };
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
-                "This device is enrolled, so application changes must first pass its organization application policy. That policy bridge is not active in this build; the safe result is no change. Next step: use the managed software catalog after the application-policy milestone lands.".to_string(),
-                json!({ "application": id, "decision": "deny", "policy_ids": ["organization-application-policy"] }),
+                message,
+                json!({
+                    "application": id,
+                    "decision": "deny",
+                    "reason": reason,
+                    "policy_ids": [policy_id],
+                }),
             ));
         }
         Ok(actor)
@@ -2215,6 +2272,7 @@ impl Inner {
         *self.device_token.lock().unwrap() = Some(token);
         *self.enrollment.lock().unwrap() = Some(enrollment);
         *self.org_layers.lock().unwrap() = loaded.layers;
+        *self.application_policy.lock().unwrap() = loaded.applications;
         self.reload_ai_authority();
         self.recompute_effective();
 
@@ -2373,6 +2431,7 @@ impl Inner {
         }
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
+        self.application_policy.lock().unwrap().clear();
         self.reload_ai_authority();
         // M10 trigger 3, the other half: unenrolling changes what may be
         // asked back to *nothing*, and answering a stale view afterwards

@@ -9,7 +9,7 @@
 //! validated, merged, and tested against `fixtures/organizations/acme` — so
 //! Milestone 5 enrollment drops files into an engine that already works.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -77,11 +77,63 @@ struct PolicySourceEnvelope {
 /// One provenance-tagged layer opinion: `(capability path, layer value)`.
 pub type Layer = (String, LayerValue<Value>);
 
+/// One provenance-tagged organization opinion about application lifecycle.
+/// Application names are catalog ids (docs/design/app-catalog.md section
+/// 1.3), never package-manager identifiers supplied by an IPC caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationPolicyLayer {
+    pub provenance: Provenance,
+    pub required: BTreeSet<String>,
+    pub denied: BTreeSet<String>,
+    pub allow_user_install: Option<bool>,
+}
+
+/// The two lifecycle mutations governed by SPEC section 46.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationPolicyAction {
+    Install,
+    Remove,
+}
+
+/// A closed reason vocabulary for authorization, audit details and UI copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationPolicyReason {
+    Required,
+    Denied,
+    UserInstallAllowed,
+    UserInstallBlocked,
+    NoManagedPolicy,
+    UserRemovalAllowed,
+}
+
+impl ApplicationPolicyReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Denied => "denied",
+            Self::UserInstallAllowed => "user_install_allowed",
+            Self::UserInstallBlocked => "user_install_blocked",
+            Self::NoManagedPolicy => "no_managed_policy",
+            Self::UserRemovalAllowed => "user_removal_allowed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationPolicyDecision {
+    pub allowed: bool,
+    pub reason: ApplicationPolicyReason,
+    pub provenance: Option<Provenance>,
+}
+
 /// Result of loading `policy.d/`.
 #[derive(Debug, Default)]
 pub struct LoadedPolicies {
     /// Flattened org-layer entries, in ascending-filename order.
     pub layers: Vec<Layer>,
+    /// SPEC section 46 application layers, retained separately because app
+    /// membership is not a scalar capability value.
+    pub applications: Vec<ApplicationPolicyLayer>,
     /// `spec.*` paths that have no registered capability yet — logged once
     /// at load and ignored (they land with their capabilities, M5+).
     pub unmapped: Vec<String>,
@@ -161,6 +213,9 @@ pub fn load_policy_dir(dir: &Path) -> io::Result<LoadedPolicies> {
         };
         match &envelope.policy {
             Some(payload) => {
+                if let Some(application) = extract_application_policy(payload, &provenance)? {
+                    loaded.applications.push(application);
+                }
                 let flat = flatten_desired_state(payload);
                 for (cap_path, value) in flat.mapped {
                     loaded.layers.push((
@@ -189,6 +244,209 @@ pub fn load_policy_dir(dir: &Path) -> io::Result<LoadedPolicies> {
     Ok(loaded)
 }
 
+fn non_empty_catalog_id(value: &Value, field: &str, path: &Path) -> io::Result<String> {
+    let Some(id) = value.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: {field} must contain non-empty catalog ids",
+                path.display()
+            ),
+        ));
+    };
+    Ok(id.to_string())
+}
+
+/// Extract and validate the strict `spec.applications` shape from a desired
+/// state payload. The envelope schema intentionally permits other policy
+/// document kinds, so absence is not an error; once the subtree exists,
+/// malformed lifecycle policy refuses daemon start/enrollment.
+fn extract_application_policy(
+    document: &Value,
+    provenance: &Provenance,
+) -> io::Result<Option<ApplicationPolicyLayer>> {
+    let Some(applications) = document
+        .get("spec")
+        .and_then(|spec| spec.get("applications"))
+    else {
+        return Ok(None);
+    };
+    let path = Path::new("spec.applications");
+    let Some(object) = applications.as_object() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "spec.applications must be an object",
+        ));
+    };
+    for key in object.keys() {
+        if !matches!(key.as_str(), "required" | "denied" | "allowUserInstall") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("spec.applications contains unsupported field {key:?}"),
+            ));
+        }
+    }
+
+    let Some(required_values) = object.get("required").and_then(Value::as_array) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "spec.applications.required must be an array",
+        ));
+    };
+    let mut required = BTreeSet::new();
+    for value in required_values {
+        let id = non_empty_catalog_id(value, "spec.applications.required", path)?;
+        if !required.insert(id.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("spec.applications.required contains duplicate {id:?}"),
+            ));
+        }
+    }
+
+    let mut denied = BTreeSet::new();
+    if let Some(denied_values) = object.get("denied") {
+        let Some(entries) = denied_values.as_array() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "spec.applications.denied must be an array",
+            ));
+        };
+        for entry in entries {
+            let Some(entry) = entry.as_object() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "spec.applications.denied entries must be objects",
+                ));
+            };
+            if entry.len() != 1 || !entry.contains_key("package") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "spec.applications.denied entries contain only package",
+                ));
+            }
+            let id = non_empty_catalog_id(
+                entry.get("package").expect("checked above"),
+                "spec.applications.denied.package",
+                path,
+            )?;
+            if !denied.insert(id.clone()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("spec.applications.denied contains duplicate {id:?}"),
+                ));
+            }
+        }
+    }
+    if let Some(conflict) = required.intersection(&denied).next() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("spec.applications cannot require and deny {conflict:?}"),
+        ));
+    }
+
+    let allow_user_install = match object.get("allowUserInstall") {
+        Some(value) => Some(value.as_bool().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "spec.applications.allowUserInstall must be boolean",
+            )
+        })?),
+        None => None,
+    };
+
+    Ok(Some(ApplicationPolicyLayer {
+        provenance: provenance.clone(),
+        required,
+        denied,
+        allow_user_install,
+    }))
+}
+
+fn higher_precedence<'a>(
+    current: Option<&'a ApplicationPolicyLayer>,
+    candidate: &'a ApplicationPolicyLayer,
+) -> Option<&'a ApplicationPolicyLayer> {
+    match current {
+        Some(winner) if winner.provenance.rank <= candidate.provenance.rank => Some(winner),
+        _ => Some(candidate),
+    }
+}
+
+/// Resolve one application lifecycle request through the same lower-rank-wins
+/// precedence ladder as scalar desired state. On a managed device, absence of
+/// a usable application layer fails closed for installs; removing a
+/// non-required app remains the user's choice.
+pub fn evaluate_application_policy(
+    layers: &[ApplicationPolicyLayer],
+    id: &str,
+    action: ApplicationPolicyAction,
+) -> ApplicationPolicyDecision {
+    let mut membership: Option<&ApplicationPolicyLayer> = None;
+    for layer in layers {
+        if layer.required.contains(id) || layer.denied.contains(id) {
+            membership = higher_precedence(membership, layer);
+        }
+    }
+    if let Some(layer) = membership {
+        let required = layer.required.contains(id);
+        return match (action, required) {
+            (ApplicationPolicyAction::Install, true) => ApplicationPolicyDecision {
+                allowed: true,
+                reason: ApplicationPolicyReason::Required,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Install, false) => ApplicationPolicyDecision {
+                allowed: false,
+                reason: ApplicationPolicyReason::Denied,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Remove, true) => ApplicationPolicyDecision {
+                allowed: false,
+                reason: ApplicationPolicyReason::Required,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Remove, false) => ApplicationPolicyDecision {
+                allowed: true,
+                reason: ApplicationPolicyReason::UserRemovalAllowed,
+                provenance: Some(layer.provenance.clone()),
+            },
+        };
+    }
+
+    if action == ApplicationPolicyAction::Remove {
+        return ApplicationPolicyDecision {
+            allowed: true,
+            reason: ApplicationPolicyReason::UserRemovalAllowed,
+            provenance: None,
+        };
+    }
+
+    let mut install_policy: Option<&ApplicationPolicyLayer> = None;
+    for layer in layers {
+        if layer.allow_user_install.is_some() {
+            install_policy = higher_precedence(install_policy, layer);
+        }
+    }
+    match install_policy {
+        Some(layer) if layer.allow_user_install == Some(true) => ApplicationPolicyDecision {
+            allowed: true,
+            reason: ApplicationPolicyReason::UserInstallAllowed,
+            provenance: Some(layer.provenance.clone()),
+        },
+        Some(layer) => ApplicationPolicyDecision {
+            allowed: false,
+            reason: ApplicationPolicyReason::UserInstallBlocked,
+            provenance: Some(layer.provenance.clone()),
+        },
+        None => ApplicationPolicyDecision {
+            allowed: false,
+            reason: ApplicationPolicyReason::NoManagedPolicy,
+            provenance: None,
+        },
+    }
+}
+
 /// Result of flattening one `DeviceDesiredState` payload.
 #[derive(Debug, Default, PartialEq)]
 pub struct FlattenedSpec {
@@ -201,9 +459,10 @@ pub struct FlattenedSpec {
 /// Flatten a `DeviceDesiredState` document (SPEC section 38) into
 /// capability paths. M4 maps exactly
 /// `spec.security.firewall.enabled: true|false` →
-/// `security.firewall: "enabled"|"disabled"`; every other `spec.*` subtree
-/// is reported in `unmapped` (no registered capability exists for it yet —
-/// honest limit, milestone-4.md section 3.2).
+/// `security.firewall: "enabled"|"disabled"`. `spec.applications` is consumed
+/// by the set-membership application-policy engine above; every other
+/// `spec.*` subtree is reported in `unmapped` (no registered capability exists
+/// for it yet — honest limit, milestone-4.md section 3.2).
 pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
     let mut flat = FlattenedSpec::default();
     let Some(spec) = document.get("spec").and_then(Value::as_object) else {
@@ -231,6 +490,7 @@ pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
                     }
                 }
             }
+            ("applications", Some(_)) => {}
             _ => flat.unmapped.push(format!("spec.{section}")),
         }
     }
@@ -370,7 +630,6 @@ mod tests {
         for expected in [
             "spec.security.diskEncryption",
             "spec.security.secureBoot",
-            "spec.applications",
             "spec.ai",
             "spec.network",
             "spec.update",
@@ -411,7 +670,102 @@ mod tests {
         assert_eq!(layer.provenance.rank, 2);
         assert_eq!(layer.provenance.policy_id, "eng-baseline-v12");
         assert_eq!(layer.provenance.source_name, "Acme Engineering Baseline");
+        assert_eq!(loaded.applications.len(), 1);
+        assert_eq!(
+            loaded.applications[0].required,
+            BTreeSet::from(["git".to_string(), "podman".to_string()])
+        );
+        assert!(loaded.applications[0].denied.is_empty());
+        assert_eq!(loaded.applications[0].allow_user_install, None);
         assert!(!loaded.unmapped.is_empty(), "acme spec has unmapped paths");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_application_policy_is_precedence_aware_and_fail_closed() {
+        let baseline = ApplicationPolicyLayer {
+            provenance: Provenance {
+                kind: SourceKind::OrganizationBaseline,
+                rank: 2,
+                policy_id: "baseline".into(),
+                source_name: "Engineering Baseline".into(),
+            },
+            required: BTreeSet::from(["claude-desktop".into()]),
+            denied: BTreeSet::from(["discord".into()]),
+            allow_user_install: Some(false),
+        };
+        let role = ApplicationPolicyLayer {
+            provenance: Provenance {
+                kind: SourceKind::OrganizationRolePolicy,
+                rank: 3,
+                policy_id: "developer-role".into(),
+                source_name: "Developer Role".into(),
+            },
+            required: BTreeSet::new(),
+            denied: BTreeSet::new(),
+            allow_user_install: Some(true),
+        };
+        let layers = [role, baseline];
+
+        let required = evaluate_application_policy(
+            &layers,
+            "claude-desktop",
+            ApplicationPolicyAction::Install,
+        );
+        assert!(required.allowed);
+        assert_eq!(required.reason, ApplicationPolicyReason::Required);
+        assert_eq!(required.provenance.unwrap().policy_id, "baseline");
+
+        let remove_required =
+            evaluate_application_policy(&layers, "claude-desktop", ApplicationPolicyAction::Remove);
+        assert!(!remove_required.allowed);
+        assert_eq!(remove_required.reason, ApplicationPolicyReason::Required);
+
+        let denied =
+            evaluate_application_policy(&layers, "discord", ApplicationPolicyAction::Install);
+        assert!(!denied.allowed);
+        assert_eq!(denied.reason, ApplicationPolicyReason::Denied);
+
+        let optional =
+            evaluate_application_policy(&layers, "spotify", ApplicationPolicyAction::Install);
+        assert!(!optional.allowed, "rank-2 false beats rank-3 true");
+        assert_eq!(optional.reason, ApplicationPolicyReason::UserInstallBlocked);
+        assert_eq!(optional.provenance.unwrap().policy_id, "baseline");
+
+        let remove_optional =
+            evaluate_application_policy(&layers, "spotify", ApplicationPolicyAction::Remove);
+        assert!(remove_optional.allowed);
+        assert_eq!(
+            remove_optional.reason,
+            ApplicationPolicyReason::UserRemovalAllowed
+        );
+
+        let missing = evaluate_application_policy(&[], "spotify", ApplicationPolicyAction::Install);
+        assert!(!missing.allowed);
+        assert_eq!(missing.reason, ApplicationPolicyReason::NoManagedPolicy);
+    }
+
+    #[test]
+    fn contradictory_application_membership_refuses_policy_load() {
+        let dir = tmp("load-app-conflict");
+        let mut envelope = acme_combined();
+        envelope["policy"]["spec"]["applications"] = json!({
+            "required": ["spotify"],
+            "denied": [{"package": "spotify"}],
+            "allowUserInstall": true
+        });
+        std::fs::write(
+            dir.join("bad.json"),
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+        let error = load_policy_dir(&dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot require and deny \"spotify\""),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -420,6 +774,7 @@ mod tests {
         let dir = tmp("load-absent").join("does-not-exist");
         let loaded = load_policy_dir(&dir).unwrap();
         assert!(loaded.layers.is_empty());
+        assert!(loaded.applications.is_empty());
         assert!(loaded.unmapped.is_empty());
     }
 

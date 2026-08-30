@@ -75,6 +75,7 @@ DeferredSurfaceBase {
     property string appPhase: ""
     property var appRecord: null
     property string appFailure: ""
+    property bool appRemoveArmed: false
     // Browse mode expands this same lazy surface into the application library;
     // no second resident launcher/store process is introduced.
     property bool appBrowse: false
@@ -133,6 +134,7 @@ DeferredSurfaceBase {
         root.appPhase = "";
         root.appRecord = null;
         root.appFailure = "";
+        root.appRemoveArmed = false;
         root.appBrowse = false;
         root.note = "";
         hideTimer.restart(); // keep the window alive for the exit animation
@@ -472,6 +474,22 @@ DeferredSurfaceBase {
         })
     }
 
+    Process {
+        id: appRemoveProc
+        stdout: StdioCollector {
+            id: appRemoveOut
+            waitForEnd: true
+            onStreamFinished: root.finishAppRemove()
+        }
+        stderr: StdioCollector {
+            id: appRemoveErr
+            waitForEnd: true
+            onStreamFinished: root.finishAppRemove()
+        }
+        onRunningChanged: if (!appRemoveProc.running)
+            root.finishAppRemove()
+    }
+
     function firstError(text: string, fallback: string): string {
         var lines = String(text).split("\n");
         for (var i = 0; i < lines.length; i++) {
@@ -490,6 +508,7 @@ DeferredSurfaceBase {
         root.appPhase = "loading";
         root.appRecord = null;
         root.appFailure = "";
+        root.appRemoveArmed = false;
         try {
             appInspectProc.command = ["punarctl", "--json", "app", "show", id];
             appInspectProc.running = true;
@@ -517,6 +536,10 @@ DeferredSurfaceBase {
     function appAction(): void {
         if (root.appId === "")
             return;
+        if (root.appRemoveArmed) {
+            root.requestAppRemove();
+            return;
+        }
         if (root.appPhase === "failed") {
             root.askApp(root.appId);
             return;
@@ -579,6 +602,50 @@ DeferredSurfaceBase {
         if (appInstallProc.running)
             return;
         root.appFailure = root.firstError(appInstallErr.text, "The install did not complete.");
+        root.appPhase = "failed";
+    }
+
+    function requestAppRemove(): void {
+        if (root.appId === "" || root.appPhase !== "ready" || root.appRecord === null)
+            return;
+        var source = String(root.appRecord.source || "");
+        if (root.appRecord.installed !== true || (source !== "flatpak" && source !== "vendor_deb"))
+            return;
+        if (!root.appRemoveArmed) {
+            root.appFailure = "";
+            root.appRemoveArmed = true;
+            return;
+        }
+        root.appRemoveArmed = false;
+        root.appPhase = "removing";
+        try {
+            appRemoveProc.command = ["punarctl", "--json", "app", "remove", root.appId, "--yes"];
+            appRemoveProc.running = true;
+        } catch (e) {
+            root.appFailure = "The application uninstaller is unavailable.";
+            root.appPhase = "failed";
+        }
+    }
+
+    function finishAppRemove(): void {
+        if (root.appId === "" || (root.appPhase !== "removing" && root.appPhase !== "failed"))
+            return;
+        var parsed = root.parseLastLine(appRemoveOut.text);
+        if (parsed !== null && typeof parsed === "object" && parsed.installed === false) {
+            var updated = ({});
+            for (var key in root.appRecord)
+                updated[key] = root.appRecord[key];
+            updated.installed = false;
+            root.appRecord = updated;
+            root.appFailure = "";
+            root.appRemoveArmed = false;
+            root.appPhase = "ready";
+            return;
+        }
+        if (appRemoveProc.running)
+            return;
+        root.appFailure = root.firstError(appRemoveErr.text, "The uninstall did not complete. The application remains installed.");
+        root.appRemoveArmed = false;
         root.appPhase = "failed";
     }
 
@@ -983,6 +1050,7 @@ DeferredSurfaceBase {
             root.appId = "";
             root.appPhase = "";
             root.appRecord = null;
+            root.appRemoveArmed = false;
             root.note = "";
         }
 
@@ -992,6 +1060,7 @@ DeferredSurfaceBase {
             root.appPhase = "";
             root.appRecord = null;
             root.appFailure = "";
+            root.appRemoveArmed = false;
             root.note = "";
             queryInput.text = text;
             queryInput.forceActiveFocus();
@@ -1162,6 +1231,7 @@ DeferredSurfaceBase {
                             root.appId = "";
                             root.appPhase = "";
                             root.appRecord = null;
+                            root.appRemoveArmed = false;
                             // The set of explainable paths is fetched from
                             // punard once, the first time a question is
                             // actually asked — never on open, never on a
@@ -1176,11 +1246,14 @@ DeferredSurfaceBase {
                                 // First Escape leaves the answer, second closes.
                                 if (root.explainPath !== "")
                                     root.explainPath = "";
+                                else if (root.appRemoveArmed)
+                                    root.appRemoveArmed = false;
                                 else if (root.appId !== "") {
                                     root.appId = "";
                                     root.appPhase = "";
                                     root.appRecord = null;
                                     root.appFailure = "";
+                                    root.appRemoveArmed = false;
                                 }
                                 else if (root.appBrowse) {
                                     root.appBrowse = false;
@@ -1215,6 +1288,12 @@ DeferredSurfaceBase {
                                 else
                                     root.activate(list.currentIndex >= 0 && list.currentIndex < win.results.length ? win.results[list.currentIndex] : null);
                                 event.accepted = true;
+                                break;
+                            case Qt.Key_Delete:
+                                if (root.appId !== "") {
+                                    root.requestAppRemove();
+                                    event.accepted = true;
+                                }
                                 break;
                             }
                         }
@@ -1262,7 +1341,10 @@ DeferredSurfaceBase {
                     record: root.appRecord
                     iconSource: Catalog.iconSource(Catalog.byId(root.appId))
                     failure: root.appFailure
+                    removalArmed: root.appRemoveArmed
                     onActionRequested: root.appAction()
+                    onRemoveRequested: root.requestAppRemove()
+                    onCancelRemoveRequested: root.appRemoveArmed = false
                 }
 
                 Local.ApplicationBrowser {

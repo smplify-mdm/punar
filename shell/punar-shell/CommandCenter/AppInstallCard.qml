@@ -9,12 +9,15 @@ import "../Theme"
 Item {
     id: root
 
-    // "loading" · "ready" · "installing" · "opening" · "failed"
+    // "loading" · "ready" · "installing" · "removing" · "opening" · "failed"
     property string phase: "loading"
     property var record: null
     property string iconSource: ""
     property string failure: ""
+    property bool removalArmed: false
     signal actionRequested()
+    signal removeRequested()
+    signal cancelRemoveRequested()
 
     readonly property bool ready: root.phase === "ready"
     readonly property bool nativeSource: root.record !== null && (root.record.source === "flatpak" || root.record.source === "vendor_deb")
@@ -227,9 +230,12 @@ Item {
         Meta {
             anchors.left: actionButton.right
             anchors.leftMargin: 12
+            anchors.right: removeButton.visible ? removeButton.left : parent.right
+            anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
             visible: detailsScroll.contentHeight > detailsScroll.height
             text: "Scroll to review all access"
+            elide: Text.ElideRight
         }
 
         Rectangle {
@@ -253,10 +259,14 @@ Item {
                         return "Checking…";
                     if (root.phase === "installing")
                         return "Installing…";
+                    if (root.phase === "removing")
+                        return "Removing…";
                     if (root.phase === "opening")
                         return "Opening…";
                     if (root.phase === "failed")
                         return "Try again ↵";
+                    if (root.removalArmed)
+                        return "Keep app";
                     if (root.webSource)
                         return "Open web app ↵";
                     if (root.installed)
@@ -271,7 +281,50 @@ Item {
                 anchors.fill: parent
                 enabled: root.ready || root.phase === "failed"
                 cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: root.actionRequested()
+                onClicked: {
+                    if (root.removalArmed)
+                        root.cancelRemoveRequested();
+                    else
+                        root.actionRequested();
+                }
+            }
+        }
+
+        // Removal stays in the same card as installation and launch. The
+        // first action only arms a plainly worded confirmation; no package is
+        // changed until the second click (or Enter), and Escape can always
+        // return to the ordinary Open state.
+        Rectangle {
+            id: removeButton
+            anchors.right: parent.right
+            anchors.rightMargin: 16
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.nativeSource && root.installed && (root.ready || root.phase === "removing")
+            width: removeLabel.implicitWidth + 24
+            height: removeLabel.implicitHeight + 13
+            radius: Theme.radiusTag
+            color: root.removalArmed ? Theme.shellDestructive : Theme.shellSurface
+            border.width: Theme.hairline
+            border.color: Theme.shellDestructive
+
+            Meta {
+                id: removeLabel
+                anchors.centerIn: parent
+                color: root.removalArmed ? Theme.shellSurface : Theme.shellDestructive
+                text: {
+                    if (root.phase === "removing")
+                        return "Removing…";
+                    if (root.removalArmed)
+                        return "Confirm uninstall ↵";
+                    return "Uninstall";
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.ready
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.removeRequested()
             }
         }
     }

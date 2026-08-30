@@ -668,20 +668,26 @@ empty temporary directory, dropped capabilities and only the desktop runtime,
 display/audio, GPU and network surfaces declared in the inspection card. No
 request field can supply a URL, remote, ref, digest, executable or option.
 
-The call is allowed only for a human-attributed peer on a personal device.
-Agent-attributed calls are denied and audited. Enrolled devices fail closed
-until the organization application-policy bridge is implemented; this keeps a
-personal catalog from bypassing managed software policy. Audit action is
-`system.install_package`, resource is the catalog id, with `success`, `noop`,
-`failure` or `verify_failed`.
+The call is allowed for a human-attributed peer on a personal device.
+Agent-attributed calls are denied and audited. On an enrolled device, punard
+evaluates the catalog id against the precedence-resolved SPEC section 46
+application layers: `required` is installable, `denied` is refused, and an
+optional app follows the winning `allowUserInstall` value. A managed document
+without a usable application opinion fails closed rather than inheriting
+personal install rules. Denials return the closed `details.reason` vocabulary
+`required | denied | user_install_blocked | no_managed_policy` and cite the
+winning `policy_ids`. Audit action is `system.install_package`, resource is the
+catalog id, with `success`, `noop`, `denied`, `failure` or `verify_failed`.
 
 ### 5.15 `apps.remove`
 
-Params: `{"id":"spotify"}`. Same human/personal authorization and
-serialization as install. A Flatpak application id is resolved from the
-catalog and removal is fixed-argv/verified. A vendor package removes only the
-catalog-owned payload and desktop entry; its per-user isolated home is retained
-for explicit data deletion or reinstall. Audit action is
+Params: `{"id":"spotify"}`. Same human attribution and serialization as
+install. On an enrolled device, removing an `applications.required` id is
+denied with the winning policy named; every other user-installed app remains
+removable, including an already-present denied app. A Flatpak application id is
+resolved from the catalog and removal is fixed-argv/verified. A vendor package
+removes only the catalog-owned payload and desktop entry; its per-user isolated
+home is retained for explicit data deletion or reinstall. Audit action is
 `system.remove_package`; web sources have no local package and return
 `conflict` rather than pretending to remove browser data.
 

@@ -197,6 +197,47 @@ fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
     (catalog, flatpak, digest)
 }
 
+fn prepare_enrolled_application_policy(state_dir: &Path, applications: Value) {
+    let policy_dir = state_dir.join("policy.d");
+    fs::create_dir_all(&policy_dir).unwrap();
+    fs::write(
+        policy_dir.join("application-baseline.json"),
+        serde_json::to_vec_pretty(&json!({
+            "policy_id": "application-baseline",
+            "source_kind": "organization_baseline",
+            "precedence_rank": 2,
+            "source_name": "Acme Application Baseline",
+            "policy": {
+                "apiVersion": "smplify.io/v1alpha1",
+                "kind": "DeviceDesiredState",
+                "metadata": {"organization": "acme", "device": "dev_test"},
+                "spec": {"applications": applications}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        state_dir.join("enrollment.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "org": {
+                "id": "acme",
+                "name": "Acme",
+                "display_name": "Acme Engineering",
+                "domain": "acme.test"
+            },
+            "enrolled_at": "2026-08-30T00:00:00Z",
+            "attestation": "test",
+            "policy_files": ["application-baseline.json"],
+            "last_sync": {"at": null, "result": null},
+            "last_inventory_hash": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 impl Drop for TestDaemon {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
@@ -364,6 +405,141 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
     assert_eq!(event["resource"], "spotify");
     assert_eq!(event["source"], "human");
     assert_eq!(event["result"], "success");
+}
+
+#[test]
+fn managed_required_app_installs_but_cannot_be_removed() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        mock,
+        |state_dir| {
+            prepare_enrolled_application_policy(
+                state_dir,
+                json!({
+                    "required": ["spotify"],
+                    "denied": [],
+                    "allowUserInstall": false
+                }),
+            );
+        },
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({"id": "spotify"})));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap();
+    let installed = td.call(
+        "apps.install",
+        Some(json!({
+            "id": "spotify",
+            "confirm_metadata_sha256": digest
+        })),
+    );
+    assert_eq!(installed["result"]["installed"], true, "{installed}");
+
+    let removed = td.call("apps.remove", Some(json!({"id": "spotify"})));
+    assert_eq!(removed["error"]["code"], "denied", "{removed}");
+    assert_eq!(removed["error"]["details"]["reason"], "required");
+    assert_eq!(
+        removed["error"]["details"]["policy_ids"],
+        json!(["application-baseline"])
+    );
+    assert!(td.dir.join("app-state").exists(), "denial changed nothing");
+}
+
+#[test]
+fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let denied = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        mock,
+        |state_dir| {
+            prepare_enrolled_application_policy(
+                state_dir,
+                json!({
+                    "required": [],
+                    "denied": [{"package": "spotify"}],
+                    "allowUserInstall": true
+                }),
+            );
+        },
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+        },
+    );
+    let detail = denied.call("apps.catalog", Some(json!({"id": "spotify"})));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap();
+    let response = denied.call(
+        "apps.install",
+        Some(json!({
+            "id": "spotify",
+            "confirm_metadata_sha256": digest
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied", "{response}");
+    assert_eq!(response["error"]["details"]["reason"], "denied");
+    assert!(!denied.dir.join("app-state").exists());
+
+    let optional = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        MockCapability::new("mock.widget", json!("off")),
+        |state_dir| {
+            prepare_enrolled_application_policy(
+                state_dir,
+                json!({
+                    "required": [],
+                    "denied": [],
+                    "allowUserInstall": true
+                }),
+            );
+        },
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+        },
+    );
+    let detail = optional.call("apps.catalog", Some(json!({"id": "spotify"})));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        optional.call(
+            "apps.install",
+            Some(json!({
+                "id": "spotify",
+                "confirm_metadata_sha256": digest
+            }))
+        )["result"]["installed"],
+        true
+    );
+    let removed = optional.call("apps.remove", Some(json!({"id": "spotify"})));
+    assert_eq!(removed["result"]["installed"], false, "{removed}");
+    assert_eq!(removed["result"]["changed"], true);
 }
 
 #[test]

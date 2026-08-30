@@ -34,6 +34,9 @@ section 60 (hard safety constraints), section 73 (denial voice), section 1.22
   the current production claim*; the `FULL` / `PARTIAL` / `UNSUPPORTED` coverage
   vocabulary; *"silence is not support"*), section 8 unmanaged-first (org chrome
   only when enrolled; enrollment annotates, never restructures).
+- [`managed-app-configuration.md`](managed-app-configuration.md) — typed,
+  verifiable per-app settings on top of this catalog's lifecycle policy; no
+  arbitrary file or command channel.
 - `shell/theme/punar-tokens.json` — every surface below consumes tokens; no
   hardcoded colour appears in this design.
 - `docs/api/ipc.md` — transport, framing (**4096-byte request line limit**),
