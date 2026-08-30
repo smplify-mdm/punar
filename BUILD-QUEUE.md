@@ -315,6 +315,16 @@ post-login desktop; it never persists a password or recovery-code frame. This
 closes the clean first-account journey for generic QEMU ARM64, not the
 installer, encryption-at-install, x86 release-image parity or physical ARM.
 
+The hosted `ubuntu-24.04-arm` pool does not consistently expose `/dev/kvm`.
+Canonical run 33294648139 proved native image build, checksum, minimal ARM boot,
+and automatic rollback, then twice spent one host hour under TCG advancing only
+about 202 guest seconds; ordinary guest device deadlines expired before the
+shared partition appeared. CI now keeps minimal boot/rollback under TCG, records
+an explicit `accelerator-unavailable.txt`, and runs the full ARM desktop and
+stabilized-idle gates only when native KVM is actually usable. This is an honest
+infrastructure skip, not an ARM desktop pass; the full local Apple-HVF proof
+above remains the current graphical runtime evidence.
+
 An unchanged-input comparison found the ESP and root-slot regions stable but
 the full qcow2 non-identical because btrfs assigns fresh UUIDs to the three
 subvolumes. The filesystem/device identities are fixed; subvolume UUIDs are
@@ -577,6 +587,18 @@ small cross-architecture CLI troubleshooting set. Static/schema/QML gates are
 green; the expanded catalog, editor launcher, file-manager behavior and core
 Spotify/Chromium app-mode path passed both architecture lanes in canonical
 [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091).
+The card now completes the visual native-app lifecycle: installed applications
+show **Uninstall**, the first click/Delete only arms an inline confirmation,
+Enter or the second click executes the typed `punarctl --json app remove` call,
+Escape cancels, and a failed verification explicitly leaves installed state
+unchanged. The section 46 managed-policy bridge is also live: lower-rank policy
+wins per application, required apps may install but may not be removed, denied
+apps may not install, optional installs obey `allowUserInstall`, optional
+removal stays user-controlled, and a missing managed opinion fails closed.
+Malformed, duplicate or contradictory application membership refuses the
+policy load/enrollment. Unit and real-daemon integration tests cover all four
+decisions. Managed per-app settings remain a separate typed-adapter milestone;
+Punar does not project undocumented macOS/Windows vendor settings onto Linux.
 Connected ARM/HVF testing also proved the corrected Firefox native-detail path,
 including its pinned source and verified permissions; third-party native UI
 compatibility remains open. Generic web-app

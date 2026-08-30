@@ -428,12 +428,21 @@ jobs:
           qemu-img info punar-dev-arm64.qcow2
           qemu-img info punar-desktop-arm64.qcow2
 
-      - name: Enable KVM access for the runner user
+      - name: Detect native ARM64 acceleration
+        id: arm_accel
         run: |
           if [ -e /dev/kvm ]; then
             sudo chmod 666 /dev/kvm
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              echo "Native ARM64 KVM is available"
+            else
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::/dev/kvm exists but is not accessible; graphical/performance proof requires a native runner"
+            fi
           else
-            echo "::warning::/dev/kvm is unavailable; boot proof will use TCG"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm is unavailable; minimal boot and rollback will use TCG, while graphical/performance proof is skipped honestly"
           fi
 
       - name: Boot native ARM64 image
@@ -443,15 +452,30 @@ jobs:
         run: ./tools/update-rollback-test-arm64.sh
 
       - name: Native ARM64 desktop gate
+        if: steps.arm_accel.outputs.available == 'true'
         run: |
           PUNAR_QEMU_ARCH=arm64 ./tools/boot-test.sh --mode desktop \
             os/images/out/punar-desktop-arm64.qcow2 \
             os/images/out/arm64-desktop-proof
 
       - name: Native ARM64 stabilized-idle performance gate
+        if: steps.arm_accel.outputs.available == 'true'
         run: |
           ./tests/performance/check-budgets.sh \
             os/images/out/arm64-desktop-proof/ram-report.txt
+
+      - name: Record unavailable native ARM64 desktop proof
+        if: steps.arm_accel.outputs.available != 'true'
+        run: |
+          mkdir -p os/images/out/arm64-desktop-proof
+          cat > os/images/out/arm64-desktop-proof/accelerator-unavailable.txt <<'EOF'
+          ARM64 desktop and stabilized-idle performance proof were not run.
+          This hosted ARM runner exposed no usable /dev/kvm. TCG is retained
+          for the minimal boot and automatic-rollback gates, but is not a
+          valid performance environment and cannot complete the full desktop
+          suite within the hosted job budget. Run tools/boot-test.sh --mode
+          desktop on native KVM or Apple HVF before claiming ARM desktop proof.
+          EOF
 
       - name: Upload ARM64 images and runtime proof
         uses: actions/upload-artifact@v4
