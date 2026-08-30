@@ -9,7 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,12 @@ use thiserror::Error;
 static NEXT_TRANSACTION: AtomicU64 = AtomicU64::new(1);
 const OUTPUT_LIMIT: u64 = 64 * 1024;
 const PROBE_TABLE: &str = "punar-net-probe";
+// Linux may briefly return ETXTBSY (errno 26) while an executable is being
+// atomically replaced. Keep the retry deliberately short and bounded so an
+// update cannot turn a policy operation into an unbounded wait.
+const EXECUTABLE_FILE_BUSY_ERRNO: i32 = 26;
+const SPAWN_BUSY_ATTEMPTS: usize = 8;
+const SPAWN_BUSY_BACKOFF: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum ExecError {
@@ -104,13 +110,15 @@ impl NftExecutor {
         }
         let stdout = files.open_stdout()?;
         let stderr = files.open_stderr()?;
-        let mut child = Command::new(&self.nft_bin)
-            .arg("-f")
-            .arg(&files.input)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()?;
+        let mut child = spawn_with_executable_busy_retry(|| {
+            Command::new(&self.nft_bin)
+                .arg("-f")
+                .arg(&files.input)
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(stdout.try_clone()?))
+                .stderr(Stdio::from(stderr.try_clone()?))
+                .spawn()
+        })?;
         let status = wait_bounded(&mut child, self.timeout)?;
         let result = CommandResult {
             success: status.success(),
@@ -146,12 +154,14 @@ impl NftExecutor {
         let files = TransactionFiles::create(&self.transaction_dir)?;
         let stdout = files.open_stdout()?;
         let stderr = files.open_stderr()?;
-        let mut child = Command::new(&self.nft_bin)
-            .args(["-j", "list", "table", "inet", "punar-net"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()?;
+        let mut child = spawn_with_executable_busy_retry(|| {
+            Command::new(&self.nft_bin)
+                .args(["-j", "list", "table", "inet", "punar-net"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(stdout.try_clone()?))
+                .stderr(Stdio::from(stderr.try_clone()?))
+                .spawn()
+        })?;
         let status = wait_bounded(&mut child, self.timeout)?;
         let stdout = read_bounded(&files.stdout)?;
         let stderr = read_bounded(&files.stderr)?;
@@ -182,12 +192,14 @@ impl NftExecutor {
         let files = TransactionFiles::create(&self.transaction_dir)?;
         let stdout = files.open_stdout()?;
         let stderr = files.open_stderr()?;
-        let mut child = Command::new(&self.nft_bin)
-            .args(["-j", "list", "table", "inet", "punar-net"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()?;
+        let mut child = spawn_with_executable_busy_retry(|| {
+            Command::new(&self.nft_bin)
+                .args(["-j", "list", "table", "inet", "punar-net"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(stdout.try_clone()?))
+                .stderr(Stdio::from(stderr.try_clone()?))
+                .spawn()
+        })?;
         let status = wait_bounded(&mut child, self.timeout)?;
         let stderr = read_bounded(&files.stderr)?;
         if status.success() {
@@ -310,6 +322,25 @@ fn wait_bounded(
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn spawn_with_executable_busy_retry<F>(mut spawn: F) -> io::Result<Child>
+where
+    F: FnMut() -> io::Result<Child>,
+{
+    for attempt in 0..SPAWN_BUSY_ATTEMPTS {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.raw_os_error() == Some(EXECUTABLE_FILE_BUSY_ERRNO)
+                    && attempt + 1 < SPAWN_BUSY_ATTEMPTS =>
+            {
+                thread::sleep(SPAWN_BUSY_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded spawn loop always returns on its final attempt")
 }
 
 fn read_bounded(path: &Path) -> io::Result<String> {
@@ -566,6 +597,21 @@ printf '%s\n' '{"nftables":[{"metainfo":{"json_schema_version":1}},{"counter":{"
             "-j\nlist\ntable\ninet\npunar-net\n"
         );
         fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn executable_busy_spawn_is_retried_then_succeeds() {
+        let mut attempts = 0;
+        let mut child = spawn_with_executable_busy_retry(|| {
+            attempts += 1;
+            if attempts < 4 {
+                return Err(io::Error::from_raw_os_error(EXECUTABLE_FILE_BUSY_ERRNO));
+            }
+            Command::new("/bin/true").spawn()
+        })
+        .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(attempts, 4);
     }
 
     #[test]
