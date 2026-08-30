@@ -1,5 +1,37 @@
 # Milestone 13 — Demo polish: design plan
 
+> **Implementation note (2026-08-30):** this document is the original M13
+> design/audit and its embedded evidence matrix is historical until refreshed
+> by the final M13 check. The current status of record is `BUILD-QUEUE.md` and
+> `IMPLEMENTATION_STATUS.md`: M2–M10 and M12 are canonical runtime-proven, the
+> A/B update fallback is canonical ARM64-proven, CPU/write gates exist, and a
+> fixture-free ARM64 release image now passes the real first-account journey
+> through the signed-in desktop (`PUNAR_ONBOARDING_OK`, image SHA-256
+> `12db1a9b9d51a4fbcb74ab45c7770040d76e33d16994ea872350443b44b6a9c6`). M13 is
+> **partially implemented**; the deterministic personal/enrolled 14-beat demo,
+> updated matrix, x86 release-image parity, human keyboard walkthrough and
+> physical-hardware acceptance remain open. Do not read the older `NOT MET`
+> rows below as current claims.
+
+## Current implementation evidence
+
+`tools/test-release-onboarding-arm64.sh` is the executable clean-release gate.
+It boots the fixture-free image through QEMU in mandatory snapshot mode, waits
+for framebuffer states rather than sleeping blindly, drives the real keyboard
+fields, creates the first local account, observes the recovery receipt, enters
+through the one-use PAM token and requires the real desktop bar. Its structural
+probe performs no OCR. It retains only `firstboot.png`, `desktop.png` and a
+secret-free report; the password is never logged and the one-time recovery
+receipt is never saved. The 2026-08-30 native Apple-HVF run emitted
+`PUNAR_ONBOARDING_OK`.
+
+The same change makes compact onboarding focus reveal each field inside the
+Flickable, resets scroll before the recovery receipt, provides deterministic
+forward/back focus targets and treats Enter on the focused receipt heading as
+the default **Enter desktop** action. This is real release-path evidence, but
+it does not replace the final human keyboard-only walkthrough or the complete
+14-beat personal/enrolled demo.
+
 Spec authority: section 76 Milestone 13 ("Deliver first boot, enrollment,
 keyboard UX, AI panel, privacy panel, and a deterministic demo"), grounded
 in section 75 (the MVP hero demo — **fourteen steps, and this milestone's

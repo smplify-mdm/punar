@@ -1458,9 +1458,10 @@ that is the whole point of changing them.
 
 ## 16. Verification status (spec 1.22)
 
-**Implementation and the clean ARM64 runtime proof are complete locally. This
-milestone is not marked verified until a fresh x86_64 image and canonical
-dual-architecture CI also emit `PUNAR_M12_OK`.**
+**Verified in canonical dual-architecture CI:**
+[run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091)
+(2026-08-29, commit `fe45b9d`) emitted `PUNAR_M12_OK` with 66 assertions on
+both the x86_64 KVM and ARM64 TCG lanes.
 
 - The `punar-netd` binary, systemd hardening, typed IPC, nft transaction
   generator, bounded observation, deny-log parser, agent-ledger bridge,
@@ -1475,11 +1476,18 @@ dual-architecture CI also emit `PUNAR_M12_OK`.**
   audit/ledger privacy join, malformed-data fail-safe, missing-table self-heal,
   service confinement (including no `CAP_SYS_PTRACE`), closed method table and
   panel screenshot all passed.
+- The first canonical candidate,
+  [run 33258287925](https://github.com/smplify-mdm/punar/actions/runs/33258287925),
+  passed the product behavior but exposed an ordering assumption in the final
+  systemd `IPAddressDeny` assertion: the runner printed the exact IPv4/IPv6
+  deny set in the opposite order. Commit `fe45b9d` made the assertion compare
+  the exact two-member set without weakening it; positive and negative local
+  cases, ShellCheck and the complete canonical rerun passed.
 - `m12-check.sh` hard-gates the real three-way loopback probe,
   counters, audit/ledger privacy join, malformed-data fail-safe, missing-table
   self-heal, service confinement, closed method table, and panel screenshot.
-- **Not yet claimed:** x86_64 parity, canonical CI, real internet/VPN/relay
-  behavior, physical NICs, Raspberry Pi firmware/peripherals, or an
+- **Not yet claimed:** real internet/VPN/relay behavior, physical NICs,
+  Raspberry Pi firmware/peripherals, or an
   escape-proof per-session network namespace. The loopback proof establishes
   policy, attachment, enforcement, attribution, observation and the ledger
   join only; any failed assertion in the remaining lanes stays red rather than

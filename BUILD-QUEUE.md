@@ -11,19 +11,20 @@ mistakes that each cost a full CI cycle.
 
 ## 0. The finish line
 
-Spec §80 defines done as: a clean VM can do 26 things. **20 of the 26 are
-already demonstrated** by the latest ARM64 candidate's 713 milestone
+Spec §80 defines done as: a clean VM can do 26 things. **25 of the 26 are
+now demonstrated** by the latest ARM64 candidate's 778 milestone
 assertions, 122 desktop-surface assertions, 5 wireless-posture assertions and
-15 isolated surface-cost checks. The genuinely open ones:
+15 isolated surface-cost checks. The remaining optimization target and the
+recently closed gates are recorded here:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **EXPANDED ARM64 GATE PROVEN LOCALLY; CANONICAL CI PENDING:** clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The 2026-08-29 clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. Commit `2e317c572a8f92dfad1cd157352fdc8dda0eefcf` added the responsive icon-led library plus Telegram, Firefox, Element, Slack, and Discord; its x86 runtime surface passed in run 33146409332. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app install/context support remains M11 work. |
-| 19 | enforce project network rule | **CLEAN ARM64 VM GATE PROVEN LOCALLY; X86_64 + CANONICAL CI PENDING.** The exact 2026-08-29 candidate emitted `PUNAR_M12_OK` with 66 assertions: a same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This is generic UEFI/QEMU ARM64 evidence, not internet, VPN, Raspberry Pi or physical-NIC evidence. |
-| 20 | display local network activity | **CLEAN ARM64 VM GATE PROVEN LOCALLY; X86_64 + CANONICAL CI PENDING.** The same exact-image gate joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. The screenshot and report exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
-| 25 | demonstrate rollback/update mechanism | **LOCALLY RUNTIME-PROVEN; CANONICAL CI PENDING.** Signed apply already verified the inactive-slot write/readback/hash and health-gated blessing. On 2026-08-27, `tools/update-rollback-test-arm64.sh` then booted a disposable persistent ARM64 disk four times: an impossible root PARTUUID exhausted the pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. The proof also caught and fixed a real selection bug: counted releases must use systemd 261's assessment-aware `preferred` glob, not `default`. |
-| 3 | remain within idle budget | 1322 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues |
-| 10 | report compliance | works, but the *word* was wrong on personal devices — see §3 |
+| 7 | launch browser / **web app** | **CORE DoD VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) passed both 122-assertion desktop-surface suites. Clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app install/context support remains M11 work. |
+| 19 | enforce project network rule | **VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_M12_OK` with 66 assertions on both x86_64 KVM and ARM64 TCG. A same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This proves generic UEFI/QEMU behavior, not internet, VPN, Raspberry Pi or physical-NIC behavior. |
+| 20 | display local network activity | **VERIFIED IN CANONICAL DUAL-ARCH CI:** the same run joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. Both screenshots and reports exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
+| 25 | demonstrate rollback/update mechanism | **VERIFIED IN CANONICAL ARM64 CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_UPDATE_AUTO_ROLLBACK_OK attempts=3 fallback_slot=A`. Signed apply had already verified inactive-slot write/readback/hash and health-gated blessing. The four-boot proof exhausted an impossible pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. |
+| 3 | remain within idle budget | 1311 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues — the only §80 target still missed |
+| 10 | report compliance | **VERIFIED:** personal devices render `DRIFT · MATCHES` without organization wording; enrolled wording remains distinct — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
 would an engineer still choose Punar?"* The answer must be yes. That is why the
@@ -34,9 +35,9 @@ The update product is three-channel governed rolling: `stable` (default),
 the same verification and rollback path; only promotion cadence and soak
 differ. Project toolchain freshness belongs to `punar-env`, never a partial
 host upgrade. The core apply, boot-counting, health-gate, blessing, and
-automatic-fallback path is implemented and locally proven. Channel
-transport/promotion, production key custody, and canonical CI coverage remain
-unshipped.
+automatic-fallback path is implemented and canonical ARM64 CI-proven. Channel
+transport/promotion, production key custody, and end-to-end production
+repository coverage remain unshipped.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
@@ -141,8 +142,8 @@ The result was honest but modest: **1333 MB mean / 1337 MB max**, only 12 MB
 below the preceding 1345/1348 MB run and still above the 1024 MB target. The
 second pass separated the notification daemon from its visual ledger: the
 service remains eager, while the PUNAR+SHIFT+N window joins the measured lazy
-set. The green x86 desktop job in run 33078009194 measured **1322 MB mean /
-1329 MB max** and proved 103 shell assertions. Notification construction was
+set. The canonical x86 desktop job in run 33273700091 measured **1311 MB mean /
+1319 MB max** and proved the complete 122-assertion shell suite. Notification construction was
 43 ms and first map 108 ms. This recovered another 11 MB without making its
 first open perceptibly slower.
 
@@ -301,6 +302,19 @@ Its provenance records source commit `e03598ec`, Debian snapshot
 remain intentionally ignored; source, pins, and build recipes are the durable
 GitHub inputs.
 
+The current fixture-free product candidate was rebuilt on 2026-08-30 from the
+same pinned snapshot. `punar-release-arm64.qcow2` is **0.985 GiB allocated /
+33 GiB virtual** with SHA-256
+`12db1a9b9d51a4fbcb74ab45c7770040d76e33d16994ea872350443b44b6a9c6`.
+`tools/test-release-onboarding-arm64.sh` booted that exact hash with a
+disposable snapshot disk and emitted `PUNAR_ONBOARDING_OK`: the real keyboard
+path created the first account, the one-time recovery receipt appeared, its
+focused default action entered through the one-use PAM token, and the actual
+desktop bar rendered. The proof retains only the untouched first screen and
+post-login desktop; it never persists a password or recovery-code frame. This
+closes the clean first-account journey for generic QEMU ARM64, not the
+installer, encryption-at-install, x86 release-image parity or physical ARM.
+
 An unchanged-input comparison found the ESP and root-slot regions stable but
 the full qcow2 non-identical because btrfs assigns fresh UUIDs to the three
 subvolumes. The filesystem/device identities are fixed; subvolume UUIDs are
@@ -311,8 +325,8 @@ artifact and makes no bit-for-bit reproducibility claim.
 the A/B layout, inactive-slot apply, and a healthy counted boot being blessed.
 They do not prove Raspberry Pi firmware/peripherals, a real GPU, Secure Boot,
 an installer, or any physical ARM machine. Automatic fallback is now proven
-on a disposable persistent copy by the four-boot ARM64 gate, but not yet by a
-canonical remote run.
+on a disposable persistent copy by the four-boot ARM64 gate and by canonical
+ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091).
 
 **Next sequence:**
 
@@ -439,9 +453,15 @@ one account card with exactly three user-provided values: username, password,
 and device name; password confirmation is verification, not another value. A
 compact recovery receipt follows in the same card. Do not resurrect M13's
 seven-stage wizard: network, timezone, organization, privacy, theme, wallpaper,
-AI, and updates belong after the usable desktop. The backend still owes a
-transactional account create, password secrecy, a real greeter/logout/login
-loop, A/B persistence, negative scans, and rollback-on-failure proof.
+AI, and updates belong after the usable desktop.
+
+**Current runtime result:** transactional first-account creation, anonymous
+stdin password delivery and immediate clearing, the real greeter's one-use PAM
+handoff, A/B-shaped release storage, compact responsive focus scrolling and
+the no-secret-frame ARM64 release gate are implemented and passed on
+2026-08-30. Still open are the destructive installer and installed-image proof,
+encryption/recovery wiring, full negative/rollback matrix, x86 release-image
+parity, logout/login human acceptance and physical hardware.
 
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying
@@ -515,17 +535,18 @@ HTTPie, Postman, Meld, and Podman Desktop; Logs, Mission Center, Wireshark,
 Apostrophe, and KeePassXC cover troubleshooting, Markdown, and credentials.
 The base desktop now also carries Geany, Files/Thunar with GVfs SMB, and a
 small cross-architecture CLI troubleshooting set. Static/schema/QML gates are
-green; the expanded catalog, editor launcher, and file-manager behavior passed
-the clean local ARM64 VM gate on 2026-08-29 and remain pending in canonical CI.
-Spotify's path is proven on a clean ARM64 release VM and the
-expanded library passed its x86 runtime surface in run 33146409332. Connected
-ARM/HVF testing then proved the corrected Firefox native-detail path, including
-its pinned source and verified permissions; follow-up CI is pending. Generic web-app
+green; the expanded catalog, editor launcher, file-manager behavior and core
+Spotify/Chromium app-mode path passed both architecture lanes in canonical
+[run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091).
+Connected ARM/HVF testing also proved the corrected Firefox native-detail path,
+including its pinned source and verified permissions; third-party native UI
+compatibility remains open. Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
 remain open. M12's implementation, daemon/CLI/image integration and event-driven
-reconciliation are host-green; its real `m12-check` is now staged as a hard
-boot-test gate, but the full clean-image enforcement/observation run still must
-close DoD items 19 and 20 before either is called verified.
+reconciliation are complete: the same canonical run emitted `PUNAR_M12_OK`
+with 66 assertions on x86_64 and ARM64 and closed DoD items 19 and 20 for
+generic UEFI/QEMU. Physical NIC, Raspberry Pi and real relay behavior remain
+separate production gates.
 The private relay is `user-blocked.md` item 6 and is the largest item on that
 list.
 

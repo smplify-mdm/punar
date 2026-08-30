@@ -307,12 +307,12 @@ Budget implications:
 
 ## 4. Baseline results
 
-The RAM rows come directly from the green x86 desktop job in
-[run 33078009194](https://github.com/smplify-mdm/punar/actions/runs/33078009194),
-commit `959234a`, built from the pinned
+The current x86 rows come directly from the green x86 desktop job in
+[run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091),
+commit `fe45b9d`, built from the pinned
 2026/08/20 Arch snapshot. The desktop job used KVM with the canonical 8 GiB /
 4-vCPU shape, ten-minute stabilization and thirty ten-second samples. Image
-artifact digest: `sha256:7d2216d0b85fd64a5953c7808d4e0e25b5ae7b70499cd3d9606e180d3727f6b0`.
+artifact ZIP digest: `sha256:1961a28daa7af5c06dc6030b4e855f5f85fbe722eef2a9f518f4548eb5a6efc5`.
 The usable-desktop value is explicitly a single-run host proxy, not the
 three-cold-boot median section 2.6 requires.
 
@@ -329,20 +329,24 @@ native-virtualization results, not Raspberry Pi or bare-metal evidence.
 
 | Metric | Method | Budget | Measured value | Environment | Image / date |
 |---|---|---|---|---|---|
-| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1322 MB** (target missed; ceiling met) | KVM VM, 8 GiB / 4 vCPU | `959234a` / 2026-08-27 |
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1311 MB** (target missed; ceiling met) | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1210 MB** (target missed; ceiling met) | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1329 MB** | KVM VM, 8 GiB / 4 vCPU | `959234a` / 2026-08-27 |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1319 MB** | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1213 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Punar services PSS (sum: punard + punar-agentd + punar-secrets) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **7 MB** | KVM VM, 8 GiB / 4 vCPU | `959234a` / 2026-08-27 |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **9 MB** | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
 | Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **24 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
 | Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
+| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
 | Idle CPU, whole guest | 2.4 | informational | **0.10% across 4 vCPU** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
+| Idle CPU, whole guest | 2.4 | informational | **0.09% across 4 vCPU** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
 | Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
+| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
 | Idle writes, whole guest | 2.5 | informational | **4,595,712 B** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
+| Idle writes, whole guest | 2.5 | informational | **4,534,272 B** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
 | Live zram | 2.2 / 1.6 | present and active | **7,923 MB, zstd, active** | Apple-HVF ARM64 VM | `62081fb…12c14c9` / 2026-08-29 |
 | Boot to userspace complete | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
-| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **20 s single-run host proxy; not yet a baseline** | KVM VM | `959234a` / 2026-08-27 |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **20 s single-run host proxy; not yet a baseline** | KVM VM | `fe45b9d` / 2026-08-29 |
 | Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **16 s single-run host proxy; not yet a baseline** | Apple-HVF ARM64 VM | `62081fb…12c14c9` / 2026-08-29 |
 
 Waivers granted: none.
@@ -434,3 +438,4 @@ A `tests/performance/` harness that:
 | 2026-08-27 | Implemented boundary snapshots for per-service cgroup CPU/write bytes and whole-guest context, enforced the existing 0.50% per-service CPU interpretation, required connected runtime facts, corrected the sampling interval from 290 to the full 300 seconds, and carried live zram facts into the host gate. |
 | 2026-08-27 | Recorded two native Apple-HVF ARM64 windows: 1205/1210 MB mean, 1213 MB max, 18 MB service PSS, 0.00–0.01% max first-party CPU and exactly 8,192 first-party write bytes in each. Established a 65,536-byte/five-minute combined first-party write ceiling with 8× headroom; whole-guest writes remain context. No waiver. |
 | 2026-08-29 | Recorded repeated four-service ARM64 candidates. The final exact-tree gate (`62081fb…12c14c9`) measured 1210/1213 MB RAM, 24 MB combined PSS, 0.00% max first-party CPU, 73,728 first-party write bytes and active 7,923 MB zram; the complete M2–M10, M12 and 122-assertion desktop-surface suites passed. The write ceiling is 98,304 bytes after a native KVM filesystem produced the same 73,728-byte durability batch. No waiver; the 1,024 MB RAM target remains missed. |
+| 2026-08-29 | Replaced the older x86 baseline with canonical dual-architecture run 33273700091 at `fe45b9d`: x86_64 KVM measured 1311/1319 MB RAM, 9 MB four-service PSS, 0.00% maximum first-party CPU, 73,728 first-party write bytes and a 20 s single-run desktop marker; both architecture lanes emitted `PUNAR_M12_OK`. The 1,024 MB target remains missed and the 1,536 MB hard ceiling remains met; no waiver. |

@@ -267,6 +267,7 @@ jobs:
             tools/build-image.sh tools/boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/update-rollback-test-arm64.sh \
+            tools/test-release-onboarding-arm64.sh \
             tools/demo-arm64-vm.sh \
             tools/check-hyprland-dispatchers.sh \
             os/images/check-release-image.sh \
@@ -286,6 +287,7 @@ jobs:
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/graphics-env-test.sh \
+            tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
             tests/desktop/terminal-app-test.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
@@ -308,6 +310,9 @@ jobs:
 
       - name: Test hardware-aware graphics selection
         run: ./tests/desktop/graphics-env-test.sh
+
+      - name: Test release framebuffer state classifier
+        run: ./tests/desktop/framebuffer-probe-test.sh
 
       - name: Test native Lua layout switching
         run: ./tests/desktop/layout-script-test.sh

@@ -112,7 +112,26 @@ Scope {
         property string hint: "↵"
         property bool busy: false
         property bool quiet: false
+        property var nextFocusTarget: null
+        property var previousFocusTarget: null
         signal invoked
+
+        function focusFirst(): void {
+            action.forceActiveFocus();
+        }
+
+        function focusLast(): void {
+            action.forceActiveFocus();
+        }
+
+        function focusTarget(target: var): void {
+            if (target === null || target === undefined)
+                return;
+            if (typeof target.focusFirst === "function")
+                target.focusFirst();
+            else if (typeof target.forceActiveFocus === "function")
+                target.forceActiveFocus();
+        }
 
         width: actionRow.implicitWidth + 40
         height: Math.max(44, actionRow.implicitHeight + 22)
@@ -164,6 +183,11 @@ Scope {
         Keys.onPressed: function (event) {
             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) && action.enabled && !action.busy) {
                 action.invoked();
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Tab) {
+                action.focusTarget((event.modifiers & Qt.ShiftModifier) !== 0
+                    ? action.previousFocusTarget
+                    : action.nextFocusTarget);
                 event.accepted = true;
             }
         }
@@ -289,6 +313,9 @@ Scope {
         id: entry
 
         property alias text: input.text
+        property var scrollHost: null
+        property var nextFocusTarget: null
+        property var previousFocusTarget: null
         property string label: ""
         property string placeholder: ""
         property string icon: "user"
@@ -303,6 +330,33 @@ Scope {
 
         function focusField(): void {
             input.forceActiveFocus();
+        }
+
+        function focusFirst(): void {
+            input.forceActiveFocus();
+        }
+
+        function focusLast(): void {
+            if (entry.secret)
+                revealButton.forceActiveFocus();
+            else
+                input.forceActiveFocus();
+        }
+
+        function focusTarget(target: var, last: bool): void {
+            if (target === null || target === undefined)
+                return;
+            if (last && typeof target.focusLast === "function")
+                target.focusLast();
+            else if (!last && typeof target.focusFirst === "function")
+                target.focusFirst();
+            else if (typeof target.forceActiveFocus === "function")
+                target.forceActiveFocus();
+        }
+
+        function revealFocusedField(): void {
+            if (entry.scrollHost !== null && typeof entry.scrollHost.revealItem === "function")
+                entry.scrollHost.revealItem(entry);
         }
 
         function clear(): void {
@@ -387,12 +441,22 @@ Scope {
                 Accessible.passwordEdit: entry.secret && !entry.reveal
 
                 onActiveFocusChanged: {
-                    if (!activeFocus)
+                    if (activeFocus)
+                        entry.revealFocusedField();
+                    else
                         entry.blurred();
                 }
                 Keys.onPressed: function (event) {
                     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         entry.accepted();
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Tab) {
+                        if ((event.modifiers & Qt.ShiftModifier) !== 0)
+                            entry.focusTarget(entry.previousFocusTarget, true);
+                        else if (entry.secret)
+                            revealButton.forceActiveFocus();
+                        else
+                            entry.focusTarget(entry.nextFocusTarget, false);
                         event.accepted = true;
                     } else if (event.key === Qt.Key_Escape && entry.secret) {
                         entry.clear();
@@ -430,11 +494,21 @@ Scope {
                     border.color: Theme.shellFocusRing
                 }
 
-                onActiveFocusChanged: if (!activeFocus)
-                    entry.reveal = false
+                onActiveFocusChanged: {
+                    if (activeFocus)
+                        entry.revealFocusedField();
+                    else
+                        entry.reveal = false;
+                }
                 Keys.onPressed: function (event) {
                     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
                         entry.reveal = !entry.reveal;
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Tab) {
+                        if ((event.modifiers & Qt.ShiftModifier) !== 0)
+                            input.forceActiveFocus();
+                        else
+                            entry.focusTarget(entry.nextFocusTarget, false);
                         event.accepted = true;
                     }
                 }
@@ -612,6 +686,14 @@ Scope {
                 accountProcess.running = true;
             }
 
+            function startFirstSession(): void {
+                if (firstSession.running)
+                    return;
+                panel.formFailure = "";
+                firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername];
+                firstSession.running = true;
+            }
+
             function finishAccount(body: string): void {
                 if (panel.accountHandled)
                     return;
@@ -627,6 +709,11 @@ Scope {
                     panel.createdUsername = response.username;
                     panel.recoveryCode = response.recoveryCode;
                     panel.receipt = true;
+                    // The compact layout may have scrolled to the device
+                    // field. A content swap must reset that scroll position;
+                    // otherwise the one-time recovery receipt can render
+                    // above the visible viewport while focus moves to it.
+                    viewport.contentY = 0;
                     receiptPane.opacity = 1;
                     receiptPane.y = 0;
                     receiptHeading.forceActiveFocus();
@@ -1010,6 +1097,21 @@ Scope {
                     boundsBehavior: Flickable.StopAtBounds
                     interactive: contentHeight > height
 
+                    function revealItem(item: var): void {
+                        var mapped = item.mapToItem(content, 0, 0);
+                        var margin = 12;
+                        var itemHeight = Math.max(item.height, item.implicitHeight);
+                        var top = Math.max(0, mapped.y - margin);
+                        var bottom = mapped.y + itemHeight + margin;
+                        if (top < viewport.contentY)
+                            viewport.contentY = top;
+                        else if (bottom > viewport.contentY + viewport.height)
+                            viewport.contentY = Math.min(
+                                Math.max(0, viewport.contentHeight - viewport.height),
+                                bottom - viewport.height
+                            );
+                    }
+
                     Column {
                         id: content
                         width: viewport.width
@@ -1054,6 +1156,8 @@ Scope {
                                 help: "Your home folder and terminal name. This cannot be changed later."
                                 errorText: panel.usernameBackendError !== "" ? panel.usernameBackendError : panel.usernameError()
                                 enabled: !panel.accountBusy
+                                scrollHost: viewport
+                                nextFocusTarget: passwordField
                                 onTextChanged: panel.usernameBackendError = ""
                                 onBlurred: panel.usernameTouched = true
                                 onAccepted: passwordField.focusField()
@@ -1076,6 +1180,9 @@ Scope {
                                     errorText: panel.passwordBackendError !== "" ? panel.passwordBackendError : panel.passwordError()
                                     secret: true
                                     enabled: !panel.accountBusy
+                                    scrollHost: viewport
+                                    previousFocusTarget: usernameField
+                                    nextFocusTarget: confirmField
                                     onTextChanged: panel.passwordBackendError = ""
                                     onBlurred: panel.passwordTouched = true
                                     onAccepted: confirmField.focusField()
@@ -1090,6 +1197,9 @@ Scope {
                                     errorText: panel.confirmError()
                                     secret: true
                                     enabled: !panel.accountBusy
+                                    scrollHost: viewport
+                                    previousFocusTarget: passwordField
+                                    nextFocusTarget: deviceField
                                     onBlurred: panel.confirmTouched = true
                                     onAccepted: deviceField.focusField()
                                 }
@@ -1104,6 +1214,9 @@ Scope {
                                 help: "The name shown on your network. Timezone is selected automatically."
                                 errorText: panel.deviceBackendError !== "" ? panel.deviceBackendError : panel.deviceError()
                                 enabled: !panel.accountBusy
+                                scrollHost: viewport
+                                previousFocusTarget: confirmField
+                                nextFocusTarget: retryButton
                                 onTextChanged: panel.deviceBackendError = ""
                                 onBlurred: panel.deviceTouched = true
                                 onAccepted: panel.createAccount()
@@ -1206,6 +1319,7 @@ Scope {
                                         label: panel.formFailure === "" ? "Continue" : "Retry"
                                         busy: panel.accountBusy
                                         enabled: !panel.accountBusy
+                                        previousFocusTarget: deviceField
                                         onInvoked: panel.createAccount()
                                     }
                                 }
@@ -1246,8 +1360,18 @@ Scope {
                                 font.letterSpacing: -0.02 * 30
                                 color: Theme.shellFg
                                 focus: true
+                                activeFocusOnTab: true
                                 Accessible.role: Accessible.Heading
                                 Accessible.name: text
+                                Keys.onPressed: function (event) {
+                                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                        panel.startFirstSession();
+                                        event.accepted = true;
+                                    } else if (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier) === 0) {
+                                        copyButton.forceActiveFocus();
+                                        event.accepted = true;
+                                    }
+                                }
                             }
 
                             Rectangle {
@@ -1302,6 +1426,8 @@ Scope {
                                     hint: ""
                                     quiet: true
                                     enabled: !copyProcess.running
+                                    previousFocusTarget: receiptHeading
+                                    nextFocusTarget: enterButton
                                     onInvoked: {
                                         copyProcess.stdinEnabled = true;
                                         copyProcess.running = true;
@@ -1327,13 +1453,9 @@ Scope {
                                     id: enterButton
                                     anchors.right: parent.right
                                     label: "Enter desktop"
-                                    busy: false
-                                    onInvoked: {
-                                        enterButton.busy = true;
-                                        panel.formFailure = "";
-                                        firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername];
-                                        firstSession.running = true;
-                                    }
+                                    busy: firstSession.running
+                                    previousFocusTarget: copyButton
+                                    onInvoked: panel.startFirstSession()
                                 }
                             }
                         }
