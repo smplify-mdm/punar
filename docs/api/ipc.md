@@ -730,7 +730,9 @@ Root-only, non-mutating, and audited as `action: "install.plan"`,
    serial, optional WWN, size and device node inside the plan;
 5. returns the four fixed partitions, byte offsets/sizes, filesystems,
    encryption decision, data subvolumes, the signed compressed-artifact
-   digest/size and the signed uncompressed-slot digest/size.
+   digest/size, the signed uncompressed-slot digest/size, and the signed boot
+   artifact kind, filename, digest and size. The latter binds either the UKI
+   or Raspberry Pi boot filesystem into the same confirmation token.
 
 The response validates against `schemas/install/plan.json`. `plan_token` is
 SHA-256 over compact, recursively key-sorted JSON of the nested `plan` object

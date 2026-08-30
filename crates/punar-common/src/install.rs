@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::update::BootArtifactKind;
+
 /// The production data-volume default.  `none` exists only behind the
 /// installer's explicit destructive confirmation flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,19 @@ pub struct InstallPayloadPlan {
     pub uncompressed_size_bytes: u64,
 }
 
+/// The signed boot artifact installed beside the verified root-slot payload.
+/// Keeping this identity inside the confirmation token prevents a release
+/// manifest with the same release id and payload from substituting a different
+/// UKI or Raspberry Pi boot filesystem after the user confirms the plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallBootArtifactPlan {
+    pub kind: BootArtifactKind,
+    pub filename: String,
+    pub digest_sha256: String,
+    pub size_bytes: u64,
+}
+
 /// One future GPT partition.  Offsets and sizes are bytes and aligned to
 /// both the disk logical-sector size and 1 MiB.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -145,6 +160,7 @@ pub struct InstallPlan {
     pub encryption: InstallEncryption,
     pub recovery_mode: InstallRecoveryMode,
     pub payload: InstallPayloadPlan,
+    pub boot_artifact: InstallBootArtifactPlan,
     pub partitions: Vec<InstallPartitionPlan>,
     pub data_subvolumes: Vec<String>,
     pub warnings: Vec<String>,

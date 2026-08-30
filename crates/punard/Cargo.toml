@@ -24,9 +24,10 @@ serde_json = { workspace = true }
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
 # Justifications for both live at the workspace [workspace.dependencies] table:
-# rustix = SO_PEERCRED + pre-listen socket setup without unsafe;
+# rustix = SO_PEERCRED + pre-listen socket setup and the installer's
+# mount/sync/unmount ESP transaction without unsafe;
 # signal-hook = safe SIGTERM handling for graceful shutdown.
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["mount", "process"] }
 sha2 = { workspace = true }
 signal-hook = { workspace = true }
 # Installer passphrases and the optional first-boot passthrough are consumed

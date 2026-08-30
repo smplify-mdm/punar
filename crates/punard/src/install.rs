@@ -2,9 +2,9 @@
 //! and secret-free status reporting.
 //!
 //! The internal executor now owns release verification, fixed-layout disk
-//! preparation, bounded slot-A writing, and a physical re-read. The public
-//! `install.apply` method stays absent until the same fixed transaction can
-//! also install boot assets, seed the shared filesystem, and verify the
+//! preparation, bounded slot-A writing, a physical re-read, and UEFI boot
+//! installation. The public `install.apply` method stays absent until the
+//! same fixed transaction can also seed the shared filesystem and verify the
 //! installed result. A half-installer is not an install API.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -16,14 +16,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 
 use punar_common::install::{
-    InstallApplyParams, InstallAwaiting, InstallDiskIdentity, InstallEncryption, InstallFailure,
-    InstallOverallState, InstallPartitionPlan, InstallPayloadPlan, InstallPhase, InstallPhaseState,
-    InstallPlan, InstallPlanParams, InstallPlanResult, InstallRecoveryAckParams,
-    InstallRecoveryMode, InstallStatusResult, InstallTarget, InstallTargetPartition,
-    InstallTargetsResult, canonical_json,
+    InstallApplyParams, InstallAwaiting, InstallBootArtifactPlan, InstallDiskIdentity,
+    InstallEncryption, InstallFailure, InstallOverallState, InstallPartitionPlan,
+    InstallPayloadPlan, InstallPhase, InstallPhaseState, InstallPlan, InstallPlanParams,
+    InstallPlanResult, InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult,
+    InstallTarget, InstallTargetPartition, InstallTargetsResult, canonical_json,
 };
 use punar_common::update::{
-    Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
+    Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
     verify_release_manifest,
 };
 use punar_recovery::{PersonalRecoveryConfirmation, PersonalRecoveryView, SecretRecoveryKey};
@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::util::{hex, sha256_hex, write_atomic};
+use crate::util::{hex, sha256_hex, write_atomic, write_atomic_synced};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -61,6 +61,7 @@ const DIRECT_IO_BLOCKS: usize = SLOT_IO_BYTES / DIRECT_IO_BLOCK_BYTES;
 const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
 const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
+const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -83,6 +84,7 @@ pub struct InstallerSources {
     pub repart_path: PathBuf,
     pub cryptenroll_path: PathBuf,
     pub cryptsetup_path: PathBuf,
+    pub bootctl_path: PathBuf,
     pub repart_definitions_root: PathBuf,
     pub repart_runtime_root: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
@@ -97,6 +99,10 @@ pub struct InstallerSources {
     /// regular file. This field does not exist in production builds.
     #[cfg(test)]
     pub allow_regular_target_for_tests: bool,
+    /// Unit-test-only mounted ESP. Production always mounts partition 1 with
+    /// the safe in-process mount syscall path.
+    #[cfg(test)]
+    pub mounted_esp_override: Option<PathBuf>,
 }
 
 impl Default for InstallerSources {
@@ -114,6 +120,7 @@ impl Default for InstallerSources {
             repart_path: PathBuf::from("/usr/bin/systemd-repart"),
             cryptenroll_path: PathBuf::from("/usr/bin/systemd-cryptenroll"),
             cryptsetup_path: PathBuf::from("/usr/bin/cryptsetup"),
+            bootctl_path: PathBuf::from("/usr/bin/bootctl"),
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),
             release_manifest_override: None,
@@ -121,6 +128,8 @@ impl Default for InstallerSources {
             boot_platform_override: None,
             #[cfg(test)]
             allow_regular_target_for_tests: false,
+            #[cfg(test)]
+            mounted_esp_override: None,
         }
     }
 }
@@ -495,11 +504,13 @@ impl Installer {
         Ok(())
     }
 
-    /// Re-read the signed manifest and verify the compressed artifact through
-    /// one already-open descriptor. No target byte is touched in this phase.
+    /// Re-read the signed manifest and verify both the compressed root payload
+    /// and boot artifact through already-open descriptors. No target byte is
+    /// touched in this phase.
     pub fn verify_release_payload(&self, plan: &InstallPlan) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::VerifyRelease)?;
-        self.open_verified_payload(plan).map(drop)
+        self.open_verified_payload(plan).map(drop)?;
+        self.open_verified_boot_artifact(plan).map(drop)
     }
 
     /// Materialize Punar's fixed GPT, ESP and shared-data filesystem from the
@@ -733,6 +744,131 @@ impl Installer {
         )
     }
 
+    /// Install the release's already-verified boot artifact onto the target
+    /// boot partition. Initial installation deliberately creates one
+    /// permanently uncounted slot-A UKI: there is no known-good slot B to
+    /// fall back to yet. Later updates use the separate `+3-0` counted-name
+    /// path once a last-known-good release exists.
+    ///
+    /// The target ESP is derived from the confirmed disk, mounted with
+    /// `nodev,nosuid,noexec,nosymfollow`, and always unmounted before the
+    /// transaction may enter `seed`. `bootctl --no-variables` keeps firmware
+    /// NVRAM outside the disk-scoped destructive confirmation.
+    #[cfg(target_os = "linux")]
+    pub fn install_boot_artifact(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::Boot)?;
+        let manifest = self.release_manifest_for_plan(plan)?;
+        match (manifest.boot_platform, manifest.boot_artifact.kind) {
+            (BootPlatform::Uefi, BootArtifactKind::Uki) => {
+                self.install_uefi_boot_artifact(plan, &manifest)?;
+                self.enter_phase(InstallPhase::Seed)
+            }
+            (BootPlatform::RaspberryPi, BootArtifactKind::RaspberryPiBootfs) => {
+                Err(InstallError::Refused(
+                    "Raspberry Pi boot-filesystem installation is not implemented in this executor"
+                        .into(),
+                ))
+            }
+            _ => Err(InstallError::Trust(
+                "the signed boot artifact does not match its boot platform".into(),
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn install_uefi_boot_artifact(
+        &self,
+        plan: &InstallPlan,
+        manifest: &ReleaseManifest,
+    ) -> Result<(), InstallError> {
+        // Re-verify through one open descriptor before touching the ESP. The
+        // bounded copy below hashes the bytes again, closing an in-place
+        // source-mutation race between this check and the final rename.
+        let mut boot_artifact = self.open_verified_boot_artifact(plan)?;
+        let token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        let esp = self.mount_esp(plan, &token)?;
+        run_bootctl(&self.sources.bootctl_path, esp.path())?;
+
+        let fallback = esp
+            .path()
+            .join("EFI/BOOT")
+            .join(uefi_fallback_filename(manifest.architecture));
+        require_bounded_regular_file(&fallback, BOOTLOADER_MAX_BYTES, "UEFI fallback bootloader")?;
+
+        let version = manifest.version.to_string();
+        let uki_dir = esp.path().join("EFI/Linux");
+        fs::create_dir_all(&uki_dir)?;
+        let uki_name = format!("punar_{version}.efi");
+        let installed_uki = uki_dir.join(&uki_name);
+        copy_verified_file_atomic(
+            &mut boot_artifact,
+            &installed_uki,
+            plan.boot_artifact.size_bytes,
+            &plan.boot_artifact.digest_sha256,
+        )?;
+
+        let loader_dir = esp.path().join("loader");
+        fs::create_dir_all(&loader_dir)?;
+        let selector = format!("punar_{version}*.efi");
+        let loader = format!("preferred {selector}\ntimeout 0\neditor no\n");
+        write_atomic_synced(&loader_dir.join("loader.conf"), loader.as_bytes(), 0o644)?;
+
+        let mut installed = open_regular_nofollow(&installed_uki, "installed slot-A UKI")?;
+        verify_reader(
+            &mut installed,
+            &plan.boot_artifact.digest_sha256,
+            plan.boot_artifact.size_bytes,
+        )
+        .map_err(|error| InstallError::Trust(error.to_string()))?;
+        drop(installed);
+
+        // `syncfs` covers bootctl's files, the UKI rename and loader.conf on
+        // the one target filesystem. A successful phase is therefore never
+        // published while those directory updates exist only in cache.
+        let filesystem = File::open(esp.path())?;
+        rustix::fs::syncfs(&filesystem).map_err(rustix_install_io)?;
+        drop(filesystem);
+        esp.finish()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_esp(&self, plan: &InstallPlan, token: &str) -> Result<MountedEsp, InstallError> {
+        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, 1)?;
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        validate_repart_target(&source, allow_regular_target)?;
+
+        #[cfg(test)]
+        if let Some(path) = &self.sources.mounted_esp_override {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(InstallError::Refused(
+                    "the test ESP override is not a directory".into(),
+                ));
+            }
+            return Ok(MountedEsp::borrowed(path.clone()));
+        }
+
+        let path = self
+            .sources
+            .repart_runtime_root
+            .join(format!("esp-{token}"));
+        create_private_directory(&path)?;
+        let flags = rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW;
+        if let Err(error) = rustix::mount::mount(&source, &path, "vfat", flags, Some(c"umask=0077"))
+        {
+            let _ = fs::remove_dir(&path);
+            return Err(rustix_install_io(error));
+        }
+        Ok(MountedEsp::mounted(path))
+    }
+
     fn require_transaction_phase(
         &self,
         plan: &InstallPlan,
@@ -755,8 +891,41 @@ impl Installer {
     }
 
     fn open_verified_payload(&self, plan: &InstallPlan) -> Result<File, InstallError> {
-        use std::os::unix::fs::OpenOptionsExt;
+        let manifest = self.release_manifest_for_plan(plan)?;
+        let parent = self
+            .sources
+            .release_manifest_path
+            .parent()
+            .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
+        open_verified_release_file(
+            parent,
+            &manifest.payload.filename,
+            &plan.payload.digest_sha256,
+            plan.payload.compressed_size_bytes,
+            "release payload",
+        )
+    }
 
+    fn open_verified_boot_artifact(&self, plan: &InstallPlan) -> Result<File, InstallError> {
+        let manifest = self.release_manifest_for_plan(plan)?;
+        let parent = self
+            .sources
+            .release_manifest_path
+            .parent()
+            .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
+        open_verified_release_file(
+            parent,
+            &manifest.boot_artifact.filename,
+            &plan.boot_artifact.digest_sha256,
+            plan.boot_artifact.size_bytes,
+            "release boot artifact",
+        )
+    }
+
+    fn release_manifest_for_plan(
+        &self,
+        plan: &InstallPlan,
+    ) -> Result<ReleaseManifest, InstallError> {
         let manifest = self.release_manifest()?;
         if manifest.release_id != plan.payload.release_id
             || manifest.payload.filename != plan.payload.filename
@@ -765,44 +934,16 @@ impl Installer {
             || manifest.payload.uncompressed_digest_sha256
                 != plan.payload.uncompressed_digest_sha256
             || manifest.payload.uncompressed_size_bytes != plan.payload.uncompressed_size_bytes
+            || manifest.boot_artifact.kind != plan.boot_artifact.kind
+            || manifest.boot_artifact.filename != plan.boot_artifact.filename
+            || manifest.boot_artifact.digest_sha256 != plan.boot_artifact.digest_sha256
+            || manifest.boot_artifact.size_bytes != plan.boot_artifact.size_bytes
         {
             return Err(InstallError::Trust(
                 "the signed release no longer matches the confirmed install plan".into(),
             ));
         }
-        let parent = self
-            .sources
-            .release_manifest_path
-            .parent()
-            .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
-        let path = parent.join(&manifest.payload.filename);
-        if path.file_name().and_then(|name| name.to_str())
-            != Some(manifest.payload.filename.as_str())
-        {
-            return Err(InstallError::Trust(
-                "release payload filename escapes its fixed directory".into(),
-            ));
-        }
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(
-                i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
-                    .expect("open flags fit libc::c_int"),
-            )
-            .open(path)?;
-        if !file.metadata()?.file_type().is_file() {
-            return Err(InstallError::Trust(
-                "release payload is not a regular file".into(),
-            ));
-        }
-        verify_reader(
-            &mut file,
-            &plan.payload.digest_sha256,
-            plan.payload.compressed_size_bytes,
-        )
-        .map_err(|error| InstallError::Trust(error.to_string()))?;
-        file.seek(SeekFrom::Start(0))?;
-        Ok(file)
+        Ok(manifest)
     }
 
     pub fn targets(&self) -> Result<InstallTargetsResult, InstallError> {
@@ -947,6 +1088,12 @@ impl Installer {
                 compressed_size_bytes: manifest.payload.size_bytes,
                 uncompressed_digest_sha256: manifest.payload.uncompressed_digest_sha256,
                 uncompressed_size_bytes: manifest.payload.uncompressed_size_bytes,
+            },
+            boot_artifact: InstallBootArtifactPlan {
+                kind: manifest.boot_artifact.kind,
+                filename: manifest.boot_artifact.filename,
+                digest_sha256: manifest.boot_artifact.digest_sha256,
+                size_bytes: manifest.boot_artifact.size_bytes,
             },
             partitions,
             data_subvolumes: vec!["@var".into(), "@home".into(), "@var-tmp".into()],
@@ -1393,6 +1540,230 @@ impl Installer {
         }
         Ok(disks)
     }
+}
+
+fn open_verified_release_file(
+    parent: &Path,
+    filename: &str,
+    digest_sha256: &str,
+    size_bytes: u64,
+    description: &str,
+) -> Result<File, InstallError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = parent.join(filename);
+    if path.file_name().and_then(|name| name.to_str()) != Some(filename) {
+        return Err(InstallError::Trust(format!(
+            "{description} filename escapes its fixed directory"
+        )));
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
+                .expect("open flags fit libc::c_int"),
+        )
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(InstallError::Trust(format!(
+            "{description} is not a regular file"
+        )));
+    }
+    verify_reader(&mut file, digest_sha256, size_bytes)
+        .map_err(|error| InstallError::Trust(error.to_string()))?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+struct MountedEsp {
+    path: PathBuf,
+    mounted: bool,
+    remove_directory: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl MountedEsp {
+    fn mounted(path: PathBuf) -> Self {
+        Self {
+            path,
+            mounted: true,
+            remove_directory: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn borrowed(path: PathBuf) -> Self {
+        Self {
+            path,
+            mounted: false,
+            remove_directory: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn finish(mut self) -> Result<(), InstallError> {
+        if self.mounted {
+            rustix::mount::unmount(&self.path, rustix::mount::UnmountFlags::empty())
+                .map_err(rustix_install_io)?;
+            self.mounted = false;
+        }
+        if self.remove_directory {
+            // `/run` is transient and cleanup cannot invalidate a completed,
+            // durably unmounted ESP transaction.
+            let _ = fs::remove_dir(&self.path);
+            self.remove_directory = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MountedEsp {
+    fn drop(&mut self) {
+        if self.mounted {
+            let _ = rustix::mount::unmount(&self.path, rustix::mount::UnmountFlags::empty());
+            self.mounted = false;
+        }
+        if self.remove_directory {
+            let _ = fs::remove_dir(&self.path);
+            self.remove_directory = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rustix_install_io(error: rustix::io::Errno) -> InstallError {
+    InstallError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
+fn uefi_fallback_filename(architecture: Architecture) -> &'static str {
+    match architecture {
+        Architecture::X86_64 => "BOOTX64.EFI",
+        Architecture::Aarch64 => "BOOTAA64.EFI",
+    }
+}
+
+fn run_bootctl(binary: &Path, esp: &Path) -> Result<(), InstallError> {
+    let mut esp_argument = OsString::from("--esp-path=");
+    esp_argument.push(esp.as_os_str());
+    let status = fixed_tool_command(binary)
+        .arg("install")
+        .arg(esp_argument)
+        .arg("--no-variables")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "bootctl did not install the fixed removable-media bootloader",
+        )));
+    }
+    Ok(())
+}
+
+fn require_bounded_regular_file(
+    path: &Path,
+    maximum_size: u64,
+    description: &str,
+) -> Result<(), InstallError> {
+    let file = open_regular_nofollow(path, description)?;
+    let size = file.metadata()?.len();
+    if size == 0 || size > maximum_size {
+        return Err(InstallError::Io(std::io::Error::other(format!(
+            "{description} has an invalid size"
+        ))));
+    }
+    Ok(())
+}
+
+fn open_regular_nofollow(path: &Path, description: &str) -> Result<File, InstallError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
+                .expect("open flags fit libc::c_int"),
+        )
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(InstallError::Refused(format!(
+            "{description} is not a regular file"
+        )));
+    }
+    Ok(file)
+}
+
+fn copy_verified_file_atomic(
+    source: &mut File,
+    destination: &Path,
+    expected_size: u64,
+    expected_digest: &str,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = destination.parent().ok_or_else(|| {
+        InstallError::Invalid("the installed boot artifact has no parent directory".into())
+    })?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| InstallError::Invalid("the installed boot artifact has no name".into()))?;
+    let temporary = parent.join(format!(".{name}.new"));
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(InstallError::Io(error)),
+    }
+
+    let copied = (|| {
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&temporary)?;
+        source.seek(SeekFrom::Start(0))?;
+        let mut hasher = Sha256::new();
+        let mut remaining = expected_size;
+        let mut buffer = vec![0_u8; SLOT_IO_BYTES];
+        while remaining != 0 {
+            let wanted = usize::try_from(remaining.min(SLOT_IO_BYTES as u64))
+                .expect("bounded boot-artifact chunk fits usize");
+            let read = source.read(&mut buffer[..wanted])?;
+            if read == 0 {
+                return Err(InstallError::Trust(
+                    "the boot artifact ended before its signed size".into(),
+                ));
+            }
+            output.write_all(&buffer[..read])?;
+            hasher.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+        let mut extra = [0_u8; 1];
+        if source.read(&mut extra)? != 0 {
+            return Err(InstallError::Trust(
+                "the boot artifact exceeds its signed size".into(),
+            ));
+        }
+        if hex(&hasher.finalize()) != expected_digest {
+            return Err(InstallError::Trust(
+                "the copied boot artifact does not match its signed digest".into(),
+            ));
+        }
+        output.sync_all()?;
+        drop(output);
+        fs::rename(&temporary, destination)?;
+        Ok(())
+    })();
+    if copied.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    copied
 }
 
 fn create_private_directory(path: &Path) -> Result<(), InstallError> {
@@ -2539,6 +2910,25 @@ mod tests {
         bytes
     }
 
+    fn advance_status_to_boot(installer: &Installer, result: &InstallPlanResult) {
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                result.plan.payload.uncompressed_size_bytes,
+            )
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+        installer
+            .update_write_progress(result.plan.payload.uncompressed_size_bytes)
+            .unwrap();
+        installer.enter_phase(InstallPhase::ReRead).unwrap();
+        installer.enter_phase(InstallPhase::Boot).unwrap();
+    }
+
     #[test]
     fn descriptor_intake_reads_exact_bounded_bytes_without_logging_them() {
         let fixture = Fixture::new();
@@ -3041,6 +3431,21 @@ mod tests {
             first.plan.payload.uncompressed_digest_sha256,
             "4444444444444444444444444444444444444444444444444444444444444444"
         );
+        assert!(matches!(
+            first.plan.boot_artifact.kind,
+            punar_common::update::BootArtifactKind::Uki
+        ));
+
+        let mut changed_sources = fixture.sources.clone();
+        let mut changed_manifest = changed_sources.release_manifest_override.clone().unwrap();
+        changed_manifest.boot_artifact.digest_sha256 = "3".repeat(64);
+        changed_sources.release_manifest_override = Some(changed_manifest);
+        let boot_changed = Installer::new(changed_sources)
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap();
+        assert_eq!(first.plan.payload, boot_changed.plan.payload);
+        assert_ne!(first.plan.boot_artifact, boot_changed.plan.boot_artifact);
+        assert_ne!(first.plan_token, boot_changed.plan_token);
 
         let mut disk = File::options()
             .write(true)
@@ -3055,6 +3460,176 @@ mod tests {
             changed.plan.disk.existing_gpt_sha256
         );
         assert_ne!(first.plan_token, changed.plan_token);
+    }
+
+    #[test]
+    fn release_verification_binds_and_reads_the_exact_boot_artifact() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let payload = b"fixture compressed root payload";
+        let boot_artifact = b"MZ fixture unified kernel image";
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        manifest.payload.filename = "slot.raw.zst".into();
+        manifest.payload.digest_sha256 = sha256_hex(payload);
+        manifest.payload.size_bytes = payload.len() as u64;
+        manifest.boot_artifact.filename = "punar.efi".into();
+        manifest.boot_artifact.digest_sha256 = sha256_hex(boot_artifact);
+        manifest.boot_artifact.size_bytes = boot_artifact.len() as u64;
+        fs::write(release_dir.join(&manifest.payload.filename), payload).unwrap();
+        fs::write(
+            release_dir.join(&manifest.boot_artifact.filename),
+            boot_artifact,
+        )
+        .unwrap();
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                result.plan.payload.uncompressed_size_bytes,
+            )
+            .unwrap();
+        installer.verify_release_payload(&result.plan).unwrap();
+
+        fs::write(
+            release_dir.join(&result.plan.boot_artifact.filename),
+            b"MZ fixture unified kernel imagf",
+        )
+        .unwrap();
+        let error = installer.verify_release_payload(&result.plan).unwrap_err();
+        assert!(error.to_string().contains("digest"));
+        assert_eq!(installer.status().phase, Some(InstallPhase::VerifyRelease));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uefi_boot_install_is_disk_bound_durable_and_never_writes_nvram() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        File::create(fixture.sources.dev_root.join("vda1")).unwrap();
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let artifact = b"MZ signed fixture slot-A unified kernel image";
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        manifest.boot_artifact.filename = "punar-slot-a.efi".into();
+        manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
+        manifest.boot_artifact.size_bytes = artifact.len() as u64;
+        fs::write(release_dir.join(&manifest.boot_artifact.filename), artifact).unwrap();
+
+        let esp = fixture.root.join("esp");
+        fs::create_dir(&esp).unwrap();
+        let capture = fixture.root.join("bootctl-capture");
+        let fake_bootctl = fixture.root.join("bootctl");
+        fs::write(
+            &fake_bootctl,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 capture='{}'\n\
+                 : > \"${{capture}}.args\"\n\
+                 esp=''\n\
+                 for argument in \"$@\"; do\n\
+                   printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.args\"\n\
+                   case \"${{argument}}\" in --esp-path=*) esp=\"${{argument#--esp-path=}}\" ;; esac\n\
+                 done\n\
+                 printf '%s\\n' \"${{LC_ALL:-missing}}\" > \"${{capture}}.locale\"\n\
+                 [ -n \"${{esp}}\" ]\n\
+                 mkdir -p \"${{esp}}/EFI/BOOT\"\n\
+                 printf 'fixture systemd-boot' > \"${{esp}}/EFI/BOOT/BOOTX64.EFI\"\n",
+                capture.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_bootctl, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.sources.bootctl_path = fake_bootctl;
+        fixture.sources.allow_regular_target_for_tests = true;
+        fixture.sources.mounted_esp_override = Some(esp.clone());
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        let version = fixture
+            .sources
+            .release_manifest_override
+            .as_ref()
+            .unwrap()
+            .version
+            .to_string();
+        advance_status_to_boot(&installer, &result);
+        installer.install_boot_artifact(&result.plan).unwrap();
+
+        let arguments = fs::read_to_string(capture.with_extension("args")).unwrap();
+        let expected_esp_argument = format!("--esp-path={}", esp.display());
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            ["install", expected_esp_argument.as_str(), "--no-variables"]
+        );
+        assert!(!arguments.lines().any(|argument| argument == "--variables"));
+        assert_eq!(
+            fs::read_to_string(capture.with_extension("locale"))
+                .unwrap()
+                .trim(),
+            "C"
+        );
+        assert_eq!(
+            fs::read(esp.join(format!("EFI/Linux/punar_{version}.efi"))).unwrap(),
+            artifact
+        );
+        assert_eq!(
+            fs::read_to_string(esp.join("loader/loader.conf")).unwrap(),
+            format!("preferred punar_{version}*.efi\ntimeout 0\neditor no\n")
+        );
+        assert!(esp.join("EFI/BOOT/BOOTX64.EFI").is_file());
+        assert!(fs::read_dir(esp.join("EFI/Linux")).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("+3-0")
+        }));
+        assert_eq!(installer.status().phase, Some(InstallPhase::Seed));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn boot_artifact_tampering_is_refused_before_the_esp_is_touched() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        File::create(fixture.sources.dev_root.join("vda1")).unwrap();
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let artifact = b"MZ signed fixture slot-A unified kernel image";
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        manifest.boot_artifact.filename = "punar-slot-a.efi".into();
+        manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
+        manifest.boot_artifact.size_bytes = artifact.len() as u64;
+        let artifact_path = release_dir.join(&manifest.boot_artifact.filename);
+        fs::write(&artifact_path, artifact).unwrap();
+
+        let esp = fixture.root.join("esp");
+        fs::create_dir(&esp).unwrap();
+        fixture.sources.bootctl_path = fixture.root.join("bootctl-must-not-run");
+        fixture.sources.allow_regular_target_for_tests = true;
+        fixture.sources.mounted_esp_override = Some(esp.clone());
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        advance_status_to_boot(&installer, &result);
+        let mut tampered = artifact.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        fs::write(&artifact_path, tampered).unwrap();
+
+        let error = installer.install_boot_artifact(&result.plan).unwrap_err();
+        assert!(error.to_string().contains("digest"));
+        assert!(fs::read_dir(&esp).unwrap().next().is_none());
+        assert_eq!(installer.status().phase, Some(InstallPhase::Boot));
     }
 
     #[test]

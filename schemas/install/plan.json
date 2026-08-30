@@ -36,6 +36,7 @@
         "encryption",
         "recovery_mode",
         "payload",
+        "boot_artifact",
         "partitions",
         "data_subvolumes",
         "warnings"
@@ -56,6 +57,7 @@
           "enum": ["personal_copy", "organization_escrow", "none"]
         },
         "payload": { "$ref": "#/$defs/payload" },
+        "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
         "partitions": {
           "type": "array",
           "minItems": 4,
@@ -136,6 +138,22 @@
           "minimum": 1,
           "description": "Signed root-slot byte count covered by uncompressed_digest_sha256."
         }
+      },
+      "additionalProperties": false
+    },
+    "boot_artifact": {
+      "type": "object",
+      "required": ["kind", "filename", "digest_sha256", "size_bytes"],
+      "properties": {
+        "kind": { "enum": ["uki", "raspberry_pi_bootfs"] },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "digest_sha256": { "$ref": "#/$defs/digest" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },

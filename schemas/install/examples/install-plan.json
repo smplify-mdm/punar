@@ -24,6 +24,12 @@
       "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
       "uncompressed_size_bytes": 8589934592
     },
+    "boot_artifact": {
+      "kind": "uki",
+      "filename": "punar-desktop-x86_64-uefi-2026.08.28.1.uki.efi",
+      "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 168370688
+    },
     "partitions": [
       {
         "number": 1,
@@ -68,5 +74,5 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "0bf1dc00484dc27fe3e3eae4df6b480e420209039a3428d650c39556e4ad13a7"
+  "plan_token": "70d834d0a5d234adba171c4a6746561c5ad2ce7c9684a650cab322d89ceee554"
 }

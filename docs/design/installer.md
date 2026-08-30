@@ -1309,13 +1309,13 @@ specification.
 | format | vfat + btrfs + subvolumes | `systemd-repart` `Format=` / `Subvolumes=` |
 | write-slot-a | stream payload → slot A | `repart` `CopyBlocks=`, or a bounded 4 MiB read/write loop in `punard` — the same loop `update.apply` uses |
 | re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.uncompressed_size_bytes` bytes, sha256, and compare `payload.uncompressed_digest_sha256`. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
-| boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the slot UKI; write `loader.conf`. **`--no-variables` is a decision, not a default** (§7.3.1) |
+| boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the first known-good slot-A UKI as the permanently uncounted `punar_<version>.efi`; write assessment-aware `preferred punar_<version>*.efi`, `timeout 0`, `editor no` to `loader.conf`. Later updates alone use `+3-0`, because only then does a known-good fallback exist. **`--no-variables` is a decision, not a default** (§7.3.1) |
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log. **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
 **Implementation checkpoint (2026-08-30).** The internal `punard` executor
-now implements the first six rows through re-read, while the public
-`install.apply` method remains deliberately absent. Disk preparation invokes
+now implements the first seven rows through UEFI boot installation, while the
+public `install.apply` method remains deliberately absent. Disk preparation invokes
 one fixed `systemd-repart` transaction for the partition/encrypt/format rows:
 it merges only the immutable base, LUKS2 and streaming layers, revalidates the
 plan at the destructive boundary, requires a block device, and provides the
@@ -1326,9 +1326,18 @@ recovery key. The passphrase enters only on anonymous stdin and the key leaves
 only on bounded anonymous stdout into a zeroizing owner; bounded LUKS metadata
 identifies the `systemd-recovery` keyslot. The personal lane is wired to the
 no-timeout two-group acknowledgement gate and cannot enter `format` until it
-succeeds. Organization receipt orchestration, boot, seed, final verification
-and the integrated audit path remain unimplemented, so this checkpoint is
-not an installability claim.
+succeeds. The signed plan now binds the boot-artifact kind, name, digest and
+size as well as both root-payload identities. At `boot`, the executor rechecks
+that artifact before touching the target, mounts the derived ESP with
+`nodev,nosuid,noexec,nosymfollow`, invokes the fixed `bootctl --no-variables`
+path, copies and re-hashes the uncounted slot-A UKI, durably writes the
+assessment-aware loader configuration, calls `syncfs`, and must unmount before
+entering `seed`. Unit tests prove exact argv, absence of an NVRAM write flag,
+digest refusal before any ESP mutation, and the permanent initial filename.
+The privileged real-vfat mount still needs the live installer VM gate.
+Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
+seed, final verification and the integrated audit path remain unimplemented,
+so this checkpoint is not an installability claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
