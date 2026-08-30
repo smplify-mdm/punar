@@ -15,7 +15,7 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 
 > **Punar has never booted on hardware, and nobody outside this repository
 > has ever installed it.** The UEFI four-partition and native Raspberry Pi
-> five-partition A/B layouts below now build as plan-bound definition sets.
+> six-partition A/B layouts below now build as plan-bound definition sets.
 > Generic UEFI images boot in ARM64 VMs, and the internal installer can plan,
 > write and verify both boot adapters. A real pinned Pi bootfs and matching
 > root-A payload now build and verify as an ephemerally signed install bundle;
@@ -339,31 +339,35 @@ required per §44.1 and §5.1), no swap partition (§4.6), no recovery partition
 | 3 | `PUNAR-ROOT-B` | `4f68bce3-…` (root-x86-64) | fixed literal **B** | **8 GiB** | ext4 | yes, by swapping |
 | 4 | `PUNAR-DATA` | `0fc63daf-…` (linux-generic) | fixed literal | **remainder** | **LUKS2 → btrfs** | **never** |
 
-ADR-006's native Raspberry Pi adapter uses five GPT partitions because the Pi
-firmware needs a FAT partition for each root slot. It does not insert UEFI:
+ADR-006's native Raspberry Pi adapter uses six GPT partitions: a small selector
+FAT plus one firmware-visible FAT partition for each root slot. It does not
+insert UEFI:
 
 | # | Name | GPT type | PARTUUID | Size | Filesystem | Pair |
 |---|---|---|---|---|---|---|
-| 1 | `PUNAR-BOOT-A` | ESP | `79115027-a3f0-43dc-a251-4a0c637b135f` | **1 GiB** | vfat | root A |
-| 2 | `PUNAR-ROOT-A` | root-arm64 | `1beabfe0-9cb8-4b49-91ef-d372b845e7ea` | **8 GiB** | ext4 | boot A |
-| 3 | `PUNAR-BOOT-B` | ESP | `706d6f54-d8b9-4276-9f4f-f1ac379a482e` | **1 GiB** | vfat | root B |
-| 4 | `PUNAR-ROOT-B` | root-arm64 | `2b1b91a9-cf2c-4e9c-a723-5ec997971662` | **8 GiB** | unformatted at install | boot B |
-| 5 | `PUNAR-DATA` | linux-generic | `21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9` | **remainder** | **LUKS2 → btrfs** | shared |
+| 1 | `PUNAR-SELECT` | ESP | `6ab88335-d069-4898-b639-734f3f2b971a` | **32 MiB** | vfat | selector only |
+| 2 | `PUNAR-BOOT-A` | ESP | `79115027-a3f0-43dc-a251-4a0c637b135f` | **1 GiB** | vfat | root A |
+| 3 | `PUNAR-ROOT-A` | root-arm64 | `1beabfe0-9cb8-4b49-91ef-d372b845e7ea` | **8 GiB** | ext4 | boot A |
+| 4 | `PUNAR-BOOT-B` | ESP | `706d6f54-d8b9-4276-9f4f-f1ac379a482e` | **1 GiB** | vfat | root B |
+| 5 | `PUNAR-ROOT-B` | root-arm64 | `2b1b91a9-cf2c-4e9c-a723-5ec997971662` | **8 GiB** | unformatted at install | boot B |
+| 6 | `PUNAR-DATA` | linux-generic | `21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9` | **remainder** | **LUKS2 → btrfs** | shared |
 
-The signed `raspberry_pi_bootfs` artifact is a raw, 4096-byte-aligned FAT
-filesystem image for boot A. The installer writes it through one verified
-descriptor, fsyncs, performs a post-write physical `O_DIRECT` digest reread,
-then mounts it read-only and refuses to proceed unless `autoboot.txt` selects
-partition 1 normally and partition 3 under `[tryboot]`; `cmdline.txt` binds
-only root A read-only; and `config.txt`, `kernel8.img`, and `initramfs8` satisfy
-the fixed aarch64 boot contract. Boot B stays an inactive filesystem until a
+The signed `raspberry_pi_bootfs` artifact is a raw, 4096-byte-aligned,
+slot-neutral FAT filesystem image. The installer writes it to boot A through
+one verified descriptor, fsyncs, performs a post-write physical `O_DIRECT`
+digest reread, then mounts it read-only and refuses to proceed unless the
+`boot_partition=2` and `boot_partition=4` branches select command lines bound
+read-only to root A and root B respectively; `config.txt`, `kernel8.img`, and
+`initramfs8` satisfy the fixed aarch64 boot contract. The artifact contains no
+`autoboot.txt`. The installer separately writes and verifies the bounded
+ordinary-A/tryboot-B selector on partition 1. Boot B stays inactive until a
 verified update writes the complete B boot/root pair. This is software-path
 component proof, not Raspberry Pi hardware qualification.
 
 `tools/build-raspberry-pi-bootfs.sh` provides the matching build-side
-primitive. It creates a 256 MiB raw FAT32 image (well inside the 1 GiB boot
-partition), fixes the volume id, writes the exact A/tryboot-B selectors and
-Pi 4/Pi 5 KMS configuration, and copies only a bounded kernel/initramfs plus
+primitive. It creates a 256 MiB raw FAT32 image (well inside either 1 GiB boot
+partition), fixes the volume id, writes the paired A/B command lines and Pi
+4/Pi 5 KMS configuration, and copies only a bounded kernel/initramfs plus
 the pinned board DTBs, overlays and vendor boot files. The official
 `raspberrypi/firmware` tag, commit, critical-file digests, board-assets tree
 and `6.18.46-v8+` module tree are pinned in
@@ -394,7 +398,7 @@ apply, inactive boot/root-pair update, runtime boot and physical qualification
 remain the next boundaries; this is not yet a shippable Pi image or hardware
 evidence.
 
-Inside the data partition (4 on UEFI, 5 on Raspberry Pi), three subvolumes are
+Inside the data partition (4 on UEFI, 6 on Raspberry Pi), three subvolumes are
 mounted as three separate mounts:
 
 | Subvolume | Mount | Why it is its own mount |
@@ -601,7 +605,7 @@ argument for this layout.
 ```
 
 `os/images/repart.d/install-raspberry-pi/` is the parallel complete base set
-for `PUNAR-BOOT-A`, root A, `PUNAR-BOOT-B`, root B and data in that exact
+for selector, `PUNAR-BOOT-A`, root A, `PUNAR-BOOT-B`, root B and data in that exact
 order. The shared encrypted-data and streaming-root overlays shadow its
 `50-data.conf` and `20-root-a.conf` by the same fixed filenames. The image
 staging script copies all four directories from this one committed source;
@@ -1413,7 +1417,7 @@ that artifact before touching the target, mounts the derived ESP with
 path, copies and re-hashes the uncounted slot-A UKI, durably writes the
 assessment-aware loader configuration, calls `syncfs`, and must unmount before
 entering `seed`. The seed executor derives and unlocks the plan-bound data
-partition (4 on UEFI, 5 on Raspberry Pi) with one
+partition (4 on UEFI, 6 on Raspberry Pi) with one
 fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
 creates a random machine id, copies the validated live device identity so the
 installation and installed audit records have one subject, creates the private

@@ -392,7 +392,7 @@ The first headless installer slice is now implemented and locally verified on
 both ARM64 and x86_64: `install.targets` is live-mode-only read discovery, and
 `install.plan` is a root-only, audited, non-mutating plan bound to the disk
 serial, optional WWN, byte size and SHA-256 of its first/last 34 LBAs. The plan
-contains the complete four-partition UEFI or five-partition native Raspberry
+contains the complete four-partition UEFI or six-partition native Raspberry
 Pi layout and signed payload
 identity; its recursively canonical JSON token changes when either GPT edge or
 any field changes. Tests cover dm-backed boot-media exclusion, the answer-disk
@@ -438,13 +438,15 @@ secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
 privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
 The organization receipt gate is connected inside the executor. The native
 Raspberry Pi boot-filesystem branch is also connected: its signed raw FAT
-image is bounded to boot A, fsynced, physically reread, mounted read-only and
-validated for ordinary-A/tryboot-B plus boot-A/root-A pairing before `seed`.
-The plan/schema/repart source now carries the exact five-partition layout, and
-the LUKS/seed path derives data as partition 5 rather than assuming UEFI's
-partition 4. The build-side raw FAT primitive now pins an official
+image is slot-neutral, bounded, fsynced, physically reread, mounted read-only
+and validated for exact boot-A/root-A plus boot-B/root-B pairing before
+`seed`. The selector-owned `autoboot.txt` is absent from that artifact and is
+written and verified separately, so a future inactive boot-A write cannot
+overwrite the last-known-good selector. The plan/schema/repart source now
+carries the exact six-partition layout, and the LUKS/seed path derives data as
+partition 6 rather than assuming UEFI's partition 4. The build-side raw FAT primitive now pins an official
 `raspberrypi/firmware` commit, critical boot-file and complete board/module
-tree digests; assembles the exact selectors, Pi 4/5 DTBs/overlays,
+tree digests; assembles the exact paired command lines, Pi 4/5 DTBs/overlays,
 `kernel8.img` and caller-supplied initramfs; verifies that the root payload
 contains identical loadable modules plus regenerated dependency indexes;
 reopens the result; and rejects kernel or module drift in the native ARM
@@ -558,7 +560,7 @@ pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
 seed/final-verify executor half is now closed internally: the platform-bound
-data partition (4 on UEFI, 5 on Raspberry Pi) is
+data partition (4 on UEFI, 6 on Raspberry Pi) is
 unlocked through one fixed `cryptsetup` argv and anonymous passphrase pipe;
 only `@var` is mounted; a random machine identity, the validated live device
 identity, a private Punar state directory, `seed.json` and an optional

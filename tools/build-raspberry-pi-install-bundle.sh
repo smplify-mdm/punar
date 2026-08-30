@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Convert one verified generic ARM64 release image into a signed Raspberry Pi
-# *installation* bundle for root/boot slot A. This is intentionally separate
+# *installation* bundle for root slot A plus a slot-neutral Pi boot artifact.
+# This is intentionally separate
 # from build-release-bundle.sh, whose payload and UKI are rebound to inactive
 # slot B for update/rollback proof. Mixing those roles would create duplicate
 # filesystem identities after the first update.
@@ -21,7 +22,7 @@ ROOT_A_BYTES=$((8 * 1024 * 1024 * 1024))
 RELEASE_DIR="${OUT_ROOT}/release"
 KEY_DIR="${OUT_ROOT}/keys"
 PAYLOAD_NAME="${IMAGE_ID}-${ARCH}-${BOOT_PLATFORM}-${VERSION}.root-a.raw.zst"
-BOOTFS_NAME="${IMAGE_ID}-${ARCH}-${BOOT_PLATFORM}-${VERSION}.boot-a.img"
+BOOTFS_NAME="${IMAGE_ID}-${ARCH}-${BOOT_PLATFORM}-${VERSION}.boot.img"
 
 # shellcheck source=/dev/null
 . "${REPO_ROOT}/os/images/arm64/snapshot.env"
@@ -85,7 +86,7 @@ container_path() {
     printf '/work/%s' "${1#"${REPO_ROOT}"/}"
 }
 
-echo "==> Building a case-sensitive root-A + boot-A Raspberry Pi install pair"
+echo "==> Building root A plus the slot-neutral Raspberry Pi boot artifact"
 docker run --rm --privileged \
     --platform linux/arm64 \
     --volume "${REPO_ROOT}:/work" \

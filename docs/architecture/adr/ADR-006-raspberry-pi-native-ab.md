@@ -64,6 +64,11 @@ known-good boot partition normally and the inactive one only under the
 one-shot tryboot flag. The candidate commits by atomically swapping the two
 partition numbers in `autoboot.txt` after the same health gate used by x86.
 
+The selector is a third, small FAT partition. It contains `autoboot.txt` but
+no OS payload. This separation is required by the official update flow: if
+boot A also owned the selector, a later update targeting inactive A could
+overwrite the last-known-good boot decision while it was still needed.
+
 This is not the same implementation as systemd-boot counting, but it has the
 same safety property without emulating a PC firmware stack.
 
@@ -80,14 +85,18 @@ labelled engineering previews and Punar must not claim Raspberry Pi support.
 The slot is a pair:
 
 ```text
-boot A (FAT)  ── cmdline root=PARTUUID(root A)  ── root A
-boot B (FAT)  ── cmdline root=PARTUUID(root B)  ── root B
-shared data   ── /var + /home + Punar identity, never rolled back
+selector (FAT) ── autoboot.txt: ordinary 2, tryboot 4
+boot A (FAT)   ── cmdline root=PARTUUID(root A)  ── root A
+boot B (FAT)   ── cmdline root=PARTUUID(root B)  ── root B
+shared data    ── /var + /home + Punar identity, never rolled back
 ```
 
-Normal `autoboot.txt` selects the blessed boot partition. Its `[tryboot]`
-branch selects the candidate. Boot and root partitions are always written and
-verified as one slot; a configuration may never point boot A at root B.
+The selector partition's `autoboot.txt` selects the blessed boot partition.
+Its `[tryboot]` branch selects the candidate. Boot and root partitions are
+always written and verified as one slot; a configuration may never point boot
+A at root B. The slot boot artifact is byte-identical in boot A and B and uses
+firmware's read-only `boot_partition` conditional to choose the paired root
+command line.
 
 ## Update state machine
 
@@ -96,8 +105,9 @@ verified as one slot; a configuration may never point boot A at root B.
 2. Stream the signed release into the inactive root and boot partitions;
    verify manifest signature, admissibility, streamed digest and post-write
    re-read digest in ADR-003's order.
-3. Leave the ordinary `boot_partition` unchanged. Set the `[tryboot]` branch
-   to the inactive boot partition and invoke `reboot "0 tryboot"`.
+3. Re-read the selector partition. Leave ordinary `boot_partition` unchanged,
+   require `[tryboot]` to name the inactive boot partition, and invoke
+   `reboot "0 tryboot"`.
 4. The firmware clears the one-shot flag before starting the candidate. A
    reset before commit therefore returns to the ordinary blessed partition.
 5. Early candidate userspace proves all of: expected slot identity, root is
@@ -116,8 +126,10 @@ documents that it is cancelled when the Arm CPU starts.
 ## Security and failure properties
 
 - The candidate cannot bless itself before the health unit reaches the final
-  atomic write; a partial write of `autoboot.txt` must be rejected in the image
-  test and recovered from a separately verified previous copy.
+  selector write. A separately verified previous selector is retained. FAT
+  does not make rename power-loss atomic, so recovery under selector-write
+  fault injection remains an explicit physical-board release gate rather than
+  an assumed property.
 - Slot payload signatures remain user-blocked item 7, and Pi Secure Boot keys
   remain user-blocked item 1. CI uses ephemeral keys and labels that proof
   `SIMULATED`, exactly as x86 does.
@@ -132,8 +144,9 @@ documents that it is cancelled when the Arm CPU starts.
 
 ## Verification required before shipping support
 
-1. A generated Pi image has two boot/root pairs with distinct fixed PARTUUIDs
-   and shared data partitions; every cmdline points only at its paired root.
+1. A generated Pi image has a dedicated selector, two boot/root pairs with
+   distinct fixed PARTUUIDs and shared data; every cmdline points only at its
+   paired root and neither slot artifact contains `autoboot.txt`.
 2. QEMU/aarch64 checks the slot builder and state machine, explicitly labelled
    as software-path evidence rather than Raspberry Pi hardware evidence.
 3. On a real Pi, deliberately fail before the health service, during daemon

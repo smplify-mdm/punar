@@ -42,6 +42,7 @@ use crate::hardware::{HardwareSources, observe_install_hardware};
 use crate::util::{hex, random_hex, sha256_hex, write_atomic, write_atomic_synced};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
+pub const PI_SELECTOR_PARTUUID: &str = "6ab88335-d069-4898-b639-734f3f2b971a";
 pub const PI_BOOT_A_PARTUUID: &str = "79115027-a3f0-43dc-a251-4a0c637b135f";
 pub const PI_BOOT_B_PARTUUID: &str = "706d6f54-d8b9-4276-9f4f-f1ac379a482e";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -56,6 +57,7 @@ const ANSWERS_LABEL: &str = "PUNAR_ANSWERS";
 const GIB: u64 = 1024 * 1024 * 1024;
 const ALIGNMENT: u64 = 1024 * 1024;
 const ESP_SIZE: u64 = GIB;
+const PI_SELECTOR_SIZE: u64 = 32 * 1024 * 1024;
 const ROOT_SIZE: u64 = 8 * GIB;
 const DATA_MINIMUM: u64 = 16 * GIB;
 const TARGET_DISK_BYTES: u64 = 128_000_000_000;
@@ -74,13 +76,17 @@ const LUKS_UUID_OUTPUT_MAX_BYTES: u64 = 64;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const PI_BOOT_CONFIG_MAX_BYTES: usize = 64 * 1024;
+const PI_AUTOBOOT_MAX_BYTES: usize = 512;
 const PI_KERNEL_MAX_BYTES: u64 = 128 * 1024 * 1024;
-const PI_INITRAMFS_MAX_BYTES: u64 = 768 * 1024 * 1024;
+const PI_INITRAMFS_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const HARDWARE_REPORT_MAX_BYTES: usize = 8 * 1024 * 1024;
 const AUDIT_HANDOFF_MAX_BYTES: usize = 16 * 1024 * 1024;
+const PI_INITIAL_AUTOBOOT: &[u8] =
+    b"[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=4\n";
 
-const PUNAR_PARTUUIDS: [&str; 6] = [
+const PUNAR_PARTUUIDS: [&str; 7] = [
     ESP_PARTUUID,
+    PI_SELECTOR_PARTUUID,
     PI_BOOT_A_PARTUUID,
     PI_BOOT_B_PARTUUID,
     ROOT_A_PARTUUID,
@@ -123,10 +129,15 @@ pub struct InstallerSources {
     /// regular file. This field does not exist in production builds.
     #[cfg(test)]
     pub allow_regular_target_for_tests: bool,
-    /// Unit-test-only mounted ESP. Production always mounts partition 1 with
-    /// the safe in-process mount syscall path.
+    /// Unit-test-only mounted UEFI ESP or Raspberry Pi boot slot A.
+    /// Production always mounts the platform-derived partition with the safe
+    /// in-process mount syscall path.
     #[cfg(test)]
     pub mounted_esp_override: Option<PathBuf>,
+    /// Unit-test-only Raspberry Pi selector filesystem. Production mounts
+    /// partition 1 separately so inactive boot-slot writes never touch it.
+    #[cfg(test)]
+    pub mounted_pi_selector_override: Option<PathBuf>,
     /// Unit-test-only mounted `@var` subvolume. Production always derives,
     /// unlocks and mounts the platform's fixed data partition itself.
     #[cfg(test)]
@@ -169,6 +180,8 @@ impl Default for InstallerSources {
             allow_regular_target_for_tests: false,
             #[cfg(test)]
             mounted_esp_override: None,
+            #[cfg(test)]
+            mounted_pi_selector_override: None,
             #[cfg(test)]
             mounted_data_override: None,
             #[cfg(test)]
@@ -802,7 +815,11 @@ impl Installer {
         self.require_transaction_phase(plan, InstallPhase::WriteSlotA)?;
         validate_root_slot_payload(plan)?;
         let payload = self.open_verified_payload(plan)?;
-        let slot_path = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        let slot_path = partition_device_path(
+            &self.sources.dev_root,
+            &plan.disk.device,
+            root_a_partition_number(plan)?,
+        )?;
         let mut slot = fs::OpenOptions::new()
             .write(true)
             .custom_flags(
@@ -869,7 +886,11 @@ impl Installer {
     pub fn verify_written_slot_a(&self, plan: &InstallPlan) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::ReRead)?;
         validate_root_slot_payload(plan)?;
-        let slot_path = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        let slot_path = partition_device_path(
+            &self.sources.dev_root,
+            &plan.disk.device,
+            root_a_partition_number(plan)?,
+        )?;
         digest_direct_block_device(
             &slot_path,
             plan.payload.uncompressed_size_bytes,
@@ -1164,7 +1185,7 @@ impl Installer {
 
         validate_raspberry_pi_boot_plan(plan)?;
         let mut artifact = self.open_verified_boot_artifact(plan)?;
-        let target = partition_device_path(&self.sources.dev_root, &plan.disk.device, 1)?;
+        let target = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
         #[cfg(test)]
         let allow_regular_target = self.sources.allow_regular_target_for_tests;
         #[cfg(not(test))]
@@ -1207,7 +1228,61 @@ impl Installer {
         );
         let boot = self.mount_boot_partition_a(plan, &token, true)?;
         validate_raspberry_pi_boot_filesystem(boot.path())?;
-        boot.finish()
+        boot.finish()?;
+
+        let selector = self.mount_raspberry_pi_selector(plan, &token)?;
+        let autoboot_path = selector.path().join("autoboot.txt");
+        write_atomic_synced(&autoboot_path, PI_INITIAL_AUTOBOOT, 0o600)?;
+        let installed_autoboot = read_bounded_regular(
+            &autoboot_path,
+            PI_AUTOBOOT_MAX_BYTES,
+            "installed Raspberry Pi autoboot.txt",
+        )?;
+        validate_raspberry_pi_autoboot(&installed_autoboot, 2, 4)?;
+        let filesystem = File::open(selector.path())?;
+        rustix::fs::syncfs(&filesystem).map_err(rustix_install_io)?;
+        drop(filesystem);
+        selector.finish()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_raspberry_pi_selector(
+        &self,
+        plan: &InstallPlan,
+        token: &str,
+    ) -> Result<MountedEsp, InstallError> {
+        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, 1)?;
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        validate_repart_target(&source, allow_regular_target)?;
+
+        #[cfg(test)]
+        if let Some(path) = &self.sources.mounted_pi_selector_override {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(InstallError::Refused(
+                    "the test Raspberry Pi selector override is not a directory".into(),
+                ));
+            }
+            return Ok(MountedEsp::borrowed(path.clone()));
+        }
+
+        let path = self
+            .sources
+            .repart_runtime_root
+            .join(format!("pi-selector-{token}"));
+        create_private_directory(&path)?;
+        let flags = rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW;
+        if let Err(error) = rustix::mount::mount(&source, &path, "vfat", flags, Some(c"umask=0077"))
+        {
+            let _ = fs::remove_dir(&path);
+            return Err(rustix_install_io(error));
+        }
+        Ok(MountedEsp::mounted(path))
     }
 
     #[cfg(target_os = "linux")]
@@ -1217,7 +1292,11 @@ impl Installer {
         token: &str,
         read_only: bool,
     ) -> Result<MountedEsp, InstallError> {
-        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, 1)?;
+        let partition = match plan_boot_platform(plan)? {
+            BootPlatform::Uefi => 1,
+            BootPlatform::RaspberryPi => 2,
+        };
+        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, partition)?;
         #[cfg(test)]
         let allow_regular_target = self.sources.allow_regular_target_for_tests;
         #[cfg(not(test))]
@@ -1355,7 +1434,11 @@ impl Installer {
             return Ok(MountedFilesystem::borrowed(path.clone()));
         }
 
-        let source = partition_device_path(&self.sources.dev_root, &plan.disk.device, 2)?;
+        let source = partition_device_path(
+            &self.sources.dev_root,
+            &plan.disk.device,
+            root_a_partition_number(plan)?,
+        )?;
         validate_repart_target(&source, false)?;
         let path = self
             .sources
@@ -3813,12 +3896,29 @@ fn partition_plan(
         .map(|value| align_down(value, ALIGNMENT))
         .ok_or_else(|| InstallError::Refused("disk is too small for a GPT".into()))?;
     let root_a = first + ESP_SIZE;
-    let (boot_b, root_b, data) = match boot_platform {
-        BootPlatform::Uefi => (None, root_a + ROOT_SIZE, root_a + 2 * ROOT_SIZE),
+    let (selector, boot_a, boot_b, platform_root_a, root_b, data) = match boot_platform {
+        BootPlatform::Uefi => (
+            None,
+            None,
+            None,
+            root_a,
+            root_a + ROOT_SIZE,
+            root_a + 2 * ROOT_SIZE,
+        ),
         BootPlatform::RaspberryPi => {
-            let boot_b = root_a + ROOT_SIZE;
+            let selector = first;
+            let boot_a = selector + PI_SELECTOR_SIZE;
+            let boot_b = boot_a + ESP_SIZE + ROOT_SIZE;
+            let root_a = boot_a + ESP_SIZE;
             let root_b = boot_b + ESP_SIZE;
-            (Some(boot_b), root_b, root_b + ROOT_SIZE)
+            (
+                Some(selector),
+                Some(boot_a),
+                Some(boot_b),
+                root_a,
+                root_b,
+                root_b + ROOT_SIZE,
+            )
         }
     };
     let data_size = usable_end.checked_sub(data).ok_or_else(|| {
@@ -3882,26 +3982,36 @@ fn partition_plan(
         BootPlatform::RaspberryPi => vec![
             partition(
                 1,
-                "PUNAR-BOOT-A",
+                "PUNAR-SELECT",
                 ESP_TYPE_GUID,
-                PI_BOOT_A_PARTUUID,
-                first,
-                ESP_SIZE,
+                PI_SELECTOR_PARTUUID,
+                selector.expect("Raspberry Pi layout has a selector"),
+                PI_SELECTOR_SIZE,
                 Some("vfat"),
                 false,
             ),
             partition(
                 2,
+                "PUNAR-BOOT-A",
+                ESP_TYPE_GUID,
+                PI_BOOT_A_PARTUUID,
+                boot_a.expect("Raspberry Pi layout has boot slot A"),
+                ESP_SIZE,
+                Some("vfat"),
+                false,
+            ),
+            partition(
+                3,
                 "PUNAR-ROOT-A",
                 root_type,
                 ROOT_A_PARTUUID,
-                root_a,
+                platform_root_a,
                 ROOT_SIZE,
                 Some("ext4"),
                 false,
             ),
             partition(
-                3,
+                4,
                 "PUNAR-BOOT-B",
                 ESP_TYPE_GUID,
                 PI_BOOT_B_PARTUUID,
@@ -3911,7 +4021,7 @@ fn partition_plan(
                 false,
             ),
             partition(
-                4,
+                5,
                 "PUNAR-ROOT-B",
                 root_type,
                 ROOT_B_PARTUUID,
@@ -3921,7 +4031,7 @@ fn partition_plan(
                 false,
             ),
             partition(
-                5,
+                6,
                 "PUNAR-DATA",
                 DATA_TYPE_GUID,
                 DATA_PARTUUID,
@@ -3959,11 +4069,10 @@ fn partition(
 }
 
 fn fixed_install_bytes(boot_platform: BootPlatform) -> u64 {
-    let boot_partitions = match boot_platform {
-        BootPlatform::Uefi => 1,
-        BootPlatform::RaspberryPi => 2,
-    };
-    boot_partitions * ESP_SIZE + 2 * ROOT_SIZE
+    match boot_platform {
+        BootPlatform::Uefi => ESP_SIZE + 2 * ROOT_SIZE,
+        BootPlatform::RaspberryPi => PI_SELECTOR_SIZE + 2 * ESP_SIZE + 2 * ROOT_SIZE,
+    }
 }
 
 fn plan_boot_platform(plan: &InstallPlan) -> Result<BootPlatform, InstallError> {
@@ -3979,7 +4088,7 @@ fn plan_boot_platform(plan: &InstallPlan) -> Result<BootPlatform, InstallError> 
 fn data_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
     let number = match plan_boot_platform(plan)? {
         BootPlatform::Uefi => 4,
-        BootPlatform::RaspberryPi => 5,
+        BootPlatform::RaspberryPi => 6,
     };
     let partition = plan
         .partitions
@@ -3992,6 +4101,13 @@ fn data_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
         ));
     }
     Ok(number)
+}
+
+fn root_a_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
+    Ok(match plan_boot_platform(plan)? {
+        BootPlatform::Uefi => 2,
+        BootPlatform::RaspberryPi => 3,
+    })
 }
 
 fn minimum_disk_bytes(sector_bytes: u64, boot_platform: BootPlatform) -> u64 {
@@ -4217,10 +4333,11 @@ fn partition_device_path(
 }
 
 fn validate_root_slot_payload(plan: &InstallPlan) -> Result<(), InstallError> {
+    let root_a_number = root_a_partition_number(plan)?;
     let slot = plan
         .partitions
         .iter()
-        .find(|partition| partition.number == 2)
+        .find(|partition| partition.number == root_a_number)
         .ok_or_else(|| InstallError::Invalid("install plan has no root slot A".into()))?;
     if slot.name != "PUNAR-ROOT-A"
         || slot.partuuid != ROOT_A_PARTUUID
@@ -4261,6 +4378,14 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
     let expected = [
         (
             1,
+            "PUNAR-SELECT",
+            ESP_TYPE_GUID,
+            PI_SELECTOR_PARTUUID,
+            Some("vfat"),
+            false,
+        ),
+        (
+            2,
             "PUNAR-BOOT-A",
             ESP_TYPE_GUID,
             PI_BOOT_A_PARTUUID,
@@ -4268,7 +4393,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
             false,
         ),
         (
-            2,
+            3,
             "PUNAR-ROOT-A",
             ARM_ROOT_TYPE_GUID,
             ROOT_A_PARTUUID,
@@ -4276,7 +4401,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
             false,
         ),
         (
-            3,
+            4,
             "PUNAR-BOOT-B",
             ESP_TYPE_GUID,
             PI_BOOT_B_PARTUUID,
@@ -4284,7 +4409,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
             false,
         ),
         (
-            4,
+            5,
             "PUNAR-ROOT-B",
             ARM_ROOT_TYPE_GUID,
             ROOT_B_PARTUUID,
@@ -4292,7 +4417,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
             false,
         ),
         (
-            5,
+            6,
             "PUNAR-DATA",
             DATA_TYPE_GUID,
             DATA_PARTUUID,
@@ -4302,7 +4427,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
     ];
     if plan.partitions.len() != expected.len() {
         return Err(InstallError::Invalid(
-            "Raspberry Pi install plan must contain exactly five fixed partitions".into(),
+            "Raspberry Pi install plan must contain exactly six fixed partitions".into(),
         ));
     }
     for (partition, (number, name, type_guid, partuuid, filesystem, encrypted)) in
@@ -4320,11 +4445,12 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
             ));
         }
     }
-    if plan.partitions[0].size_bytes != ESP_SIZE
-        || plan.partitions[1].size_bytes != ROOT_SIZE
-        || plan.partitions[2].size_bytes != ESP_SIZE
-        || plan.partitions[3].size_bytes != ROOT_SIZE
-        || plan.partitions[4].size_bytes < DATA_MINIMUM
+    if plan.partitions[0].size_bytes != PI_SELECTOR_SIZE
+        || plan.partitions[1].size_bytes != ESP_SIZE
+        || plan.partitions[2].size_bytes != ROOT_SIZE
+        || plan.partitions[3].size_bytes != ESP_SIZE
+        || plan.partitions[4].size_bytes != ROOT_SIZE
+        || plan.partitions[5].size_bytes < DATA_MINIMUM
     {
         return Err(InstallError::Invalid(
             "Raspberry Pi install plan has invalid fixed partition sizes".into(),
@@ -4335,23 +4461,23 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
 
 #[cfg(target_os = "linux")]
 fn validate_raspberry_pi_boot_filesystem(root: &Path) -> Result<(), InstallError> {
-    let autoboot = read_bounded_regular(
-        &root.join("autoboot.txt"),
+    let cmdline_a = read_bounded_regular(
+        &root.join("cmdline-a.txt"),
         PI_BOOT_CONFIG_MAX_BYTES,
-        "Raspberry Pi autoboot.txt",
+        "Raspberry Pi slot-A command line",
     )?;
-    let cmdline = read_bounded_regular(
-        &root.join("cmdline.txt"),
+    let cmdline_b = read_bounded_regular(
+        &root.join("cmdline-b.txt"),
         PI_BOOT_CONFIG_MAX_BYTES,
-        "Raspberry Pi cmdline.txt",
+        "Raspberry Pi slot-B command line",
     )?;
     let config = read_bounded_regular(
         &root.join("config.txt"),
         PI_BOOT_CONFIG_MAX_BYTES,
         "Raspberry Pi config.txt",
     )?;
-    validate_raspberry_pi_autoboot(&autoboot)?;
-    validate_raspberry_pi_cmdline(&cmdline)?;
+    validate_raspberry_pi_cmdline(&cmdline_a, ROOT_A_PARTUUID, "slot A")?;
+    validate_raspberry_pi_cmdline(&cmdline_b, ROOT_B_PARTUUID, "slot B")?;
     validate_raspberry_pi_config(&config)?;
     require_bounded_regular_file(
         &root.join("kernel8.img"),
@@ -4386,12 +4512,16 @@ fn set_once(slot: &mut Option<String>, value: &str, description: &str) -> Result
     Ok(())
 }
 
-fn validate_raspberry_pi_autoboot(bytes: &[u8]) -> Result<(), InstallError> {
+fn validate_raspberry_pi_autoboot(
+    bytes: &[u8],
+    expected_normal_partition: u8,
+    expected_try_partition: u8,
+) -> Result<(), InstallError> {
     let text = pi_boot_text(bytes, "Raspberry Pi autoboot.txt")?;
     let mut section = "";
     let mut tryboot_a_b = None;
-    let mut normal_partition = None;
-    let mut try_partition = None;
+    let mut observed_normal_partition = None;
+    let mut observed_try_partition = None;
     for line in text.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -4409,11 +4539,13 @@ fn validate_raspberry_pi_autoboot(bytes: &[u8]) -> Result<(), InstallError> {
         let value = value.trim();
         match (section, key) {
             ("all", "tryboot_a_b") => set_once(&mut tryboot_a_b, value, "autoboot tryboot_a_b")?,
-            ("all", "boot_partition") => {
-                set_once(&mut normal_partition, value, "ordinary boot_partition")?
-            }
+            ("all", "boot_partition") => set_once(
+                &mut observed_normal_partition,
+                value,
+                "ordinary boot_partition",
+            )?,
             ("tryboot", "boot_partition") => {
-                set_once(&mut try_partition, value, "tryboot boot_partition")?
+                set_once(&mut observed_try_partition, value, "tryboot boot_partition")?
             }
             (_, "tryboot_a_b" | "boot_partition") => {
                 return Err(InstallError::Trust(
@@ -4423,28 +4555,35 @@ fn validate_raspberry_pi_autoboot(bytes: &[u8]) -> Result<(), InstallError> {
             _ => {}
         }
     }
+    let expected_normal_partition = expected_normal_partition.to_string();
+    let expected_try_partition = expected_try_partition.to_string();
     if tryboot_a_b.as_deref() != Some("1")
-        || normal_partition.as_deref() != Some("1")
-        || try_partition.as_deref() != Some("3")
+        || observed_normal_partition.as_deref() != Some(expected_normal_partition.as_str())
+        || observed_try_partition.as_deref() != Some(expected_try_partition.as_str())
     {
         return Err(InstallError::Trust(
-            "Raspberry Pi autoboot.txt does not bind ordinary boot to slot A and tryboot to slot B"
+            "Raspberry Pi autoboot.txt does not bind ordinary and tryboot to the required boot slots"
                 .into(),
         ));
     }
     Ok(())
 }
 
-fn validate_raspberry_pi_cmdline(bytes: &[u8]) -> Result<(), InstallError> {
-    let text = pi_boot_text(bytes, "Raspberry Pi cmdline.txt")?;
+fn validate_raspberry_pi_cmdline(
+    bytes: &[u8],
+    root_partuuid: &str,
+    slot: &str,
+) -> Result<(), InstallError> {
+    let description = format!("Raspberry Pi {slot} command line");
+    let text = pi_boot_text(bytes, &description)?;
     let lines = text
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
     if lines.len() != 1 {
-        return Err(InstallError::Trust(
-            "Raspberry Pi cmdline.txt must contain exactly one command line".into(),
-        ));
+        return Err(InstallError::Trust(format!(
+            "Raspberry Pi {slot} command line must contain exactly one line"
+        )));
     }
     let tokens = lines[0].split_ascii_whitespace().collect::<Vec<_>>();
     let roots = tokens
@@ -4452,15 +4591,15 @@ fn validate_raspberry_pi_cmdline(bytes: &[u8]) -> Result<(), InstallError> {
         .filter(|token| token.starts_with("root="))
         .copied()
         .collect::<Vec<_>>();
-    let expected_root = format!("root=PARTUUID={ROOT_A_PARTUUID}");
+    let expected_root = format!("root=PARTUUID={root_partuuid}");
     if roots.as_slice() != [expected_root.as_str()]
         || !tokens.contains(&"rootfstype=ext4")
         || !tokens.contains(&"ro")
         || !tokens.contains(&"rootwait")
     {
-        return Err(InstallError::Trust(
-            "Raspberry Pi cmdline.txt does not bind boot slot A read-only to root slot A".into(),
-        ));
+        return Err(InstallError::Trust(format!(
+            "Raspberry Pi {slot} command line does not bind its root slot read-only"
+        )));
     }
     Ok(())
 }
@@ -4471,6 +4610,8 @@ fn validate_raspberry_pi_config(bytes: &[u8]) -> Result<(), InstallError> {
     let mut kernel = None;
     let mut initramfs = None;
     let mut arm_64bit = None;
+    let mut cmdline_a = None;
+    let mut cmdline_b = None;
     for line in text.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -4503,6 +4644,12 @@ fn validate_raspberry_pi_config(bytes: &[u8]) -> Result<(), InstallError> {
                         "Raspberry Pi boot identity appears outside config.txt [all]".into(),
                     ));
                 }
+                "cmdline" if section == "boot_partition=2" => {
+                    set_once(&mut cmdline_a, value, "Raspberry Pi slot-A cmdline")?
+                }
+                "cmdline" if section == "boot_partition=4" => {
+                    set_once(&mut cmdline_b, value, "Raspberry Pi slot-B cmdline")?
+                }
                 "cmdline" | "os_prefix" | "boot_partition" | "tryboot_a_b" => {
                     return Err(InstallError::Trust(format!(
                         "Raspberry Pi config.txt may not redirect {key}"
@@ -4522,9 +4669,12 @@ fn validate_raspberry_pi_config(bytes: &[u8]) -> Result<(), InstallError> {
     if kernel.as_deref() != Some("kernel8.img")
         || initramfs.as_deref() != Some("initramfs8 followkernel")
         || arm_64bit.as_deref() != Some("1")
+        || cmdline_a.as_deref() != Some("cmdline-a.txt")
+        || cmdline_b.as_deref() != Some("cmdline-b.txt")
     {
         return Err(InstallError::Trust(
-            "Raspberry Pi config.txt does not select the fixed aarch64 kernel and initramfs".into(),
+            "Raspberry Pi config.txt does not select the fixed kernel, initramfs and paired slot command lines"
+                .into(),
         ));
     }
     Ok(())
@@ -5074,18 +5224,18 @@ mod tests {
     fn write_raspberry_pi_boot_fixture(root: &Path) {
         fs::create_dir_all(root).unwrap();
         fs::write(
-            root.join("autoboot.txt"),
-            "[all]\ntryboot_a_b=1\nboot_partition=1\n[tryboot]\nboot_partition=3\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("cmdline.txt"),
+            root.join("cmdline-a.txt"),
             format!("root=PARTUUID={ROOT_A_PARTUUID} rootfstype=ext4 ro rootwait quiet\n"),
         )
         .unwrap();
         fs::write(
+            root.join("cmdline-b.txt"),
+            format!("root=PARTUUID={ROOT_B_PARTUUID} rootfstype=ext4 ro rootwait quiet\n"),
+        )
+        .unwrap();
+        fs::write(
             root.join("config.txt"),
-            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\n",
+            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\n[boot_partition=2]\ncmdline=cmdline-a.txt\n[boot_partition=4]\ncmdline=cmdline-b.txt\n",
         )
         .unwrap();
         fs::write(root.join("kernel8.img"), b"fixture aarch64 kernel").unwrap();
@@ -5770,7 +5920,7 @@ mod tests {
         let minimum = minimum_disk_bytes(512, BootPlatform::RaspberryPi);
         assert_eq!(
             minimum - minimum_disk_bytes(512, BootPlatform::Uefi),
-            ESP_SIZE
+            ESP_SIZE + PI_SELECTOR_SIZE
         );
         assert!(
             partition_plan(
@@ -5791,24 +5941,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(data, DATA_MINIMUM);
-        assert_eq!(partitions.len(), 5);
+        assert_eq!(partitions.len(), 6);
         assert_eq!(
             partitions
                 .iter()
                 .map(|partition| (partition.number, partition.name.as_str()))
                 .collect::<Vec<_>>(),
             [
-                (1, "PUNAR-BOOT-A"),
-                (2, "PUNAR-ROOT-A"),
-                (3, "PUNAR-BOOT-B"),
-                (4, "PUNAR-ROOT-B"),
-                (5, "PUNAR-DATA"),
+                (1, "PUNAR-SELECT"),
+                (2, "PUNAR-BOOT-A"),
+                (3, "PUNAR-ROOT-A"),
+                (4, "PUNAR-BOOT-B"),
+                (5, "PUNAR-ROOT-B"),
+                (6, "PUNAR-DATA"),
             ]
         );
-        assert_eq!(partitions[0].partuuid, PI_BOOT_A_PARTUUID);
-        assert_eq!(partitions[2].partuuid, PI_BOOT_B_PARTUUID);
-        assert_eq!(partitions[1].type_guid, ARM_ROOT_TYPE_GUID);
-        assert!(partitions[4].encrypted);
+        assert_eq!(partitions[0].partuuid, PI_SELECTOR_PARTUUID);
+        assert_eq!(partitions[1].partuuid, PI_BOOT_A_PARTUUID);
+        assert_eq!(partitions[3].partuuid, PI_BOOT_B_PARTUUID);
+        assert_eq!(partitions[2].type_guid, ARM_ROOT_TYPE_GUID);
+        assert!(partitions[5].encrypted);
     }
 
     #[test]
@@ -6075,7 +6227,11 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.configure_raspberry_pi();
         fixture.add_disk("vda", 252, 128_000_000_000, "PI-TARGET-128G");
-        let target = fixture.sources.dev_root.join("vda1");
+        let selector_target = fixture.sources.dev_root.join("vda1");
+        let selector_file = File::create(&selector_target).unwrap();
+        selector_file.set_len(PI_SELECTOR_SIZE).unwrap();
+        drop(selector_file);
+        let target = fixture.sources.dev_root.join("vda2");
         let target_file = File::create(&target).unwrap();
         target_file.set_len(ESP_SIZE).unwrap();
         drop(target_file);
@@ -6096,13 +6252,16 @@ mod tests {
 
         let mounted_boot = fixture.root.join("mounted-pi-boot-a");
         write_raspberry_pi_boot_fixture(&mounted_boot);
+        let mounted_selector = fixture.root.join("mounted-pi-selector");
+        fs::create_dir_all(&mounted_selector).unwrap();
         fixture.sources.allow_regular_target_for_tests = true;
         fixture.sources.mounted_esp_override = Some(mounted_boot);
+        fixture.sources.mounted_pi_selector_override = Some(mounted_selector.clone());
 
         let installer = fixture.installer();
         let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
-        assert_eq!(result.plan.partitions.len(), 5);
-        assert_eq!(data_partition_number(&result.plan).unwrap(), 5);
+        assert_eq!(result.plan.partitions.len(), 6);
+        assert_eq!(data_partition_number(&result.plan).unwrap(), 6);
         advance_status_to_boot(&installer, &result);
         installer.install_boot_artifact(&result.plan).unwrap();
 
@@ -6112,16 +6271,20 @@ mod tests {
             .read_exact(&mut installed)
             .unwrap();
         assert_eq!(installed, artifact);
+        assert_eq!(
+            fs::read(mounted_selector.join("autoboot.txt")).unwrap(),
+            PI_INITIAL_AUTOBOOT
+        );
         assert_eq!(installer.status().phase, Some(InstallPhase::Seed));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn raspberry_pi_bootfs_refuses_mismatched_root_or_tryboot_selector() {
+    fn raspberry_pi_bootfs_refuses_mismatched_root_or_cmdline_redirection() {
         let mut fixture = Fixture::new();
         fixture.configure_raspberry_pi();
         fixture.add_disk("vda", 252, 128_000_000_000, "PI-TARGET-128G");
-        let target = fixture.sources.dev_root.join("vda1");
+        let target = fixture.sources.dev_root.join("vda2");
         let target_file = File::create(&target).unwrap();
         target_file.set_len(ESP_SIZE).unwrap();
         drop(target_file);
@@ -6144,31 +6307,19 @@ mod tests {
         write_raspberry_pi_boot_fixture(&mounted_boot);
         fs::write(
             mounted_boot.join("config.txt"),
-            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\ninclude escape.txt\n",
+            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\ninclude escape.txt\n[boot_partition=2]\ncmdline=cmdline-a.txt\n[boot_partition=4]\ncmdline=cmdline-b.txt\n",
         )
         .unwrap();
         let include_error = validate_raspberry_pi_boot_filesystem(&mounted_boot).unwrap_err();
         assert!(include_error.to_string().contains("include"));
         fs::write(
             mounted_boot.join("config.txt"),
-            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\n",
+            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\n[boot_partition=2]\ncmdline=cmdline-a.txt\n[boot_partition=4]\ncmdline=cmdline-b.txt\n",
         )
         .unwrap();
         fs::write(
-            mounted_boot.join("cmdline.txt"),
+            mounted_boot.join("cmdline-a.txt"),
             format!("root=PARTUUID={ROOT_B_PARTUUID} rootfstype=ext4 ro rootwait quiet\n"),
-        )
-        .unwrap();
-        fs::write(
-            mounted_boot.join("autoboot.txt"),
-            "[all]\ntryboot_a_b=1\nboot_partition=3\n[tryboot]\nboot_partition=1\n",
-        )
-        .unwrap();
-        let selector_error = validate_raspberry_pi_boot_filesystem(&mounted_boot).unwrap_err();
-        assert!(selector_error.to_string().contains("autoboot"));
-        fs::write(
-            mounted_boot.join("autoboot.txt"),
-            "[all]\ntryboot_a_b=1\nboot_partition=1\n[tryboot]\nboot_partition=3\n",
         )
         .unwrap();
         fixture.sources.allow_regular_target_for_tests = true;
@@ -6178,8 +6329,20 @@ mod tests {
         let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
         advance_status_to_boot(&installer, &result);
         let error = installer.install_boot_artifact(&result.plan).unwrap_err();
-        assert!(error.to_string().contains("cmdline"));
+        assert!(error.to_string().contains("command line"));
         assert_eq!(installer.status().phase, Some(InstallPhase::Boot));
+    }
+
+    #[test]
+    fn raspberry_pi_selector_is_bounded_to_the_two_boot_slots() {
+        validate_raspberry_pi_autoboot(PI_INITIAL_AUTOBOOT, 2, 4).unwrap();
+        for invalid in [
+            b"[all]\ntryboot_a_b=1\nboot_partition=4\n[tryboot]\nboot_partition=2\n".as_slice(),
+            b"[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=3\n".as_slice(),
+            b"[all]\nboot_partition=2\n[tryboot]\ntryboot_a_b=1\nboot_partition=4\n".as_slice(),
+        ] {
+            assert!(validate_raspberry_pi_autoboot(invalid, 2, 4).is_err());
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -6862,7 +7025,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn raspberry_pi_disk_preparation_selects_five_partition_base_and_overlays() {
+    fn raspberry_pi_disk_preparation_selects_six_partition_base_and_overlays() {
         use std::os::unix::fs::PermissionsExt;
 
         let mut fixture = Fixture::new();
@@ -6877,6 +7040,10 @@ mod tests {
             fs::create_dir_all(definitions.join(directory)).unwrap();
         }
         for (name, body) in [
+            (
+                "05-selector.conf",
+                "[Partition]\nType=esp\nLabel=PUNAR-SELECT\n",
+            ),
             (
                 "10-boot-a.conf",
                 "[Partition]\nType=esp\nLabel=PUNAR-BOOT-A\n",
@@ -6922,9 +7089,11 @@ mod tests {
                  for argument in \"$@\"; do\n\
                    case \"${{argument}}\" in --definitions=*) definitions=${{argument#--definitions=}} ;; esac\n\
                  done\n\
+                 test -f \"${{definitions}}/05-selector.conf\"\n\
                  test -f \"${{definitions}}/10-boot-a.conf\"\n\
                  test -f \"${{definitions}}/30-boot-b.conf\"\n\
                  test -f \"${{definitions}}/40-root-b.conf\"\n\
+                 grep -q 'Label=PUNAR-SELECT' \"${{definitions}}/05-selector.conf\"\n\
                  grep -q 'Label=PUNAR-BOOT-A' \"${{definitions}}/10-boot-a.conf\"\n\
                  grep -q 'Label=PUNAR-BOOT-B' \"${{definitions}}/30-boot-b.conf\"\n\
                  grep -q 'Label=PUNAR-ROOT-A-STREAMED' \"${{definitions}}/20-root-a.conf\"\n\

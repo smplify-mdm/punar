@@ -13,6 +13,7 @@ ROOT_MODULES="${3:-}"
 OUTPUT="${4:-}"
 BOOTFS_BYTES="${PUNAR_RPI_BOOTFS_BYTES:-268435456}"
 ROOT_A_PARTUUID="1beabfe0-9cb8-4b49-91ef-d372b845e7ea"
+ROOT_B_PARTUUID="2b1b91a9-cf2c-4e9c-a723-5ec997971662"
 MIN_BOOTFS_BYTES=$((64 * 1024 * 1024))
 MAX_BOOTFS_BYTES=$((1024 * 1024 * 1024))
 MAX_KERNEL_BYTES=$((64 * 1024 * 1024))
@@ -188,16 +189,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "${TEMP_DIR}/autoboot.txt" <<'EOF'
-[all]
-tryboot_a_b=1
-boot_partition=1
-
-[tryboot]
-boot_partition=3
-EOF
-cat > "${TEMP_DIR}/cmdline.txt" <<EOF
+cat > "${TEMP_DIR}/cmdline-a.txt" <<EOF
 root=PARTUUID=${ROOT_A_PARTUUID} rootfstype=ext4 ro rootwait quiet splash fsck.repair=yes
+EOF
+cat > "${TEMP_DIR}/cmdline-b.txt" <<EOF
+root=PARTUUID=${ROOT_B_PARTUUID} rootfstype=ext4 ro rootwait quiet splash fsck.repair=yes
 EOF
 cat > "${TEMP_DIR}/config.txt" <<'EOF'
 [all]
@@ -205,6 +201,12 @@ arm_64bit=1
 kernel=kernel8.img
 initramfs initramfs8 followkernel
 disable_overscan=1
+
+[boot_partition=2]
+cmdline=cmdline-a.txt
+
+[boot_partition=4]
+cmdline=cmdline-b.txt
 
 [pi4]
 dtoverlay=vc4-kms-v3d-pi4
@@ -214,12 +216,12 @@ dtoverlay=vc4-kms-v3d-pi5
 EOF
 
 truncate --size "${BOOTFS_BYTES}" "${OUTPUT}"
-# FAT volume labels are limited to eleven characters; the GPT partition keeps
-# the full PUNAR-BOOT-A name while this internal filesystem label stays legal.
-mkfs.vfat -F 32 -n PUNARBOOTA -i 79115027 "${OUTPUT}" >/dev/null
+# The exact same signed image can occupy boot A or boot B. The GPT partition
+# label carries slot identity; the FAT label intentionally remains neutral.
+mkfs.vfat -F 32 -n PUNARBOOT -i 79115027 "${OUTPUT}" >/dev/null
 mmd -i "${OUTPUT}" ::/overlays
 
-for file in autoboot.txt cmdline.txt config.txt; do
+for file in cmdline-a.txt cmdline-b.txt config.txt; do
     mcopy -i "${OUTPUT}" "${TEMP_DIR}/${file}" "::/${file}"
 done
 for file in kernel8.img start4.elf fixup4.dat LICENCE.broadcom COPYING.linux; do
@@ -235,7 +237,7 @@ while IFS= read -r -d '' file; do
     mcopy -i "${OUTPUT}" "${file}" "::/overlays/$(basename "${file}")"
 done < <(find "${BOOT}/overlays" -maxdepth 1 -type f -print0 | sort -z)
 
-for file in autoboot.txt cmdline.txt config.txt; do
+for file in cmdline-a.txt cmdline-b.txt config.txt; do
     mtype -i "${OUTPUT}" "::/${file}" > "${TEMP_DIR}/installed-${file}"
     cmp "${TEMP_DIR}/${file}" "${TEMP_DIR}/installed-${file}"
 done

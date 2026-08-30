@@ -86,16 +86,20 @@ PUNAR_RPI_BOOTFS_BYTES=$((64 * 1024 * 1024)) \
     "${WORK}/bootfs.img"
 
 [ "$(stat -c %s "${WORK}/bootfs.img")" = "$((64 * 1024 * 1024))" ]
-mtype -i "${WORK}/bootfs.img" ::/autoboot.txt \
-    | grep -Fxq 'boot_partition=1'
-mtype -i "${WORK}/bootfs.img" ::/autoboot.txt \
-    | grep -Fxq 'boot_partition=3'
-mtype -i "${WORK}/bootfs.img" ::/cmdline.txt \
+mtype -i "${WORK}/bootfs.img" ::/cmdline-a.txt \
     | grep -Fq 'root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea'
-mtype -i "${WORK}/bootfs.img" ::/cmdline.txt | grep -Fq ' ro rootwait '
+mtype -i "${WORK}/bootfs.img" ::/cmdline-b.txt \
+    | grep -Fq 'root=PARTUUID=2b1b91a9-cf2c-4e9c-a723-5ec997971662'
+mtype -i "${WORK}/bootfs.img" ::/cmdline-a.txt | grep -Fq ' ro rootwait '
 mtype -i "${WORK}/bootfs.img" ::/config.txt | grep -Fxq 'kernel=kernel8.img'
 mtype -i "${WORK}/bootfs.img" ::/config.txt \
     | grep -Fxq 'initramfs initramfs8 followkernel'
+mtype -i "${WORK}/bootfs.img" ::/config.txt | grep -Fxq 'cmdline=cmdline-a.txt'
+mtype -i "${WORK}/bootfs.img" ::/config.txt | grep -Fxq 'cmdline=cmdline-b.txt'
+if mdir -i "${WORK}/bootfs.img" ::/autoboot.txt >/dev/null 2>&1; then
+    echo "error: slot artifact contains the selector-owned autoboot.txt" >&2
+    exit 1
+fi
 mdir -i "${WORK}/bootfs.img" ::/overlays/vc4-kms-v3d-pi5.dtbo >/dev/null
 
 printf 'tampered kernel\n' >> "${WORK}/firmware/boot/kernel8.img"
