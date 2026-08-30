@@ -391,9 +391,10 @@ seccomp blocks `pidfd_getfd`. Secret input is now restricted further to
 anonymous memfds sealed against writes, growth and shrinkage; ordinary files
 are refused, and the daemon rewinds the duplicated open description before
 its bounded read. The recovery gate and the internal
-verify/layout/write/re-read executor primitives now exist. Recovery-key
-enrollment, boot installation, shared-state seeding, final installed-system
-verification, ISO assembly and the unattended VM lane are still next.
+verify/layout/recovery-enroll/write/re-read executor primitives now exist.
+Organization receipt orchestration, boot installation, shared-state seeding,
+final installed-system verification, ISO assembly and the unattended VM lane
+are still next.
 
 The executor's compressed-versus-written identity ambiguity is closed before
 its first write: the signed release manifest now binds both the downloaded
@@ -431,6 +432,21 @@ profile inherits the same source of truth as the direct images. The public
 method remains absent: this is real executor progress, not an installability
 claim.
 
+The same internal transaction now stops honestly in `encrypt` after the fixed
+repart operation and invokes pinned `systemd-cryptenroll --recovery-key` for
+encrypted plans. The install passphrase reaches its anonymous stdin through
+`--unlock-key-file=/dev/stdin`; the generated 256-bit modhex key is captured
+only from bounded anonymous stdout into `SecretRecoveryKey`; and a bounded
+`cryptsetup luksDump --dump-json-metadata` identifies exactly one typed
+`systemd-recovery` keyslot without carrying key material. The personal lane
+then enters the existing no-timeout two-group acknowledgement gate and cannot
+advance to `format` until confirmation succeeds. A native ARM64 test proves
+the exact argv, both one-way pipes, secret absence from argv, typed keyslot,
+paused status and eventual phase advance. The organization lane already has
+component proof for local HPKE wrapping and signed escrow receipts, but the
+installer transaction has not yet connected that receipt gate; public apply
+therefore remains absent.
+
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
 pipe/Unix socket, the two answers return through a sealed memfd, wrong groups
@@ -450,9 +466,9 @@ checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
 pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
-recovery enrollment, boot/seed/final-verify executor half, audit wiring and
-live descriptor-duplication proof still remain before `install.apply` is
-registered.
+organization recovery-receipt orchestration, boot/seed/final-verify executor
+half, audit wiring and live descriptor-duplication proof still remain before
+`install.apply` is registered.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

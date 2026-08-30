@@ -59,6 +59,8 @@ const STATUS_PROGRESS_BYTES: u64 = 64 * 1024 * 1024;
 const DIRECT_IO_BLOCK_BYTES: usize = 4096;
 const DIRECT_IO_BLOCKS: usize = SLOT_IO_BYTES / DIRECT_IO_BLOCK_BYTES;
 const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
+const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
+const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -79,6 +81,8 @@ pub struct InstallerSources {
     pub status_path: PathBuf,
     pub zstd_path: PathBuf,
     pub repart_path: PathBuf,
+    pub cryptenroll_path: PathBuf,
+    pub cryptsetup_path: PathBuf,
     pub repart_definitions_root: PathBuf,
     pub repart_runtime_root: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
@@ -108,6 +112,8 @@ impl Default for InstallerSources {
             status_path: PathBuf::from("/run/punar/install.json"),
             zstd_path: PathBuf::from("/usr/bin/zstd"),
             repart_path: PathBuf::from("/usr/bin/systemd-repart"),
+            cryptenroll_path: PathBuf::from("/usr/bin/systemd-cryptenroll"),
+            cryptsetup_path: PathBuf::from("/usr/bin/cryptsetup"),
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),
             release_manifest_override: None,
@@ -584,9 +590,61 @@ impl Installer {
         prepared?;
 
         self.enter_phase(InstallPhase::Encrypt)?;
-        self.enter_phase(InstallPhase::Format)?;
-        self.enter_phase(InstallPhase::WriteSlotA)?;
+        if plan.encryption == InstallEncryption::None {
+            // The wire keeps one phase vocabulary for encrypted and explicit
+            // opt-out installs. With no LUKS header there is no recovery key
+            // to enroll or acknowledge, so these two completed operations are
+            // advanced together only after repart has succeeded.
+            self.enter_phase(InstallPhase::Format)?;
+            self.enter_phase(InstallPhase::WriteSlotA)?;
+        }
         Ok(())
+    }
+
+    /// Ask the pinned systemd primitive to generate and enroll its typed
+    /// 256-bit recovery key into the new LUKS2 data partition. The existing
+    /// passphrase enters on anonymous stdin; the recovery key leaves on an
+    /// anonymous stdout pipe into a zeroizing owner. A second fixed command
+    /// reads only LUKS metadata to identify the `systemd-recovery` keyslot.
+    ///
+    /// This deliberately leaves the transaction in `encrypt`. The caller
+    /// must route the returned owner through either the personal disclosure
+    /// checkpoint or organization escrow and may advance to `format` only
+    /// after that custody gate succeeds.
+    #[cfg(target_os = "linux")]
+    pub fn enroll_recovery_key(
+        &self,
+        plan: &InstallPlan,
+        inputs: &InstallApplyInputs,
+    ) -> Result<(SecretRecoveryKey, u8), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::Encrypt)?;
+        if plan.encryption != InstallEncryption::Luks2
+            || plan.recovery_mode == InstallRecoveryMode::None
+        {
+            return Err(InstallError::Invalid(
+                "recovery enrollment requires an encrypted plan with a custody mode".into(),
+            ));
+        }
+        let passphrase = inputs
+            .passphrase()
+            .filter(|passphrase| !passphrase.is_empty())
+            .ok_or_else(|| {
+                InstallError::Invalid(
+                    "recovery enrollment requires the active install passphrase descriptor".into(),
+                )
+            })?;
+        let target = partition_device_path(&self.sources.dev_root, &plan.disk.device, 4)?;
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        validate_repart_target(&target, allow_regular_target)?;
+
+        let recovery_key =
+            run_systemd_cryptenroll(&self.sources.cryptenroll_path, &target, passphrase)?;
+        let recovery_keyslot =
+            read_systemd_recovery_keyslot(&self.sources.cryptsetup_path, &target)?;
+        Ok((recovery_key, recovery_keyslot))
     }
 
     /// Decompress the already-verified artifact into root slot A through one
@@ -1439,7 +1497,7 @@ fn run_systemd_repart(
 ) -> Result<(), InstallError> {
     let mut definitions_arg = OsString::from("--definitions=");
     definitions_arg.push(definitions.as_os_str());
-    let mut command = Command::new(binary);
+    let mut command = fixed_tool_command(binary);
     command
         .args([
             "--dry-run=no",
@@ -1480,6 +1538,153 @@ fn run_systemd_repart(
         )));
     }
     Ok(())
+}
+
+fn run_systemd_cryptenroll(
+    binary: &Path,
+    target: &Path,
+    passphrase: &[u8],
+) -> Result<SecretRecoveryKey, InstallError> {
+    let mut command = fixed_tool_command(binary);
+    command
+        .args(["--unlock-key-file=/dev/stdin", "--recovery-key"])
+        .arg(target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| {
+            InstallError::Io(std::io::Error::other(
+                "systemd-cryptenroll did not provide its fixed input pipe",
+            ))
+        })
+        .and_then(|mut stdin| stdin.write_all(passphrase).map_err(InstallError::Io));
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        InstallError::Io(std::io::Error::other(
+            "systemd-cryptenroll did not provide its fixed recovery pipe",
+        ))
+    })?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    if let Err(error) = Read::by_ref(&mut stdout)
+        .take(RECOVERY_KEY_OUTPUT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(error));
+    }
+    drop(stdout);
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > RECOVERY_KEY_OUTPUT_MAX_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(std::io::Error::other(
+            "systemd-cryptenroll returned an invalid recovery key",
+        )));
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "systemd-cryptenroll did not enroll a recovery key",
+        )));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        InstallError::Io(std::io::Error::other(
+            "systemd-cryptenroll returned an invalid recovery key",
+        ))
+    })?;
+    SecretRecoveryKey::parse(text.trim()).map_err(|_| {
+        InstallError::Io(std::io::Error::other(
+            "systemd-cryptenroll returned an invalid recovery key",
+        ))
+    })
+}
+
+fn read_systemd_recovery_keyslot(binary: &Path, target: &Path) -> Result<u8, InstallError> {
+    let mut command = fixed_tool_command(binary);
+    command
+        .args(["luksDump", "--dump-json-metadata"])
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        InstallError::Io(std::io::Error::other(
+            "cryptsetup did not provide its fixed metadata pipe",
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    if let Err(error) = Read::by_ref(&mut stdout)
+        .take(LUKS_METADATA_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(error));
+    }
+    drop(stdout);
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LUKS_METADATA_MAX_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(std::io::Error::other(
+            "the LUKS metadata exceeded the fixed inspection limit",
+        )));
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup did not inspect the recovery keyslot",
+        )));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        InstallError::Io(std::io::Error::other(
+            "cryptsetup returned invalid LUKS metadata",
+        ))
+    })?;
+    let tokens = metadata
+        .get("tokens")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            InstallError::Io(std::io::Error::other(
+                "the LUKS metadata has no token registry",
+            ))
+        })?;
+    let slots = tokens
+        .values()
+        .filter(|token| {
+            token.get("type").and_then(serde_json::Value::as_str) == Some("systemd-recovery")
+        })
+        .filter_map(|token| token.get("keyslots").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|slot| slot.parse::<u8>().ok())
+        .filter(|slot| *slot <= 31)
+        .collect::<BTreeSet<_>>();
+    if slots.len() != 1 {
+        return Err(InstallError::Io(std::io::Error::other(
+            "the LUKS metadata does not identify exactly one recovery keyslot",
+        )));
+    }
+    Ok(*slots.iter().next().expect("one recovery keyslot exists"))
+}
+
+fn fixed_tool_command(binary: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.env_clear().env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    command.env("LC_ALL", "C").env("SYSTEMD_COLORS", "0");
+    command
 }
 
 #[cfg(target_os = "linux")]
@@ -3005,9 +3210,11 @@ mod tests {
     }
 
     #[test]
-    fn disk_preparation_uses_fixed_overlays_and_an_anonymous_secret_pipe() {
+    fn disk_preparation_and_personal_recovery_use_only_anonymous_secret_pipes() {
         use std::os::unix::fs::PermissionsExt;
 
+        const RECOVERY_KEY: &str =
+            "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
         let mut fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
         let definitions = fixture.root.join("repart.d");
@@ -3065,7 +3272,45 @@ mod tests {
         .unwrap();
         fs::set_permissions(&fake_repart, fs::Permissions::from_mode(0o755)).unwrap();
 
+        let fake_cryptenroll = fixture.root.join("systemd-cryptenroll");
+        fs::write(
+            &fake_cryptenroll,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 capture='{}'\n\
+                 : > \"${{capture}}.cryptenroll.args\"\n\
+                 for argument in \"$@\"; do\n\
+                   printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.cryptenroll.args\"\n\
+                 done\n\
+                 wc -c > \"${{capture}}.cryptenroll.stdin-bytes\"\n\
+                 printf '%s\\n' '{}'\n",
+                capture.display(),
+                RECOVERY_KEY,
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_cryptenroll, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fake_cryptsetup = fixture.root.join("cryptsetup");
+        fs::write(
+            &fake_cryptsetup,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 capture='{}'\n\
+                 : > \"${{capture}}.cryptsetup.args\"\n\
+                 for argument in \"$@\"; do\n\
+                   printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.cryptsetup.args\"\n\
+                 done\n\
+                 printf '%s\\n' '{{\"tokens\":{{\"0\":{{\"type\":\"systemd-recovery\",\"keyslots\":[\"7\"]}}}}}}'\n",
+                capture.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_cryptsetup, fs::Permissions::from_mode(0o755)).unwrap();
+
         fixture.sources.repart_path = fake_repart;
+        fixture.sources.cryptenroll_path = fake_cryptenroll;
+        fixture.sources.cryptsetup_path = fake_cryptsetup;
         fixture.sources.repart_definitions_root = definitions;
         fixture.sources.repart_runtime_root = fixture.root.join("runtime");
         fixture.sources.allow_regular_target_for_tests = true;
@@ -3120,13 +3365,74 @@ mod tests {
                 .unwrap()
                 .contains("Encrypt=key-file")
         );
-        assert_eq!(installer.status().phase, Some(InstallPhase::WriteSlotA));
+        assert_eq!(installer.status().phase, Some(InstallPhase::Encrypt));
         assert!(
             fs::read_dir(&fixture.sources.repart_runtime_root)
                 .unwrap()
                 .next()
                 .is_none()
         );
+
+        File::create(fixture.sources.dev_root.join("vda4")).unwrap();
+        let (recovery_key, keyslot) = installer
+            .enroll_recovery_key(&result.plan, &inputs)
+            .unwrap();
+        assert_eq!(keyslot, 7);
+        let cryptenroll_args =
+            fs::read_to_string(capture.with_extension("cryptenroll.args")).unwrap();
+        assert!(cryptenroll_args.contains("--unlock-key-file=/dev/stdin"));
+        assert!(cryptenroll_args.contains("--recovery-key"));
+        assert!(
+            cryptenroll_args.contains(&fixture.sources.dev_root.join("vda4").display().to_string())
+        );
+        assert!(!cryptenroll_args.contains(std::str::from_utf8(&secret).unwrap()));
+        assert_eq!(
+            fs::read_to_string(capture.with_extension("cryptenroll.stdin-bytes"))
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap(),
+            secret.len()
+        );
+        let cryptsetup_args =
+            fs::read_to_string(capture.with_extension("cryptsetup.args")).unwrap();
+        assert!(cryptsetup_args.contains("luksDump"));
+        assert!(cryptsetup_args.contains("--dump-json-metadata"));
+        assert!(!cryptsetup_args.contains(RECOVERY_KEY));
+
+        let mut challenge = None;
+        installer
+            .begin_personal_recovery(&result.plan_token, recovery_key, keyslot, |text, groups| {
+                assert_eq!(text, RECOVERY_KEY);
+                challenge = Some(groups);
+                Ok(())
+            })
+            .unwrap();
+        installer
+            .await_recovery_status(InstallAwaiting::RecoveryKeyAck)
+            .unwrap();
+        let groups = challenge.unwrap();
+        let key_groups = RECOVERY_KEY.split('-').collect::<Vec<_>>();
+        let response = format!(
+            "{} {}",
+            key_groups[usize::from(groups[0] - 1)],
+            key_groups[usize::from(groups[1] - 1)]
+        );
+        installer
+            .acknowledge_personal_recovery_bytes(&result.plan_token, response.as_bytes())
+            .unwrap();
+        let confirmation = installer
+            .wait_for_personal_recovery(&result.plan_token)
+            .unwrap();
+        assert!(confirmation.confirmed);
+        assert_eq!(confirmation.recovery_keyslot, keyslot);
+        installer.resume_recovery_status().unwrap();
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+        assert_eq!(installer.status().phase, Some(InstallPhase::WriteSlotA));
+        let published_status = fs::read_to_string(&fixture.sources.status_path).unwrap();
+        assert!(!published_status.contains(RECOVERY_KEY));
+        assert!(!published_status.contains(std::str::from_utf8(&secret).unwrap()));
     }
 
     #[test]

@@ -1320,10 +1320,15 @@ one fixed `systemd-repart` transaction for the partition/encrypt/format rows:
 it merges only the immutable base, LUKS2 and streaming layers, revalidates the
 plan at the destructive boundary, requires a block device, and provides the
 passphrase on anonymous stdin. Status reports `partition` while the combined
-transaction is in flight and marks the following two checkpoints complete
-only after success. Boot, seed, recovery enrollment, final verification and
-their integrated audit path remain unimplemented, so this checkpoint is not
-an installability claim.
+transaction is in flight, then stops in `encrypt` for encrypted plans while
+the pinned `systemd-cryptenroll` primitive generates and enrolls its typed
+recovery key. The passphrase enters only on anonymous stdin and the key leaves
+only on bounded anonymous stdout into a zeroizing owner; bounded LUKS metadata
+identifies the `systemd-recovery` keyslot. The personal lane is wired to the
+no-timeout two-group acknowledgement gate and cannot enter `format` until it
+succeeds. Organization receipt orchestration, boot, seed, final verification
+and the integrated audit path remain unimplemented, so this checkpoint is
+not an installability claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
