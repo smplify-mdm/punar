@@ -35,6 +35,23 @@ Lifecycle and configuration are intentionally separate.
 A required app whose configuration cannot be enforced is not compliant. Punar
 must not report success merely because the package exists.
 
+### 2.1 One library, several reviewed delivery adapters
+
+The product surface is the **Punar Application Library**, not Flatpak,
+Snapcraft, a vendor download page, or the host package manager. Those are
+possible implementation sources behind catalog entries. The user always gets
+the same Install/Open/Uninstall interaction, progress, error voice, inventory
+and policy explanation.
+
+Punar does not adopt the Snap Store as its trust or management authority. A
+catalog entry may use a system Flatpak, a digest-pinned vendor package, a web
+app, or a future reviewed native-package adapter, but its exact identity,
+architecture, containment, update and removal behavior remain Punar contracts.
+This avoids parallel app stores and lets an enterprise express one lifecycle
+policy regardless of the underlying source. Installing Snap packages directly
+may be considered later as a compatibility adapter; it must not introduce a
+second background updater or bypass Punar's signed catalog and audit path.
+
 ## 3. Typed adapter rule
 
 Every supported application has a compiled adapter with a closed contract:

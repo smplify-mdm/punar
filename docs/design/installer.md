@@ -1922,11 +1922,14 @@ designs immediately.
    device wrapper, ciphertext upload, signed receipt verification, mock
    RBAC release and non-secret release audit are implemented and host-tested;
    pinned ARM64 systemd has generated and unlocked a real loopback LUKS2
-   recovery slot. The installer/installed image does not yet connect them,
-   and production tenant KMS custody, authenticated portal identity, step-up
-   release authorization and rotation still depend on the real control plane
-   and identity provider (user-blocked 4 and 5). No current release image has
-   silently created or uploaded a disk recovery key.
+   recovery slot. The internal installer now reads the actual LUKS UUID,
+   retains the recovery key in memory across failed escrow attempts, uploads
+   only an HPKE envelope and refuses to cross `encrypt` until the exact signed
+   receipt verifies. Public apply/server/UI orchestration and installed-image
+   proof are still absent, and production tenant KMS custody, authenticated
+   portal identity, step-up release authorization and rotation still depend
+   on the real control plane and identity provider (user-blocked 4 and 5). No
+   current release image has silently created or uploaded a disk recovery key.
 9. **`onboarding.md` §1.8 Layer 2 does not exist.** The ESP has room for
    the recovery UKI (§6.4, requirement 5) and this design does not build
    one, so `punar-recover` and the boot-menu recovery entry are **dashed**.
@@ -1997,7 +2000,7 @@ until it is taken.
 |---|---|
 | Dual-boot / free-space / manual partitioning | Phase 2 |
 | Repair mode (rewrite ESP + slot A, preserve `PUNAR-DATA`) | Next, and it is the highest-value follow-on — it is the answer to `update-and-rollback.md` §6.5 |
-| Recovery-key escrow implementation | Device wrap/upload/signed-receipt and dev/CI portal custody/release are implemented and host-proven (§5.3). Installer wiring, production KMS/IdP/step-up release and rotation remain user-blocked 4 + 5. |
+| Recovery-key escrow implementation | Device wrap/upload/signed-receipt, the installer's retry-safe no-default-continue receipt gate, and dev/CI portal custody/release are implemented and component-proven (§5.3). Public apply/UI orchestration, installed-image proof, production KMS/IdP/step-up release and rotation remain open or user-blocked 4 + 5. |
 | The Layer-2 recovery boot entry (`punar-recover`, a fourth UKI) | Next, alongside repair mode — they are the same artefact. ESP room is reserved (§6.4) |
 | Account creation, password policy, the greeter, `identity.local-account` | `docs/design/onboarding.md` — the installer creates no account at all (§6.4) |
 | Graphical LUKS unlock | Phase 2. Plate D-002's greeter is `onboarding.md` §5's, and ships there |

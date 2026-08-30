@@ -413,8 +413,10 @@ data and root A read-only, and refuses digest, plan, owner/mode and unexpected
 answer drift before success. Its no-NVRAM/digest/phase, fixed cryptsetup argv,
 secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
 privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
-Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
-ISO assembly and the unattended VM lane are still next. The
+The organization receipt gate is connected inside the executor; trusted
+enrollment/token sourcing in the public server orchestration, Raspberry Pi
+boot-filesystem installation, ISO assembly and the unattended VM lane are
+still next. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
 firmware metadata; no serial/MAC/user data is collected; no usable graphics is
@@ -480,14 +482,22 @@ encrypted plans. The install passphrase reaches its anonymous stdin through
 `--unlock-key-file=/dev/stdin`; the generated 256-bit modhex key is captured
 only from bounded anonymous stdout into `SecretRecoveryKey`; and a bounded
 `cryptsetup luksDump --dump-json-metadata` identifies exactly one typed
-`systemd-recovery` keyslot without carrying key material. The personal lane
+`systemd-recovery` keyslot without carrying key material, and a separate
+bounded `cryptsetup luksUUID` read binds escrow to the actual LUKS volume
+rather than the deterministic GPT partition UUID. The personal lane
 then enters the existing no-timeout two-group acknowledgement gate and cannot
 advance to `format` until confirmation succeeds. A native ARM64 test proves
 the exact argv, both one-way pipes, secret absence from argv, typed keyslot,
-paused status and eventual phase advance. The organization lane already has
-component proof for local HPKE wrapping and signed escrow receipts, but the
-installer transaction has not yet connected that receipt gate; public apply
-therefore remains absent.
+paused status and eventual phase advance. The organization lane is now wired
+into the same installer checkpoint: it fetches authenticated tenant material,
+constructs the organization/key/device/LUKS/slot binding locally, uploads only
+the HPKE envelope, and completes `encrypt` only after the exact signed receipt
+verifies. Unavailable escrow, a mismatched token, or any verification failure
+leaves status at `awaiting: organization_escrow_receipt`, refuses `format`, and
+retains the only key in memory for retry. The real dev/CI control plane and
+literal-secret negative assertions pass on native ARM64. Public apply remains
+absent until server-side orchestration supplies the trusted enrollment
+organization/token and every remaining boot branch is complete.
 
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
@@ -503,7 +513,7 @@ on ARM64 Linux across the full workspace. It serializes each transition under
 one lock and atomically publishes the same value to IPC and
 `/run/punar/install.json`; phases cannot skip or move backward, slot A cannot
 advance to re-read until its byte count equals the signed raw size, recovery
-is an explicit waiting state, and terminal failures cancel any personal-key
+is an explicit waiting state, and terminal failures cancel any active recovery-key
 checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
 pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
@@ -518,7 +528,7 @@ read-only before success. The verifier binds the exact seed digest in daemon
 memory, enforces plan fields, owner/modes and OOBE presence, and refuses
 tampering or an unrequested answer file. Native ARM64 unit tests prove the
 fixed unlock/close argv, secret absence from argv, exact seed content/modes,
-successful closure and both refusal paths. Organization recovery-receipt
+successful closure and both refusal paths. Public organization/enrollment
 orchestration, Raspberry Pi boot, live mount proof and live
 descriptor-duplication proof still remain before `install.apply` is
 registered. Hardware reporting is no longer in that remainder: its bounded
@@ -537,8 +547,11 @@ zeroizing personal one-screen display/copy + two-random-group confirmation
 and the managed RFC 9180 HPKE envelope. `punard` wraps locally, uploads only
 ciphertext and verifies an exact signed receipt; the real dev/CI Smplify mock
 proves device-token binding, separate recovery-release RBAC, required reason
-code and append-only audit. **This is component proof, not a shipping claim:**
-installer/UI wiring, installed-image proof, real portal IdP/step-up, tenant
+code and append-only audit. The installer now holds that verified receipt as
+its no-default-continue `encrypt` gate and reads the actual LUKS UUID before
+constructing the binding. **This is still component proof, not a shipping
+claim:** public installer/UI orchestration, installed-image proof, real portal
+IdP/step-up, tenant
 KMS/HSM custody and rotation are still open.
 
 The owner has now simplified the interaction contract. The required path is

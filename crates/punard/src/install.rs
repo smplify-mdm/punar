@@ -29,12 +29,15 @@ use punar_common::update::{
     Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
     verify_release_manifest,
 };
-use punar_common::{AuditEvent, Decision};
-use punar_recovery::{PersonalRecoveryConfirmation, PersonalRecoveryView, SecretRecoveryKey};
+use punar_common::{AuditEvent, Decision, Redacted};
+use punar_recovery::{
+    PersonalRecoveryConfirmation, PersonalRecoveryView, RecoveryBinding, SecretRecoveryKey,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::enroll::ControlPlaneClient;
 use crate::hardware::{HardwareSources, observe_install_hardware};
 use crate::util::{hex, random_hex, sha256_hex, write_atomic, write_atomic_synced};
 
@@ -65,6 +68,7 @@ const DIRECT_IO_BLOCK_BYTES: usize = 4096;
 const DIRECT_IO_BLOCKS: usize = SLOT_IO_BYTES / DIRECT_IO_BLOCK_BYTES;
 const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
 const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
+const LUKS_UUID_OUTPUT_MAX_BYTES: u64 = 64;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const HARDWARE_REPORT_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -210,6 +214,30 @@ pub struct InstallAuditEvents {
     pub apply_success: AuditEvent,
 }
 
+/// Non-secret identity read back from the LUKS2 volume after systemd enrolls
+/// its recovery token. Organization escrow binds to the filesystem UUID, not
+/// the deterministic GPT partition UUID in the install plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryKeyIdentity {
+    pub luks_uuid: String,
+    pub recovery_keyslot: u8,
+}
+
+/// Locally verified proof that the organization custody checkpoint completed.
+/// Possession means the signed receipt matched the exact ciphertext envelope
+/// and the installer may advance past `encrypt`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrganizationEscrowEvidence {
+    pub organization_id: String,
+    pub tenant_key_id: String,
+    pub device_id: String,
+    pub luks_uuid: String,
+    pub recovery_keyslot: u8,
+    pub receipt_id: String,
+    pub received_at: String,
+    pub envelope_sha256: String,
+}
+
 /// Non-serializable, non-debuggable apply inputs duplicated from descriptors
 /// owned by the authenticated peer. Both buffers zeroize on every return
 /// path, including validation and child-process failures.
@@ -256,6 +284,13 @@ enum RecoveryGateState {
     Confirmed {
         plan_token: String,
         confirmation: PersonalRecoveryConfirmation,
+    },
+    Organization {
+        plan_token: String,
+        organization_id: String,
+        device_id: String,
+        identity: RecoveryKeyIdentity,
+        recovery_key: SecretRecoveryKey,
     },
 }
 
@@ -555,7 +590,7 @@ impl Installer {
             Ok(next)
         })?;
         if let Some(plan_token) = failed_plan_token {
-            self.cancel_personal_recovery(&plan_token);
+            self.cancel_recovery(&plan_token);
         }
         *self.seed_digest.lock().unwrap() = None;
         Ok(())
@@ -701,7 +736,7 @@ impl Installer {
         &self,
         plan: &InstallPlan,
         inputs: &InstallApplyInputs,
-    ) -> Result<(SecretRecoveryKey, u8), InstallError> {
+    ) -> Result<(SecretRecoveryKey, RecoveryKeyIdentity), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::Encrypt)?;
         if plan.encryption != InstallEncryption::Luks2
             || plan.recovery_mode == InstallRecoveryMode::None
@@ -729,7 +764,14 @@ impl Installer {
             run_systemd_cryptenroll(&self.sources.cryptenroll_path, &target, passphrase)?;
         let recovery_keyslot =
             read_systemd_recovery_keyslot(&self.sources.cryptsetup_path, &target)?;
-        Ok((recovery_key, recovery_keyslot))
+        let luks_uuid = read_luks_uuid(&self.sources.cryptsetup_path, &target)?;
+        Ok((
+            recovery_key,
+            RecoveryKeyIdentity {
+                luks_uuid,
+                recovery_keyslot,
+            },
+        ))
     }
 
     /// Decompress the already-verified artifact into root slot A through one
@@ -1688,6 +1730,149 @@ impl Installer {
         Ok(())
     }
 
+    /// Arm the managed-device checkpoint before any wrapped material leaves
+    /// the device. The key remains solely in this non-serializing gate while
+    /// status is `awaiting: organization_escrow_receipt`.
+    #[cfg(target_os = "linux")]
+    pub fn begin_organization_recovery(
+        &self,
+        plan: &InstallPlan,
+        plan_token: &str,
+        organization_id: &str,
+        recovery_key: SecretRecoveryKey,
+        identity: RecoveryKeyIdentity,
+    ) -> Result<(), InstallError> {
+        validate_plan_token(plan_token)?;
+        self.require_transaction_phase(plan, InstallPhase::Encrypt)?;
+        if plan.recovery_mode != InstallRecoveryMode::OrganizationEscrow
+            || plan.encryption != InstallEncryption::Luks2
+        {
+            return Err(InstallError::Invalid(
+                "organization recovery requires an encrypted organization_escrow plan".into(),
+            ));
+        }
+        let expected_token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        if plan_token != expected_token {
+            return Err(InstallError::Invalid(
+                "the organization recovery checkpoint does not match this plan_token".into(),
+            ));
+        }
+        let device_id_bytes = read_validated_device_id(&self.sources.live_device_id_path)?;
+        let device_id = std::str::from_utf8(&device_id_bytes)
+            .expect("validated device identity is UTF-8")
+            .trim_end_matches('\n')
+            .to_string();
+        RecoveryBinding {
+            organization_id: organization_id.to_string(),
+            tenant_key_id: "pending".into(),
+            device_id: device_id.clone(),
+            luks_uuid: identity.luks_uuid.clone(),
+            recovery_keyslot: identity.recovery_keyslot,
+        }
+        .validate()
+        .map_err(|_| {
+            InstallError::Invalid("the organization recovery binding is invalid".into())
+        })?;
+
+        let mut state = self.recovery.state.lock().unwrap();
+        if !matches!(*state, RecoveryGateState::Idle) {
+            return Err(InstallError::Refused(
+                "a recovery confirmation is already active".into(),
+            ));
+        }
+        self.await_recovery_status(InstallAwaiting::OrganizationEscrowReceipt)?;
+        *state = RecoveryGateState::Organization {
+            plan_token: plan_token.to_string(),
+            organization_id: organization_id.to_string(),
+            device_id,
+            identity,
+            recovery_key,
+        };
+        self.recovery.changed.notify_all();
+        Ok(())
+    }
+
+    /// Retry-safe managed custody: fetch the authenticated tenant key, wrap
+    /// locally, upload ciphertext only, and verify the signed exact-envelope
+    /// receipt. Every error leaves both the key and the awaiting checkpoint
+    /// intact. Only a verified receipt completes the `encrypt` phase.
+    pub fn attempt_organization_recovery(
+        &self,
+        plan_token: &str,
+        client: &ControlPlaneClient,
+        device_token: &Redacted<String>,
+    ) -> Result<OrganizationEscrowEvidence, InstallError> {
+        validate_plan_token(plan_token)?;
+        let mut state = self.recovery.state.lock().unwrap();
+        let RecoveryGateState::Organization {
+            plan_token: expected_token,
+            organization_id,
+            device_id,
+            identity,
+            recovery_key,
+        } = &mut *state
+        else {
+            return Err(InstallError::Invalid(
+                "no organization recovery checkpoint is active".into(),
+            ));
+        };
+        if expected_token != plan_token {
+            return Err(InstallError::Invalid(
+                "no organization recovery checkpoint matches this plan_token".into(),
+            ));
+        }
+
+        let tenant = client.recovery_key(device_token).map_err(|_| {
+            InstallError::Io(std::io::Error::other(
+                "organization recovery escrow is unavailable",
+            ))
+        })?;
+        if tenant.organization_id != *organization_id {
+            return Err(InstallError::Trust(
+                "organization recovery tenant identity did not match enrollment".into(),
+            ));
+        }
+        let binding = RecoveryBinding {
+            organization_id: organization_id.clone(),
+            tenant_key_id: tenant.key_id.clone(),
+            device_id: device_id.clone(),
+            luks_uuid: identity.luks_uuid.clone(),
+            recovery_keyslot: identity.recovery_keyslot,
+        };
+        let envelope = tenant.seal(&binding, recovery_key).map_err(|_| {
+            InstallError::Trust(
+                "organization recovery envelope construction failed verification".into(),
+            )
+        })?;
+        let raw_receipt = client
+            .recovery_escrow(device_token, &envelope)
+            .map_err(|_| {
+                InstallError::Io(std::io::Error::other(
+                    "organization recovery escrow is unavailable",
+                ))
+            })?;
+        let receipt = raw_receipt.verify(&tenant, &envelope).map_err(|_| {
+            InstallError::Trust("organization recovery escrow receipt failed verification".into())
+        })?;
+        let evidence = OrganizationEscrowEvidence {
+            organization_id: organization_id.clone(),
+            tenant_key_id: tenant.key_id,
+            device_id: device_id.clone(),
+            luks_uuid: identity.luks_uuid.clone(),
+            recovery_keyslot: identity.recovery_keyslot,
+            receipt_id: receipt.receipt_id().to_string(),
+            received_at: receipt.received_at().to_string(),
+            envelope_sha256: receipt.envelope_sha256().to_string(),
+        };
+
+        self.resume_recovery_status()?;
+        *state = RecoveryGateState::Idle;
+        self.recovery.changed.notify_all();
+        Ok(evidence)
+    }
+
     /// Consume the two challenged recovery groups from a sealed peer memfd.
     /// Neither group is returned, serialized, or included in an error.
     #[cfg(target_os = "linux")]
@@ -1797,9 +1982,9 @@ impl Installer {
         }
     }
 
-    /// Abandon an active checkpoint on transaction failure. Dropping the
+    /// Abandon an active checkpoint on transaction failure. Dropping either
     /// view zeroizes the only in-memory owner of the recovery key.
-    pub fn cancel_personal_recovery(&self, plan_token: &str) {
+    pub fn cancel_recovery(&self, plan_token: &str) {
         let mut state = self.recovery.state.lock().unwrap();
         let matches = match &*state {
             RecoveryGateState::Personal {
@@ -1807,6 +1992,10 @@ impl Installer {
                 ..
             }
             | RecoveryGateState::Confirmed {
+                plan_token: expected,
+                ..
+            }
+            | RecoveryGateState::Organization {
                 plan_token: expected,
                 ..
             } => expected == plan_token,
@@ -2635,6 +2824,63 @@ fn read_systemd_recovery_keyslot(binary: &Path, target: &Path) -> Result<u8, Ins
     Ok(*slots.iter().next().expect("one recovery keyslot exists"))
 }
 
+fn read_luks_uuid(binary: &Path, target: &Path) -> Result<String, InstallError> {
+    let mut command = fixed_tool_command(binary);
+    command
+        .arg("luksUUID")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        InstallError::Io(std::io::Error::other(
+            "cryptsetup did not provide its fixed UUID pipe",
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    if let Err(error) = Read::by_ref(&mut stdout)
+        .take(LUKS_UUID_OUTPUT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(error));
+    }
+    drop(stdout);
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LUKS_UUID_OUTPUT_MAX_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup returned an invalid LUKS UUID",
+        )));
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup did not inspect the LUKS UUID",
+        )));
+    }
+    let uuid = std::str::from_utf8(&bytes)
+        .map_err(|_| {
+            InstallError::Io(std::io::Error::other(
+                "cryptsetup returned an invalid LUKS UUID",
+            ))
+        })?
+        .trim();
+    let valid = uuid.len() == 36
+        && uuid.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !valid {
+        return Err(InstallError::Io(std::io::Error::other(
+            "cryptsetup returned an invalid LUKS UUID",
+        )));
+    }
+    Ok(uuid.to_ascii_lowercase())
+}
+
 #[cfg(target_os = "linux")]
 fn open_luks_mapping(
     binary: &Path,
@@ -3387,7 +3633,7 @@ const fn public_error_reason(error: &InstallError) -> &'static str {
     match error {
         InstallError::Refused(_) => "a safety precondition was refused",
         InstallError::Invalid(_) => "an installer input or transition was invalid",
-        InstallError::Trust(_) => "release signature or manifest verification failed",
+        InstallError::Trust(_) => "a required trust verification failed",
         InstallError::Io(_) => "a required device or filesystem operation failed",
     }
 }
@@ -4133,6 +4379,15 @@ mod tests {
         }
     }
 
+    fn organization_encrypted_params(disk: &str) -> InstallPlanParams {
+        InstallPlanParams {
+            disk: disk.into(),
+            keymap: "us".into(),
+            encryption: InstallEncryption::Luks2,
+            recovery_mode: InstallRecoveryMode::OrganizationEscrow,
+        }
+    }
+
     fn unencrypted_params(disk: &str) -> InstallPlanParams {
         InstallPlanParams {
             disk: disk.into(),
@@ -4494,8 +4749,127 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        installer.cancel_personal_recovery(&token);
+        installer.cancel_recovery(&token);
         assert!(installer.wait_for_personal_recovery(&token).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn organization_recovery_retries_in_memory_and_advances_only_after_verified_receipt() {
+        use punar_mock_smplify::config::MockConfig;
+        use punar_mock_smplify::server::MockServer;
+
+        const KEY: &str = "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
+        const UUID: &str = "69782a5d-4852-44dc-9b9d-a0c11fd90f5f";
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        fixture.sources.allow_regular_target_for_tests = true;
+        let installer = fixture.installer();
+        let result = installer
+            .plan(&organization_encrypted_params("/dev/vda"))
+            .unwrap();
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                result.plan.payload.uncompressed_size_bytes,
+            )
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer
+            .begin_organization_recovery(
+                &result.plan,
+                &result.plan_token,
+                "acme",
+                SecretRecoveryKey::parse(KEY).unwrap(),
+                RecoveryKeyIdentity {
+                    luks_uuid: UUID.into(),
+                    recovery_keyslot: 3,
+                },
+            )
+            .unwrap();
+
+        let awaiting = installer.status();
+        assert_eq!(awaiting.state, InstallOverallState::Awaiting);
+        assert_eq!(
+            awaiting.awaiting,
+            Some(InstallAwaiting::OrganizationEscrowReceipt)
+        );
+        assert_eq!(
+            awaiting.phases[phase_index(InstallPhase::Encrypt)].state,
+            InstallPhaseState::Waiting
+        );
+        assert!(installer.enter_phase(InstallPhase::Format).is_err());
+
+        let unavailable = ControlPlaneClient::new(fixture.root.join("missing.sock"));
+        let unavailable_token = Redacted::new("a".repeat(64));
+        assert!(
+            installer
+                .attempt_organization_recovery(
+                    &result.plan_token,
+                    &unavailable,
+                    &unavailable_token,
+                )
+                .is_err()
+        );
+        assert_eq!(installer.status(), awaiting);
+        assert!(
+            installer
+                .attempt_organization_recovery(&"f".repeat(64), &unavailable, &unavailable_token,)
+                .is_err()
+        );
+        assert_eq!(installer.status(), awaiting);
+
+        let socket = fixture.root.join("mock-api.sock");
+        let state_dir = fixture.root.join("mock-state");
+        let fixtures_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/organizations/acme");
+        let handle = MockServer::new(MockConfig {
+            socket: socket.clone(),
+            fixtures_dir,
+            state_dir: state_dir.clone(),
+        })
+        .unwrap()
+        .spawn()
+        .unwrap();
+        let client = ControlPlaneClient::new(&socket);
+        let (device_token, _) = client
+            .register("dev_fixture001", &Redacted::new("b".repeat(64)))
+            .unwrap();
+        let evidence = installer
+            .attempt_organization_recovery(&result.plan_token, &client, &device_token)
+            .unwrap();
+        assert_eq!(evidence.organization_id, "acme");
+        assert_eq!(evidence.tenant_key_id, "trk_mock_2026_08");
+        assert_eq!(evidence.device_id, "dev_fixture001");
+        assert_eq!(evidence.luks_uuid, UUID);
+        assert_eq!(evidence.recovery_keyslot, 3);
+        assert_eq!(evidence.envelope_sha256.len(), 64);
+        assert!(!evidence.receipt_id.is_empty());
+
+        let status = installer.status();
+        assert_eq!(status.state, InstallOverallState::Running);
+        assert_eq!(status.phase, Some(InstallPhase::Encrypt));
+        assert_eq!(status.awaiting, None);
+        assert_eq!(
+            status.phases[phase_index(InstallPhase::Encrypt)].state,
+            InstallPhaseState::Complete
+        );
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+
+        let custody =
+            fs::read_to_string(state_dir.join("received-recovery-envelopes.jsonl")).unwrap();
+        assert!(custody.contains("encapsulated_key"));
+        assert!(!custody.contains(KEY));
+        assert!(!custody.contains(&KEY.replace('-', "")));
+        let published_status = fs::read_to_string(&fixture.sources.status_path).unwrap();
+        assert!(!published_status.contains(KEY));
+        assert!(!published_status.contains(&KEY.replace('-', "")));
+
+        handle.stop();
     }
 
     #[test]
@@ -4611,6 +4985,45 @@ mod tests {
                 .to_string_lossy()
                 .contains("tmp"))
         );
+    }
+
+    #[test]
+    fn luks_uuid_readback_is_bounded_canonical_and_strict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let output = fixture.root.join("uuid-output");
+        let capture = fixture.root.join("uuid-args");
+        let tool = fixture.root.join("cryptsetup");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\ncat '{}'\n",
+                capture.display(),
+                output.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let target = fixture.root.join("data-volume");
+
+        fs::write(&output, "69782A5D-4852-44DC-9B9D-A0C11FD90F5F\n").unwrap();
+        assert_eq!(
+            read_luks_uuid(&tool, &target).unwrap(),
+            "69782a5d-4852-44dc-9b9d-a0c11fd90f5f"
+        );
+        assert_eq!(
+            fs::read_to_string(&capture)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["luksUUID", target.to_str().unwrap()]
+        );
+
+        fs::write(&output, "not-a-luks-uuid\n").unwrap();
+        assert!(read_luks_uuid(&tool, &target).is_err());
+        fs::write(&output, "a".repeat(LUKS_UUID_OUTPUT_MAX_BYTES as usize + 1)).unwrap();
+        assert!(read_luks_uuid(&tool, &target).is_err());
     }
 
     #[test]
@@ -5492,6 +5905,7 @@ mod tests {
 
         const RECOVERY_KEY: &str =
             "lhkbicdj-trbuftjv-tviijfck-dfvbknrh-uiulbhui-higltier-kecfhkbk-egrirkui";
+        const LUKS_UUID: &str = "69782a5d-4852-44dc-9b9d-a0c11fd90f5f";
         let mut fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
         let definitions = fixture.root.join("repart.d");
@@ -5574,12 +5988,17 @@ mod tests {
             format!(
                 "#!/bin/sh\nset -eu\n\
                  capture='{}'\n\
-                 : > \"${{capture}}.cryptsetup.args\"\n\
+                 test -e \"${{capture}}.cryptsetup.args\" || : > \"${{capture}}.cryptsetup.args\"\n\
                  for argument in \"$@\"; do\n\
                    printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.cryptsetup.args\"\n\
                  done\n\
-                 printf '%s\\n' '{{\"tokens\":{{\"0\":{{\"type\":\"systemd-recovery\",\"keyslots\":[\"7\"]}}}}}}'\n",
+                 case \"$1\" in\n\
+                   luksDump) printf '%s\\n' '{{\"tokens\":{{\"0\":{{\"type\":\"systemd-recovery\",\"keyslots\":[\"7\"]}}}}}}' ;;\n\
+                   luksUUID) printf '%s\\n' '{}' ;;\n\
+                   *) exit 2 ;;\n\
+                 esac\n",
                 capture.display(),
+                LUKS_UUID,
             ),
         )
         .unwrap();
@@ -5651,10 +6070,11 @@ mod tests {
         );
 
         File::create(fixture.sources.dev_root.join("vda4")).unwrap();
-        let (recovery_key, keyslot) = installer
+        let (recovery_key, identity) = installer
             .enroll_recovery_key(&result.plan, &inputs)
             .unwrap();
-        assert_eq!(keyslot, 7);
+        assert_eq!(identity.recovery_keyslot, 7);
+        assert_eq!(identity.luks_uuid, LUKS_UUID);
         let cryptenroll_args =
             fs::read_to_string(capture.with_extension("cryptenroll.args")).unwrap();
         assert!(cryptenroll_args.contains("--unlock-key-file=/dev/stdin"));
@@ -5675,15 +6095,21 @@ mod tests {
             fs::read_to_string(capture.with_extension("cryptsetup.args")).unwrap();
         assert!(cryptsetup_args.contains("luksDump"));
         assert!(cryptsetup_args.contains("--dump-json-metadata"));
+        assert!(cryptsetup_args.contains("luksUUID"));
         assert!(!cryptsetup_args.contains(RECOVERY_KEY));
 
         let mut challenge = None;
         installer
-            .begin_personal_recovery(&result.plan_token, recovery_key, keyslot, |text, groups| {
-                assert_eq!(text, RECOVERY_KEY);
-                challenge = Some(groups);
-                Ok(())
-            })
+            .begin_personal_recovery(
+                &result.plan_token,
+                recovery_key,
+                identity.recovery_keyslot,
+                |text, groups| {
+                    assert_eq!(text, RECOVERY_KEY);
+                    challenge = Some(groups);
+                    Ok(())
+                },
+            )
             .unwrap();
         installer
             .await_recovery_status(InstallAwaiting::RecoveryKeyAck)
@@ -5702,7 +6128,7 @@ mod tests {
             .wait_for_personal_recovery(&result.plan_token)
             .unwrap();
         assert!(confirmation.confirmed);
-        assert_eq!(confirmation.recovery_keyslot, keyslot);
+        assert_eq!(confirmation.recovery_keyslot, identity.recovery_keyslot);
         installer.resume_recovery_status().unwrap();
         installer.enter_phase(InstallPhase::Format).unwrap();
         installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
