@@ -414,13 +414,29 @@ answer drift before success. Its no-NVRAM/digest/phase, fixed cryptsetup argv,
 secret-pipe, encrypted/unencrypted seed and tamper-refusal tests are green; its
 privileged real-vfat/LUKS/btrfs mounts still need the live installer VM gate.
 Organization receipt orchestration, Raspberry Pi boot-filesystem installation,
-the audit handoff, ISO assembly and the unattended VM lane are still next. The
+ISO assembly and the unattended VM lane are still next. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
 firmware metadata; no serial/MAC/user data is collected; no usable graphics is
 a blocker; partial/unsupported devices are warnings; and the fresh report is
 durably written, digest-bound and read-only verified beside the seed while
 physical qualification remains explicitly false.
+The audit handoff is also closed inside the executor: the installed system
+inherits the validated live device id, the live JSONL is accepted only when
+every record has the exact twelve-field schema and that identity, unknown or
+secret-shaped fields and duplicate ids fail closed, and the exact
+`install.recovery_key/enrolled` plus `install.apply/success` terminal events
+are appended without secret-bearing fields for encrypted installs; the
+explicit unencrypted lane must omit, and may not falsely claim, recovery
+enrollment. `/var/log/punar/audit.jsonl` is durably written at `0640`, then the
+shared volume is unmounted, reopened
+read-only and compared byte-for-byte with owner/mode checks before install
+success. ARM64 tests prove the required three-event trail, secret-field
+refusal and post-write tamper refusal. This remains component proof until the
+public apply orchestration and unattended install lane exercise I35 end to end.
+The origin is fail-closed too: `install.plan` does not return a usable token
+unless its success event has been durably appended, so a full/unwritable audit
+filesystem is discovered while the target disk is still byte-identical.
 
 The executor's compressed-versus-written identity ambiguity is closed before
 its first write: the signed release manifest now binds both the downloaded
@@ -479,7 +495,7 @@ pipe/Unix socket, the two answers return through a sealed memfd, wrong groups
 or a different plan token cannot consume the gate, and there is deliberately
 no timeout/default-continue. Cancellation drops the only
 `PersonalRecoveryView` and zeroizes the key. The state machine and strict wire
-types are unit-proven; executor/status/audit wiring and the live
+types are unit-proven; public descriptor orchestration and the live
 descriptor-duplication proof remain before the methods are registered.
 
 The executor-facing status coordinator is now implemented and locally green
@@ -494,21 +510,24 @@ complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
 seed/final-verify executor half is now closed internally: partition 4 is
 unlocked through one fixed `cryptsetup` argv and anonymous passphrase pipe;
-only `@var` is mounted; random machine/device identities, a private Punar
-state directory, `seed.json` and an optional byte-identical OOBE passthrough
-are durably written; then both shared data and root slot A are reopened
+only `@var` is mounted; a random machine identity, the validated live device
+identity, a private Punar state directory, `seed.json` and an optional
+byte-identical OOBE passthrough are durably written; then both shared data and
+root slot A are reopened
 read-only before success. The verifier binds the exact seed digest in daemon
 memory, enforces plan fields, owner/modes and OOBE presence, and refuses
 tampering or an unrequested answer file. Native ARM64 unit tests prove the
 fixed unlock/close argv, secret absence from argv, exact seed content/modes,
 successful closure and both refusal paths. Organization recovery-receipt
-orchestration, Raspberry Pi boot, audit wiring, live mount proof and live
+orchestration, Raspberry Pi boot, live mount proof and live
 descriptor-duplication proof still remain before `install.apply` is
 registered. Hardware reporting is no longer in that remainder: its bounded
 PCI/USB/platform observer, ARM-aware categories, strict schema, plan-time
 graphics blocker/warnings, privacy exclusions, installed-state copy and exact
 read-only digest verification are locally green on ARM64 and cross-check on
-x86_64.
+x86_64. Neither is the audit handoff: its identity-bound exact-schema copy,
+terminal-event append, durable write and read-only byte verification are
+unit-proven; I35 remains open until the public unattended lane exists.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

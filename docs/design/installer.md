@@ -1189,7 +1189,7 @@ What that buys, concretely:
 
 - **One audit writer.** The install's events are written by the same
   schema-conformant appender as everything else, and at the `seed` phase the
-  live audit log is copied to `/var/lib/punar/audit/` on the new system.
+  live audit log is copied to `/var/log/punar/audit.jsonl` on the new system.
   **The device's audit trail begins with its own installation.** An install
   that leaves no record in the machine it created is a hole in §53.
 - **One set of capability backends.** The keymap chosen at stage 01 is
@@ -1310,7 +1310,7 @@ specification.
 | write-slot-a | stream payload → slot A | `repart` `CopyBlocks=`, or a bounded 4 MiB read/write loop in `punard` — the same loop `update.apply` uses |
 | re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.uncompressed_size_bytes` bytes, sha256, and compare `payload.uncompressed_digest_sha256`. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
 | boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the first known-good slot-A UKI as the permanently uncounted `punar_<version>.efi`; write assessment-aware `preferred punar_<version>*.efi`, `timeout 0`, `editor no` to `loader.conf`. Later updates alone use `+3-0`, because only then does a known-good fallback exist. **`--no-variables` is a decision, not a default** (§7.3.1) |
-| seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log. **No account.** |
+| seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log to `/var/log/punar/audit.jsonl` (`0640 root:root` during install, reassigned to the runtime `punar` group at boot). **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
 **Implementation checkpoint (2026-08-30).** The internal `punard` executor
@@ -1335,7 +1335,9 @@ path, copies and re-hashes the uncounted slot-A UKI, durably writes the
 assessment-aware loader configuration, calls `syncfs`, and must unmount before
 entering `seed`. The seed executor derives and unlocks partition 4 with one
 fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
-creates a random machine id, random device id, private Punar state directory,
+creates a random machine id, copies the validated live device identity so the
+installation and installed audit records have one subject, creates the private
+Punar state directory,
 the advisory seed, a bounded privacy-minimized hardware report and the optional
 byte-identical OOBE passthrough. The report walks PCI, USB and ARM platform
 devices, resolves modaliases against the running kernel, checks bound modules
@@ -1348,9 +1350,23 @@ and reopens root slot A read-only before it may publish success. Unit tests
 prove exact unlock/close argv, secret absence from argv, hardware classification
 and privacy bounds, the seed/report shapes and modes, successful closure and
 tamper/unrequested-answer refusal.
+The audit handoff is now implemented behind that same final gate: it validates
+the live JSONL as exact twelve-field schema records for this device, rejects
+unknown or secret-shaped fields and duplicate ids, appends the exact
+human-authorized `install.recovery_key/enrolled` and `install.apply/success`
+terminal events for encrypted installs (the explicit unencrypted lane must
+omit the recovery event), durably writes `/var/log/punar/audit.jsonl`, then
+unmounts and reopens `@var` read-only to compare every byte, owner and mode
+before success.
+Unit tests prove the three required installation events, secret-field refusal
+and post-write tamper refusal. This is internal component proof; I35 still
+requires the public unattended install lane.
+`install.plan` also treats its success audit append as a precondition to
+returning the plan token: an audit I/O failure is reported with
+`disk_changed: false`, rather than being discovered after destructive work.
 The privileged real-vfat, LUKS and btrfs mounts still need the live installer
 VM gate. Organization receipt orchestration, Raspberry Pi boot-filesystem
-installation, the integrated audit path and public descriptor orchestration
+installation and public descriptor orchestration
 remain unimplemented, so this checkpoint is not an installability claim.
 
 Five external binaries, all from the image, all with fixed argv, all with

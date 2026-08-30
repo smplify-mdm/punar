@@ -3,10 +3,10 @@
 //!
 //! The internal executor now owns release verification, fixed-layout disk
 //! preparation, bounded slot-A writing, a physical re-read, UEFI boot
-//! installation, shared-state seeding and read-only final verification. The
-//! public `install.apply` method stays absent until the transaction also owns
-//! the hardware report, audit handoff, managed-recovery orchestration and the
-//! Raspberry Pi boot path. A half-installer is not an install API.
+//! installation, shared-state seeding, hardware/audit handoff and read-only
+//! final verification. The public `install.apply` method stays absent until
+//! the transaction also owns managed-recovery orchestration and the Raspberry
+//! Pi boot path. A half-installer is not an install API.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 
+use punar_common::audit::{AUDIT_LOG_PATH, validate_event_schema};
 use punar_common::install::{
     InstallApplyParams, InstallAwaiting, InstallBootArtifactPlan, InstallDiskIdentity,
     InstallEncryption, InstallFailure, InstallHardwareCoverage, InstallHardwareReport,
@@ -28,13 +29,14 @@ use punar_common::update::{
     Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
     verify_release_manifest,
 };
+use punar_common::{AuditEvent, Decision};
 use punar_recovery::{PersonalRecoveryConfirmation, PersonalRecoveryView, SecretRecoveryKey};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::hardware::{HardwareSources, observe_install_hardware};
-use crate::util::{hex, random_alnum, random_hex, sha256_hex, write_atomic, write_atomic_synced};
+use crate::util::{hex, random_hex, sha256_hex, write_atomic, write_atomic_synced};
 
 pub const ESP_PARTUUID: &str = "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
@@ -66,6 +68,7 @@ const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const HARDWARE_REPORT_MAX_BYTES: usize = 8 * 1024 * 1024;
+const AUDIT_HANDOFF_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -92,6 +95,11 @@ pub struct InstallerSources {
     pub repart_definitions_root: PathBuf,
     pub repart_runtime_root: PathBuf,
     pub hardware: HardwareSources,
+    /// Live device identity and audit source. `Daemon::new` binds these to
+    /// its configured state/audit paths so test and production identities
+    /// cannot drift between the daemon and installer.
+    pub live_device_id_path: PathBuf,
+    pub live_audit_path: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
     /// against `release_keys_dir` and leaves this `None`.
     pub release_manifest_override: Option<ReleaseManifest>,
@@ -141,6 +149,8 @@ impl Default for InstallerSources {
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),
             hardware: HardwareSources::default(),
+            live_device_id_path: PathBuf::from("/var/lib/punar/device-id"),
+            live_audit_path: PathBuf::from(AUDIT_LOG_PATH),
             release_manifest_override: None,
             architecture_override: None,
             boot_platform_override: None,
@@ -188,6 +198,16 @@ pub struct Installer {
     seed_digest: Arc<Mutex<Option<String>>>,
     /// Digest of the exact hardware evidence written beside the seed.
     hardware_report_digest: Arc<Mutex<Option<String>>>,
+}
+
+/// Exact terminal records copied into the installed audit trail after the
+/// installed root and shared state have passed their read-only checks. The
+/// event type has no secret-bearing field; this wrapper prevents a caller
+/// from substituting unrelated schema-valid events. Recovery is absent only
+/// for the explicit unencrypted lane; claiming enrollment there is refused.
+pub struct InstallAuditEvents {
+    pub recovery_enrolled: Option<AuditEvent>,
+    pub apply_success: AuditEvent,
 }
 
 /// Non-serializable, non-debuggable apply inputs duplicated from descriptors
@@ -890,6 +910,7 @@ impl Installer {
                 "the hardware report exceeds its fixed installed-state limit".into(),
             ));
         }
+        let installed_device_id = read_validated_device_id(&self.sources.live_device_id_path)?;
 
         let data = self.mount_data_volume(plan, inputs, &token, false)?;
         let lib_dir = data.path().join("lib");
@@ -906,11 +927,7 @@ impl Installer {
             format!("{}\n", random_hex(16)?).as_bytes(),
             0o444,
         )?;
-        write_new_synced_exact(
-            &punar_dir.join("device-id"),
-            format!("dev_{}\n", random_alnum(10)?).as_bytes(),
-            0o600,
-        )?;
+        write_new_synced_exact(&punar_dir.join("device-id"), &installed_device_id, 0o600)?;
 
         if let Some(answers) = inputs.oobe_answers() {
             write_new_synced_exact(&install_dir.join("oobe-answers.json"), answers, 0o600)?;
@@ -941,6 +958,7 @@ impl Installer {
         plan: &InstallPlan,
         params: &InstallApplyParams,
         inputs: &InstallApplyInputs,
+        audit_events: &InstallAuditEvents,
     ) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::VerifyInstalled)?;
         let token = sha256_hex(
@@ -963,18 +981,18 @@ impl Installer {
                 "no hardware-report identity is active".into(),
             ));
         };
+        let expected_device_id = read_validated_device_id(&self.sources.live_device_id_path)?;
 
         let data = self.mount_data_volume(plan, inputs, &token, true)?;
         let manifest = self.release_manifest_for_plan(plan)?;
-        verify_installed_seed(
-            data.path(),
-            plan,
-            params,
-            inputs,
-            &expected_seed_digest,
-            &expected_hardware_report_digest,
-            &format!("{}-{}", manifest.image_id, manifest.version),
-        )?;
+        let expected_image_version = format!("{}-{}", manifest.image_id, manifest.version);
+        let expectations = InstalledSeedExpectations {
+            seed_digest: &expected_seed_digest,
+            hardware_report_digest: &expected_hardware_report_digest,
+            device_id: &expected_device_id,
+            image_version: &expected_image_version,
+        };
+        verify_installed_seed(data.path(), plan, params, inputs, &expectations)?;
         data.finish()?;
 
         let root = self.mount_root_slot_a(plan, &token)?;
@@ -984,6 +1002,39 @@ impl Installer {
             "installed punard service",
         )?;
         root.finish()?;
+
+        let device_id = std::str::from_utf8(&expected_device_id)
+            .map_err(|_| InstallError::Trust("the live device identity is invalid".into()))?
+            .strip_suffix('\n')
+            .ok_or_else(|| InstallError::Trust("the live device identity is invalid".into()))?;
+        let recovery_required = plan.recovery_mode != InstallRecoveryMode::None;
+        let audit_bytes = build_installed_audit_handoff(
+            &self.sources.live_audit_path,
+            device_id,
+            audit_events,
+            recovery_required,
+        )?;
+
+        let data = self.mount_data_volume(plan, inputs, &token, false)?;
+        let log_dir = data.path().join("log");
+        ensure_directory_exact(&log_dir, 0o755)?;
+        let audit_dir = log_dir.join("punar");
+        ensure_directory_exact(&audit_dir, 0o750)?;
+        write_new_synced_exact(&audit_dir.join("audit.jsonl"), &audit_bytes, 0o640)?;
+        let filesystem = File::open(data.path())?;
+        rustix::fs::syncfs(&filesystem).map_err(rustix_install_io)?;
+        drop(filesystem);
+        data.finish()?;
+
+        let data = self.mount_data_volume(plan, inputs, &token, true)?;
+        verify_installed_audit(
+            data.path(),
+            &audit_bytes,
+            device_id,
+            audit_events,
+            recovery_required,
+        )?;
+        data.finish()?;
 
         self.complete_transaction_status()?;
         *self.seed_digest.lock().unwrap() = None;
@@ -2880,6 +2931,279 @@ fn read_bounded_regular(
 }
 
 #[cfg(target_os = "linux")]
+fn validate_device_id_bytes(bytes: &[u8]) -> Result<(), InstallError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| InstallError::Trust("the device identity is not UTF-8".into()))?;
+    let token = text.strip_suffix('\n').ok_or_else(|| {
+        InstallError::Trust("the device identity is not newline-terminated".into())
+    })?;
+    let suffix = token
+        .strip_prefix("dev_")
+        .filter(|suffix| {
+            !suffix.is_empty()
+                && suffix.len() <= 60
+                && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| InstallError::Trust("the device identity is invalid".into()))?;
+    debug_assert!(!suffix.is_empty());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_validated_device_id(path: &Path) -> Result<Vec<u8>, InstallError> {
+    let bytes = read_bounded_regular(path, 65, "live device identity")?;
+    validate_device_id_bytes(&bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_validated_audit(bytes: &[u8], device_id: &str) -> Result<Vec<AuditEvent>, InstallError> {
+    const FIELDS: [&str; 12] = [
+        "action",
+        "agent_session_id",
+        "decision",
+        "device_id",
+        "event_id",
+        "policy_ids",
+        "project_id",
+        "resource",
+        "result",
+        "source",
+        "timestamp",
+        "user_id",
+    ];
+
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(InstallError::Trust(
+            "the audit log ends in a partial record".into(),
+        ));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| InstallError::Trust("the audit log is not UTF-8".into()))?;
+    let mut events = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            return Err(InstallError::Trust(
+                "the audit log contains an empty record".into(),
+            ));
+        }
+        let raw: serde_json::Value = serde_json::from_str(line)
+            .map_err(|_| InstallError::Trust("the audit log contains invalid JSON".into()))?;
+        let object = raw.as_object().ok_or_else(|| {
+            InstallError::Trust("the audit log contains a non-object record".into())
+        })?;
+        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+            return Err(InstallError::Trust(
+                "the audit log contains an unknown, missing or secret-shaped field".into(),
+            ));
+        }
+        let event: AuditEvent = serde_json::from_value(raw)
+            .map_err(|_| InstallError::Trust("the audit record has the wrong shape".into()))?;
+        validate_event_schema(&event).map_err(|_| {
+            InstallError::Trust("the audit record does not conform to its schema".into())
+        })?;
+        if event.device_id != device_id {
+            return Err(InstallError::Trust(
+                "the audit record belongs to a different device identity".into(),
+            ));
+        }
+        if events
+            .iter()
+            .any(|existing: &AuditEvent| existing.event_id == event.event_id)
+        {
+            return Err(InstallError::Trust(
+                "the audit log contains a duplicate event id".into(),
+            ));
+        }
+        events.push(event);
+    }
+    Ok(events)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_install_terminal_event(
+    event: &AuditEvent,
+    device_id: &str,
+    action: &str,
+    resource: &str,
+    result: &str,
+) -> Result<(), InstallError> {
+    validate_event_schema(event).map_err(|_| {
+        InstallError::Trust("an installation terminal event is not schema-conformant".into())
+    })?;
+    if event.device_id != device_id
+        || event.action != action
+        || event.resource.as_deref() != Some(resource)
+        || event.decision != Decision::Allow
+        || event.result != result
+        || event.source != punar_common::PrincipalKind::Human
+        || event.agent_session_id.as_deref() != Some(punar_common::audit::AGENT_SESSION_NONE)
+        || event.project_id.as_deref() != Some(punar_common::audit::PROJECT_ID_SYSTEM)
+    {
+        return Err(InstallError::Trust(
+            "an installation terminal event is not bound to this human-authorized install".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_audit_event_once(
+    bytes: &mut Vec<u8>,
+    events: &mut Vec<AuditEvent>,
+    event: &AuditEvent,
+) -> Result<(), InstallError> {
+    if let Some(existing) = events
+        .iter()
+        .find(|existing| existing.event_id == event.event_id)
+    {
+        if existing != event {
+            return Err(InstallError::Trust(
+                "an installation event id was reused with different content".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let mut line = serde_json::to_vec(event)
+        .map_err(|_| InstallError::Trust("an installation audit event did not serialize".into()))?;
+    line.push(b'\n');
+    if bytes.len().saturating_add(line.len()) > AUDIT_HANDOFF_MAX_BYTES {
+        return Err(InstallError::Refused(
+            "the installed audit handoff exceeds its fixed size limit".into(),
+        ));
+    }
+    bytes.extend_from_slice(&line);
+    events.push(event.clone());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_install_audit_events(
+    events: &[AuditEvent],
+    terminal: &InstallAuditEvents,
+    recovery_required: bool,
+) -> Result<(), InstallError> {
+    let has_plan = events.iter().any(|event| {
+        event.action == "install.plan"
+            && event.resource.as_deref() == Some("system_disk")
+            && event.decision == Decision::Allow
+            && event.source == punar_common::PrincipalKind::Human
+            && event.user_id == terminal.apply_success.user_id
+            && event.agent_session_id.as_deref() == Some(punar_common::audit::AGENT_SESSION_NONE)
+            && event.result == "success"
+    });
+    let has_recovery = terminal
+        .recovery_enrolled
+        .as_ref()
+        .is_some_and(|expected| events.iter().any(|event| event == expected));
+    let has_apply = events.iter().any(|event| event == &terminal.apply_success);
+    if !has_plan || (recovery_required && !has_recovery) || !has_apply {
+        return Err(InstallError::Trust(
+            "the installed audit handoff is missing a required installation event".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn build_installed_audit_handoff(
+    source: &Path,
+    device_id: &str,
+    terminal: &InstallAuditEvents,
+    recovery_required: bool,
+) -> Result<Vec<u8>, InstallError> {
+    match (recovery_required, terminal.recovery_enrolled.as_ref()) {
+        (true, Some(event)) => validate_install_terminal_event(
+            event,
+            device_id,
+            "install.recovery_key",
+            "system_disk",
+            "enrolled",
+        )?,
+        (true, None) => {
+            return Err(InstallError::Trust(
+                "the encrypted installation has no recovery-enrollment event".into(),
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(InstallError::Trust(
+                "the unencrypted installation falsely claims recovery enrollment".into(),
+            ));
+        }
+        (false, None) => {}
+    }
+    validate_install_terminal_event(
+        &terminal.apply_success,
+        device_id,
+        "install.apply",
+        "system_image",
+        "success",
+    )?;
+    if terminal
+        .recovery_enrolled
+        .as_ref()
+        .is_some_and(|event| event.user_id != terminal.apply_success.user_id)
+    {
+        return Err(InstallError::Trust(
+            "the installation terminal events belong to different human actors".into(),
+        ));
+    }
+    let mut bytes = read_bounded_regular(
+        source,
+        AUDIT_HANDOFF_MAX_BYTES,
+        "live installation audit log",
+    )?;
+    let mut events = parse_validated_audit(&bytes, device_id)?;
+    if let Some(recovery) = terminal.recovery_enrolled.as_ref() {
+        append_audit_event_once(&mut bytes, &mut events, recovery)?;
+    }
+    append_audit_event_once(&mut bytes, &mut events, &terminal.apply_success)?;
+    require_install_audit_events(&events, terminal, recovery_required)?;
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_installed_audit(
+    var_root: &Path,
+    expected: &[u8],
+    device_id: &str,
+    terminal: &InstallAuditEvents,
+    recovery_required: bool,
+) -> Result<(), InstallError> {
+    verify_installed_directory_mode(&var_root.join("log"), 0o755)?;
+    verify_installed_directory_mode(&var_root.join("log/punar"), 0o750)?;
+    let path = var_root.join("log/punar/audit.jsonl");
+    let actual = read_bounded_regular(&path, AUDIT_HANDOFF_MAX_BYTES, "installed audit log")?;
+    verify_installed_file_mode(&path, 0o640)?;
+    if actual != expected {
+        return Err(InstallError::Trust(
+            "the installed audit log changed between its durable write and read-only verification"
+                .into(),
+        ));
+    }
+    let events = parse_validated_audit(&actual, device_id)?;
+    require_install_audit_events(&events, terminal, recovery_required)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_installed_directory_mode(path: &Path, mode: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.permissions().mode() & 0o7777 != mode
+        || metadata.uid() != expected_install_owner()
+        || metadata.gid() != expected_install_group()
+    {
+        return Err(InstallError::Refused(format!(
+            "{} does not have the required directory type, owner and mode",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn verify_installed_file_mode(path: &Path, mode: u32) -> Result<(), InstallError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -2897,14 +3221,20 @@ fn verify_installed_file_mode(path: &Path, mode: u32) -> Result<(), InstallError
 }
 
 #[cfg(target_os = "linux")]
+struct InstalledSeedExpectations<'a> {
+    seed_digest: &'a str,
+    hardware_report_digest: &'a str,
+    device_id: &'a [u8],
+    image_version: &'a str,
+}
+
+#[cfg(target_os = "linux")]
 fn verify_installed_seed(
     var_root: &Path,
     plan: &InstallPlan,
     params: &InstallApplyParams,
     inputs: &InstallApplyInputs,
-    expected_seed_digest: &str,
-    expected_hardware_report_digest: &str,
-    expected_image_version: &str,
+    expected: &InstalledSeedExpectations<'_>,
 ) -> Result<(), InstallError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -2923,7 +3253,7 @@ fn verify_installed_seed(
     let seed_path = punar_dir.join("install/seed.json");
     let seed_bytes = read_bounded_regular(&seed_path, 4096, "installed seed")?;
     verify_installed_file_mode(&seed_path, 0o644)?;
-    if sha256_hex(&seed_bytes) != expected_seed_digest {
+    if sha256_hex(&seed_bytes) != expected.seed_digest {
         return Err(InstallError::Trust(
             "the installed seed changed between its durable write and read-only verification"
                 .into(),
@@ -2935,7 +3265,7 @@ fn verify_installed_seed(
         || seed.locale != params.seed.locale
         || seed.keymap != plan.keymap
         || !punar_common::time::is_rfc3339_timestamp(&seed.installed_at)
-        || seed.image_version != expected_image_version
+        || seed.image_version != expected.image_version
         || seed.disk_encrypted != (plan.encryption == InstallEncryption::Luks2)
         || seed.disk_recovery.mode != plan.recovery_mode
     {
@@ -2960,18 +3290,12 @@ fn verify_installed_seed(
     }
 
     let device_path = punar_dir.join("device-id");
-    let device_id = read_bounded_regular(&device_path, 64, "installed device id")?;
+    let device_id = read_bounded_regular(&device_path, 65, "installed device id")?;
     verify_installed_file_mode(&device_path, 0o600)?;
-    let device_text = std::str::from_utf8(&device_id).unwrap_or_default();
-    let device_token = device_text.strip_suffix('\n').unwrap_or_default();
-    if device_token.len() != 14
-        || !device_token.starts_with("dev_")
-        || !device_token[4..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric())
-    {
+    validate_device_id_bytes(&device_id)?;
+    if device_id != expected.device_id {
         return Err(InstallError::Trust(
-            "the installed device id is invalid".into(),
+            "the installed device id does not match its installation audit identity".into(),
         ));
     }
 
@@ -2982,7 +3306,7 @@ fn verify_installed_seed(
         "installed hardware report",
     )?;
     verify_installed_file_mode(&hardware_path, 0o644)?;
-    if sha256_hex(&hardware_bytes) != expected_hardware_report_digest {
+    if sha256_hex(&hardware_bytes) != expected.hardware_report_digest {
         return Err(InstallError::Trust(
             "the installed hardware report changed between its durable write and read-only verification"
                 .into(),
@@ -3627,6 +3951,7 @@ fn gpt_edge_sha256(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use punar_common::audit::{AuditActor, AuditOutcome, AuditWriter};
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -3667,6 +3992,21 @@ mod tests {
                 manifest.version
             );
             let status_path = root.join("install-status.json");
+            let live_device_id_path = root.join("live-device-id");
+            fs::write(&live_device_id_path, "dev_fixture001\n").unwrap();
+            let live_audit_path = root.join("live-audit.jsonl");
+            let mut audit = AuditWriter::open(&live_audit_path).unwrap();
+            audit
+                .append(&AuditEvent::action(
+                    "dev_fixture001",
+                    &AuditActor::cli_peer("root"),
+                    "install.plan",
+                    "system_disk",
+                    Decision::Allow,
+                    AuditOutcome::Success,
+                ))
+                .unwrap();
+            drop(audit);
             Self {
                 root,
                 sources: InstallerSources {
@@ -3678,6 +4018,8 @@ mod tests {
                     release_manifest_override: Some(manifest),
                     architecture_override: Some(Architecture::X86_64),
                     boot_platform_override: Some(BootPlatform::Uefi),
+                    live_device_id_path,
+                    live_audit_path,
                     hardware_report_override: Some(InstallHardwareReport {
                         v: 1,
                         generated_at: "2026-08-30T00:00:00Z".into(),
@@ -3813,6 +4155,106 @@ mod tests {
             oobe_answers_fd: None,
             unattended: false,
         }
+    }
+
+    fn terminal_audit_events() -> InstallAuditEvents {
+        let actor = AuditActor::cli_peer("root");
+        let mut recovery_enrolled = AuditEvent::action(
+            "dev_fixture001",
+            &actor,
+            "install.recovery_key",
+            "system_disk",
+            Decision::Allow,
+            AuditOutcome::Success,
+        );
+        recovery_enrolled.result = "enrolled".into();
+        InstallAuditEvents {
+            recovery_enrolled: Some(recovery_enrolled),
+            apply_success: AuditEvent::action(
+                "dev_fixture001",
+                &actor,
+                "install.apply",
+                "system_image",
+                Decision::Allow,
+                AuditOutcome::Success,
+            ),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn audit_handoff_rejects_unknown_secret_shaped_fields() {
+        let fixture = Fixture::new();
+        let bytes = fs::read(&fixture.sources.live_audit_path).unwrap();
+        let mut raw: serde_json::Value = serde_json::from_slice(bytes.trim_ascii_end()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .insert("password".into(), serde_json::json!("must-not-copy"));
+        let mut changed = serde_json::to_vec(&raw).unwrap();
+        changed.push(b'\n');
+        fs::write(&fixture.sources.live_audit_path, changed).unwrap();
+
+        let error = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal_audit_events(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("secret-shaped field"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn audit_handoff_refuses_false_or_missing_recovery_claims() {
+        let fixture = Fixture::new();
+        let error = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal_audit_events(),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("falsely claims"));
+
+        let mut terminal = terminal_audit_events();
+        terminal.recovery_enrolled = None;
+        let error = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no recovery-enrollment event"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_audit_must_match_the_durable_handoff_byte_for_byte() {
+        let fixture = Fixture::new();
+        let terminal = terminal_audit_events();
+        let expected = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal,
+            true,
+        )
+        .unwrap();
+        let var_root = fixture.root.join("installed-var");
+        ensure_directory_exact(&var_root, 0o755).unwrap();
+        ensure_directory_exact(&var_root.join("log"), 0o755).unwrap();
+        ensure_directory_exact(&var_root.join("log/punar"), 0o750).unwrap();
+        let audit_path = var_root.join("log/punar/audit.jsonl");
+        write_new_synced_exact(&audit_path, &expected, 0o640).unwrap();
+        verify_installed_audit(&var_root, &expected, "dev_fixture001", &terminal, true).unwrap();
+
+        let mut changed = expected.clone();
+        changed.push(b' ');
+        fs::write(&audit_path, changed).unwrap();
+        let error = verify_installed_audit(&var_root, &expected, "dev_fixture001", &terminal, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("changed between"));
     }
 
     fn first_mib(path: &Path) -> Vec<u8> {
@@ -4726,12 +5168,45 @@ mod tests {
             fs::metadata(&seed_path).unwrap().uid(),
             expected_install_owner()
         );
+        assert_eq!(
+            fs::read(data.join("lib/punar/device-id")).unwrap(),
+            b"dev_fixture001\n"
+        );
 
+        let audit_events = terminal_audit_events();
         installer
-            .verify_installed_system(&result.plan, &params, &inputs)
+            .verify_installed_system(&result.plan, &params, &inputs, &audit_events)
             .unwrap();
         assert_eq!(installer.status().state, InstallOverallState::Succeeded);
         assert_eq!(installer.status().phase, None);
+
+        let audit_path = data.join("log/punar/audit.jsonl");
+        let audit_bytes = fs::read(&audit_path).unwrap();
+        let events = parse_validated_audit(&audit_bytes, "dev_fixture001").unwrap();
+        assert_eq!(events.len(), 3);
+        require_install_audit_events(&events, &audit_events, true).unwrap();
+        let audit_text = std::str::from_utf8(&audit_bytes).unwrap();
+        for forbidden in [
+            "\"password\":",
+            "\"passphrase\":",
+            "\"recovery_key\":",
+            "\"private_key\":",
+            "\"token\":",
+        ] {
+            assert!(!audit_text.contains(forbidden), "found {forbidden}");
+        }
+        assert_eq!(
+            fs::metadata(&audit_path).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+        assert_eq!(
+            fs::metadata(data.join("log/punar"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o750
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4770,10 +5245,23 @@ mod tests {
                 .unwrap();
         assert!(!seed.disk_encrypted);
         assert_eq!(seed.disk_recovery.mode, InstallRecoveryMode::None);
+        let mut audit_events = terminal_audit_events();
+        audit_events.recovery_enrolled = None;
         installer
-            .verify_installed_system(&result.plan, &params, &inputs)
+            .verify_installed_system(&result.plan, &params, &inputs, &audit_events)
             .unwrap();
         assert_eq!(installer.status().state, InstallOverallState::Succeeded);
+        let events = parse_validated_audit(
+            &fs::read(data.join("log/punar/audit.jsonl")).unwrap(),
+            "dev_fixture001",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.action == "install.recovery_key")
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4805,6 +5293,7 @@ mod tests {
         installer
             .seed_installed_system(&result.plan, &params, &inputs)
             .unwrap();
+        let audit_events = terminal_audit_events();
 
         fs::write(
             data.join("lib/punar/install/oobe-answers.json"),
@@ -4812,7 +5301,7 @@ mod tests {
         )
         .unwrap();
         let error = installer
-            .verify_installed_system(&result.plan, &params, &inputs)
+            .verify_installed_system(&result.plan, &params, &inputs, &audit_events)
             .unwrap_err();
         assert!(error.to_string().contains("unrequested OOBE answers"));
         assert_eq!(installer.status().state, InstallOverallState::Running);
@@ -4828,7 +5317,7 @@ mod tests {
         changed_hardware.push(b' ');
         fs::write(&hardware_path, changed_hardware).unwrap();
         let error = installer
-            .verify_installed_system(&result.plan, &params, &inputs)
+            .verify_installed_system(&result.plan, &params, &inputs, &audit_events)
             .unwrap_err();
         assert!(error.to_string().contains("hardware report changed"));
         assert_eq!(installer.status().state, InstallOverallState::Running);
@@ -4839,7 +5328,7 @@ mod tests {
         seed.push(b' ');
         fs::write(seed_path, seed).unwrap();
         let error = installer
-            .verify_installed_system(&result.plan, &params, &inputs)
+            .verify_installed_system(&result.plan, &params, &inputs, &audit_events)
             .unwrap_err();
         assert!(error.to_string().contains("seed changed"));
         assert_eq!(installer.status().state, InstallOverallState::Running);

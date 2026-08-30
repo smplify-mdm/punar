@@ -369,7 +369,10 @@ impl Daemon {
             cfg.app_arch_override.as_deref(),
         )
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        let installer = Installer::new(cfg.installer_sources.clone());
+        let mut installer_sources = cfg.installer_sources.clone();
+        installer_sources.live_device_id_path = cfg.state_dir.join("device-id");
+        installer_sources.live_audit_path = cfg.audit_path.clone();
+        let installer = Installer::new(installer_sources);
         if cfg.live_mode {
             installer
                 .initialize_status_file()
@@ -912,6 +915,31 @@ impl Inner {
         }
     }
 
+    /// Installation cannot safely defer an audit write: the installed audit
+    /// handoff requires the plan as its origin record, and discovering a
+    /// missing origin only after partitioning would turn an audit outage into
+    /// a partially destructive install. Other established mutation surfaces
+    /// retain their response contract; the installer alone fails closed
+    /// before it returns a usable plan token.
+    fn log_install_plan_required(&self, event: AuditEvent) -> Result<(), IpcError> {
+        match self.audit.lock().unwrap().append(&event) {
+            Ok(()) => {
+                self.audit_events.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("punard: FAILED to append required install.plan audit event: {error}");
+                Err(IpcError::with_details(
+                    ErrorCode::Internal,
+                    "Installation planning stopped because Punar could not durably record its origin. No disk bytes were changed.\n\
+                     Policy: os hard safety constraint — an installation cannot begin without its audit trail.\n\
+                     Next step: verify free space and /var/log/punar permissions, then retry.",
+                    json!({ "component": "installer_audit", "disk_changed": false }),
+                ))
+            }
+        }
+    }
+
     /// The audit attribution for one connected peer.
     ///
     /// M3: the resolved username, `source: human`. M8 adds the section-12.5
@@ -1061,14 +1089,14 @@ impl Inner {
         }
         match self.installer.plan(params) {
             Ok(plan) => {
-                self.log_audit(AuditEvent::action(
+                self.log_install_plan_required(AuditEvent::action(
                     &self.device_id,
                     &actor,
                     ACTION,
                     RESOURCE,
                     Decision::Allow,
                     AuditOutcome::Success,
-                ));
+                ))?;
                 Ok(to_value(plan))
             }
             Err(error) => {
@@ -2782,6 +2810,9 @@ fn to_value<T: serde::Serialize>(value: T) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, OpenOptions};
+
+    use punar_common::audit::AUDIT_ROTATE_BYTES;
 
     #[test]
     fn read_line_bounded_handles_lines_and_limits() {
@@ -2810,5 +2841,64 @@ mod tests {
             LineRead::Line(l) => assert_eq!(l, "after"),
             _ => panic!("expected the next line"),
         }
+    }
+
+    #[test]
+    fn install_plan_audit_failure_is_fail_closed_before_disk_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "punard-install-audit-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let audit_path = root.join("audit.jsonl");
+        let daemon = Daemon::new(
+            DaemonConfig::new(
+                root.join("punard.sock"),
+                root.join("state"),
+                audit_path.clone(),
+            ),
+            Registry::new(Vec::new()),
+        )
+        .unwrap();
+
+        let before = daemon.inner.audit_events.load(Ordering::SeqCst);
+        OpenOptions::new()
+            .write(true)
+            .open(&audit_path)
+            .unwrap()
+            .set_len(AUDIT_ROTATE_BYTES)
+            .unwrap();
+        fs::remove_file(&audit_path).unwrap();
+        fs::create_dir(&audit_path).unwrap();
+
+        let error = daemon
+            .inner
+            .log_install_plan_required(AuditEvent::action(
+                &daemon.inner.device_id,
+                &AuditActor::cli_peer("root"),
+                "install.plan",
+                "system_disk",
+                Decision::Allow,
+                AuditOutcome::Success,
+            ))
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(
+            error.details,
+            Some(json!({
+                "component": "installer_audit",
+                "disk_changed": false
+            }))
+        );
+        assert_eq!(
+            daemon.inner.audit_events.load(Ordering::SeqCst),
+            before,
+            "a failed durable append must not increment the audit count"
+        );
+
+        drop(daemon);
+        fs::remove_dir_all(root).unwrap();
     }
 }
