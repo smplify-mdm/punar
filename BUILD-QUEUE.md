@@ -390,9 +390,10 @@ installer VM still owes the kernel-privilege proof because ordinary container
 seccomp blocks `pidfd_getfd`. Secret input is now restricted further to
 anonymous memfds sealed against writes, growth and shrinkage; ordinary files
 are refused, and the daemon rewinds the duplicated open description before
-its bounded read. The recovery gate,
-partition/encrypt/write/re-read/boot/seed executor, ISO assembly and the
-unattended VM lane are still next.
+its bounded read. The recovery gate and the internal
+verify/layout/write/re-read executor primitives now exist. Recovery-key
+enrollment, boot installation, shared-state seeding, final installed-system
+verification, ISO assembly and the unattended VM lane are still next.
 
 The executor's compressed-versus-written identity ambiguity is closed before
 its first write: the signed release manifest now binds both the downloaded
@@ -414,6 +415,22 @@ creates LUKS2+btrfs data, and opens it with the piped key. `punard` can
 therefore own a bounded verified slot write without storing either the secret
 or an 8 GiB raw payload on the live filesystem.
 
+On 2026-08-30 that exact V-REPART mechanism moved behind `punard`'s internal
+plan-bound executor. `prepare_disk_layout` re-reads the physical identity, GPT
+edges and signed release at the destructive boundary; refuses a target that is
+no longer a block device; merges only the immutable base, encrypted and
+streaming definition layers through bounded `O_NOFOLLOW` regular-file reads;
+and gives `systemd-repart` the passphrase only through anonymous stdin. It
+captures neither output stream and removes the secret-free rendered set after
+the fixed operation. A native ARM64 test proves overlay precedence, exact
+argv, passphrase absence from argv, byte delivery through the pipe, cleanup
+and phase ordering; a separate refusal test changes a GPT edge immediately
+before execution and proves the target remains byte-identical. The shipped
+definition layers are now staged into the shared desktop tree so a later live
+profile inherits the same source of truth as the direct images. The public
+method remains absent: this is real executor progress, not an installability
+claim.
+
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
 pipe/Unix socket, the two answers return through a sealed memfd, wrong groups
@@ -433,8 +450,9 @@ checkpoint. Public failures use a fixed secret-free vocabulary and distinguish
 pre-write refusal from a disk that may be partially prepared. Tests prove the
 complete nine-phase success path, monotonic progress, recovery pause/resume,
 secret-free failure, key cancellation and persisted/in-memory agreement. The
-destructive executor, audit wiring and live descriptor-duplication proof still
-remain before `install.apply` is registered.
+recovery enrollment, boot/seed/final-verify executor half, audit wiring and
+live descriptor-duplication proof still remain before `install.apply` is
+registered.
 
 The encryption seam is now materially ahead of the installer. On 2026-08-27
 the pinned ARM64 systemd 261.2 spike created a real LUKS2 volume, enrolled a

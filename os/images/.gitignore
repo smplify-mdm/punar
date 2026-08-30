@@ -22,6 +22,7 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/theme/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/catalog/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/desktop/mkosi.extra/usr/share/punar/network/
+mkosi.profiles/desktop/mkosi.extra/usr/share/punar/repart.d/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/
 mkosi.profiles/dev/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/dev/mkosi.extra/usr/bin/

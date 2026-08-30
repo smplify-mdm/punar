@@ -95,6 +95,7 @@ stage_desktop_extra() {
     local shell_src="${REPO_ROOT}/shell/punar-shell"
     local tokens="${REPO_ROOT}/shell/theme/punar-tokens.json"
     local themes="${REPO_ROOT}/shell/theme/themes"
+    local repart_src="${IMAGES_DIR}/repart.d"
     local extra="${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra"
     local dev_extra="${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra"
 
@@ -109,6 +110,7 @@ stage_desktop_extra() {
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
            "${extra}/usr/share/punar/theme" \
            "${extra}/usr/share/punar/network" \
+           "${extra}/usr/share/punar/repart.d" \
            "${extra}/usr/share/punar/fixtures" \
            "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
@@ -116,6 +118,9 @@ stage_desktop_extra() {
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
              "${extra}/usr/share/punar/network/zones" \
+             "${extra}/usr/share/punar/repart.d/install" \
+             "${extra}/usr/share/punar/repart.d/install-encrypted" \
+             "${extra}/usr/share/punar/repart.d/install-streaming" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
              "${dev_extra}/usr/share/punar/fixtures/projects/atlas"
 
@@ -176,6 +181,17 @@ stage_desktop_extra() {
     # shell/theme/themes stays the single source of truth (the contrast
     # gate in Theme/ThemeContrast.qml runs against these exact bytes).
     cp -R "${themes}/." "${extra}/usr/share/punar/theme/themes/"
+    # The internal installer executor accepts no caller-provided layout.
+    # Stage the three immutable definition layers it merges: the canonical
+    # A/B layout, the LUKS2 data overlay and the root-A streaming overlay.
+    # The eventual live profile inherits this same desktop tree, preventing a
+    # second hand-maintained installer layout from drifting from image builds.
+    install -m 0644 "${repart_src}/install/"*.conf \
+        "${extra}/usr/share/punar/repart.d/install/"
+    install -m 0644 "${repart_src}/install-encrypted/"*.conf \
+        "${extra}/usr/share/punar/repart.d/install-encrypted/"
+    install -m 0644 "${repart_src}/install-streaming/"*.conf \
+        "${extra}/usr/share/punar/repart.d/install-streaming/"
     # M5: Acme organization fixtures for the dev/CI mock control plane
     # (milestone-5.md §4.4) — served VERBATIM by punar-mock-smplify from
     # /usr/share/punar/fixtures/acme. Same staged-not-committed-twice

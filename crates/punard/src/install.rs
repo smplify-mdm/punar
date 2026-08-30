@@ -1,11 +1,14 @@
 //! Installer discovery, destructive-plan construction, bounded secret intake,
 //! and secret-free status reporting.
 //!
-//! Nothing in this module writes a block device yet. The public
-//! `install.apply` method stays absent until the fixed transaction can carry a
-//! verified plan through partition, encrypt, write, re-read, boot, and seed.
+//! The internal executor now owns release verification, fixed-layout disk
+//! preparation, bounded slot-A writing, and a physical re-read. The public
+//! `install.apply` method stays absent until the same fixed transaction can
+//! also install boot assets, seed the shared filesystem, and verify the
+//! installed result. A half-installer is not an install API.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -55,6 +58,7 @@ const SLOT_IO_BYTES: usize = 4 * 1024 * 1024;
 const STATUS_PROGRESS_BYTES: u64 = 64 * 1024 * 1024;
 const DIRECT_IO_BLOCK_BYTES: usize = 4096;
 const DIRECT_IO_BLOCKS: usize = SLOT_IO_BYTES / DIRECT_IO_BLOCK_BYTES;
+const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
 
 const PUNAR_PARTUUIDS: [&str; 4] = [
     ESP_PARTUUID,
@@ -74,6 +78,9 @@ pub struct InstallerSources {
     pub release_keys_dir: PathBuf,
     pub status_path: PathBuf,
     pub zstd_path: PathBuf,
+    pub repart_path: PathBuf,
+    pub repart_definitions_root: PathBuf,
+    pub repart_runtime_root: PathBuf,
     /// Test-only seam. Production always verifies exact manifest bytes
     /// against `release_keys_dir` and leaves this `None`.
     pub release_manifest_override: Option<ReleaseManifest>,
@@ -82,6 +89,10 @@ pub struct InstallerSources {
     /// Raspberry Pi media selects this explicitly when its live profile is
     /// assembled. UEFI is the production default for the current ISO.
     pub boot_platform_override: Option<BootPlatform>,
+    /// Unit-test-only seam for a fake repart program targeting a sparse
+    /// regular file. This field does not exist in production builds.
+    #[cfg(test)]
+    pub allow_regular_target_for_tests: bool,
 }
 
 impl Default for InstallerSources {
@@ -96,9 +107,14 @@ impl Default for InstallerSources {
             release_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
             status_path: PathBuf::from("/run/punar/install.json"),
             zstd_path: PathBuf::from("/usr/bin/zstd"),
+            repart_path: PathBuf::from("/usr/bin/systemd-repart"),
+            repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
+            repart_runtime_root: PathBuf::from("/run/punar/install"),
             release_manifest_override: None,
             architecture_override: None,
             boot_platform_override: None,
+            #[cfg(test)]
+            allow_regular_target_for_tests: false,
         }
     }
 }
@@ -478,6 +494,99 @@ impl Installer {
     pub fn verify_release_payload(&self, plan: &InstallPlan) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::VerifyRelease)?;
         self.open_verified_payload(plan).map(drop)
+    }
+
+    /// Materialize Punar's fixed GPT, ESP and shared-data filesystem from the
+    /// definition files shipped in the immutable image. For an encrypted
+    /// plan, the passphrase travels through the child's anonymous stdin pipe;
+    /// it is never a path, argument, environment value, status field or
+    /// captured output.
+    ///
+    /// `systemd-repart` performs partitioning, LUKS creation and formatting as
+    /// one crash-consistent operation. The public nine-phase status retains
+    /// those three user-facing checkpoints: while the tool runs, `partition`
+    /// is active; only after a successful exit are `encrypt` and `format`
+    /// completed and `write_slot_a` entered. A failure therefore never claims
+    /// that any of the three preparation checkpoints completed.
+    pub fn prepare_disk_layout(
+        &self,
+        plan: &InstallPlan,
+        inputs: &InstallApplyInputs,
+    ) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::Partition)?;
+        let token = sha256_hex(
+            &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        );
+        let refreshed = self.compute_plan(&InstallPlanParams {
+            disk: plan.disk.device.clone(),
+            keymap: plan.keymap.clone(),
+            encryption: plan.encryption,
+            recovery_mode: plan.recovery_mode,
+        })?;
+        if refreshed.plan_token != token || refreshed.plan != *plan {
+            return Err(InstallError::Invalid(
+                "the physical disk, GPT edges, or signed release changed at the destructive boundary"
+                    .into(),
+            ));
+        }
+
+        let passphrase = match (plan.encryption, inputs.passphrase()) {
+            (InstallEncryption::Luks2, Some(passphrase)) if !passphrase.is_empty() => {
+                Some(passphrase)
+            }
+            (InstallEncryption::Luks2, _) => {
+                return Err(InstallError::Invalid(
+                    "an encrypted disk preparation requires a non-empty passphrase descriptor"
+                        .into(),
+                ));
+            }
+            (InstallEncryption::None, None) => None,
+            (InstallEncryption::None, Some(_)) => {
+                return Err(InstallError::Invalid(
+                    "an unencrypted disk preparation must not receive a passphrase".into(),
+                ));
+            }
+        };
+
+        let target = device_path(&self.sources.dev_root, &plan.disk.device)?;
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        validate_repart_target(&target, allow_regular_target)?;
+        let rendered = self
+            .sources
+            .repart_runtime_root
+            .join(format!("definitions-{token}"));
+        create_private_directory(&rendered)?;
+
+        let base = self.sources.repart_definitions_root.join("install");
+        let encrypted = self
+            .sources
+            .repart_definitions_root
+            .join("install-encrypted");
+        let streaming = self
+            .sources
+            .repart_definitions_root
+            .join("install-streaming");
+        let definition_sources = if plan.encryption == InstallEncryption::Luks2 {
+            vec![base, encrypted, streaming]
+        } else {
+            vec![base, streaming]
+        };
+        let prepared = render_repart_definitions(&rendered, &definition_sources).and_then(|()| {
+            run_systemd_repart(&self.sources.repart_path, &rendered, &target, passphrase)
+        });
+        // The merged files contain no secret material. Cleanup is best-effort
+        // because a completed destructive operation must never be reported as
+        // failed solely because a transient /run directory could not unlink.
+        let _ = fs::remove_dir_all(&rendered);
+        prepared?;
+
+        self.enter_phase(InstallPhase::Encrypt)?;
+        self.enter_phase(InstallPhase::Format)?;
+        self.enter_phase(InstallPhase::WriteSlotA)?;
+        Ok(())
     }
 
     /// Decompress the already-verified artifact into root slot A through one
@@ -1226,6 +1335,151 @@ impl Installer {
         }
         Ok(disks)
     }
+}
+
+fn create_private_directory(path: &Path) -> Result<(), InstallError> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        InstallError::Invalid("the repart runtime directory has no parent".into())
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).create(path).map_err(InstallError::Io)
+}
+
+/// Merge the immutable base and overlays with explicit later-source-wins
+/// semantics. Every input must be one bounded regular `.conf` file opened
+/// with `O_NOFOLLOW`; the fresh output directory receives each final name
+/// exactly once. This keeps symlinks and mutable include paths out of the
+/// destructive command's trust boundary.
+fn render_repart_definitions(destination: &Path, sources: &[PathBuf]) -> Result<(), InstallError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut rendered = BTreeMap::<OsString, Vec<u8>>::new();
+    for source in sources {
+        let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let is_definition = Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension == "conf");
+            if !is_definition {
+                continue;
+            }
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(
+                    i32::try_from(
+                        (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits(),
+                    )
+                    .expect("open flags fit libc::c_int"),
+                )
+                .open(entry.path())?;
+            if !file.metadata()?.file_type().is_file() {
+                return Err(InstallError::Refused(
+                    "a shipped repart definition is not a regular file".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take(REPART_DEFINITION_MAX_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > REPART_DEFINITION_MAX_BYTES {
+                return Err(InstallError::Refused(
+                    "a shipped repart definition exceeds the fixed size limit".into(),
+                ));
+            }
+            rendered.insert(name, bytes);
+        }
+    }
+    if rendered.is_empty() {
+        return Err(InstallError::Refused(
+            "the shipped repart definition set is empty".into(),
+        ));
+    }
+    for (name, bytes) in rendered {
+        let path = destination.join(name);
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+    }
+    Ok(())
+}
+
+fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<(), InstallError> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
+                .expect("open flags fit libc::c_int"),
+        )
+        .open(path)?;
+    let kind = file.metadata()?.file_type();
+    if !(kind.is_block_device() || allow_regular_for_tests && kind.is_file()) {
+        return Err(InstallError::Refused(
+            "the confirmed installer target is no longer a block device".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn run_systemd_repart(
+    binary: &Path,
+    definitions: &Path,
+    target: &Path,
+    passphrase: Option<&[u8]>,
+) -> Result<(), InstallError> {
+    let mut definitions_arg = OsString::from("--definitions=");
+    definitions_arg.push(definitions.as_os_str());
+    let mut command = Command::new(binary);
+    command
+        .args([
+            "--dry-run=no",
+            "--offline=no",
+            "--empty=force",
+            "--pretty=no",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if passphrase.is_some() {
+        command.arg("--key-file=/dev/stdin").stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    command.arg(definitions_arg).arg(target);
+
+    let mut child = command.spawn()?;
+    if let Some(secret) = passphrase {
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                InstallError::Io(std::io::Error::other(
+                    "systemd-repart did not provide its fixed input pipe",
+                ))
+            })
+            .and_then(|mut stdin| stdin.write_all(secret).map_err(InstallError::Io));
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(InstallError::Io(std::io::Error::other(
+            "systemd-repart did not prepare the fixed Punar disk layout",
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2748,6 +3002,168 @@ mod tests {
         changed = apply_params(&plan);
         changed.seed.locale = "../../etc".into();
         assert!(installer.preflight_apply(&changed).is_err());
+    }
+
+    #[test]
+    fn disk_preparation_uses_fixed_overlays_and_an_anonymous_secret_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let definitions = fixture.root.join("repart.d");
+        for directory in ["install", "install-encrypted", "install-streaming"] {
+            fs::create_dir_all(definitions.join(directory)).unwrap();
+        }
+        fs::write(
+            definitions.join("install/10-esp.conf"),
+            "[Partition]\nType=esp\nLabel=PUNAR-ESP\nFormat=vfat\n",
+        )
+        .unwrap();
+        fs::write(
+            definitions.join("install/20-root-a.conf"),
+            "[Partition]\nType=root\nCopyBlocks=/run/forbidden.raw\n",
+        )
+        .unwrap();
+        fs::write(
+            definitions.join("install/50-data.conf"),
+            "[Partition]\nType=linux-generic\nFormat=btrfs\n",
+        )
+        .unwrap();
+        fs::write(
+            definitions.join("install-encrypted/50-data.conf"),
+            "[Partition]\nType=linux-generic\nFormat=btrfs\nEncrypt=key-file\n",
+        )
+        .unwrap();
+        fs::write(
+            definitions.join("install-streaming/20-root-a.conf"),
+            "[Partition]\nType=root\nLabel=PUNAR-ROOT-A\n",
+        )
+        .unwrap();
+
+        let capture = fixture.root.join("repart-capture");
+        let fake_repart = fixture.root.join("systemd-repart");
+        fs::write(
+            &fake_repart,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 capture='{}'\n\
+                 definitions=''\n\
+                 : > \"${{capture}}.args\"\n\
+                 for argument in \"$@\"; do\n\
+                   printf '%s\\n' \"${{argument}}\" >> \"${{capture}}.args\"\n\
+                   case \"${{argument}}\" in\n\
+                     --definitions=*) definitions=${{argument#--definitions=}} ;;\n\
+                   esac\n\
+                 done\n\
+                 test -n \"${{definitions}}\"\n\
+                 cp \"${{definitions}}/20-root-a.conf\" \"${{capture}}.root-a\"\n\
+                 cp \"${{definitions}}/50-data.conf\" \"${{capture}}.data\"\n\
+                 wc -c > \"${{capture}}.stdin-bytes\"\n",
+                capture.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_repart, fs::Permissions::from_mode(0o755)).unwrap();
+
+        fixture.sources.repart_path = fake_repart;
+        fixture.sources.repart_definitions_root = definitions;
+        fixture.sources.repart_runtime_root = fixture.root.join("runtime");
+        fixture.sources.allow_regular_target_for_tests = true;
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                result.plan.payload.uncompressed_size_bytes,
+            )
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        let secret = b"correct horse battery staple".to_vec();
+        let inputs = InstallApplyInputs {
+            passphrase: Some(Zeroizing::new(secret.clone())),
+            recovery_output: None,
+            oobe_answers: None,
+        };
+
+        installer
+            .prepare_disk_layout(&result.plan, &inputs)
+            .unwrap();
+
+        let args = fs::read_to_string(capture.with_extension("args")).unwrap();
+        assert!(args.contains("--dry-run=no"));
+        assert!(args.contains("--offline=no"));
+        assert!(args.contains("--empty=force"));
+        assert!(args.contains("--key-file=/dev/stdin"));
+        assert!(args.contains(&fixture.sources.dev_root.join("vda").display().to_string()));
+        assert!(
+            !args
+                .as_bytes()
+                .windows(secret.len())
+                .any(|bytes| bytes == secret)
+        );
+        assert_eq!(
+            fs::read_to_string(capture.with_extension("stdin-bytes"))
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap(),
+            secret.len()
+        );
+        assert!(
+            !fs::read_to_string(capture.with_extension("root-a"))
+                .unwrap()
+                .contains("CopyBlocks=")
+        );
+        assert!(
+            fs::read_to_string(capture.with_extension("data"))
+                .unwrap()
+                .contains("Encrypt=key-file")
+        );
+        assert_eq!(installer.status().phase, Some(InstallPhase::WriteSlotA));
+        assert!(
+            fs::read_dir(&fixture.sources.repart_runtime_root)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn disk_preparation_rereads_identity_at_the_destructive_boundary() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        fixture.sources.allow_regular_target_for_tests = true;
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                result.plan.payload.uncompressed_size_bytes,
+            )
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+
+        let disk = fixture.sources.dev_root.join("vda");
+        let mut changed = fs::OpenOptions::new().write(true).open(&disk).unwrap();
+        changed.seek(SeekFrom::Start(0)).unwrap();
+        changed.write_all(b"changed-after-verify").unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+        let before = first_mib(&disk);
+        let inputs = InstallApplyInputs {
+            passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
+            recovery_output: None,
+            oobe_answers: None,
+        };
+
+        let error = installer
+            .prepare_disk_layout(&result.plan, &inputs)
+            .unwrap_err();
+        assert!(error.to_string().contains("destructive boundary"));
+        assert_eq!(first_mib(&disk), before);
+        assert_eq!(installer.status().phase, Some(InstallPhase::Partition));
     }
 
     #[test]

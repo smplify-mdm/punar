@@ -1313,6 +1313,18 @@ specification.
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log. **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
+**Implementation checkpoint (2026-08-30).** The internal `punard` executor
+now implements the first six rows through re-read, while the public
+`install.apply` method remains deliberately absent. Disk preparation invokes
+one fixed `systemd-repart` transaction for the partition/encrypt/format rows:
+it merges only the immutable base, LUKS2 and streaming layers, revalidates the
+plan at the destructive boundary, requires a block device, and provides the
+passphrase on anonymous stdin. Status reports `partition` while the combined
+transaction is in flight and marks the following two checkpoints complete
+only after success. Boot, seed, recovery enrollment, final verification and
+their integrated audit path remain unimplemented, so this checkpoint is not
+an installability claim.
+
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
 `bash -c`. Nothing read from the answer file ever becomes part of a command
