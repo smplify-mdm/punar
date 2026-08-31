@@ -223,7 +223,8 @@ os/images/
                                    and a dev artefact is present
   scripts/container-build.sh       MODIFIED — stage_installer(), build_release_triple(),
                                    assemble_iso()
-  builder/Containerfile            MODIFIED — add libisoburn (xorriso).
+  builder/Containerfile            MODIFIED — add libisoburn (xorriso) and
+                                   GRUB for the compact optical EFI handoff.
                                    erofs-utils, dosfstools, mtools, zstd, cpio
                                    are already pinned in the builder.
 ```
@@ -245,12 +246,15 @@ schemas/install/hardware-report.json  NEW — §9.3
 2. `mkosi --profile desktop` → the release tree → the `slot.raw.zst` payload
    and the slot UKI, i.e. **the ordinary release build**, unchanged. The ISO
    consumes its output; it does not fork it.
-3. `xorriso -as mkisofs` assembles both plus the manifest into the hybrid ISO:
+3. `grub-mkstandalone` embeds a fixed, zero-timeout chainload configuration
+   into a compact optical `BOOTX64.EFI`. The full installer UKI remains on
+   ISO9660 and in the appended raw-drive ESP. `xorriso -as mkisofs` assembles
+   both plus the manifest into the hybrid ISO:
 
    ```text
    xorriso -as mkisofs \
      -iso-level 3 -rational-rock -volid PUNAR_INSTALL \
-     -eltorito-alt-boot -e --interval:appended_partition_2:all:: -no-emul-boot \
+     -eltorito-alt-boot -e boot/efi.img -no-emul-boot \
      -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B esp.img \
      -o punar-installer-<version>-x86_64.iso iso_root/
    ```
@@ -259,9 +263,10 @@ schemas/install/hardware-report.json  NEW — §9.3
 covers `disk`, `directory`, `tar`, `cpio`, `uki`, `esp` and friends; it is
 *not* an ISO authoring tool, and this design does not pretend it is. What
 "the same pinned mkosi pipeline" means precisely is: **every byte inside
-the ISO is a mkosi output from the pinned ALA snapshot, and the only
-non-mkosi step is one deterministic `xorriso` invocation over those
-outputs.** The container gains one package; the snapshot pin, the builder
+the ISO comes from the pinned ALA snapshot and the same mkosi-produced release
+and installer trees; the only boot handoff added around those outputs is a
+fixed-config GRUB standalone, followed by one deterministic `xorriso`
+invocation.** The snapshot pin, the builder
 base digest and `SourceDateEpoch` are unchanged, so the ISO stays as
 input-deterministic as the qcow2 is today. If a later mkosi gains a native
 ISO output, step 3 collapses into step 1 and nothing else in this document
@@ -309,7 +314,7 @@ scheduled — they are cheap, and each one changes a build step if it is false:
 |---|---|---|
 | F1 | `mkosi --profile desktop,installer` composes **two** profiles. The repository passes a single profile today (`container-build.sh` line 452). mkosi renamed the option to a list form at some point in its 25.x line; the pinned version is whatever `pacman -S mkosi` resolved to in the 2026/08/20 snapshot | **VERIFIED 2026-08-27.** Pinned mkosi 26 parses `Profiles=`/`--profile=` with a comma-delimited list and loads each matching `mkosi.profiles/` directory in order. Its scripts receive `$PROFILES` as a **space-delimited** string despite the same pinned manual still saying comma-delimited; the policy gate normalizes both and fixture-tests the distinction. |
 | F2 | `Format=uki` emits the installer UKI, and a second `mkosi` invocation emits the slot payload, from the same config tree | **TO VERIFY.** `Format=uki` is a documented mkosi output; that it composes with the profile split here is not |
-| F3 | The `xorriso -as mkisofs … -append_partition 2 … -e --interval:appended_partition_2:all::` idiom produces an image that boots as `-cdrom` **and** as a raw drive on OVMF | **TO VERIFY** — this is the exact form assertion I05 exists to prove, and it is the step with the least margin for a typo. The idiom is the one Arch's own `archiso` uses; that it is correct *here*, at this xorriso version, over these inputs, is what I05 asserts |
+| F3 | A compact GRUB El Torito image chainloads the ISO9660 installer UKI as `-cdrom`, while the appended systemd-boot ESP loads the byte-identical UKI as a raw drive | **IN VERIFICATION.** Native Ubuntu OVMF rejected the original 256 MiB El Torito image because its load-sector count was zero; the artifact gate now requires a non-zero count, the two UKIs to be byte-identical, and I05 to boot both forms. |
 | F4 | `libisoburn` is present in the 2026/08/20 snapshot and installs into the builder cleanly | **TO VERIFY.** Low risk; named because the builder's package list is a pin |
 
 None of these is load-bearing on the *design*: each has a fallback that is a
@@ -1816,7 +1821,7 @@ Gating unless marked. **40 assertions.**
 | # | Assertion |
 |---|---|
 | I01 | The ISO is produced from the pinned snapshot by `tools/build-image.sh`; `xorriso -indev … -toc` lists exactly the expected top-level entries and no others. |
-| I02 | The appended ESP partition contains `EFI/BOOT/BOOTX64.EFI` and **exactly one** UKI; that UKI's `.cmdline` section contains `punar.live=1` and **no** `root=PARTUUID=`. |
+| I02 | The compact optical ESP contains GRUB `EFI/BOOT/BOOTX64.EFI` with a non-zero El Torito load count. The appended raw-drive ESP contains systemd-boot and **exactly one** UKI; the ISO9660 and raw-drive copies of that UKI are byte-identical, and its `.cmdline` contains `punar.live=1` and **no** `root=PARTUUID=`. |
 | I03 | `release.json` validates against `schemas/update/release-manifest.json`; its `payload.digest_sha256` equals the sha256 of the compressed payload file on the ISO; decompression yields exactly `uncompressed_size_bytes` with sha256 `uncompressed_digest_sha256`; `release.json.sig` verifies against the per-run ephemeral key. *(Key custody: SIMULATED, user-blocked 7.)* |
 | I04 | The live erofs tree and the slot payload tree are **identical**: same file list, same modes, same per-file sha256, compared against `tree-manifest.json`. |
 

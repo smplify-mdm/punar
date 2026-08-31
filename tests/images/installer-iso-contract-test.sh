@@ -44,6 +44,11 @@ PVD_VOLUME_ID="$(awk -F ':' '
 xorriso -indev "${ISO}" -report_el_torito plain > "${WORK}/eltorito.txt" 2>&1
 grep -Eq 'UEFI|EFI' "${WORK}/eltorito.txt" \
     || fail 'no UEFI El Torito boot image was reported'
+grep -Eq 'El Torito boot img :[[:space:]]+1[[:space:]]+UEFI[[:space:]]+y[[:space:]]+none[[:space:]]+0x[0-9A-Fa-f]+[[:space:]]+0x[0-9A-Fa-f]+[[:space:]]+[1-9][0-9]*[[:space:]]+[0-9]+' \
+    "${WORK}/eltorito.txt" \
+    || fail 'UEFI El Torito image has a zero/invalid load-sector count'
+grep -Fq 'El Torito img path :   1  /boot/efi.img' "${WORK}/eltorito.txt" \
+    || fail 'UEFI El Torito image is not the compact optical ESP'
 
 mkdir -p "${WORK}/iso" "${WORK}/erofs-root"
 xorriso -osirrox on -indev "${ISO}" -extract /punar "${WORK}/iso/punar" \
@@ -140,6 +145,19 @@ INSTALLER_UKI="punar-installer-${VERSION}-x86_64.efi"
 mcopy -i "${ISO}@@${ESP_OFFSET}" "::/EFI/Linux/${INSTALLER_UKI}" "${WORK}/${INSTALLER_UKI}"
 [ -s "${WORK}/BOOTX64.EFI" ] || fail 'removable-media UEFI bootloader is empty'
 [ -s "${WORK}/${INSTALLER_UKI}" ] || fail 'installer UKI is empty'
+
+# The optical path must be small enough for a non-zero El Torito load count
+# and must chainload the byte-identical UKI verified above from ISO9660.
+xorriso -osirrox on -indev "${ISO}" \
+    -extract /boot/efi.img "${WORK}/optical-esp.img" \
+    -extract "/EFI/Linux/${INSTALLER_UKI}" "${WORK}/optical-${INSTALLER_UKI}" \
+    > "${WORK}/extract-optical.txt" 2>&1
+mcopy -i "${WORK}/optical-esp.img" ::/EFI/BOOT/BOOTX64.EFI \
+    "${WORK}/optical-BOOTX64.EFI"
+[ -s "${WORK}/optical-BOOTX64.EFI" ] \
+    || fail 'optical UEFI handoff loader is empty'
+cmp "${WORK}/optical-${INSTALLER_UKI}" "${WORK}/${INSTALLER_UKI}" \
+    || fail 'optical and raw-drive installer UKIs differ'
 
 objcopy --dump-section ".cmdline=${WORK}/installer.cmdline" "${WORK}/${INSTALLER_UKI}"
 tr -d '\000' < "${WORK}/installer.cmdline" > "${WORK}/installer.cmdline.txt"

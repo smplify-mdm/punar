@@ -219,8 +219,46 @@ chmod 0600 "${WORK}/release.seed"
 "${RELEASE_TOOL}" verify-artifact "${PAYLOAD}" "${PAYLOAD_DIGEST}" "${PAYLOAD_SIZE}"
 "${RELEASE_TOOL}" verify-artifact "${SLOT_UKI}" "${SLOT_UKI_DIGEST}" "${SLOT_UKI_SIZE}"
 
-# The appended GPT ESP is both the El Torito image and the UEFI removable-media
-# boot partition when the ISO is written to USB or attached as a raw drive.
+# Put the exact installer UKI in the ISO filesystem. Optical firmware first
+# loads a compact GRUB standalone from a standards-sized El Torito FAT image;
+# GRUB then chainloads this UKI. Keeping the 100+ MiB UKI outside the El Torito
+# image avoids the zero/overflowed 16-bit load-sector count rejected by OVMF.
+mkdir -p "${WORK}/iso-root/EFI/Linux" "${WORK}/iso-root/boot"
+cp "${WORK}/${INSTALLER_UKI_NAME}" \
+    "${WORK}/iso-root/EFI/Linux/${INSTALLER_UKI_NAME}"
+cat > "${WORK}/grub.cfg" <<EOF
+set timeout=0
+set default=0
+
+menuentry "Punar installer" {
+    search --no-floppy --file /EFI/Linux/${INSTALLER_UKI_NAME} --set=root
+    chainloader /EFI/Linux/${INSTALLER_UKI_NAME}
+    boot
+}
+EOF
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="${WORK}/optical-bootx64.efi" \
+    --install-modules="part_gpt part_msdos fat iso9660 search search_fs_file chain" \
+    --modules="part_gpt part_msdos fat iso9660 search search_fs_file chain" \
+    --locales= \
+    --fonts= \
+    "boot/grub/grub.cfg=${WORK}/grub.cfg"
+
+OPTICAL_ESP_BYTES=$((32 * 1024 * 1024))
+OPTICAL_LOADER_SIZE="$(stat -c %s "${WORK}/optical-bootx64.efi")"
+if [ "${OPTICAL_ESP_BYTES}" -lt $((OPTICAL_LOADER_SIZE + 16 * 1024 * 1024)) ]; then
+    OPTICAL_ESP_BYTES=$((OPTICAL_LOADER_SIZE + 16 * 1024 * 1024))
+    OPTICAL_ESP_BYTES=$((((OPTICAL_ESP_BYTES + 1024 * 1024 - 1) / (1024 * 1024)) * 1024 * 1024))
+fi
+truncate --size "${OPTICAL_ESP_BYTES}" "${WORK}/iso-root/boot/efi.img"
+mkfs.vfat -F 32 -n PUNAR_OPTICAL "${WORK}/iso-root/boot/efi.img"
+mmd -i "${WORK}/iso-root/boot/efi.img" ::/EFI ::/EFI/BOOT
+mcopy -i "${WORK}/iso-root/boot/efi.img" \
+    "${WORK}/optical-bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
+
+# The appended GPT ESP remains the UEFI removable-media boot partition when
+# the same ISO bytes are written to USB or attached as a raw drive.
 INSTALLER_UKI_SIZE="$(stat -c %s "${WORK}/${INSTALLER_UKI_NAME}")"
 ESP_BYTES=$((INSTALLER_UKI_SIZE + 64 * 1024 * 1024))
 if [ "${ESP_BYTES}" -lt $((256 * 1024 * 1024)) ]; then ESP_BYTES=$((256 * 1024 * 1024)); fi
@@ -239,7 +277,7 @@ xorriso -as mkisofs \
     -appended_part_as_gpt \
     -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B "${WORK}/esp.img" \
     -eltorito-alt-boot \
-    -e --interval:appended_partition_2:all:: \
+    -e boot/efi.img \
     -no-emul-boot \
     -o "${TMP_ISO}" "${WORK}/iso-root"
 mv -f "${TMP_ISO}" "${OUTPUT_ISO}"

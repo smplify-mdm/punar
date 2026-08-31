@@ -24,7 +24,9 @@ ARG SNAPSHOT_DATE=2026/08/20
 # 3. Install the build toolchain. mkosi drives pacman for the target image
 #    itself; systemd-ukify + binutils build the UKI; dosfstools+mtools/e2fsprogs/
 #    btrfs-progs/erofs-utils cover mkfs for ESP and root; libisoburn supplies
-#    the pinned xorriso hybrid-ISO author; diffutils supplies cmp(1) for the
+#    the pinned xorriso hybrid-ISO author; GRUB supplies the compact optical
+#    EFI handoff (the full UKI is too large for a portable El Torito image);
+#    diffutils supplies cmp(1) for the
 #    empty-slot content gate; qemu-img converts raw -> qcow2.
 #    rust (1:1.97.1-1 in ALA 2026/08/20 extra, verified
 #    2026-08-25; includes cargo, satisfies workspace rust-version 1.85)
@@ -49,6 +51,7 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT_DATE}/\$repo/o
         btrfs-progs \
         erofs-utils \
         libisoburn \
+        grub \
         diffutils \
         cpio \
         zstd \
