@@ -253,11 +253,20 @@ grub-mkstandalone \
     --fonts= \
     "boot/grub/grub.cfg=${WORK}/grub.cfg"
 
-OPTICAL_ESP_BYTES=$((32 * 1024 * 1024))
+OPTICAL_ESP_BYTES=$((31 * 1024 * 1024))
+OPTICAL_ESP_HEADROOM_BYTES=$((4 * 1024 * 1024))
 OPTICAL_LOADER_SIZE="$(stat -c %s "${WORK}/optical-bootx64.efi")"
-if [ "${OPTICAL_ESP_BYTES}" -lt $((OPTICAL_LOADER_SIZE + 16 * 1024 * 1024)) ]; then
-    OPTICAL_ESP_BYTES=$((OPTICAL_LOADER_SIZE + 16 * 1024 * 1024))
-    OPTICAL_ESP_BYTES=$((((OPTICAL_ESP_BYTES + 1024 * 1024 - 1) / (1024 * 1024)) * 1024 * 1024))
+# El Torito's load-size field is 16-bit and counts 512-byte sectors. A 32 MiB
+# image therefore wraps to zero and is rejected by OVMF. Refuse loader growth
+# instead of silently crossing that format boundary.
+if [ $((OPTICAL_ESP_BYTES % 512)) -ne 0 ] \
+    || [ $((OPTICAL_ESP_BYTES / 512)) -gt 65535 ]; then
+    echo "error: optical ESP exceeds the El Torito load-sector limit" >&2
+    exit 1
+fi
+if [ $((OPTICAL_LOADER_SIZE + OPTICAL_ESP_HEADROOM_BYTES)) -gt "${OPTICAL_ESP_BYTES}" ]; then
+    echo "error: optical UEFI loader no longer fits the bounded El Torito image" >&2
+    exit 1
 fi
 truncate --size "${OPTICAL_ESP_BYTES}" "${WORK}/iso-root/boot/efi.img"
 mkfs.vfat -F 32 -n "${OPTICAL_ESP_LABEL}" "${WORK}/iso-root/boot/efi.img"
