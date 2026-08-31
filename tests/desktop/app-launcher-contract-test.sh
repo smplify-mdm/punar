@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPS="${REPO_ROOT}/shell/punar-shell/Services/Apps.qml"
 COMMAND="${REPO_ROOT}/shell/punar-shell/CommandCenter/CommandCenter.qml"
 BROWSER="${REPO_ROOT}/shell/punar-shell/CommandCenter/ApplicationBrowser.qml"
+SURFACES="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
 
 fail() {
     echo "app-launcher-contract-test: FAIL: $*" >&2
@@ -43,6 +44,16 @@ contains "${APPS}" 'list[i].activate();'
 contains "${APPS}" 'HyprlandActions.focusWindow("class:^" + exactClass + "$");'
 contains "${APPS}" 'if (root.focusExisting(root.entryWindowCandidates(entry)))'
 contains "${APPS}" 'entry.execute();'
+
+# The canonical desktop gate exercises the user-visible consequence rather
+# than relying on the source ordering alone: an existing app is left on a
+# different workspace, selected again, and must focus without duplication.
+contains "${SURFACES}" 'selecting an open app switched to workspace 8 without launching a duplicate'
+# Literal source-contract fragments intentionally contain shell syntax.
+# shellcheck disable=SC2016
+contains "${SURFACES}" '[ "${active_workspace}" = "8" ]'
+# shellcheck disable=SC2016
+contains "${SURFACES}" '[ "${client_state}" = "$(printf '\''1\ttrue\ttrue'\'')" ]'
 
 python3 - "${APPS}" <<'PY'
 import sys

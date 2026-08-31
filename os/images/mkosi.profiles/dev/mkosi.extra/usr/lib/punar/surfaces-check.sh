@@ -867,8 +867,61 @@ geany_client() {
 }
 if wait_for 90 geany_client; then
     note "ok   graphical text editor window appeared"
-    hyprctl dispatch "hl.dsp.focus({ window = 'class:^(geany|Geany)$' })" >/dev/null 2>&1 || true
-    hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+
+    # Selecting an application is also task switching. Put the existing
+    # editor on workspace 8, leave it for workspace 9, then select Geany
+    # through Command Center a second time. The shell must focus the existing
+    # toplevel (which switches workspaces) and must not spawn a duplicate.
+    geany_address="$(hyprctl -j clients 2>/dev/null \
+        | jq -r '[.[] | select(.class | ascii_downcase | test("geany"))][0].address // ""')"
+    geany_pid="$(hyprctl -j clients 2>/dev/null \
+        | jq -r '[.[] | select(.class | ascii_downcase | test("geany"))][0].pid // 0')"
+    hyprctl dispatch "hl.dsp.focus({ window = 'address:${geany_address}' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.window.move({ workspace = '8' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.focus({ workspace = '9' })" >/dev/null 2>&1 || true
+
+    geany_moved() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -e --arg address "${geany_address}" \
+                'any(.[]; .address == $address and .workspace.id == 8)' \
+                >/dev/null 2>&1
+    }
+    if wait_for 20 geany_moved; then
+        note "ok   existing editor isolated on workspace 8 before app selection"
+    else
+        note "FAIL could not place the existing editor on workspace 8"
+        FAILED=1
+    fi
+
+    geany_switch_row="$(ipc commandcenter query geany | tr -d '\r\n\"')"
+    check_eq "installed editor remains an open action" \
+        "app · Application(geany) · installed · open" "${geany_switch_row}"
+    geany_switch_result="$(ipc commandcenter run | tr -d '\r\n\"')"
+    check_eq "selecting an open editor invokes its installed-app action" \
+        "app · Application(geany) · installed · open" "${geany_switch_result}"
+
+    geany_focused_without_duplicate() {
+        active_workspace="$(hyprctl -j activeworkspace 2>/dev/null | jq -r '.id // 0')"
+        client_state="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg address "${geany_address}" --argjson pid "${geany_pid}" \
+                '[.[] | select(.class | ascii_downcase | test("geany"))] as $apps
+                 | [($apps | length),
+                    (any($apps[]; .address == $address and .pid == $pid)),
+                    (any($apps[]; .address == $address and .workspace.id == 8))]
+                 | @tsv')"
+        [ "${active_workspace}" = "8" ] \
+            && [ "${client_state}" = "$(printf '1\ttrue\ttrue')" ]
+    }
+    if wait_for 30 geany_focused_without_duplicate; then
+        note "ok   selecting an open app switched to workspace 8 without launching a duplicate"
+    else
+        note "FAIL selecting an open app did not focus its workspace exactly once"
+        hyprctl -j clients > /run/punar/surfaces-geany-focus-failure.json 2>/dev/null || true
+        FAILED=1
+    fi
+
+    hyprctl dispatch "hl.dsp.window.close({ window = 'address:${geany_address}' })" >/dev/null 2>&1 || true
+    hyprctl dispatch "hl.dsp.focus({ workspace = '1' })" >/dev/null 2>&1 || true
 else
     note "FAIL Geany was selected in Command Center but no editor window appeared"
     FAILED=1
