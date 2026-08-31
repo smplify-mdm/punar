@@ -352,7 +352,7 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    pins the official firmware commit plus critical and tree digests; stages
    all 1,909 byte-identical loadable modules into release root A; regenerates
    and inspects its dependency indexes; creates the matching dracut initramfs;
-   and binds the 8 GiB root-A payload plus a reopened 256 MiB FAT boot-A image
+   and binds the 8 GiB root-A payload plus a reopened 256 MiB slot-neutral FAT boot image
    into the canonical signed manifest. Version `2026.08.30.4`, built from
    commit `708384d29076a384d7f707803b3a03b55a5f4e32`, independently
    reproduced raw-root SHA-256
@@ -363,10 +363,25 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    `5a1cbb4c7dd9bb6836c653617ac5030e355f8bf17791c9ce4bc5427b22d80391`.
    The independent audit mounted both artifacts read-only, counted all 1,909
    loadable modules, proved the root and boot initramfs copies identical, and
-   verified the ephemeral Ed25519 signature. This is verified software-path
-   evidence, not a production signature or booted-Pi claim. Next wire public
-   apply orchestration and complete the inactive boot/root-pair update state
-   machine.
+   verified the ephemeral Ed25519 signature. The corrected six-partition
+   selector layout was rebuilt as `2026.08.30.5`: raw-root SHA-256
+   `a976fe4d7d3d74d6b434154cc49a1a537cc578005696497237e762a706eba93e`,
+   compressed-payload SHA-256
+   `4d1514c8c83c0c9a3db250d9b402b90b92436c56103961deec6f6221b8756c0f`,
+   and slot-neutral bootfs SHA-256
+   `d1ffe4d8439824b1d0f0101e057babad0c4969c6789e57a65ad098feb549087f`.
+   `punard::pi_update` now proves the internal inactive-pair transaction: it
+   derives the running slot only from big-endian firmware device-tree facts,
+   verifies the signed target-bound bundle before writes, streams only the
+   inactive root/boot pair, fsyncs and re-hashes physical reads, validates the
+   paired boot filesystem, re-reads the unchanged selector and durably records
+   pending state. Candidate commit requires the expected tryboot identity,
+   read-only paired root and all four health signals before retaining a
+   verified selector backup and swapping ordinary/try partitions. Tests prove
+   the known-good pair remains byte-identical. This is verified software-path
+   evidence, not a production signature or booted-Pi claim. The typed public
+   `update.*` daemon/CLI surface, reboot handoff and image health-unit wiring
+   remain before this becomes user-operable.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
@@ -453,9 +468,16 @@ reopens the result; and rejects kernel or module drift in the native ARM
 builder test. The full local install-bundle proof now stages the pinned tree
 into release root A, generates and inspects the matching dracut initramfs,
 builds boot A, checks both filesystems, and signs/verifies the canonical
-manifest and both artifacts. Production key custody, trusted enrollment/token
-sourcing in public server orchestration, ISO assembly, inactive-pair updates
-and the unattended VM lane remain open. The
+manifest and both artifacts. The internal native Pi updater now verifies the
+signed bundle before touching disk, derives the inactive slot from firmware,
+writes and physically re-reads only that boot/root pair, keeps the selector
+unchanged while staging, and permits a later selector swap only from the
+expected tryboot candidate after read-only-root and four-signal health checks.
+Its signed regular-file transaction test proves slot A remains byte-identical
+while slot B is staged and the durable pending record is then consumed by the
+candidate commit. Production key custody, the public `update.*` server/CLI
+surface, reboot/health-unit integration, ISO assembly and the unattended Pi
+lane remain open. The
 hardware-report handoff is now closed in code and contract: PCI, USB and ARM
 platform devices are classified from modalias/module binding and fixed-argv
 firmware metadata; no serial/MAC/user data is collected; no usable graphics is

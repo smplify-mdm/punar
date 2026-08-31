@@ -35,6 +35,9 @@ signal-hook = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# Native Pi update fixtures sign the exact same release bytes the production
+# verifier consumes. Private keys exist only in tempdir tests.
+ed25519-dalek = { workspace = true }
 # M10: the remote-query suite runs against a real punar-mock-smplify
 # instance on a tempdir socket — the same binary the image ships, not a
 # second in-test copy of the control-plane protocol.

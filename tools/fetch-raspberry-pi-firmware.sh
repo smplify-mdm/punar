@@ -40,15 +40,42 @@ git init --quiet "${OUTPUT}"
 git -C "${OUTPUT}" remote add origin "${PUNAR_RPI_FIRMWARE_REPOSITORY}"
 git -C "${OUTPUT}" sparse-checkout init --cone
 git -C "${OUTPUT}" sparse-checkout set boot modules
-git -C "${OUTPUT}" -c protocol.version=2 fetch --quiet --depth=1 \
-    --filter=blob:none origin \
-    "refs/tags/${PUNAR_RPI_FIRMWARE_TAG}:refs/tags/${PUNAR_RPI_FIRMWARE_TAG}"
+fetched=false
+for attempt in 1 2 3; do
+    if git -C "${OUTPUT}" \
+        -c protocol.version=2 \
+        -c http.version=HTTP/1.1 \
+        fetch --quiet --depth=1 --filter=blob:none origin \
+        "refs/tags/${PUNAR_RPI_FIRMWARE_TAG}:refs/tags/${PUNAR_RPI_FIRMWARE_TAG}"; then
+        fetched=true
+        break
+    fi
+    if [ "${attempt}" -lt 3 ]; then
+        echo "warning: pinned firmware fetch attempt ${attempt} failed; retrying" >&2
+        sleep "$((attempt * 2))"
+    fi
+done
+[ "${fetched}" = true ] \
+    || die "could not fetch the pinned firmware tag after three attempts"
 
 tag_commit="$(git -C "${OUTPUT}" rev-parse \
     "refs/tags/${PUNAR_RPI_FIRMWARE_TAG}^{commit}")"
 [ "${tag_commit}" = "${PUNAR_RPI_FIRMWARE_COMMIT}" ] \
     || die "official firmware tag no longer resolves to the pinned commit"
-git -C "${OUTPUT}" checkout --quiet --detach "${PUNAR_RPI_FIRMWARE_COMMIT}"
+checked_out=false
+for attempt in 1 2 3; do
+    if git -C "${OUTPUT}" -c http.version=HTTP/1.1 \
+        checkout --quiet --detach "${PUNAR_RPI_FIRMWARE_COMMIT}"; then
+        checked_out=true
+        break
+    fi
+    if [ "${attempt}" -lt 3 ]; then
+        echo "warning: sparse firmware checkout attempt ${attempt} failed; retrying" >&2
+        sleep "$((attempt * 2))"
+    fi
+done
+[ "${checked_out}" = true ] \
+    || die "could not materialize the pinned firmware tree after three attempts"
 [ "$(git -C "${OUTPUT}" rev-parse HEAD)" = "${PUNAR_RPI_FIRMWARE_COMMIT}" ] \
     || die "firmware checkout did not land on the pinned commit"
 [ -z "$(git -C "${OUTPUT}" status --porcelain --untracked-files=no)" ] \

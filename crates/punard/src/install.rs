@@ -4460,7 +4460,7 @@ fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallErro
 }
 
 #[cfg(target_os = "linux")]
-fn validate_raspberry_pi_boot_filesystem(root: &Path) -> Result<(), InstallError> {
+pub(crate) fn validate_raspberry_pi_boot_filesystem(root: &Path) -> Result<(), InstallError> {
     let cmdline_a = read_bounded_regular(
         &root.join("cmdline-a.txt"),
         PI_BOOT_CONFIG_MAX_BYTES,
@@ -4512,7 +4512,7 @@ fn set_once(slot: &mut Option<String>, value: &str, description: &str) -> Result
     Ok(())
 }
 
-fn validate_raspberry_pi_autoboot(
+pub(crate) fn validate_raspberry_pi_autoboot(
     bytes: &[u8],
     expected_normal_partition: u8,
     expected_try_partition: u8,
@@ -4680,7 +4680,7 @@ fn validate_raspberry_pi_config(bytes: &[u8]) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn stream_exact_payload(
+pub(crate) fn stream_exact_payload(
     source: &mut impl Read,
     destination: &mut impl Write,
     expected_size: u64,
@@ -4723,7 +4723,7 @@ fn stream_exact_payload(
 }
 
 #[cfg(target_os = "linux")]
-fn digest_installed_partition(
+pub(crate) fn digest_installed_partition(
     path: &Path,
     expected_size: u64,
     expected_digest: &str,

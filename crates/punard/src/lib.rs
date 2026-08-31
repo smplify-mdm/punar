@@ -58,6 +58,7 @@ pub mod device;
 pub mod enroll;
 pub mod hardware;
 pub mod install;
+pub mod pi_update;
 pub mod policy;
 pub mod server;
 pub mod state;

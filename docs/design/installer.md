@@ -381,7 +381,7 @@ then reopens the FAT image with mtools and runs read-only `fsck.vfat`.
 `tools/build-raspberry-pi-install-bundle.sh` close the component connection:
 they extract release root A, stage the pinned `6.18.46-v8+` modules, regenerate
 the indexes, create and inspect a non-host-specific dracut initramfs, assemble
-boot A, check ext4 and FAT, compress root A, and bind both artifact identities
+the slot-neutral boot filesystem, check ext4 and FAT, compress root A, and bind both artifact identities
 into the ordinary target-bound release manifest. The local `2026.08.30.4`
 proof, built from commit `708384d29076a384d7f707803b3a03b55a5f4e32`,
 verified an 8 GiB root containing 1,909 exact loadable modules, a
@@ -393,10 +393,20 @@ compressed-payload SHA-256
 `a77791001fce5cb3fe3e6e62f25e8dfa246b6d768fb2881fd7b894f36467d42b`,
 and bootfs SHA-256
 `5a1cbb4c7dd9bb6836c653617ac5030e355f8bf17791c9ce4bc5427b22d80391`,
-then verified the ephemeral Ed25519 signature. Production key custody, public
-apply, inactive boot/root-pair update, runtime boot and physical qualification
-remain the next boundaries; this is not yet a shippable Pi image or hardware
-evidence.
+then verified the ephemeral Ed25519 signature. The selector-corrected
+`2026.08.30.5` rebuild produced raw-root SHA-256
+`a976fe4d7d3d74d6b434154cc49a1a537cc578005696497237e762a706eba93e`,
+compressed-payload SHA-256
+`4d1514c8c83c0c9a3db250d9b402b90b92436c56103961deec6f6221b8756c0f`,
+and slot-neutral bootfs SHA-256
+`d1ffe4d8439824b1d0f0101e057babad0c4969c6789e57a65ad098feb549087f`.
+The internal `punard::pi_update` engine now implements and tests signed
+inactive-pair staging plus health-gated selector commit without accepting a
+device path or command from its caller. It is not yet registered as a public
+`update.*` daemon method or wired into the image's health/reboot units.
+Production key custody, that typed public surface, runtime boot and physical
+qualification remain the next boundaries; this is not yet a shippable Pi
+image or hardware evidence.
 
 Inside the data partition (4 on UEFI, 6 on Raspberry Pi), three subvolumes are
 mounted as three separate mounts:
