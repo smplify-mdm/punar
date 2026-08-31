@@ -48,6 +48,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 HOST_ARCH="$(uname -m)"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 if [ "${HOST_ARCH}" != "x86_64" ]; then
     echo "warning: host architecture is ${HOST_ARCH}; building via --platform linux/amd64 emulation" >&2
     echo "warning: expect a slow build; CI (x86_64) is the canonical build environment" >&2
@@ -94,6 +96,8 @@ docker run --rm --privileged \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
     --env "PUNAR_INSTALLER_VERSION=${PUNAR_INSTALLER_VERSION}" \
     --env "PUNAR_CI_RUN_ID=${PUNAR_CI_RUN_ID}" \
+    --env "PUNAR_HOST_UID=${HOST_UID}" \
+    --env "PUNAR_HOST_GID=${HOST_GID}" \
     "${BUILDER_TAG}" \
     /work/os/images/scripts/container-build.sh
 

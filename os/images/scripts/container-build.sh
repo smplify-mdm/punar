@@ -718,4 +718,15 @@ echo "==> Writing build metadata"
 )
 
 echo "==> Build complete"
+
+# The repository is a host bind mount and this builder runs as root. Return
+# generated artifacts to the invoking user so later host-side verification can
+# create proof directories beside them (and so local maintainers can remove or
+# replace a build without sudo). Numeric IDs avoid needing a matching passwd
+# entry inside the pinned builder.
+if [[ "${PUNAR_HOST_UID:-}" =~ ^[0-9]+$ ]] \
+    && [[ "${PUNAR_HOST_GID:-}" =~ ^[0-9]+$ ]]; then
+    chown -R "${PUNAR_HOST_UID}:${PUNAR_HOST_GID}" out
+fi
+
 ls -lh out/
