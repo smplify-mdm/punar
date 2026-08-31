@@ -247,11 +247,11 @@ EOF
 grub-mkstandalone \
     --format=x86_64-efi \
     --output="${WORK}/optical-bootx64.efi" \
-    --install-modules="part_gpt part_msdos fat iso9660 search search_fs_file chain" \
-    --modules="part_gpt part_msdos fat iso9660 search search_fs_file chain" \
+    --install-modules="part_gpt part_msdos fat iso9660 search search_fs_file chain normal configfile" \
+    --modules="part_gpt part_msdos fat iso9660 search search_fs_file chain normal configfile" \
     --locales= \
     --fonts= \
-    "boot/grub/grub.cfg=${WORK}/grub.cfg"
+    "/boot/grub/grub.cfg=${WORK}/grub.cfg"
 
 OPTICAL_ESP_BYTES=$((31 * 1024 * 1024))
 OPTICAL_ESP_HEADROOM_BYTES=$((4 * 1024 * 1024))

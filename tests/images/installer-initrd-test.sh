@@ -102,5 +102,9 @@ grep -Fq "mkfs.vfat -F 16 -n \"\${OPTICAL_ESP_LABEL}\"" "${ASSEMBLER}" \
 assert_line "${ASSEMBLER}" "OPTICAL_ESP_BYTES=\$((31 * 1024 * 1024))"
 grep -Fq 'OPTICAL_ESP_BYTES / 512)) -gt 65535' "${ASSEMBLER}" \
     || fail 'installer assembly does not enforce the El Torito load-sector limit'
+grep -Fq "\"/boot/grub/grub.cfg=\${WORK}/grub.cfg\"" "${ASSEMBLER}" \
+    || fail 'standalone optical GRUB does not embed its configuration at the canonical path'
+grep -Fq 'chain normal configfile"' "${ASSEMBLER}" \
+    || fail 'standalone optical GRUB cannot execute its embedded configuration'
 
 echo 'installer-initrd-test: PASS'
