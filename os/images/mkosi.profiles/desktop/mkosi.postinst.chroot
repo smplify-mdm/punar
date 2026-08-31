@@ -49,6 +49,14 @@ systemctl --global disable \
     podman-clean-transient.service podman-restart.service \
     podman.service podman.socket >/dev/null 2>&1 || true
 
+# The Arch keyring package enables a weekly WKD refresh from the public
+# network. Punar's governed base must not mutate package-verification trust
+# independently of the selected OS update channel, and an idle workstation
+# must not make an undisclosed maintenance request. Snapshot promotion updates
+# the keyring as one reviewed artifact instead.
+rm -f \
+    /usr/lib/systemd/system/timers.target.wants/archlinux-keyring-wkd-sync.timer
+
 # Pre-warm the vendored font cache so the first onboarding/session surface
 # does not pay the scan. Fontconfig can recover at runtime if this fails.
 fc-cache --system-only -f \
