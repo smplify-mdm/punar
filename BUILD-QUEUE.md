@@ -414,11 +414,23 @@ vector choice. The new live contract is `docs/design/wallpapers.md`.
 
 ### 6.1 Installer and onboarding
 `docs/design/installer.md`, `onboarding-flow.md`, and the backend notes in
-`onboarding.md`. **Nobody can install Punar on a real machine today** — the
-only path is booting a prebuilt image. The prebuilt image is now A/B-shaped,
-which removes the disk-layout prerequisite but does not make it an installer.
-The missing installer blocks hardware testing, which blocks 9 of the
-`user-blocked.md` items.
+`onboarding.md`. **Nobody can complete a production-qualified installation on
+a real machine today.** A real hybrid x86_64 installer ISO now exists and boots
+its read-only EROFS/volatile-overlay live root, but the destructive transaction
+and installed-image proof remain open. The prebuilt image is also A/B-shaped,
+which removes the disk-layout prerequisite without substituting for that proof.
+The missing end-to-end install and physical-hardware acceptance still block the
+corresponding `user-blocked.md` items.
+
+**Installer-media milestone, canonical CI 2026-08-31:** commit `dda2bb1`,
+[run 33442898971](https://github.com/smplify-mdm/punar/actions/runs/33442898971),
+built `punar-installer-2026.08.31.1-x86_64.iso` at 4,425,449,472 bytes with
+SHA-256 `33f48a6651900651c9e8452c07e15edc6d96253193076be8c5054096b34686d1`.
+The final-artifact contract passed, then native KVM/OVMF reached
+`PUNAR_INSTALLER_OK` in **7 seconds as optical media** and **6 seconds from the
+same bytes as a raw drive**. This closes installer assertions I01–I05 for
+generic x86_64 QEMU/OVMF. It does not prove a destructive install, encryption,
+installed-system boot, USB media, Secure Boot, or physical firmware/hardware.
 
 The first headless installer slice is now implemented and locally verified on
 both ARM64 and x86_64: `install.targets` is live-mode-only read discovery, and

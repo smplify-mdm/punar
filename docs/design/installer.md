@@ -39,7 +39,7 @@ it solid.
 
 | # | Mechanism | Line | Standing |
 |---|---|---|---|
-| 01 | ISO built by the pinned mkosi pipeline, offline install, no network | *dashed* | Designed here. Solid when the `install-test` CI lane is green (§10). |
+| 01 | ISO built by the pinned mkosi pipeline, offline live boot, no network | **solid through I05** | **VERIFIED 2026-08-31:** canonical run 33442898971 built the final hybrid ISO, passed its artifact contract, and booted its live root with `-nic none` in both optical and raw-drive forms. The destructive install remains dashed. |
 | 02 | ADR-003 partition layout created on a device | *dashed* | **Implemented and content-checked in the directly built ARM64 VM image**: I08–I11/I13's unencrypted-layout equivalents pass and the image boots. It is not an installed device and not encrypted. Solid only when the real installer lane passes I08–I13. This gives execution-trust V3 an artefact to target without claiming the installer exists. |
 | 03 | LUKS2 by default, passphrase unlock | *dashed* | Designed here (§5). Solid when I12 and I19 pass. |
 | 04 | **TPM-assisted unlock** | *dashed* | **SIMULATED and deliberately not enrolled.** User-blocked item 2. §5.4 argues why enrolling against a software TPM would be worse than not enrolling at all. |
@@ -52,15 +52,20 @@ it solid.
 | 11 | The installer→first-boot seam (`seed.json`, the accountless image) | *dashed* | Designed against `onboarding.md` §4.2–4.4 (§6.4). Solid when I29–I32 pass — and it is the one row whose failure mode is *silence on both sides*, which is why it gets four assertions. |
 | 12 | **`onboarding.md` §1.8 Layer 2 recovery** (a fourth UKI, `punar-recover`) | *dashed* | **Does not exist.** ESP room is reserved and the artefact is not built. Recorded here because onboarding §4.4 requirement 5 asked this document to decide, and this is the decision. |
 | 13 | **Bare-metal boot, USB boot, real firmware** | *dashed* | **NOT PROVEN AND NOT PROVABLE HERE.** QEMU + OVMF + virtio proves the software stack and nothing about hardware. |
-| 14 | **The ISO build steps against the pinned toolchain** (comma-composed profiles, `Format=uki`, the `xorriso` hybrid idiom, `libisoburn` in the snapshot) | *dashed* | **TO VERIFY, F1–F4 in §3.6.** The builder installs `mkosi` by name, not by version, so these are properties of the snapshot and not of this document. Each has a build-script fallback. |
+| 14 | **The ISO build steps against the pinned toolchain** (comma-composed profiles, `Format=uki`, the `xorriso` hybrid idiom, `libisoburn` in the snapshot) | **solid** | **VERIFIED 2026-08-31:** F1–F4 and the finished artifact are exercised by canonical run 33442898971. |
 | 15 | **A recovery path when the freshly installed system does not come up** | *dashed*, **and absent** | §12.1. I17 requires slot B zero-filled, `punar-recover` is not built, and `onboarding.md` §1.6.2 shows that a locked root makes `punard` the only privilege path. This is the sharpest gap the three designs have between them, and §12.1 recommends the cheap half of the fix. |
 
 ---
 
 ## 1. Today's truth, stated before anything is designed on top of it
 
-`os/images/mkosi.conf` still emits a directly bootable `Format=disk`, not an
-installer ISO. Its raw disk now uses the canonical four-partition definition
+`os/images/mkosi.conf` emits the directly bootable `Format=disk`, and the
+installer profile plus pinned assembly script now also emit a hybrid x86_64
+ISO. Canonical run 33442898971 verified the finished ISO and reached the live
+root under OVMF as both `-cdrom` and a raw drive. This is installer-media/live-
+root evidence, not a destructive install or installed-system result.
+
+The directly built raw disk uses the canonical four-partition definition
 set from §4.7: ESP, populated 8 GiB slot A, empty 8 GiB slot B and an
 unencrypted btrfs `PUNAR-DATA` partition with separate `/var`, `/home` and
 `/var/tmp` subvolume mounts. A content-aware build gate checks the GPT,
@@ -76,8 +81,7 @@ and puts it in `wheel`; `etc/greetd/config.toml` autologins that user into
 Hyprland. `linux-firmware` is deliberately excluded from both images.
 `cryptsetup` is not installed in the target. The directly built VM layout is
 deliberately plaintext; the production encrypted overlay has been validated
-only by V-REPART. `image-pipeline.md` still correctly records *"qcow2 only.
-No installer ISO yet."*
+only by V-REPART.
 
 Two accepted designs are blocked on that:
 
@@ -313,9 +317,9 @@ scheduled — they are cheap, and each one changes a build step if it is false:
 | # | Claim | Status |
 |---|---|---|
 | F1 | `mkosi --profile desktop,installer` composes **two** profiles. The repository passes a single profile today (`container-build.sh` line 452). mkosi renamed the option to a list form at some point in its 25.x line; the pinned version is whatever `pacman -S mkosi` resolved to in the 2026/08/20 snapshot | **VERIFIED 2026-08-27.** Pinned mkosi 26 parses `Profiles=`/`--profile=` with a comma-delimited list and loads each matching `mkosi.profiles/` directory in order. Its scripts receive `$PROFILES` as a **space-delimited** string despite the same pinned manual still saying comma-delimited; the policy gate normalizes both and fixture-tests the distinction. |
-| F2 | `Format=uki` emits the installer UKI, and a second `mkosi` invocation emits the slot payload, from the same config tree | **TO VERIFY.** `Format=uki` is a documented mkosi output; that it composes with the profile split here is not |
-| F3 | A compact GRUB El Torito image chainloads the ISO9660 installer UKI as `-cdrom`, while the appended systemd-boot ESP loads the byte-identical UKI as a raw drive | **IN VERIFICATION.** Native Ubuntu OVMF rejected the original 256 MiB El Torito image because its load-sector count was zero; the artifact gate now requires a non-zero count, the two UKIs to be byte-identical, and I05 to boot both forms. |
-| F4 | `libisoburn` is present in the 2026/08/20 snapshot and installs into the builder cleanly | **TO VERIFY.** Low risk; named because the builder's package list is a pin |
+| F2 | `Format=uki` emits the installer UKI, and a second `mkosi` invocation emits the slot payload, from the same config tree | **VERIFIED 2026-08-31.** The canonical builder produced and structurally verified both artifacts from the composed profile tree. |
+| F3 | A compact GRUB El Torito image chainloads the ISO9660 installer UKI as `-cdrom`, while the appended systemd-boot ESP loads the byte-identical UKI as a raw drive | **VERIFIED 2026-08-31.** Run 33442898971 passed the finished-artifact identity checks and I05: optical boot reached `PUNAR_INSTALLER_OK` in 7 seconds and raw-drive boot in 6 seconds under native KVM/OVMF. The compact path uses a sub-65,536-sector FAT16 image and a standalone GRUB containing `normal`/`configfile`; the appended disk ESP remains FAT32. |
+| F4 | `libisoburn` is present in the 2026/08/20 snapshot and installs into the builder cleanly | **VERIFIED 2026-08-31.** The pinned builder assembled and inspected the promoted ISO with xorriso/libisoburn. |
 
 None of these is load-bearing on the *design*: each has a fallback that is a
 build-script change. They are listed because "the same pinned mkosi pipeline"
@@ -1813,6 +1817,13 @@ The ISO is booted **twice** in step 4 — once as `-cdrom`, once as a raw
 `-drive` — so the hybrid/USB path is exercised structurally (I05).
 
 ### 10.2 The assertions
+
+**Canonical status, 2026-08-31:** I01–I05 are green in
+[run 33442898971](https://github.com/smplify-mdm/punar/actions/runs/33442898971)
+for commit `dda2bb1`. The exact ISO is 4,425,449,472 bytes, SHA-256
+`33f48a6651900651c9e8452c07e15edc6d96253193076be8c5054096b34686d1`.
+I06 onward remain open until the privileged install-VM lane exercises the
+typed daemon, destructive transaction, installed disk and recovery boundaries.
 
 Gating unless marked. **40 assertions.**
 

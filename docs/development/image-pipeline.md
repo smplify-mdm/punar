@@ -538,8 +538,11 @@ snapshots.
   the openSUSE-style btrfs+snapper bootable-snapshot layout ADR-001 specifies
   for MVP, and no A/B partitions. The A/B trajectory only needs this
   pipeline's *output* to become the A/B payload later; nothing here blocks it.
-- **qcow2 only.** No installer ISO yet (spec 66 lists it for MVP; ISO output
-  is an mkosi format away once needed).
+- **Installer media now exists; installation proof does not.** Canonical run
+  33442898971 built and verified the 4.12 GiB hybrid x86_64 ISO and booted its
+  live root under OVMF as both optical media and a raw drive. The destructive
+  install, encrypted installed-system boot, physical USB and bare-hardware
+  qualification remain separate work.
 - **No budget measurement harness.** The boot marker's meminfo lines are a
   coarse signal, not the Milestone 0 resource baseline; a proper idle-RAM/CPU
   measurement pass against PERFORMANCE_BUDGETS.md is separate work.

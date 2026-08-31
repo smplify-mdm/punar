@@ -48,10 +48,10 @@ Binding prior contracts, not relitigated here:
   `punarctl update status`.
 - [`milestone-13.md`](milestone-13.md) §3 row 25 and §8 — the Definition-of-Done
   audit that records item 25 **NOT MET**, and M13's proposed remedy.
-- [`image-pipeline.md`](image-pipeline.md) — how images are actually built
-  today, and its own limitation list: *"Unsigned"*, *"No rollback layout.
-  Plain single-root disk (mkosi default layout)"*, *"qcow2 only"*,
-  *"Reproducibility unproven"*.
+- [`image-pipeline.md`](image-pipeline.md) — how images are actually built.
+  This plan began from its historical *"Unsigned"*, *"No rollback layout"*
+  and *"qcow2 only"* baseline; the current pipeline document records which of
+  those boundaries have since been closed and which remain.
 
 **Ownership note.** This document is a design plan, not an implementation.
 It writes only itself. Milestone 10 is being implemented concurrently in
@@ -161,7 +161,7 @@ operating systems under the same release name.
 | 18 | **Health is four concrete signals, all of which already exist:** `PUNAR_BOOT_OK` (boot completed), punard + punar-agentd answering on their sockets, `PUNAR_DESKTOP_OK` (the session came up), and a clean section-42 verify pass across the capability registry. §6.2. |
 | 19 | **Boot counting is systemd-boot's own (`name+tries-left-tries-done.efi` + `systemd-bless-boot`), not a punar-owned counter.** A punar counter cannot be decremented by a kernel that panics before userspace; the bootloader's can. §6.3. |
 | 20 | **The exact automatic-rollback rule: blessing is gated on health.** `punar-update-health.service` is ordered before `systemd-bless-boot.service` in the `boot-complete.target` chain. Health fails ⇒ no blessing ⇒ tries-left stays decremented ⇒ after three unblessed boots systemd-boot selects the previous slot's permanently-blessed UKI. §6.4. |
-| 21 | **The last-known-good UKI is never removed by an update, and the ESP is sized for three.** The "both slots bad" case is therefore reachable only by ESP corruption or deletion — for which the answer is recovery media, which **does not exist** and is named as unowned work. §6.5. |
+| 21 | **The last-known-good UKI is never removed by an update, and the ESP is sized for three.** The "both slots bad" case is therefore reachable only by ESP corruption or deletion. Bootable installer media now exists, but its authenticated ESP inspection/repair workflow does not and remains named as unowned work. §6.5. |
 | 22 | **Four typed methods, one new capability, no reboot method.** `update.status` (read, any peer), `update.check` / `update.apply` / `update.rollback` (root-only, audited). Rebooting is the *caller's* act (`punarctl update apply --reboot` runs `systemctl reboot` itself); punard does not grow a side-effect verb it does not need. §7.1. |
 | 23 | **`update.apply` is NOT approval-gated for a human at the keyboard, and IS denied for agent-attributed peers by M9's AI authority path.** Gating your own laptop behind an approval you also grant is theatre; an agent updating or rolling back the OS unattended is exactly what M9 exists to stop. The denial cites a *named* rule (`host.system_update: deny`), not the generic no-rule text. §7.3. |
 | 24 | **Rollback is never blocked on a managed device in this slice.** It is audited, and reported on the next sync. A device that cannot be recovered is worse than a device that reports a recovery. An org-side `rollbackPermitted` field is *proposed*, not implemented. §7.3. |
@@ -936,13 +936,14 @@ Enumerated, because "rollback failed" is not one failure:
 | New slot boots unhealthy | No blessing, counts down over subsequent boots | The design (path B) |
 | **Old slot's UKI missing** | Nothing to fall back to | **An update never deletes the last-known-good UKI.** Retention is exactly two release UKIs (current + last-good); the ESP is sized for three so a write never has to delete before it succeeds. Asserted (§12.1 C3) |
 | **Old slot's payload overwritten** | Fallback boots into a half-written root | Staging **always** targets the slot that is *not* last-known-good. A device with `rollback_state: none` (one release only) writes the empty slot; a device with a good pair overwrites the older of the two. Never the running one, never the blessed one |
-| **ESP corrupt / vfat damage** | No entries at all | **No software answer.** The device needs recovery media, which **does not exist** — spec 66 lists a bootable ISO for the MVP and `image-pipeline.md` records *"qcow2 only. No installer ISO yet."* Named as unowned work in §13.2, not glossed |
+| **ESP corrupt / vfat damage** | No entries at all | **No shipping repair workflow.** A bootable installer ISO now exists and is OVMF-proven, but it has no implemented ESP inspection/repair operation. That recovery function remains unowned work in §13.2, not glossed. |
 | **Both slots exhausted** | Unreachable by construction: a blessed entry has no counter and cannot be exhausted. Reachable only via the two rows above | Same as above |
 | `/var` corrupt | The OS boots; punard cannot read its store | Out of scope for OS rollback by design (§3.6). punard must start with an unreadable store and say so in the section 73 voice rather than crash-looping — an existing robustness requirement this document does not extend |
 
 **The honest summary:** this design guarantees recovery from *a bad
-release*. It does not guarantee recovery from *a damaged ESP*, and until
-recovery media exists, that gap is real and named.
+release*. It does not guarantee recovery from *a damaged ESP*; bootable media
+now exists, but until it gains an authenticated repair workflow that gap is
+real and named.
 
 ---
 
@@ -1562,7 +1563,7 @@ This is a recommendation to M13's owner. This document does not modify
 | 1 | **Delta transport** (casync/desync-style, or systemd-sysupdate's future) | Phase 2 | The single largest UX and bandwidth win; needs a real artifact host to matter (§9.2) |
 | 2 | **Real keys, signed UKIs, Secure Boot enrollment, shim evaluation** | Phase 2 + USER-BLOCKED | §12.2 items 1, 2 |
 | 3 | **The control plane**: cohort assignment, health aggregation, automatic halt, the promotion schedule | Phase 2 (spec 50/77) | Smplify-side software; no amount of device work substitutes |
-| 4 | **Recovery media** (the spec 66 bootable ISO) | Unowned — named here | The last line of defense against §6.5's ESP row; `image-pipeline.md` records *"No installer ISO yet"* |
+| 4 | **Recovery repair workflow on the bootable installer ISO** | Unowned — named here | The ISO now boots its live root in canonical OVMF optical/raw-drive gates, but it cannot yet inspect or repair a damaged ESP. |
 | 5 | **dm-verity on the root slot**, and measured boot | Phase 2 (spec 44.1) | Turns "we verified it once at write time" into "the kernel verifies every block forever" |
 | 6 | **Desktop-image multi-boot proof** and a second boot in the existing `desktop-test` | Follow-up | M13 §8.3's precedent: name the follow-up, do not attempt it alongside a layout change |
 | 7 | **Managed reboot deadlines**, `pinnedVersion`, `rollbackPermitted` | Phase 2 + USER-BLOCKED item 7 | Schema widening should follow a product decision, not precede it |

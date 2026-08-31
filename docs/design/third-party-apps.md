@@ -1267,8 +1267,9 @@ Consequences that follow:
 - The fixture repo (app-catalog §9) proves the *mechanism* offline and installs
   a ~3 MB fixture app. It is not a substitute for a runtime and the checks must
   never be read as proving that a real install works.
-- **The named remedy, drawn dashed and not built:** the installer ISO is
-  already ≈ 2.5–4 GB (installer.md §3). Adding `org.freedesktop.Platform` and
+- **The named remedy remains unbuilt:** the bootable installer ISO now exists
+  and is approximately 4.12 GiB (installer.md §3). Adding
+  `org.freedesktop.Platform` and
   seeding `/var/lib/flatpak` at install time would cost ≈ 1.2 GB of ISO and
   give every freshly installed machine one working runtime with no network.
   That is a real option with a real price and it is **DESIGN-ONLY** — not

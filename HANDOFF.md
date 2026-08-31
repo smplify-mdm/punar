@@ -335,7 +335,9 @@ proves no class carries a weaker security/privacy result.
 
 ### 7.4 Designed and unbuilt, roughly by value
 - **Installer + onboarding** — `docs/design/installer.md`, `onboarding.md`.
-  Nobody can install Punar on a real machine today.
+  The hybrid x86_64 ISO and its optical/raw-drive live boot are canonical
+  CI-proven; the destructive transaction, installed-image boot, encryption
+  wiring, physical media and bare-hardware acceptance are not.
 - **Catalog breadth + broad-filesystem consent** — `docs/design/third-party-apps.md`,
   `app-catalog.md`. The typed `punarctl app` path and first curated apps now
   exist. Editors and creative tools that request `home` or `host` filesystem
