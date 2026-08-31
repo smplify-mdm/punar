@@ -53,12 +53,23 @@ punar_configure_graphics() {
 
     if [ "${punar_real_gpu}" -eq 1 ]; then
         PUNAR_GRAPHICS_MODE=hardware
-        unset AQ_NO_MODIFIERS LIBGL_ALWAYS_SOFTWARE
+        # These are Punar's unaccelerated-session overrides, not global
+        # product defaults. Never carry them onto bare metal: Qt Quick and
+        # Mesa should use the real GPU and their normal worker policy there.
+        unset AQ_NO_MODIFIERS LIBGL_ALWAYS_SOFTWARE QT_QUICK_BACKEND LP_NUM_THREADS
     else
         PUNAR_GRAPHICS_MODE=software
         AQ_NO_MODIFIERS=1
         LIBGL_ALWAYS_SOFTWARE=1
-        export AQ_NO_MODIFIERS LIBGL_ALWAYS_SOFTWARE
+        # QEMU's virtio-vga gate has no virgl renderer. Asking Qt Quick to
+        # build a GPU scene through llvmpipe creates a large worker arena for
+        # a shell whose shipped surfaces are all supported by the built-in
+        # raster adaptation. Keep the compositor's necessary Mesa fallback,
+        # but bound its llvmpipe pool so VM resources scale predictably.
+        # Real GPUs take the branch above and receive neither override.
+        QT_QUICK_BACKEND=software
+        LP_NUM_THREADS=2
+        export AQ_NO_MODIFIERS LIBGL_ALWAYS_SOFTWARE QT_QUICK_BACKEND LP_NUM_THREADS
     fi
 
     if [ "${punar_drm_cards}" -eq 0 ]; then

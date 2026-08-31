@@ -132,6 +132,12 @@ if [ -r "${GRAPHICS_REPORT}" ]; then
     graphics_mode="$(printf '%s\n' "${graphics_line}" \
         | sed -n 's/^mode=\([^ ]*\).*/\1/p')"
     check_eq "virtio session graphics mode" "software" "${graphics_mode}"
+    graphics_qt_backend="$(printf '%s\n' "${graphics_line}" \
+        | sed -n 's/.* qt_quick_backend=\([^ ]*\).*/\1/p')"
+    graphics_llvmpipe_threads="$(printf '%s\n' "${graphics_line}" \
+        | sed -n 's/.* llvmpipe_threads=\([^ ]*\).*/\1/p')"
+    check_eq "virtio Qt Quick backend" "software" "${graphics_qt_backend}"
+    check_eq "virtio llvmpipe worker cap" "2" "${graphics_llvmpipe_threads}"
     case "${graphics_line}" in
         *drivers=virtio_gpu*|*drivers=virtio_pci*|*drivers=virtio-pci*)
             note "ok   virtio DRM driver recorded = ${graphics_line}"

@@ -33,13 +33,16 @@ export XDG_DATA_DIRS
 punar_configure_graphics
 
 # Leave a session-scoped, privacy-safe proof for diagnostics and the VM gate.
-# It contains only the selected mode and kernel DRM module names.
-printf 'punar-session: graphics=%s drivers=%s\n' \
-    "${PUNAR_GRAPHICS_MODE}" "${PUNAR_DRM_DRIVERS}" >&2
+# It contains only the selected mode, kernel DRM module names, and Punar's
+# fallback renderer policy (never user or device identifiers).
+printf 'punar-session: graphics=%s drivers=%s qt_quick_backend=%s llvmpipe_threads=%s\n' \
+    "${PUNAR_GRAPHICS_MODE}" "${PUNAR_DRM_DRIVERS}" \
+    "${QT_QUICK_BACKEND:-default}" "${LP_NUM_THREADS:-default}" >&2
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ]; then
     umask 077
-    printf 'mode=%s drivers=%s\n' \
+    printf 'mode=%s drivers=%s qt_quick_backend=%s llvmpipe_threads=%s\n' \
         "${PUNAR_GRAPHICS_MODE}" "${PUNAR_DRM_DRIVERS}" \
+        "${QT_QUICK_BACKEND:-default}" "${LP_NUM_THREADS:-default}" \
         > "${XDG_RUNTIME_DIR}/punar-graphics-mode"
 fi
 
