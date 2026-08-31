@@ -97,7 +97,7 @@ fi
 assert_line "${ASSEMBLER}" 'OPTICAL_ESP_LABEL=PUNAR_BOOT'
 grep -Fq "\"\${#OPTICAL_ESP_LABEL}\" -le 11" "${ASSEMBLER}" \
     || fail 'installer assembly does not enforce the FAT label length limit'
-grep -Fq "mkfs.vfat -F 32 -n \"\${OPTICAL_ESP_LABEL}\"" "${ASSEMBLER}" \
+grep -Fq "mkfs.vfat -F 16 -n \"\${OPTICAL_ESP_LABEL}\"" "${ASSEMBLER}" \
     || fail 'optical ESP does not use the validated FAT label'
 assert_line "${ASSEMBLER}" "OPTICAL_ESP_BYTES=\$((31 * 1024 * 1024))"
 grep -Fq 'OPTICAL_ESP_BYTES / 512)) -gt 65535' "${ASSEMBLER}" \

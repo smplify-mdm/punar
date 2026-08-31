@@ -269,7 +269,10 @@ if [ $((OPTICAL_LOADER_SIZE + OPTICAL_ESP_HEADROOM_BYTES)) -gt "${OPTICAL_ESP_BY
     exit 1
 fi
 truncate --size "${OPTICAL_ESP_BYTES}" "${WORK}/iso-root/boot/efi.img"
-mkfs.vfat -F 32 -n "${OPTICAL_ESP_LABEL}" "${WORK}/iso-root/boot/efi.img"
+# FAT32 requires more clusters than this bounded El Torito image can contain;
+# OVMF rejects that undersized filesystem. FAT16 is valid for this removable
+# optical boot image and keeps the separately appended disk ESP on FAT32.
+mkfs.vfat -F 16 -n "${OPTICAL_ESP_LABEL}" "${WORK}/iso-root/boot/efi.img"
 mmd -i "${WORK}/iso-root/boot/efi.img" ::/EFI ::/EFI/BOOT
 mcopy -i "${WORK}/iso-root/boot/efi.img" \
     "${WORK}/optical-bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
