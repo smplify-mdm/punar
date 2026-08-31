@@ -139,5 +139,8 @@ grep -Fwq 'punar.live=1' "${WORK}/installer.cmdline.txt" \
 if grep -Fq 'root=PARTUUID=' "${WORK}/installer.cmdline.txt"; then
     fail 'installer UKI embeds an installed-slot PARTUUID'
 fi
+if grep -Eq '(^|[[:space:]])console=(ttyS|ttyAMA)' "${WORK}/installer.cmdline.txt"; then
+    fail 'installer UKI enables a serial kernel console'
+fi
 
 echo "installer-iso-contract-test: PASS version=${VERSION} bytes=$(stat -c %s "${ISO}")"

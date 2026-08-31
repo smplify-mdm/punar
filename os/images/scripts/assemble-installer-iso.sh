@@ -147,6 +147,10 @@ if grep -Fq 'root=PARTUUID=' "${WORK}/installer.cmdline.txt"; then
     echo "error: installer UKI embeds an installed-slot PARTUUID" >&2
     exit 1
 fi
+if grep -Eq '(^|[[:space:]])console=(ttyS|ttyAMA)' "${WORK}/installer.cmdline.txt"; then
+    echo "error: installer UKI enables a serial kernel console" >&2
+    exit 1
+fi
 
 PAYLOAD="${WORK}/iso-root/punar/${PAYLOAD_NAME}"
 SLOT_UKI="${WORK}/iso-root/punar/${SLOT_UKI_NAME}"

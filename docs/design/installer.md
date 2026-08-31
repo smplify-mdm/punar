@@ -1824,7 +1824,7 @@ Gating unless marked. **40 assertions.**
 
 | # | Assertion |
 |---|---|
-| I05 | The ISO boots under OVMF **both** as `-cdrom` and as a raw `-drive`, reaching `PUNAR_INSTALLER_OK` on the serial console in each case. |
+| I05 | The ISO boots under OVMF **both** as `-cdrom` and as a raw `-drive`, reaching `PUNAR_INSTALLER_OK` on the dedicated serial proof device in each case. The UKI does **not** designate that device as a kernel console or enable a getty. |
 | I06 | In the live environment `punard` is running and `punarctl debug rpc install.targets` returns the blank 128 GiB disk and **does not** return the boot medium. |
 | I07 | `punarctl debug rpc install.plan` returns a plan validating against `schemas/install/plan.json`, and a `plan_token` equal to the sha256 of its own canonical form. |
 

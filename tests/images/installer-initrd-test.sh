@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UNIT_ROOT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/systemd/system"
+INSTALLER_CONF="${REPO_ROOT}/os/images/mkosi.profiles/installer/mkosi.conf"
 
 fail() {
     echo "installer-initrd-test: FAIL: $*" >&2
@@ -54,7 +55,16 @@ assert_line "${TARGET}" 'Requires=sysroot.mount'
 assert_line "${TARGET}" 'Wants=punar-installer-ready.service'
 assert_line "${READY}" 'Requires=sysroot.mount'
 assert_line "${READY}" 'ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK'
-assert_line "${READY}" 'TTYPath=/dev/console'
+assert_line "${READY}" 'TTYPath=/dev/ttyS0'
+
+# The proof marker may use QEMU's serial device directly, but the live kernel
+# must not designate a serial console. That would widen the pre-install attack
+# surface on physical hardware and violates the same A8 rule as the product.
+assert_line "${INSTALLER_CONF}" \
+    'KernelCommandLine=console=tty0 systemd.getty_auto=no punar.live=1'
+if grep -Eq 'KernelCommandLine=.*console=(ttyS|ttyAMA)' "${INSTALLER_CONF}"; then
+    fail 'installer kernel command line enables a serial console'
+fi
 
 # No unit may introduce a shell, caller-supplied environment expansion, a
 # network dependency, or a writable boot-medium mount.

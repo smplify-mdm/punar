@@ -9,4 +9,4 @@ Before=initrd-root-fs.target
 Type=oneshot
 ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK
 StandardOutput=tty
-TTYPath=/dev/console
+TTYPath=/dev/ttyS0
