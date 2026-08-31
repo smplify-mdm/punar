@@ -287,6 +287,7 @@ jobs:
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             os/images/scripts/assemble-installer-iso.sh \
+            os/images/scripts/build-installer-initrd.sh \
             tests/images/check-staged-service-executables.sh \
             tests/images/check-repart-layout.sh \
             tests/images/installer-initrd-test.sh \

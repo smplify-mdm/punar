@@ -172,4 +172,22 @@ if grep -Eq '(^|[[:space:]])console=(ttyS|ttyAMA)' "${WORK}/installer.cmdline.tx
     fail 'installer UKI enables a serial kernel console'
 fi
 
+# Reconstruct the deterministic live-root member from source and prove the
+# final artifact contains those exact bytes. A source-only unit test cannot
+# catch a PE section that was linked at the old size and silently truncated.
+"${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh" \
+    "${REPO_ROOT}/os/images/installer-initrd" "${WORK}/expected-punar-live.initrd"
+objcopy --dump-section ".initrd=${WORK}/installer.initrd" "${WORK}/${INSTALLER_UKI}"
+python3 - "${WORK}/expected-punar-live.initrd" "${WORK}/installer.initrd" <<'PY'
+import sys
+
+expected = open(sys.argv[1], "rb").read()
+actual = open(sys.argv[2], "rb").read()
+occurrences = actual.count(expected)
+if occurrences != 1:
+    raise SystemExit(
+        f"installer UKI contains the exact live-root initrd member {occurrences} times"
+    )
+PY
+
 echo "installer-iso-contract-test: PASS version=${VERSION} bytes=$(stat -c %s "${ISO}")"

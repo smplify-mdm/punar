@@ -66,5 +66,34 @@ else:
     print(" ".join(str(item) for item in value))
 ' "${MKOSI_CONFIG}")
 
+# Pinned mkosi 26 builds its default initrd as a dependency, then appends every
+# member placed under ARTIFACTDIR/io.mkosi.initrd before invoking ukify. Add the
+# installer-only live-root units at that supported boundary. Growing a linked
+# UKI's .initrd section later with objcopy is not equivalent: PE/COFF section
+# allocation may remain at the old size even when objcopy exits successfully.
+NORMALIZED_PROFILES=$(printf '%s' "${PROFILES:-}" | tr ',' ' ')
+case " ${NORMALIZED_PROFILES} " in
+    *' installer '*)
+        [ -n "${ARTIFACTDIR:-}" ] || {
+            echo 'error: mkosi did not expose ARTIFACTDIR for the installer build' >&2
+            exit 2
+        }
+        CHECKER_DIR=$(dirname "${CHECKER}")
+        INITRD_SOURCE="${CHECKER_DIR}/installer-initrd"
+        INITRD_BUILDER="${CHECKER_DIR}/scripts/build-installer-initrd.sh"
+        [ -d "${INITRD_SOURCE}" ] || {
+            echo "error: installer initrd source is missing: ${INITRD_SOURCE}" >&2
+            exit 2
+        }
+        [ -x "${INITRD_BUILDER}" ] || {
+            echo "error: installer initrd builder is missing: ${INITRD_BUILDER}" >&2
+            exit 2
+        }
+        mkdir -p "${ARTIFACTDIR}/io.mkosi.initrd"
+        "${INITRD_BUILDER}" "${INITRD_SOURCE}" \
+            "${ARTIFACTDIR}/io.mkosi.initrd/90-punar-live.initrd"
+        ;;
+esac
+
 exec "${CHECKER}" "${BUILDROOT}" "${PROFILES:-}" \
     "${KERNEL_COMMAND_LINE}" "${MANIFEST}"

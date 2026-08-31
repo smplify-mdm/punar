@@ -25,11 +25,17 @@ SYSROOT="${UNIT_ROOT}/sysroot.mount"
 READY="${UNIT_ROOT}/punar-installer-ready.service"
 TARGET="${UNIT_ROOT}/initrd-root-fs.target.d/50-punar-live.conf"
 SWITCH_ROOT_PROOF="${UNIT_ROOT}/initrd-switch-root.service.d/50-punar-serial-proof.conf"
+FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
+INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
+ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${TARGET}" "${SWITCH_ROOT_PROOF}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
+[ -x "${INITRD_BUILDER}" ] || fail 'installer initrd builder is not executable'
+grep -Fq -- '--owner=0:0' "${INITRD_BUILDER}" \
+    || fail 'installer initrd builder does not normalize archive ownership'
 
 # All installer inputs are fixed below the read-only, non-executable medium.
 assert_line "${MEDIUM}" 'What=/dev/disk/by-label/PUNAR_INSTALL'
@@ -79,5 +85,19 @@ if rg -n '(sh -c|bash -c|EnvironmentFile=|curl|wget|network-online|Options=.*(^|
     "${UNIT_ROOT}"; then
     fail 'live-root units contain an unbounded execution/network/write path'
 fi
+
+# The archive is injected before ukify links the UKI. Post-link objcopy growth
+# is specifically forbidden because a successful command does not prove that
+# the PE/COFF section allocation grew with the payload.
+grep -Fq 'ARTIFACTDIR}/io.mkosi.initrd/90-punar-live.initrd' "${FINALIZER}" \
+    || fail 'mkosi finalization does not publish the installer initrd artifact'
+if grep -Fq 'objcopy --update-section ".initrd=' "${ASSEMBLER}"; then
+    fail 'installer assembly still mutates the linked UKI initrd section'
+fi
+assert_line "${ASSEMBLER}" 'OPTICAL_ESP_LABEL=PUNAR_BOOT'
+grep -Fq "\"\${#OPTICAL_ESP_LABEL}\" -le 11" "${ASSEMBLER}" \
+    || fail 'installer assembly does not enforce the FAT label length limit'
+grep -Fq "mkfs.vfat -F 32 -n \"\${OPTICAL_ESP_LABEL}\"" "${ASSEMBLER}" \
+    || fail 'optical ESP does not use the validated FAT label'
 
 echo 'installer-initrd-test: PASS'

@@ -18,6 +18,12 @@ OUTPUT_ISO=$4
 GIT_SHA=$5
 BUILT_AT=$6
 CI_RUN_ID=$7
+OPTICAL_ESP_LABEL=PUNAR_BOOT
+
+# FAT volume labels are limited to 11 characters. Keep this explicit so a
+# branding change cannot make the native release job fail late in assembly.
+[ "${#OPTICAL_ESP_LABEL}" -le 11 ] \
+    || { echo "error: optical ESP label exceeds FAT's 11-character limit" >&2; exit 2; }
 
 IMAGES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${IMAGES_DIR}/../.." && pwd)"
@@ -125,21 +131,23 @@ zstd -T0 -10 --force --no-progress "${SLOT_RAW}" \
 extract_uki "${RELEASE_RAW}" "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
 extract_uki "${INSTALLER_RAW}" "${WORK}/${INSTALLER_UKI_NAME}"
 
-# Extend mkosi's hardware-generic initrd with declarative live-root units.
-# Linux accepts concatenated newc archives; later members supply only these
-# unit files and leave mkosi's package-derived initrd unchanged.
+# The live-root archive must already be inside the UKI built by mkosi/ukify.
+# Reconstruct the deterministic member and require its exact bytes in the
+# linked .initrd section before spending time on ISO authoring.
+"${IMAGES_DIR}/scripts/build-installer-initrd.sh" \
+    "${IMAGES_DIR}/installer-initrd" "${WORK}/expected-punar-live.initrd"
 objcopy --dump-section ".initrd=${WORK}/installer.initrd" "${WORK}/${INSTALLER_UKI_NAME}"
-mkdir -p "${WORK}/installer-initrd-tree"
-cp -a "${IMAGES_DIR}/installer-initrd/." "${WORK}/installer-initrd-tree/"
-find "${WORK}/installer-initrd-tree" -exec touch -h --date='@1787184000' -- {} +
-(
-    cd "${WORK}/installer-initrd-tree"
-    find . -print0 | LC_ALL=C sort -z \
-        | cpio --null --create --format=newc --reproducible --quiet \
-        > "${WORK}/punar-live.initrd"
-)
-cat "${WORK}/punar-live.initrd" >> "${WORK}/installer.initrd"
-objcopy --update-section ".initrd=${WORK}/installer.initrd" "${WORK}/${INSTALLER_UKI_NAME}"
+python3 - "${WORK}/expected-punar-live.initrd" "${WORK}/installer.initrd" <<'PY'
+import sys
+
+expected = open(sys.argv[1], "rb").read()
+actual = open(sys.argv[2], "rb").read()
+occurrences = actual.count(expected)
+if occurrences != 1:
+    raise SystemExit(
+        f"installer UKI contains the exact live-root initrd member {occurrences} times"
+    )
+PY
 objcopy --dump-section ".cmdline=${WORK}/installer.cmdline" "${WORK}/${INSTALLER_UKI_NAME}"
 tr -d '\000' < "${WORK}/installer.cmdline" > "${WORK}/installer.cmdline.txt"
 grep -Fwq 'punar.live=1' "${WORK}/installer.cmdline.txt"
@@ -252,7 +260,7 @@ if [ "${OPTICAL_ESP_BYTES}" -lt $((OPTICAL_LOADER_SIZE + 16 * 1024 * 1024)) ]; t
     OPTICAL_ESP_BYTES=$((((OPTICAL_ESP_BYTES + 1024 * 1024 - 1) / (1024 * 1024)) * 1024 * 1024))
 fi
 truncate --size "${OPTICAL_ESP_BYTES}" "${WORK}/iso-root/boot/efi.img"
-mkfs.vfat -F 32 -n PUNAR_OPTICAL "${WORK}/iso-root/boot/efi.img"
+mkfs.vfat -F 32 -n "${OPTICAL_ESP_LABEL}" "${WORK}/iso-root/boot/efi.img"
 mmd -i "${WORK}/iso-root/boot/efi.img" ::/EFI ::/EFI/BOOT
 mcopy -i "${WORK}/iso-root/boot/efi.img" \
     "${WORK}/optical-bootx64.efi" ::/EFI/BOOT/BOOTX64.EFI
