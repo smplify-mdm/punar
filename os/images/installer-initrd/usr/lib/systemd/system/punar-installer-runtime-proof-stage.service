@@ -1,0 +1,11 @@
+[Unit]
+Description=Stage the VM-only Punar installer runtime proof into the live overlay
+DefaultDependencies=no
+Requires=sysroot.mount
+After=sysroot.mount
+Before=initrd-root-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/punar-live/stage-runtime-proof.sh
+

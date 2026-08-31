@@ -288,6 +288,8 @@ jobs:
             os/images/scripts/container-build.sh \
             os/images/scripts/assemble-installer-iso.sh \
             os/images/scripts/build-installer-initrd.sh \
+            os/images/installer-initrd/usr/lib/punar-live/stage-runtime-proof.sh \
+            os/images/installer-initrd/usr/lib/punar-live/rootfs/usr/lib/punar/installer-runtime-proof.sh \
             tests/images/check-staged-service-executables.sh \
             tests/images/check-repart-layout.sh \
             tests/images/installer-initrd-test.sh \
@@ -400,7 +402,8 @@ jobs:
       - name: Install QEMU and OVMF firmware
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf python3-jsonschema
 
       - name: Enable KVM access for the runner user
         run: |

@@ -1,0 +1,11 @@
+[Unit]
+Description=Prove the typed Punar installer surface in live userspace
+ConditionKernelCommandLine=punar.live=1
+ConditionPathExists=/dev/virtio-ports/punar.install-proof
+Requires=punard.service
+After=punard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/punar/installer-runtime-proof.sh
+

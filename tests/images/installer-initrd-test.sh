@@ -23,17 +23,26 @@ OVERLAY="${UNIT_ROOT}/run-punar-overlay.mount"
 PREP="${UNIT_ROOT}/run-punar-overlay-prep.service"
 SYSROOT="${UNIT_ROOT}/sysroot.mount"
 READY="${UNIT_ROOT}/punar-installer-ready.service"
+RUNTIME_STAGE="${UNIT_ROOT}/punar-installer-runtime-proof-stage.service"
 TARGET="${UNIT_ROOT}/initrd-root-fs.target.d/50-punar-live.conf"
 SWITCH_ROOT_PROOF="${UNIT_ROOT}/initrd-switch-root.service.d/50-punar-serial-proof.conf"
+STAGE_SCRIPT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/stage-runtime-proof.sh"
+RUNTIME_ROOT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/rootfs"
+RUNTIME_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.service"
+RUNTIME_SCRIPT="${RUNTIME_ROOT}/usr/lib/punar/installer-runtime-proof.sh"
 FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
 INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
 ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
-    "${SYSROOT}" "${READY}" "${TARGET}" "${SWITCH_ROOT_PROOF}"; do
+    "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
+    "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${RUNTIME_UNIT}" \
+    "${RUNTIME_SCRIPT}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 [ -x "${INITRD_BUILDER}" ] || fail 'installer initrd builder is not executable'
+[ -x "${STAGE_SCRIPT}" ] || fail 'runtime proof staging script is not executable'
+[ -x "${RUNTIME_SCRIPT}" ] || fail 'runtime proof script is not executable'
 grep -Fq -- '--owner=0:0' "${INITRD_BUILDER}" \
     || fail 'installer initrd builder does not normalize archive ownership'
 
@@ -59,10 +68,26 @@ assert_line "${SYSROOT}" 'Options=lowerdir=/run/punar/lower,upperdir=/run/punar/
 # Reaching initrd-root-fs.target must require the overlay and emit the exact
 # serial marker used by both optical-drive and raw-hybrid boot gates.
 assert_line "${TARGET}" 'Requires=sysroot.mount'
-assert_line "${TARGET}" 'Wants=punar-installer-ready.service'
+assert_line "${TARGET}" 'Wants=punar-installer-ready.service punar-installer-runtime-proof-stage.service'
 assert_line "${READY}" 'Requires=sysroot.mount'
 assert_line "${READY}" 'ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK'
 assert_line "${READY}" 'TTYPath=/dev/ttyS0'
+
+# The second boundary must cross switch-root and query the real daemon. Its
+# service is staged only into the volatile overlay and can run only when the
+# VM gate presents its dedicated virtio port. It performs no apply/write call.
+assert_line "${RUNTIME_STAGE}" 'Requires=sysroot.mount'
+assert_line "${RUNTIME_STAGE}" 'ExecStart=/usr/lib/punar-live/stage-runtime-proof.sh'
+assert_line "${RUNTIME_UNIT}" 'ConditionKernelCommandLine=punar.live=1'
+assert_line "${RUNTIME_UNIT}" 'ConditionPathExists=/dev/virtio-ports/punar.install-proof'
+assert_line "${RUNTIME_UNIT}" 'Requires=punard.service'
+grep -Fq 'install.targets' "${RUNTIME_SCRIPT}" \
+    || fail 'runtime proof does not exercise install.targets'
+grep -Fq 'install.plan' "${RUNTIME_SCRIPT}" \
+    || fail 'runtime proof does not exercise install.plan'
+if grep -Eq 'install\.(apply|recovery_ack)' "${RUNTIME_SCRIPT}"; then
+    fail 'read-only runtime proof invokes a mutating installer method'
+fi
 
 # A failed handoff must be diagnosable without turning the proof UART into a
 # kernel console or enabling an emergency login.
