@@ -221,6 +221,7 @@ boot_form() {
             die "live userspace installer proof failed in ${form} mode"
         fi
         if grep -aq 'PUNAR_INSTALLER_OK' "${log}" \
+            && grep -aq 'PUNAR_INSTALL_RUNTIME_STAGE_OK' "${log}" \
             && grep -aq '^PUNAR_INSTALL_RUNTIME_END$' "${runtime_log}"; then
             now=$(date +%s)
             validate_runtime_proof "${runtime_log}" "${form}"

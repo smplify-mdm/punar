@@ -29,6 +29,8 @@ SWITCH_ROOT_PROOF="${UNIT_ROOT}/initrd-switch-root.service.d/50-punar-serial-pro
 STAGE_SCRIPT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/stage-runtime-proof.sh"
 RUNTIME_ROOT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/rootfs"
 RUNTIME_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.service"
+RUNTIME_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.path"
+RUNTIME_WANTS="${RUNTIME_ROOT}/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf"
 RUNTIME_SCRIPT="${RUNTIME_ROOT}/usr/lib/punar/installer-runtime-proof.sh"
 FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
 INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
@@ -37,7 +39,7 @@ ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
     "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${RUNTIME_UNIT}" \
-    "${RUNTIME_SCRIPT}"; do
+    "${RUNTIME_PATH}" "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 [ -x "${INITRD_BUILDER}" ] || fail 'installer initrd builder is not executable'
@@ -67,8 +69,8 @@ assert_line "${SYSROOT}" 'Options=lowerdir=/run/punar/lower,upperdir=/run/punar/
 
 # Reaching initrd-root-fs.target must require the overlay and emit the exact
 # serial marker used by both optical-drive and raw-hybrid boot gates.
-assert_line "${TARGET}" 'Requires=sysroot.mount'
-assert_line "${TARGET}" 'Wants=punar-installer-ready.service punar-installer-runtime-proof-stage.service'
+assert_line "${TARGET}" 'Requires=sysroot.mount punar-installer-runtime-proof-stage.service'
+assert_line "${TARGET}" 'Wants=punar-installer-ready.service'
 assert_line "${READY}" 'Requires=sysroot.mount'
 assert_line "${READY}" 'ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK'
 assert_line "${READY}" 'TTYPath=/dev/ttyS0'
@@ -78,9 +80,19 @@ assert_line "${READY}" 'TTYPath=/dev/ttyS0'
 # VM gate presents its dedicated virtio port. It performs no apply/write call.
 assert_line "${RUNTIME_STAGE}" 'Requires=sysroot.mount'
 assert_line "${RUNTIME_STAGE}" 'ExecStart=/usr/lib/punar-live/stage-runtime-proof.sh'
+assert_line "${RUNTIME_STAGE}" 'TTYPath=/dev/ttyS0'
 assert_line "${RUNTIME_UNIT}" 'ConditionKernelCommandLine=punar.live=1'
-assert_line "${RUNTIME_UNIT}" 'ConditionPathExists=/dev/virtio-ports/punar.install-proof'
 assert_line "${RUNTIME_UNIT}" 'Requires=punard.service'
+assert_line "${RUNTIME_UNIT}" 'ExecStart=/bin/sh /usr/lib/punar/installer-runtime-proof.sh'
+assert_line "${RUNTIME_UNIT}" 'RemainAfterExit=yes'
+assert_line "${RUNTIME_PATH}" 'PathExists=/dev/virtio-ports/punar.install-proof'
+assert_line "${RUNTIME_PATH}" 'Unit=punar-installer-runtime-proof.service'
+assert_line "${RUNTIME_WANTS}" 'Wants=punar-installer-runtime-proof.path'
+grep -Fq 'PUNAR_INSTALL_RUNTIME_STAGE_OK' "${STAGE_SCRIPT}" \
+    || fail 'runtime proof staging has no serial completion marker'
+if grep -Eq '/usr/bin/(cp|ln)([[:space:]]|$)' "${STAGE_SCRIPT}"; then
+    fail 'runtime proof staging depends on non-guaranteed initrd coreutils'
+fi
 grep -Fq 'install.targets' "${RUNTIME_SCRIPT}" \
     || fail 'runtime proof does not exercise install.targets'
 grep -Fq 'install.plan' "${RUNTIME_SCRIPT}" \

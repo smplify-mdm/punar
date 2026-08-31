@@ -8,4 +8,6 @@ Before=initrd-root-fs.target
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/punar-live/stage-runtime-proof.sh
-
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS0

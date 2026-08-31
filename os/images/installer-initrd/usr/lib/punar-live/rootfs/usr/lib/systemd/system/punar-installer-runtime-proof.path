@@ -1,0 +1,8 @@
+[Unit]
+Description=Wait for the VM-only Punar installer proof channel
+ConditionKernelCommandLine=punar.live=1
+
+[Path]
+PathExists=/dev/virtio-ports/punar.install-proof
+Unit=punar-installer-runtime-proof.service
+
