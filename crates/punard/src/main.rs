@@ -186,6 +186,11 @@ fn run(args: RunArgs) -> ExitCode {
     let live_mode = std::fs::read_to_string("/proc/cmdline")
         .map(|cmdline| punard::install::live_mode_from_cmdline(&cmdline))
         .unwrap_or(false);
+    let installer_sources = if live_mode {
+        punard::install::InstallerSources::for_live_medium()
+    } else {
+        punard::install::InstallerSources::default()
+    };
     let cfg = DaemonConfig {
         group: args.group,
         control_plane_socket,
@@ -198,6 +203,7 @@ fn run(args: RunArgs) -> ExitCode {
         app_catalog_path: Some(args.app_catalog),
         flatpak_bin: args.flatpak_bin,
         live_mode,
+        installer_sources,
         ..cfg
     };
 

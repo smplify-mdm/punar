@@ -5,10 +5,12 @@
 #   punar-dev      — minimal CI image (profile "dev").
 #   punar-desktop  — graphical CI/demo image (profiles "desktop,dev").
 #   punar-release  — production-safe graphical image (profile "desktop").
+#   punar-installer — offline UEFI hybrid ISO (profiles "desktop" and
+#                     "desktop,installer", plus pinned xorriso assembly).
 #
 # Usage:
-#   tools/build-image.sh [dev|desktop|release|all]     (default: all)
-# or set PUNAR_IMAGES=dev|desktop|release|all. `all` retains the CI pair and
+#   tools/build-image.sh [dev|desktop|release|iso|all]     (default: all)
+# or set PUNAR_IMAGES=dev|desktop|release|iso|all. `all` retains the CI pair and
 # does not implicitly add the release artifact. Set PUNAR_BUILD_MODE=summary for the
 # cheap config-validation path (staging + `mkosi summary`, no image build).
 #
@@ -24,7 +26,8 @@
 # mounted into the container: the desktop profile stages Hyprland/foot/font
 # configs from os/modules/desktop and the shell from shell/ at build time.
 #
-# Output: os/images/out/punar-{dev,desktop,release}-x86_64.qcow2 as selected
+# Output: os/images/out/punar-{dev,desktop,release}-x86_64.qcow2 as selected,
+#         and punar-installer-<version>-x86_64.iso for `iso`
 #         (+ SHA256SUMS and build-info.txt in build mode)
 set -euo pipefail
 
@@ -51,6 +54,12 @@ if [ "${HOST_ARCH}" != "x86_64" ]; then
 fi
 
 GIT_SHA="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
+if [ -z "${PUNAR_INSTALLER_VERSION:-}" ]; then
+    COMMIT_DAY="$(git -C "${REPO_ROOT}" show -s --format=%cd --date=format:%Y.%m.%d "${GIT_SHA}" 2>/dev/null || date -u +%Y.%m.%d)"
+    COMMIT_NUMBER="$(git -C "${REPO_ROOT}" rev-list --count "${GIT_SHA}" 2>/dev/null || echo 1)"
+    PUNAR_INSTALLER_VERSION="${COMMIT_DAY}.${COMMIT_NUMBER}"
+fi
+PUNAR_CI_RUN_ID="${GITHUB_RUN_ID:-local-${GIT_SHA:0:12}}"
 
 echo "==> Building builder container image: ${BUILDER_TAG}"
 echo "    base:     ${PUNAR_BUILDER_BASE}"
@@ -83,6 +92,8 @@ docker run --rm --privileged \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
     --env "PUNAR_IMAGES=${PUNAR_IMAGES}" \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
+    --env "PUNAR_INSTALLER_VERSION=${PUNAR_INSTALLER_VERSION}" \
+    --env "PUNAR_CI_RUN_ID=${PUNAR_CI_RUN_ID}" \
     "${BUILDER_TAG}" \
     /work/os/images/scripts/container-build.sh
 

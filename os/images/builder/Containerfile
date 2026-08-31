@@ -23,8 +23,9 @@ ARG SNAPSHOT_DATE=2026/08/20
 #    this pacman.conf never ships in an image.
 # 3. Install the build toolchain. mkosi drives pacman for the target image
 #    itself; systemd-ukify + binutils build the UKI; dosfstools+mtools/e2fsprogs/
-#    btrfs-progs/erofs-utils cover mkfs for ESP and root; diffutils supplies
-#    cmp(1) for the empty-slot content gate; qemu-img converts raw -> qcow2.
+#    btrfs-progs/erofs-utils cover mkfs for ESP and root; libisoburn supplies
+#    the pinned xorriso hybrid-ISO author; diffutils supplies cmp(1) for the
+#    empty-slot content gate; qemu-img converts raw -> qcow2.
 #    rust (1:1.97.1-1 in ALA 2026/08/20 extra, verified
 #    2026-08-25; includes cargo, satisfies workspace rust-version 1.85)
 #    compiles punard/punarctl for the desktop image from the SAME pinned
@@ -47,6 +48,7 @@ RUN echo "Server = https://archive.archlinux.org/repos/${SNAPSHOT_DATE}/\$repo/o
         e2fsprogs \
         btrfs-progs \
         erofs-utils \
+        libisoburn \
         diffutils \
         cpio \
         zstd \

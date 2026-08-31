@@ -1,0 +1,12 @@
+[Unit]
+Description=Punar live erofs root
+DefaultDependencies=no
+Requires=run-punar-medium.mount
+After=run-punar-medium.mount
+Before=run-punar-overlay-prep.service
+
+[Mount]
+What=/run/punar/medium/punar/live.erofs
+Where=/run/punar/lower
+Type=erofs
+Options=loop,ro,nosuid,nodev

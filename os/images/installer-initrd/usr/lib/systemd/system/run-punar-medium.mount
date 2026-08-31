@@ -1,0 +1,12 @@
+[Unit]
+Description=Punar installer boot medium
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=run-punar-lower.mount
+JobRunningTimeoutSec=90s
+
+[Mount]
+What=/dev/disk/by-label/PUNAR_INSTALL
+Where=/run/punar/medium
+Type=iso9660
+Options=ro,nosuid,nodev,noexec

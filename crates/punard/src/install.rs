@@ -192,6 +192,21 @@ impl Default for InstallerSources {
     }
 }
 
+impl InstallerSources {
+    /// Fixed read-only release inputs exposed by the live initrd. The ISO is
+    /// mounted by filesystem label before switch-root, so neither IPC callers
+    /// nor answer files can redirect the installer to another manifest, key,
+    /// payload or boot artifact.
+    pub fn for_live_medium() -> Self {
+        Self {
+            release_manifest_path: PathBuf::from("/run/punar/medium/punar/release.json"),
+            release_signature_path: PathBuf::from("/run/punar/medium/punar/release.json.sig"),
+            release_keys_dir: PathBuf::from("/run/punar/medium/punar/keys"),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error("installer refused the request: {0}")]
@@ -5980,6 +5995,24 @@ mod tests {
         for value in ["", "punar.live=0", "xpunar.live=1", "punar.live=1x"] {
             assert!(!live_mode_from_cmdline(value), "{value}");
         }
+    }
+
+    #[test]
+    fn live_medium_release_inputs_are_fixed_below_the_read_only_mount() {
+        let sources = InstallerSources::for_live_medium();
+        assert_eq!(
+            sources.release_manifest_path,
+            PathBuf::from("/run/punar/medium/punar/release.json")
+        );
+        assert_eq!(
+            sources.release_signature_path,
+            PathBuf::from("/run/punar/medium/punar/release.json.sig")
+        );
+        assert_eq!(
+            sources.release_keys_dir,
+            PathBuf::from("/run/punar/medium/punar/keys")
+        );
+        assert!(sources.release_manifest_override.is_none());
     }
 
     #[test]

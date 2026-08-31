@@ -1,0 +1,10 @@
+[Unit]
+Description=Punar live writable overlay storage
+DefaultDependencies=no
+Before=run-punar-overlay-prep.service
+
+[Mount]
+What=tmpfs
+Where=/run/punar/overlay
+Type=tmpfs
+Options=mode=0755,nosuid,nodev

@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare the Punar live writable overlay
+DefaultDependencies=no
+Requires=run-punar-lower.mount run-punar-overlay.mount
+After=run-punar-lower.mount run-punar-overlay.mount
+Before=sysroot.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mkdir -p /run/punar/overlay/upper /run/punar/overlay/work
+RemainAfterExit=yes

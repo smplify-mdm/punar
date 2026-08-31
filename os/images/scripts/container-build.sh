@@ -16,7 +16,7 @@
 #                    outputs, never baked into the image).
 #
 # Env knobs:
-#   PUNAR_IMAGES     dev | desktop | release | all   (default: all; `all`
+#   PUNAR_IMAGES     dev | desktop | release | iso | all   (default: all; `all`
 #                    means the historical CI pair, not release)
 #   PUNAR_BUILD_MODE build | summary | stage (default: build; summary runs
 #                    staging + `mkosi summary`; stage refreshes only the
@@ -36,8 +36,8 @@ IMAGES="${PUNAR_IMAGES:-all}"
 MODE="${PUNAR_BUILD_MODE:-build}"
 
 case "${IMAGES}" in
-    dev|desktop|release|all) ;;
-    *) echo "error: PUNAR_IMAGES must be dev, desktop, release, or all (got: ${IMAGES})" >&2; exit 2 ;;
+    dev|desktop|release|iso|all) ;;
+    *) echo "error: PUNAR_IMAGES must be dev, desktop, release, iso, or all (got: ${IMAGES})" >&2; exit 2 ;;
 esac
 case "${MODE}" in
     build|summary) ;;
@@ -358,6 +358,19 @@ stage_punar_binaries() {
         'Advanced Micro Devices X86-64'
 }
 
+stage_installer_build_tool() {
+    local cargo_target="${IMAGES_DIR}/cache/cargo-target"
+    echo "==> Building the detached-release signing/verifier tool for installer assembly"
+    (
+        cd "${REPO_ROOT}" &&
+            CARGO_HOME="${IMAGES_DIR}/cache/cargo" \
+                CARGO_TARGET_DIR="${cargo_target}" \
+                cargo build --release --locked \
+                    -p punar-common --bin punar-release-tool
+    )
+    [ -x "${cargo_target}/release/punar-release-tool" ]
+}
+
 reset_staged_binaries() {
     # Generated and gitignored. Clear them before the minimal build so an old
     # desktop build can never leak product/mock binaries into punar-dev.
@@ -613,6 +626,7 @@ if [ "${IMAGES}" = "dev" ] || [ "${IMAGES}" = "all" ]; then
 fi
 
 if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
+    || [ "${IMAGES}" = "iso" ] \
     || [ "${IMAGES}" = "all" ]; then
     stage_desktop_extra
     if [ "${MODE}" = "stage" ]; then
@@ -622,6 +636,9 @@ if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
     if [ "${MODE}" = "build" ]; then
         stage_punar_binaries
         stage_env_base_oci
+        if [ "${IMAGES}" = "iso" ]; then
+            stage_installer_build_tool
+        fi
     fi
     if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
         run_mkosi punar-desktop \
@@ -635,11 +652,38 @@ if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
     fi
 fi
 
-if [ "${IMAGES}" = "release" ]; then
+if [ "${IMAGES}" = "release" ] || [ "${IMAGES}" = "iso" ]; then
     run_mkosi punar-release \
         --profile desktop \
         --image-id punar-release
+    # Summary mode must validate both trees used by the installer assembly,
+    # not only the installed release tree.  Keep this outside the build-only
+    # block so an invalid live kernel command line or initrd module list fails
+    # the cheap preflight before native CI spends time building either disk.
+    if [ "${IMAGES}" = "iso" ] && [ "${MODE}" = "summary" ]; then
+        run_mkosi punar-installer-root \
+            --profile desktop,installer \
+            --image-id punar-installer-root
+    fi
     if [ "${MODE}" = "build" ]; then
+        if [ "${IMAGES}" = "iso" ]; then
+            run_mkosi punar-installer-root \
+                --profile desktop,installer \
+                --image-id punar-installer-root
+            installer_version="${PUNAR_INSTALLER_VERSION:?PUNAR_INSTALLER_VERSION is required for an ISO build}"
+            installer_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            installer_ci_run_id="${PUNAR_CI_RUN_ID:-local-${PUNAR_GIT_SHA:0:12}}"
+            "${IMAGES_DIR}/scripts/assemble-installer-iso.sh" \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-release.raw" \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root.raw" \
+                "${installer_version}" \
+                "${IMAGES_DIR}/out/punar-installer-${installer_version}-x86_64.iso" \
+                "${PUNAR_GIT_SHA}" "${installer_built_at}" "${installer_ci_run_id}"
+            truncate --size 0 -- "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root.raw"
+            rm -f -- "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root.raw" \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root"
+            BUILT+=("punar-installer-${installer_version}-x86_64.iso")
+        fi
         convert_output punar-release
         BUILT+=("punar-release")
     fi
@@ -658,7 +702,7 @@ echo "==> Writing build metadata"
     echo "qemu-img: $(qemu-img --version | head -n 1)"
     echo "git-sha: ${PUNAR_GIT_SHA:-unknown}"
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "note: unsigned development images; VM-only (no linux-firmware)"
+    echo "note: unsigned development artifacts; release and installer trees include the pinned bare-hardware firmware and CPU/GPU support floor"
     echo "note: punar-desktop is the M1 graphical workstation (Hyprland + punar-shell) + M3 control plane (punard/punarctl, hermetic in-container build) + M5 enrollment exercise scaffolding (punar-mock-smplify dev/CI mock + staged Acme fixtures — never enabled, m5-check-only) + M6 developer environments (punar-env + preloaded punar-env-base OCI archive + staged Atlas project fixture) + M7 AI agent registry (punar-agentd daemon + vendored adapter/signature data + the punar-mock-agent and foo-agent dev/CI fixtures — the mock stands in for a real agent binary, which the offline VM cannot have) + M9 approval gates and the short-lived credential broker (punar-secrets daemon + the staged AI authority document and credential-class catalog — the provider is a MOCK and every surface says so; the CI VM has no network and no real credential authority exists)"
 } > out/build-info.txt
 
@@ -666,7 +710,11 @@ echo "==> Writing build metadata"
 # the artifact names.
 (
     cd out
-    sha256sum -- *.qcow2 > SHA256SUMS
+    shopt -s nullglob
+    artifacts=(*.qcow2 *.iso)
+    [ "${#artifacts[@]}" -gt 0 ]
+    sha256sum -- "${artifacts[@]}" > SHA256SUMS
+    shopt -u nullglob
 )
 
 echo "==> Build complete"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Report that the Punar live installer root is ready
+DefaultDependencies=no
+Requires=sysroot.mount
+After=sysroot.mount
+Before=initrd-root-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK
+StandardOutput=tty
+TTYPath=/dev/console

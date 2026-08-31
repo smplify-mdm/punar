@@ -218,6 +218,12 @@ jobs:
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
+      - name: Validate installer live-root and tree-manifest contracts
+        run: |
+          ./tests/images/installer-initrd-test.sh
+          ./tests/images/tree-manifest-test.sh
+          python3 -m py_compile tools/tree_manifest.py
+
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
@@ -264,7 +270,7 @@ jobs:
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
-            tools/build-image.sh tools/boot-test.sh \
+            tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
@@ -280,17 +286,22 @@ jobs:
             os/images/mkosi.finalize \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
+            os/images/scripts/assemble-installer-iso.sh \
             tests/images/check-staged-service-executables.sh \
             tests/images/check-repart-layout.sh \
+            tests/images/installer-initrd-test.sh \
+            tests/images/installer-iso-contract-test.sh \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
+            tests/images/tree-manifest-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
+            tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
@@ -325,6 +336,9 @@ jobs:
       - name: Test terminal application launching
         run: ./tests/desktop/terminal-app-test.sh
 
+      - name: Test installed-app state and cross-workspace focus contract
+        run: ./tests/desktop/app-launcher-contract-test.sh
+
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
 
@@ -350,6 +364,67 @@ jobs:
             os/images/out/SHA256SUMS
             os/images/out/build-info.txt
           if-no-files-found: error
+          retention-days: 7
+
+  installer-image:
+    name: installer-image (hybrid ISO + dual-form UEFI boot)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache installer mkosi and Cargo inputs
+        uses: actions/cache@v4
+        with:
+          path: os/images/cache
+          key: installer-mkosi-${{ hashFiles('os/images/snapshot.env') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: installer-mkosi-${{ hashFiles('os/images/snapshot.env') }}-
+
+      - name: Build release image and hybrid installer ISO
+        run: ./tools/build-image.sh iso
+
+      # Re-open the completed ISO in the same pinned builder that authored it.
+      # This verifies the final bytes: signed metadata, artifact hashes,
+      # release/live tree identity, appended GPT ESP and exact live cmdline.
+      - name: Verify final installer artifact contract
+        run: |
+          source os/images/snapshot.env
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          docker run --rm --privileged \
+            -v "$PWD:/work" -w /work \
+            "punar-image-builder:${PUNAR_SNAPSHOT_DATE//\//-}" \
+            ./tests/images/installer-iso-contract-test.sh "/work/${installer_iso}"
+
+      - name: Install QEMU and OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot installer as optical media and raw hybrid drive
+        run: |
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          ./tools/installer-boot-test.sh "${installer_iso}"
+
+      - name: Upload installer, checksum and boot proof
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-installer-x86_64
+          path: |
+            os/images/out/punar-installer-*-x86_64.iso
+            os/images/out/SHA256SUMS
+            os/images/out/build-info.txt
+            os/images/out/installer-boot-proof/**
+          if-no-files-found: warn
           retention-days: 7
 
   boot-test:

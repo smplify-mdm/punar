@@ -1,0 +1,12 @@
+[Unit]
+Description=Punar live overlay root
+DefaultDependencies=no
+Requires=run-punar-overlay-prep.service
+After=run-punar-overlay-prep.service
+Before=initrd-root-fs.target
+
+[Mount]
+What=overlay
+Where=/sysroot
+Type=overlay
+Options=lowerdir=/run/punar/lower,upperdir=/run/punar/overlay/upper,workdir=/run/punar/overlay/work
