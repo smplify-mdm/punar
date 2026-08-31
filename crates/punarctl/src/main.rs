@@ -68,6 +68,7 @@ mod views;
 mod watch;
 
 use std::io::{IsTerminal, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -240,6 +241,10 @@ enum AppCommand {
     Open {
         /// Catalog id, such as `spotify`.
         id: String,
+        /// Custom URI delivered by the desktop handler. Ordinary users do
+        /// not type this; browsers supply it for flows such as OAuth.
+        #[arg(value_name = "URI")]
+        uris: Vec<String>,
     },
     /// Remove the native package. Per-user application data is preserved.
     Remove {
@@ -730,7 +735,7 @@ fn app_remove(client: &Client, style: &Style, json_output: bool, id: &str, yes: 
     }
 }
 
-fn app_open(client: &Client, id: &str) -> ExitCode {
+fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
     let detail = match inspect_app(client, id) {
         Ok(value) => value,
         Err(error) => return fail(&error),
@@ -742,6 +747,11 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
     };
     let mut command = match app.get("source").and_then(Value::as_str) {
         Some("web") => {
+            if !uris.is_empty() {
+                return fail(&CallError::Protocol {
+                    why: "a web-app launcher cannot receive a native callback URI".to_string(),
+                });
+            }
             let Some(url) = app.get("url").and_then(Value::as_str) else {
                 return fail(&CallError::Protocol {
                     why: "the curated web app has no URL".to_string(),
@@ -762,6 +772,11 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
             command
         }
         Some("flatpak") => {
+            if !uris.is_empty() {
+                return fail(&CallError::Protocol {
+                    why: "Punar does not proxy callback URIs into Flatpak launchers".to_string(),
+                });
+            }
             if app.get("installed").and_then(Value::as_bool) != Some(true) {
                 eprintln!(
                     "{} is not installed. Next step: `punarctl app install {id}`.",
@@ -778,7 +793,7 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
             command.args(["run", "--system", app_id]);
             command
         }
-        Some("vendor_deb") => match vendor_app_command(app, id) {
+        Some("vendor_deb") => match vendor_app_command(app, id, uris) {
             Ok(command) => command,
             Err(why) => {
                 eprintln!(
@@ -809,7 +824,11 @@ fn app_open(client: &Client, id: &str) -> ExitCode {
     }
 }
 
-fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, String> {
+fn vendor_app_command(
+    app: &Value,
+    id: &str,
+    uris: &[String],
+) -> Result<std::process::Command, String> {
     if app.get("installed").and_then(Value::as_bool) != Some(true) {
         return Err(format!(
             "{} is not installed",
@@ -840,6 +859,7 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         .strip_prefix(&app_root)
         .map_err(|_| "the installed launcher path is invalid".to_string())?;
     let sandbox_executable = Path::new("/app").join(relative_executable);
+    let callback_uris = validated_vendor_callback_uris(app, uris)?;
 
     let host_home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -857,6 +877,17 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         .map(PathBuf::from)
         .filter(|path| valid_runtime_dir(path))
         .ok_or_else(|| "the desktop runtime directory is unavailable".to_string())?;
+    // Electron forwards a deep link to the already-running instance through
+    // its process-singleton socket. Chromium commonly places that socket in
+    // /tmp, so a fresh private tmpfs for every invocation strands OAuth
+    // callbacks in the second process. Share one *app-specific, session-only*
+    // directory across invocations instead: it lives below /run/user, is
+    // removed at logout, and remains invisible to every other vendor app.
+    let app_runtime_tmp = vendor_runtime_tmp(&runtime, id);
+    std::fs::create_dir_all(&app_runtime_tmp)
+        .map_err(|error| format!("could not prepare the isolated app runtime: {error}"))?;
+    std::fs::set_permissions(&app_runtime_tmp, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not protect the isolated app runtime: {error}"))?;
     let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
     if wayland_display.is_empty()
         || !wayland_display
@@ -901,8 +932,6 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         "/proc",
         "--dev",
         "/dev",
-        "--tmpfs",
-        "/tmp",
         "--dir",
         "/run",
         "--dir",
@@ -910,6 +939,9 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
     ]);
     append_resolver_mount(&mut command, Path::new("/run/systemd/resolve"));
     command
+        .arg("--bind")
+        .arg(&app_runtime_tmp)
+        .arg("/tmp")
         .arg("--dir")
         .arg("/home")
         .arg("--bind")
@@ -992,7 +1024,50 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         .arg("--")
         .arg(sandbox_executable)
         .arg("--no-sandbox");
+    command.args(callback_uris);
     Ok(command)
+}
+
+fn vendor_runtime_tmp(runtime: &Path, id: &str) -> PathBuf {
+    runtime.join("punar-apps").join(id).join("tmp")
+}
+
+/// Accept only custom schemes declared by the signed catalog record. The URI
+/// is passed as one argv item after bwrap's `--` separator; it is never a
+/// shell string, daemon request, log field, or environment variable because
+/// OAuth callbacks can contain credentials.
+fn validated_vendor_callback_uris<'a>(
+    app: &Value,
+    uris: &'a [String],
+) -> Result<Vec<&'a str>, String> {
+    if uris.len() > 8 {
+        return Err("too many callback URIs were supplied".to_string());
+    }
+    let allowed: Vec<&str> = app
+        .get("uri_schemes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut validated = Vec::with_capacity(uris.len());
+    for uri in uris {
+        if uri.is_empty() || uri.len() > 8192 || uri.chars().any(char::is_control) {
+            return Err("the callback URI is empty, oversized, or contains controls".to_string());
+        }
+        let (scheme, rest) = uri
+            .split_once(':')
+            .ok_or_else(|| "the callback is not an absolute URI".to_string())?;
+        if rest.is_empty()
+            || !allowed
+                .iter()
+                .any(|candidate| scheme.eq_ignore_ascii_case(candidate))
+        {
+            return Err("the callback URI scheme is not owned by this catalog app".to_string());
+        }
+        validated.push(uri.as_str());
+    }
+    Ok(validated)
 }
 
 /// Keep the app's network view useful without exposing the host runtime tree.
@@ -1640,7 +1715,7 @@ fn main() -> ExitCode {
                 yes,
                 confirm_metadata_sha256,
             } => app_install(&client, &style, json, &id, yes, confirm_metadata_sha256),
-            AppCommand::Open { id } => app_open(&client, &id),
+            AppCommand::Open { id, uris } => app_open(&client, &id, &uris),
             AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
         },
         Command::Audit { command } => match command {
@@ -2204,7 +2279,8 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, append_resolver_mount};
+    use super::{Cli, append_resolver_mount, validated_vendor_callback_uris, vendor_runtime_tmp};
+    use serde_json::json;
 
     #[test]
     fn vendor_sandbox_mounts_system_resolver_read_only() {
@@ -2225,6 +2301,46 @@ mod tests {
                 OsStr::new("/run/systemd/resolve"),
             ]
         );
+    }
+
+    #[test]
+    fn vendor_callback_accepts_only_the_signed_catalog_scheme() {
+        let app = json!({"uri_schemes": ["claude"]});
+        let good = vec!["claude://claude.ai/auth/callback?code=redacted&state=opaque".to_string()];
+        assert_eq!(
+            validated_vendor_callback_uris(&app, &good).unwrap(),
+            [good[0].as_str()]
+        );
+
+        for rejected in [
+            "https://claude.ai/auth/callback",
+            "file:///etc/passwd",
+            "claude:",
+            "claude://callback\nsecond-argument",
+        ] {
+            assert!(
+                validated_vendor_callback_uris(&app, &[rejected.to_string()]).is_err(),
+                "accepted unsafe callback {rejected:?}"
+            );
+        }
+        assert!(validated_vendor_callback_uris(&json!({"uri_schemes": []}), &good).is_err());
+    }
+
+    #[test]
+    fn vendor_runtime_tmp_is_stable_per_app_and_separate_between_apps() {
+        let runtime = Path::new("/run/user/1000");
+        let first = vendor_runtime_tmp(runtime, "claude-desktop");
+        let second = vendor_runtime_tmp(runtime, "claude-desktop");
+        let other = vendor_runtime_tmp(runtime, "slack");
+        assert_eq!(
+            first,
+            Path::new("/run/user/1000/punar-apps/claude-desktop/tmp")
+        );
+        assert_eq!(
+            first, second,
+            "a callback launch must see the first instance runtime"
+        );
+        assert_ne!(first, other, "vendor apps must not share temporary state");
     }
 
     /// clap's self-check: asserts the argument definitions are internally
@@ -2256,6 +2372,13 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ],
             &["punarctl", "app", "open", "spotify"],
+            &[
+                "punarctl",
+                "app",
+                "open",
+                "claude-desktop",
+                "claude://claude.ai/auth/callback?code=redacted&state=opaque",
+            ],
             &["punarctl", "app", "remove", "spotify", "--yes"],
             &["punarctl", "capabilities"],
             &["punarctl", "compliance"],

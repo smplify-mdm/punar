@@ -96,6 +96,11 @@ struct App {
     keywords: Vec<String>,
     #[serde(default)]
     window_app_ids: Vec<String>,
+    /// Custom URL schemes the upstream desktop application owns, without
+    /// the trailing colon (for example `claude`).  This is signed catalog
+    /// data, not something a caller may choose at launch time.
+    #[serde(default)]
+    uri_schemes: Vec<String>,
     summary: String,
     trust_tier: String,
     license: String,
@@ -178,6 +183,7 @@ pub struct AppManager {
     bsdtar_bin: PathBuf,
     vendor_root: PathBuf,
     vendor_desktop_dir: PathBuf,
+    vendor_config_dir: PathBuf,
     arch: String,
 }
 
@@ -226,7 +232,12 @@ impl AppManager {
             curl_bin: PathBuf::from("/usr/bin/curl"),
             bsdtar_bin: PathBuf::from("/usr/bin/bsdtar"),
             vendor_root: PathBuf::from("/var/lib/punar-apps"),
-            vendor_desktop_dir: PathBuf::from("/var/lib/punar-applications"),
+            // XDG_DATA_DIRS entries are data roots; desktop files live in
+            // their `applications/` child.  Keeping the root itself here was
+            // enough for Punar's catalog view but not for freedesktop URI
+            // activation or every standards-compliant application index.
+            vendor_desktop_dir: PathBuf::from("/var/lib/punar-applications/applications"),
+            vendor_config_dir: PathBuf::from("/var/lib/punar-applications/config"),
             arch: arch.to_string(),
         })
     }
@@ -244,11 +255,13 @@ impl AppManager {
         bsdtar_bin: PathBuf,
         vendor_root: PathBuf,
         desktop_dir: PathBuf,
+        config_dir: PathBuf,
     ) -> Self {
         self.curl_bin = curl_bin;
         self.bsdtar_bin = bsdtar_bin;
         self.vendor_root = vendor_root;
         self.vendor_desktop_dir = desktop_dir;
+        self.vendor_config_dir = config_dir;
         self
     }
 
@@ -469,6 +482,7 @@ impl AppManager {
             "featured": app.featured,
             "category": app.category,
             "window_app_ids": app.window_app_ids,
+            "uri_schemes": app.uri_schemes,
             "summary": app.summary,
             "trust_tier": app.trust_tier,
             "license": app.license,
@@ -551,7 +565,6 @@ impl AppManager {
             payload_root,
             executable,
             icon_path,
-            desktop_id,
             ..
         } = source
         else {
@@ -563,6 +576,12 @@ impl AppManager {
             ));
         }
         if self.installed_vendor_digest(&app.id)?.as_deref() == Some(sha256) {
+            // An OS update may improve desktop integration while preserving
+            // the already-verified payload in /var.  Repairing the launcher
+            // and URI index on a no-op install avoids requiring a 160+ MB
+            // re-download merely to pick up that integration.
+            self.write_vendor_desktop_integration(app, source)?;
+            self.refresh_vendor_desktop_indexes()?;
             return Ok(json!({
                 "id": app.id,
                 "name": app.name,
@@ -781,16 +800,7 @@ impl AppManager {
             symlink(sha256, &current_tmp).map_err(backend_io)?;
             fs::rename(&current_tmp, app_dir.join("current")).map_err(backend_io)?;
 
-            let icon = version_dir.join(icon_path);
-            let desktop = vendor_desktop_entry(app, desktop_id, &icon);
-            crate::util::write_atomic_synced(
-                &self
-                    .vendor_desktop_dir
-                    .join(format!("{desktop_id}.desktop")),
-                desktop.as_bytes(),
-                0o644,
-            )
-            .map_err(backend_io)?;
+            self.write_vendor_desktop_integration(app, source)?;
             for entry in fs::read_dir(&app_dir).map_err(backend_io)? {
                 let entry = entry.map_err(backend_io)?;
                 let path = entry.path();
@@ -805,6 +815,7 @@ impl AppManager {
         })();
         let _ = fs::remove_dir_all(&staging);
         outcome?;
+        self.refresh_vendor_desktop_indexes()?;
         Ok(json!({
             "id": app.id,
             "name": app.name,
@@ -817,20 +828,131 @@ impl AppManager {
 
     fn remove_vendor_deb(&self, app: &App) -> Result<Value, AppError> {
         let app_dir = self.vendor_root.join(&app.id);
+        let source = self.select_source(app)?;
+        let Source::VendorDeb { desktop_id, .. } = source else {
+            unreachable!("remove_vendor_deb called for another source")
+        };
         let desktop = self
             .vendor_desktop_dir
-            .join(format!("punar-{}.desktop", app.id));
+            .join(format!("{desktop_id}.desktop"));
         let existed = app_dir.exists() || desktop.exists();
         if app_dir.exists() {
             fs::remove_dir_all(&app_dir).map_err(backend_io)?;
         }
         crate::util::remove_synced(&desktop).map_err(backend_io)?;
+        // Remove the pre-fix location too.  It was directly below the XDG
+        // data root instead of its required applications/ child.
+        if let Some(data_root) = self.vendor_desktop_dir.parent() {
+            crate::util::remove_synced(&data_root.join(format!("{desktop_id}.desktop")))
+                .map_err(backend_io)?;
+        }
+        self.refresh_vendor_desktop_indexes()?;
         Ok(json!({
             "id": app.id,
             "name": app.name,
             "installed": false,
             "changed": existed,
         }))
+    }
+
+    /// Rebuild the standards-facing launchers and URI indexes from installed
+    /// manifests. Called once at daemon startup so an A/B OS update repairs
+    /// existing application state without touching its isolated user data.
+    pub(crate) fn reconcile_vendor_desktop_integration(&self) -> Result<(), AppError> {
+        if !self.vendor_root.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.vendor_desktop_dir).map_err(backend_io)?;
+        fs::create_dir_all(&self.vendor_config_dir).map_err(backend_io)?;
+        for app in &self.catalog.apps {
+            let Ok(source) = self.select_source(app) else {
+                continue;
+            };
+            if matches!(source, Source::VendorDeb { .. })
+                && self.installed_vendor_digest(&app.id)?.is_some()
+            {
+                self.write_vendor_desktop_integration(app, source)?;
+            }
+        }
+        self.refresh_vendor_desktop_indexes()
+    }
+
+    fn write_vendor_desktop_integration(&self, app: &App, source: &Source) -> Result<(), AppError> {
+        let Source::VendorDeb {
+            icon_path,
+            desktop_id,
+            ..
+        } = source
+        else {
+            unreachable!("vendor desktop integration requested for another source")
+        };
+        let icon = self
+            .vendor_root
+            .join(&app.id)
+            .join("current")
+            .join(icon_path);
+        if !icon.is_file() {
+            return Err(AppError::Verification(format!(
+                "installed app {:?} is missing its declared icon",
+                app.id
+            )));
+        }
+        fs::create_dir_all(&self.vendor_desktop_dir).map_err(backend_io)?;
+        let desktop = vendor_desktop_entry(app, desktop_id, &icon);
+        crate::util::write_atomic_synced(
+            &self
+                .vendor_desktop_dir
+                .join(format!("{desktop_id}.desktop")),
+            desktop.as_bytes(),
+            0o644,
+        )
+        .map_err(backend_io)?;
+        if let Some(data_root) = self.vendor_desktop_dir.parent() {
+            crate::util::remove_synced(&data_root.join(format!("{desktop_id}.desktop")))
+                .map_err(backend_io)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_vendor_desktop_indexes(&self) -> Result<(), AppError> {
+        let mut handlers: BTreeMap<String, String> = BTreeMap::new();
+        for app in &self.catalog.apps {
+            if app.uri_schemes.is_empty() || self.installed_vendor_digest(&app.id)?.is_none() {
+                continue;
+            }
+            let Ok(Source::VendorDeb { desktop_id, .. }) = self.select_source(app) else {
+                continue;
+            };
+            for scheme in &app.uri_schemes {
+                handlers.insert(scheme.clone(), format!("{desktop_id}.desktop"));
+            }
+        }
+
+        fs::create_dir_all(&self.vendor_desktop_dir).map_err(backend_io)?;
+        fs::create_dir_all(&self.vendor_config_dir).map_err(backend_io)?;
+        let mimeapps_path = self.vendor_config_dir.join("mimeapps.list");
+        let mimeinfo_path = self.vendor_desktop_dir.join("mimeinfo.cache");
+        if handlers.is_empty() {
+            crate::util::remove_synced(&mimeapps_path).map_err(backend_io)?;
+            crate::util::remove_synced(&mimeinfo_path).map_err(backend_io)?;
+            return Ok(());
+        }
+
+        let mut defaults = String::from("[Default Applications]\n");
+        let mut associations = String::from("[Added Associations]\n");
+        let mut cache = String::from("[MIME Cache]\n");
+        for (scheme, desktop) in handlers {
+            let mime = format!("x-scheme-handler/{scheme}");
+            defaults.push_str(&format!("{mime}={desktop};\n"));
+            associations.push_str(&format!("{mime}={desktop};\n"));
+            cache.push_str(&format!("{mime}={desktop};\n"));
+        }
+        defaults.push('\n');
+        defaults.push_str(&associations);
+        crate::util::write_atomic_synced(&mimeapps_path, defaults.as_bytes(), 0o644)
+            .map_err(backend_io)?;
+        crate::util::write_atomic_synced(&mimeinfo_path, cache.as_bytes(), 0o644)
+            .map_err(backend_io)
     }
 
     fn installed_vendor_digest(&self, id: &str) -> Result<Option<String>, AppError> {
@@ -1267,14 +1389,37 @@ fn vendor_desktop_entry(app: &App, desktop_id: &str, icon: &Path) -> String {
         "writing" => "Office;TextEditor",
         _ => "Utility",
     };
+    let startup_class = app
+        .window_app_ids
+        .first()
+        .map_or(desktop_id, String::as_str);
+    let uri_placeholder = if app.uri_schemes.is_empty() {
+        ""
+    } else {
+        " %U"
+    };
+    let mime_types = if app.uri_schemes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "MimeType={};\n",
+            app.uri_schemes
+                .iter()
+                .map(|scheme| format!("x-scheme-handler/{scheme}"))
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    };
     format!(
-        "[Desktop Entry]\nType=Application\nVersion=1.0\nName={}\nComment={}\nExec=punarctl app open {}\nIcon={}\nTerminal=false\nCategories={};\nStartupNotify=true\nStartupWMClass={}\n",
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName={}\nComment={}\nExec=punarctl app open {}{}\nIcon={}\nTerminal=false\nCategories={};\nStartupNotify=true\nStartupWMClass={}\n{}",
         app.name,
         app.summary,
         app.id,
+        uri_placeholder,
         icon.display(),
         category,
-        desktop_id,
+        startup_class,
+        mime_types,
     )
 }
 
@@ -1298,6 +1443,7 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
         }
     }
     let mut ids = BTreeSet::new();
+    let mut uri_owners: BTreeMap<&str, &str> = BTreeMap::new();
     for app in &catalog.apps {
         if app.id.is_empty()
             || app.id.len() > 64
@@ -1361,6 +1507,38 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                 app.id
             )));
         }
+        if app.uri_schemes.len() > 8
+            || app.uri_schemes.iter().collect::<BTreeSet<_>>().len() != app.uri_schemes.len()
+            || app.uri_schemes.iter().any(|scheme| {
+                scheme.is_empty()
+                    || scheme.len() > 32
+                    || !scheme.bytes().enumerate().all(|(index, byte)| {
+                        (index == 0 && byte.is_ascii_lowercase())
+                            || (index > 0
+                                && (byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'+' | b'.' | b'-')))
+                    })
+                    || matches!(
+                        scheme.as_str(),
+                        "data" | "file" | "ftp" | "http" | "https" | "javascript" | "mailto"
+                    )
+            })
+        {
+            return Err(AppError::InvalidCatalog(format!(
+                "app {:?} has invalid or reserved URI schemes",
+                app.id
+            )));
+        }
+        for scheme in &app.uri_schemes {
+            if let Some(owner) = uri_owners.insert(scheme, &app.id) {
+                return Err(AppError::InvalidCatalog(format!(
+                    "URI scheme {scheme:?} is claimed by both {owner:?} and {:?}",
+                    app.id
+                )));
+            }
+        }
+        let mut has_vendor_source = false;
         for source in &app.sources {
             if let Source::Flatpak {
                 remote,
@@ -1410,6 +1588,7 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                 desktop_id,
             } = source
             {
+                has_vendor_source = true;
                 let allowed_origin = url
                     .starts_with("https://persistent.oaistatic.com/codex-app-prod/linux/deb/")
                     || url.starts_with(
@@ -1459,6 +1638,12 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
                     )));
                 }
             }
+        }
+        if !app.uri_schemes.is_empty() && !has_vendor_source {
+            return Err(AppError::InvalidCatalog(format!(
+                "app {:?} declares URI schemes without a Punar-generated vendor launcher",
+                app.id
+            )));
         }
     }
     Ok(())
@@ -1939,11 +2124,18 @@ mod tests {
         let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
         let catalog = write_vendor_catalog(&dir, &digest, byte_size);
         let vendor_root = dir.join("installed");
-        let desktop_dir = dir.join("applications");
+        let desktop_dir = dir.join("share/applications");
+        let config_dir = dir.join("config");
         let manager = AppManager::load(Some(&catalog), PathBuf::from("/bin/false"))
             .unwrap()
             .with_arch("x86_64")
-            .with_vendor_paths(curl, bsdtar, vendor_root.clone(), desktop_dir.clone());
+            .with_vendor_paths(
+                curl,
+                bsdtar,
+                vendor_root.clone(),
+                desktop_dir.clone(),
+                config_dir.clone(),
+            );
 
         let detail = manager.catalog(Some("chatgpt-desktop"), None).unwrap();
         assert_eq!(detail["app"]["source"], "vendor_deb");
@@ -1991,6 +2183,77 @@ mod tests {
         assert_eq!(removed["changed"], true);
         assert!(!vendor_root.join("chatgpt-desktop").exists());
         assert!(!desktop_dir.join("punar-chatgpt-desktop.desktop").exists());
+        assert!(!config_dir.join("mimeapps.list").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn vendor_custom_uri_scheme_is_registered_only_while_installed() {
+        let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
+        let catalog = write_vendor_catalog(&dir, &digest, byte_size);
+        let mut document: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        document["apps"][0]["uriSchemes"] = json!(["claude"]);
+        document["apps"][0]["windowAppIds"] = json!(["com.anthropic.Claude"]);
+        fs::write(&catalog, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+
+        let vendor_root = dir.join("installed");
+        let desktop_dir = dir.join("share/applications");
+        let config_dir = dir.join("config");
+        let manager = AppManager::load(Some(&catalog), PathBuf::from("/bin/false"))
+            .unwrap()
+            .with_arch("x86_64")
+            .with_vendor_paths(
+                curl,
+                bsdtar,
+                vendor_root,
+                desktop_dir.clone(),
+                config_dir.clone(),
+            );
+
+        manager.install("chatgpt-desktop", &digest).unwrap();
+        let desktop =
+            fs::read_to_string(desktop_dir.join("punar-chatgpt-desktop.desktop")).unwrap();
+        assert!(desktop.contains("Exec=punarctl app open chatgpt-desktop %U"));
+        assert!(desktop.contains("MimeType=x-scheme-handler/claude;"));
+        assert!(desktop.contains("StartupWMClass=com.anthropic.Claude"));
+        let defaults = fs::read_to_string(config_dir.join("mimeapps.list")).unwrap();
+        assert!(defaults.contains("x-scheme-handler/claude=punar-chatgpt-desktop.desktop"));
+        let cache = fs::read_to_string(desktop_dir.join("mimeinfo.cache")).unwrap();
+        assert!(cache.contains("x-scheme-handler/claude=punar-chatgpt-desktop.desktop;"));
+
+        manager.remove("chatgpt-desktop").unwrap();
+        assert!(!config_dir.join("mimeapps.list").exists());
+        assert!(!desktop_dir.join("mimeinfo.cache").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn catalog_rejects_reserved_or_nonvendor_uri_handlers() {
+        let (dir, _curl, _bsdtar, digest, byte_size) = vendor_fixture();
+        let catalog = write_vendor_catalog(&dir, &digest, byte_size);
+        let original: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+
+        let mut reserved = original.clone();
+        reserved["apps"][0]["uriSchemes"] = json!(["https"]);
+        fs::write(&catalog, serde_json::to_vec_pretty(&reserved).unwrap()).unwrap();
+        assert!(matches!(
+            AppManager::load(Some(&catalog), PathBuf::from("/bin/false")),
+            Err(AppError::InvalidCatalog(_))
+        ));
+
+        let mut web = original;
+        web["apps"][0]["uriSchemes"] = json!(["claude"]);
+        web["apps"][0]["sources"] = json!([{
+            "kind": "web",
+            "architectures": ["x86_64"],
+            "url": "https://claude.ai/",
+            "browser": "chromium"
+        }]);
+        fs::write(&catalog, serde_json::to_vec_pretty(&web).unwrap()).unwrap();
+        assert!(matches!(
+            AppManager::load(Some(&catalog), PathBuf::from("/bin/false")),
+            Err(AppError::InvalidCatalog(_))
+        ));
         let _ = fs::remove_dir_all(dir);
     }
 

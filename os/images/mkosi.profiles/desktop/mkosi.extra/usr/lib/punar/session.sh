@@ -27,6 +27,15 @@ punar_user_data="${XDG_DATA_HOME:-${HOME}/.local/share}"
 XDG_DATA_DIRS="${punar_user_data}/flatpak/exports/share:/var/lib/flatpak/exports/share:/var/lib/punar-applications:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XDG_DATA_DIRS
 
+# Installed vendor apps may own a custom URI scheme (Claude's OAuth callback
+# is `claude:`). punard writes only the signed-catalog associations into this
+# root-owned directory. It follows the normal XDG precedence: a user's own
+# ~/.config/mimeapps.list remains first and can deliberately choose another
+# handler. Administrator defaults in the inherited directories also outrank
+# the product fallback, which exists only while the app is installed.
+XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:/var/lib/punar-applications/config"
+export XDG_CONFIG_DIRS
+
 # Installed by the image staging step.
 # shellcheck disable=SC1091
 . /usr/lib/punar/punar-graphics-env.sh

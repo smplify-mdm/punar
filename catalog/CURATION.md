@@ -31,6 +31,11 @@ An application is admitted only when all of these hold:
    update path remains authoritative.
 6. Its icon and descriptive metadata are suitable for a clear, searchable
    application library.
+7. Any custom URI scheme is present in the upstream package's desktop entry,
+   has a narrow product-specific purpose, and does not replace a reserved
+   browser, file, mail, script, or network-transfer handler. The review records
+   the exact scheme in the signed catalog and tests both registration on
+   install and removal on uninstall.
 
 Popularity can nominate an application for review; it cannot bypass review.
 Enterprise policy may further allow or deny catalog identities, and a personal

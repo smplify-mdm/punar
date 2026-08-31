@@ -27,6 +27,14 @@ provide a native Linux payload. ChatGPT and Claude have distinct official web
 and native preview/beta entries on both architectures. Punar never labels a web
 fallback as a native installation.
 
+An optional `uriSchemes` list records a vendor application's custom callback
+schemes. It is allowed only for scriptlessly extracted vendor packages, must be
+confirmed against the upstream desktop entry, and becomes a handler only while
+that package is installed. Punar rejects browser, file, mail, and other reserved
+schemes; the launcher accepts only a scheme owned by that signed catalog entry.
+Claude Desktop therefore owns `claude:` for its browser authorization handoff,
+without gaining authority over `https:` links or arbitrary protocols.
+
 Search is offline and deterministic. It matches every query term against the
 catalog id, display name, summary, category, and curated keywords. That makes
 queries such as `Claude`, `ChatGPT`, `AI assistant`, `REST API`, `Markdown`,

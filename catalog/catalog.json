@@ -220,6 +220,7 @@
       "category": "ai",
       "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic", "native", "desktop", "Cowork"],
       "windowAppIds": ["com.anthropic.Claude"],
+      "uriSchemes": ["claude"],
       "summary": "Anthropic’s native Linux beta, downloaded on demand and installed without granting its package scripts control of Punar.",
       "trustTier": "curated",
       "license": "proprietary",

@@ -632,6 +632,7 @@ installation. `pinned` is not a claim that bytes have already been downloaded:
 ```json
 {"app":{"id":"chatgpt-desktop","source":"vendor_deb","installed":false,
  "version":"26.825.32147","download_bytes":409931742,
+ "uri_schemes":[],
  "inspection":{"pinned":true,"verified_on_install":true,
   "package_sha256":"<64 hex>","containment":"hardened_native",
   "permissions":["Network access","Isolated app home",...]}}}
@@ -664,11 +665,22 @@ punard downloads only from the catalog's closed vendor origin, enforces exact
 byte size and SHA-256, extracts only `data.tar.xz` into a root-owned staging
 tree, rejects unsafe paths/file types/symlinks, clears setuid/setgid bits, and
 generates its own desktop entry. Debian control archives and maintainer scripts
-are never executed, and no vendor repository is registered. The launcher uses
-Bubblewrap with a read-only system/app payload, isolated writable app home,
-empty temporary directory, dropped capabilities and only the desktop runtime,
-display/audio, GPU and network surfaces declared in the inspection card. No
-request field can supply a URL, remote, ref, digest, executable or option.
+are never executed, and no vendor repository is registered. A custom URI scheme
+is registered only when both the upstream desktop entry and the signed Punar
+catalog declare it, and only while that app is installed. The launcher accepts
+only those catalog-owned schemes as fixed argv values after Bubblewrap's option
+separator; callback URIs never transit punard, the audit log, the shell, or an
+environment variable.
+
+The launcher uses Bubblewrap with a read-only system/app payload, isolated
+writable app home, a per-app session-only temporary directory, dropped
+capabilities and only the desktop runtime, display/audio, GPU and network
+surfaces declared in the inspection card. Sharing that temporary directory
+between invocations of the *same* app lets an Electron callback process hand
+OAuth back to its existing process; other apps cannot see it and logout removes
+it. No request field can supply a URL, remote, ref, digest, executable or
+option. A user's own `~/.config/mimeapps.list` and administrator defaults in
+the inherited XDG config directories continue to outrank the Punar fallback.
 
 The call is allowed for a human-attributed peer on a personal device.
 Agent-attributed calls are denied and audited. On an enrolled device, punard

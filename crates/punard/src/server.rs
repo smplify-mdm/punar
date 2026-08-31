@@ -398,6 +398,13 @@ impl Daemon {
             cfg.app_arch_override.as_deref(),
         )
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        if let Err(error) = apps.reconcile_vendor_desktop_integration() {
+            // A corrupt or full mutable app volume must not take down the
+            // device control plane at boot. The signed catalog itself already
+            // failed closed in `load_for_arch`; keep serving typed diagnostics
+            // and let the next app install/remove retry this derived index.
+            eprintln!("punard: vendor desktop integration repair failed: {error}");
+        }
         let mut installer_sources = cfg.installer_sources.clone();
         installer_sources.live_device_id_path = cfg.state_dir.join("device-id");
         installer_sources.live_audit_path = cfg.audit_path.clone();

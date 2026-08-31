@@ -131,6 +131,13 @@
           "maxItems": 8,
           "uniqueItems": true
         },
+        "uriSchemes": {
+          "description": "Non-web custom URI schemes owned by a Punar-generated vendor launcher. Used for browser-to-app callbacks such as OAuth; schemes are globally unique and additionally validated by punard.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9+.-]*$", "not": {"enum": ["data", "file", "ftp", "http", "https", "javascript", "mailto"]}},
+          "maxItems": 8,
+          "uniqueItems": true
+        },
         "summary": {"type": "string", "minLength": 1, "maxLength": 240},
         "trustTier": {"enum": ["curated", "community"]},
         "license": {"enum": ["free", "mixed", "proprietary"]},
