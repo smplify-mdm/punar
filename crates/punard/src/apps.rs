@@ -24,6 +24,11 @@ use thiserror::Error;
 use crate::util::{run_with_timeout, sha256_hex};
 
 const INSPECT_TIMEOUT: Duration = Duration::from_secs(30);
+// Reading or copying a compressed member from a pinned vendor package can be
+// substantially slower on low-power ARM hardware and inside a VM. Keep this
+// bounded, but do not apply the small-metadata timeout to a several-hundred-MB
+// payload that has already passed its byte-size and SHA-256 checks.
+const VENDOR_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_VENDOR_PACKAGE_BYTES: u64 = 600 * 1024 * 1024;
@@ -89,6 +94,8 @@ struct App {
     category: String,
     #[serde(default)]
     keywords: Vec<String>,
+    #[serde(default)]
+    window_app_ids: Vec<String>,
     summary: String,
     trust_tier: String,
     license: String,
@@ -461,6 +468,7 @@ impl AppManager {
             "icon": app.icon,
             "featured": app.featured,
             "category": app.category,
+            "window_app_ids": app.window_app_ids,
             "summary": app.summary,
             "trust_tier": app.trust_tier,
             "license": app.license,
@@ -615,7 +623,7 @@ impl AppManager {
                 )));
             }
 
-            let members = archive_list(&self.bsdtar_bin, &package, INSPECT_TIMEOUT)?;
+            let members = archive_list(&self.bsdtar_bin, &package, VENDOR_ARCHIVE_TIMEOUT)?;
             if members
                 .iter()
                 .filter(|member| member.as_str() == data_member)
@@ -679,9 +687,10 @@ impl AppManager {
                 &package,
                 data_member,
                 &data_archive,
-                INSPECT_TIMEOUT,
+                VENDOR_ARCHIVE_TIMEOUT,
             )?;
-            let payload_members = archive_list(&self.bsdtar_bin, &data_archive, INSPECT_TIMEOUT)?;
+            let payload_members =
+                archive_list(&self.bsdtar_bin, &data_archive, VENDOR_ARCHIVE_TIMEOUT)?;
             if payload_members
                 .iter()
                 .any(|member| !safe_archive_member(member))
@@ -1186,7 +1195,7 @@ fn normalize_archive_path(value: &str) -> Option<String> {
 }
 
 fn safe_archive_member(value: &str) -> bool {
-    normalize_archive_path(value).is_some()
+    matches!(value, "." | "./") || normalize_archive_path(value).is_some()
 }
 
 fn validate_extracted_tree(root: &Path) -> Result<(), AppError> {
@@ -1333,6 +1342,22 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
         {
             return Err(AppError::InvalidCatalog(format!(
                 "app {:?} has invalid search keywords",
+                app.id
+            )));
+        }
+        if app.window_app_ids.len() > 8
+            || app.window_app_ids.iter().collect::<BTreeSet<_>>().len() != app.window_app_ids.len()
+            || app.window_app_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 128
+                    || !id.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_alphanumeric()
+                            || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                    })
+            })
+        {
+            return Err(AppError::InvalidCatalog(format!(
+                "app {:?} has invalid runtime window ids",
                 app.id
             )));
         }
@@ -1891,6 +1916,22 @@ mod tests {
         .unwrap();
         fs::set_permissions(&bsdtar, fs::Permissions::from_mode(0o755)).unwrap();
         (dir, curl, bsdtar, digest, byte_size)
+    }
+
+    #[test]
+    fn archive_root_member_is_safe_but_traversal_is_not() {
+        assert!(safe_archive_member("."));
+        assert!(safe_archive_member("./"));
+        assert!(safe_archive_member("./usr/lib/app"));
+        for unsafe_member in [
+            "",
+            "/",
+            "../escape",
+            "./../../escape",
+            "usr/../../../escape",
+        ] {
+            assert!(!safe_archive_member(unsafe_member), "{unsafe_member:?}");
+        }
     }
 
     #[test]

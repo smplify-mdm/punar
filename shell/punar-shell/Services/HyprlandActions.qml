@@ -26,6 +26,10 @@ QtObject {
         Hyprland.dispatch("hl.dsp.focus({ workspace = " + root.luaString(selector) + " })");
     }
 
+    function focusWindow(selector: string): void {
+        Hyprland.dispatch("hl.dsp.focus({ window = " + root.luaString(selector) + " })");
+    }
+
     function renameWorkspace(selector: var, name: string): void {
         var expression = "hl.dsp.workspace.rename({ workspace = " + root.luaString(selector);
         if (name !== "")

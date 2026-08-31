@@ -908,6 +908,7 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         "--dir",
         "/run/user",
     ]);
+    append_resolver_mount(&mut command, Path::new("/run/systemd/resolve"));
     command
         .arg("--dir")
         .arg("/home")
@@ -992,6 +993,21 @@ fn vendor_app_command(app: &Value, id: &str) -> Result<std::process::Command, St
         .arg(sandbox_executable)
         .arg("--no-sandbox");
     Ok(command)
+}
+
+/// Keep the app's network view useful without exposing the host runtime tree.
+/// systemd-resolved makes `/etc/resolv.conf` a symlink into this directory;
+/// the otherwise-empty sandbox `/run` would leave that link dangling and make
+/// every hostname lookup fail. Only the resolver directory is shared, and it
+/// is mounted read-only.
+fn append_resolver_mount(command: &mut std::process::Command, resolver_dir: &Path) {
+    if resolver_dir.is_dir() {
+        command
+            .args(["--dir", "/run/systemd"])
+            .arg("--ro-bind")
+            .arg(resolver_dir)
+            .arg("/run/systemd/resolve");
+    }
 }
 
 fn valid_runtime_dir(path: &Path) -> bool {
@@ -2183,9 +2199,33 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, append_resolver_mount};
+
+    #[test]
+    fn vendor_sandbox_mounts_system_resolver_read_only() {
+        // `/` is a portable, existing directory; the helper's destination is
+        // fixed, so this verifies the exact bwrap shape without assuming the
+        // test host itself runs systemd-resolved.
+        let mut command = std::process::Command::new("/usr/bin/bwrap");
+        append_resolver_mount(&mut command, Path::new("/"));
+        let args: Vec<&OsStr> = command.get_args().collect();
+
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--dir"),
+                OsStr::new("/run/systemd"),
+                OsStr::new("--ro-bind"),
+                OsStr::new("/"),
+                OsStr::new("/run/systemd/resolve"),
+            ]
+        );
+    }
 
     /// clap's self-check: asserts the argument definitions are internally
     /// consistent, and that `--version` can be answered.

@@ -29,6 +29,7 @@ Item {
     readonly property string containment: root.verified ? String(root.inspection.containment || "unknown") : ""
     readonly property var permissions: root.verified && Array.isArray(root.inspection.permissions) ? root.inspection.permissions : []
     readonly property var disclosures: root.record !== null && Array.isArray(root.record.disclosures) ? root.record.disclosures : []
+    readonly property bool transactionBusy: root.phase === "installing" || root.phase === "removing"
 
     // The action is deliberately outside the scrolling permission body. A
     // long native permission set must never push Install/Open below the
@@ -227,14 +228,53 @@ Item {
             color: Theme.shellBorder
         }
 
+        // The app IPC is transactional today: it reports completion or a
+        // precise failure, but not trustworthy byte-level progress. This
+        // compact activity track therefore communicates that work is live
+        // without inventing a percentage. It can become determinate once the
+        // daemon exposes verified download/extract progress events.
+        Rectangle {
+            id: activityTrack
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 3
+            visible: root.transactionBusy
+            clip: true
+            color: Theme.shellBorder
+
+            Rectangle {
+                id: activitySegment
+                width: Math.max(72, activityTrack.width * 0.26)
+                height: parent.height
+                radius: parent.height / 2
+                color: Theme.shellFg
+
+                NumberAnimation on x {
+                    from: -activitySegment.width
+                    to: activityTrack.width
+                    duration: Theme.durSpatial * 3
+                    loops: Animation.Infinite
+                    running: activityTrack.visible
+                    easing.type: Easing.InOutSine
+                }
+            }
+        }
+
         Meta {
             anchors.left: actionButton.right
             anchors.leftMargin: 12
             anchors.right: removeButton.visible ? removeButton.left : parent.right
             anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
-            visible: detailsScroll.contentHeight > detailsScroll.height
-            text: "Scroll to review all access"
+            visible: root.transactionBusy || detailsScroll.contentHeight > detailsScroll.height
+            text: {
+                if (root.phase === "installing")
+                    return "Downloading, verifying, and preparing…";
+                if (root.phase === "removing")
+                    return "Removing application…";
+                return "Scroll to review all access";
+            }
             elide: Text.ElideRight
         }
 
@@ -264,7 +304,7 @@ Item {
                     if (root.phase === "opening")
                         return "Opening…";
                     if (root.phase === "failed")
-                        return "Try again ↵";
+                        return "Check source again ↵";
                     if (root.removalArmed)
                         return "Keep app";
                     if (root.webSource)

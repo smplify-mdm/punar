@@ -124,6 +124,13 @@
           "maxItems": 16,
           "uniqueItems": true
         },
+        "windowAppIds": {
+          "description": "Runtime app IDs exposed through the Wayland foreign-toplevel protocol. These are used only to focus an existing application window; they are never executed.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "maxItems": 8,
+          "uniqueItems": true
+        },
         "summary": {"type": "string", "minLength": 1, "maxLength": 240},
         "trustTier": {"enum": ["curated", "community"]},
         "license": {"enum": ["free", "mixed", "proprietary"]},

@@ -4,6 +4,7 @@ singleton Apps 1.0 Apps.qml
 singleton Catalog 1.0 Catalog.qml
 singleton Approvals 1.0 Approvals.qml
 singleton Ledger 1.0 Ledger.qml
+singleton LocalTime 1.0 LocalTime.qml
 singleton Notifications 1.0 Notifications.qml
 singleton Network 1.0 Network.qml
 singleton Status 1.0 Status.qml

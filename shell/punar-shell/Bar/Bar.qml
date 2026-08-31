@@ -106,8 +106,8 @@ Scope {
     // user next changes focus.
     //
     // The two readings share one source: Hyprland sends the same class string
-    // as the foreign toplevel's app_id and as `hyprctl clients .class`, so the
-    // check's comparison is a relation between two views of one fact. One
+    // as the foreign toplevel's app_id and as `hyprctl clients .class`. Apps
+    // maps that stable technical identity to the product role people see. One
     // caveat, stated because it is not obvious: the wlr protocol sends app_id
     // ONCE, at map — its onClass handler is dead code in 0.56.2 — so a window
     // that renamed its class mid-life would keep its original name here while
@@ -124,9 +124,10 @@ Scope {
         var cls = String(top.appId).trim();
         if (cls === "")
             return "";
+        var name = Apps.displayNameForAppId(cls);
         // A pathological class should not be allowed to push the clock off
         // the right-hand edge; the cluster's slots are the bar's priority.
-        return cls.length > 24 ? cls.substring(0, 23) + "\u2026" : cls;
+        return name.length > 24 ? name.substring(0, 23) + "\u2026" : name;
     }
 
     readonly property string workspaceLabel: {
@@ -500,7 +501,27 @@ Scope {
                     id: clockLabel
 
                     anchors.verticalCenter: parent.verticalCenter
-                    text: Qt.formatDateTime(minuteClock.date, "HH:mm")
+                    // Keep the revision read in the binding itself. Property
+                    // reads hidden inside a singleton JavaScript function are
+                    // not dependency-tracked reliably by every Qt/QML build,
+                    // which left the freshly selected timezone invisible
+                    // until SystemClock's next minute tick.
+                    text: {
+                        var timeZoneRevision = LocalTime.revision;
+                        var immediateClockText = LocalTime.immediateClockText;
+                        var immediateClockMinute = LocalTime.immediateClockMinute;
+                        // Keep each value in the dependency graph directly;
+                        // LocalTime.format() also reads them, but reads hidden
+                        // inside singleton functions are not tracked reliably.
+                        var instant = minuteClock.date && minuteClock.date.getTime
+                                ? minuteClock.date.getTime() : Date.now();
+                        if (immediateClockText !== ""
+                                && immediateClockMinute === Math.floor(instant / 60000))
+                            return immediateClockText;
+                        return timeZoneRevision >= 0
+                                ? LocalTime.format(minuteClock.date, "HH:mm")
+                                : "";
+                    }
                     color: Theme.shellInk2
                 }
             }

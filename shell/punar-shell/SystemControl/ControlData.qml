@@ -92,6 +92,7 @@ Scope {
     property int lastActionExit: -1
     property string lastActionError: ""
     property bool lastActionPending: false
+    property string pendingTimeZone: ""
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
@@ -101,6 +102,11 @@ Scope {
     // card; two empty arguments mean browse everything. shell.qml is the
     // only place allowed to connect those sibling surfaces.
     signal applicationRequested(var entry, string catalogId)
+
+    // A successful timezone mutation must cross the lazy-surface boundary
+    // explicitly. The resident shell owns the clock and is the only object
+    // that can guarantee an immediate refresh of the visible masthead.
+    signal systemTimeZoneChanged(string timeZone)
 
     // ---------------------------------------------------------------
     // Small helpers. Tones are STRINGS here ("ok"/"warn"/"bad"/"") —
@@ -283,15 +289,24 @@ Scope {
             data.lastActionPending = false;
             data.lastActionExit = exitCode;
             data.lastActionError = String(mutationErr.text).trim();
+            var changedTimeZone = data.pendingTimeZone;
+            data.pendingTimeZone = "";
+            // A successful control-plane write may have changed the process
+            // timezone. The resident shell receives this explicit signal;
+            // relying on a singleton call from this deferred component left
+            // the visible clock uninformed on the shipped Qt build.
+            if (exitCode === 0 && changedTimeZone !== "")
+                data.systemTimeZoneChanged(changedTimeZone);
             // Never trust the write: re-read the control plane and let
             // the registry say what actually happened.
             data.refreshProbes();
         })
     }
 
-    function runMutation(argv: list<string>): void {
+    function runMutation(argv: list<string>, changedTimeZone: string): void {
         if (mutation.running)
             return;
+        data.pendingTimeZone = changedTimeZone === undefined ? "" : changedTimeZone;
         data.lastActionArgv = argv.join(" ");
         data.lastActionExit = -1;
         data.lastActionError = "";
@@ -688,7 +703,12 @@ Scope {
             // anything is sent. Esc cancels; Enter submits.
             data.reasonForCapability = String(a.path);
         } else if (kind === "capset") {
-            data.runMutation(["punarctl", "capabilities", "set", String(a.path), String(a.value)]);
+            var path = String(a.path);
+            var value = String(a.value);
+            data.runMutation(
+                ["punarctl", "capabilities", "set", path, value],
+                path === "time.timezone" ? value : ""
+            );
         } else if (kind === "revoke") {
             data.runMutation(["punarctl", "privilege", "revoke", String(a.grantId)]);
         }

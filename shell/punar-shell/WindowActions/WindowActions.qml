@@ -236,8 +236,9 @@ DeferredSurfaceBase {
             app = parsed.initialClass.trim();
 
         root.targetAddress = address;
-        root.targetApp = app === "" ? "Application" : app;
-        root.targetTitle = typeof parsed.title === "string" ? parsed.title.trim() : "";
+        root.targetApp = Apps.displayNameForAppId(app);
+        root.targetTitle = Apps.windowTitleForAppId(app,
+                typeof parsed.title === "string" ? parsed.title : "");
         root.phase = "ready";
         root.windowVisible = true;
     }

@@ -68,6 +68,7 @@ DeferredSurfaceBase {
     // section straight to the PUNAR+A panel (the AlertStack precedent).
     signal aiPanelRequested
     signal applicationRequested(var entry, string catalogId)
+    signal systemTimeZoneChanged(string timeZone)
 
     // Everything this surface knows. It holds no colour and draws
     // nothing; the data contract is the header of ControlData.qml.
@@ -77,6 +78,9 @@ DeferredSurfaceBase {
         onAiPanelRequested: root.aiPanelRequested()
         onApplicationRequested: function(entry, catalogId) {
             root.applicationRequested(entry, catalogId);
+        }
+        onSystemTimeZoneChanged: function(timeZone) {
+            root.systemTimeZoneChanged(timeZone);
         }
     }
 

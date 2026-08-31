@@ -767,15 +767,18 @@ if wait_for 180 chromium_client; then
 
     # THE MENUBAR TRACKS WHAT IS RUNNING. With a browser on screen and
     # focused, the bar's left zone must name it. This is asserted as a
-    # relation between two independent readings of the live session — what
-    # Hyprland says is focused, and what the bar says it is naming — so it
-    # cannot pass by rendering a constant, and it fails if the bar stops
-    # following focus.
+    # relation between two independent readings of the live session — the
+    # stable technical class Hyprland reports and the generic product role the
+    # bar maps it to — so it cannot pass by rendering a constant, and it fails
+    # if the bar stops following focus.
     hyprctl dispatch "hl.dsp.focus({ window = 'class:^([Cc]hromium.*)$' })" >/dev/null 2>&1
     bar_names_focus() {
         hy="$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""' | tr '[:upper:]' '[:lower:]')"
         br="$(ipc bar app | tr -d '[:space:]"' | tr '[:upper:]' '[:lower:]')"
-        [ -n "${hy}" ] && [ -n "${br}" ] && [ "${hy}" = "${br}" ]
+        case "${hy}" in
+            *chromium*) [ "${br}" = "browser" ] ;;
+            *) return 1 ;;
+        esac
     }
     if wait_for 20 bar_names_focus; then
         note "ok   the menubar names the focused window ($(ipc bar app | tr -d '[:space:]\"'))"

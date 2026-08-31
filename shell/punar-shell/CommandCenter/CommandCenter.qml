@@ -492,12 +492,15 @@ DeferredSurfaceBase {
 
     function firstError(text: string, fallback: string): string {
         var lines = String(text).split("\n");
+        var useful = [];
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim();
             if (line !== "")
-                return line;
+                useful.push(line);
+            if (useful.length === 3)
+                break;
         }
-        return fallback;
+        return useful.length > 0 ? useful.join("\n") : fallback;
     }
 
     function askApp(id: string): void {
@@ -524,6 +527,9 @@ DeferredSurfaceBase {
         var parsed = root.parseLastLine(appInspectOut.text);
         if (parsed !== null && typeof parsed === "object" && parsed.app) {
             root.appRecord = parsed.app;
+            var inspectedSource = String(parsed.app.source || "");
+            if (inspectedSource === "flatpak" || inspectedSource === "vendor_deb")
+                Apps.recordCatalogInstallState(root.appId, parsed.app.installed === true);
             root.appPhase = "ready";
             return;
         }
@@ -548,14 +554,13 @@ DeferredSurfaceBase {
             return;
         var source = String(root.appRecord.source || "");
         if (source === "web" || root.appRecord.installed === true) {
-            root.appPhase = "opening";
-            try {
-                appOpenProc.command = ["punarctl", "app", "open", root.appId];
-                appOpenProc.running = true;
-            } catch (e) {
-                root.appFailure = "The application launcher is unavailable.";
-                root.appPhase = "failed";
+            var catalogApp = Catalog.byId(root.appId);
+            if ((catalogApp !== null && Apps.focusCatalogApp(catalogApp))
+                    || Apps.focusCatalogApp(root.appRecord)) {
+                root.dismiss();
+                return;
             }
+            root.openCatalogApp(root.appId, catalogApp);
             return;
         }
         var inspection = root.appRecord.inspection;
@@ -591,6 +596,7 @@ DeferredSurfaceBase {
             return;
         var parsed = root.parseLastLine(appInstallOut.text);
         if (parsed !== null && typeof parsed === "object" && parsed.installed === true) {
+            Apps.recordCatalogInstallState(root.appId, true);
             var updated = ({});
             for (var key in root.appRecord)
                 updated[key] = root.appRecord[key];
@@ -632,6 +638,7 @@ DeferredSurfaceBase {
             return;
         var parsed = root.parseLastLine(appRemoveOut.text);
         if (parsed !== null && typeof parsed === "object" && parsed.installed === false) {
+            Apps.recordCatalogInstallState(root.appId, false);
             var updated = ({});
             for (var key in root.appRecord)
                 updated[key] = root.appRecord[key];
@@ -658,6 +665,25 @@ DeferredSurfaceBase {
         }
         root.appFailure = root.firstError(appOpenErr.text, "The application could not start.");
         root.appPhase = "failed";
+    }
+
+    function openCatalogApp(id: string, app: var): void {
+        if (appOpenProc.running)
+            return;
+        if (app !== null && app !== undefined && Apps.focusCatalogApp(app)) {
+            root.dismiss();
+            return;
+        }
+        root.appId = id;
+        root.appPhase = "opening";
+        root.appFailure = "";
+        try {
+            appOpenProc.command = ["punarctl", "app", "open", id];
+            appOpenProc.running = true;
+        } catch (e) {
+            root.appFailure = "The application launcher is unavailable.";
+            root.appPhase = "failed";
+        }
     }
 
     // ---- row construction -------------------------------------------------
@@ -691,7 +717,7 @@ DeferredSurfaceBase {
             "glyph": Apps.glyphFor(entry.name),
             "icon": Apps.iconSource(entry),
             "name": Apps.displayName(entry),
-            "meta": "Launch(" + Apps.bareId(entry) + ")",
+            "meta": "Application(" + Apps.bareId(entry) + ") · installed · open",
             "cap": false,
             "kind": "app",
             "state": "shipped",
@@ -701,19 +727,31 @@ DeferredSurfaceBase {
     }
 
     function catalogAppRow(app: var, group: string): var {
+        var installed = Apps.catalogAppInstalled(app);
         return {
             "group": group,
             "glyph": Apps.glyphFor(String(app.name || app.id)),
             "icon": Catalog.iconSource(app),
             "name": String(app.name),
             "meta": "Application(" + String(app.id) + ") · "
-                + (Catalog.webOnly(app) ? "official web app" : "installable")
+                + (installed ? "installed · open" : (Catalog.webOnly(app) ? "official web app" : "installable"))
                 + " · " + String(app.category || "application"),
             "cap": true,
             "kind": "catalog-app",
             "state": "shipped",
-            "arg": String(app.id)
+            "arg": String(app.id),
+            "installed": installed,
+            "catalog": app
         };
+    }
+
+    function entryRepresentedByCatalog(entry: var, catalogApps: var): bool {
+        for (var i = 0; i < catalogApps.length; i++) {
+            if (Apps.catalogAppInstalled(catalogApps[i])
+                    && Apps.catalogAppMatchesEntry(catalogApps[i], entry))
+                return true;
+        }
+        return false;
     }
 
     // A role row names what the thing IS on this machine ("Open browser"
@@ -723,11 +761,14 @@ DeferredSurfaceBase {
     function roleRow(entry: var, glyph: string, label: string, group: string): var {
         if (entry === null || entry === undefined)
             return null;
+        var productName = Apps.displayName(entry);
+        var roleName = String(label).replace(/^Open\s+/i, "");
         return {
             "group": group,
             "glyph": glyph,
             "icon": Apps.iconSource(entry),
-            "name": label + " · " + Apps.displayName(entry),
+            "name": productName.toLowerCase() === roleName.toLowerCase()
+                    ? label : label + " · " + productName,
             "meta": "Launch(" + Apps.bareId(entry) + ")",
             "cap": true,
             "kind": "app",
@@ -864,8 +905,13 @@ DeferredSurfaceBase {
 
             var available = Catalog.search("", 8);
             var availableGroup = "Get applications · " + Catalog.entries.length;
-            for (i = 0; i < available.length; i++)
-                out.push(root.catalogAppRow(available[i], availableGroup));
+            for (i = 0; i < available.length; i++) {
+                // Installed products already appear in the Installed group.
+                // They must never remain under a group that tells the person
+                // to get or install them again.
+                if (!Apps.catalogAppInstalled(available[i]))
+                    out.push(root.catalogAppRow(available[i], availableGroup));
+            }
 
             for (i = 0; i < actions.surfaces.length; i++)
                 out.push(root.surfaceRow(actions.surfaces[i], "System"));
@@ -930,12 +976,16 @@ DeferredSurfaceBase {
             out.push(root.projectRow(normalized, "Projects", false));
 
         // ---- applications ----
-        var matchedApps = Apps.search(lower, 8);
-        for (i = 0; i < matchedApps.length; i++)
-            out.push(root.appRow(matchedApps[i], "Applications"));
         var catalogApps = Catalog.search(lower, 4);
+        var matchedApps = Apps.search(lower, 8);
+        for (i = 0; i < matchedApps.length; i++) {
+            // Prefer the richer catalog identity for curated apps, but only
+            // when it joins to this live installed desktop entry.
+            if (!root.entryRepresentedByCatalog(matchedApps[i], catalogApps))
+                out.push(root.appRow(matchedApps[i], "Applications"));
+        }
         for (i = 0; i < catalogApps.length; i++)
-            out.push(root.catalogAppRow(catalogApps[i], "Get applications"));
+            out.push(root.catalogAppRow(catalogApps[i], Apps.catalogAppInstalled(catalogApps[i]) ? "Applications" : "Get applications"));
 
         // ---- policy (spec §40) ----
         var asked = actions.isQuestion(q) ? actions.questionPath(q) : "";
@@ -971,7 +1021,10 @@ DeferredSurfaceBase {
                 root.note = "That application could not be launched";
             return;
         case "catalog-app":
-            root.askApp(item.arg);
+            if (item.installed === true)
+                root.openCatalogApp(item.arg, item.catalog);
+            else
+                root.askApp(item.arg);
             return;
         case "project":
             if (actions.openProject(item.arg) >= 0)
@@ -1074,7 +1127,7 @@ DeferredSurfaceBase {
         // Live models this result set is derived from. Listed explicitly so
         // the binding re-evaluates when any of them changes — the probe
         // answering, an application appearing, a workspace being renamed.
-        readonly property var resultDeps: [Apps.entries, Catalog.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames, WallpaperState.activeId]
+        readonly property var resultDeps: [Apps.entries, Apps.catalogInstallRevision, Catalog.entries, actions.availableTargets, Hyprland.workspaces.values, WorkspaceState.pendingNames, WallpaperState.activeId]
 
         readonly property var results: root.buildResults(queryInput.text, win.resultDeps)
         onResultsChanged: list.currentIndex = win.results.length > 0 ? 0 : -1

@@ -272,6 +272,9 @@ ShellRoot {
         surfaceName: "systemcontrol"
         sourceComponent: SystemControl {
             onAiPanelRequested: shellRoot.showAiPanel()
+            onSystemTimeZoneChanged: function(timeZone) {
+                LocalTime.systemTimeZoneChanged(timeZone);
+            }
             onApplicationRequested: function(entry, catalogId) {
                 systemControlSurface.closeSurface();
                 if (entry !== null && entry !== undefined) {

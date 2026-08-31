@@ -38,6 +38,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Wayland
 
 Singleton {
     id: root
@@ -46,11 +47,29 @@ Singleton {
     // Distribution packages occasionally expose implementation launchers as
     // ordinary applications. Foot is the important example: `foot.desktop`,
     // `footclient.desktop`, and `foot-server.desktop` are three ways to reach
-    // one terminal product. A person should see one Terminal, not a process
-    // topology. Keep the canonical entry and suppress only the two explicitly
-    // known helpers; this is intentionally not a fuzzy name filter.
+    // one terminal product. Thunar also publishes a settings helper which is
+    // not a working standalone application in Punar. A person should see the
+    // products, not their process topology. This is intentionally an exact-id
+    // list, never a fuzzy name filter.
     readonly property var rawEntries: DesktopEntries.applications.values
     readonly property var entries: root.productEntries(root.rawEntries)
+
+    // DesktopEntries updates asynchronously after an installer writes or
+    // removes a desktop file. Keep the result of the just-completed typed
+    // transaction as an immediate, session-local truth so returning from an
+    // install card can never offer the same app for installation again.
+    // A monotonic revision beside the map gives every dependent QML binding
+    // a deterministic change notification.
+    readonly property var catalogInstallState: ({})
+    property int catalogInstallRevision: 0
+
+    function recordCatalogInstallState(id: string, installed: bool): void {
+        var normalized = root.normalizedWindowId(id);
+        if (normalized === "")
+            return;
+        root.catalogInstallState[normalized] = installed;
+        root.catalogInstallRevision++;
+    }
 
     // Role candidates, most-specific first. Ids are freedesktop desktop-file
     // ids without the `.desktop` suffix. `chromium` is the id Arch's
@@ -67,7 +86,7 @@ Singleton {
         var out = [];
         for (var i = 0; i < entries.length; i++) {
             var id = root.bareId(entries[i]);
-            if (id === "footclient" || id === "foot-server")
+            if (id === "footclient" || id === "foot-server" || id === "thunar-settings")
                 continue;
             out.push(entries[i]);
         }
@@ -76,17 +95,52 @@ Singleton {
 
     // Product names may deliberately differ from a package's desktop-file
     // name. Keep aliases here so every launcher/settings surface agrees.
-    function displayName(entry: var): string {
-        var id = root.bareId(entry);
-        if (id === "foot" || id === "footclient" || id === "foot-server")
+    function genericNameForId(id: string): string {
+        var value = String(id).trim().toLowerCase();
+        if (value.length > 8 && value.slice(-8) === ".desktop")
+            value = value.slice(0, -8);
+        if (value === "foot" || value === "footclient" || value === "foot-server"
+                || value === "org.codeberg.dnkl.foot")
             return "Terminal";
-        if (id === "nvim")
-            return "Neovim (Terminal)";
-        if (id === "geany")
-            return "Text Editor (Geany)";
-        if (id === "thunar")
+        if (value === "chromium" || value === "chromium-browser" || value === "org.chromium.chromium")
+            return "Browser";
+        if (value === "nvim")
+            return "Terminal Editor";
+        if (value === "geany")
+            return "Text Editor";
+        if (value === "thunar")
             return "Files";
+        if (value === "htop")
+            return "System Monitor";
+        return "";
+    }
+
+    function displayName(entry: var): string {
+        var generic = root.genericNameForId(root.bareId(entry));
+        if (generic !== "")
+            return generic;
         return String(entry && entry.name ? entry.name : "Application");
+    }
+
+    // Foreign-toplevel and Hyprland events expose technical app ids, not
+    // desktop entries. Keep the same product vocabulary in the bar and in
+    // window actions even when the app did not originate in the launcher.
+    function displayNameForAppId(appId: string): string {
+        var value = String(appId).trim();
+        var generic = root.genericNameForId(value);
+        if (generic !== "")
+            return generic;
+        var entry = root.entryById(value);
+        if (entry !== null)
+            return root.displayName(entry);
+        return value === "" ? "Application" : value;
+    }
+
+    function windowTitleForAppId(appId: string, title: string): string {
+        var value = String(title).trim();
+        if (root.genericNameForId(appId) === "Files")
+            value = value.replace(/\s*[-–]\s*Thunar\s*$/i, "");
+        return value;
     }
 
     function iconSource(entry: var): string {
@@ -143,6 +197,12 @@ Singleton {
     // the declared source id so every browse surface hides an app immediately
     // after installation instead of offering it twice.
     function catalogAppInstalled(app: var): bool {
+        // Establish an explicit binding dependency even though the state map
+        // itself is updated in place for this singleton's lifetime.
+        void root.catalogInstallRevision;
+        var catalogId = root.normalizedWindowId(app && app.id);
+        if (catalogId !== "" && root.catalogInstallState[catalogId] !== undefined)
+            return root.catalogInstallState[catalogId] === true;
         var sources = app && Array.isArray(app.sources) ? app.sources : [];
         for (var i = 0; i < sources.length; i++) {
             var appId = String(sources[i].appId || "").toLowerCase();
@@ -150,6 +210,25 @@ Singleton {
                 return true;
             var desktopId = String(sources[i].desktopId || "").toLowerCase();
             if (desktopId !== "" && root.entryById(desktopId) !== null)
+                return true;
+        }
+        return false;
+    }
+
+    // True when a desktop entry is one of the launchers declared by a
+    // catalog product. The command center uses this to present one result for
+    // an installed catalog application instead of a separate "installed"
+    // row and "installable" row for the same product.
+    function catalogAppMatchesEntry(app: var, entry: var): bool {
+        if (entry === null || entry === undefined)
+            return false;
+        var entryId = root.bareId(entry);
+        var sources = app && Array.isArray(app.sources) ? app.sources : [];
+        for (var i = 0; i < sources.length; i++) {
+            var appId = root.normalizedWindowId(sources[i].appId);
+            var desktopId = root.normalizedWindowId(sources[i].desktopId);
+            if ((appId !== "" && entryId === appId)
+                    || (desktopId !== "" && entryId === desktopId))
                 return true;
         }
         return false;
@@ -253,6 +332,117 @@ Singleton {
 
     // ---- launch ----------------------------------------------------------
 
+    function normalizedWindowId(value: var): string {
+        var id = String(value === undefined || value === null ? "" : value).trim().toLowerCase();
+        if (id.length > 8 && id.slice(-8) === ".desktop")
+            id = id.slice(0, -8);
+        return id;
+    }
+
+    function executableName(value: var): string {
+        var path = String(value === undefined || value === null ? "" : value).trim();
+        if (path === "")
+            return "";
+        var parts = path.split("/");
+        return root.normalizedWindowId(parts[parts.length - 1]);
+    }
+
+    function addWindowCandidate(candidates: var, value: var): void {
+        var id = root.normalizedWindowId(value);
+        if (id === "")
+            return;
+        candidates[id] = true;
+        // Punar-owned desktop entries carry a namespace so they cannot clash
+        // with package-owned files. Applications correctly expose their own
+        // app_id to Wayland, without that packaging namespace.
+        if (id.indexOf("punar-") === 0 && id.length > 6)
+            candidates[id.slice(6)] = true;
+    }
+
+    function entryWindowCandidates(entry: var): var {
+        var candidates = ({});
+        if (entry === null || entry === undefined)
+            return candidates;
+        root.addWindowCandidate(candidates, root.bareId(entry));
+
+        // A catalog-generated desktop file launches through the typed
+        // `punarctl app open <id>` capability. Include that product id: it is
+        // the stable identity exposed by Claude/ChatGPT's native windows.
+        var argv = entry.command || [];
+        if (argv.length >= 4
+                && root.executableName(argv[0]) === "punarctl"
+                && String(argv[1]) === "app"
+                && String(argv[2]) === "open")
+            root.addWindowCandidate(candidates, argv[3]);
+        else if (argv.length > 0)
+            root.addWindowCandidate(candidates, root.executableName(argv[0]));
+
+        // Runtime app IDs belong to the signed catalog rather than a
+        // launcher-specific exception table. This join also covers native
+        // apps such as Claude whose Wayland identity intentionally differs
+        // from both its executable and its desktop-file id.
+        var catalogApps = Catalog.entries;
+        for (var k = 0; k < catalogApps.length; k++) {
+            if (!root.catalogAppMatchesEntry(catalogApps[k], entry))
+                continue;
+            var catalogCandidates = root.catalogWindowCandidates(catalogApps[k]);
+            for (var candidate in catalogCandidates)
+                candidates[candidate] = true;
+        }
+        return candidates;
+    }
+
+    function catalogWindowCandidates(app: var): var {
+        var candidates = ({});
+        if (app === null || app === undefined)
+            return candidates;
+        root.addWindowCandidate(candidates, app.id);
+        root.addWindowCandidate(candidates, app.app_id);
+        root.addWindowCandidate(candidates, app.desktop_id);
+        root.addWindowCandidate(candidates, app.package_name);
+        root.addWindowCandidate(candidates, root.executableName(app.launch_executable));
+        var directWindowIds = Array.isArray(app.windowAppIds) ? app.windowAppIds
+            : (Array.isArray(app.window_app_ids) ? app.window_app_ids : []);
+        for (var direct = 0; direct < directWindowIds.length; direct++)
+            root.addWindowCandidate(candidates, directWindowIds[direct]);
+
+        var sources = Array.isArray(app.sources) ? app.sources : [];
+        for (var i = 0; i < sources.length; i++) {
+            root.addWindowCandidate(candidates, sources[i].appId);
+            root.addWindowCandidate(candidates, sources[i].desktopId);
+            root.addWindowCandidate(candidates, sources[i].packageName);
+            root.addWindowCandidate(candidates, root.executableName(sources[i].executable));
+        }
+        return candidates;
+    }
+
+    // Foreign-toplevel activation stays protocol-native, with a typed
+    // Hyprland focus request to guarantee that an off-workspace match is
+    // raised on this compositor. This gives the launcher task-switcher
+    // semantics without polling or parsing window titles, and without
+    // spawning a duplicate process.
+    function focusExisting(candidates: var): bool {
+        var list = ToplevelManager.toplevels.values;
+        for (var i = 0; i < list.length; i++) {
+            var observedAppId = String(list[i].appId || "").trim();
+            var appId = root.normalizedWindowId(observedAppId);
+            if (appId !== "" && candidates[appId] === true) {
+                // Keep the protocol-level activation request for compositor
+                // portability, then use Hyprland's typed focus dispatcher to
+                // guarantee macOS-like task switching across workspaces.
+                list[i].activate();
+                var exactClass = observedAppId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                HyprlandActions.focusWindow("class:^" + exactClass + "$");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function focusCatalogApp(app: var): bool {
+        return root.focusExisting(root.catalogWindowCandidates(app));
+    }
+
     // Launch through Quickshell's parsed `Exec` — never a shell string.
     // Returns false when there is nothing to launch, so the caller can say
     // so instead of pretending something happened.
@@ -260,6 +450,8 @@ Singleton {
         if (entry === null || entry === undefined)
             return false;
         try {
+            if (root.focusExisting(root.entryWindowCandidates(entry)))
+                return true;
             if (entry.runInTerminal === true) {
                 var terminalCommand = ["/usr/lib/punar/punar-terminal-app.sh"];
                 var workingDirectory = String(entry.workingDirectory || "");
