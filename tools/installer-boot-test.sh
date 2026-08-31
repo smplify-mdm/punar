@@ -6,6 +6,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO=${1:-}
 PROOF_DIR=${2:-"${REPO_ROOT}/os/images/out/installer-boot-proof"}
+BOOT_FORMS=${PUNAR_INSTALLER_BOOT_FORMS:-"optical raw-drive"}
 
 die() {
     echo "installer-boot-test: FAIL: $*" >&2
@@ -119,6 +120,12 @@ boot_form() {
     done
 }
 
-boot_form optical
-boot_form raw-drive
-echo 'installer-boot-test: PASS (optical + raw-drive)'
+read -r -a requested_forms <<< "${BOOT_FORMS}"
+[ "${#requested_forms[@]}" -gt 0 ] || die 'no installer boot forms were requested'
+for form in "${requested_forms[@]}"; do
+    case "${form}" in
+        optical|raw-drive) boot_form "${form}" ;;
+        *) die "unsupported installer boot form: ${form}" ;;
+    esac
+done
+echo "installer-boot-test: PASS (${requested_forms[*]})"
