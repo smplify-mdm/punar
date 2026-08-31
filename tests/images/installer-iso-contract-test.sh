@@ -30,8 +30,17 @@ cleanup() { rm -rf "${WORK}"; }
 trap cleanup EXIT
 
 xorriso -indev "${ISO}" -pvd_info > "${WORK}/pvd.txt" 2>&1
-grep -Eq "Volume Id[[:space:]]*:[[:space:]]*'PUNAR_INSTALL'" "${WORK}/pvd.txt" \
-    || fail 'ISO9660 volume label is not PUNAR_INSTALL'
+PVD_VOLUME_ID="$(awk -F ':' '
+    /^Volume Id[[:space:]]*:/ {
+        value = $2
+        sub(/^[[:space:]]*/, "", value)
+        sub(/[[:space:]]*$/, "", value)
+        print value
+        exit
+    }
+' "${WORK}/pvd.txt")"
+[ "${PVD_VOLUME_ID}" = PUNAR_INSTALL ] \
+    || fail "ISO9660 volume label is not PUNAR_INSTALL (observed: ${PVD_VOLUME_ID:-missing})"
 xorriso -indev "${ISO}" -report_el_torito plain > "${WORK}/eltorito.txt" 2>&1
 grep -Eq 'UEFI|EFI' "${WORK}/eltorito.txt" \
     || fail 'no UEFI El Torito boot image was reported'
