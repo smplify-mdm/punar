@@ -178,12 +178,11 @@ warn > 1024 MB** (`check-budgets.sh`), whole-system `MemTotal - MemAvailable`,
 KVM, 10 min stabilize + 5 min window.
 
 **Correction to an earlier version of this section**, which said the number had
-"drifted above" the target. It has not drifted above it — it has never been
-below it. The earliest measurement on record, M1 with a bar and a command
-centre and nothing else, is 1162 MB against a 1024 MB target. The 1024 figure
-has warned on every run this project has ever made, and describing the current
-number as a regression against it was wrong. What *is* a regression is the
-90 MB the thirteen surfaces added on top.
+"drifted above" the target. Before 2026-08-31 it had never been below it: the
+earliest measurement on record, M1 with a bar and a command centre and nothing
+else, was 1162 MB against a 1024 MB target. The first result below that target
+is the native ARM64 row added below; describing the preceding history as a
+regression against a previously-met target would still be wrong.
 
 | Run | Mean | Boot | What changed |
 |---|---|---|---|
@@ -193,7 +192,9 @@ number as a regression against it was wrong. What *is* a regression is the
 | [32945695360](https://github.com/smplify-mdm/punar/actions/runs/32945695360) | 1277 MB | 20 s | networkd + resolved + xdg-utils |
 | [33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202) | 1302 MB | 20 s | corrected surface-latency proof; shell PSS remained ~329 MiB |
 | [33078009194](https://github.com/smplify-mdm/punar/actions/runs/33078009194) | 1322 MB | 20 s | x86 KVM after all measured surface loaders; 7 MB first-party PSS |
+| [33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989) | **1116 MB** | 20 s | x86 KVM with the unaccelerated-renderer policy; 10 MB four-service PSS; full gate green |
 | local native ARM64, `c2d39a…c1e1` | 1205 / 1210 MB | 18 s | two connected Apple-HVF windows; 18 MB first-party PSS |
+| local native ARM64, `cf522b…d19133` | **1004 MB** | 16 s | Qt raster adaptation + two-worker llvmpipe cap on unaccelerated adapters; 24 MB four-service PSS; all runtime suites green |
 
 **Attribution, measured rather than guessed.** The two runs above bracket the
 networking change exactly: everything else identical, `1265 → 1277`. Wired
@@ -208,8 +209,16 @@ window construct on demand and unload after their close animation. Their small
 IPC handlers stay resident so `state()` can answer `"closed"` without loading
 the visual tree. Always-visible and unbidden security surfaces remain eager.
 
-Three daemons sum to **7 MB** PSS on x86 KVM and **18 MB** on native ARM64,
-both comfortably below the 100 MB target. The Rust side is not the RAM problem.
+The current four daemons sum to **24 MB** PSS on native ARM64, comfortably
+below the 100 MB target. The Rust side is not the RAM problem.
+
+**The clean-VM target is now met without weakening the hardware path.** The
+Apple-HVF candidate moved from 1210/1213 MB to 1004/1005 MB after the
+unaccelerated virtio path selected Qt Quick's built-in software adaptation and
+bounded Mesa's llvmpipe pool. AMD, Intel, Raspberry Pi VC4 and other real DRM
+drivers explicitly clear both variables and retain their normal hardware
+renderer. The reduction therefore closes the clean-VM budget item; it does
+not substitute for a physical-device baseline.
 
 ## Who actually holds it (run 33024091202, per-process PSS at stabilized idle)
 

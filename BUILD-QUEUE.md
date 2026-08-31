@@ -11,11 +11,12 @@ mistakes that each cost a full CI cycle.
 
 ## 0. The finish line
 
-Spec §80 defines done as: a clean VM can do 26 things. **25 of the 26 are
-now demonstrated** by the latest ARM64 candidate's 778 milestone
+Spec §80 defines done as: a clean VM can do 26 things. **All 26 are now
+demonstrated** by the latest native ARM64 candidate's 780 milestone
 assertions, 122 desktop-surface assertions, 5 wireless-posture assertions and
-15 isolated surface-cost checks. The remaining optimization target and the
-recently closed gates are recorded here:
+15 isolated surface-cost checks. Physical x86/ARM hardware acceptance remains
+a separate Phase-2 gate; clean-VM completion must not be restated as a
+bare-metal claim. The recently closed gates are recorded here:
 
 | # | DoD item | Status |
 |---|---|---|
@@ -23,7 +24,7 @@ recently closed gates are recorded here:
 | 19 | enforce project network rule | **VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_M12_OK` with 66 assertions on both x86_64 KVM and ARM64 TCG. A same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This proves generic UEFI/QEMU behavior, not internet, VPN, Raspberry Pi or physical-NIC behavior. |
 | 20 | display local network activity | **VERIFIED IN CANONICAL DUAL-ARCH CI:** the same run joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. Both screenshots and reports exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
 | 25 | demonstrate rollback/update mechanism | **VERIFIED IN CANONICAL ARM64 CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_UPDATE_AUTO_ROLLBACK_OK attempts=3 fallback_slot=A`. Signed apply had already verified inactive-slot write/readback/hash and health-gated blessing. The four-boot proof exhausted an impossible pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. |
-| 3 | remain within idle budget | 1311 MB x86 KVM / 1210 MB native ARM64 against a 1024 MB target; hard ceiling met, optimization continues — the only §80 target still missed |
+| 3 | remain within idle budget | **MET ON NATIVE ARM64 VM:** exact Apple-HVF candidate `cf522b…d19133` measured **1004 MB mean / 1005 MB max** against the unchanged 1024 MB target, down from the comparable 1210/1213 MB baseline. Four first-party services totaled 24 MB PSS; idle CPU, writes and zram also passed. The unaccelerated-VM renderer policy is runtime-proven and real-GPU paths explicitly clear it. This closes clean-VM DoD item 3, not Raspberry Pi or bare-metal performance acceptance. |
 | 10 | report compliance | **VERIFIED:** personal devices render `DRIFT · MATCHES` without organization wording; enrolled wording remains distinct — see §3 |
 
 And spec §81 Test A is the real bar: *"If Smplify management were removed,
@@ -138,7 +139,7 @@ user-invoked surfaces lazy-load and destroy themselves after their 300 ms close 
 Their `IpcHandler`s stay resident in `shell.qml`: `state()` answers `closed`
 and `residency()` answers `unloaded` without constructing the panel.
 
-The result was honest but modest: **1333 MB mean / 1337 MB max**, only 12 MB
+The first result was honest but modest: **1333 MB mean / 1337 MB max**, only 12 MB
 below the preceding 1345/1348 MB run and still above the 1024 MB target. The
 second pass separated the notification daemon from its visual ledger: the
 service remains eager, while the PUNAR+SHIFT+N window joins the measured lazy
@@ -146,6 +147,21 @@ set. The canonical x86 desktop job in run 33273700091 measured **1311 MB mean /
 1319 MB max** and proved the complete 122-assertion shell suite. Notification construction was
 43 ms and first map 108 ms. This recovered another 11 MB without making its
 first open perceptibly slower.
+
+The third measured pass targeted the unaccelerated VM path identified by the
+process attribution rather than removing user-facing compatibility. On
+virtual adapters with no real GPU, Qt Quick now uses its built-in software
+adaptation and Mesa's remaining llvmpipe pool is capped at two workers. Real
+GPUs—including Raspberry Pi VC4—explicitly clear both overrides. The exact
+native ARM64 candidate (`cf522b…d19133`) measured **1004/1005 MB**, a 206 MB
+(17.0%) mean reduction from the comparable 1210/1213 MB baseline. Canonical
+x86 KVM [run 33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989)
+measured **1116/1118 MB**, 195 MB (14.9%) below its preceding 1311/1319 MB
+baseline. Both paths passed the formal budgets and full behavioral gate; all
+780 milestone assertions, 122 surface assertions and 15 isolated surface
+samples passed locally on ARM64. This meets the clean-VM target without disabling Xwayland,
+audio, portals, polkit, alerts, approvals, the lock surface, or security
+services. It remains VM-path evidence, not a bare-metal performance result.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); toasts and OSD (must receive events while closed);
@@ -174,10 +190,10 @@ machine.
 
 Native runs hard-fail when any first-party cgroup reaches 0.50% of one CPU;
 TCG numeric breaches remain labeled/warn-only. The latest DHCP-connected
-Apple-HVF ARM64 candidate measured 1210/1213 MB RAM, 24 MB across all four
-service cgroups, 0.00% maximum first-party CPU and 73,728 first-party write
-bytes. The immediately preceding image measured 1200/1205 MB, 26 MB service
-PSS and 0.01% maximum first-party CPU. A native x86 KVM window also measured 73,728 bytes
+Apple-HVF ARM64 candidate measured 1004/1005 MB RAM, 24 MB across all four
+service cgroups, 0.01% maximum first-party CPU and 73,728 first-party write
+bytes. The immediately preceding exact-method image measured 1210/1213 MB,
+24 MB service PSS and 0.00% maximum first-party CPU. A native x86 KVM window also measured 73,728 bytes
 across three durability-synced reconcile audit batches; the cross-filesystem
 ceiling is therefore 98,304 bytes/five minutes, reserving one quarter of the
 ceiling without hiding a sustained writer. Whole-guest writes remain context
@@ -302,10 +318,11 @@ Its provenance records source commit `e03598ec`, Debian snapshot
 remain intentionally ignored; source, pins, and build recipes are the durable
 GitHub inputs.
 
-The current fixture-free product candidate was rebuilt on 2026-08-30 from the
+The current fixture-free product candidate was rebuilt on 2026-08-31 from the
 same pinned snapshot. `punar-release-arm64.qcow2` is **0.985 GiB allocated /
 33 GiB virtual** with SHA-256
-`12db1a9b9d51a4fbcb74ab45c7770040d76e33d16994ea872350443b44b6a9c6`.
+`3c82250e43b3923c40eb2a5165bf54f79af12e886bc3fe534d6db58b2db35bf9`;
+its embedded provenance records source commit `e29edbd`.
 `tools/test-release-onboarding-arm64.sh` booted that exact hash with a
 disposable snapshot disk and emitted `PUNAR_ONBOARDING_OK`: the real keyboard
 path created the first account, the one-time recovery receipt appeared, its

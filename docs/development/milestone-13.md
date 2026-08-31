@@ -1,13 +1,14 @@
 # Milestone 13 — Demo polish: design plan
 
-> **Implementation note (2026-08-30):** this document is the original M13
+> **Implementation note (2026-08-31):** this document is the original M13
 > design/audit and its embedded evidence matrix is historical until refreshed
 > by the final M13 check. The current status of record is `BUILD-QUEUE.md` and
 > `IMPLEMENTATION_STATUS.md`: M2–M10 and M12 are canonical runtime-proven, the
 > A/B update fallback is canonical ARM64-proven, CPU/write gates exist, and a
 > fixture-free ARM64 release image now passes the real first-account journey
 > through the signed-in desktop (`PUNAR_ONBOARDING_OK`, image SHA-256
-> `12db1a9b9d51a4fbcb74ab45c7770040d76e33d16994ea872350443b44b6a9c6`). M13 is
+> `3c82250e43b3923c40eb2a5165bf54f79af12e886bc3fe534d6db58b2db35bf9`,
+> source commit `e29edbd`). M13 is
 > **partially implemented**; the deterministic personal/enrolled 14-beat demo,
 > updated matrix, x86 release-image parity, human keyboard walkthrough and
 > physical-hardware acceptance remain open. Do not read the older `NOT MET`
@@ -22,7 +23,7 @@ fields, creates the first local account, observes the recovery receipt, enters
 through the one-use PAM token and requires the real desktop bar. Its structural
 probe performs no OCR. It retains only `firstboot.png`, `desktop.png` and a
 secret-free report; the password is never logged and the one-time recovery
-receipt is never saved. The 2026-08-30 native Apple-HVF run emitted
+receipt is never saved. The 2026-08-31 native Apple-HVF run emitted
 `PUNAR_ONBOARDING_OK`.
 
 The same change makes compact onboarding focus reveal each field inside the
@@ -196,7 +197,7 @@ memory.
 |---|---|---|---|---|---|
 | 1 | boot Punar | M0 | `tools/boot-test.sh` phase 1, `PUNAR_BOOT_OK` on the serial console — run 32788238871 | **PROVEN IN CI** | Nothing. Bare-metal boot is Phase 2 (spec 66). |
 | 2 | reach graphical keyboard-first desktop | M1 | `PUNAR_DESKTOP_OK` (greetd → Hyprland → quickshell chain, 18 s) + a real rendered frame in `punar-desktop-screenshot` — run 32804034681 | **PROVEN IN CI** † | The adjective *keyboard-first* is carried entirely by item 5, which is not met. This row proves *graphical*, not *keyboard-first*. |
-| 3 | remain within defined idle resource budget | M1 + **M13** | `idle-ram.sh` → `PUNAR_RAM_MEAN_MB` / `PUNAR_SERVICES_RSS_MB`, gated by `tests/performance/check-budgets.sh` — mean 1156–1175 MB across runs 32804034681…32868450695; services 4 MB | **NOT MET** | (a) Idle RAM is **131–151 MB over the 1.0 GB target** in every run ever taken (under the 1.5 GB ceiling, recorded as a standing warning). (b) **Idle CPU has never been measured** — spec 6.3 defines a budget and no gate exists. (c) **Idle disk-write throughput has never been measured** — spec 6.4, same. (d) Every number is from an emulated x86_64 VM on an arm64 host and is labeled indicative, not a hardware claim. §7.3, §7.4. |
+| 3 | remain within defined idle resource budget | M1 + **M13** | `idle-ram.sh` → RAM/PSS/CPU/write/zram facts, gated by `tests/performance/check-budgets.sh`. Exact native Apple-HVF ARM64 candidate `cf522b…d19133`: **1004 MB mean / 1005 MB max**, 24 MB four-service PSS, 0.01% max first-party CPU, 73,728 first-party write bytes, active zram; complete M2–M10/M12 and surface suites passed | **MET IN CLEAN VM** † | The unchanged 1,024 MB VM target is met. The improvement is intentionally scoped to unaccelerated virtual adapters; hardware paths clear the overrides. Raspberry Pi and bare-metal performance remain Phase-2 physical-device evidence, not implied by this row. §7.3, §7.4. |
 | 4 | use universal command center | M1 + **M13** | `CommandCenter.qml` ships and loads (it is inside `PUNAR_DESKTOP_OK`); `PUNAR+Space` bind is in `punar-binds.conf` and parses | **NOT MET** | **No check script has ever opened the command center** (`grep commandcenter` across `m2..m9-check.sh` returns nothing; only `aipanel` and `approval` are opened over `qs ipc`). Its action table is still M1's two static entries plus `DesktopEntries`; M2 §2 listed rename-workspace / go-to-workspace / layout-preset actions as in-scope and **they did not ship** (M2's own §8 verification table never claims they did). Spec 75 step 3 — type `Open Atlas` — has **no owner and no implementation**. §6.2 row 1. |
 | 5 | manage windows without mouse | M1/M2 | `m2-check.sh` drives every window operation via `hyprctl dispatch` and asserts the resulting state — `PUNAR_M2_OK`, run 32825539021; the keyboard grammar parses under `Hyprland --verify-config` on the pinned 0.56.2-1 | **HUMAN-VERIFIED ONLY — never executed** | **No keystroke has ever been injected anywhere in this project.** `hyprctl dispatch` proves the dispatcher; it does not traverse the bind table. The 23-step walkthrough in `keyboard-grammar.md` "must be executed by a human against a booted desktop image" and has been the single open M1 acceptance item since 2026-08-25. §3.4, §7.5. |
 | 6 | switch project workspaces | M2 | `m2-check.sh` rows 1–11: rename → `workspaces.json` schema-valid → shell restart → name restored — `PUNAR_M2_OK`, run 32825539021 | **PROVEN IN CI** | Nothing for this item. The *command-center* route to it is item 4. |
@@ -242,22 +243,15 @@ that drifts from the runs is worse than no count.
 
 ### 3.4 The four rows that need care
 
-**Item 3 — idle resource budget: measured, and over.** This is not a
-gap in evidence; it is a gap in the product. Every measured run since
-2026-08-25 has landed between 1156 MB and 1175 MB against a 1024 MB
-target — 13–15% over — and the number went *up* by 13 MB when M7 added
-the second daemon, honestly reported. It sits under the 1536 MB hard
-ceiling, so it is a standing warning and not a release blocker, and that
-is the only thing keeping item 3 out of blocker territory. Two further
-holes: **idle CPU and idle disk I/O have never been measured at all**.
-`tests/performance/check-budgets.sh` gates RAM and services-RSS and
-nothing else; `PERFORMANCE_BUDGETS.md` has said "the rest of section 5
-remains planned" since M0 and it is still true. An item that reads
-*"remain within defined idle resource budget"* cannot be called met when
-two of the four defined budgets have no measurement and the headline one
-is over. §7.3 and §7.4 are M13's answer, and §7.3 states plainly what
-happens if the diet does not close the gap: the item stays **NOT MET**
-and the threshold does not move.
+**Item 3 — idle resource budget: now met in the clean ARM64 VM.** The
+measurement method and thresholds did not move. The exact Apple-HVF candidate
+`cf522b…d19133` measured 1004/1005 MB against the 1024 MB target, 24 MB
+combined first-party PSS, 0.01% maximum first-party CPU, 73,728 first-party
+write bytes and active zram. Every post-idle milestone and surface suite
+passed. The 206 MB improvement from the comparable 1210/1213 MB ARM64
+baseline comes from an unaccelerated-VM rendering policy; real-GPU sessions
+explicitly clear it. The dagger therefore remains important: this row closes
+spec §80's clean-VM item, not physical x86/ARM or Raspberry Pi performance.
 
 **Item 5 — manage windows without a mouse: never executed by anyone.**
 This is the most-cited capability in the product's positioning and the
@@ -633,8 +627,8 @@ against the source and check scripts rather than against the prose.
 |---|---|---|---|---|
 | 1 | **Command-center project verb** — spec 75 step 3's `Open Atlas` | Never explicitly deferred; M2 §2 listed command-center actions as in-scope and shipped none of them | `CommandCenter.qml` `staticActions` has exactly two entries (`Open terminal`, `System Control` stub); no check script opens the overlay | **BUILD** (§7.1 B3) — it is a hero-demo step with no owner |
 | 2 | **Keyboard-only walkthrough never executed** | M1 acceptance, "pending" since 2026-08-25 | `IMPLEMENTATION_STATUS.md` M1: *"the only open M1 item"* | **BUILD + EXECUTE** (§7.5) — bind-table assertion, then a human runs the 23 steps and signs it |
-| 3 | **Idle RAM 13–15% over target** | M1; carried as a standing warning through M2–M7 | Every measured run: 1156–1175 MB vs 1024 MB | **BUILD** (§7.3) — measure first, then cut; if it misses, item 3 stays NOT MET |
-| 4 | **Idle CPU and idle disk-write never measured** | Never deferred — simply never built | `check-budgets.sh` gates RAM and services-RSS only; `PERFORMANCE_BUDGETS.md` still says "the rest of section 5 remains planned" | **BUILD** (§7.4) — two gates, cheap, closes half of DoD item 3's hole |
+| 3 | **Idle RAM target** | M1; carried as a standing warning through later milestones | Historical 1156–1337 MB measurements; exact 2026-08-31 ARM64 candidate now 1004/1005 MB vs 1024 MB | **CLOSED FOR CLEAN VM** (§7.3) — physical-device baseline remains Phase 2 |
+| 4 | **Idle CPU and idle disk-write measurement** | Originally missing | The same canonical window now enforces per-cgroup CPU and combined first-party writes; latest ARM64 result 0.01% / 73,728 B | **CLOSED** (§7.4) — missing counters fail on every accelerator |
 | 5 | **Rollback / update mechanism (DoD 25)** | Never assigned to any milestone | `punarctl update status` stub text names the absence; `mkosi.conf` lists btrfs+snapper under "not yet done" | **BUILD** (§8), with a written fallback to **NOT MET** |
 | 6 | **Graphical system control (spec 63, Plate D-004)** | No milestone references D-004 at all | `grep D-004 milestone-*.md`: no hits. `CommandCenter.qml` has a `System Control` entry whose meta reads *"arrives M3"* — a stub that outlived the milestone it named | **BUILD, scoped** (§7.2) — navigator chrome + SECURITY/ORGANIZATION only; beats 2 and 11 need it |
 | 7 | **Notification centre / freedesktop notification daemon** | M10 §17 ("— **M13**"), M11 §4.9 + §15 row 1 | The image contains no `org.freedesktop.Notifications` implementation | **REFUSE** (decision 10). Ship one denial toast for beat 8; re-point M10's and M11's rows to *not planned for MVP* |
@@ -721,7 +715,8 @@ it. This also removes the `System Control · arrives M3` stub from
 
 **Target: mean idle RAM under 1024 MB by the canonical
 `PERFORMANCE_BUDGETS.md` §2.1–2.2 method. Stretch: 750 MB. Current:
-1156–1175 MB. The thresholds do not move (Law 5).**
+**1004 MB mean / 1005 MB max on native Apple-HVF ARM64. Target met; stretch
+remains open.** The thresholds did not move (Law 5).
 
 **Step 0, before any cut: publish the breakdown.** `idle-ram.sh` gains a
 per-process, per-cgroup PSS dump at the end of the sampling window
@@ -736,7 +731,7 @@ these is a commitment to a number**:
 
 | Candidate | Hypothesis | Expected value | Risk / label |
 |---|---|---|---|
-| **llvmpipe worker arenas** — cap `LP_NUM_THREADS` in `session.sh` | Software GL thread arenas scale with CPU count; the CI VM has several | Possibly large — and **VM-only** | Must be labeled non-representative of hardware; a cut that only helps under llvmpipe does **not** count toward the hardware claim |
+| **Unaccelerated VM rendering** — Qt raster adaptation plus `LP_NUM_THREADS=2` | Qt/Mesa software-rendering arenas dominated the VM's shell/compositor footprint | **Implemented:** 1210 → 1004 MB mean on comparable Apple-HVF ARM64 windows | VM-only and labeled as such; real-GPU paths explicitly clear both overrides, so this closes clean-VM DoD but not the hardware claim |
 | **Lazy QML surfaces** — `Loader { active: false }` for AiPanel, Overview, Approval, FirstBoot, SystemControl, PrivacyPanel | Six QML scenes are instantiated at shell start for surfaces that are closed | Tens of MB, real on hardware too | Also improves first paint of every panel beat. Interacts with `qs ipc` opening: the loader must activate on the IPC call |
 | **`xdg-desktop-portal` + `-hyprland`** — two resident processes | Nothing in the current session opens a portal at idle | Small-medium | **Check with M11 first** — web apps may need the file-chooser portal. Socket-activate rather than remove if so |
 | **`pipewire` + `pipewire-pulse` + `wireplumber`** — three resident processes | The VM has no audio device | Small-medium | Socket-activate, do not remove: spec 63 lists Audio under System Control, and removing audio from a desktop to win a benchmark is the wrong trade |

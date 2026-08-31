@@ -4,7 +4,33 @@ Tracks progress against the milestone plan in
 [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md) section 76. The spec
 is authoritative; this file only records status.
 
-Last updated: 2026-08-29.
+Last updated: 2026-08-31.
+
+## Current clean-VM status — all 26 spec §80 items demonstrated
+
+The latest native Apple-HVF ARM64 candidate closes the last clean-VM budget
+item without changing the metric or threshold. Image
+`sha256:cf522bfff438411c2467a66ce65fc23ff6998ce67ce38798cd88c38b48d19133`,
+with source content committed as `e29edbd`, measured **1004 MB mean / 1005 MB
+max** after the canonical ten-minute stabilization and five-minute window
+(target 1024 MB). The four first-party services totaled 24 MB PSS; maximum
+first-party CPU was 0.01%, first-party writes were 73,728 bytes, and zram was
+active. The same run passed 780 M2–M10/M12 assertions, 122 desktop-surface
+assertions, 5 wireless-posture assertions, and 15 isolated surface-cost
+samples.
+
+The same source is fully green in canonical eight-job
+[run 33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989).
+Its x86 KVM lane measured 1116/1118 MB, 10 MB combined service PSS, 0.00%
+maximum first-party CPU and 73,728 first-party write bytes while exporting the
+complete behavioral proof.
+
+The reduction applies only to unaccelerated virtual adapters: Qt Quick uses
+its built-in software adaptation and Mesa's llvmpipe pool is bounded. Real
+DRM drivers—including Raspberry Pi VC4—explicitly clear both overrides. This
+meets spec §80's clean-VM definition of done; it is not a Raspberry Pi,
+physical x86/ARM, installer, or production-readiness claim. Those remain
+separate acceptance work.
 
 ## Architecture target expansion — generic ARM64 VM built; Raspberry Pi open
 
@@ -1592,4 +1618,4 @@ exist and function, until sharper criteria are defined.
 | M10 — Shadow AI detection MVP | Known/observed/unknown classification, fixture unknown agent, local alert, Smplify remote query | Not specified in spec §76 | **Done** — latest [run 33024091202](https://github.com/smplify-mdm/punar/actions/runs/33024091202) (2026-08-26, `9f3cd43`) is green on all five jobs, including **`PUNAR_M10_OK` with 135 assertions**. Continuous timer-driven detection, unknown-agent evidence, privacy-bounded ledger, local alert, remote-query authorization/refusal rules and the user-visible query register are runtime-proven. Status of record: [`docs/development/milestone-10.md`](docs/development/milestone-10.md) §22. |
 | M11 — Browser/web-app integration | Current Chromium, native launcher integration, project/browser context prototype, web-app install flow | Not specified in spec §76 | **Partially implemented** — the responsive Applications library, curated signed catalog, installed/available truth, official web entries, and architecture-labelled vendor package previews exist; Spotify and Chromium app-mode launch paths have passed a clean ARM64 VM exercise. Generic user-created web apps, persistent browser contexts, and dual-architecture compatibility coverage remain open. |
 | M12 — Network privacy prototype | Local network observability, project-route policy, relay abstraction, simulated or prototype private relay | Not specified in spec §76 | **Done — canonical dual-architecture CI green:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) (2026-08-29, commit `fe45b9d`) emitted **`PUNAR_M12_OK` with 66 assertions** on both x86_64 KVM and ARM64 TCG. The real same-user allow/deny/out-of-scope control probes, cgroup-v2 nft attachment, kernel socket-to-cgroup attribution across the user boundary, named counters, privacy-bounded connection view, netd-to-ledger/audit joins, malformed-data fail-safe, table self-heal, no-`CAP_SYS_PTRACE` confinement and panel screenshot all passed. The canonical x86_64 lane measured 1311/1319 MB RAM, 9 MB combined Punar PSS, 0.00% maximum first-party CPU and 73,728 first-party write bytes; the exact native Apple-HVF ARM64 image (`sha256:62081fb3a5d7fbf58115c35d5b04a5eb6957caf5d101ebe0089eba85612c14c9`) reached `PUNAR_DESKTOP_OK` in 16 s and measured 1210/1213 MB plus 24 MB PSS. The ARM64 CI lane additionally proved three failed update boots automatically returned to slot A. This verifies generic UEFI/QEMU policy behavior; real relay/VPN traffic, escape-proof network namespaces, physical NICs and Raspberry Pi firmware/peripherals remain explicitly out. |
-| M13 — Demo polish | First boot, enrollment, keyboard UX, AI panel, privacy panel, deterministic demo | Not specified in spec §76 | **Partially implemented; clean first-account journey runtime-proven** — the fixture-free ARM64 release image (`sha256:12db1a9b9d51a4fbcb74ab45c7770040d76e33d16994ea872350443b44b6a9c6`, source commit `fe45b9d` plus the pending greeter/proof changes) passed release-contamination policy, exact A/B layout validation and `PUNAR_ONBOARDING_OK` on Apple HVF on 2026-08-30. `tools/test-release-onboarding-arm64.sh` booted that exact artifact with a disposable disk, drove the real keyboard path, created the first local account, observed the one-time recovery receipt without retaining a secret frame, authenticated through the one-use PAM path and structurally verified the real desktop; only the untouched first screen and signed-in desktop were retained. Compact-layout focus now scrolls every field into view, the receipt resets stale scroll and focused Enter starts the desktop. The enrollment surfaces, keyboard overlay, AI panel and Privacy panel exist and their underlying milestone gates are green. The deterministic personal/enrolled 14-beat demo, refreshed M13 matrix, final human keyboard-only walkthrough, x86 release-image parity and physical-hardware acceptance remain open. |
+| M13 — Demo polish | First boot, enrollment, keyboard UX, AI panel, privacy panel, deterministic demo | Not specified in spec §76 | **Partially implemented; clean first-account journey runtime-proven** — the fixture-free ARM64 release image (`sha256:3c82250e43b3923c40eb2a5165bf54f79af12e886bc3fe534d6db58b2db35bf9`, source commit `e29edbd`) passed release-contamination policy, exact A/B layout validation and `PUNAR_ONBOARDING_OK` on Apple HVF on 2026-08-31. `tools/test-release-onboarding-arm64.sh` booted that exact artifact with a disposable disk, drove the real keyboard path, created the first local account, observed the one-time recovery receipt without retaining a secret frame, authenticated through the one-use PAM path and structurally verified the real desktop; only the untouched first screen and signed-in desktop were retained. Compact-layout focus now scrolls every field into view, the receipt resets stale scroll and focused Enter starts the desktop. The enrollment surfaces, keyboard overlay, AI panel and Privacy panel exist and their underlying milestone gates are green. The deterministic personal/enrolled 14-beat demo, refreshed M13 matrix, final human keyboard-only walkthrough, x86 release-image parity and physical-hardware acceptance remain open. |

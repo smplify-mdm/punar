@@ -2,9 +2,10 @@
 
 Status: **RAM, combined service PSS, idle CPU, first-party writes and live
 zram are measured and enforced.** The same DHCP-connected 8 GiB / 4-vCPU
-stabilized-idle window covers all of those facts. Repeated native Apple-HVF
-ARM64 windows established the CPU/write baseline; a later native KVM result
-set the cross-filesystem first-party write ceiling.
+stabilized-idle window covers all of those facts. A native Apple-HVF ARM64
+window now meets the whole-system 1 GiB target; repeated native ARM64 windows
+established the CPU/write baseline and a native KVM result set the
+cross-filesystem first-party write ceiling.
 A cgroup-memory cross-check, boot-regression gate, physical-device baselines
 and tracked JSON history remain open.
 
@@ -316,38 +317,42 @@ artifact ZIP digest: `sha256:1961a28daa7af5c06dc6030b4e855f5f85fbe722eef2a9f518f
 The usable-desktop value is explicitly a single-run host proxy, not the
 three-cold-boot median section 2.6 requires.
 
-The ARM rows are from the final local native Apple-HVF run of
+The ARM rows are from the latest local native Apple-HVF run of
 `punar-desktop-arm64.qcow2`, SHA-256
-`62081fb3a5d7fbf58115c35d5b04a5eb6957caf5d101ebe0089eba85612c14c9`,
-built from the same immutable 2026-08-20 Debian snapshot. Its 8 GiB / 4-vCPU
-guest was DHCP-connected at the ten-minute boundary. It measured 1210/1213 MB,
-24 MB across the four service cgroups, 0.00% maximum first-party CPU, 73,728
-first-party write bytes and 4,595,712 whole-guest bytes. The preceding M12
-candidate measured 1211/1218 MB and 27 MB service PSS. Repetition is why the
-budgets are gates rather than invented pre-measurement numbers. These are
-native-virtualization results, not Raspberry Pi or bare-metal evidence.
+`cf522bfff438411c2467a66ce65fc23ff6998ce67ce38798cd88c38b48d19133`,
+built from the same immutable 2026-08-20 Debian snapshot and the source
+content committed as `e29edbd`. Its 8 GiB / 4-vCPU guest was DHCP-connected
+at the ten-minute boundary. It measured **1004/1005 MB**, 24 MB across the
+four service cgroups, 0.01% maximum first-party CPU, 73,728 first-party write
+bytes and 3,960,832 whole-guest bytes. The immediately preceding exact-method
+ARM64 baseline measured 1210/1213 MB; selecting Qt's built-in software
+adaptation and capping Mesa's llvmpipe worker pool only on unaccelerated
+virtual adapters reduced the mean by 206 MB (17.0%). Hardware sessions
+explicitly clear both overrides. Repetition is why the budgets are gates
+rather than invented pre-measurement numbers. These are native-virtualization
+results, not Raspberry Pi or bare-metal evidence.
 
 | Metric | Method | Budget | Measured value | Environment | Image / date |
 |---|---|---|---|---|---|
-| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1311 MB** (target missed; ceiling met) | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
-| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1210 MB** (target missed; ceiling met) | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1319 MB** | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
-| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1213 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **9 MB** | KVM VM, 8 GiB / 4 vCPU | `fe45b9d` / 2026-08-29 |
-| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **24 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `62081fb…12c14c9` / 2026-08-29 |
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1116 MB** (target missed; ceiling met) | KVM VM, 8 GiB / 4 vCPU | `e29edbd` / 2026-08-31 |
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1004 MB** (target met) | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1118 MB** | KVM VM, 8 GiB / 4 vCPU | `e29edbd` / 2026-08-31 |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1005 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **10 MB** | KVM VM, 8 GiB / 4 vCPU | `e29edbd` / 2026-08-31 |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **24 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
-| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
-| Idle CPU, whole guest | 2.4 | informational | **0.10% across 4 vCPU** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle CPU, whole guest | 2.4 | informational | **0.09% across 4 vCPU** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
-| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
-| Idle writes, whole guest | 2.5 | informational | **4,595,712 B** | Apple-HVF ARM64 VM, connected | `62081fb…12c14c9` / 2026-08-29 |
-| Idle writes, whole guest | 2.5 | informational | **4,534,272 B** | KVM x86_64 VM, connected | `fe45b9d` / 2026-08-29 |
-| Live zram | 2.2 / 1.6 | present and active | **7,923 MB, zstd, active** | Apple-HVF ARM64 VM | `62081fb…12c14c9` / 2026-08-29 |
+| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.01%** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
+| Idle CPU, whole guest | 2.4 | informational | **0.12% across 4 vCPU** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle CPU, whole guest | 2.4 | informational | **0.08% across 4 vCPU** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
+| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
+| Idle writes, whole guest | 2.5 | informational | **3,960,832 B** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle writes, whole guest | 2.5 | informational | **4,722,688 B** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
+| Live zram | 2.2 / 1.6 | present and active | **7,923 MB, zstd, active** | Apple-HVF ARM64 VM | `cf522b…d19133` / 2026-08-31 |
 | Boot to userspace complete | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
-| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **20 s single-run host proxy; not yet a baseline** | KVM VM | `fe45b9d` / 2026-08-29 |
-| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **16 s single-run host proxy; not yet a baseline** | Apple-HVF ARM64 VM | `62081fb…12c14c9` / 2026-08-29 |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **20 s single-run host proxy; not yet a baseline** | KVM VM | `e29edbd` / 2026-08-31 |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **16 s single-run host proxy; not yet a baseline** | Apple-HVF ARM64 VM | `cf522b…d19133` / 2026-08-31 |
 
 Waivers granted: none.
 
@@ -439,3 +444,5 @@ A `tests/performance/` harness that:
 | 2026-08-27 | Recorded two native Apple-HVF ARM64 windows: 1205/1210 MB mean, 1213 MB max, 18 MB service PSS, 0.00–0.01% max first-party CPU and exactly 8,192 first-party write bytes in each. Established a 65,536-byte/five-minute combined first-party write ceiling with 8× headroom; whole-guest writes remain context. No waiver. |
 | 2026-08-29 | Recorded repeated four-service ARM64 candidates. The final exact-tree gate (`62081fb…12c14c9`) measured 1210/1213 MB RAM, 24 MB combined PSS, 0.00% max first-party CPU, 73,728 first-party write bytes and active 7,923 MB zram; the complete M2–M10, M12 and 122-assertion desktop-surface suites passed. The write ceiling is 98,304 bytes after a native KVM filesystem produced the same 73,728-byte durability batch. No waiver; the 1,024 MB RAM target remains missed. |
 | 2026-08-29 | Replaced the older x86 baseline with canonical dual-architecture run 33273700091 at `fe45b9d`: x86_64 KVM measured 1311/1319 MB RAM, 9 MB four-service PSS, 0.00% maximum first-party CPU, 73,728 first-party write bytes and a 20 s single-run desktop marker; both architecture lanes emitted `PUNAR_M12_OK`. The 1,024 MB target remains missed and the 1,536 MB hard ceiling remains met; no waiver. |
+| 2026-08-31 | The native Apple-HVF ARM64 candidate with source content committed as `e29edbd` selected Qt's raster adaptation and `LP_NUM_THREADS=2` only for unaccelerated virtual adapters. The exact canonical window (`cf522b…d19133`) improved from 1210/1213 MB to **1004/1005 MB**, meeting the unchanged 1,024 MB target; 24 MB combined service PSS, 0.01% maximum first-party CPU, 73,728 first-party write bytes and active zram also passed. M2–M10/M12, 122 desktop-surface assertions and 15 isolated surface samples all passed. Hardware GPU paths explicitly clear both overrides, so this closes the clean-VM budget item but is not a Raspberry Pi or bare-metal performance claim. No waiver. |
+| 2026-08-31 | Canonical x86 KVM [run 33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989) at `e29edbd` measured **1116/1118 MB**, down from 1311/1319 MB on the preceding exact method. It also passed 10 MB four-service PSS, 0.00% maximum first-party CPU, 73,728 first-party write bytes, active zram and the complete behavioral export. The x86 VM remains above the 1,024 MB target but below the 1,536 MB ceiling; no waiver. |

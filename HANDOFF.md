@@ -33,36 +33,38 @@ are that machinery.
 ## 2. Current state
 
 **Last fully green canonical baseline:** run
-[33050021488](https://github.com/smplify-mdm/punar/actions/runs/33050021488)
-on `ba3dc945`, all seven jobs, including x86_64/ARM64 code contracts, the image,
-minimal boot, the full graphical desktop, and all ten in-VM exercises. Newer
-work on `origin/main` adds native onboarding, recovery, the app catalog, ARM64
-A/B apply and health-gated boot blessing. Treat the newest workflow run on the
-current remote head as authoritative; do not describe a newer head as green
-because this historical baseline passed.
+[33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989)
+on `e29edbd`, all eight jobs, including x86_64/ARM64 code contracts, both image
+lanes, minimal boot, ARM64 automatic rollback, the full graphical desktop,
+all ten in-VM exercises, desktop surfaces and the stabilized-idle budgets.
+The canonical x86 KVM lane measured 1116/1118 MB after the VM renderer change;
+the exact local native ARM64 evidence below is the clean-VM target-closing run.
 
 | Exercise | Assertions | What it proves |
 |---|---:|---|
-| M2 multitasking | 33 | tiling, layouts, scratchpads, named workspaces |
-| M3 daemon + CLI | 28 | typed IPC, capability registry, audit |
+| M2 multitasking | 41 | tiling, layouts, scratchpads, named workspaces; VM renderer policy |
+| M3 daemon + CLI | 33 | typed IPC, capability registry, audit |
 | M4 desired state | 29 | policy merge, explain, drift remediation |
 | M5 enrollment | 63 | mock control plane, enroll → managed → unenroll |
 | M6 dev environments | 56 | rootless podman, offline `podman load` |
 | M7 agent registry | 78 | cgroup-attested agent identity, classification |
-| M8 access ledger | 136 | what an agent touched, schema-exact |
+| M8 access ledger | 142 | what an agent touched, schema-exact |
 | M9 approvals + secrets | 138 | approval gates, short-lived credentials |
-| M10 shadow-AI | 135 | periodic detection, anti-nag alerts, remote query |
-| Desktop surfaces (live) | 64 | all 13 shell surfaces open/close/paint |
+| M10 shadow-AI | 134 | periodic detection, anti-nag alerts, remote query |
+| M12 network privacy | 66 | cgroup network policy, connection view, relay abstraction |
+| Desktop surfaces (live) | 122 | all shell surfaces and app lifecycle paths open/close/paint |
 
-**Latest measurement:** idle RAM **1333 MB mean / 1337 MB max** (target 1024 —
-never once met, not even at M1's 1162 MB), boot **20 s**, three daemons **7 MB**
-PSS. Earlier comparable runs measured 1265–1302 MB.
+**Latest measurement:** native Apple-HVF ARM64 idle RAM **1004 MB mean / 1005
+MB max** (target 1024, now met in the clean VM), boot **16 s**, four daemons
+**24 MB** combined PSS. The comparable prior ARM64 run measured 1210/1213 MB.
+This is VM evidence; Raspberry Pi and bare-metal performance still require
+physical-device runs.
 
-**Latest per-process attribution:** shell 354 MiB · Hyprland 165 MiB ·
-Xwayland 43 MiB · hyprpolkitagent 15 MiB · foot server 10 MiB. The shell
-remains the largest actionable process cost; the first lazy pass saved only
-12 MB whole-system, so a second measured pass is in progress rather than
-claiming the target is solved.
+**Latest per-process attribution (ARM64 VM):** Hyprland 172 MiB · shell 166
+MiB · Xwayland 74 MiB · portals 65 MiB combined · hyprpolkitagent 30 MiB.
+Qt's raster adaptation plus a two-worker llvmpipe cap applies only to
+unaccelerated virtual adapters; real GPU paths explicitly clear both. The
+complete runtime suite passed after the reduction.
 
 **Measured isolated surface cost (KVM).** Run 33044217553 verified the probe
 identity as the real `qs` executable on every sample. Medians are resident
@@ -308,14 +310,17 @@ installed revision column is named `active`, not `commit`; the follow-up fixes
 all three gates and keeps the long application detail action visible, but must
 not be called pushed or canonically green until its own commit and run exist.
 
-### 7.2 Measured lazy-loading — first pass proven, second pass next
+### 7.2 Measured memory reduction — clean-VM target met
 The corrected probe in run 33044217553 identified the real `qs` executable and
 measured all five candidate panels. Construction medians are 31–59 ms and
 isolated retained deltas are 106982–123032 KiB. Run 33050021488 proved command
 center, System Control, shortcuts, AI panel and overview lazy-load in the real
-image. The canonical idle result improved from 1345 to 1333 MB — real, but far
-short of the target. The next pass lazy-loads only the NotificationCenter
-visual tree; the notification daemon, toasts, and event listeners stay eager.
+image; the notification visual followed while its daemon/listeners stayed
+eager. The later native ARM64 pass then scoped Qt's raster adaptation and a
+two-worker llvmpipe pool strictly to unaccelerated virtual adapters. The exact
+candidate `cf522b…d19133` measured 1004/1005 MB and passed the complete runtime
+suite. Real GPUs keep the normal renderer, so physical hardware measurement is
+still required even though the clean-VM target is met.
 
 **Do not lazy-load these:** the bar and wallpaper are always visible; approval
 and alerts must appear *unbidden*; toasts/OSD must receive events while closed;
