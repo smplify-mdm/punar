@@ -858,9 +858,9 @@ fi
 # query + Enter route used above so a broken Terminal=true adapter or desktop
 # entry cannot pass the image build unnoticed.
 geany_row="$(ipc commandcenter query geany | tr -d '\r\n\"')"
-check_eq "command center finds the graphical text editor" "app · Launch(geany)" "${geany_row}"
+check_eq "command center finds the graphical text editor" "app · Application(geany) · installed · open" "${geany_row}"
 geany_result="$(ipc commandcenter run | tr -d '\r\n\"')"
-check_eq "command center launches the graphical text editor" "app · Launch(geany)" "${geany_result}"
+check_eq "command center launches the graphical text editor" "app · Application(geany) · installed · open" "${geany_result}"
 geany_client() {
     hyprctl -j clients 2>/dev/null \
         | jq -e 'any(.[]; .class | ascii_downcase | test("geany"))'
@@ -880,9 +880,9 @@ foot_count() {
 }
 foot_before="$(foot_count)"
 nvim_row="$(ipc commandcenter query nvim | tr -d '\r\n\"')"
-check_eq "command center finds Neovim as a terminal editor" "app · Launch(nvim)" "${nvim_row}"
+check_eq "command center finds Neovim as a terminal editor" "app · Application(nvim) · installed · open" "${nvim_row}"
 nvim_result="$(ipc commandcenter run | tr -d '\r\n\"')"
-check_eq "command center routes Neovim through a terminal" "app · Launch(nvim)" "${nvim_result}"
+check_eq "command center routes Neovim through a terminal" "app · Application(nvim) · installed · open" "${nvim_result}"
 nvim_client() {
     [ "$(foot_count)" -gt "${foot_before}" ]
 }
@@ -896,9 +896,9 @@ else
 fi
 
 files_row="$(ipc commandcenter query thunar | tr -d '\r\n\"')"
-check_eq "command center finds the file manager" "app · Launch(thunar)" "${files_row}"
+check_eq "command center finds the file manager" "app · Application(thunar) · installed · open" "${files_row}"
 files_result="$(ipc commandcenter run | tr -d '\r\n\"')"
-check_eq "command center launches the file manager" "app · Launch(thunar)" "${files_result}"
+check_eq "command center launches the file manager" "app · Application(thunar) · installed · open" "${files_result}"
 files_client() {
     hyprctl -j clients 2>/dev/null \
         | jq -e 'any(.[]; .class | ascii_downcase | test("thunar"))'
