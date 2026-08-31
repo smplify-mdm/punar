@@ -61,7 +61,7 @@ assert_line "${READY}" 'TTYPath=/dev/ttyS0'
 # must not designate a serial console. That would widen the pre-install attack
 # surface on physical hardware and violates the same A8 rule as the product.
 assert_line "${INSTALLER_CONF}" \
-    'KernelCommandLine=console=tty0 systemd.getty_auto=no punar.live=1'
+    'KernelCommandLine=console=tty0 rd.systemd.gpt_auto=0 systemd.getty_auto=no punar.live=1'
 if grep -Eq 'KernelCommandLine=.*console=(ttyS|ttyAMA)' "${INSTALLER_CONF}"; then
     fail 'installer kernel command line enables a serial console'
 fi

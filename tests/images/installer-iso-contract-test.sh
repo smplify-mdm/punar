@@ -145,6 +145,8 @@ objcopy --dump-section ".cmdline=${WORK}/installer.cmdline" "${WORK}/${INSTALLER
 tr -d '\000' < "${WORK}/installer.cmdline" > "${WORK}/installer.cmdline.txt"
 grep -Fwq 'punar.live=1' "${WORK}/installer.cmdline.txt" \
     || fail 'installer UKI lacks exact punar.live=1 token'
+grep -Fwq 'rd.systemd.gpt_auto=0' "${WORK}/installer.cmdline.txt" \
+    || fail 'installer UKI does not disable initrd GPT root discovery'
 if grep -Fq 'root=PARTUUID=' "${WORK}/installer.cmdline.txt"; then
     fail 'installer UKI embeds an installed-slot PARTUUID'
 fi

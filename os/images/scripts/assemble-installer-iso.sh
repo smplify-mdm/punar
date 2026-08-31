@@ -143,6 +143,8 @@ objcopy --update-section ".initrd=${WORK}/installer.initrd" "${WORK}/${INSTALLER
 objcopy --dump-section ".cmdline=${WORK}/installer.cmdline" "${WORK}/${INSTALLER_UKI_NAME}"
 tr -d '\000' < "${WORK}/installer.cmdline" > "${WORK}/installer.cmdline.txt"
 grep -Fwq 'punar.live=1' "${WORK}/installer.cmdline.txt"
+grep -Fwq 'rd.systemd.gpt_auto=0' "${WORK}/installer.cmdline.txt" \
+    || { echo "error: installer UKI does not disable initrd GPT root discovery" >&2; exit 1; }
 if grep -Fq 'root=PARTUUID=' "${WORK}/installer.cmdline.txt"; then
     echo "error: installer UKI embeds an installed-slot PARTUUID" >&2
     exit 1
