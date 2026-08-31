@@ -16,6 +16,7 @@ die() {
 [ -n "${ISO}" ] || die "usage: $0 INSTALLER_ISO [PROOF_DIR]"
 [ -f "${ISO}" ] || die "installer ISO is missing: ${ISO}"
 command -v qemu-system-x86_64 >/dev/null || die 'qemu-system-x86_64 is required'
+command -v python3 >/dev/null || die 'python3 is required for framebuffer proof capture'
 
 OVMF_CODE=''
 OVMF_VARS=''
@@ -52,23 +53,62 @@ TIMEOUT=${PUNAR_INSTALLER_BOOT_TIMEOUT:-${DEFAULT_TIMEOUT}}
 
 mkdir -p "${PROOF_DIR}"
 QEMU_PID=''
+QMP_SOCKET=''
 cleanup() {
     if [ -n "${QEMU_PID}" ] && kill -0 "${QEMU_PID}" 2>/dev/null; then
         kill "${QEMU_PID}" 2>/dev/null || true
         wait "${QEMU_PID}" 2>/dev/null || true
     fi
+    if [ -n "${QMP_SOCKET}" ]; then
+        rm -f -- "${QMP_SOCKET}"
+    fi
 }
 trap cleanup EXIT INT TERM
+
+capture_screen() {
+    local screen=$1
+    [ -n "${QMP_SOCKET}" ] && [ -S "${QMP_SOCKET}" ] || return 0
+    python3 - "${QMP_SOCKET}" "${screen}" <<'PY' || true
+import json
+import socket
+import sys
+
+qmp_socket, screen = sys.argv[1:]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(5)
+    client.connect(qmp_socket)
+    stream = client.makefile("rwb", buffering=0)
+    json.loads(stream.readline())
+
+    def execute(command, arguments=None):
+        request = {"execute": command}
+        if arguments is not None:
+            request["arguments"] = arguments
+        stream.write(json.dumps(request).encode() + b"\n")
+        while True:
+            response = json.loads(stream.readline())
+            if "return" in response:
+                return
+            if "error" in response:
+                raise RuntimeError(response["error"])
+
+    execute("qmp_capabilities")
+    execute("screendump", {"filename": screen})
+PY
+}
 
 boot_form() {
     local form=$1
     local log="${PROOF_DIR}/${form}-serial.log"
+    local screen="${PROOF_DIR}/${form}-screen.ppm"
     local vars_copy="${PROOF_DIR}/${form}-OVMF_VARS.fd"
     local started now
     local -a medium_args
 
     cp "${OVMF_VARS}" "${vars_copy}"
     : > "${log}"
+    QMP_SOCKET="/tmp/punar-installer-qmp-$$-${form}.sock"
+    rm -f -- "${QMP_SOCKET}"
     if [ "${form}" = optical ]; then
         medium_args=(-cdrom "${ISO}")
     else
@@ -88,6 +128,7 @@ boot_form() {
         -display none \
         -serial "file:${log}" \
         -monitor none \
+        -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
         -no-reboot \
         > "${PROOF_DIR}/${form}-qemu.log" 2>&1 &
     QEMU_PID=$!
@@ -96,10 +137,13 @@ boot_form() {
     while :; do
         if grep -aq 'PUNAR_INSTALLER_OK' "${log}"; then
             now=$(date +%s)
+            capture_screen "${screen}"
             echo "installer-boot-test: ${form} PASS ($((now - started))s, ${ACCEL})"
             kill "${QEMU_PID}" 2>/dev/null || true
             wait "${QEMU_PID}" 2>/dev/null || true
             QEMU_PID=''
+            rm -f -- "${QMP_SOCKET}"
+            QMP_SOCKET=''
             return 0
         fi
         if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
@@ -110,9 +154,12 @@ boot_form() {
         fi
         now=$(date +%s)
         if [ "$((now - started))" -ge "${TIMEOUT}" ]; then
+            capture_screen "${screen}"
             kill "${QEMU_PID}" 2>/dev/null || true
             wait "${QEMU_PID}" 2>/dev/null || true
             QEMU_PID=''
+            rm -f -- "${QMP_SOCKET}"
+            QMP_SOCKET=''
             tail -n 120 "${log}" >&2 || true
             die "timed out after ${TIMEOUT}s waiting for ${form} installer boot"
         fi

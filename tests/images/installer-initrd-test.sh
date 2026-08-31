@@ -24,9 +24,10 @@ PREP="${UNIT_ROOT}/run-punar-overlay-prep.service"
 SYSROOT="${UNIT_ROOT}/sysroot.mount"
 READY="${UNIT_ROOT}/punar-installer-ready.service"
 TARGET="${UNIT_ROOT}/initrd-root-fs.target.d/50-punar-live.conf"
+SWITCH_ROOT_PROOF="${UNIT_ROOT}/initrd-switch-root.service.d/50-punar-serial-proof.conf"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
-    "${SYSROOT}" "${READY}" "${TARGET}"; do
+    "${SYSROOT}" "${READY}" "${TARGET}" "${SWITCH_ROOT_PROOF}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 
@@ -56,6 +57,12 @@ assert_line "${TARGET}" 'Wants=punar-installer-ready.service'
 assert_line "${READY}" 'Requires=sysroot.mount'
 assert_line "${READY}" 'ExecStart=/usr/bin/echo PUNAR_INSTALLER_OK'
 assert_line "${READY}" 'TTYPath=/dev/ttyS0'
+
+# A failed handoff must be diagnosable without turning the proof UART into a
+# kernel console or enabling an emergency login.
+assert_line "${SWITCH_ROOT_PROOF}" 'StandardOutput=tty'
+assert_line "${SWITCH_ROOT_PROOF}" 'StandardError=tty'
+assert_line "${SWITCH_ROOT_PROOF}" 'TTYPath=/dev/ttyS0'
 
 # The proof marker may use QEMU's serial device directly, but the live kernel
 # must not designate a serial console. That would widen the pre-install attack
