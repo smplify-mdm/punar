@@ -1,0 +1,4 @@
+# Punar live installer: the writable overlay is the volatile filesystem.
+# Installed-device mounts are deliberately suppressed until install.apply
+# mounts its target beneath the daemon's private runtime directory.
+

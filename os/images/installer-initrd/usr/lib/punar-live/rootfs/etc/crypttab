@@ -1,0 +1,3 @@
+# Punar live installer: no installed data volume exists before install.apply.
+# The vendor crypttab remains unchanged inside the signed slot payload.
+

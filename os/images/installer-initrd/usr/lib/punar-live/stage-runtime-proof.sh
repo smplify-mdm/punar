@@ -19,9 +19,16 @@ copy_text() {
 # those guaranteed primitives and enable the path watcher with a target drop-in
 # rather than a symlink.
 /usr/bin/mkdir -p \
+    /sysroot/etc \
     /sysroot/usr/lib/punar \
     /sysroot/usr/lib/systemd/system \
     /sysroot/usr/lib/systemd/system/multi-user.target.d
+copy_text \
+    /usr/lib/punar-live/rootfs/etc/fstab \
+    /sysroot/etc/fstab
+copy_text \
+    /usr/lib/punar-live/rootfs/etc/crypttab \
+    /sysroot/etc/crypttab
 copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/punar/installer-runtime-proof.sh \
     /sysroot/usr/lib/punar/installer-runtime-proof.sh

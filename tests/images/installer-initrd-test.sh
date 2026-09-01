@@ -28,6 +28,8 @@ TARGET="${UNIT_ROOT}/initrd-root-fs.target.d/50-punar-live.conf"
 SWITCH_ROOT_PROOF="${UNIT_ROOT}/initrd-switch-root.service.d/50-punar-serial-proof.conf"
 STAGE_SCRIPT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/stage-runtime-proof.sh"
 RUNTIME_ROOT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/punar-live/rootfs"
+LIVE_FSTAB="${RUNTIME_ROOT}/etc/fstab"
+LIVE_CRYPTTAB="${RUNTIME_ROOT}/etc/crypttab"
 RUNTIME_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.service"
 RUNTIME_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.path"
 RUNTIME_WANTS="${RUNTIME_ROOT}/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf"
@@ -38,7 +40,8 @@ ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
-    "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${RUNTIME_UNIT}" \
+    "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${LIVE_FSTAB}" \
+    "${LIVE_CRYPTTAB}" "${RUNTIME_UNIT}" \
     "${RUNTIME_PATH}" "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
@@ -92,6 +95,16 @@ grep -Fq 'PUNAR_INSTALL_RUNTIME_STAGE_OK' "${STAGE_SCRIPT}" \
     || fail 'runtime proof staging has no serial completion marker'
 if grep -Eq '/usr/bin/(cp|ln)([[:space:]]|$)' "${STAGE_SCRIPT}"; then
     fail 'runtime proof staging depends on non-guaranteed initrd coreutils'
+fi
+grep -Fq '/sysroot/etc/fstab' "${STAGE_SCRIPT}" \
+    || fail 'live staging does not replace the installed fstab'
+grep -Fq '/sysroot/etc/crypttab' "${STAGE_SCRIPT}" \
+    || fail 'live staging does not replace the installed crypttab'
+if grep -Eq 'PARTUUID=|/dev/|/var|/home|/efi' "${LIVE_FSTAB}"; then
+    fail 'live fstab still names an installed-device mount'
+fi
+if grep -Eq 'PARTUUID=|/dev/|punar-data' "${LIVE_CRYPTTAB}"; then
+    fail 'live crypttab still names an installed data volume'
 fi
 grep -Fq 'install.targets' "${RUNTIME_SCRIPT}" \
     || fail 'runtime proof does not exercise install.targets'
