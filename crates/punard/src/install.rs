@@ -1394,6 +1394,7 @@ impl Installer {
             Some(open_luks_mapping(
                 &self.sources.cryptsetup_path,
                 &self.sources.dev_root,
+                &self.sources.sys_class_block,
                 &partition,
                 token,
                 passphrase,
@@ -3183,6 +3184,7 @@ fn read_luks_uuid(binary: &Path, target: &Path) -> Result<String, InstallError> 
 fn open_luks_mapping(
     binary: &Path,
     dev_root: &Path,
+    sys_class_block: &Path,
     target: &Path,
     plan_token: &str,
     passphrase: &[u8],
@@ -3195,17 +3197,85 @@ fn open_luks_mapping(
     }
     let name = format!("punar-install-data-{}", &plan_token[..16]);
     run_cryptsetup_open(binary, target, &name, passphrase)?;
-    let path = dev_root.join("mapper").join(&name);
-    if let Err(error) = validate_repart_target(&path, false) {
-        let _ = close_luks_mapping(binary, &name);
-        return Err(error);
-    }
+    let path = match resolve_luks_mapping_path(dev_root, sys_class_block, &name, false) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = close_luks_mapping(binary, &name);
+            return Err(error);
+        }
+    };
     Ok(OpenedLuksMapping {
         cryptsetup_path: binary.to_path_buf(),
         name,
         path,
         open: true,
     })
+}
+
+/// Resolve cryptsetup's conventional `/dev/mapper/NAME -> ../dm-N` link
+/// without ever opening through it. The kernel-owned sysfs name must bind the
+/// direct dm node back to the exact mapping name before that node may be used
+/// as a mount source. Arbitrary, absolute and multi-component links remain
+/// refused at this privilege boundary.
+#[cfg(target_os = "linux")]
+fn resolve_luks_mapping_path(
+    dev_root: &Path,
+    sys_class_block: &Path,
+    name: &str,
+    allow_regular_for_tests: bool,
+) -> Result<PathBuf, InstallError> {
+    use std::path::Component;
+
+    let mapper_root = dev_root.join("mapper");
+    if !fs::symlink_metadata(&mapper_root)?.file_type().is_dir() {
+        return Err(InstallError::Refused(
+            "the device-mapper directory is not a real directory".into(),
+        ));
+    }
+    let mapper_link = mapper_root.join(name);
+    if !fs::symlink_metadata(&mapper_link)?.file_type().is_symlink() {
+        return Err(InstallError::Refused(format!(
+            "the fixed LUKS mapping {} is not a device-mapper link",
+            mapper_link.display()
+        )));
+    }
+    let destination = fs::read_link(&mapper_link)?;
+    let mut components = destination.components();
+    let direct_name = match (components.next(), components.next(), components.next()) {
+        (Some(Component::ParentDir), Some(Component::Normal(name)), None) => name,
+        _ => {
+            return Err(InstallError::Refused(format!(
+                "the fixed LUKS mapping {} does not name one direct dm node",
+                mapper_link.display()
+            )));
+        }
+    };
+    let direct_name = direct_name
+        .to_str()
+        .ok_or_else(|| InstallError::Refused("the device-mapper node name is not UTF-8".into()))?;
+    if direct_name
+        .strip_prefix("dm-")
+        .is_none_or(|minor| minor.is_empty() || !minor.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(InstallError::Refused(
+            "the device-mapper link does not target a numbered dm node".into(),
+        ));
+    }
+
+    let direct_path = dev_root.join(direct_name);
+    validate_repart_target(&direct_path, allow_regular_for_tests)?;
+    let kernel_name =
+        read_trimmed(sys_class_block.join(direct_name).join("dm/name")).ok_or_else(|| {
+            InstallError::Refused(format!(
+                "the kernel did not identify device-mapper node {direct_name}"
+            ))
+        })?;
+    if kernel_name != name {
+        return Err(InstallError::Refused(format!(
+            "device-mapper node {direct_name} belongs to a different mapping"
+        )));
+    }
+    Ok(direct_path)
 }
 
 #[cfg(target_os = "linux")]
@@ -5275,6 +5345,70 @@ mod tests {
         let error = validate_repart_target(&link, true).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
         assert!(error.to_string().contains("vda4-target"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn luks_mapping_resolves_only_an_exact_kernel_named_dm_node() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let mapping_name = "punar-install-data-0123456789abcdef";
+        fs::create_dir_all(fixture.sources.dev_root.join("mapper")).unwrap();
+        File::create(fixture.sources.dev_root.join("dm-0")).unwrap();
+        symlink(
+            "../dm-0",
+            fixture.sources.dev_root.join("mapper").join(mapping_name),
+        )
+        .unwrap();
+        let sysfs_mapping = fixture.sources.sys_class_block.join("dm-0/dm");
+        fs::create_dir_all(&sysfs_mapping).unwrap();
+        fs::write(sysfs_mapping.join("name"), format!("{mapping_name}\n")).unwrap();
+
+        assert_eq!(
+            resolve_luks_mapping_path(
+                &fixture.sources.dev_root,
+                &fixture.sources.sys_class_block,
+                mapping_name,
+                true,
+            )
+            .unwrap(),
+            fixture.sources.dev_root.join("dm-0")
+        );
+
+        fs::write(sysfs_mapping.join("name"), "some-other-mapping\n").unwrap();
+        let error = resolve_luks_mapping_path(
+            &fixture.sources.dev_root,
+            &fixture.sources.sys_class_block,
+            mapping_name,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("different mapping"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn luks_mapping_refuses_a_link_outside_the_direct_dm_shape() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let mapping_name = "punar-install-data-0123456789abcdef";
+        fs::create_dir_all(fixture.sources.dev_root.join("mapper")).unwrap();
+        symlink(
+            "../../etc/passwd",
+            fixture.sources.dev_root.join("mapper").join(mapping_name),
+        )
+        .unwrap();
+
+        let error = resolve_luks_mapping_path(
+            &fixture.sources.dev_root,
+            &fixture.sources.sys_class_block,
+            mapping_name,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("one direct dm node"));
     }
 
     #[cfg(target_os = "linux")]
