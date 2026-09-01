@@ -1646,10 +1646,22 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
     }
 
     let client = Client::for_target(Target::Punard, socket);
+    let mut target_result = None;
+    for attempt in 0..120 {
+        match client.call("install.targets", None) {
+            Ok(result) => {
+                target_result = Some(result);
+                break;
+            }
+            Err(CallError::Unreachable { .. }) if attempt != 119 => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => return Err(error.message()),
+        }
+    }
     let targets: InstallTargetsResult = serde_json::from_value(
-        client
-            .call("install.targets", None)
-            .map_err(|error| error.message())?,
+        target_result
+            .ok_or_else(|| "punard did not become reachable within 30 seconds".to_string())?,
     )
     .map_err(|error| format!("install.targets returned an invalid result ({error})"))?;
     let [target] = targets.targets.as_slice() else {
@@ -2039,7 +2051,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
-                    eprintln!("PUNAR_INSTALL_APPLY_FAIL {error}");
+                    // This hidden command's stdout is the VM proof protocol;
+                    // send both terminal states to the dedicated virtio port.
+                    println!("PUNAR_INSTALL_APPLY_FAIL {error}");
                     ExitCode::FAILURE
                 }
             },
