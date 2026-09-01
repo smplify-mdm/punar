@@ -35,15 +35,15 @@ use punar_common::install::{
 };
 use punar_common::ipc::{
     ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
-    ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams, AuditStatus,
-    AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams, CapabilityCompliance,
-    Classification as WireClassification, ComplianceBlock, ComplianceState, EnrollStartParams,
-    EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode, FirstSync, IpcError,
-    LastQuery, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
-    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
-    PolicySourceRef, PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult,
-    PrivilegeStatusResult, ReconcileEntry, ReconcileResult, RemediationOutcome, Request,
-    ResolveDecision, Response, SERVER_READ_TIMEOUT, StatusResult,
+    ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
+    AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
+    CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
+    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
+    FirstSync, IpcError, LastQuery, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
+    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
+    PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams, PrivilegeRevokeParams,
+    PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry, ReconcileResult,
+    RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT, StatusResult,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -1229,6 +1229,7 @@ impl Inner {
             Method::AppsList => self.handle_apps_list(),
             Method::AppsInstall(params) => self.handle_apps_install(peer, params),
             Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
+            Method::AppsUpdate(params) => self.handle_apps_update(peer, params),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::InstallTargets => self
@@ -1753,7 +1754,7 @@ impl Inner {
             ));
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
-                "An AI agent may not install or remove desktop applications. Policy: personal defaults — application mutations require the person at the device. Next step: open Command Center and choose the application yourself.".to_string(),
+                "An AI agent may not install, update, or remove desktop applications. Policy: personal defaults — application mutations require the person at the device. Next step: open Command Center and choose the application yourself.".to_string(),
                 json!({ "application": id, "decision": "deny", "policy_ids": ["personal-defaults"] }),
             ));
         }
@@ -1923,6 +1924,137 @@ impl Inner {
                 Err(app_ipc_error(error))
             }
         }
+    }
+
+    fn handle_apps_update(
+        &self,
+        peer: &Peer,
+        params: &AppsUpdateParams,
+    ) -> Result<Value, IpcError> {
+        if params.all == params.id.is_some() {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                "Choose one application id or --all, not both. Nothing was updated. Next step: run `punarctl app update <id>` or `punarctl app update --all`.".to_string(),
+                json!({ "params": ["id", "all"] }),
+            ));
+        }
+
+        let action = "system.update_package";
+        // Agent attribution is a method-level denial, including the no-op
+        // case where no catalog app happens to be installed. An empty device
+        // must not turn a forbidden mutation into a probing oracle.
+        let requester = self.actor_of(peer);
+        if requester.source == PrincipalKind::AiAgent {
+            let resource = params.id.as_deref().unwrap_or("installed_applications");
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &requester,
+                action,
+                resource,
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "An AI agent may not update desktop applications. Policy: personal defaults — application mutations require the person at the device. Next step: open Command Center and select Update all yourself.".to_string(),
+                json!({ "application": resource, "decision": "deny", "policy_ids": ["personal-defaults"] }),
+            ));
+        }
+        // Hold the same transaction lock used by install/remove while
+        // discovering installed state. Otherwise a concurrent removal could
+        // make an app disappear between selection and update.
+        let _guard = self.app_mutation.lock().unwrap();
+        let candidates = self
+            .apps
+            .update_candidates(params.id.as_deref())
+            .map_err(app_ipc_error)?;
+        if !params.all && candidates.is_empty() {
+            let id = params.id.as_deref().unwrap_or("application");
+            return Err(IpcError::with_details(
+                ErrorCode::Conflict,
+                format!(
+                    "Application {id:?} is not installed as a native Punar catalog app. Nothing was updated. Next step: install it from the App Store first."
+                ),
+                json!({ "application": id, "installed": false }),
+            ));
+        }
+        let mut results = Vec::new();
+        let mut failures = Vec::new();
+        let mut updated = 0_u64;
+        let mut current = 0_u64;
+
+        for id in &candidates {
+            let actor = match self.app_mutation_authorized(peer, action, id) {
+                Ok(actor) => actor,
+                Err(error) if params.all => {
+                    failures.push(json!({
+                        "id": id,
+                        "status": "denied",
+                        "error": error.message,
+                    }));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match self.apps.update(id) {
+                Ok(result) => {
+                    let changed = result["changed"] == true;
+                    if changed {
+                        updated += 1;
+                    } else {
+                        current += 1;
+                    }
+                    self.log_audit(AuditEvent::action(
+                        &self.device_id,
+                        &actor,
+                        action,
+                        id,
+                        Decision::Allow,
+                        if changed {
+                            AuditOutcome::Success
+                        } else {
+                            AuditOutcome::Noop
+                        },
+                    ));
+                    results.push(result);
+                }
+                Err(error) => {
+                    let (decision, outcome) = match &error {
+                        AppError::Verification(_) => (Decision::Allow, AuditOutcome::VerifyFailed),
+                        AppError::Policy(_) => (Decision::Deny, AuditOutcome::Denied),
+                        _ => (Decision::Allow, AuditOutcome::Failure),
+                    };
+                    self.log_audit(AuditEvent::action(
+                        &self.device_id,
+                        &actor,
+                        action,
+                        id,
+                        decision,
+                        outcome,
+                    ));
+                    if !params.all {
+                        return Err(app_ipc_error(error));
+                    }
+                    failures.push(json!({
+                        "id": id,
+                        "status": "failed",
+                        "error": error.to_string(),
+                    }));
+                }
+            }
+        }
+
+        Ok(json!({
+            "scope": if params.all { "all" } else { "one" },
+            "requested_id": params.id,
+            "eligible": candidates.len(),
+            "updated": updated,
+            "current": current,
+            "failed": failures.len(),
+            "changed": updated > 0,
+            "apps": results,
+            "failures": failures,
+        }))
     }
 
     fn handle_status(&self) -> StatusResult {

@@ -2,14 +2,16 @@
 //!
 //! `update.check` accepts only a `force` bit. Origins, paths, keys, target
 //! identity and rollout identity all come from root-owned daemon state. The
-//! current slice deliberately uses a fixed directory transport so offline CI
-//! and removable repository media exercise the real signature/admission/cache
-//! path without pretending HTTPS transport is complete.
+//! network source is a root-owned HTTPS base URL. If it is absent, a fixed
+//! directory transport remains available for offline recovery media and CI.
+//! Neither transport lets the caller choose an origin, path or trust key.
 
 use std::fs;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseTarget, ReleaseVersion, UpdateChannel,
@@ -18,18 +20,26 @@ use punar_common::update::{
 use thiserror::Error;
 
 use crate::update_status::{read_bounded, read_os_release};
-use crate::util::write_atomic_synced;
+use crate::util::{run_with_timeout, write_atomic_synced};
 
 const CHANNEL_DOCUMENT_MAX: u64 = 64 * 1024;
 const SIGNATURE_MAX: u64 = 64;
+const REPOSITORY_URL_MAX: u64 = 2048;
 const DEFAULT_CACHE_MAX_AGE: u64 = 15 * 60;
+const HTTPS_FETCH_TIMEOUT: Duration = Duration::from_secs(35);
+static FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct UpdateCheckSources {
-    /// Fixed local transport root. Production network transport is not yet
-    /// claimed; a mounted repository exposes `channel.json` and its signature
-    /// here without making a caller-supplied path part of the IPC contract.
+    /// Optional root-owned HTTPS base URL. When present, it is authoritative:
+    /// an invalid or unreachable network source never downgrades to local media.
+    pub repository_url_file: PathBuf,
+    /// Expected owner of `repository_url_file` (root in production; injectable
+    /// only so unprivileged contract tests can exercise the same checks).
+    pub repository_url_owner_uid: u32,
+    /// Fixed local transport root used only when `repository_url_file` is absent.
     pub repository_dir: PathBuf,
+    pub curl_bin: PathBuf,
     pub trusted_keys_dir: PathBuf,
     pub cached_channel: PathBuf,
     pub cached_signature: PathBuf,
@@ -44,7 +54,10 @@ pub struct UpdateCheckSources {
 impl Default for UpdateCheckSources {
     fn default() -> Self {
         Self {
+            repository_url_file: PathBuf::from("/etc/punar/update-repository.url"),
+            repository_url_owner_uid: 0,
             repository_dir: PathBuf::from("/run/punar/update-source"),
+            curl_bin: PathBuf::from("/usr/bin/curl"),
             trusted_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
             cached_channel: PathBuf::from("/var/lib/punar/update/verified-channel.json"),
             cached_signature: PathBuf::from("/var/lib/punar/update/verified-channel.json.sig"),
@@ -117,14 +130,7 @@ impl UpdateCheckEngine {
             let age = file_age_seconds(&self.sources.cached_channel).unwrap_or(0);
             (document, signature, age)
         } else {
-            let document = read_source(
-                &self.sources.repository_dir.join("channel.json"),
-                CHANNEL_DOCUMENT_MAX,
-            )?;
-            let signature = read_source(
-                &self.sources.repository_dir.join("channel.json.sig"),
-                SIGNATURE_MAX,
-            )?;
+            let (document, signature) = self.fetch_fresh(&target)?;
             (document, signature, 0)
         };
 
@@ -224,6 +230,119 @@ impl UpdateCheckEngine {
             && file_age_seconds(&self.sources.cached_channel)
                 .is_some_and(|age| age <= self.sources.cache_max_age_seconds)
     }
+
+    fn fetch_fresh(&self, target: &ReleaseTarget) -> Result<(Vec<u8>, Vec<u8>), UpdateCheckError> {
+        match fs::symlink_metadata(&self.sources.repository_url_file) {
+            Ok(_) => {
+                // Any directory entry is authoritative, including an invalid
+                // symlink. `read_repository_base_url` opens with O_NOFOLLOW;
+                // treating a broken link as "absent" would silently downgrade
+                // a configured device to removable-media transport.
+                let base = read_repository_base_url(
+                    &self.sources.repository_url_file,
+                    self.sources.repository_url_owner_uid,
+                )?;
+                let prefix = format!(
+                    "{base}/{}/{}/{}",
+                    target.channel, target.architecture, target.boot_platform
+                );
+                let document = self.fetch_https(
+                    &format!("{prefix}/channel.json"),
+                    CHANNEL_DOCUMENT_MAX,
+                    "channel metadata",
+                )?;
+                let signature = self.fetch_https(
+                    &format!("{prefix}/channel.json.sig"),
+                    SIGNATURE_MAX,
+                    "channel signature",
+                )?;
+                Ok((document, signature))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let document = read_source(
+                    &self.sources.repository_dir.join("channel.json"),
+                    CHANNEL_DOCUMENT_MAX,
+                )?;
+                let signature = read_source(
+                    &self.sources.repository_dir.join("channel.json.sig"),
+                    SIGNATURE_MAX,
+                )?;
+                Ok((document, signature))
+            }
+            Err(error) => Err(source_configuration(
+                &self.sources.repository_url_file,
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn fetch_https(
+        &self,
+        url: &str,
+        max_bytes: u64,
+        description: &str,
+    ) -> Result<Vec<u8>, UpdateCheckError> {
+        ensure_private_parent(&self.sources.cached_channel)
+            .map_err(|error| UpdateCheckError::SourceUnavailable(error.to_string()))?;
+        let parent = self.sources.cached_channel.parent().ok_or_else(|| {
+            UpdateCheckError::SourceUnavailable("update cache path has no parent".to_string())
+        })?;
+        let temporary = parent.join(format!(
+            ".fetch-{}-{}",
+            std::process::id(),
+            FETCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| {
+                UpdateCheckError::SourceUnavailable(format!(
+                    "could not create a private HTTPS staging file: {error}"
+                ))
+            })?;
+
+        let maximum = max_bytes.to_string();
+        let output = temporary.to_string_lossy().into_owned();
+        let result = run_with_timeout(
+            &self.sources.curl_bin,
+            &[
+                "--disable",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--max-redirs",
+                "0",
+                "--tlsv1.2",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "30",
+                "--max-filesize",
+                &maximum,
+                "--output",
+                &output,
+                url,
+            ],
+            HTTPS_FETCH_TIMEOUT,
+        );
+        let bytes = match result {
+            Ok(result) if result.success => read_source(&temporary, max_bytes),
+            Ok(_) => Err(UpdateCheckError::SourceUnavailable(format!(
+                "HTTPS {description} download failed"
+            ))),
+            Err(error) => Err(UpdateCheckError::SourceUnavailable(format!(
+                "HTTPS {description} download could not run: {error}"
+            ))),
+        };
+        let _ = fs::remove_file(&temporary);
+        bytes
+    }
 }
 
 fn check_result(
@@ -287,6 +406,104 @@ fn host_architecture() -> Result<Architecture, UpdateCheckError> {
 
 fn read_source(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateCheckError> {
     read_bounded(path, max_bytes).map_err(UpdateCheckError::SourceUnavailable)
+}
+
+fn read_repository_base_url(path: &Path, expected_uid: u32) -> Result<String, UpdateCheckError> {
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
+        .open(path)
+        .map_err(|error| source_configuration(path, error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| source_configuration(path, error.to_string()))?;
+    if !metadata.file_type().is_file() {
+        return Err(source_configuration(path, "it is not a regular file"));
+    }
+    if metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
+        return Err(source_configuration(
+            path,
+            format!("it must be owned by uid {expected_uid} and not be group/other writable"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(REPOSITORY_URL_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| source_configuration(path, error.to_string()))?;
+    if bytes.len() as u64 > REPOSITORY_URL_MAX {
+        return Err(source_configuration(path, "it exceeds 2048 bytes"));
+    }
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| source_configuration(path, "it is not UTF-8"))?;
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    validate_repository_base_url(line).map_err(|reason| source_configuration(path, reason))
+}
+
+fn source_configuration(path: &Path, reason: impl Into<String>) -> UpdateCheckError {
+    UpdateCheckError::SourceUnavailable(format!(
+        "HTTPS repository configuration {} is invalid: {}",
+        path.display(),
+        reason.into()
+    ))
+}
+
+fn validate_repository_base_url(value: &str) -> Result<String, &'static str> {
+    if value.is_empty()
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err("the URL must be one non-empty line without whitespace");
+    }
+    let normalized = value.strip_suffix('/').unwrap_or(value);
+    let rest = normalized
+        .strip_prefix("https://")
+        .ok_or("only an https:// URL is accepted")?;
+    if rest.contains(['?', '#', '@', '%', '\\']) {
+        return Err("userinfo, query, fragment, escapes and backslashes are not accepted");
+    }
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.is_empty() || authority.contains(['[', ']']) {
+        return Err("a DNS hostname or IPv4 address is required");
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !port.contains(':') => (host, Some(port)),
+        Some(_) => return Err("IPv6 literals are not accepted"),
+        None => (authority, None),
+    };
+    if host.len() > 253
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        })
+    {
+        return Err("the hostname is invalid");
+    }
+    if let Some(port) = port {
+        if port.is_empty() || port.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+            return Err("the HTTPS port is invalid");
+        }
+    }
+    if !path.is_empty()
+        && path.split('/').any(|segment| {
+            segment.is_empty()
+                || matches!(segment, "." | "..")
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+        })
+    {
+        return Err("the base path contains an unsafe segment");
+    }
+    Ok(normalized.to_string())
 }
 
 fn read_cache(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateTrustError> {
@@ -369,7 +586,10 @@ mod tests {
 
     fn sources(root: &Path) -> UpdateCheckSources {
         UpdateCheckSources {
+            repository_url_file: root.join("update-repository.url"),
+            repository_url_owner_uid: rustix::process::geteuid().as_raw(),
             repository_dir: root.join("repository"),
+            curl_bin: root.join("curl"),
             trusted_keys_dir: root.join("keys"),
             cached_channel: root.join("state/verified-channel.json"),
             cached_signature: root.join("state/verified-channel.json.sig"),
@@ -453,5 +673,186 @@ mod tests {
         assert!(error.is_untrusted());
         assert_eq!(error.stage(), "channel_target");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn https_source_uses_fixed_privacy_preserving_paths_and_caches_verified_bytes() {
+        let root = root("https");
+        let (engine, _) = fixture(&root);
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test/punar/\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let log = root.join("curl-argv");
+        let curl = &engine.sources.curl_bin;
+        fs::write(
+            curl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nout=\nurl=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; else url=$1; fi\n  shift\ndone\ncase \"$url\" in\n  *.sig) cp '{}' \"$out\" ;;\n  *.json) cp '{}' \"$out\" ;;\n  *) exit 2 ;;\nesac\n",
+                log.display(),
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json.sig")
+                    .display(),
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json")
+                    .display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(curl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap();
+        assert!(!result.cached);
+        assert!(engine.sources.cached_channel.is_file());
+        assert!(engine.sources.cached_signature.is_file());
+        let argv = fs::read_to_string(log).unwrap();
+        assert!(argv.contains("--disable"));
+        assert!(argv.contains("--proto\n=https"));
+        assert!(argv.contains("--max-redirs\n0"));
+        assert!(argv.contains("--tlsv1.2"));
+        assert!(
+            argv.contains("https://updates.example.test/punar/stable/aarch64/uefi/channel.json\n")
+        );
+        assert!(
+            argv.contains(
+                "https://updates.example.test/punar/stable/aarch64/uefi/channel.json.sig\n"
+            )
+        );
+        assert!(!argv.contains("dev_00123"));
+        assert!(!argv.contains("2026.08.20.1"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_https_source_never_downgrades_to_local_media() {
+        let root = root("https-no-downgrade");
+        let (engine, _) = fixture(&root);
+        fs::write(
+            &engine.sources.repository_url_file,
+            "http://updates.example.test/punar\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let error = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap_err();
+        assert!(error.is_unreachable());
+        assert!(error.to_string().contains("only an https:// URL"));
+        assert!(!engine.sources.cached_channel.exists());
+        assert!(!engine.sources.cached_signature.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_repository_symlink_never_downgrades_to_local_media() {
+        let root = root("https-symlink-no-downgrade");
+        let (engine, _) = fixture(&root);
+        std::os::unix::fs::symlink(
+            root.join("missing-repository-url"),
+            &engine.sources.repository_url_file,
+        )
+        .unwrap();
+
+        let error = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap_err();
+        assert!(error.is_unreachable());
+        assert!(error.to_string().contains("configuration"));
+        assert!(!engine.sources.cached_channel.exists());
+        assert!(!engine.sources.cached_signature.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_https_response_is_refused_before_signature_or_cache() {
+        let root = root("https-oversized");
+        let (engine, _) = fixture(&root);
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let oversized = root.join("oversized");
+        fs::write(&oversized, vec![b'x'; CHANNEL_DOCUMENT_MAX as usize + 1]).unwrap();
+        fs::write(
+            &engine.sources.curl_bin,
+            format!(
+                "#!/bin/sh\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; fi\n  shift\ndone\ncp '{}' \"$out\"\n",
+                oversized.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&engine.sources.curl_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap_err();
+        assert!(error.is_unreachable());
+        assert!(!engine.sources.cached_channel.exists());
+        assert!(!engine.sources.cached_signature.exists());
+        assert!(
+            !engine
+                .sources
+                .cached_channel
+                .parent()
+                .unwrap()
+                .read_dir()
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".fetch-"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repository_url_validation_rejects_ambiguous_and_unsafe_forms() {
+        assert_eq!(
+            validate_repository_base_url("https://updates.example.test/releases-v1/").unwrap(),
+            "https://updates.example.test/releases-v1"
+        );
+        assert!(validate_repository_base_url("https://updates.example.test:8443").is_ok());
+        for invalid in [
+            "http://updates.example.test",
+            "https://user@updates.example.test",
+            "https://updates.example.test?channel=edge",
+            "https://updates.example.test/#fragment",
+            "https://updates.example.test/%2e%2e",
+            "https://updates.example.test/../private",
+            "https://updates.example.test//nested",
+            "https://[::1]",
+            "https://updates.example.test:0",
+            "https:// updates.example.test",
+            "https://updates.example.test\nhttps://other.example.test",
+        ] {
+            assert!(
+                validate_repository_base_url(invalid).is_err(),
+                "unsafe URL was accepted: {invalid:?}"
+            );
+        }
     }
 }

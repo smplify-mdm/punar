@@ -21,14 +21,21 @@ Item {
     property string query: ""
     property int currentIndex: 0
     property string selectedCategory: "all"
+    property string updatePhase: "idle"
+    property int updatesAvailable: 0
+    property string updateMessage: ""
     signal launchRequested(var entry)
     signal catalogRequested(string id)
+    signal updateAllRequested()
 
     readonly property var installedEntries: root.query.trim() !== "" || root.selectedCategory === "all"
         ? Apps.search(root.query, 0) : []
     readonly property var availableEntries: root.availableCatalog(root.query)
     readonly property var categoryEntries: Catalog.categories()
     readonly property var items: root.buildItems()
+    readonly property bool updateBusy: root.updatePhase === "checking" || root.updatePhase === "updating"
+    readonly property bool updateActionable: !root.updateBusy
+        && (root.updatesAvailable > 0 || root.updatePhase === "failed")
     readonly property int tileWidth: {
         var usable = Math.max(0, root.width - 32);
         if (usable >= 720)
@@ -248,10 +255,11 @@ Item {
 
             Row {
                 width: parent.width
-                height: 40
+                height: 58
+                spacing: 12
 
                 Column {
-                    width: parent.width - countMeta.width
+                    width: parent.width - updateButton.width - parent.spacing
                     spacing: 2
 
                     Text {
@@ -275,14 +283,117 @@ Item {
                         color: Theme.shellInk2
                         elide: Text.ElideRight
                     }
-                }
 
-                Meta {
-                    id: countMeta
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.width < 540
+                    Meta {
+                        width: parent.width
+                        text: root.width < 540
                         ? root.installedEntries.length + " here · " + root.availableEntries.length + " more"
                         : root.installedEntries.length + " installed · " + root.availableEntries.length + " available"
+                        elide: Text.ElideRight
+                    }
+                }
+
+                Rectangle {
+                    id: updateButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(88, updateLabel.implicitWidth + 22)
+                    height: 32
+                    radius: Theme.radiusTag
+                    color: root.updateActionable ? Theme.shellFg
+                        : (updateMouse.containsMouse && !root.updateBusy
+                            ? Theme.shellMuted : Theme.shellSurface)
+                    border.width: Theme.hairline
+                    border.color: updateButton.activeFocus ? Theme.shellFg
+                        : (root.updatePhase === "failed" ? Theme.shellStatusBad
+                        : (root.updateActionable ? Theme.shellFg : Theme.shellBorder)
+                        )
+                    opacity: root.updateBusy ? 0.72 : 1
+                    activeFocusOnTab: root.updateActionable
+                    Accessible.role: Accessible.Button
+                    Accessible.name: root.updatesAvailable > 0 ? "Update all applications" : "Application updates"
+                    Accessible.description: root.updateMessage
+
+                    Keys.onPressed: function(event) {
+                        if (root.updateActionable
+                                && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                                    || event.key === Qt.Key_Space)) {
+                            root.updateAllRequested();
+                            event.accepted = true;
+                        }
+                    }
+
+                    Meta {
+                        id: updateLabel
+                        anchors.centerIn: parent
+                        color: root.updateActionable ? Theme.shellSurface : Theme.shellInk2
+                        text: {
+                            if (root.updatePhase === "checking")
+                                return "Checking…";
+                            if (root.updatePhase === "updating")
+                                return "Updating…";
+                            if (root.updatePhase === "failed")
+                                return "Try again";
+                            if (root.updatesAvailable > 0)
+                                return root.width < 620 ? "Update · " + root.updatesAvailable
+                                    : "Update all · " + root.updatesAvailable;
+                            return "All current";
+                        }
+                    }
+
+                    MouseArea {
+                        id: updateMouse
+                        anchors.fill: parent
+                        enabled: root.updateActionable
+                        hoverEnabled: enabled
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            updateButton.forceActiveFocus();
+                            root.updateAllRequested();
+                        }
+                    }
+                }
+            }
+
+            Item {
+                width: parent.width
+                height: root.updateMessage !== "" || root.updateBusy ? 26 : 0
+                visible: height > 0
+
+                Meta {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    text: root.updateMessage
+                    color: root.updatePhase === "failed" ? Theme.shellStatusBad : Theme.shellInk3
+                    elide: Text.ElideRight
+                }
+
+                Rectangle {
+                    id: updateTrack
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: 3
+                    visible: root.updateBusy
+                    clip: true
+                    color: Theme.shellBorder
+
+                    Rectangle {
+                        id: updateSegment
+                        width: Math.max(72, updateTrack.width * 0.24)
+                        height: parent.height
+                        radius: parent.height / 2
+                        color: Theme.shellFg
+
+                        NumberAnimation on x {
+                            from: -updateSegment.width
+                            to: updateTrack.width
+                            duration: Theme.durSpatial * 3
+                            loops: Animation.Infinite
+                            running: updateTrack.visible
+                            easing.type: Easing.InOutSine
+                        }
+                    }
                 }
             }
 

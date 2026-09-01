@@ -268,7 +268,10 @@ fn configure_update_fixture(
         fs::write(repository.join("channel.json.sig"), signature).unwrap();
     }
     cfg.update_check_sources = UpdateCheckSources {
+        repository_url_file: dir.join("update-repository.url"),
+        repository_url_owner_uid: rustix::process::geteuid().as_raw(),
         repository_dir: repository,
+        curl_bin: dir.join("curl"),
         trusted_keys_dir: keys,
         cached_channel: cfg.state_dir.join("update/verified-channel.json"),
         cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
@@ -488,6 +491,67 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
     assert_eq!(event["resource"], "spotify");
     assert_eq!(event["source"], "human");
     assert_eq!(event["result"], "success");
+}
+
+#[test]
+fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+        },
+    );
+    let absent = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    assert_eq!(absent["error"]["code"], "conflict", "{absent}");
+    assert_eq!(absent["error"]["details"]["installed"], false);
+
+    fs::write(
+        td.dir.join("app-state"),
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n",
+    )
+    .unwrap();
+
+    let listed = td.call("apps.list", None);
+    assert_eq!(listed["result"]["updates_available"], 1, "{listed}");
+    assert_eq!(listed["result"]["apps"][0]["update_available"], true);
+
+    let invalid = td.call("apps.update", Some(json!({ "all": true, "id": "spotify" })));
+    assert_eq!(invalid["error"]["code"], "invalid_params", "{invalid}");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("app-state")).unwrap().trim(),
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    );
+
+    let updated = td.call("apps.update", Some(json!({ "all": true })));
+    assert_eq!(updated["result"]["eligible"], 1, "{updated}");
+    assert_eq!(updated["result"]["updated"], 1);
+    assert_eq!(updated["result"]["current"], 0);
+    assert_eq!(updated["result"]["failed"], 0);
+    assert_eq!(updated["result"]["apps"][0]["status"], "updated");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("app-state")).unwrap().trim(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    let event = td.audit_lines().last().unwrap().clone();
+    assert_eq!(event["action"], "system.update_package");
+    assert_eq!(event["resource"], "spotify");
+    assert_eq!(event["result"], "success");
+
+    let current = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    assert_eq!(current["result"]["updated"], 0, "{current}");
+    assert_eq!(current["result"]["current"], 1);
+    assert_eq!(current["result"]["apps"][0]["status"], "current");
+    assert_eq!(td.audit_lines().last().unwrap()["result"], "noop");
 }
 
 #[test]

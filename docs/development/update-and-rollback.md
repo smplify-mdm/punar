@@ -522,6 +522,7 @@ again, do not trust the plan.*
 | Piece | Status | Note |
 |---|---|---|
 | Manifest schema, signature verification code, digest streaming, re-read verification, key-set loading, rotation logic | **REAL** — implementable and CI-provable today | §12.1 group B |
+| Privacy-preserving HTTPS channel discovery | **REAL device code; transport unit-proven** | Root-owned origin, fixed target path, HTTPS-only/TLS floor, no redirects, bounded private staging, signature and target verification before cache. A production CDN/TLS path is still §12.2 hardware/network evidence. |
 | The release signing key used in CI | **SIMULATED** — an ephemeral ed25519 keypair generated per CI run, used to sign the fixtures, discarded | The *code path* is real; the *custody* is not |
 | The production release signing key and its custody model | **USER-BLOCKED** | §12.2 item 1 |
 | Secure Boot vendor keys (PK/KEK/db), `sbctl` enrollment, mkosi `uki-signed` output | **USER-BLOCKED** | `image-pipeline.md` states the pipeline is *"Unsigned. No Secure Boot, no signed UKIs, no sbctl key management yet."* §12.2 item 2 |
@@ -1466,7 +1467,7 @@ boot 6  N+1 running again. update.auto_rollback in the audit log. Failed slot
 | Signature **verification** code path | **PROVEN** with per-run ephemeral keys | Group B |
 | Real release signing key and its **custody** | **USER-BLOCKED** | §12.2 item 1 below |
 | Secure Boot chain: firmware rejecting an unsigned or wrongly-signed UKI | **NOT PROVEN / SIMULATED** | CI's OVMF is not in Secure Boot mode with enrolled vendor keys. ADR-001: *"All VM-based SB/TPM demos are labeled simulated"* |
-| HTTPS transport, TLS, CDN behavior, resumption over a real link | **NOT PROVEN** | `file://` fixture only; the VM has `-nic none` |
+| HTTPS transport construction and fail-closed behavior | **CODE-PROVEN, not end-to-end network-proven** | Unit tests exercise fixed privacy-preserving paths, HTTPS-only/TLS floor, redirect refusal, response bounds, exact signature admission, and no local fallback through a fixed fake curl. The canonical VM remains `-nic none`; production CDN/TLS and resumption still require §12.2 evidence. |
 | Staged rollout across a **real fleet** | **SIMULATED** — one device plus the group-B bucket unit tests | There is no fleet and no control plane (spec 50/77 → Phase 2) |
 | Health-gated **promotion** (the vendor halting a bad rollout on evidence) | **NOT BUILT** | Control-plane software; mock can serve `halted: true`, which proves the device honors it, not that anyone decided it |
 | Real hardware boot, TPM, measured boot | **NOT PROVEN** | Every number and boot this project has produced is an emulated x86_64 VM on an arm64 host |

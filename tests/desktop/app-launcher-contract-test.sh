@@ -55,6 +55,15 @@ contains "${SURFACES}" '[ "${active_workspace}" = "8" ]'
 # shellcheck disable=SC2016
 contains "${SURFACES}" '[ "${client_state}" = "$(printf '\''1\ttrue\ttrue'\'')" ]'
 
+# Bulk update is a visible, bounded catalog action. It checks observed daemon
+# state first, shows live progress, and invokes only the typed --all verb.
+contains "${BROWSER}" 'signal updateAllRequested()'
+contains "${BROWSER}" ': "Update all · " + root.updatesAvailable;'
+contains "${BROWSER}" 'visible: root.updateBusy'
+contains "${COMMAND}" '["punarctl", "--json", "app", "list"]'
+contains "${COMMAND}" '["punarctl", "--json", "app", "update", "--all", "--yes"]'
+contains "${COMMAND}" 'root.appUpdateMessage = "Updating " + root.appUpdatesAvailable'
+
 python3 - "${APPS}" <<'PY'
 import sys
 

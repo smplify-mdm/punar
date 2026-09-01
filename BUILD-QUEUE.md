@@ -40,7 +40,7 @@ automatic-fallback path is implemented and canonical ARM64 CI-proven. Channel
 transport/promotion, production key custody, and end-to-end production
 repository coverage remain unshipped.
 
-The first two governed-update slices are implemented. `punarctl update status`
+The first three governed-update slices are implemented. `punarctl update status`
 obtains bounded local evidence through the read-only `update.status` IPC method
 and reports release identity, actual/desired slot, health signals, rollback
 state, channel provenance, and browser-package provenance without inventing
@@ -50,9 +50,16 @@ continues to win through the normal effective-policy engine. The current
 working tree also adds root-only, audited `update.check`: it verifies exact-byte
 Ed25519 channel metadata against the device image/architecture/platform/channel,
 computes rollout eligibility locally, and atomically caches only authenticated
-state. Unit and daemon/CLI integration suites pass locally; canonical CI is
-still required before calling the discovery slice shipped. `update.apply`,
-`update.rollback`, and production HTTPS channel transport remain open.
+state. A root-owned optional HTTPS origin now resolves the fixed
+channel/architecture/platform paths without sending device identity or current
+version; HTTPS-only/TLS floor, redirect refusal, response bounds, private
+staging, exact signature/target admission, and no downgrade to local media are
+unit-proven. The local-media transport remains only when no network origin is
+configured. Unit and daemon/CLI integration suites pass locally; canonical CI
+and a real production CDN/TLS exercise are still required before calling the
+network discovery path shipped. `update.apply`, `update.rollback`, promotion
+automation, production key custody, and production repository coverage remain
+open.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
@@ -780,7 +787,15 @@ apps may not install, optional installs obey `allowUserInstall`, optional
 removal stays user-controlled, and a missing managed opinion fails closed.
 Malformed, duplicate or contradictory application membership refuses the
 policy load/enrollment. Unit and real-daemon integration tests cover all four
-decisions. Managed per-app settings remain a separate typed-adapter milestone;
+decisions. The current working tree also implements the already-specified
+`apps.update` method and `punarctl app update <id>|--all`: only installed native
+catalog apps are eligible, target identities come only from the signed catalog,
+managed policy is enforced per id, and the aggregate names updated/current/
+failed outcomes. The Application Library checks live state, exposes an
+accessible **Update all** control, shows indeterminate activity without
+inventing a percentage, and keeps partial failures explicit. Rust integration,
+static contract, QML lint, and the UI detector pass locally; a rebuilt image and
+canonical VM transaction remain required. Managed per-app settings remain a separate typed-adapter milestone;
 Punar does not project undocumented macOS/Windows vendor settings onto Linux.
 Connected ARM/HVF testing also proved the corrected Firefox native-detail path,
 including its pinned source and verified permissions; third-party native UI
@@ -790,8 +805,14 @@ the callback process could not join the primary app's `second-instance`
 handoff. The current working tree retains PID isolation but gives each app one
 private namespace-owning session and a `0600` callback socket; catalog and URI
 scheme validation still run for every relay. Static contracts and Rust tests
-pass locally. A rebuilt image plus a real user OAuth round-trip and canonical
-dual-architecture CI are still required before closing that compatibility gate.
+pass locally. The live ARM VM then exposed a second, independent failure: its
+image lacked the GTK portal backend, so `org.freedesktop.portal.OpenURI` was
+absent and a later Google sign-in click could not open the browser. Injecting
+the exact snapshot backend live restored OpenURI and opened the real Google
+authorization page; both architecture profiles now include that backend and a
+static gate prevents its removal. A rebuilt image plus a complete callback
+round-trip and canonical dual-architecture CI are still required before closing
+that compatibility gate.
 Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
 remain open. M12's implementation, daemon/CLI/image integration and event-driven

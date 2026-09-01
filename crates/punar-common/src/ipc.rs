@@ -546,6 +546,18 @@ pub struct AppsRemoveParams {
     pub id: String,
 }
 
+/// Update one installed catalog application, or every installed catalog
+/// application. Exactly one selector must be set; the daemon rejects both or
+/// neither so a caller can never accidentally widen one update into all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+}
+
 // -- M9 approval + privilege params (contract section 14) -------------------
 
 /// Params for `approvals.get`.
@@ -781,6 +793,10 @@ pub enum Method {
     /// `apps.remove` — remove the native package for one catalog id. Human
     /// only and always audited.
     AppsRemove(AppsRemoveParams),
+    /// `apps.update` — move one or all already-installed native applications
+    /// to the exact identities pinned by the signed image catalog. Human only
+    /// and always audited.
+    AppsUpdate(AppsUpdateParams),
     /// `update.status` — read-only, local release/channel/health/rollback
     /// evidence. Any admitted peer may inspect it; no check or mutation is
     /// hidden behind this method.
@@ -809,7 +825,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 30] = [
+    pub const NAMES: [&'static str; 31] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -833,6 +849,7 @@ impl Method {
         "apps.list",
         "apps.install",
         "apps.remove",
+        "apps.update",
         "update.status",
         "update.check",
         "install.targets",
@@ -869,6 +886,7 @@ impl Method {
             Method::AppsList => "apps.list",
             Method::AppsInstall(_) => "apps.install",
             Method::AppsRemove(_) => "apps.remove",
+            Method::AppsUpdate(_) => "apps.update",
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
             Method::InstallTargets => "install.targets",
@@ -924,7 +942,8 @@ impl Method {
             Method::AppsCatalog(_)
             | Method::AppsList
             | Method::AppsInstall(_)
-            | Method::AppsRemove(_) => false,
+            | Method::AppsRemove(_)
+            | Method::AppsUpdate(_) => false,
             Method::UpdateStatus => false,
             Method::UpdateCheck(_) => true,
             Method::InstallTargets => false,
@@ -963,6 +982,7 @@ impl Method {
             Method::AppsCatalog(p) => serde_json::to_value(p),
             Method::AppsInstall(p) => serde_json::to_value(p),
             Method::AppsRemove(p) => serde_json::to_value(p),
+            Method::AppsUpdate(p) => serde_json::to_value(p),
             Method::UpdateCheck(p) => serde_json::to_value(p),
             Method::InstallPlan(p) => serde_json::to_value(p),
             Method::InstallApply(p) => serde_json::to_value(p),
@@ -1032,6 +1052,7 @@ impl Method {
             "apps.list" => Self::expect_no_params(method, params).map(|()| Method::AppsList),
             "apps.install" => Self::parse_required_params(method, params).map(Method::AppsInstall),
             "apps.remove" => Self::parse_required_params(method, params).map(Method::AppsRemove),
+            "apps.update" => Self::parse_required_params(method, params).map(Method::AppsUpdate),
             "update.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
@@ -2051,6 +2072,10 @@ mod tests {
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
             }),
+            Method::AppsUpdate(AppsUpdateParams {
+                id: None,
+                all: true,
+            }),
             Method::UpdateStatus,
             Method::UpdateCheck(UpdateCheckParams { force: false }),
             Method::InstallTargets,
@@ -2291,6 +2316,23 @@ mod tests {
 
         let reject = Request::parse_json_line(
             r#"{"v":1,"id":"1","method":"apps.install","params":{"id":"spotify","confirm_metadata_sha256":"abc","command":"curl evil"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"apps.update","params":{"all":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::AppsUpdate(AppsUpdateParams {
+                id: None,
+                all: true
+            })
+        ));
+        let reject = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"apps.update","params":{"all":true,"url":"https://evil.invalid"}}"#,
         )
         .unwrap_err();
         assert_eq!(reject.error.code, ErrorCode::InvalidParams);

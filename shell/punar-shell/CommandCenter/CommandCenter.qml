@@ -76,9 +76,21 @@ DeferredSurfaceBase {
     property var appRecord: null
     property string appFailure: ""
     property bool appRemoveArmed: false
+    // Read from punard's observed package state, never inferred from desktop
+    // files. The browser can therefore distinguish "installed" from
+    // "installed but behind Punar's signed target" without contacting an
+    // upstream store from QML.
+    property string appUpdatePhase: "idle"
+    property int appUpdatesAvailable: 0
+    property string appUpdateMessage: ""
     // Browse mode expands this same lazy surface into the application library;
     // no second resident launcher/store process is introduced.
     property bool appBrowse: false
+
+    onAppBrowseChanged: {
+        if (root.appBrowse)
+            root.refreshAppUpdates();
+    }
 
     // One honest line under the results — why a row did nothing, or why a
     // question has no answer on this device. Cleared by the next keystroke;
@@ -135,6 +147,9 @@ DeferredSurfaceBase {
         root.appRecord = null;
         root.appFailure = "";
         root.appRemoveArmed = false;
+        root.appUpdatePhase = "idle";
+        root.appUpdatesAvailable = 0;
+        root.appUpdateMessage = "";
         root.appBrowse = false;
         root.note = "";
         hideTimer.restart(); // keep the window alive for the exit animation
@@ -490,6 +505,38 @@ DeferredSurfaceBase {
             root.finishAppRemove()
     }
 
+    Process {
+        id: appListProc
+        stdout: StdioCollector {
+            id: appListOut
+            waitForEnd: true
+            onStreamFinished: root.finishAppList()
+        }
+        stderr: StdioCollector {
+            id: appListErr
+            waitForEnd: true
+            onStreamFinished: root.finishAppList()
+        }
+        onRunningChanged: if (!appListProc.running)
+            root.finishAppList()
+    }
+
+    Process {
+        id: appUpdateProc
+        stdout: StdioCollector {
+            id: appUpdateOut
+            waitForEnd: true
+            onStreamFinished: root.finishAppUpdateAll()
+        }
+        stderr: StdioCollector {
+            id: appUpdateErr
+            waitForEnd: true
+            onStreamFinished: root.finishAppUpdateAll()
+        }
+        onRunningChanged: if (!appUpdateProc.running)
+            root.finishAppUpdateAll()
+    }
+
     function firstError(text: string, fallback: string): string {
         var lines = String(text).split("\n");
         var useful = [];
@@ -654,6 +701,103 @@ DeferredSurfaceBase {
         root.appFailure = root.firstError(appRemoveErr.text, "The uninstall did not complete. The application remains installed.");
         root.appRemoveArmed = false;
         root.appPhase = "failed";
+    }
+
+    function refreshAppUpdates(): void {
+        if (!root.appBrowse || appUpdateProc.running)
+            return;
+        if (appListProc.running)
+            appListProc.running = false;
+        root.appUpdatePhase = "checking";
+        root.appUpdateMessage = "Checking installed apps against Punar’s signed catalog…";
+        try {
+            appListProc.command = ["punarctl", "--json", "app", "list"];
+            appListProc.running = true;
+        } catch (e) {
+            root.appUpdatePhase = "failed";
+            root.appUpdateMessage = "Update status is unavailable. Open the app library to try again.";
+        }
+    }
+
+    function finishAppList(): void {
+        if (root.appUpdatePhase !== "checking")
+            return;
+        var parsed = root.parseLastLine(appListOut.text);
+        if (parsed !== null && typeof parsed === "object" && Array.isArray(parsed.apps)) {
+            root.appUpdatesAvailable = Number(parsed.updates_available || 0);
+            for (var i = 0; i < parsed.apps.length; i++) {
+                var app = parsed.apps[i];
+                if (app && typeof app.id === "string" && app.source !== "web")
+                    Apps.recordCatalogInstallState(app.id, app.installed === true);
+            }
+            root.appUpdatePhase = "ready";
+            root.appUpdateMessage = root.appUpdatesAvailable > 0
+                ? root.appUpdatesAvailable + (root.appUpdatesAvailable === 1
+                    ? " verified update is ready · Ctrl U updates all."
+                    : " verified updates are ready · Ctrl U updates all.")
+                : "Installed catalog apps are current.";
+            return;
+        }
+        if (appListProc.running)
+            return;
+        root.appUpdatePhase = "failed";
+        root.appUpdateMessage = root.firstError(
+            appListErr.text,
+            "Punar could not check installed app versions. Select Try again."
+        );
+    }
+
+    function requestAppUpdateAll(): void {
+        if (appUpdateProc.running || appListProc.running)
+            return;
+        if (root.appUpdatePhase === "failed") {
+            root.refreshAppUpdates();
+            return;
+        }
+        if (root.appUpdatesAvailable < 1)
+            return;
+        root.appUpdatePhase = "updating";
+        root.appUpdateMessage = "Updating " + root.appUpdatesAvailable
+            + (root.appUpdatesAvailable === 1 ? " application…" : " applications…");
+        try {
+            appUpdateProc.command = ["punarctl", "--json", "app", "update", "--all", "--yes"];
+            appUpdateProc.running = true;
+        } catch (e) {
+            root.appUpdatePhase = "failed";
+            root.appUpdateMessage = "The application updater is unavailable. Select Try again.";
+        }
+    }
+
+    function finishAppUpdateAll(): void {
+        if (root.appUpdatePhase !== "updating")
+            return;
+        var parsed = root.parseLastLine(appUpdateOut.text);
+        if (parsed !== null && typeof parsed === "object"
+                && typeof parsed.updated === "number" && typeof parsed.failed === "number") {
+            var updated = Number(parsed.updated);
+            var failed = Number(parsed.failed);
+            root.appUpdatesAvailable = failed;
+            if (failed > 0) {
+                root.appUpdatePhase = "failed";
+                root.appUpdateMessage = updated + " updated · " + failed
+                    + (failed === 1 ? " app needs attention. Select Try again."
+                        : " apps need attention. Select Try again.");
+            } else {
+                root.appUpdatePhase = "complete";
+                root.appUpdateMessage = updated > 0
+                    ? updated + (updated === 1 ? " application updated. All current."
+                        : " applications updated. All current.")
+                    : "Installed catalog apps are current.";
+            }
+            return;
+        }
+        if (appUpdateProc.running)
+            return;
+        root.appUpdatePhase = "failed";
+        root.appUpdateMessage = root.firstError(
+            appUpdateErr.text,
+            "The update did not complete. Installed apps were left at their last verified versions."
+        );
     }
 
     function finishAppOpen(exitCode: int): void {
@@ -1348,6 +1492,13 @@ DeferredSurfaceBase {
                                     event.accepted = true;
                                 }
                                 break;
+                            case Qt.Key_U:
+                                if (root.appBrowse && root.appId === ""
+                                        && (event.modifiers & Qt.ControlModifier)) {
+                                    root.requestAppUpdateAll();
+                                    event.accepted = true;
+                                }
+                                break;
                             }
                         }
                     }
@@ -1411,6 +1562,9 @@ DeferredSurfaceBase {
                         : 0
                     visible: root.appBrowse && root.appId === ""
                     query: queryInput.text
+                    updatePhase: root.appUpdatePhase
+                    updatesAvailable: root.appUpdatesAvailable
+                    updateMessage: root.appUpdateMessage
                     onLaunchRequested: function(entry) {
                         if (Apps.launch(entry))
                             root.dismiss();
@@ -1420,6 +1574,7 @@ DeferredSurfaceBase {
                     onCatalogRequested: function(id) {
                         root.askApp(id);
                     }
+                    onUpdateAllRequested: root.requestAppUpdateAll()
                 }
 
                 ListView {

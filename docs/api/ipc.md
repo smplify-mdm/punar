@@ -94,8 +94,9 @@ each direction. No length prefixes, no binary framing.
   response timeout for the `enroll start`/`enroll stop` verbs. Every other
   method keeps the 10 s/15 s bounds unchanged.
   **Application amendment:** `apps.catalog` may spend 30 s verifying remote
-  metadata (`punarctl`: 45 s), while `apps.install` and `apps.remove` have
-  bounded 30-minute/10-minute backend transactions (`punarctl`: 30 minutes).
+  metadata (`punarctl`: 45 s), while `apps.install`, `apps.update`, and
+  `apps.remove` have bounded 30-minute/30-minute/10-minute per-app backend
+  transactions (`punarctl`: 30 minutes for one app; 125 minutes for `--all`).
   They remain one synchronous inspect→mutate→verify transaction; expiry kills
   the child and returns a typed failure.
 - Responses are emitted as a single line; UTF-8; no ANSI, no pretty-printing.
@@ -204,8 +205,9 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `privilege.revoke` (M9) | grant owner or root | yes | always |
 | `apps.catalog` | any connected peer | no | no |
 | `apps.list` | any connected peer | no | no |
-| `apps.install` | **human, personal device only** | yes | always |
-| `apps.remove` | **human, personal device only** | yes | always |
+| `apps.install` | **human; managed policy decides when enrolled** | yes | always |
+| `apps.remove` | **human; managed policy decides when enrolled** | yes | always |
+| `apps.update` | **human; managed policy decides per installed app** | yes | always |
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `install.targets` | any connected peer, **live environment only** | no | no |
@@ -649,8 +651,10 @@ state. Punar does not claim that either vendor formally supports Punar.
 ### 5.13 `apps.list`
 
 Params: none. Read-only, any connected peer, not audited. Returns each catalog
-id, selected architecture source, native installed state and observed commit.
-Web apps are not falsely represented as locally installed packages.
+id, selected architecture source, native installed state, observed identity,
+signed target identity, per-app `update_available`, and the aggregate
+`updates_available` count. Web apps are not falsely represented as locally
+installed packages.
 
 ### 5.14 `apps.install`
 
@@ -714,6 +718,23 @@ home is retained for explicit data deletion or reinstall. Audit action is
 `system.remove_package`; web sources have no local package and return
 `conflict` rather than pretending to remove browser data.
 
+### 5.15a `apps.update`
+
+Strict params are either `{"id":"spotify","all":false}` or `{"all":true}`.
+Both selectors—or neither—are `invalid_params`. The caller cannot supply a
+package name, URL, remote, ref, version, commit, digest, executable, or backend
+option.
+
+Only already-installed native catalog apps are eligible. For each one, punard
+derives the exact target from the signed image catalog, reuses the same
+fixed-argv verification and containment path as `apps.install`, verifies the
+resulting identity, and records `system.update_package`. Already-current apps
+are audited as `noop`; web services are excluded because their code updates in
+the browser. `--all` enforces managed application policy independently for
+every installed id and returns explicit `updated`, `current`, and `failed`
+counts plus named failures, so a partial transaction is never presented as
+fully successful. An AI-attributed peer cannot invoke the mutation.
+
 ### 5.16 `update.status`
 
 Params: none. Read-only and unaudited. This is the implemented first slice of
@@ -769,17 +790,27 @@ resolves the precedence-winning `system.update_channel`, running image id and
 version, host architecture, boot platform, device cohort identity, fixed
 repository location, and root-owned Ed25519 key set itself.
 
-The implemented transport reads the bounded `channel.json` and detached raw
-64-byte signature from `/run/punar/update-source`; it is the same authenticated
-selection transaction used by offline CI and mounted repository media, not a
-claim that production HTTPS channel transport has shipped. Signature
-verification covers the exact document bytes. The signed image id,
-architecture, boot platform and channel must all match this device before the
-document can influence selection or enter the cache. The cache directory is
-`0700`, both cache files are `0600`, and document publication is the last
-atomic, synced write. An absent source, invalid signature, wrong target,
-incomplete local identity, or cache failure never changes the running release
-and never admits unverified metadata.
+When root-owned `/etc/punar/update-repository.url` is present, the implemented
+transport issues two fixed HTTPS GETs beneath
+`<base>/<channel>/<architecture>/<boot-platform>/`: `channel.json` and its
+detached raw 64-byte signature. The file must be a non-symlink regular file
+owned by uid 0 and not group/other writable; only one unambiguous `https://`
+base URL is accepted. Curl configuration is disabled, redirects are refused,
+TLS 1.2 is the minimum, connect/overall time and response bytes are bounded,
+and downloads land in private `0600` staging files. Neither device identity
+nor current version appears in the request path or query. A configured HTTPS
+source is authoritative: invalid configuration or network failure never
+downgrades to removable media.
+
+When that configuration file is absent, the same transaction reads the
+bounded pair from `/run/punar/update-source` for offline CI and recovery media.
+Signature verification covers the exact document bytes in either case. The
+signed image id, architecture, boot platform and channel must all match this
+device before the document can influence selection or enter the cache. The
+cache directory is `0700`, both cache files are `0600`, and document
+publication is the last atomic, synced write. An absent source, invalid
+signature, wrong target, incomplete local identity, or cache failure never
+changes the running release and never admits unverified metadata.
 
 Example result:
 

@@ -73,6 +73,10 @@ pub const APP_INSPECT_TIMEOUT: Duration = Duration::from_secs(45);
 /// keep the budget
 /// bounded but human-sized for slow links.
 pub const APP_MUTATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Bulk updates remain one bounded user transaction. The daemon serializes
+/// apps and each backend stays independently bounded; this larger client
+/// window prevents a second large download from being mistaken for a hang.
+pub const APP_UPDATE_ALL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60 + 5 * 60);
 
 /// Exit codes per Plate D-014 Sect III / docs/api/ipc.md section 7.
 /// 0 = success and 2 = usage (owned by clap) complete the set.

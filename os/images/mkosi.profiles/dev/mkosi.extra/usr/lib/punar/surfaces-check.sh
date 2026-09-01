@@ -76,6 +76,24 @@ finish() {
 
 note "# Punar desktop-surfaces exercise — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# A developer-first image must prove its baseline tools execute for the
+# ordinary desktop user. Merely naming `git` in mkosi.conf is insufficient:
+# a packaging regression, broken loader, or PATH mistake would still leave AI
+# coding tools claiming Git is unavailable after boot.
+if command -v git >/dev/null 2>&1; then
+    git_version="$(git --version 2>/dev/null || true)"
+    case "${git_version}" in
+        "git version "*) note "ok   developer baseline Git is usable (${git_version})" ;;
+        *)
+            note "FAIL Git is on PATH but did not report a usable version (got '${git_version}')"
+            FAILED=1
+            ;;
+    esac
+else
+    note "FAIL developer baseline Git is not available on the desktop PATH"
+    FAILED=1
+fi
+
 # --- session env discovery (m2-check.sh pattern) -----------------------------
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR

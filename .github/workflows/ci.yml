@@ -298,6 +298,7 @@ jobs:
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/tree-manifest-test.sh \
+            tests/images/developer-baseline-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
@@ -343,6 +344,9 @@ jobs:
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      - name: Test cross-architecture developer baseline
+        run: ./tests/images/developer-baseline-contract-test.sh
 
       - name: Test native-vendor OAuth sandbox contract
         run: ./tests/images/vendor-sandbox-contract-test.sh

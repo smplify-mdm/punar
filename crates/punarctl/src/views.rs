@@ -4391,6 +4391,74 @@ pub fn app_mutation(
     Ok(out)
 }
 
+pub fn app_updates(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let updated = result
+        .get("updated")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "application update result has no updated count".to_string())?;
+    let current = result
+        .get("current")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "application update result has no current count".to_string())?;
+    let failed = result
+        .get("failed")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "application update result has no failed count".to_string())?;
+    let mut out = fmt::masthead(style, "Application updates", hostname);
+    let (slot, verdict) = if failed > 0 {
+        (
+            Slot::Bad,
+            format!("Update incomplete · {updated} updated · {failed} failed"),
+        )
+    } else if updated > 0 {
+        (Slot::Ok, format!("✓ {updated} application(s) updated"))
+    } else {
+        (Slot::Ok, "✓ Installed applications are current".to_string())
+    };
+    out.push_str(&fmt::verdict(style, slot, &verdict));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Updated",
+                &updated.to_string(),
+                Slot::Ok,
+                "signed catalog targets",
+            ),
+            Row::new(
+                "Already current",
+                &current.to_string(),
+                Slot::Neutral,
+                "no package change",
+            ),
+            Row::new(
+                "Failed",
+                &failed.to_string(),
+                if failed > 0 { Slot::Bad } else { Slot::Neutral },
+                if failed > 0 {
+                    "retry after reviewing the named failures"
+                } else {
+                    "none"
+                },
+            ),
+        ],
+    ));
+    if let Some(failures) = result.get("failures").and_then(Value::as_array) {
+        for failure in failures {
+            let id = failure
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("application");
+            let reason = failure
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("the update did not complete");
+            out.push_str(&fmt::note(style, &format!("{id} · {reason}")));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

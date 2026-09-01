@@ -287,6 +287,17 @@ enum AppCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Update one or all installed native apps from Punar's signed catalog.
+    Update {
+        /// Catalog id, such as `spotify`.
+        id: Option<String>,
+        /// Update every installed catalog app.
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        /// Skip the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -776,6 +787,58 @@ fn app_remove(client: &Client, style: &Style, json_output: bool, id: &str, yes: 
         Ok(result) => render_or_json(json_output, &result, |v| {
             views::app_mutation(style, v, &local_hostname(), "removed")
         }),
+        Err(error) => fail(&error),
+    }
+}
+
+fn app_update(
+    client: &Client,
+    style: &Style,
+    json_output: bool,
+    id: Option<&str>,
+    all: bool,
+    yes: bool,
+) -> ExitCode {
+    if all == id.is_some() {
+        eprintln!("Choose one application id or --all, not both.");
+        eprintln!("Next step: run `punarctl app update <id>` or `punarctl app update --all`.");
+        return ExitCode::FAILURE;
+    }
+    if !yes && !json_output && std::io::stdin().is_terminal() {
+        let target = id.map_or("all installed catalog apps", |value| value);
+        eprint!("Update {target} to Punar's verified version? Type yes to continue: ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if answer.trim() != "yes" {
+            eprintln!("Update aborted — nothing was changed.");
+            return ExitCode::FAILURE;
+        }
+    }
+    let params = match id {
+        Some(id) => json!({ "id": id, "all": false }),
+        None => json!({ "all": true }),
+    };
+    match client.call_with_timeout(
+        "apps.update",
+        Some(params),
+        if all {
+            crate::ipc::APP_UPDATE_ALL_TIMEOUT
+        } else {
+            crate::ipc::APP_MUTATION_TIMEOUT
+        },
+    ) {
+        Ok(result) => {
+            let exit = render_or_json(json_output, &result, |value| {
+                views::app_updates(style, value, &local_hostname())
+            });
+            if exit == ExitCode::SUCCESS
+                && result.get("failed").and_then(Value::as_u64).unwrap_or(0) > 0
+            {
+                ExitCode::FAILURE
+            } else {
+                exit
+            }
+        }
         Err(error) => fail(&error),
     }
 }
@@ -2612,6 +2675,9 @@ fn main() -> ExitCode {
                 schemes,
             } => app_vendor_session(&app_id, &executable, &schemes),
             AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
+            AppCommand::Update { id, all, yes } => {
+                app_update(&client, &style, json, id.as_deref(), all, yes)
+            }
         },
         Command::Audit { command } => match command {
             AuditCommand::Tail { n } => {

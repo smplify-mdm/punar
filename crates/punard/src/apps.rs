@@ -314,15 +314,23 @@ impl AppManager {
             let Ok(source) = self.select_source(app) else {
                 continue;
             };
-            let (installed_now, commit) = match source {
-                Source::Flatpak { app_id, .. } => installed
+            let (installed_now, commit, target, update_available) = match source {
+                Source::Flatpak { app_id, commit, .. } => installed
                     .get(app_id)
-                    .map_or((false, Value::Null), |c| (true, json!(c))),
-                Source::VendorDeb { .. } => {
+                    .map_or((false, Value::Null, json!(commit), false), |observed| {
+                        (true, json!(observed), json!(commit), observed != commit)
+                    }),
+                Source::VendorDeb { sha256, .. } => {
                     let digest = self.installed_vendor_digest(&app.id)?;
-                    (digest.is_some(), digest.map_or(Value::Null, Value::String))
+                    let update_available = digest.as_deref().is_some_and(|value| value != sha256);
+                    (
+                        digest.is_some(),
+                        digest.map_or(Value::Null, Value::String),
+                        json!(sha256),
+                        update_available,
+                    )
                 }
-                Source::Web { .. } => (false, Value::Null),
+                Source::Web { .. } => (false, Value::Null, Value::Null, false),
             };
             apps.push(json!({
                 "id": app.id,
@@ -330,9 +338,112 @@ impl AppManager {
                 "source": source_kind(source),
                 "installed": installed_now,
                 "installed_commit": commit,
+                "target_commit": target,
+                "update_available": update_available,
             }));
         }
-        Ok(json!({ "architecture": self.arch, "apps": apps }))
+        let updates_available = apps
+            .iter()
+            .filter(|app| app["update_available"] == true)
+            .count();
+        Ok(json!({
+            "architecture": self.arch,
+            "updates_available": updates_available,
+            "apps": apps,
+        }))
+    }
+
+    /// Installed native catalog ids eligible for Punar-owned updates. Web
+    /// applications are services rather than local packages and therefore do
+    /// not enter this path.
+    pub fn update_candidates(&self, id: Option<&str>) -> Result<Vec<String>, AppError> {
+        let installed_flatpaks = self.installed_flatpaks()?;
+        let apps: Vec<&App> = match id {
+            Some(id) => vec![self.app(id)?],
+            None => self.catalog.apps.iter().collect(),
+        };
+        let mut candidates = Vec::new();
+        for app in apps {
+            match self.select_source(app)? {
+                Source::Flatpak { app_id, .. } if installed_flatpaks.contains_key(app_id) => {
+                    candidates.push(app.id.clone());
+                }
+                Source::VendorDeb { .. } if self.installed_vendor_digest(&app.id)?.is_some() => {
+                    candidates.push(app.id.clone());
+                }
+                Source::Flatpak { .. } | Source::VendorDeb { .. } | Source::Web { .. } => {}
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Update one already-installed application to the identity pinned in the
+    /// signed catalog. No digest, ref, URL, or version is accepted from the
+    /// caller; this is intentionally narrower than a package-manager update.
+    pub fn update(&self, id: &str) -> Result<Value, AppError> {
+        let app = self.app(id)?;
+        let source = self.select_source(app)?;
+        match source {
+            Source::Flatpak {
+                app_id,
+                commit,
+                metadata_sha256,
+                ..
+            } => {
+                let Some(before) = self.installed_commit(app_id)? else {
+                    return Ok(json!({
+                        "id": id,
+                        "name": app.name,
+                        "installed": false,
+                        "changed": false,
+                        "status": "not_installed",
+                    }));
+                };
+                if before.as_str() == commit {
+                    return Ok(json!({
+                        "id": id,
+                        "name": app.name,
+                        "installed": true,
+                        "changed": false,
+                        "status": "current",
+                        "commit": commit,
+                    }));
+                }
+                let mut result = self.install(id, metadata_sha256)?;
+                result["status"] = json!("updated");
+                result["previous_commit"] = json!(before);
+                Ok(result)
+            }
+            Source::VendorDeb { sha256, .. } => {
+                let Some(before) = self.installed_vendor_digest(id)? else {
+                    return Ok(json!({
+                        "id": id,
+                        "name": app.name,
+                        "installed": false,
+                        "changed": false,
+                        "status": "not_installed",
+                    }));
+                };
+                if before.as_str() == sha256 {
+                    return Ok(json!({
+                        "id": id,
+                        "name": app.name,
+                        "installed": true,
+                        "changed": false,
+                        "status": "current",
+                        "commit": sha256,
+                    }));
+                }
+                let mut result = self.install_vendor_deb(app, source, sha256)?;
+                result["status"] = json!("updated");
+                result["previous_commit"] = json!(before);
+                Ok(result)
+            }
+            Source::Web { .. } => Err(AppError::Unsupported {
+                app: id.to_string(),
+                arch: format!("{} (the web service updates in the browser)", self.arch),
+            }),
+        }
     }
 
     /// Install the exact package identity whose metadata the caller saw.
@@ -2013,6 +2124,30 @@ mod tests {
         let argv = fs::read_to_string(&argv_path).unwrap();
         assert!(argv.contains("install --system --noninteractive --or-update --commit=aaaaaaaa"));
         assert!(!argv.contains("sh -c"));
+
+        fs::write(
+            &state_path,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n",
+        )
+        .unwrap();
+        let list = manager.list().unwrap();
+        assert_eq!(list["updates_available"], 1);
+        assert_eq!(list["apps"][0]["installed"], true);
+        assert_eq!(list["apps"][0]["update_available"], true);
+        assert_eq!(
+            manager.update_candidates(None).unwrap(),
+            vec!["spotify".to_string()]
+        );
+        let updated = manager.update("spotify").unwrap();
+        assert_eq!(updated["changed"], true);
+        assert_eq!(updated["status"], "updated");
+        assert_eq!(
+            updated["previous_commit"],
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+        let current = manager.update("spotify").unwrap();
+        assert_eq!(current["changed"], false);
+        assert_eq!(current["status"], "current");
         let _ = fs::remove_dir_all(dir);
     }
 

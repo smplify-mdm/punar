@@ -24,6 +24,8 @@ contains() {
 [ -x "${BRIDGE}" ] || fail "the portal bridge is not executable"
 contains "${X86_PROFILE}" '         xdg-dbus-proxy'
 contains "${ARM_PROFILE}" '         xdg-dbus-proxy'
+contains "${X86_PROFILE}" '         xdg-desktop-portal-gtk'
+contains "${ARM_PROFILE}" '         xdg-desktop-portal-gtk'
 contains "${BRIDGE}" 'org.freedesktop.portal.Desktop'
 contains "${BRIDGE}" 'org.freedesktop.portal.OpenURI'
 contains "${BRIDGE}" 'https://*|http://*'
