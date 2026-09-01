@@ -403,7 +403,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils ovmf python3-jsonschema
+            qemu-system-x86 qemu-utils ovmf python3-jsonschema \
+            btrfs-progs cryptsetup-bin
 
       - name: Enable KVM access for the runner user
         run: |
@@ -418,6 +419,12 @@ jobs:
           test -n "${installer_iso}"
           ./tools/installer-boot-test.sh "${installer_iso}"
 
+      - name: Install to a disposable encrypted disk and verify I08-I13
+        run: |
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          ./tools/install-test.sh "${installer_iso}"
+
       - name: Upload installer, checksum and boot proof
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -428,6 +435,7 @@ jobs:
             os/images/out/SHA256SUMS
             os/images/out/build-info.txt
             os/images/out/installer-boot-proof/**
+            os/images/out/installer-install-proof/**
           if-no-files-found: warn
           retention-days: 7
 

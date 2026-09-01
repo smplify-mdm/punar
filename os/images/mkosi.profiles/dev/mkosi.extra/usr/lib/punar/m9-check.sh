@@ -225,7 +225,7 @@ else
     note "FAIL no vendor wants symlink at ${WANTS_LINK}"
     FAILED=1
 fi
-if systemctl show multi-user.target -p Wants 2>/dev/null | tr ' ' '\n' \
+if systemctl show multi-user.target --property=Wants --value 2>/dev/null | tr ' ' '\n' \
         | grep -qx 'punar-secrets.service'; then
     note "ok   multi-user.target Wants= lists punar-secrets.service (the symlink took effect)"
 else

@@ -1,0 +1,12 @@
+[Unit]
+Description=Prove the attended encrypted installer against a disposable VM disk
+ConditionKernelCommandLine=punar.live=1
+Requires=punard.service
+After=punard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/punarctl debug installer-apply-proof
+StandardOutput=file:/dev/virtio-ports/punar.install-apply-proof
+StandardError=inherit
+RemainAfterExit=yes

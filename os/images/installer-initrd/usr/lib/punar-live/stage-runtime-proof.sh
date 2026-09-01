@@ -1,8 +1,8 @@
 #!/bin/sh
-# Add a proof service only to the volatile live overlay. The signed release
+# Add proof services only to the volatile live overlay. The signed release
 # tree and the slot payload stay byte-identical; installed systems never carry
-# this service. On physical media it is skipped because the named virtio port
-# exists only when the QEMU gate deliberately attaches it.
+# these services. On physical media they are skipped because the named virtio
+# ports exist only when the QEMU gates deliberately attach them.
 set -eu
 
 copy_text() {
@@ -38,6 +38,12 @@ copy_text \
 copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-runtime-proof.path \
     /sysroot/usr/lib/systemd/system/punar-installer-runtime-proof.path
+copy_text \
+    /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-apply-proof.service \
+    /sysroot/usr/lib/systemd/system/punar-installer-apply-proof.service
+copy_text \
+    /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-apply-proof.path \
+    /sysroot/usr/lib/systemd/system/punar-installer-apply-proof.path
 copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf \
     /sysroot/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf

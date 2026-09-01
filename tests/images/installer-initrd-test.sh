@@ -32,6 +32,8 @@ LIVE_FSTAB="${RUNTIME_ROOT}/etc/fstab"
 LIVE_CRYPTTAB="${RUNTIME_ROOT}/etc/crypttab"
 RUNTIME_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.service"
 RUNTIME_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.path"
+APPLY_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.service"
+APPLY_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.path"
 RUNTIME_WANTS="${RUNTIME_ROOT}/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf"
 RUNTIME_SCRIPT="${RUNTIME_ROOT}/usr/lib/punar/installer-runtime-proof.sh"
 FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
@@ -42,7 +44,8 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
     "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${LIVE_FSTAB}" \
     "${LIVE_CRYPTTAB}" "${RUNTIME_UNIT}" \
-    "${RUNTIME_PATH}" "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
+    "${RUNTIME_PATH}" "${APPLY_UNIT}" "${APPLY_PATH}" \
+    "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 [ -x "${INITRD_BUILDER}" ] || fail 'installer initrd builder is not executable'
@@ -90,7 +93,14 @@ assert_line "${RUNTIME_UNIT}" 'ExecStart=/bin/sh /usr/lib/punar/installer-runtim
 assert_line "${RUNTIME_UNIT}" 'RemainAfterExit=yes'
 assert_line "${RUNTIME_PATH}" 'PathExists=/dev/virtio-ports/punar.install-proof'
 assert_line "${RUNTIME_PATH}" 'Unit=punar-installer-runtime-proof.service'
-assert_line "${RUNTIME_WANTS}" 'Wants=punar-installer-runtime-proof.path'
+assert_line "${APPLY_UNIT}" 'ConditionKernelCommandLine=punar.live=1'
+assert_line "${APPLY_UNIT}" 'Requires=punard.service'
+assert_line "${APPLY_UNIT}" 'ExecStart=/usr/bin/punarctl debug installer-apply-proof'
+assert_line "${APPLY_UNIT}" 'StandardOutput=file:/dev/virtio-ports/punar.install-apply-proof'
+assert_line "${APPLY_PATH}" 'PathExists=/dev/virtio-ports/punar.install-apply-proof'
+assert_line "${APPLY_PATH}" 'Unit=punar-installer-apply-proof.service'
+assert_line "${RUNTIME_WANTS}" \
+    'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path'
 grep -Fq 'PUNAR_INSTALL_RUNTIME_STAGE_OK' "${STAGE_SCRIPT}" \
     || fail 'runtime proof staging has no serial completion marker'
 if grep -Eq '/usr/bin/(cp|ln)([[:space:]]|$)' "${STAGE_SCRIPT}"; then

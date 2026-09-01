@@ -14,9 +14,11 @@ punar-common = { workspace = true }
 # the daemon answers `approval_required` immediately and must not park a
 # connection for the life of an approval — so the CLI watches for the
 # wake and asks the socket for the truth. Already in the workspace tree
-# for punard's SO_PEERCRED and punar-common's flock; `event` adds the
-# poll module and no new crate. Neither inotify nor poll is reachable
-# from safe std, and workspace crates are #![forbid(unsafe_code)].
-rustix = { workspace = true, features = ["event"] }
+# for punard's SO_PEERCRED and punar-common's flock; `event` adds poll for
+# approval waits and `process` lets the VM-only installer gate verify uid 0.
+# None of these kernel interfaces is reachable from safe std, and workspace
+# crates are #![forbid(unsafe_code)].
+rustix = { workspace = true, features = ["event", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+zeroize = { workspace = true }

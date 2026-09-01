@@ -67,15 +67,27 @@ mod peer;
 mod views;
 mod watch;
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Parser, Subcommand};
+#[cfg(target_os = "linux")]
+use punar_common::install::{
+    InstallApplyParams, InstallAwaiting, InstallEncryption, InstallOverallState, InstallPlanParams,
+    InstallPlanResult, InstallRecoveryAckParams, InstallRecoveryMode, InstallSeedParams,
+    InstallStatusResult, InstallTargetsResult,
+};
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use zeroize::Zeroizing;
 
 use crate::fmt::Style;
 use crate::ipc::{CallError, Client, Target};
@@ -527,6 +539,12 @@ enum DebugCommand {
         #[arg(long, value_name = "JSON")]
         params: Option<String>,
     },
+    /// Exercise the attended encrypted installer against the exact disposable
+    /// VM target. This command has no caller-controlled disk or secret input,
+    /// is live-only, and additionally requires the dedicated CI virtio port.
+    #[cfg(target_os = "linux")]
+    #[command(name = "installer-apply-proof", hide = true)]
+    InstallerApplyProof,
 }
 
 #[derive(Subcommand)]
@@ -1544,6 +1562,241 @@ fn secrets_get(
     }
 }
 
+#[cfg(target_os = "linux")]
+const INSTALL_APPLY_PROOF_PORT: &str = "/dev/virtio-ports/punar.install-apply-proof";
+#[cfg(target_os = "linux")]
+const INSTALL_APPLY_PROOF_SERIAL: &str = "PUNAR-CI-TARGET";
+#[cfg(target_os = "linux")]
+const INSTALL_APPLY_PROOF_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const INSTALL_APPLY_PROOF_PASSPHRASE: &[u8] = b"punar-ci-only-vm-passphrase";
+
+#[cfg(target_os = "linux")]
+fn sealed_install_proof_memfd(name: &str, value: &[u8]) -> Result<std::fs::File, String> {
+    use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
+
+    let owned = memfd_create(name, MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)
+        .map_err(|error| format!("could not allocate sealed anonymous memory ({error})"))?;
+    let mut file = std::fs::File::from(owned);
+    file.write_all(value)
+        .map_err(|error| format!("could not populate sealed anonymous memory ({error})"))?;
+    fcntl_add_seals(
+        &file,
+        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+    )
+    .map_err(|error| format!("could not seal anonymous memory ({error})"))?;
+    Ok(file)
+}
+
+/// Resolve the two challenged recovery groups without ever returning the
+/// complete recovery key or placing a group in a diagnostic string.
+#[cfg(target_os = "linux")]
+fn install_proof_recovery_confirmation(
+    recovery_key: &str,
+    challenge: &str,
+) -> Result<Zeroizing<String>, String> {
+    let groups = recovery_key.trim().split('-').collect::<Vec<_>>();
+    if groups.len() != 8 || groups.iter().any(|group| group.is_empty()) {
+        return Err("the recovery disclosure did not contain eight groups".into());
+    }
+    let positions = challenge
+        .split_ascii_whitespace()
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "the recovery disclosure challenge was malformed".to_string())?;
+    if positions.len() != 2
+        || positions[0] == positions[1]
+        || positions.iter().any(|position| !(1..=8).contains(position))
+    {
+        return Err("the recovery disclosure challenge was out of bounds".into());
+    }
+    Ok(Zeroizing::new(format!(
+        "{} {}",
+        groups[positions[0] - 1],
+        groups[positions[1] - 1]
+    )))
+}
+
+/// The destructive VM gate deliberately has no caller-controlled disk,
+/// passphrase or recovery material. It can run only as root in the live image
+/// while QEMU presents the named proof port; the daemon still revalidates the
+/// disk identity and consumes the secrets through its production descriptor
+/// boundary.
+#[cfg(target_os = "linux")]
+fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if rustix::process::getuid().as_raw() != 0 {
+        return Err("the installer apply proof must run as root".into());
+    }
+    let port = Path::new(INSTALL_APPLY_PROOF_PORT);
+    let metadata = port
+        .metadata()
+        .map_err(|_| "the dedicated installer apply proof port is absent".to_string())?;
+    if !metadata.file_type().is_char_device() {
+        return Err("the installer apply proof endpoint is not a character device".into());
+    }
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .map_err(|error| format!("could not read the live kernel command line ({error})"))?;
+    if !cmdline
+        .split_ascii_whitespace()
+        .any(|token| token == "punar.live=1")
+    {
+        return Err("the installer apply proof is available only in the live environment".into());
+    }
+
+    let client = Client::for_target(Target::Punard, socket);
+    let targets: InstallTargetsResult = serde_json::from_value(
+        client
+            .call("install.targets", None)
+            .map_err(|error| error.message())?,
+    )
+    .map_err(|error| format!("install.targets returned an invalid result ({error})"))?;
+    let [target] = targets.targets.as_slice() else {
+        return Err("the apply proof requires exactly one eligible disposable target".into());
+    };
+    if target.serial.as_deref() != Some(INSTALL_APPLY_PROOF_SERIAL)
+        || target.size_bytes != INSTALL_APPLY_PROOF_BYTES
+        || !target.eligible
+        || !target.partitions.is_empty()
+    {
+        return Err("the only target is not the exact blank CI disk".into());
+    }
+
+    let plan_params = InstallPlanParams {
+        disk: target.device.clone(),
+        keymap: "us".into(),
+        encryption: InstallEncryption::Luks2,
+        recovery_mode: InstallRecoveryMode::PersonalCopy,
+    };
+    let plan: InstallPlanResult = serde_json::from_value(
+        client
+            .call(
+                "install.plan",
+                Some(serde_json::to_value(&plan_params).map_err(|error| error.to_string())?),
+            )
+            .map_err(|error| error.message())?,
+    )
+    .map_err(|error| format!("install.plan returned an invalid result ({error})"))?;
+    if plan.plan.disk.device != target.device
+        || plan.plan.disk.serial != INSTALL_APPLY_PROOF_SERIAL
+        || plan.plan.encryption != InstallEncryption::Luks2
+        || plan.plan.recovery_mode != InstallRecoveryMode::PersonalCopy
+    {
+        return Err("the confirmed plan is not bound to the encrypted CI target".into());
+    }
+
+    let passphrase = sealed_install_proof_memfd(
+        "punar-installer-ci-passphrase",
+        INSTALL_APPLY_PROOF_PASSPHRASE,
+    )?;
+    let (recovery_writer, recovery_reader) = UnixStream::pair()
+        .map_err(|error| format!("could not create the recovery disclosure channel ({error})"))?;
+    recovery_reader
+        .set_read_timeout(Some(Duration::from_secs(15 * 60)))
+        .map_err(|error| format!("could not bound the recovery disclosure wait ({error})"))?;
+
+    let apply_params = InstallApplyParams {
+        plan_token: plan.plan_token.clone(),
+        disk: target.device.clone(),
+        passphrase_fd: Some(
+            u32::try_from(passphrase.as_raw_fd())
+                .map_err(|_| "the passphrase descriptor was out of range".to_string())?,
+        ),
+        recovery_output_fd: Some(
+            u32::try_from(recovery_writer.as_raw_fd())
+                .map_err(|_| "the recovery descriptor was out of range".to_string())?,
+        ),
+        keymap: "us".into(),
+        seed: InstallSeedParams {
+            locale: "C.UTF-8".into(),
+        },
+        oobe_answers_fd: None,
+        unattended: false,
+    };
+    let apply_value = serde_json::to_value(&apply_params).map_err(|error| error.to_string())?;
+    let apply_socket = socket.map(Path::to_path_buf);
+    let apply = std::thread::spawn(move || {
+        let apply_client = Client::for_target(Target::Punard, apply_socket.as_deref());
+        apply_client.call_with_timeout(
+            "install.apply",
+            Some(apply_value),
+            Duration::from_secs(60 * 60),
+        )
+    });
+
+    let mut disclosure = BufReader::new(recovery_reader);
+    let mut header = String::new();
+    let mut recovery_key = Zeroizing::new(String::new());
+    let mut challenge = String::new();
+    disclosure
+        .read_line(&mut header)
+        .map_err(|error| format!("could not read the recovery disclosure header ({error})"))?;
+    disclosure
+        .read_line(&mut recovery_key)
+        .map_err(|error| format!("could not read the recovery disclosure ({error})"))?;
+    disclosure
+        .read_line(&mut challenge)
+        .map_err(|error| format!("could not read the recovery challenge ({error})"))?;
+    if header.trim_end() != "PUNAR-RECOVERY-V1" {
+        return Err("the recovery disclosure protocol version was invalid".into());
+    }
+    let confirmation = install_proof_recovery_confirmation(&recovery_key, &challenge)?;
+
+    let mut awaiting = false;
+    for _ in 0..100 {
+        let status: InstallStatusResult = serde_json::from_value(
+            client
+                .call("install.status", None)
+                .map_err(|error| error.message())?,
+        )
+        .map_err(|error| format!("install.status returned an invalid result ({error})"))?;
+        if status.state == InstallOverallState::Awaiting
+            && status.awaiting == Some(InstallAwaiting::RecoveryKeyAck)
+        {
+            awaiting = true;
+            break;
+        }
+        if status.state == InstallOverallState::Failed {
+            return Err("the installation failed before recovery acknowledgement".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !awaiting {
+        return Err("the installer did not publish its recovery acknowledgement gate".into());
+    }
+
+    let groups = sealed_install_proof_memfd(
+        "punar-installer-ci-recovery-confirmation",
+        confirmation.as_bytes(),
+    )?;
+    let ack = InstallRecoveryAckParams {
+        plan_token: plan.plan_token.clone(),
+        groups_fd: u32::try_from(groups.as_raw_fd())
+            .map_err(|_| "the recovery confirmation descriptor was out of range".to_string())?,
+    };
+    client
+        .call(
+            "install.recovery_ack",
+            Some(serde_json::to_value(ack).map_err(|error| error.to_string())?),
+        )
+        .map_err(|error| error.message())?;
+
+    let result = apply
+        .join()
+        .map_err(|_| "the installer apply client thread terminated unexpectedly".to_string())?
+        .map_err(|error| error.message())?;
+    let status: InstallStatusResult = serde_json::from_value(result)
+        .map_err(|error| format!("install.apply returned an invalid status ({error})"))?;
+    if status.state != InstallOverallState::Succeeded
+        || status.plan_token.as_deref() != Some(plan.plan_token.as_str())
+        || status.disk.as_deref() != Some(target.device.as_str())
+    {
+        return Err("install.apply did not finish with the confirmed disk and plan".into());
+    }
+    Ok(plan.plan_token)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let style = Style::detect();
@@ -1778,6 +2031,18 @@ fn main() -> ExitCode {
                     Err(error) => fail(&error),
                 }
             }
+            #[cfg(target_os = "linux")]
+            DebugCommand::InstallerApplyProof => match run_installer_apply_proof(socket.as_deref())
+            {
+                Ok(plan_token) => {
+                    println!("PUNAR_INSTALL_APPLY_OK plan_token={plan_token}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("PUNAR_INSTALL_APPLY_FAIL {error}");
+                    ExitCode::FAILURE
+                }
+            },
         },
         // M9 (contract section 14): the approval gate, from the human
         // side. `resolve` is human-only in the daemon, and this CLI never
@@ -2279,6 +2544,8 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
+    #[cfg(target_os = "linux")]
+    use super::install_proof_recovery_confirmation;
     use super::{Cli, append_resolver_mount, validated_vendor_callback_uris, vendor_runtime_tmp};
     use serde_json::json;
 
@@ -2341,6 +2608,40 @@ mod tests {
             "a callback launch must see the first instance runtime"
         );
         assert_ne!(first, other, "vendor apps must not share temporary state");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installer_proof_selects_only_the_challenged_recovery_groups() {
+        let selected = install_proof_recovery_confirmation(
+            "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH\n",
+            "2 7\n",
+        )
+        .unwrap();
+        assert_eq!(selected.as_str(), "BBBB GGGG");
+
+        for invalid in ["2 2", "0 7", "2 9", "two seven", "2"] {
+            assert!(
+                install_proof_recovery_confirmation(
+                    "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH",
+                    invalid,
+                )
+                .is_err(),
+                "accepted invalid challenge {invalid:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installer_apply_proof_accepts_no_caller_controlled_target_or_secret() {
+        assert!(Cli::try_parse_from(["punarctl", "debug", "installer-apply-proof"]).is_ok());
+        for forbidden in [
+            ["punarctl", "debug", "installer-apply-proof", "/dev/vda"],
+            ["punarctl", "debug", "installer-apply-proof", "--passphrase"],
+        ] {
+            assert!(Cli::try_parse_from(forbidden).is_err());
+        }
     }
 
     /// clap's self-check: asserts the argument definitions are internally
