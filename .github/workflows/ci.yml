@@ -298,6 +298,7 @@ jobs:
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/tree-manifest-test.sh \
+            tests/images/vendor-sandbox-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \
@@ -309,6 +310,7 @@ jobs:
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
             tests/desktop/terminal-app-test.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
@@ -341,6 +343,9 @@ jobs:
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      - name: Test native-vendor OAuth sandbox contract
+        run: ./tests/images/vendor-sandbox-contract-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all

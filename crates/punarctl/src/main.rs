@@ -69,7 +69,7 @@ mod watch;
 
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
@@ -86,7 +86,6 @@ use punar_common::install::{
 };
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
-#[cfg(target_os = "linux")]
 use zeroize::Zeroizing;
 
 use crate::fmt::Style;
@@ -258,6 +257,12 @@ enum AppCommand {
         #[arg(value_name = "URI")]
         uris: Vec<String>,
     },
+    /// Supervise one native vendor process behind its filtered desktop bus.
+    /// This is an implementation detail of `app open`: the public command
+    /// returns immediately while this child owns the proxy for the life of
+    /// the application.
+    #[command(name = "run-vendor", hide = true)]
+    RunVendor { id: String },
     /// Remove the native package. Per-user application data is preserved.
     Remove {
         /// Catalog id, such as `spotify`.
@@ -811,15 +816,15 @@ fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
             command.args(["run", "--system", app_id]);
             command
         }
-        Some("vendor_deb") => match vendor_app_command(app, id, uris) {
-            Ok(command) => command,
-            Err(why) => {
+        Some("vendor_deb") => {
+            if let Err(why) = spawn_vendor_supervisor(id, uris) {
                 eprintln!(
                     "The application could not start.\nWhy: {why}.\nNext step: reinstall it from the application library."
                 );
                 return ExitCode::FAILURE;
             }
-        },
+            return ExitCode::SUCCESS;
+        }
         _ => {
             return fail(&CallError::Protocol {
                 why: "the application source is not supported by this client".to_string(),
@@ -842,10 +847,98 @@ fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
     }
 }
 
+fn spawn_vendor_supervisor(id: &str, uris: &[String]) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate the Punar application supervisor: {error}"))?;
+    let mut command = vendor_supervisor_command(&executable, id);
+    let payload = Zeroizing::new(
+        serde_json::to_vec(uris)
+            .map_err(|error| format!("could not encode the application callback: {error}"))?,
+    );
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start the Punar application supervisor: {error}"))?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| "the application supervisor has no private input channel".to_string())
+        .and_then(|mut input| {
+            input.write_all(&payload).map_err(|error| {
+                format!("could not deliver the application callback privately: {error}")
+            })
+        });
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn vendor_supervisor_command(executable: &Path, id: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    // OAuth callbacks travel through the anonymous stdin pipe below. Keeping
+    // them out of this long-lived process's argv prevents disclosure through
+    // /proc/$pid/cmdline while the application remains open.
+    command.args(["app", "run-vendor", id]);
+    command
+}
+
+fn app_run_vendor(client: &Client, id: &str) -> ExitCode {
+    let uris = match read_vendor_supervisor_uris() {
+        Ok(value) => value,
+        Err(why) => {
+            eprintln!("punarctl: vendor application supervisor: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let detail = match inspect_app(client, id) {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let Some(app) = detail.get("app") else {
+        return fail(&CallError::Protocol {
+            why: "apps.catalog returned no app object".to_string(),
+        });
+    };
+    if app.get("source").and_then(Value::as_str) != Some("vendor_deb") {
+        return fail(&CallError::Protocol {
+            why: "the private supervisor accepts only verified vendor applications".to_string(),
+        });
+    }
+    match supervise_vendor_app(app, id, &uris) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("punarctl: vendor application supervisor: {why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+const VENDOR_SUPERVISOR_PAYLOAD_LIMIT: u64 = 8 * 8192 + 1024;
+
+fn read_vendor_supervisor_uris() -> Result<Zeroizing<Vec<String>>, String> {
+    let mut payload = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(VENDOR_SUPERVISOR_PAYLOAD_LIMIT + 1)
+        .read_to_end(&mut payload)
+        .map_err(|error| format!("could not read the private application callback: {error}"))?;
+    if payload.len() as u64 > VENDOR_SUPERVISOR_PAYLOAD_LIMIT {
+        return Err("the private application callback is oversized".to_string());
+    }
+    let uris = serde_json::from_slice::<Vec<String>>(&payload)
+        .map_err(|_| "the private application callback is malformed".to_string())?;
+    Ok(Zeroizing::new(uris))
+}
+
 fn vendor_app_command(
     app: &Value,
     id: &str,
     uris: &[String],
+    filtered_bus: &Path,
 ) -> Result<std::process::Command, String> {
     if app.get("installed").and_then(Value::as_bool) != Some(true) {
         return Err(format!(
@@ -955,6 +1048,7 @@ fn vendor_app_command(
         "--dir",
         "/run/user",
     ]);
+    append_vendor_open_bridge(&mut command);
     append_resolver_mount(&mut command, Path::new("/run/systemd/resolve"));
     command
         .arg("--bind")
@@ -1003,7 +1097,6 @@ fn vendor_app_command(
     command.arg("--dir").arg(&runtime);
     let runtime_paths = [
         runtime.join(&wayland_display),
-        runtime.join("bus"),
         runtime.join("pulse"),
         runtime.join("pipewire-0"),
         runtime.join("pipewire-0-manager"),
@@ -1011,12 +1104,7 @@ fn vendor_app_command(
     for path in runtime_paths.iter().filter(|path| path.exists()) {
         command.arg("--bind").arg(path).arg(path);
     }
-    if runtime.join("bus").exists() {
-        command
-            .arg("--setenv")
-            .arg("DBUS_SESSION_BUS_ADDRESS")
-            .arg(format!("unix:path={}/bus", runtime.display()));
-    }
+    append_filtered_session_bus_mount(&mut command, filtered_bus);
     for key in ["LANG", "LC_ALL"] {
         if let Some(value) = std::env::var_os(key) {
             command.arg("--setenv").arg(key).arg(value);
@@ -1044,6 +1132,144 @@ fn vendor_app_command(
         .arg("--no-sandbox");
     command.args(callback_uris);
     Ok(command)
+}
+
+fn append_vendor_open_bridge(command: &mut std::process::Command) {
+    command.args([
+        "--ro-bind",
+        "/usr/lib/punar/vendor-sandbox-bin/xdg-open",
+        "/usr/bin/xdg-open",
+    ]);
+}
+
+fn append_filtered_session_bus_mount(command: &mut std::process::Command, filtered_bus: &Path) {
+    const SANDBOX_BUS: &str = "/run/punar-session-bus";
+    command
+        .arg("--bind")
+        .arg(filtered_bus)
+        .arg(SANDBOX_BUS)
+        .arg("--setenv")
+        .arg("DBUS_SESSION_BUS_ADDRESS")
+        .arg(format!("unix:path={SANDBOX_BUS}"));
+}
+
+fn filtered_bus_proxy_command(
+    real_bus: &Path,
+    filtered_bus: &Path,
+    ready_fd: i32,
+) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/xdg-dbus-proxy");
+    command
+        .arg(format!("--fd={ready_fd}"))
+        .arg(format!("unix:path={}", real_bus.display()))
+        .arg(filtered_bus)
+        .args([
+            "--filter",
+            "--call=org.freedesktop.portal.*=*",
+            "--broadcast=org.freedesktop.portal.*=@/org/freedesktop/portal/*",
+            "--talk=org.freedesktop.Notifications",
+        ]);
+    command
+}
+
+/// Keep the real user bus outside the vendor mount namespace. A filtered
+/// xdg-dbus-proxy exposes only the freedesktop desktop portal and notification
+/// service: binding `/run/user/$UID/bus` directly would also expose the user
+/// systemd manager and turn a nominal application sandbox into an execution
+/// trampoline back onto the host.
+#[cfg(target_os = "linux")]
+fn supervise_vendor_app(app: &Value, id: &str, uris: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| valid_runtime_dir(path))
+        .ok_or_else(|| "the desktop runtime directory is unavailable".to_string())?;
+    let real_bus = runtime.join("bus");
+    let bus_metadata = std::fs::symlink_metadata(&real_bus)
+        .map_err(|error| format!("the desktop session bus is unavailable: {error}"))?;
+    if !bus_metadata.file_type().is_socket() {
+        return Err("the desktop session bus is not a direct Unix socket".to_string());
+    }
+
+    let app_runtime = runtime.join("punar-apps").join(id);
+    std::fs::create_dir_all(&app_runtime)
+        .map_err(|error| format!("could not prepare the isolated app runtime: {error}"))?;
+    std::fs::set_permissions(&app_runtime, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("could not protect the isolated app runtime: {error}"))?;
+    let filtered_bus = app_runtime.join(format!("bus-{}", std::process::id()));
+    if std::fs::symlink_metadata(&filtered_bus).is_ok() {
+        return Err("the private desktop bus path already exists".to_string());
+    }
+
+    let (mut ready_reader, ready_writer) = UnixStream::pair()
+        .map_err(|error| format!("could not create the desktop-bus readiness channel: {error}"))?;
+    // std creates both descriptors close-on-exec. Only the proxy endpoint is
+    // inherited by the one child that consumes --fd; the supervisor endpoint
+    // cannot leak into either the proxy or the vendor application.
+    rustix::io::fcntl_setfd(ready_writer.as_fd(), rustix::io::FdFlags::empty())
+        .map_err(|error| format!("could not pass the desktop-bus readiness channel: {error}"))?;
+    let ready_fd = ready_writer.as_raw_fd();
+    let mut proxy = filtered_bus_proxy_command(&real_bus, &filtered_bus, ready_fd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start the filtered desktop bus: {error}"))?;
+    drop(ready_writer);
+
+    let outcome = (|| {
+        ready_reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| format!("could not bound the desktop-bus startup wait: {error}"))?;
+        let mut ready = [0_u8; 1];
+        ready_reader
+            .read_exact(&mut ready)
+            .map_err(|error| format!("the filtered desktop bus did not become ready: {error}"))?;
+        if ready != *b"x" {
+            return Err("the filtered desktop bus returned an invalid readiness marker".into());
+        }
+        let metadata = std::fs::symlink_metadata(&filtered_bus)
+            .map_err(|error| format!("the filtered desktop bus socket is missing: {error}"))?;
+        if !metadata.file_type().is_socket() {
+            return Err("the filtered desktop bus path is not a Unix socket".into());
+        }
+
+        let mut command = vendor_app_command(app, id, uris, &filtered_bus)?;
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not enter the application sandbox: {error}"))?;
+        if !status.success() {
+            return Err(format!("the isolated application exited with {status}"));
+        }
+        Ok(())
+    })();
+
+    // Closing the peer of xdg-dbus-proxy's --fd channel is its explicit
+    // lifetime signal. Bound the reap too: a broken proxy cannot leave a
+    // resident process behind after the application closes.
+    drop(ready_reader);
+    for _ in 0..100 {
+        match proxy.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
+    if proxy.try_wait().ok().flatten().is_none() {
+        let _ = proxy.kill();
+        let _ = proxy.wait();
+    }
+    let _ = std::fs::remove_file(&filtered_bus);
+    outcome
+}
+
+#[cfg(not(target_os = "linux"))]
+fn supervise_vendor_app(_app: &Value, _id: &str, _uris: &[String]) -> Result<(), String> {
+    Err("verified vendor applications are available only on Linux".to_string())
 }
 
 fn vendor_runtime_tmp(runtime: &Path, id: &str) -> PathBuf {
@@ -2118,6 +2344,7 @@ fn main() -> ExitCode {
                 confirm_metadata_sha256,
             } => app_install(&client, &style, json, &id, yes, confirm_metadata_sha256),
             AppCommand::Open { id, uris } => app_open(&client, &id, &uris),
+            AppCommand::RunVendor { id } => app_run_vendor(&client, &id),
             AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
         },
         Command::Audit { command } => match command {
@@ -2697,7 +2924,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::install_proof_recovery_confirmation;
-    use super::{Cli, append_resolver_mount, validated_vendor_callback_uris, vendor_runtime_tmp};
+    use super::{
+        Cli, append_filtered_session_bus_mount, append_resolver_mount, append_vendor_open_bridge,
+        filtered_bus_proxy_command, validated_vendor_callback_uris, vendor_runtime_tmp,
+        vendor_supervisor_command,
+    };
     use serde_json::json;
 
     #[test]
@@ -2717,6 +2948,64 @@ mod tests {
                 OsStr::new("--ro-bind"),
                 OsStr::new("/"),
                 OsStr::new("/run/systemd/resolve"),
+            ]
+        );
+    }
+
+    #[test]
+    fn vendor_sandbox_uses_the_portal_bridge_and_not_the_real_user_bus() {
+        let mut command = std::process::Command::new("/usr/bin/bwrap");
+        append_vendor_open_bridge(&mut command);
+        append_filtered_session_bus_mount(&mut command, Path::new("/run/private/bus"));
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--ro-bind"),
+                OsStr::new("/usr/lib/punar/vendor-sandbox-bin/xdg-open"),
+                OsStr::new("/usr/bin/xdg-open"),
+                OsStr::new("--bind"),
+                OsStr::new("/run/private/bus"),
+                OsStr::new("/run/punar-session-bus"),
+                OsStr::new("--setenv"),
+                OsStr::new("DBUS_SESSION_BUS_ADDRESS"),
+                OsStr::new("unix:path=/run/punar-session-bus"),
+            ]
+        );
+    }
+
+    #[test]
+    fn vendor_bus_proxy_admits_portals_without_the_user_service_manager() {
+        let command = filtered_bus_proxy_command(
+            Path::new("/run/user/1000/bus"),
+            Path::new("/run/private/bus"),
+            17,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--filter"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--call=org.freedesktop.portal.*=*")
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.contains("org.freedesktop.systemd1"))
+        );
+    }
+
+    #[test]
+    fn vendor_supervisor_argv_never_carries_an_oauth_callback() {
+        let command = vendor_supervisor_command(Path::new("/usr/bin/punarctl"), "claude-desktop");
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("app"),
+                OsStr::new("run-vendor"),
+                OsStr::new("claude-desktop"),
             ]
         );
     }
@@ -2831,6 +3120,7 @@ mod tests {
                 "claude-desktop",
                 "claude://claude.ai/auth/callback?code=redacted&state=opaque",
             ],
+            &["punarctl", "app", "run-vendor", "claude-desktop"],
             &["punarctl", "app", "remove", "spotify", "--yes"],
             &["punarctl", "capabilities"],
             &["punarctl", "compliance"],

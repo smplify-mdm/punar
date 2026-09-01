@@ -1,0 +1,21 @@
+#!/bin/sh
+# Vendor applications may ask the host to open a public web page, but may not
+# inherit a browser process inside their private HOME or reach arbitrary host
+# URI handlers. The filtered session bus admits this one portal request; the
+# portal launches the user's chosen browser in the real desktop session.
+set -eu
+
+if [ "$#" -ne 1 ] || [ "${#1}" -gt 8192 ]; then
+    exit 64
+fi
+
+case "$1" in
+    https://*|http://*) ;;
+    *) exit 64 ;;
+esac
+
+exec /usr/bin/busctl --user --quiet call \
+    org.freedesktop.portal.Desktop \
+    /org/freedesktop/portal/desktop \
+    org.freedesktop.portal.OpenURI \
+    OpenURI 'ssa{sv}' '' "$1" 0
