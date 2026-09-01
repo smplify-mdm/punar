@@ -36,6 +36,18 @@ export XDG_DATA_DIRS
 XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:/var/lib/punar-applications/config"
 export XDG_CONFIG_DIRS
 
+# Import the mutable desktop-entry and URI-handler roots before Hyprland (and
+# therefore any D-Bus-activated desktop portal) can start. Doing this only
+# from Hyprland's exec-once hook leaves a race where an already-running portal
+# keeps the login manager's old environment and sends vendor OAuth callbacks
+# such as `claude:` back to the browser instead of the installed application.
+# Hyprland refreshes the same values after its Wayland identifiers exist.
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd XDG_CONFIG_DIRS XDG_DATA_DIRS \
+        || printf '%s\n' \
+            'punar-session: could not pre-import application handler paths' >&2
+fi
+
 # Installed by the image staging step.
 # shellcheck disable=SC1091
 . /usr/lib/punar/punar-graphics-env.sh

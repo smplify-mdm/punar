@@ -21,7 +21,12 @@ hl.env("QT_QPA_PLATFORM", "wayland")
 -- The event is emitted once per compositor lifetime, unlike config reloads.
 -- This is the Lua equivalent of exec-once and preserves the low idle surface.
 hl.on("hyprland.start", function()
-    hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")
+    -- URI launches commonly cross a D-Bus-activated desktop portal.  The
+    -- portal is owned by the user manager, not this session process, so it
+    -- must see the mutable Punar application roots exported by session.sh.
+    -- Without these two variables a browser can resolve `claude:` against
+    -- only the immutable image defaults and leave OAuth stranded in a tab.
+    hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE XDG_CONFIG_DIRS XDG_DATA_DIRS")
     hl.exec_cmd(shell)
     hl.exec_cmd(layoutScript .. " restore")
     hl.exec_cmd("systemctl --user start hyprpolkitagent.service")

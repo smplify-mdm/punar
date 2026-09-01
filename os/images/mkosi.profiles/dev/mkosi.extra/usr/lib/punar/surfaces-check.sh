@@ -977,6 +977,33 @@ else
     FAILED=1
 fi
 
+# URI activation can be delegated to a D-Bus-activated portal.  That service
+# inherits the systemd user manager's environment, not Hyprland's process
+# environment.  The mutable application desktop entries and scheme defaults
+# therefore have to be imported into the manager or an installed Claude app
+# leaves its OAuth callback in the browser.
+user_environment="$(systemctl --user show-environment 2>/dev/null)"
+if printf '%s\n' "${user_environment}" \
+    | grep -Fq 'XDG_DATA_DIRS=' \
+    && printf '%s\n' "${user_environment}" \
+        | grep -F 'XDG_DATA_DIRS=' \
+        | grep -Fq '/var/lib/punar-applications'; then
+    note "ok   user manager sees the mutable application data root"
+else
+    note "FAIL user manager cannot see the mutable application data root"
+    FAILED=1
+fi
+if printf '%s\n' "${user_environment}" \
+    | grep -Fq 'XDG_CONFIG_DIRS=' \
+    && printf '%s\n' "${user_environment}" \
+        | grep -F 'XDG_CONFIG_DIRS=' \
+        | grep -Fq '/var/lib/punar-applications/config'; then
+    note "ok   user manager sees the mutable application handler defaults"
+else
+    note "FAIL user manager cannot see the mutable application handler defaults"
+    FAILED=1
+fi
+
 for scheme in x-scheme-handler/https x-scheme-handler/http text/html; do
     handler="$(xdg-mime query default "${scheme}" 2>/dev/null | tr -d '[:space:]')"
     check_eq "default handler for ${scheme}" "chromium.desktop" "${handler}"

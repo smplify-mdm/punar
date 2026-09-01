@@ -6,6 +6,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BRIDGE="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open"
 X86_PROFILE="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.conf"
 ARM_PROFILE="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf"
+HYPR_LUA="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
+HYPR_LEGACY="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.conf"
+SESSION="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh"
 
 fail() {
     echo "vendor-sandbox-contract-test: FAIL: $*" >&2
@@ -23,6 +26,9 @@ contains "${ARM_PROFILE}" '         xdg-dbus-proxy'
 contains "${BRIDGE}" 'org.freedesktop.portal.Desktop'
 contains "${BRIDGE}" 'org.freedesktop.portal.OpenURI'
 contains "${BRIDGE}" 'https://*|http://*'
+contains "${HYPR_LUA}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
+contains "${HYPR_LEGACY}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
+contains "${SESSION}" 'dbus-update-activation-environment --systemd XDG_CONFIG_DIRS XDG_DATA_DIRS'
 
 # These inputs must be rejected before any D-Bus connection is attempted.
 for uri in 'claude://login/code' 'file:///etc/passwd' '/home/user/document'; do
