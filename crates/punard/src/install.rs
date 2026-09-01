@@ -9,7 +9,7 @@
 //! the unattended answer-disk lane remains separately gated.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsString;
+use std::ffi::{CStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1425,20 +1425,8 @@ impl Installer {
         create_private_directory(&path).map_err(|error| {
             install_error_context(error, "installed data mountpoint preparation")
         })?;
-        let mut flags = rustix::mount::MountFlags::NODEV
-            | rustix::mount::MountFlags::NOSUID
-            | rustix::mount::MountFlags::NOEXEC
-            | rustix::mount::MountFlags::NOSYMFOLLOW;
-        if read_only {
-            flags |= rustix::mount::MountFlags::RDONLY;
-        }
-        if let Err(error) = rustix::mount::mount(
-            source,
-            &path,
-            "btrfs",
-            flags,
-            Some(c"subvol=@var,compress=zstd:1,noatime"),
-        ) {
+        let (flags, options) = installed_data_mount_spec(read_only);
+        if let Err(error) = rustix::mount::mount(source, &path, "btrfs", flags, Some(options)) {
             let _ = fs::remove_dir(&path);
             drop(mapping);
             return Err(install_error_context(
@@ -2366,6 +2354,23 @@ impl Installer {
         }
         Ok(disks)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn installed_data_mount_spec(read_only: bool) -> (rustix::mount::MountFlags, &'static CStr) {
+    // mount(8) translates `noatime` into MS_NOATIME before calling mount(2).
+    // This installer calls mount(2) through rustix, so passing `noatime` in
+    // the filesystem-specific data string makes Btrfs reject the request with
+    // EINVAL. Keep VFS flags in the flag word and only Btrfs options in data.
+    let mut flags = rustix::mount::MountFlags::NODEV
+        | rustix::mount::MountFlags::NOSUID
+        | rustix::mount::MountFlags::NOEXEC
+        | rustix::mount::MountFlags::NOSYMFOLLOW
+        | rustix::mount::MountFlags::NOATIME;
+    if read_only {
+        flags |= rustix::mount::MountFlags::RDONLY;
+    }
+    (flags, c"subvol=@var,compress=zstd:1")
 }
 
 fn open_verified_release_file(
@@ -5488,6 +5493,21 @@ mod tests {
         let error = validate_repart_target(&target, false).unwrap_err();
         assert!(matches!(error, InstallError::Refused(_)));
         assert!(error.to_string().contains("no longer a block device"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_btrfs_mount_keeps_vfs_options_out_of_filesystem_data() {
+        let (writable_flags, options) = installed_data_mount_spec(false);
+        assert!(writable_flags.contains(rustix::mount::MountFlags::NOATIME));
+        assert!(writable_flags.contains(rustix::mount::MountFlags::NOSYMFOLLOW));
+        assert!(!writable_flags.contains(rustix::mount::MountFlags::RDONLY));
+        assert_eq!(options.to_bytes(), b"subvol=@var,compress=zstd:1");
+        assert!(!options.to_bytes().windows(8).any(|word| word == b"noatime"));
+
+        let (read_only_flags, _) = installed_data_mount_spec(true);
+        assert!(read_only_flags.contains(rustix::mount::MountFlags::NOATIME));
+        assert!(read_only_flags.contains(rustix::mount::MountFlags::RDONLY));
     }
 
     #[cfg(target_os = "linux")]
