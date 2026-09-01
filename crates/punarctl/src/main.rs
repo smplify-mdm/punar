@@ -1713,7 +1713,9 @@ fn read_installer_proof_disclosure_line(
                     let mut stdout = std::io::stdout().lock();
                     writeln!(stdout, "{marker}")
                         .and_then(|()| stdout.flush())
-                        .map_err(|error| format!("could not publish installer progress ({error})"))?;
+                        .map_err(|error| {
+                            format!("could not publish installer progress ({error})")
+                        })?;
                     *last_progress = Some(marker);
                 }
             }
