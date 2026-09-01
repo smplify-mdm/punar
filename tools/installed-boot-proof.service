@@ -1,0 +1,11 @@
+[Unit]
+Description=Punar CI one-boot installed-system proof
+ConditionPathExists=!/etc/initrd-release
+After=local-fs.target punar-shm-hardening.service punard.service
+Wants=punard.service
+
+[Service]
+Type=oneshot
+StandardOutput=file:/dev/virtio-ports/punar.installed-proof
+StandardError=inherit
+ExecStart=/bin/sh -eu -c 'printf "PUNAR_INSTALLED_BOOT_OK\n"; for target in / /efi /var /home /var/tmp; do findmnt --json --target "$target"; done; printf "PUNAR_ROOT_DEVICE="; stat -c %%d /; printf "PUNAR_VAR_LIB_DEVICE="; stat -c %%d /var/lib/punar; printf "PUNAR_VAR_DEVICE="; stat -c %%d /var; printf "PUNAR_SHM_OPTIONS="; findmnt -n -o OPTIONS --target /dev/shm; attempt=0; while [ ! -S /run/punard/punard.sock ] && [ "$attempt" -lt 100 ]; do attempt=$$((attempt + 1)); sleep 0.1; done; printf "PUNAR_INSTALL_APPLY_RPC="; punarctl debug rpc install.apply --params "{}" 2>&1 || :'

@@ -1,0 +1,14 @@
+[Unit]
+Description=Harden the shared-memory mount
+Documentation=file:/usr/share/doc/punar/security.md
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target
+ConditionPathIsMountPoint=/dev/shm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mount -o remount,rw,nosuid,nodev,noexec,mode=1777 /dev/shm
+
+[Install]
+WantedBy=sysinit.target

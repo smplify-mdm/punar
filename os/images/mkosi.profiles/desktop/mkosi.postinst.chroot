@@ -41,6 +41,10 @@ install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
 ln -sfn ../punar-update-health.service \
     /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
+# /dev/shm is mounted by the initrd and survives switch-root. Apply the
+# product noexec contract in the host manager before sysinit completes.
+systemctl enable punar-shm-hardening.service
+
 # Podman is a rootless CLI by default. Distribution packages sometimes enable
 # a global user API socket plus periodic lifecycle jobs during installation;
 # leave those opt-in so an idle developer session pays no daemon or timer cost.

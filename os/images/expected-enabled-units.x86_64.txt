@@ -25,6 +25,7 @@ etc/systemd/system/sockets.target.wants/systemd-report-cgroup.socket -> /usr/lib
 etc/systemd/system/sockets.target.wants/systemd-resolved-monitor.socket -> /usr/lib/systemd/system/systemd-resolved-monitor.socket
 etc/systemd/system/sockets.target.wants/systemd-resolved-varlink.socket -> /usr/lib/systemd/system/systemd-resolved-varlink.socket
 etc/systemd/system/sockets.target.wants/systemd-userdbd.socket -> /usr/lib/systemd/system/systemd-userdbd.socket
+etc/systemd/system/sysinit.target.wants/punar-shm-hardening.service -> /usr/lib/systemd/system/punar-shm-hardening.service
 etc/systemd/system/sysinit.target.wants/systemd-boot-clear-sysfail.service -> /usr/lib/systemd/system/systemd-boot-clear-sysfail.service
 etc/systemd/system/sysinit.target.wants/systemd-boot-update.service -> /usr/lib/systemd/system/systemd-boot-update.service
 etc/systemd/system/sysinit.target.wants/systemd-confext.service -> /usr/lib/systemd/system/systemd-confext.service

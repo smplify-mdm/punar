@@ -45,6 +45,10 @@ install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
 ln -sfn ../punar-update-health.service \
     /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
+# The initrd's /dev/shm mount crosses switch-root; harden that live mount
+# before the host reaches sysinit, identically to the x86 product image.
+systemctl enable punar-shm-hardening.service
+
 # Debian's Chromium wrapper reads /etc/chromium.d rather than Arch's
 # /etc/chromium-flags.conf directly. Keep the product defaults in one source
 # and adapt the launcher mechanism without writing enterprise policy.
