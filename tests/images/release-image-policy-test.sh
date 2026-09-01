@@ -135,6 +135,17 @@ MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 [ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
 echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
 
+MINIMAL="${TEST_ROOT}/minimal-dev"
+mkdir -p "${MINIMAL}"
+PROFILES='dev' \
+BUILDROOT="${MINIMAL}" \
+ARCHITECTURE=x86-64 \
+SRCDIR="${REPO_ROOT}/os/images" \
+MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
+    "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
+[ ! -e "${MINIMAL}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service" ]
+echo 'ok   mkosi finalize leaves the minimal dev profile free of desktop mount policy'
+
 expect_fail A1 mutate_a1
 expect_fail A2 mutate_a2
 expect_fail A3 mutate_a3
