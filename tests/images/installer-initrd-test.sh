@@ -5,6 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UNIT_ROOT="${REPO_ROOT}/os/images/installer-initrd/usr/lib/systemd/system"
 INSTALLER_CONF="${REPO_ROOT}/os/images/mkosi.profiles/installer/mkosi.conf"
+DESKTOP_CONF="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.conf"
 
 fail() {
     echo "installer-initrd-test: FAIL: $*" >&2
@@ -48,6 +49,7 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
+assert_line "${DESKTOP_CONF}" '         dosfstools'
 [ -x "${INITRD_BUILDER}" ] || fail 'installer initrd builder is not executable'
 [ -x "${STAGE_SCRIPT}" ] || fail 'runtime proof staging script is not executable'
 [ -x "${RUNTIME_SCRIPT}" ] || fail 'runtime proof script is not executable'

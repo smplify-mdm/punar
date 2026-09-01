@@ -2818,6 +2818,50 @@ fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<
     Ok(())
 }
 
+const FIXED_TOOL_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
+
+/// Drain a fixed tool's stderr without allowing a child to block on a full
+/// pipe. Only the first bounded prefix is retained; the rest is discarded.
+/// Installer secrets are supplied exclusively on anonymous stdin and cannot
+/// enter this stream.
+fn read_fixed_tool_diagnostic(mut stderr: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut retained = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stderr.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let available = FIXED_TOOL_DIAGNOSTIC_MAX_BYTES.saturating_sub(retained.len());
+        let keep = read.min(available);
+        retained.extend_from_slice(&buffer[..keep]);
+        truncated |= keep != read;
+    }
+    Ok((retained, truncated))
+}
+
+fn sanitize_fixed_tool_diagnostic(bytes: &[u8], truncated: bool) -> String {
+    let normalized = String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match (normalized.is_empty(), truncated) {
+        (true, _) => "no diagnostic output".into(),
+        (false, true) => format!("{normalized} [diagnostic truncated]"),
+        (false, false) => normalized,
+    }
+}
+
 fn run_systemd_repart(
     binary: &Path,
     definitions: &Path,
@@ -2835,7 +2879,7 @@ fn run_systemd_repart(
             "--pretty=no",
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if passphrase.is_some() {
         command.arg("--key-file=/dev/stdin").stdin(Stdio::piped());
     } else {
@@ -2844,6 +2888,12 @@ fn run_systemd_repart(
     command.arg(definitions_arg).arg(target);
 
     let mut child = command.spawn()?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        InstallError::Io(std::io::Error::other(
+            "systemd-repart did not provide its fixed diagnostic pipe",
+        ))
+    })?;
+    let diagnostic_reader = std::thread::spawn(move || read_fixed_tool_diagnostic(stderr));
     if let Some(secret) = passphrase {
         let write_result = child
             .stdin
@@ -2857,14 +2907,21 @@ fn run_systemd_repart(
         if let Err(error) = write_result {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = diagnostic_reader.join();
             return Err(error);
         }
     }
     let status = child.wait()?;
+    let (diagnostic, truncated) = diagnostic_reader.join().map_err(|_| {
+        InstallError::Io(std::io::Error::other(
+            "systemd-repart diagnostic reader terminated unexpectedly",
+        ))
+    })??;
     if !status.success() {
-        return Err(InstallError::Io(std::io::Error::other(
-            "systemd-repart did not prepare the fixed Punar disk layout",
-        )));
+        return Err(InstallError::Io(std::io::Error::other(format!(
+            "systemd-repart did not prepare the fixed Punar disk layout: {}",
+            sanitize_fixed_tool_diagnostic(&diagnostic, truncated)
+        ))));
     }
     Ok(())
 }
@@ -5128,6 +5185,21 @@ mod tests {
                 AuditOutcome::Success,
             ),
         }
+    }
+
+    #[test]
+    fn fixed_tool_diagnostics_are_drained_bounded_and_single_line() {
+        let mut source = b"mkfs.vfat failed:\n\x1b[31munsupported\r\n".to_vec();
+        source.resize(FIXED_TOOL_DIAGNOSTIC_MAX_BYTES + 7, b'x');
+        let (retained, truncated) =
+            read_fixed_tool_diagnostic(std::io::Cursor::new(source)).unwrap();
+
+        assert_eq!(retained.len(), FIXED_TOOL_DIAGNOSTIC_MAX_BYTES);
+        assert!(truncated);
+        let diagnostic = sanitize_fixed_tool_diagnostic(&retained, truncated);
+        assert!(diagnostic.starts_with("mkfs.vfat failed: [31munsupported"));
+        assert!(diagnostic.ends_with("[diagnostic truncated]"));
+        assert!(!diagnostic.contains(['\n', '\r', '\x1b']));
     }
 
     #[cfg(target_os = "linux")]
