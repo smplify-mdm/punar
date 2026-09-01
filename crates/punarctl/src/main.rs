@@ -1617,6 +1617,115 @@ fn install_proof_recovery_confirmation(
     )))
 }
 
+#[cfg(target_os = "linux")]
+fn join_installer_apply_proof(
+    apply: std::thread::JoinHandle<Result<Value, CallError>>,
+) -> Result<Value, String> {
+    apply
+        .join()
+        .map_err(|_| "the installer apply client thread terminated unexpectedly".to_string())?
+        .map_err(|error| error.message())
+}
+
+/// Read one line from the private recovery socket while keeping the VM proof
+/// observable. Only the public phase/state vocabulary is emitted; recovery
+/// material, descriptor numbers, disk paths and failure details never become
+/// progress output. If install.apply exits first, join it immediately so the
+/// daemon's exact typed failure is surfaced instead of being hidden behind a
+/// long socket timeout.
+#[cfg(target_os = "linux")]
+fn read_installer_proof_disclosure_line(
+    disclosure: &mut BufReader<UnixStream>,
+    line: &mut String,
+    description: &str,
+    client: &Client,
+    apply: &mut Option<std::thread::JoinHandle<Result<Value, CallError>>>,
+    deadline: Instant,
+    last_progress: &mut Option<String>,
+) -> Result<(), String> {
+    loop {
+        match disclosure.read_line(line) {
+            Ok(0) => {
+                if apply.as_ref().is_some_and(|handle| handle.is_finished()) {
+                    let result = join_installer_apply_proof(
+                        apply.take().expect("the finished apply handle is present"),
+                    );
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(format!(
+                            "install.apply ended before {description} was disclosed"
+                        )),
+                    };
+                }
+                return Err(format!(
+                    "the recovery disclosure channel closed before {description}"
+                ));
+            }
+            Ok(_) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if apply.as_ref().is_some_and(|handle| handle.is_finished()) {
+                    let result = join_installer_apply_proof(
+                        apply.take().expect("the finished apply handle is present"),
+                    );
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(format!(
+                            "install.apply ended before {description} was disclosed"
+                        )),
+                    };
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "install.apply did not disclose {description} within 25 minutes"
+                    ));
+                }
+
+                let status: InstallStatusResult = serde_json::from_value(
+                    client
+                        .call("install.status", None)
+                        .map_err(|error| error.message())?,
+                )
+                .map_err(|error| format!("install.status returned an invalid result ({error})"))?;
+                if status.state == InstallOverallState::Failed {
+                    let failure = status
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.message.as_str())
+                        .unwrap_or("the daemon did not publish a failure reason");
+                    return Err(format!(
+                        "install.apply failed before {description}: {failure}"
+                    ));
+                }
+                let marker = format!(
+                    "PUNAR_INSTALL_APPLY_PROGRESS phase={} state={}",
+                    status
+                        .phase
+                        .map(|phase| format!("{phase:?}").to_ascii_lowercase())
+                        .unwrap_or_else(|| "none".into()),
+                    format!("{:?}", status.state).to_ascii_lowercase()
+                );
+                if last_progress.as_deref() != Some(marker.as_str()) {
+                    let mut stdout = std::io::stdout().lock();
+                    writeln!(stdout, "{marker}")
+                        .and_then(|()| stdout.flush())
+                        .map_err(|error| format!("could not publish installer progress ({error})"))?;
+                    *last_progress = Some(marker);
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not read {description} from the recovery disclosure ({error})"
+                ));
+            }
+        }
+    }
+}
+
 /// The destructive VM gate deliberately has no caller-controlled disk,
 /// passphrase or recovery material. It can run only as root in the live image
 /// while QEMU presents the named proof port; the daemon still revalidates the
@@ -1705,7 +1814,7 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
     let (recovery_writer, recovery_reader) = UnixStream::pair()
         .map_err(|error| format!("could not create the recovery disclosure channel ({error})"))?;
     recovery_reader
-        .set_read_timeout(Some(Duration::from_secs(15 * 60)))
+        .set_read_timeout(Some(Duration::from_secs(1)))
         .map_err(|error| format!("could not bound the recovery disclosure wait ({error})"))?;
 
     let apply_params = InstallApplyParams {
@@ -1728,28 +1837,53 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
     };
     let apply_value = serde_json::to_value(&apply_params).map_err(|error| error.to_string())?;
     let apply_socket = socket.map(Path::to_path_buf);
-    let apply = std::thread::spawn(move || {
+    let mut apply = Some(std::thread::spawn(move || {
+        // These owners must live for exactly as long as the daemon call may
+        // duplicate their descriptors. Moving the recovery writer here also
+        // guarantees EOF at the reader if install.apply returns early.
+        let _passphrase_guard = passphrase;
+        let _recovery_writer_guard = recovery_writer;
         let apply_client = Client::for_target(Target::Punard, apply_socket.as_deref());
         apply_client.call_with_timeout(
             "install.apply",
             Some(apply_value),
             Duration::from_secs(60 * 60),
         )
-    });
+    }));
 
     let mut disclosure = BufReader::new(recovery_reader);
     let mut header = String::new();
     let mut recovery_key = Zeroizing::new(String::new());
     let mut challenge = String::new();
-    disclosure
-        .read_line(&mut header)
-        .map_err(|error| format!("could not read the recovery disclosure header ({error})"))?;
-    disclosure
-        .read_line(&mut recovery_key)
-        .map_err(|error| format!("could not read the recovery disclosure ({error})"))?;
-    disclosure
-        .read_line(&mut challenge)
-        .map_err(|error| format!("could not read the recovery challenge ({error})"))?;
+    let disclosure_deadline = Instant::now() + Duration::from_secs(25 * 60);
+    let mut last_progress = None;
+    read_installer_proof_disclosure_line(
+        &mut disclosure,
+        &mut header,
+        "the recovery protocol header",
+        &client,
+        &mut apply,
+        disclosure_deadline,
+        &mut last_progress,
+    )?;
+    read_installer_proof_disclosure_line(
+        &mut disclosure,
+        &mut recovery_key,
+        "the recovery key",
+        &client,
+        &mut apply,
+        disclosure_deadline,
+        &mut last_progress,
+    )?;
+    read_installer_proof_disclosure_line(
+        &mut disclosure,
+        &mut challenge,
+        "the recovery challenge",
+        &client,
+        &mut apply,
+        disclosure_deadline,
+        &mut last_progress,
+    )?;
     if header.trim_end() != "PUNAR-RECOVERY-V1" {
         return Err("the recovery disclosure protocol version was invalid".into());
     }
@@ -1794,10 +1928,11 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
         )
         .map_err(|error| error.message())?;
 
-    let result = apply
-        .join()
-        .map_err(|_| "the installer apply client thread terminated unexpectedly".to_string())?
-        .map_err(|error| error.message())?;
+    let result = join_installer_apply_proof(
+        apply
+            .take()
+            .ok_or_else(|| "the installer apply client thread ended too early".to_string())?,
+    )?;
     let status: InstallStatusResult = serde_json::from_value(result)
         .map_err(|error| format!("install.apply returned an invalid status ({error})"))?;
     if status.state != InstallOverallState::Succeeded
