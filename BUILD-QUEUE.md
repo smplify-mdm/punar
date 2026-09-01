@@ -40,16 +40,19 @@ automatic-fallback path is implemented and canonical ARM64 CI-proven. Channel
 transport/promotion, production key custody, and end-to-end production
 repository coverage remain unshipped.
 
-The first public governed-update slice is now implemented: `punarctl update
-status` obtains bounded local evidence through the read-only `update.status`
-IPC method and reports release identity, actual/desired slot, health signals,
-rollback state, channel provenance, and browser-package provenance without
-inventing unavailable values. Personal devices can select `stable`, `dev`, or
-`edge` through the durable `system.update_channel` capability; enrollment
-policy continues to win through the normal effective-policy engine. Targeted
-Rust unit and daemon/CLI integration suites pass. This is status and channel
-selection only: authenticated `update.check`, `update.apply`, and
-`update.rollback` transactions plus production channel transport remain open.
+The first two governed-update slices are implemented. `punarctl update status`
+obtains bounded local evidence through the read-only `update.status` IPC method
+and reports release identity, actual/desired slot, health signals, rollback
+state, channel provenance, and browser-package provenance without inventing
+unavailable values. Personal devices can select `stable`, `dev`, or `edge`
+through the durable `system.update_channel` capability; enrollment policy
+continues to win through the normal effective-policy engine. The current
+working tree also adds root-only, audited `update.check`: it verifies exact-byte
+Ed25519 channel metadata against the device image/architecture/platform/channel,
+computes rollout eligibility locally, and atomically caches only authenticated
+state. Unit and daemon/CLI integration suites pass locally; canonical CI is
+still required before calling the discovery slice shipped. `update.apply`,
+`update.rollback`, and production HTTPS channel transport remain open.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
@@ -781,7 +784,15 @@ decisions. Managed per-app settings remain a separate typed-adapter milestone;
 Punar does not project undocumented macOS/Windows vendor settings onto Linux.
 Connected ARM/HVF testing also proved the corrected Firefox native-detail path,
 including its pinned source and verified permissions; third-party native UI
-compatibility remains open. Generic web-app
+compatibility remains open. Connected ARM/HVF testing later exposed a native
+Electron OAuth defect: every callback launch entered a fresh PID namespace, so
+the callback process could not join the primary app's `second-instance`
+handoff. The current working tree retains PID isolation but gives each app one
+private namespace-owning session and a `0600` callback socket; catalog and URI
+scheme validation still run for every relay. Static contracts and Rust tests
+pass locally. A rebuilt image plus a real user OAuth round-trip and canonical
+dual-architecture CI are still required before closing that compatibility gate.
+Generic web-app
 creation, persistent launchers, browser contexts and the complete M11 check
 remain open. M12's implementation, daemon/CLI/image integration and event-driven
 reconciliation are complete: the same canonical run emitted `PUNAR_M12_OK`

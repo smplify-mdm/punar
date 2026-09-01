@@ -920,13 +920,28 @@ fn a_detection_gets_a_persisted_record_and_a_bounded_ledger() {
         "cwd",
         "cmdline",
         "argv",
-        "2410",
     ] {
         assert!(
             !ledger_text.contains(forbidden),
             "{forbidden:?} must be unrepresentable in a ledger record: {ledger_text}"
         );
     }
+    fn contains_exact(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(value) => value == needle,
+            Value::Number(value) => value.to_string() == needle,
+            Value::Array(values) => values.iter().any(|value| contains_exact(value, needle)),
+            Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| key == needle || contains_exact(value, needle)),
+            Value::Null | Value::Bool(_) => false,
+        }
+    }
+    let ledger_json: Value = serde_json::from_str(&ledger_text).unwrap();
+    assert!(
+        !contains_exact(&ledger_json, "pid") && !contains_exact(&ledger_json, "2410"),
+        "the process id must be absent as a field or exact value: {ledger_text}"
+    );
     // The zone survived as a *class*; the path it came from did not.
     assert!(ledger_text.contains("downloads"));
     let served = serde_json::to_string(&access).unwrap();

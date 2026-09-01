@@ -47,7 +47,9 @@ use punar_common::ipc::{
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
-use punar_common::update::{UpdateChannel, UpdateStatusResult};
+use punar_common::update::{
+    UpdateChannel, UpdateCheckParams, UpdateCheckResult, UpdateStatusResult,
+};
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
@@ -72,6 +74,7 @@ use crate::state::{
     MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
     migrate_m3_store,
 };
+use crate::update_check::{UpdateCheckEngine, UpdateCheckError, UpdateCheckSources};
 use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
 
@@ -217,12 +220,20 @@ pub struct DaemonConfig {
     /// Read-only local evidence consumed by `update.status`. Production uses
     /// fixed OS paths; tests inject ordinary files.
     pub update_status_sources: UpdateStatusSources,
+    /// Fixed authenticated channel source, trust anchors and verified-cache
+    /// paths consumed by `update.check`. No field is caller-controlled.
+    pub update_check_sources: UpdateCheckSources,
 }
 
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
         let status_file = state_dir.join("status.json");
         let approvals_file = state_dir.join("approvals.json");
+        let update_check_sources = UpdateCheckSources {
+            cached_channel: state_dir.join("update/verified-channel.json"),
+            cached_signature: state_dir.join("update/verified-channel.json.sig"),
+            ..UpdateCheckSources::default()
+        };
         DaemonConfig {
             socket_path,
             state_dir,
@@ -250,6 +261,7 @@ impl DaemonConfig {
             live_mode: false,
             installer_sources: InstallerSources::default(),
             update_status_sources: UpdateStatusSources::default(),
+            update_check_sources,
         }
     }
 }
@@ -374,6 +386,8 @@ struct Inner {
     app_mutation: Mutex<()>,
     installer: Installer,
     update_status: UpdateStatusEngine,
+    update_check: UpdateCheckEngine,
+    update_check_lock: Mutex<()>,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -417,6 +431,7 @@ impl Daemon {
         installer_sources.live_audit_path = cfg.audit_path.clone();
         let installer = Installer::new(installer_sources);
         let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
+        let update_check = UpdateCheckEngine::new(cfg.update_check_sources.clone());
         if cfg.live_mode {
             installer
                 .initialize_status_file()
@@ -541,6 +556,8 @@ impl Daemon {
                 app_mutation: Mutex::new(()),
                 installer,
                 update_status,
+                update_check,
+                update_check_lock: Mutex::new(()),
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
@@ -1000,6 +1017,39 @@ fn install_recovery_event(device_id: &str, actor: &AuditActor) -> AuditEvent {
     event
 }
 
+fn update_check_ipc_error(error: UpdateCheckError) -> IpcError {
+    let stage = error.stage();
+    if error.is_unreachable() {
+        return IpcError::with_details(
+            ErrorCode::UpstreamUnreachable,
+            format!(
+                "Punar could not reach its configured update source: {error}. The running release and verified cache were not changed.\n\
+                 Policy: governed updates never fall through to another channel or an unverified mirror.\n\
+                 Next step: reconnect the configured update source and retry `sudo punarctl update check`."
+            ),
+            json!({ "stage": stage }),
+        );
+    }
+    if error.is_untrusted() {
+        return IpcError::with_details(
+            ErrorCode::UntrustedArtifact,
+            "This release could not be verified. Punar will not install software it cannot check. The running release and verified cache were not changed.\n\
+             Policy: every channel document must match this device and verify against the pinned release-key set.\n\
+             Next step: do not retry from another mirror; inspect the release publication and trusted-key deployment.",
+            json!({ "stage": stage }),
+        );
+    }
+    IpcError::with_details(
+        ErrorCode::Internal,
+        format!(
+            "Punar could not complete the authenticated update check: {error}. The running release was not changed.\n\
+             Policy: incomplete local identity or an unwritable verified cache fails closed.\n\
+             Next step: inspect `journalctl -u punard` and the root-owned update state, then retry."
+        ),
+        json!({ "stage": stage }),
+    )
+}
+
 fn write_personal_recovery_disclosure(
     output: &mut dyn Write,
     recovery_key: &str,
@@ -1180,6 +1230,7 @@ impl Inner {
             Method::AppsInstall(params) => self.handle_apps_install(peer, params),
             Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
+            Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::InstallTargets => self
                 .installer
                 .targets()
@@ -1212,6 +1263,93 @@ impl Inner {
             status.channel.policy_ids = vec![entry.provenance.policy_id.clone()];
         }
         status
+    }
+
+    fn handle_update_check(
+        &self,
+        peer: &Peer,
+        params: &UpdateCheckParams,
+    ) -> Result<Value, IpcError> {
+        const ACTION: &str = "update.check";
+        const RESOURCE: &str = "update_channel";
+        let actor = self.actor_of(peer);
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                RESOURCE,
+            ));
+            return Err(IpcError::denied_needs_root(
+                "checking the governed update channel",
+                Some(RESOURCE),
+                "sudo punarctl update check",
+            ));
+        }
+
+        let channel = self
+            .effective
+            .lock()
+            .unwrap()
+            .get("system.update_channel")
+            .and_then(|entry| effective_update_channel(&entry.value))
+            .ok_or_else(|| {
+                let mut event = AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                );
+                event.policy_ids = vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.into()];
+                self.log_audit(event);
+                IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    "Punar could not check for updates because the effective update channel is invalid. The running release was not changed.\n\
+                     Policy: the precedence-resolved system.update_channel value must be stable, dev, or edge.\n\
+                     Next step: inspect `punarctl policy explain system.update_channel` and correct the winning policy.",
+                    json!({ "stage": "effective_channel" }),
+                )
+            })?;
+
+        let _guard = self.update_check_lock.lock().unwrap();
+        match self
+            .update_check
+            .check(channel, &self.device_id, params.force)
+        {
+            Ok(result) => {
+                let outcome = if result.admissible {
+                    AuditOutcome::Success
+                } else {
+                    AuditOutcome::Noop
+                };
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    outcome,
+                ));
+                Ok(to_value::<UpdateCheckResult>(result))
+            }
+            Err(error) => {
+                let mut event = AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    RESOURCE,
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                );
+                if error.is_unreachable() {
+                    event.result = "unreachable".into();
+                }
+                self.log_audit(event);
+                Err(update_check_ipc_error(error))
+            }
+        }
     }
 
     fn handle_install_plan(

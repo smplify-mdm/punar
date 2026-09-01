@@ -15,7 +15,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use punar_common::update::{
-    DesiredReleaseState, RollbackState, UpdateHealthState, UpdateSlot, UpdateStatusResult,
+    DesiredReleaseState, RollbackState, UpdateCheckResult, UpdateHealthState, UpdateSlot,
+    UpdateStatusResult,
 };
 
 use crate::fmt::{self, Row, Slot, Style};
@@ -223,6 +224,63 @@ pub fn update_status(style: &Style, result: &Value) -> Result<String, String> {
                 Slot::Warn,
                 "browser updates currently ride the complete signed OS image",
             ),
+        ],
+    ));
+    Ok(out)
+}
+
+/// `punarctl update check`: render the authenticated selection decision, not
+/// merely transport success. A signed but halted/out-of-cohort head remains a
+/// calm no-op with the reason visible.
+pub fn update_check(style: &Style, result: &Value) -> Result<String, String> {
+    let check: UpdateCheckResult = parse(result)?;
+    let mut out = fmt::masthead(style, "Update check", &check.channel.to_string());
+    out.push_str(&fmt::section(style, "Decision", "signed channel metadata"));
+    let available = check
+        .available
+        .map(|version| version.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let source = if check.cached {
+        format!("verified cache · {}s old", check.metadata_age_seconds)
+    } else {
+        "configured source · verified now".to_string()
+    };
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Current",
+                &check.current.to_string(),
+                Slot::Ok,
+                "running image",
+            ),
+            Row::new(
+                "Available",
+                &available,
+                if check.available.is_some() {
+                    Slot::Warn
+                } else {
+                    Slot::Neutral
+                },
+                check.reason.as_deref().unwrap_or("signed channel head"),
+            ),
+            Row::new(
+                "Eligible",
+                if check.admissible { "yes" } else { "no" },
+                if check.admissible {
+                    Slot::Ok
+                } else {
+                    Slot::Neutral
+                },
+                if check.halted {
+                    "channel halted"
+                } else if !check.in_cohort {
+                    "outside staged rollout"
+                } else {
+                    "target and rollout checks passed"
+                },
+            ),
+            Row::new("Evidence", &source, Slot::Neutral, "Ed25519 verified"),
         ],
     ));
     Ok(out)

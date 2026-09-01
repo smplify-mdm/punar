@@ -207,6 +207,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.install` | **human, personal device only** | yes | always |
 | `apps.remove` | **human, personal device only** | yes | always |
 | `update.status` | any connected peer | no | no |
+| `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 | `install.apply` | **root human only, live environment only** | yes | always (`success`, `denied`, `failure`) |
@@ -672,18 +673,22 @@ generates its own desktop entry. Debian control archives and maintainer scripts
 are never executed, and no vendor repository is registered. A custom URI scheme
 is registered only when both the upstream desktop entry and the signed Punar
 catalog declare it, and only while that app is installed. The launcher accepts
-only those catalog-owned schemes as fixed argv values after Bubblewrap's option
-separator; callback URIs never transit punard, the audit log, the shell, or an
-environment variable.
+only those catalog-owned schemes. Callback URIs never transit punard, the audit
+log, a shell string, or an environment variable: the host launcher receives
+them over an anonymous pipe and later launches use a per-app `0600` Unix socket.
 
 The launcher uses Bubblewrap with a read-only system/app payload, isolated
 writable app home, a per-app session-only temporary directory, dropped
 capabilities and only the desktop runtime, display/audio, GPU and network
-surfaces declared in the inspection card. Sharing that temporary directory
-between invocations of the *same* app lets an Electron callback process hand
-OAuth back to its existing process; other apps cannot see it and logout removes
-it. No request field can supply a URL, remote, ref, digest, executable or
-option. A user's own `~/.config/mimeapps.list` and administrator defaults in
+surfaces declared in the inspection card. One tiny session process owns that
+app's PID namespace. A later open or OAuth callback is authenticated against
+the signed catalog, relayed through the private socket, and launched inside the
+*same* namespace; Electron can therefore deliver `second-instance` to the
+process that initiated sign-in. The URI appears only as the vendor process's
+fixed argv inside its app sandbox, which is Electron's Linux deep-link
+contract. Other apps cannot see the socket or temporary directory, and logout
+removes both. No request field can supply a URL, remote, ref, digest, executable
+or option. A user's own `~/.config/mimeapps.list` and administrator defaults in
 the inherited XDG config directories continue to outrank the Punar fallback.
 
 The call is allowed for a human-attributed peer on a personal device.
@@ -713,9 +718,9 @@ home is retained for explicit data deletion or reinstall. Audit action is
 
 Params: none. Read-only and unaudited. This is the implemented first slice of
 the governed-update contract in
-`docs/development/update-and-rollback.md` §8.1; `update.check`,
-`update.apply`, and `update.rollback` do not enter the closed method table
-until their complete authenticated transactions exist.
+`docs/development/update-and-rollback.md` §8.1. Authenticated discovery now
+exists as `update.check`; `update.apply` and `update.rollback` do not enter the
+closed method table until their complete authenticated transactions exist.
 
 The result has `v: 1` plus the five system facts required by spec section 57
 (current, desired, channel, health, rollback) and M11's browser provenance:
@@ -746,10 +751,63 @@ value from local release, kernel/firmware, durable pending, health, policy,
 and package-database evidence. Missing or malformed evidence is represented
 as `unknown`/`unavailable` with a `reason`; it never becomes a sample version,
 an available update, or an “up to date” claim. Raw channel metadata is not
-trusted by this read: only a future successful `update.check` may create the
-verified cached state that status reports.
+trusted by this read: only a successful `update.check` may create the verified
+cached state that status reports.
 
-### 5.17 `install.targets`
+### 5.17 `update.check`
+
+Strict params:
+
+```json
+{"force":false}
+```
+
+Root-only and audited. The request may select only whether to bypass the
+15-minute verified cache. A caller cannot provide a URL, path, channel, key,
+target identity, mirror, artifact, digest, executable, or option. The daemon
+resolves the precedence-winning `system.update_channel`, running image id and
+version, host architecture, boot platform, device cohort identity, fixed
+repository location, and root-owned Ed25519 key set itself.
+
+The implemented transport reads the bounded `channel.json` and detached raw
+64-byte signature from `/run/punar/update-source`; it is the same authenticated
+selection transaction used by offline CI and mounted repository media, not a
+claim that production HTTPS channel transport has shipped. Signature
+verification covers the exact document bytes. The signed image id,
+architecture, boot platform and channel must all match this device before the
+document can influence selection or enter the cache. The cache directory is
+`0700`, both cache files are `0600`, and document publication is the last
+atomic, synced write. An absent source, invalid signature, wrong target,
+incomplete local identity, or cache failure never changes the running release
+and never admits unverified metadata.
+
+Example result:
+
+```json
+{
+  "v": 1,
+  "channel": "stable",
+  "current": "2026.08.20.1",
+  "available": "2026.08.27.1",
+  "in_cohort": true,
+  "halted": false,
+  "admissible": true,
+  "reason": null,
+  "metadata_age_seconds": 0,
+  "cached": false
+}
+```
+
+`available` names a newer signed channel head; `admissible` is the actual
+selection decision after halt, minimum-version, and rollout-cohort checks. A
+valid but halted, already-current, below-minimum, or out-of-cohort result is a
+calm audited `noop` with a human-readable `reason`. An authenticated eligible
+selection is audited `success`; authorization denial, unreachable source and
+trust/cache failures are all audited distinctly. This method discovers and
+caches a decision only. It does not download, stage, apply, reboot, bless, or
+roll back a release.
+
+### 5.18 `install.targets`
 
 Params: none. Read-only and not audited. This method exists only when the
 daemon read the exact `punar.live=1` token from `/proc/cmdline`; an installed
@@ -767,7 +825,7 @@ GPT/alignment floor remains visible with `eligible: false` and the full
 
 The implementation is discovery only. It opens no target device for writing.
 
-### 5.18 `install.plan`
+### 5.19 `install.plan`
 
 Strict params:
 
@@ -832,7 +890,7 @@ so even the two challenged key groups stay out of IPC JSON. The in-memory gate
 has no timeout/default-continue and consumes a confirmation only for the exact
 plan token.
 
-### 5.19 `install.apply` and `install.recovery_ack`
+### 5.20 `install.apply` and `install.recovery_ack`
 
 `install.apply` is root-only, live-only and human-only. Agent attribution is
 checked before uid, descriptor duplication, release reads or disk access, so
@@ -879,7 +937,7 @@ status and cancel any recovery gate. The installed audit is written and
 byte-verified before success. There is no `install.exec`, script, hook or
 caller-supplied command/path.
 
-### 5.20 `install.status`
+### 5.21 `install.status`
 
 Params: none. Read-only, unaudited and live-only. The result is the same
 secret-free object written atomically at `0644` to

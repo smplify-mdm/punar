@@ -494,11 +494,14 @@ private relay. Anything dashed in the design language is here by construction.
 **Not built:** unattended signed-answer installation, physical install/recovery
 qualification, a broad catalog and broad-filesystem consent path, execution
 trust, generic user-defined web-app install and browser contexts (M11), the
-authenticated governed-update check/apply/rollback transactions and production
+authenticated governed-update apply/rollback transactions and production
 channel transport, and physical Raspberry Pi boot/peripheral/fault-injection
-proof. The read-only `update.status` surface and the governed
-`system.update_channel` selector are implemented and covered by targeted local
-unit/integration suites; neither statement is physical-device proof.
+proof. The read-only `update.status` surface and governed
+`system.update_channel` selector are implemented. The current working tree
+adds root-only authenticated `update.check` with target-bound Ed25519 metadata,
+local cohort selection, a private verified cache, negative daemon coverage and
+CLI rendering; local suites pass, but this discovery slice is not canonical
+until its remote run passes. None of these statements is physical-device proof.
 Generic QEMU ARM64 and A/B partition/update primitives are real; they are not
 Pi support.
 

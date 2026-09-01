@@ -52,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::install::{InstallApplyParams, InstallPlanParams, InstallRecoveryAckParams};
+use crate::update::UpdateCheckParams;
 use thiserror::Error;
 
 use crate::approval::{
@@ -174,6 +175,9 @@ pub enum ErrorCode {
     /// `enroll.start` never surface as request errors; they queue per SPEC
     /// section 55. `details.stage` names the failing pipeline stage.
     UpstreamUnreachable,
+    /// A signed update document failed signature, target or trusted-key
+    /// validation. Never retried as a transport error and never cached.
+    UntrustedArtifact,
     /// M9 (contract section 14.1): the call is **gated**. An approval was
     /// created and **nothing was executed** — this is a refusal to act, not
     /// a queued action. `details` carries `approval_id`, `expires_at`,
@@ -191,7 +195,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// All wire codes, in contract-table order.
-    pub const ALL: [ErrorCode; 13] = [
+    pub const ALL: [ErrorCode; 14] = [
         ErrorCode::MalformedRequest,
         ErrorCode::UnsupportedVersion,
         ErrorCode::UnknownMethod,
@@ -203,6 +207,7 @@ impl ErrorCode {
         ErrorCode::Internal,
         ErrorCode::Conflict,
         ErrorCode::UpstreamUnreachable,
+        ErrorCode::UntrustedArtifact,
         ErrorCode::ApprovalRequired,
         ErrorCode::Expired,
     ];
@@ -221,6 +226,7 @@ impl ErrorCode {
             ErrorCode::Internal => "internal",
             ErrorCode::Conflict => "conflict",
             ErrorCode::UpstreamUnreachable => "upstream_unreachable",
+            ErrorCode::UntrustedArtifact => "untrusted_artifact",
             ErrorCode::ApprovalRequired => "approval_required",
             ErrorCode::Expired => "expired",
         }
@@ -779,6 +785,9 @@ pub enum Method {
     /// evidence. Any admitted peer may inspect it; no check or mutation is
     /// hidden behind this method.
     UpdateStatus,
+    /// `update.check` — root-only authenticated discovery. The caller may
+    /// request a fresh check but cannot supply an origin, path or key.
+    UpdateCheck(UpdateCheckParams),
     /// `install.targets` — live-environment disk discovery. Read-only; the
     /// daemon makes it `unknown_method` on an installed system.
     InstallTargets,
@@ -800,7 +809,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 29] = [
+    pub const NAMES: [&'static str; 30] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -825,6 +834,7 @@ impl Method {
         "apps.install",
         "apps.remove",
         "update.status",
+        "update.check",
         "install.targets",
         "install.plan",
         "install.apply",
@@ -860,6 +870,7 @@ impl Method {
             Method::AppsInstall(_) => "apps.install",
             Method::AppsRemove(_) => "apps.remove",
             Method::UpdateStatus => "update.status",
+            Method::UpdateCheck(_) => "update.check",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
             Method::InstallApply(_) => "install.apply",
@@ -915,6 +926,7 @@ impl Method {
             | Method::AppsInstall(_)
             | Method::AppsRemove(_) => false,
             Method::UpdateStatus => false,
+            Method::UpdateCheck(_) => true,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
@@ -951,6 +963,7 @@ impl Method {
             Method::AppsCatalog(p) => serde_json::to_value(p),
             Method::AppsInstall(p) => serde_json::to_value(p),
             Method::AppsRemove(p) => serde_json::to_value(p),
+            Method::UpdateCheck(p) => serde_json::to_value(p),
             Method::InstallPlan(p) => serde_json::to_value(p),
             Method::InstallApply(p) => serde_json::to_value(p),
             Method::InstallRecoveryAck(p) => serde_json::to_value(p),
@@ -1022,6 +1035,7 @@ impl Method {
             "update.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
+            "update.check" => Self::parse_required_params(method, params).map(Method::UpdateCheck),
             "install.targets" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
             }
@@ -1897,6 +1911,7 @@ mod tests {
             "internal",
             "conflict",
             "upstream_unreachable",
+            "untrusted_artifact",
             "approval_required",
             "expired",
         ];
@@ -2037,6 +2052,7 @@ mod tests {
                 id: "spotify".to_string(),
             }),
             Method::UpdateStatus,
+            Method::UpdateCheck(UpdateCheckParams { force: false }),
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
                 disk: "/dev/vda".to_string(),
@@ -2110,6 +2126,7 @@ mod tests {
                     // `Method::requires_root`).
                     | "approvals.create"
                     | "approvals.consume"
+                    | "update.check"
                     | "install.plan"
                     | "install.apply"
                     | "install.recovery_ack"
@@ -2277,6 +2294,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn update_check_has_one_strict_non_origin_parameter() {
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"update.check","params":{"force":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::UpdateCheck(UpdateCheckParams { force: true })
+        ));
+        for forbidden in ["origin", "url", "path", "key"] {
+            let line = format!(
+                r#"{{"v":1,"id":"1","method":"update.check","params":{{"force":false,"{forbidden}":"caller-controlled"}}}}"#
+            );
+            let reject = Request::parse_json_line(&line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
+        }
     }
 
     #[test]

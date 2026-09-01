@@ -9,6 +9,7 @@ ARM_PROFILE="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf"
 HYPR_LUA="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
 HYPR_LEGACY="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.conf"
 SESSION="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh"
+PUNARCTL="${REPO_ROOT}/crates/punarctl/src/main.rs"
 
 fail() {
     echo "vendor-sandbox-contract-test: FAIL: $*" >&2
@@ -29,6 +30,11 @@ contains "${BRIDGE}" 'https://*|http://*'
 contains "${HYPR_LUA}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
 contains "${HYPR_LEGACY}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
 contains "${SESSION}" 'dbus-update-activation-environment --systemd XDG_CONFIG_DIRS XDG_DATA_DIRS'
+contains "${PUNARCTL}" '"vendor-session"'
+contains "${PUNARCTL}" 'VENDOR_SESSION_SOCKET'
+contains "${PUNARCTL}" 'std::fs::Permissions::from_mode(0o600)'
+contains "${PUNARCTL}" 'validate_callback_schemes(schemes, &uris)'
+contains "${PUNARCTL}" 'relays.push(spawn_vendor_instance(executable, &uri_refs)?)'
 
 # These inputs must be rejected before any D-Bus connection is attempted.
 for uri in 'claude://login/code' 'file:///etc/passwd' '/home/user/document'; do

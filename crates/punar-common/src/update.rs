@@ -452,6 +452,36 @@ pub struct UpdateStatusResult {
     pub browser: BrowserUpdateStatus,
 }
 
+/// Strict request payload for `update.check`. A normal check may reuse a
+/// recently verified cache; `force` requires a fresh read from the configured
+/// update source. The caller never supplies an origin or filesystem path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCheckParams {
+    pub force: bool,
+}
+
+/// Result of one authenticated channel check. `available` names the signed
+/// channel head even when rollout, a halt, or version admissibility prevents
+/// applying it; `admissible` is the closed answer to whether this device may
+/// stage that head now.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCheckResult {
+    pub v: u8,
+    pub channel: UpdateChannel,
+    pub current: ReleaseVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<ReleaseVersion>,
+    pub in_cohort: bool,
+    pub halted: bool,
+    pub admissible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub metadata_age_seconds: u64,
+    pub cached: bool,
+}
+
 impl ReleaseManifest {
     pub fn validate(&self) -> Result<(), UpdateTrustError> {
         if self.schema_version != 1 {

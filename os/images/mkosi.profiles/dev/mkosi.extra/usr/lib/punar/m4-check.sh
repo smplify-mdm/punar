@@ -122,9 +122,12 @@ else
     note "FAIL punarctl --json policy effective exit $? (user punar): $(head -c 240 "${RUN_DIR}/m4-effective.json")"
     FAILED=1
 fi
-jq_check "effective document: 3 entries, full shape, override permitted everywhere" \
+jq_check "effective document: four named entries, full shape, override permitted everywhere" \
     "${RUN_DIR}/m4-effective.json" \
-    '(.entries | length) == 3 and (.entries | all(
+    '(.entries | length) == 4
+     and ([.entries[].path] | sort
+          == ["security.firewall", "system.update_channel", "time.timezone", "update.status"])
+     and (.entries | all(
        has("path") and has("effective_value") and has("compliance_state")
        and (.source | has("kind") and has("rank") and has("policy_id") and has("name"))
        and .user_override_permitted == true))'

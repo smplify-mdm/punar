@@ -69,11 +69,15 @@ mod watch;
 
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 #[cfg(target_os = "linux")]
+use std::net::Shutdown;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::Child;
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -263,6 +267,18 @@ enum AppCommand {
     /// the application.
     #[command(name = "run-vendor", hide = true)]
     RunVendor { id: String },
+    /// Own one vendor application's PID namespace and privately relay later
+    /// custom-URI launches into that same namespace. Started only inside the
+    /// application sandbox by `run-vendor`.
+    #[command(name = "vendor-session", hide = true)]
+    VendorSession {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        executable: PathBuf,
+        #[arg(long = "scheme")]
+        schemes: Vec<String>,
+    },
     /// Remove the native package. Per-user application data is preserved.
     Remove {
         /// Catalog id, such as `spotify`.
@@ -528,6 +544,12 @@ enum AuditCommand {
 enum UpdateCommand {
     /// Show current/desired version, channel, health, and rollback state.
     Status,
+    /// Authenticate the configured channel head and record verified metadata.
+    Check {
+        /// Bypass a recent verified cache and require the configured source.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -919,10 +941,16 @@ fn app_run_vendor(client: &Client, id: &str) -> ExitCode {
 }
 
 const VENDOR_SUPERVISOR_PAYLOAD_LIMIT: u64 = 8 * 8192 + 1024;
+const VENDOR_SESSION_SOCKET: &str = "punar-vendor-session.sock";
+const VENDOR_SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn read_vendor_supervisor_uris() -> Result<Zeroizing<Vec<String>>, String> {
+    read_vendor_callback_payload(std::io::stdin())
+}
+
+fn read_vendor_callback_payload(reader: impl Read) -> Result<Zeroizing<Vec<String>>, String> {
     let mut payload = Zeroizing::new(Vec::new());
-    std::io::stdin()
+    reader
         .take(VENDOR_SUPERVISOR_PAYLOAD_LIMIT + 1)
         .read_to_end(&mut payload)
         .map_err(|error| format!("could not read the private application callback: {error}"))?;
@@ -937,7 +965,6 @@ fn read_vendor_supervisor_uris() -> Result<Zeroizing<Vec<String>>, String> {
 fn vendor_app_command(
     app: &Value,
     id: &str,
-    uris: &[String],
     filtered_bus: &Path,
 ) -> Result<std::process::Command, String> {
     if app.get("installed").and_then(Value::as_bool) != Some(true) {
@@ -970,8 +997,6 @@ fn vendor_app_command(
         .strip_prefix(&app_root)
         .map_err(|_| "the installed launcher path is invalid".to_string())?;
     let sandbox_executable = Path::new("/app").join(relative_executable);
-    let callback_uris = validated_vendor_callback_uris(app, uris)?;
-
     let host_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -1128,9 +1153,18 @@ fn vendor_app_command(
         .arg("--chdir")
         .arg("/home/punar")
         .arg("--")
-        .arg(sandbox_executable)
-        .arg("--no-sandbox");
-    command.args(callback_uris);
+        .arg("/usr/bin/punarctl")
+        .args(["app", "vendor-session", "--app-id", id, "--executable"])
+        .arg(sandbox_executable);
+    for scheme in app
+        .get("uri_schemes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        command.args(["--scheme", scheme]);
+    }
     Ok(command)
 }
 
@@ -1181,6 +1215,7 @@ fn filtered_bus_proxy_command(
 fn supervise_vendor_app(app: &Value, id: &str, uris: &[String]) -> Result<(), String> {
     use std::os::unix::fs::FileTypeExt;
 
+    let callback_uris = validated_vendor_callback_uris(app, uris)?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| valid_runtime_dir(path))
@@ -1197,6 +1232,38 @@ fn supervise_vendor_app(app: &Value, id: &str, uris: &[String]) -> Result<(), St
         .map_err(|error| format!("could not prepare the isolated app runtime: {error}"))?;
     std::fs::set_permissions(&app_runtime, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("could not protect the isolated app runtime: {error}"))?;
+    let callback_socket = vendor_runtime_tmp(&runtime, id).join(VENDOR_SESSION_SOCKET);
+    if relay_vendor_callbacks(&callback_socket, &callback_uris)? {
+        return Ok(());
+    }
+    // A private bus socket appears just before bubblewrap enters the PID
+    // namespace. If another launch lands in that short interval, wait for
+    // its callback listener instead of creating a second namespace and
+    // recreating Electron's process-singleton ambiguity.
+    let another_session_is_starting = std::fs::read_dir(&app_runtime)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bus-"))
+                && entry.file_type().is_ok_and(|kind| kind.is_socket())
+        });
+    if another_session_is_starting {
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(50));
+            if relay_vendor_callbacks(&callback_socket, &callback_uris)? {
+                return Ok(());
+            }
+        }
+        return Err(
+            "the existing application sandbox did not open its private callback channel"
+                .to_string(),
+        );
+    }
     let filtered_bus = app_runtime.join(format!("bus-{}", std::process::id()));
     if std::fs::symlink_metadata(&filtered_bus).is_ok() {
         return Err("the private desktop bus path already exists".to_string());
@@ -1235,13 +1302,28 @@ fn supervise_vendor_app(app: &Value, id: &str, uris: &[String]) -> Result<(), St
             return Err("the filtered desktop bus path is not a Unix socket".into());
         }
 
-        let mut command = vendor_app_command(app, id, uris, &filtered_bus)?;
-        let status = command
-            .stdin(Stdio::null())
+        let mut command = vendor_app_command(app, id, &filtered_bus)?;
+        let initial_payload = Zeroizing::new(
+            serde_json::to_vec(&callback_uris)
+                .map_err(|error| format!("could not encode the application callback: {error}"))?,
+        );
+        let mut child = command
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
+            .spawn()
             .map_err(|error| format!("could not enter the application sandbox: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "the application sandbox has no private input channel".to_string())?
+            .write_all(&initial_payload)
+            .map_err(|error| {
+                format!("could not deliver the initial application callback: {error}")
+            })?;
+        let status = child
+            .wait()
+            .map_err(|error| format!("could not wait for the application sandbox: {error}"))?;
         if !status.success() {
             return Err(format!("the isolated application exited with {status}"));
         }
@@ -1276,6 +1358,181 @@ fn vendor_runtime_tmp(runtime: &Path, id: &str) -> PathBuf {
     runtime.join("punar-apps").join(id).join("tmp")
 }
 
+#[cfg(target_os = "linux")]
+fn relay_vendor_callbacks(socket: &Path, uris: &[&str]) -> Result<bool, String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let metadata = match std::fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the private callback channel: {error}"
+            ));
+        }
+    };
+    if !metadata.file_type().is_socket() {
+        return Err("the private callback channel is not a Unix socket".to_string());
+    }
+    let mut stream = match UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            std::fs::remove_file(socket).map_err(|remove| {
+                format!("could not remove a stale private callback channel: {remove}")
+            })?;
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not reach the running application session: {error}"
+            ));
+        }
+    };
+    stream
+        .set_read_timeout(Some(VENDOR_SESSION_ACK_TIMEOUT))
+        .map_err(|error| format!("could not bound the application callback wait: {error}"))?;
+    let payload = Zeroizing::new(
+        serde_json::to_vec(uris)
+            .map_err(|error| format!("could not encode the application callback: {error}"))?,
+    );
+    stream
+        .write_all(&payload)
+        .map_err(|error| format!("could not relay the application callback: {error}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("could not finish the application callback: {error}"))?;
+    let mut ack = [0_u8; 1];
+    stream
+        .read_exact(&mut ack)
+        .map_err(|error| format!("the application did not accept its callback: {error}"))?;
+    if ack == *b"1" {
+        Ok(true)
+    } else {
+        Err("the application rejected its callback".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn app_vendor_session(app_id: &str, executable: &Path, schemes: &[String]) -> ExitCode {
+    match run_vendor_session(app_id, executable, schemes) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("punarctl: vendor application session: {why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn app_vendor_session(_app_id: &str, _executable: &Path, _schemes: &[String]) -> ExitCode {
+    eprintln!("punarctl: vendor application sessions are available only on Linux");
+    ExitCode::FAILURE
+}
+
+#[cfg(target_os = "linux")]
+fn run_vendor_session(app_id: &str, executable: &Path, schemes: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if app_id.is_empty()
+        || app_id.len() > 64
+        || !app_id.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'-')
+        })
+    {
+        return Err("the application id is unsafe".to_string());
+    }
+    if !executable.is_absolute() || !executable.starts_with("/app/usr/lib") || !executable.is_file()
+    {
+        return Err("the application launcher is outside the sandbox payload".to_string());
+    }
+    if schemes.iter().any(|scheme| {
+        scheme.is_empty()
+            || scheme.len() > 32
+            || !scheme.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'+' | b'.' | b'-')
+            })
+    }) {
+        return Err("the application callback scheme is unsafe".to_string());
+    }
+
+    let initial = read_vendor_callback_payload(std::io::stdin())?;
+    validate_callback_schemes(schemes, &initial)?;
+    let socket = Path::new("/tmp").join(VENDOR_SESSION_SOCKET);
+    match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&socket)
+            .map_err(|error| format!("could not replace a stale callback channel: {error}"))?,
+        Ok(_) => return Err("the callback channel path is not a Unix socket".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not inspect the callback channel: {error}")),
+    }
+    let listener = UnixListener::bind(&socket)
+        .map_err(|error| format!("could not create the callback channel: {error}"))?;
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("could not protect the callback channel: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("could not configure the callback channel: {error}"))?;
+
+    let initial_refs = initial.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut primary = spawn_vendor_instance(executable, &initial_refs)?;
+    let mut relays: Vec<Child> = Vec::new();
+    let outcome = loop {
+        match primary.try_wait() {
+            Ok(Some(status)) if status.success() => break Ok(()),
+            Ok(Some(status)) => break Err(format!("the application exited with {status}")),
+            Ok(None) => {}
+            Err(error) => break Err(format!("could not observe the application: {error}")),
+        }
+        relays.retain_mut(|child| child.try_wait().ok().flatten().is_none());
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let accepted = (|| {
+                    stream
+                        .set_read_timeout(Some(VENDOR_SESSION_ACK_TIMEOUT))
+                        .map_err(|error| format!("could not bound the callback read: {error}"))?;
+                    let uris = read_vendor_callback_payload(&mut stream)?;
+                    validate_callback_schemes(schemes, &uris)?;
+                    let uri_refs = uris.iter().map(String::as_str).collect::<Vec<_>>();
+                    relays.push(spawn_vendor_instance(executable, &uri_refs)?);
+                    Ok::<(), String>(())
+                })();
+                let ack = if accepted.is_ok() { b"1" } else { b"0" };
+                let _ = stream.write_all(ack);
+                if let Err(error) = accepted {
+                    eprintln!("punarctl: vendor callback rejected: {error}");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => break Err(format!("the callback channel failed: {error}")),
+        }
+    };
+    let _ = std::fs::remove_file(&socket);
+    outcome
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_vendor_instance(executable: &Path, uris: &[&str]) -> Result<Child, String> {
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--no-sandbox")
+        .args(uris)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .map_err(|error| format!("could not start the isolated application: {error}"))
+}
+
 /// Accept only custom schemes declared by the signed catalog record. The URI
 /// is passed as one argv item after bwrap's `--` separator; it is never a
 /// shell string, daemon request, log field, or environment variable because
@@ -1284,17 +1541,22 @@ fn validated_vendor_callback_uris<'a>(
     app: &Value,
     uris: &'a [String],
 ) -> Result<Vec<&'a str>, String> {
-    if uris.len() > 8 {
-        return Err("too many callback URIs were supplied".to_string());
-    }
-    let allowed: Vec<&str> = app
+    let allowed: Vec<String> = app
         .get("uri_schemes")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(str::to_string)
         .collect();
-    let mut validated = Vec::with_capacity(uris.len());
+    validate_callback_schemes(&allowed, uris)?;
+    Ok(uris.iter().map(String::as_str).collect())
+}
+
+fn validate_callback_schemes(schemes: &[String], uris: &[String]) -> Result<(), String> {
+    if uris.len() > 8 {
+        return Err("too many callback URIs were supplied".to_string());
+    }
     for uri in uris {
         if uri.is_empty() || uri.len() > 8192 || uri.chars().any(char::is_control) {
             return Err("the callback URI is empty, oversized, or contains controls".to_string());
@@ -1303,15 +1565,14 @@ fn validated_vendor_callback_uris<'a>(
             .split_once(':')
             .ok_or_else(|| "the callback is not an absolute URI".to_string())?;
         if rest.is_empty()
-            || !allowed
+            || !schemes
                 .iter()
                 .any(|candidate| scheme.eq_ignore_ascii_case(candidate))
         {
             return Err("the callback URI scheme is not owned by this catalog app".to_string());
         }
-        validated.push(uri.as_str());
     }
-    Ok(validated)
+    Ok(())
 }
 
 /// Keep the app's network view useful without exposing the host runtime tree.
@@ -2345,6 +2606,11 @@ fn main() -> ExitCode {
             } => app_install(&client, &style, json, &id, yes, confirm_metadata_sha256),
             AppCommand::Open { id, uris } => app_open(&client, &id, &uris),
             AppCommand::RunVendor { id } => app_run_vendor(&client, &id),
+            AppCommand::VendorSession {
+                app_id,
+                executable,
+                schemes,
+            } => app_vendor_session(&app_id, &executable, &schemes),
             AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
         },
         Command::Audit { command } => match command {
@@ -2902,6 +3168,13 @@ fn main() -> ExitCode {
             UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
                 views::update_status(&style, v)
             }),
+            UpdateCommand::Check { force } => rpc(
+                &client,
+                json,
+                "update.check",
+                Some(json!({ "force": force })),
+                |v| views::update_check(&style, v),
+            ),
         },
     }
 }
@@ -2913,13 +3186,13 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    #[cfg(target_os = "linux")]
-    use super::install_proof_recovery_confirmation;
     use super::{
         Cli, append_filtered_session_bus_mount, append_resolver_mount, append_vendor_open_bridge,
-        filtered_bus_proxy_command, validated_vendor_callback_uris, vendor_runtime_tmp,
-        vendor_supervisor_command,
+        filtered_bus_proxy_command, read_vendor_callback_payload, validated_vendor_callback_uris,
+        vendor_runtime_tmp, vendor_supervisor_command,
     };
+    #[cfg(target_os = "linux")]
+    use super::{install_proof_recovery_confirmation, relay_vendor_callbacks};
     use serde_json::json;
 
     #[test]
@@ -3025,6 +3298,53 @@ mod tests {
     }
 
     #[test]
+    fn vendor_callback_pipe_is_strict_and_bounded() {
+        let good = br#"["claude://claude.ai/auth/callback?code=redacted&state=opaque"]"#;
+        let decoded = read_vendor_callback_payload(&good[..]).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].starts_with("claude://"));
+        assert!(read_vendor_callback_payload(&b"not json"[..]).is_err());
+        let oversized = vec![b'x'; super::VENDOR_SUPERVISOR_PAYLOAD_LIMIT as usize + 1];
+        assert!(read_vendor_callback_payload(&oversized[..]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_vendor_session_acknowledges_a_private_callback() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        // Linux sockaddr_un leaves only 108 bytes for the whole path; keep
+        // this deliberately short so the test exercises the protocol rather
+        // than the host runner's temporary-directory length.
+        let root = Path::new("/tmp").join(format!("pvr-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("callback.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut payload = Vec::new();
+            stream.read_to_end(&mut payload).unwrap();
+            let uris: Vec<String> = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(
+                uris,
+                ["claude://claude.ai/auth/callback?code=redacted&state=opaque"]
+            );
+            stream.write_all(b"1").unwrap();
+        });
+        assert!(
+            relay_vendor_callbacks(
+                &socket,
+                &["claude://claude.ai/auth/callback?code=redacted&state=opaque"]
+            )
+            .unwrap()
+        );
+        receiver.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
     fn vendor_runtime_tmp_is_stable_per_app_and_separate_between_apps() {
         let runtime = Path::new("/run/user/1000");
         let first = vendor_runtime_tmp(runtime, "claude-desktop");
@@ -3112,6 +3432,17 @@ mod tests {
                 "claude://claude.ai/auth/callback?code=redacted&state=opaque",
             ],
             &["punarctl", "app", "run-vendor", "claude-desktop"],
+            &[
+                "punarctl",
+                "app",
+                "vendor-session",
+                "--app-id",
+                "claude-desktop",
+                "--executable",
+                "/app/usr/lib/claude-desktop/claude-desktop",
+                "--scheme",
+                "claude",
+            ],
             &["punarctl", "app", "remove", "spotify", "--yes"],
             &["punarctl", "capabilities"],
             &["punarctl", "compliance"],

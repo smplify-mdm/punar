@@ -70,6 +70,20 @@ fn fixture_update_status() -> Value {
     })
 }
 
+fn fixture_update_check() -> Value {
+    json!({
+        "v": 1,
+        "channel": "stable",
+        "current": "2026.08.30.1",
+        "available": "2026.09.01.1",
+        "in_cohort": true,
+        "halted": false,
+        "admissible": true,
+        "metadata_age_seconds": 0,
+        "cached": false
+    })
+}
+
 fn firewall_descriptor() -> Value {
     json!({
         "capability": "security.firewall",
@@ -347,6 +361,10 @@ fn respond(request: &Value) -> Result<Value, Value> {
     match method {
         "status" => Ok(fixture_status()),
         "update.status" => Ok(fixture_update_status()),
+        "update.check" => {
+            assert_eq!(params.unwrap(), &json!({ "force": false }));
+            Ok(fixture_update_check())
+        }
         "capabilities.list" => Ok(fixture_capabilities()),
         "capabilities.get" => {
             let capability = params.unwrap()["capability"].as_str().unwrap();
@@ -887,6 +905,25 @@ fn update_status_is_typed_and_names_system_and_browser_evidence() {
     assert_eq!(
         serde_json::from_str::<Value>(&stdout(&json_output)).unwrap(),
         fixture_update_status()
+    );
+}
+
+#[test]
+fn update_check_sends_only_force_and_renders_the_signed_decision() {
+    let socket = start_mock();
+    let output = run(&socket, &["update", "check"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("U P D A T E   C H E C K"), "{text}");
+    assert!(text.contains("2026.08.30.1"), "{text}");
+    assert!(text.contains("2026.09.01.1"), "{text}");
+    assert!(text.contains("Ed25519 verified"), "{text}");
+
+    let json_output = run(&socket, &["--json", "update", "check"]);
+    assert_eq!(json_output.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&json_output)).unwrap(),
+        fixture_update_check()
     );
 }
 

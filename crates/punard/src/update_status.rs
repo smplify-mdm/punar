@@ -252,7 +252,7 @@ fn combine_reasons(first: Option<&str>, second: Option<&str>) -> Option<String> 
     }
 }
 
-fn read_os_release(path: &Path) -> Option<BTreeMap<String, String>> {
+pub(crate) fn read_os_release(path: &Path) -> Option<BTreeMap<String, String>> {
     let bytes = read_bounded(path, SMALL_FILE_MAX).ok()?;
     let text = std::str::from_utf8(&bytes).ok()?;
     let mut fields = BTreeMap::new();
@@ -446,7 +446,7 @@ fn pacman_field<'a>(text: &'a str, field: &str) -> Option<&'a str> {
     None
 }
 
-fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("{} is unavailable: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > max_bytes {

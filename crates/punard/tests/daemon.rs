@@ -19,10 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use ed25519_dalek::{Signer, SigningKey};
+use punar_common::update::{Architecture, BootPlatform};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
 use punard::server::{Daemon, DaemonConfig, DaemonHandle};
+use punard::update_check::UpdateCheckSources;
 use serde_json::{Value, json};
 
 static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -111,6 +114,33 @@ impl TestDaemon {
         }))
     }
 
+    fn start_update(peer: PeerSource, configure: impl FnOnce(&mut DaemonConfig, &Path)) -> Self {
+        let dir = test_dir("update");
+        let (group_file, passwd_file) = write_nss_files(&dir);
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mock = MockCapability::new("mock.widget", json!("off"));
+        let channel =
+            MockCapability::with_default("system.update_channel", json!("stable"), json!("stable"));
+        let registry = Registry::new(vec![Box::new(mock.clone()), Box::new(channel)]);
+        let mut cfg = DaemonConfig {
+            group_file,
+            passwd_file,
+            peer_source: peer,
+            io_timeout: Duration::from_secs(5),
+            ..DaemonConfig::new(dir.join("punard.sock"), state_dir, dir.join("audit.jsonl"))
+        };
+        configure(&mut cfg, &dir);
+        let daemon = Daemon::new(cfg, registry).unwrap();
+        daemon.boot_reconcile();
+        let handle = daemon.spawn().unwrap();
+        TestDaemon {
+            dir,
+            handle: Some(handle),
+            mock,
+        }
+    }
+
     fn connect(&self) -> UnixStream {
         let stream = UnixStream::connect(self.handle.as_ref().unwrap().socket_path()).unwrap();
         stream
@@ -195,6 +225,59 @@ fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
     )
     .unwrap();
     (catalog, flatpak, digest)
+}
+
+fn configure_update_fixture(
+    cfg: &mut DaemonConfig,
+    dir: &Path,
+    source_present: bool,
+    tampered: bool,
+) {
+    let repository = dir.join("update-source");
+    let keys = dir.join("release-keys");
+    let os_release = dir.join("os-release");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(
+        &os_release,
+        "IMAGE_ID=punar-desktop\nIMAGE_VERSION=2026.08.20.1\n",
+    )
+    .unwrap();
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    fs::write(keys.join("fixture.pub"), signing.verifying_key().to_bytes()).unwrap();
+    if source_present {
+        let mut document = serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "image_id": "punar-desktop",
+            "architecture": "aarch64",
+            "boot_platform": "uefi",
+            "channel": "stable",
+            "current": "2026.08.27.1",
+            "release_manifest": "releases/2026.08.27.1/release.json",
+            "rollout_bps": 10000,
+            "halted": false,
+            "published_at": "2026-08-27T22:00:00Z",
+            "min_supported_version": "2026.08.01.1"
+        }))
+        .unwrap();
+        let signature = signing.sign(&document).to_bytes();
+        if tampered {
+            document[20] ^= 1;
+        }
+        fs::write(repository.join("channel.json"), document).unwrap();
+        fs::write(repository.join("channel.json.sig"), signature).unwrap();
+    }
+    cfg.update_check_sources = UpdateCheckSources {
+        repository_dir: repository,
+        trusted_keys_dir: keys,
+        cached_channel: cfg.state_dir.join("update/verified-channel.json"),
+        cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
+        os_release,
+        pi_boot_partition: dir.join("pi-partition"),
+        cache_max_age_seconds: 900,
+        architecture_override: Some(Architecture::Aarch64),
+        boot_platform_override: Some(BootPlatform::Uefi),
+    };
 }
 
 fn prepare_enrolled_application_policy(state_dir: &Path, applications: Value) {
@@ -638,6 +721,91 @@ fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     );
     // Reads are not audited.
     assert_eq!(td.audit_lines().len(), baseline);
+}
+
+#[test]
+fn update_check_is_root_only_authenticated_cached_and_audited() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_fixture(cfg, dir, true, false)
+    });
+    let before = td.audit_lines().len();
+    let response = td.call("update.check", Some(json!({ "force": false })));
+    let result = &response["result"];
+    assert_eq!(result["current"], "2026.08.20.1");
+    assert_eq!(result["available"], "2026.08.27.1");
+    assert_eq!(result["admissible"], true);
+    assert_eq!(result["cached"], false);
+
+    let cache = td.state_path("update/verified-channel.json");
+    let signature = td.state_path("update/verified-channel.json.sig");
+    assert!(cache.is_file());
+    assert!(signature.is_file());
+    assert_eq!(
+        fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(cache.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let event = td.audit_lines().pop().unwrap();
+    assert_eq!(td.audit_lines().len(), before + 1);
+    assert_eq!(event["action"], "update.check");
+    assert_eq!(event["resource"], "update_channel");
+    assert_eq!(event["result"], "success");
+
+    let cached = td.call("update.check", Some(json!({ "force": false })));
+    assert_eq!(cached["result"]["cached"], true);
+}
+
+#[test]
+fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        |cfg, dir| configure_update_fixture(cfg, dir, true, false),
+    );
+    let response = td.call("update.check", Some(json!({ "force": true })));
+    assert_eq!(response["error"]["code"], "denied");
+    assert!(!td.state_path("update/verified-channel.json").exists());
+    let event = td.audit_lines().pop().unwrap();
+    assert_eq!(event["action"], "update.check");
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["result"], "denied");
+}
+
+#[test]
+fn update_check_tampering_fails_as_untrusted_and_never_caches() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_fixture(cfg, dir, true, true)
+    });
+    let response = td.call("update.check", Some(json!({ "force": true })));
+    assert_eq!(response["error"]["code"], "untrusted_artifact");
+    assert_eq!(response["error"]["details"]["stage"], "channel_signature");
+    assert!(!td.state_path("update/verified-channel.json").exists());
+    let event = td.audit_lines().pop().unwrap();
+    assert_eq!(event["action"], "update.check");
+    assert_eq!(event["result"], "failure");
+}
+
+#[test]
+fn update_check_missing_source_is_visible_and_audited_as_unreachable() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_fixture(cfg, dir, false, false)
+    });
+    let response = td.call("update.check", Some(json!({ "force": true })));
+    assert_eq!(response["error"]["code"], "upstream_unreachable");
+    assert!(!td.state_path("update/verified-channel.json").exists());
+    let event = td.audit_lines().pop().unwrap();
+    assert_eq!(event["action"], "update.check");
+    assert_eq!(event["result"], "unreachable");
 }
 
 /// M4 semantics (contract section 5.6): reconcile now REMEDIATES drift —
