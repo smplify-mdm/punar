@@ -15,6 +15,7 @@ EXPECTED="${TEST_ROOT}/expected-enabled-units.txt"
 mkdir -p "${CLEAN}/etc/greetd" "${CLEAN}/etc/sudoers.d" \
     "${CLEAN}/etc/xdg/hypr" \
     "${CLEAN}/usr/lib/systemd/system/multi-user.target.wants" \
+    "${CLEAN}/usr/lib/systemd/system/sysinit.target.wants" \
     "${CLEAN}/etc/systemd/system/punard.service.wants" \
     "${CLEAN}/usr/lib/systemd/user/default.target.wants" \
     "${CLEAN}/usr/lib/punar" "${CLEAN}/usr/bin" \
@@ -46,10 +47,15 @@ printf '%s\n' '[Unit]' 'Description=Punar user product service' \
     > "${CLEAN}/usr/lib/systemd/user/punar-user.service"
 ln -s ../punar-user.service \
     "${CLEAN}/usr/lib/systemd/user/default.target.wants/punar-user.service"
+printf '%s\n' '[Unit]' 'Description=Harden shared memory' \
+    > "${CLEAN}/usr/lib/systemd/system/punar-shm-hardening.service"
+ln -s ../punar-shm-hardening.service \
+    "${CLEAN}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service"
 printf '%s\n' \
     'etc/systemd/system/punard.service.wants/punar-helper.service -> /usr/lib/systemd/system/punar-helper.service' \
     'usr/lib/systemd/user/default.target.wants/punar-user.service -> ../punar-user.service' \
     'usr/lib/systemd/system/multi-user.target.wants/punard.service -> ../punard.service' \
+    'usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service -> ../punar-shm-hardening.service' \
     > "${EXPECTED}"
 
 KERNEL='console=tty0 systemd.getty_auto=no root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea rw'

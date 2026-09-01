@@ -16,6 +16,21 @@ elif [ -e "${WAIT_ONLINE_LINK}" ]; then
     exit 2
 fi
 
+# Distribution presets run after the product extra tree and intentionally own
+# /etc enablements. Keep the immutable host-safety dependency at vendor level,
+# then assert it as part of the reviewed enabled-unit manifest below. The
+# initrd's /dev/shm mount crosses switch-root; this service remounts that live
+# filesystem nosuid,nodev,noexec before the host manager completes sysinit.
+SHM_WANTS_DIR="${BUILDROOT}/usr/lib/systemd/system/sysinit.target.wants"
+SHM_UNIT="${BUILDROOT}/usr/lib/systemd/system/punar-shm-hardening.service"
+[ -f "${SHM_UNIT}" ] || {
+    echo "error: shared-memory hardening unit is missing: ${SHM_UNIT}" >&2
+    exit 2
+}
+mkdir -p "${SHM_WANTS_DIR}"
+ln -sfn ../punar-shm-hardening.service \
+    "${SHM_WANTS_DIR}/punar-shm-hardening.service"
+
 CHECKER=''
 for candidate in \
     "${SRCDIR}/check-release-image.sh" \
