@@ -329,7 +329,14 @@ jq -c --arg sid "${SID}" \
     "${AUDIT}" 2>/dev/null | tail -n 1 > "${RUN_DIR}/m12-audit-deny.json"
 jq_check "audit identifies session, project, zone and closed production result" "${RUN_DIR}/m12-audit-deny.json" \
     '.decision == "deny" and .action == "network.deny" and .resource == "corp_prod" and .result == "denied_production"'
-if grep -q '127.0.0.7\|9418' "${AUDIT}"; then
+# Inspect only semantic fields that could disclose the destination. Opaque
+# event/device ids and timestamps are deliberately excluded: their random
+# digits can contain the fixture port by coincidence without recording one.
+if ! jq -e -s '
+    all(.[];
+        ([.action, .resource, .result, .project_id] + .policy_ids)
+        | all(.[]; ((contains("127.0.0.7") or contains("9418")) | not)))
+    ' "${AUDIT}" >/dev/null 2>&1; then
     note "FAIL non-purgeable audit trail contains a destination or port"
     FAILED=1
 else
