@@ -2802,13 +2802,40 @@ fn render_repart_definitions(destination: &Path, sources: &[PathBuf]) -> Result<
 fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<(), InstallError> {
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        InstallError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not inspect fixed block-device path {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        let destination = fs::read_link(path)
+            .map(|destination| destination.display().to_string())
+            .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+        return Err(InstallError::Refused(format!(
+            "fixed block-device path {} is a symbolic link to {destination}",
+            path.display()
+        )));
+    }
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(
             i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
                 .expect("open flags fit libc::c_int"),
         )
-        .open(path)?;
+        .open(path)
+        .map_err(|error| {
+            InstallError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "could not open fixed block-device path {}: {error}",
+                    path.display()
+                ),
+            ))
+        })?;
     let kind = file.metadata()?.file_type();
     if !(kind.is_block_device() || allow_regular_for_tests && kind.is_file()) {
         return Err(InstallError::Refused(
@@ -2887,7 +2914,15 @@ fn run_systemd_repart(
     }
     command.arg(definitions_arg).arg(target);
 
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        InstallError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not start fixed disk-layout tool {}: {error}",
+                binary.display()
+            ),
+        ))
+    })?;
     let stderr = child.stderr.take().ok_or_else(|| {
         InstallError::Io(std::io::Error::other(
             "systemd-repart did not provide its fixed diagnostic pipe",
@@ -2938,7 +2973,15 @@ fn run_systemd_cryptenroll(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        InstallError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not start fixed recovery-key enrollment tool {}: {error}",
+                binary.display()
+            ),
+        ))
+    })?;
     let write_result = child
         .stdin
         .take()
@@ -3002,7 +3045,15 @@ fn read_systemd_recovery_keyslot(binary: &Path, target: &Path) -> Result<u8, Ins
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        InstallError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not start fixed LUKS metadata tool {}: {error}",
+                binary.display()
+            ),
+        ))
+    })?;
     let mut stdout = child.stdout.take().ok_or_else(|| {
         InstallError::Io(std::io::Error::other(
             "cryptsetup did not provide its fixed metadata pipe",
@@ -3071,7 +3122,15 @@ fn read_luks_uuid(binary: &Path, target: &Path) -> Result<String, InstallError> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        InstallError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not start fixed LUKS UUID tool {}: {error}",
+                binary.display()
+            ),
+        ))
+    })?;
     let mut stdout = child.stdout.take().ok_or_else(|| {
         InstallError::Io(std::io::Error::other(
             "cryptsetup did not provide its fixed UUID pipe",
@@ -5200,6 +5259,22 @@ mod tests {
         assert!(diagnostic.starts_with("mkfs.vfat failed: [31munsupported"));
         assert!(diagnostic.ends_with("[diagnostic truncated]"));
         assert!(!diagnostic.contains(['\n', '\r', '\x1b']));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixed_block_device_validation_names_a_refused_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let target = fixture.sources.dev_root.join("vda4-target");
+        let link = fixture.sources.dev_root.join("vda4");
+        File::create(&target).unwrap();
+        symlink("vda4-target", &link).unwrap();
+
+        let error = validate_repart_target(&link, true).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(error.to_string().contains("vda4-target"));
     }
 
     #[cfg(target_os = "linux")]
