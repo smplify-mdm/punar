@@ -40,6 +40,17 @@ automatic-fallback path is implemented and canonical ARM64 CI-proven. Channel
 transport/promotion, production key custody, and end-to-end production
 repository coverage remain unshipped.
 
+The first public governed-update slice is now implemented: `punarctl update
+status` obtains bounded local evidence through the read-only `update.status`
+IPC method and reports release identity, actual/desired slot, health signals,
+rollback state, channel provenance, and browser-package provenance without
+inventing unavailable values. Personal devices can select `stable`, `dev`, or
+`edge` through the durable `system.update_channel` capability; enrollment
+policy continues to win through the normal effective-policy engine. Targeted
+Rust unit and daemon/CLI integration suites pass. This is status and channel
+selection only: authenticated `update.check`, `update.apply`, and
+`update.rollback` transactions plus production channel transport remain open.
+
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal
 configuration syntax and must not leak back into the shell or user guides.
@@ -414,13 +425,12 @@ vector choice. The new live contract is `docs/design/wallpapers.md`.
 
 ### 6.1 Installer and onboarding
 `docs/design/installer.md`, `onboarding-flow.md`, and the backend notes in
-`onboarding.md`. **Nobody can complete a production-qualified installation on
-a real machine today.** A real hybrid x86_64 installer ISO now exists and boots
-its read-only EROFS/volatile-overlay live root, but the destructive transaction
-and installed-image proof remain open. The prebuilt image is also A/B-shaped,
-which removes the disk-layout prerequisite without substituting for that proof.
-The missing end-to-end install and physical-hardware acceptance still block the
-corresponding `user-blocked.md` items.
+`onboarding.md`. A real hybrid x86_64 installer ISO now boots its read-only
+EROFS/volatile-overlay live root and completes the attended encrypted install in
+KVM. This is production-path VM evidence, not a production-qualified
+bare-hardware claim: USB-media behavior, physical firmware/storage, Secure
+Boot, TPM enrollment, recovery on real hardware and the compatibility matrix
+remain open. The prebuilt image is also A/B-shaped.
 
 **Installer-media milestone, canonical CI 2026-08-31:** commit `dda2bb1`,
 [run 33442898971](https://github.com/smplify-mdm/punar/actions/runs/33442898971),
@@ -431,6 +441,21 @@ The final-artifact contract passed, then native KVM/OVMF reached
 same bytes as a raw drive**. This closes installer assertions I01–I05 for
 generic x86_64 QEMU/OVMF. It does not prove a destructive install, encryption,
 installed-system boot, USB media, Secure Boot, or physical firmware/hardware.
+
+**Encrypted installed-system milestone, canonical CI 2026-09-01:** commit
+`8a5afbc`, [run 33501585273](https://github.com/smplify-mdm/punar/actions/runs/33501585273),
+is fully green across both Rust/contract architectures, ARM64 image and
+automatic rollback, x86 image/boot, the graphical desktop and RAM budgets,
+and the installer. The same **4,425,838,592-byte** hybrid ISO (SHA-256
+`b8ec96a3502ec5968873480ae058998328da5d02adb3083e9ddb304d519929c4`)
+booted as optical media in 16 seconds and as a raw drive in 12 seconds. Its
+attended KVM install then passed **I08–I13 in 103 seconds** on a disposable
+137,438,953,472-byte disk: plan-bound repartition, LUKS2 plus personal recovery
+acknowledgement, Btrfs shared state, exact slot-A write/read-back, installed
+seed and audit handoff, UEFI boot artifact, installed-system boot and an
+independent GPT/LUKS2/Btrfs topology inspection. This closes the privileged
+generic-x86 VM proof; it does not close USB/bare-metal qualification, Secure
+Boot/TPM key custody, unattended answer media or physical recovery testing.
 
 The first headless installer slice is now implemented and locally verified on
 both ARM64 and x86_64: `install.targets` is live-mode-only read discovery, and
@@ -524,9 +549,10 @@ enrollment. `/var/log/punar/audit.jsonl` is durably written at `0640`, then the
 shared volume is unmounted, reopened
 read-only and compared byte-for-byte with owner/mode checks before install
 success. ARM64 tests prove the required three-event trail, secret-field
-refusal and post-write tamper refusal. The public attended orchestration is now
-locally proven at the typed boundary; the unattended install lane and full
-privileged installer VM still need to exercise I35 end to end.
+refusal and post-write tamper refusal. The public attended orchestration and
+privileged generic-x86 installer VM are now runtime-proven through I08–I13.
+The unattended signed-answer lane remains refused by design and I35 stays open
+until its separate custody path exists.
 The origin is fail-closed too: `install.plan` does not return a usable token
 unless its success event has been durably appended, so a full/unwritable audit
 filesystem is discovered while the target disk is still byte-identical.
@@ -564,8 +590,9 @@ and phase ordering; a separate refusal test changes a GPT edge immediately
 before execution and proves the target remains byte-identical. The shipped
 definition layers are now staged into the shared desktop tree so a later live
 profile inherits the same source of truth as the direct images. The attended
-public method has since landed; full privileged install-VM proof remains the
-boundary before this becomes an installability claim.
+public method and full privileged KVM install proof have now landed. Physical
+device qualification remains the boundary before this becomes a bare-hardware
+compatibility claim.
 
 The same internal transaction now stops honestly in `encrypt` after the fixed
 repart operation and invokes pinned `systemd-cryptenroll --recovery-key` for
@@ -588,8 +615,9 @@ leaves status at `awaiting: organization_escrow_receipt`, refuses `format`, and
 retains the only key in memory for retry. The real dev/CI control plane and
 literal-secret negative assertions pass on native ARM64. Public apply now
 supplies the trusted persisted enrollment organization and redacted device
-credential before destructive work; the production transport/KMS boundary and
-privileged full-install proof remain open.
+credential before destructive work. The KVM personal-recovery path is now
+proven end to end; the production transport/KMS boundary and a real enrolled
+organization install remain open.
 
 The personal recovery checkpoint is now a plan-bound in-memory state machine:
 the full key and random challenge indices may leave it only through an output
@@ -642,10 +670,10 @@ ciphertext and verifies an exact signed receipt; the real dev/CI Smplify mock
 proves device-token binding, separate recovery-release RBAC, required reason
 code and append-only audit. The installer now holds that verified receipt as
 its no-default-continue `encrypt` gate and reads the actual LUKS UUID before
-constructing the binding. **This is still component proof, not a shipping
-claim:** public installer/UI orchestration, installed-image proof, real portal
-IdP/step-up, tenant
-KMS/HSM custody and rotation are still open.
+constructing the binding. **This is now an attended generic-x86 VM install
+claim, not an enterprise key-custody or bare-hardware claim:** real portal
+IdP/step-up, tenant KMS/HSM custody and rotation, TPM sealing, Secure Boot keys
+and physical recovery remain open.
 
 The owner has now simplified the interaction contract. The required path is
 one account card with exactly three user-provided values: username, password,
@@ -658,9 +686,11 @@ AI, and updates belong after the usable desktop.
 stdin password delivery and immediate clearing, the real greeter's one-use PAM
 handoff, A/B-shaped release storage, compact responsive focus scrolling and
 the no-secret-frame ARM64 release gate are implemented and passed on
-2026-08-30. Still open are the destructive installer and installed-image proof,
-encryption/recovery wiring, full negative/rollback matrix, x86 release-image
-parity, logout/login human acceptance and physical hardware.
+2026-08-30. The destructive encrypted installer, recovery acknowledgement and
+installed-image proof are now closed in canonical KVM CI on 2026-09-01. Still
+open are the unattended answer-media lane, the remaining negative/power-loss
+matrix, x86 substrate parity, logout/login human acceptance and physical
+hardware.
 
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying

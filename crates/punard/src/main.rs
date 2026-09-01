@@ -15,6 +15,7 @@ use punar_common::DeviceClass;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
 use punard::backends::timezone::TimezoneBackend;
+use punard::backends::update_channel::UpdateChannelBackend;
 use punard::capability::Registry;
 use punard::server::{Daemon, DaemonConfig};
 
@@ -157,6 +158,13 @@ fn build_registry(args: &RunArgs) -> Registry {
                 ),
             ]),
         ),
+        Box::new(UpdateChannelBackend::new(
+            args.state_dir.join("update/channel"),
+            vec![
+                args.state_dir.join("update/verified-channel.json"),
+                args.state_dir.join("update/verified-channel.json.sig"),
+            ],
+        )),
     ])
 }
 
@@ -183,6 +191,9 @@ fn run(args: RunArgs) -> ExitCode {
         })
         .unwrap_or_else(|| PathBuf::from(punard::agentd::DEFAULT_AGENTD_SOCKET));
     let cfg = DaemonConfig::new(args.socket, args.state_dir, args.audit_file);
+    let mut update_status_sources = punard::update_status::UpdateStatusSources::default();
+    update_status_sources.channel_preference = cfg.state_dir.join("update/channel");
+    update_status_sources.pending_pi = cfg.state_dir.join("update/pending-pi.json");
     let live_mode = std::fs::read_to_string("/proc/cmdline")
         .map(|cmdline| punard::install::live_mode_from_cmdline(&cmdline))
         .unwrap_or(false);
@@ -204,6 +215,7 @@ fn run(args: RunArgs) -> ExitCode {
         flatpak_bin: args.flatpak_bin,
         live_mode,
         installer_sources,
+        update_status_sources,
         ..cfg
     };
 

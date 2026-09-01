@@ -619,6 +619,10 @@ fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     let td = TestDaemon::start_as_uid(1000);
     let baseline = td.audit_lines().len(); // boot reconcile summary
     assert!(td.call("status", None).get("error").is_none());
+    let update = td.call("update.status", None);
+    assert!(update.get("error").is_none());
+    assert_eq!(update["result"]["v"], 1);
+    assert_eq!(update["result"]["desired"]["state"], "unknown");
     assert!(td.call("capabilities.list", None).get("error").is_none());
     assert!(
         td.call("audit.tail", Some(json!({ "n": 5 })))

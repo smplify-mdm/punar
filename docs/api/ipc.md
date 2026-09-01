@@ -206,6 +206,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.list` | any connected peer | no | no |
 | `apps.install` | **human, personal device only** | yes | always |
 | `apps.remove` | **human, personal device only** | yes | always |
+| `update.status` | any connected peer | no | no |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 | `install.apply` | **root human only, live environment only** | yes | always (`success`, `denied`, `failure`) |
@@ -236,7 +237,7 @@ Params: none.
   "mode": "personal",
   "enrolled": false,
   "hostname": "punar-desktop",
-  "capabilities_total": 3,
+  "capabilities_total": 4,
   "last_reconcile": "2026-08-25T07:00:13Z",
   "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
   "device": {
@@ -277,7 +278,8 @@ preferences; no org involved before M5):
   "capabilities": [
     {"capability": "security.firewall", "state": "compliant"},
     {"capability": "system.hostname",   "state": "compliant"},
-    {"capability": "time.timezone",     "state": "compliant"}
+    {"capability": "time.timezone",     "state": "compliant"},
+    {"capability": "system.update_channel", "state": "compliant"}
   ],
   "drift_remediated_total": 2,
   "last_remediation_at": "2026-08-25T09:14:02Z"
@@ -317,9 +319,11 @@ Each element **is** a `schemas/capability/capability-descriptor.json` document
 enumerable, `privilege_required`, `approval_requirement`, `audit_category`).
 `current_state` is **observed live** at request time (never cached), so
 `punarctl capabilities` showing `security.firewall · enabled` is a real
-nftables read. `managed_by` is `"local"` in personal mode. The M3 registry is
-exactly: `security.firewall`, `system.hostname`, `time.timezone`
+nftables read. `managed_by` is `"local"` in personal mode. The original M3
+registry was `security.firewall`, `system.hostname`, and `time.timezone`
 (backends: docs/development/milestone-3.md section 4).
+`system.update_channel` is now the fourth capability: the same layered
+preference/organization-policy machinery governs `stable`, `dev`, or `edge`.
 
 ### 5.3 `capabilities.get`
 
@@ -705,7 +709,47 @@ home is retained for explicit data deletion or reinstall. Audit action is
 `system.remove_package`; web sources have no local package and return
 `conflict` rather than pretending to remove browser data.
 
-### 5.16 `install.targets`
+### 5.16 `update.status`
+
+Params: none. Read-only and unaudited. This is the implemented first slice of
+the governed-update contract in
+`docs/development/update-and-rollback.md` §8.1; `update.check`,
+`update.apply`, and `update.rollback` do not enter the closed method table
+until their complete authenticated transactions exist.
+
+The result has `v: 1` plus the five system facts required by spec section 57
+(current, desired, channel, health, rollback) and M11's browser provenance:
+
+```json
+{
+  "v": 1,
+  "image_id": "punar-desktop",
+  "current": {"version":"2026.08.30.1","slot":"a","blessed":true,
+              "snapshot_pin":"20260820T000000Z"},
+  "desired": {"version":"2026.09.01.1","slot":"b","state":"staged"},
+  "channel": {"name":"stable","source":"personal-preference",
+              "policy_ids":["personal-defaults"],"metadata_age_seconds":7200,
+              "rollout_bps":10000,"in_cohort":true,"halted":false,
+              "reachable":true},
+  "health": {"state":"pass","signals":{"boot":"pass","services":"pass",
+             "session":"pass","capabilities":"pass"}},
+  "rollback": {"state":"available","target_version":"2026.08.29.1",
+               "target_slot":"a"},
+  "browser": {"engine":"chromium","version":"151.0.7922.169-1",
+              "channel":"snapshot","snapshot_pin":"20260820T000000Z",
+              "pin_source":"running image"}
+}
+```
+
+The example is a shape example, not fallback data. The daemon derives every
+value from local release, kernel/firmware, durable pending, health, policy,
+and package-database evidence. Missing or malformed evidence is represented
+as `unknown`/`unavailable` with a `reason`; it never becomes a sample version,
+an available update, or an “up to date” claim. Raw channel metadata is not
+trusted by this read: only a future successful `update.check` may create the
+verified cached state that status reports.
+
+### 5.17 `install.targets`
 
 Params: none. Read-only and not audited. This method exists only when the
 daemon read the exact `punar.live=1` token from `/proc/cmdline`; an installed
@@ -723,7 +767,7 @@ GPT/alignment floor remains visible with `eligible: false` and the full
 
 The implementation is discovery only. It opens no target device for writing.
 
-### 5.17 `install.plan`
+### 5.18 `install.plan`
 
 Strict params:
 
@@ -788,7 +832,7 @@ so even the two challenged key groups stay out of IPC JSON. The in-memory gate
 has no timeout/default-continue and consumes a confirmation only for the exact
 plan token.
 
-### 5.18 `install.apply` and `install.recovery_ack`
+### 5.19 `install.apply` and `install.recovery_ack`
 
 `install.apply` is root-only, live-only and human-only. Agent attribution is
 checked before uid, descriptor duplication, release reads or disk access, so
@@ -835,7 +879,7 @@ status and cancel any recovery gate. The installed audit is written and
 byte-verified before success. There is no `install.exec`, script, hook or
 caller-supplied command/path.
 
-### 5.19 `install.status`
+### 5.20 `install.status`
 
 Params: none. Read-only, unaudited and live-only. The result is the same
 secret-free object written atomically at `0644` to

@@ -38,7 +38,7 @@
 #      disabled/compliant (disabled by your own preference IS compliant —
 #      desired == observed), preferences.json carries the entry (set_by root)
 #   7  re-enable -> table back, explain enabled/compliant
-#   8  status compliance block: overall compliant, 3 per-capability rows,
+#   8  status compliance block: overall compliant, 4 per-capability rows,
 #      drift_remediated_total captured as baseline B
 #   9  DRIFT DEMO (timer-driven): start timer, destroy the nft table, table
 #      restored within 375 s (3 x 120 s periods + 15 s AccuracySec slack);
@@ -203,10 +203,10 @@ jq_check "explain after re-enable: effective enabled, compliant" \
 
 # --- 8. status compliance block (section 52, personal scope) + baseline B ----
 "${CTL}" --json status > "${RUN_DIR}/m4-status-a.json" 2>&1
-jq_check "status compliance: overall compliant, 3 capability rows, counter is a number" \
+jq_check "status compliance: overall compliant, 4 capability rows, counter is a number" \
     "${RUN_DIR}/m4-status-a.json" \
     '.compliance.overall == "compliant"
-     and (.compliance.capabilities | length) == 3
+     and (.compliance.capabilities | length) == 4
      and (.compliance.capabilities | all(.state == "compliant"))
      and (.compliance.drift_remediated_total | type) == "number"'
 BASELINE="$(jq -r '.compliance.drift_remediated_total' "${RUN_DIR}/m4-status-a.json" 2>/dev/null)"

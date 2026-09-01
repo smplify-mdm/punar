@@ -775,6 +775,10 @@ pub enum Method {
     /// `apps.remove` — remove the native package for one catalog id. Human
     /// only and always audited.
     AppsRemove(AppsRemoveParams),
+    /// `update.status` — read-only, local release/channel/health/rollback
+    /// evidence. Any admitted peer may inspect it; no check or mutation is
+    /// hidden behind this method.
+    UpdateStatus,
     /// `install.targets` — live-environment disk discovery. Read-only; the
     /// daemon makes it `unknown_method` on an installed system.
     InstallTargets,
@@ -796,7 +800,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 28] = [
+    pub const NAMES: [&'static str; 29] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -820,6 +824,7 @@ impl Method {
         "apps.list",
         "apps.install",
         "apps.remove",
+        "update.status",
         "install.targets",
         "install.plan",
         "install.apply",
@@ -854,6 +859,7 @@ impl Method {
             Method::AppsList => "apps.list",
             Method::AppsInstall(_) => "apps.install",
             Method::AppsRemove(_) => "apps.remove",
+            Method::UpdateStatus => "update.status",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
             Method::InstallApply(_) => "install.apply",
@@ -908,6 +914,7 @@ impl Method {
             | Method::AppsList
             | Method::AppsInstall(_)
             | Method::AppsRemove(_) => false,
+            Method::UpdateStatus => false,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
@@ -928,6 +935,7 @@ impl Method {
             | Method::ApprovalsList
             | Method::PrivilegeStatus
             | Method::AppsList
+            | Method::UpdateStatus
             | Method::InstallTargets
             | Method::InstallStatus => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
@@ -1011,6 +1019,9 @@ impl Method {
             "apps.list" => Self::expect_no_params(method, params).map(|()| Method::AppsList),
             "apps.install" => Self::parse_required_params(method, params).map(Method::AppsInstall),
             "apps.remove" => Self::parse_required_params(method, params).map(Method::AppsRemove),
+            "update.status" => {
+                Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
+            }
             "install.targets" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
             }
@@ -2025,6 +2036,7 @@ mod tests {
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
             }),
+            Method::UpdateStatus,
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
                 disk: "/dev/vda".to_string(),
@@ -2228,6 +2240,7 @@ mod tests {
             "capabilities.list",
             "reconcile",
             "apps.list",
+            "update.status",
             "install.targets",
             "install.status",
         ] {

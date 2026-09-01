@@ -49,6 +49,27 @@ fn fixture_status() -> Value {
     })
 }
 
+fn fixture_update_status() -> Value {
+    json!({
+        "v": 1,
+        "image_id": "punar-desktop",
+        "current": {"version": "2026.08.30.1", "slot": "a", "blessed": true,
+                    "snapshot_pin": "20260820T000000Z"},
+        "desired": {"version": "2026.09.01.1", "slot": "b", "state": "staged"},
+        "channel": {"name": "stable", "source": "personal-preference",
+                    "policy_ids": ["personal-defaults"], "metadata_age_seconds": 7200,
+                    "rollout_bps": 10000, "in_cohort": true, "halted": false,
+                    "reachable": true},
+        "health": {"state": "pass", "signals": {"boot": "pass", "services": "pass",
+                    "session": "pass", "capabilities": "pass"}},
+        "rollback": {"state": "available", "target_version": "2026.08.29.1",
+                     "target_slot": "a"},
+        "browser": {"engine": "chromium", "version": "151.0.7922.169-1",
+                    "channel": "snapshot", "snapshot_pin": "20260820T000000Z",
+                    "pin_source": "running image"}
+    })
+}
+
 fn firewall_descriptor() -> Value {
     json!({
         "capability": "security.firewall",
@@ -317,7 +338,7 @@ fn respond(request: &Value) -> Result<Value, Value> {
     let params = request.get("params");
 
     match method {
-        "status" | "capabilities.list" | "reconcile" | "policy.effective" => {
+        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status" => {
             assert!(params.is_none(), "{method} takes no params");
         }
         _ => {}
@@ -325,6 +346,7 @@ fn respond(request: &Value) -> Result<Value, Value> {
 
     match method {
         "status" => Ok(fixture_status()),
+        "update.status" => Ok(fixture_update_status()),
         "capabilities.list" => Ok(fixture_capabilities()),
         "capabilities.get" => {
             let capability = params.unwrap()["capability"].as_str().unwrap();
@@ -844,18 +866,27 @@ fn policy_verbs_need_the_daemon_and_exit_5_without_it() {
 }
 
 // ---------------------------------------------------------------------------
-// Remaining unscheduled surface
+// Governed update status
 // ---------------------------------------------------------------------------
 
 #[test]
-fn update_keeps_its_honest_unscheduled_stub() {
-    let missing = std::env::temp_dir().join("punarctl-no-daemon-here.sock");
-    let output = run(&missing, &["update", "status"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        stderr(&output).contains("not scheduled"),
-        "{}",
-        stderr(&output)
+fn update_status_is_typed_and_names_system_and_browser_evidence() {
+    let socket = start_mock();
+    let output = run(&socket, &["update", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("P U N A R   ·   U P D A T E"), "{text}");
+    assert!(text.contains("2026.08.30.1"), "{text}");
+    assert!(text.contains("2026.09.01.1"), "{text}");
+    assert!(text.contains("SYSTEM"), "{text}");
+    assert!(text.contains("BROWSER"), "{text}");
+    assert!(text.contains("151.0.7922.169-1"), "{text}");
+
+    let json_output = run(&socket, &["--json", "update", "status"]);
+    assert_eq!(json_output.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&json_output)).unwrap(),
+        fixture_update_status()
     );
 }
 

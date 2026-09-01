@@ -47,6 +47,7 @@ use punar_common::ipc::{
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
+use punar_common::update::{UpdateChannel, UpdateStatusResult};
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
@@ -71,6 +72,7 @@ use crate::state::{
     MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
     migrate_m3_store,
 };
+use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
 
 mod m9;
@@ -212,6 +214,9 @@ pub struct DaemonConfig {
     /// Read-only block/release inputs. All paths are injectable for contract
     /// tests; no installer operation accepts a path from its caller.
     pub installer_sources: InstallerSources,
+    /// Read-only local evidence consumed by `update.status`. Production uses
+    /// fixed OS paths; tests inject ordinary files.
+    pub update_status_sources: UpdateStatusSources,
 }
 
 impl DaemonConfig {
@@ -244,6 +249,7 @@ impl DaemonConfig {
             app_arch_override: None,
             live_mode: false,
             installer_sources: InstallerSources::default(),
+            update_status_sources: UpdateStatusSources::default(),
         }
     }
 }
@@ -367,6 +373,7 @@ struct Inner {
     /// API also makes our inspect→mutate→verify chain indivisible.
     app_mutation: Mutex<()>,
     installer: Installer,
+    update_status: UpdateStatusEngine,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -409,6 +416,7 @@ impl Daemon {
         installer_sources.live_device_id_path = cfg.state_dir.join("device-id");
         installer_sources.live_audit_path = cfg.audit_path.clone();
         let installer = Installer::new(installer_sources);
+        let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
         if cfg.live_mode {
             installer
                 .initialize_status_file()
@@ -532,6 +540,7 @@ impl Daemon {
                 apps,
                 app_mutation: Mutex::new(()),
                 installer,
+                update_status,
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
@@ -1170,6 +1179,7 @@ impl Inner {
             Method::AppsList => self.handle_apps_list(),
             Method::AppsInstall(params) => self.handle_apps_install(peer, params),
             Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
+            Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::InstallTargets => self
                 .installer
                 .targets()
@@ -1180,6 +1190,28 @@ impl Inner {
             Method::InstallRecoveryAck(params) => self.handle_install_recovery_ack(peer, params),
             Method::InstallStatus => Ok(to_value(self.installer.status())),
         }
+    }
+
+    fn handle_update_status(&self) -> UpdateStatusResult {
+        let mut status = self.update_status.status();
+        if let Some(entry) = self.effective.lock().unwrap().get("system.update_channel") {
+            if let Some(channel) = effective_update_channel(&entry.value) {
+                status.channel.name = channel;
+            } else {
+                status.channel.reachable = false;
+                status.channel.reason = Some(
+                    "the effective update channel is invalid; no update will be selected"
+                        .to_string(),
+                );
+            }
+            status.channel.source = match entry.provenance.kind {
+                punar_policy::SourceKind::LocalUserPreference => "personal-preference".into(),
+                punar_policy::SourceKind::OsSecureDefault => "os-default".into(),
+                other => other.as_str().to_string(),
+            };
+            status.channel.policy_ids = vec![entry.provenance.policy_id.clone()];
+        }
+        status
     }
 
     fn handle_install_plan(
@@ -3223,6 +3255,15 @@ impl Inner {
     }
 }
 
+fn effective_update_channel(value: &Value) -> Option<UpdateChannel> {
+    match value.as_str()? {
+        "stable" => Some(UpdateChannel::Stable),
+        "dev" => Some(UpdateChannel::Dev),
+        "edge" => Some(UpdateChannel::Edge),
+        _ => None,
+    }
+}
+
 fn to_value<T: serde::Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("result structs serialize infallibly")
 }
@@ -3233,6 +3274,24 @@ mod tests {
     use std::fs::{self, OpenOptions};
 
     use punar_common::audit::AUDIT_ROTATE_BYTES;
+
+    #[test]
+    fn update_status_channel_uses_only_the_closed_effective_value() {
+        assert_eq!(
+            effective_update_channel(&json!("stable")),
+            Some(UpdateChannel::Stable)
+        );
+        assert_eq!(
+            effective_update_channel(&json!("dev")),
+            Some(UpdateChannel::Dev)
+        );
+        assert_eq!(
+            effective_update_channel(&json!("edge")),
+            Some(UpdateChannel::Edge)
+        );
+        assert_eq!(effective_update_channel(&json!("nightly")), None);
+        assert_eq!(effective_update_channel(&json!(true)), None);
+    }
 
     #[test]
     fn read_line_bounded_handles_lines_and_limits() {

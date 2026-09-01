@@ -33,10 +33,13 @@ are that machinery.
 ## 2. Current state
 
 **Last fully green canonical baseline:** run
-[33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989)
-on `e29edbd`, all eight jobs, including x86_64/ARM64 code contracts, both image
+[33501585273](https://github.com/smplify-mdm/punar/actions/runs/33501585273)
+on `8a5afbc`, all nine jobs, including x86_64/ARM64 code contracts, both image
 lanes, minimal boot, ARM64 automatic rollback, the full graphical desktop,
-all ten in-VM exercises, desktop surfaces and the stabilized-idle budgets.
+all ten in-VM exercises, desktop surfaces, stabilized-idle budgets, the hybrid
+x86_64 installer in both boot forms, and the attended encrypted install proof.
+The installer passed I08–I13 in 103 seconds under KVM and independently
+verified GPT, LUKS2 and Btrfs after installed-system boot.
 The canonical x86 KVM lane measured 1116/1118 MB after the VM renderer change;
 the exact local native ARM64 evidence below is the clean-VM target-closing run.
 
@@ -334,10 +337,11 @@ that the M3 image exercise runs through all three branches. The same check
 proves no class carries a weaker security/privacy result.
 
 ### 7.4 Designed and unbuilt, roughly by value
-- **Installer + onboarding** — `docs/design/installer.md`, `onboarding.md`.
-  The hybrid x86_64 ISO and its optical/raw-drive live boot are canonical
-  CI-proven; the destructive transaction, installed-image boot, encryption
-  wiring, physical media and bare-hardware acceptance are not.
+- **Installer physical qualification + unattended custody** —
+  `docs/design/installer.md`, `onboarding.md`. The hybrid x86_64 ISO,
+  optical/raw live boot and attended LUKS2 installed-system transaction are
+  canonical CI-proven. USB media, physical firmware/storage, Secure Boot/TPM,
+  unattended signed answers and bare-hardware acceptance are not.
 - **Catalog breadth + broad-filesystem consent** — `docs/design/third-party-apps.md`,
   `app-catalog.md`. The typed `punarctl app` path and first curated apps now
   exist. Editors and creative tools that request `home` or `host` filesystem
@@ -475,19 +479,26 @@ and generic ARM64 image build/boot. The responsive six-app library itself is
 x86 runtime-proven in run 33146409332; its ARM Flatpak detail correction and
 the two unrelated runtime-gate corrections remain pending follow-up CI.
 
-**Real and locally architecture-tested, pending its first pushed CI:** the
-headless installer discovery/plan boundary. It can list safe candidate disks
-and return a schema-validated, signed-release, physical-disk-bound A/B plan;
-it cannot partition, encrypt, copy a payload or make boot media yet.
+**Real and canonical-CI exercised:** the signed hybrid x86_64 installer boots
+as optical media and as a raw drive, discovers and binds the disposable disk,
+partitions the A/B layout, creates LUKS2+Btrfs shared state, pauses for the
+personal recovery acknowledgement, writes and physically re-reads slot A,
+installs UEFI boot artifacts, hands off seed/audit state, boots the installed
+system, and verifies its storage topology. This is generic KVM/OVMF evidence,
+not USB, physical-firmware, Secure Boot, TPM or bare-hardware qualification.
 
 **Real but SIMULATED and labelled everywhere:** Secure Boot, TPM/measured boot,
 the Smplify control plane (`punar-mock-smplify`), identity providers, the
 private relay. Anything dashed in the design language is here by construction.
 
-**Not built:** bare-metal installer media and the mutating install flow, a
-broad catalog and broad-filesystem consent path, execution trust, generic
-user-defined web-app install and browser contexts (M11), network policy and
-relay (M12), and physical Raspberry Pi boot/peripheral/fault-injection proof.
+**Not built:** unattended signed-answer installation, physical install/recovery
+qualification, a broad catalog and broad-filesystem consent path, execution
+trust, generic user-defined web-app install and browser contexts (M11), the
+authenticated governed-update check/apply/rollback transactions and production
+channel transport, and physical Raspberry Pi boot/peripheral/fault-injection
+proof. The read-only `update.status` surface and the governed
+`system.update_channel` selector are implemented and covered by targeted local
+unit/integration suites; neither statement is physical-device proof.
 Generic QEMU ARM64 and A/B partition/update primitives are real; they are not
 Pi support.
 

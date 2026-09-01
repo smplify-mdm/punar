@@ -323,7 +323,7 @@ jq_check "last received compliance: device id matches, overall compliant, exactl
 ri_count="$(line_count "${RI_FILE}")"
 check_eq "received-inventory.jsonl line count (sent at enroll only)" 1 "${ri_count}"
 tail -n 1 "${RI_FILE}" > "${RUN_DIR}/m5-received-inventory-last.json" 2>/dev/null
-jq_check "received inventory: os/kernel non-empty, 3 capability rows, exact key allowlists (device info + capability states, nothing behavioral)" \
+jq_check "received inventory: os/kernel non-empty, 4 capability rows, exact key allowlists (device info + capability states, nothing behavioral)" \
     "${RUN_DIR}/m5-received-inventory-last.json" \
     "(keys | sort) == [\"device_id\", \"inventory\", \"received_at\"]
      and .device_id == \"${DEVICE_ID}\"
@@ -331,7 +331,7 @@ jq_check "received inventory: os/kernel non-empty, 3 capability rows, exact key 
      and (.inventory.os | keys | sort) == [\"id\", \"pretty_name\", \"version_id\"]
      and (.inventory.os.id | length) > 0
      and (.inventory.kernel | length) > 0
-     and (.inventory.capabilities | length) == 3
+     and (.inventory.capabilities | length) == 4
      and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"current_state\", \"supported\"]))"
 "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-b.json" 2>&1
 rc_count_b="$(line_count "${RC_FILE}")"

@@ -3,3 +3,4 @@
 pub mod firewall;
 pub mod hostname;
 pub mod timezone;
+pub mod update_channel;

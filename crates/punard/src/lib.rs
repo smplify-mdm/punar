@@ -2,8 +2,8 @@
 //!
 //! Milestone 3 scope (SPEC section 76): UDS NDJSON server with a closed,
 //! typed method table (`docs/api/ipc.md` is the binding wire contract), a
-//! capability registry with three real backends (`security.firewall`,
-//! `system.hostname`, `time.timezone`), and an append-only audit log
+//! capability registry with real backends (`security.firewall`,
+//! `system.hostname`, `time.timezone`, and now `system.update_channel`), and an append-only audit log
 //! (`schemas/audit/audit-event.json` conformant).
 //!
 //! Milestone 4 (SPEC sections 38–40, 42, 43, 52): desired state became a
@@ -62,4 +62,5 @@ pub mod pi_update;
 pub mod policy;
 pub mod server;
 pub mod state;
+pub mod update_status;
 pub mod util;

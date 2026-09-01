@@ -300,6 +300,158 @@ pub struct ReleaseTarget {
     pub channel: UpdateChannel,
 }
 
+/// One of the two fixed whole-system update slots. `unknown` is a first-class
+/// wire value: status must never infer a slot when neither the kernel command
+/// line nor Raspberry Pi firmware identifies one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateSlot {
+    A,
+    B,
+    Unknown,
+}
+
+/// Status of a health signal produced by `punar-update-health.service`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateHealthState {
+    Pass,
+    Fail,
+    Partial,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateHealthSignals {
+    pub boot: UpdateHealthState,
+    pub services: UpdateHealthState,
+    pub session: UpdateHealthState,
+    pub capabilities: UpdateHealthState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateHealthStatus {
+    pub state: UpdateHealthState,
+    pub signals: UpdateHealthSignals,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesiredReleaseState {
+    Unknown,
+    Available,
+    Staged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentReleaseStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub slot: UpdateSlot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blessed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesiredReleaseStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<UpdateSlot>,
+    pub state: DesiredReleaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateChannelStatus {
+    pub name: UpdateChannel,
+    pub source: String,
+    pub policy_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_bps: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_cohort: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halted: Option<bool>,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackState {
+    None,
+    Available,
+    PendingReboot,
+    AutoRolledBack,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackStatus {
+    pub state: RollbackState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_slot: Option<UpdateSlot>,
+    /// Required whenever `state` is `none` or `unavailable`; omitted for a
+    /// usable or already-requested rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserUpdateStatus {
+    pub engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_pin: Option<String>,
+    pub pin_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Read-only `update.status` result. Every field is derived from local
+/// evidence; unavailable facts stay absent and carry a reason rather than a
+/// plausible-looking placeholder.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateStatusResult {
+    pub v: u8,
+    pub image_id: String,
+    pub current: CurrentReleaseStatus,
+    pub desired: DesiredReleaseStatus,
+    pub channel: UpdateChannelStatus,
+    pub health: UpdateHealthStatus,
+    pub rollback: RollbackStatus,
+    pub browser: BrowserUpdateStatus,
+}
+
 impl ReleaseManifest {
     pub fn validate(&self) -> Result<(), UpdateTrustError> {
         if self.schema_version != 1 {

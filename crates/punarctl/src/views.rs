@@ -14,6 +14,10 @@
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
+use punar_common::update::{
+    DesiredReleaseState, RollbackState, UpdateHealthState, UpdateSlot, UpdateStatusResult,
+};
+
 use crate::fmt::{self, Row, Slot, Style};
 use crate::model::{self, state_str};
 
@@ -42,6 +46,188 @@ fn personal_context(hostname: &str) -> String {
     format!("{hostname} · Personal")
 }
 
+/// `punarctl update status`: system and browser provenance from the typed
+/// local evidence surface. Unknowns remain visible instead of becoming sample
+/// versions or a false "up to date" claim.
+pub fn update_status(style: &Style, result: &Value) -> Result<String, String> {
+    let status: UpdateStatusResult = parse(result)?;
+    let mut out = fmt::masthead(style, "Update", &status.image_id);
+    out.push_str(&fmt::section(style, "System", "local evidence"));
+
+    let slot = |slot: UpdateSlot| match slot {
+        UpdateSlot::A => "slot A",
+        UpdateSlot::B => "slot B",
+        UpdateSlot::Unknown => "slot unknown",
+    };
+    let health_slot = |state| match state {
+        UpdateHealthState::Pass => Slot::Ok,
+        UpdateHealthState::Partial => Slot::Warn,
+        UpdateHealthState::Fail | UpdateHealthState::Unknown => Slot::Bad,
+    };
+    let health_word = |state| match state {
+        UpdateHealthState::Pass => "pass",
+        UpdateHealthState::Partial => "partial",
+        UpdateHealthState::Fail => "fail",
+        UpdateHealthState::Unknown => "unknown",
+    };
+
+    let current = status.current.version.as_deref().unwrap_or("unknown");
+    let current_detail = [
+        Some(slot(status.current.slot).to_string()),
+        status.current.blessed.map(|blessed| {
+            if blessed {
+                "blessed".to_string()
+            } else {
+                "not yet blessed".to_string()
+            }
+        }),
+        status.current.reason.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+
+    let desired = status.desired.version.as_deref().unwrap_or("unknown");
+    let desired_detail = match status.desired.state {
+        DesiredReleaseState::Staged => format!(
+            "staged{}",
+            status
+                .desired
+                .slot
+                .map(|value| format!(" · {}", slot(value)))
+                .unwrap_or_default()
+        ),
+        DesiredReleaseState::Available => "verified and available".to_string(),
+        DesiredReleaseState::Unknown => status
+            .desired
+            .reason
+            .clone()
+            .unwrap_or_else(|| "no verified update decision".to_string()),
+    };
+    let channel_detail = status.channel.reason.clone().unwrap_or_else(|| {
+        let age = status
+            .channel
+            .metadata_age_seconds
+            .map(|seconds| format!("metadata {seconds}s old"))
+            .unwrap_or_else(|| "verified metadata".to_string());
+        format!("{age} · {}", status.channel.source)
+    });
+    let rollback_detail = status
+        .rollback
+        .target_slot
+        .map(|target| slot(target).to_string())
+        .or_else(|| status.rollback.rollback_unavailable_reason.clone())
+        .unwrap_or_default();
+    let rollback_word = match status.rollback.state {
+        RollbackState::None => "none",
+        RollbackState::Available => "available",
+        RollbackState::PendingReboot => "pending reboot",
+        RollbackState::AutoRolledBack => "auto rolled back",
+        RollbackState::Unavailable => "unavailable",
+    };
+
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Current",
+                current,
+                if status.current.version.is_some() && status.current.slot != UpdateSlot::Unknown {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                &current_detail,
+            ),
+            Row::new(
+                "Desired",
+                desired,
+                match status.desired.state {
+                    DesiredReleaseState::Staged | DesiredReleaseState::Available => Slot::Warn,
+                    DesiredReleaseState::Unknown => Slot::Bad,
+                },
+                &desired_detail,
+            ),
+            Row::new(
+                "Channel",
+                &status.channel.name.to_string(),
+                if status.channel.reachable {
+                    Slot::Ok
+                } else {
+                    Slot::Warn
+                },
+                &channel_detail,
+            ),
+            Row::new(
+                "Health",
+                health_word(status.health.state),
+                health_slot(status.health.state),
+                status
+                    .health
+                    .reason
+                    .as_deref()
+                    .unwrap_or("four-signal boot gate"),
+            ),
+            Row::new(
+                "Rollback",
+                rollback_word,
+                match status.rollback.state {
+                    RollbackState::Available | RollbackState::AutoRolledBack => Slot::Ok,
+                    RollbackState::PendingReboot => Slot::Warn,
+                    RollbackState::None | RollbackState::Unavailable => Slot::Neutral,
+                },
+                &rollback_detail,
+            ),
+        ],
+    ));
+
+    out.push_str(&fmt::section(style, "Browser", "running image provenance"));
+    let engine_detail = status
+        .browser
+        .reason
+        .clone()
+        .unwrap_or_else(|| "installed local package".to_string());
+    let channel = status
+        .browser
+        .snapshot_pin
+        .as_deref()
+        .map(|pin| format!("{} ({pin})", status.browser.channel))
+        .unwrap_or_else(|| status.browser.channel.clone());
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Engine",
+                &status.browser.engine,
+                if status.browser.version.is_some() {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                status.browser.version.as_deref().unwrap_or(&engine_detail),
+            ),
+            Row::new(
+                "Channel",
+                &channel,
+                Slot::Neutral,
+                &status.browser.pin_source,
+            ),
+            Row::new(
+                "Security channel",
+                status
+                    .browser
+                    .security_channel
+                    .as_deref()
+                    .unwrap_or("not configured"),
+                Slot::Warn,
+                "browser updates currently ride the complete signed OS image",
+            ),
+        ],
+    ));
+    Ok(out)
+}
+
 /// SPEC section 52 states on the terminal semantic slots (fmt.rs: lime
 /// for compliant, peach for pending, red for broken/unknown).
 fn compliance_slot(state: &str) -> Slot {
@@ -62,6 +248,7 @@ fn compliance_label(capability: &str) -> &str {
         "security.firewall" => "Firewall",
         "system.hostname" => "Hostname",
         "time.timezone" => "Timezone",
+        "system.update_channel" => "Update channel",
         other => other,
     }
 }

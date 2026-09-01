@@ -459,10 +459,10 @@ pub struct FlattenedSpec {
 /// Flatten a `DeviceDesiredState` document (SPEC section 38) into
 /// capability paths. M4 maps exactly
 /// `spec.security.firewall.enabled: true|false` →
-/// `security.firewall: "enabled"|"disabled"`. `spec.applications` is consumed
-/// by the set-membership application-policy engine above; every other
-/// `spec.*` subtree is reported in `unmapped` (no registered capability exists
-/// for it yet — honest limit, milestone-4.md section 3.2).
+/// `security.firewall: "enabled"|"disabled"`, and
+/// `spec.update.channel` → `system.update_channel`. `spec.applications` is
+/// consumed by the set-membership application-policy engine above; every
+/// other `spec.*` subtree is reported in `unmapped`.
 pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
     let mut flat = FlattenedSpec::default();
     let Some(spec) = document.get("spec").and_then(Value::as_object) else {
@@ -491,6 +491,16 @@ pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
                 }
             }
             ("applications", Some(_)) => {}
+            ("update", Some(update)) => {
+                for (key, setting) in update {
+                    match (key.as_str(), setting.as_str()) {
+                        ("channel", Some(channel)) => flat
+                            .mapped
+                            .push(("system.update_channel".to_string(), json!(channel))),
+                        _ => flat.unmapped.push(format!("spec.update.{key}")),
+                    }
+                }
+            }
             _ => flat.unmapped.push(format!("spec.{section}")),
         }
     }
@@ -625,14 +635,16 @@ mod tests {
         let flat = flatten_desired_state(&desired);
         assert_eq!(
             flat.mapped,
-            [("security.firewall".to_string(), json!("enabled"))]
+            [
+                ("security.firewall".to_string(), json!("enabled")),
+                ("system.update_channel".to_string(), json!("stable")),
+            ]
         );
         for expected in [
             "spec.security.diskEncryption",
             "spec.security.secureBoot",
             "spec.ai",
             "spec.network",
-            "spec.update",
         ] {
             assert!(
                 flat.unmapped.iter().any(|u| u == expected),
@@ -654,6 +666,17 @@ mod tests {
     }
 
     #[test]
+    fn flatten_maps_the_governed_update_channel() {
+        let doc = json!({"spec": {"update": {"channel": "edge"}}});
+        let flat = flatten_desired_state(&doc);
+        assert_eq!(
+            flat.mapped,
+            [("system.update_channel".to_string(), json!("edge"))]
+        );
+        assert!(flat.unmapped.is_empty());
+    }
+
+    #[test]
     fn load_policy_dir_reads_acme_envelopes_in_filename_order() {
         let dir = tmp("load-acme");
         std::fs::write(
@@ -662,14 +685,24 @@ mod tests {
         )
         .unwrap();
         let loaded = load_policy_dir(&dir).unwrap();
-        assert_eq!(loaded.layers.len(), 1);
-        let (path, layer) = &loaded.layers[0];
+        assert_eq!(loaded.layers.len(), 2);
+        let (path, layer) = loaded
+            .layers
+            .iter()
+            .find(|(path, _)| path == "security.firewall")
+            .unwrap();
         assert_eq!(path, "security.firewall");
         assert_eq!(layer.value, json!("enabled"));
         assert_eq!(layer.provenance.kind, SourceKind::OrganizationBaseline);
         assert_eq!(layer.provenance.rank, 2);
         assert_eq!(layer.provenance.policy_id, "eng-baseline-v12");
         assert_eq!(layer.provenance.source_name, "Acme Engineering Baseline");
+        let (_, update) = loaded
+            .layers
+            .iter()
+            .find(|(path, _)| path == "system.update_channel")
+            .unwrap();
+        assert_eq!(update.value, json!("stable"));
         assert_eq!(loaded.applications.len(), 1);
         assert_eq!(
             loaded.applications[0].required,

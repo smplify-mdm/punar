@@ -2899,18 +2899,9 @@ fn main() -> ExitCode {
             }
         }
         Command::Update { command } => match command {
-            UpdateCommand::Status => {
-                // Retargeted while touched (M3 plan section 10): update
-                // orchestration is a punard responsibility (SPEC section
-                // 11.1), but no SPEC section 76 milestone schedules it —
-                // an honest stub beats a wrong label.
-                eprintln!(
-                    "punarctl update status: not implemented — update orchestration \
-                     (SPEC section 11.1) is not scheduled by the SPEC section 76 \
-                     milestone plan; this stub stays until a milestone claims it"
-                );
-                ExitCode::FAILURE
-            }
+            UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
+                views::update_status(&style, v)
+            }),
         },
     }
 }
