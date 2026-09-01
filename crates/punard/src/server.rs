@@ -996,12 +996,19 @@ fn write_personal_recovery_disclosure(
     recovery_key: &str,
     challenge_groups: [u8; 2],
 ) -> Result<(), InstallError> {
-    output.write_all(b"PUNAR-RECOVERY-V1\n")?;
-    output.write_all(recovery_key.as_bytes())?;
-    output.write_all(b"\n")?;
-    writeln!(output, "{} {}", challenge_groups[0], challenge_groups[1])?;
-    output.flush()?;
-    Ok(())
+    (|| -> io::Result<()> {
+        output.write_all(b"PUNAR-RECOVERY-V1\n")?;
+        output.write_all(recovery_key.as_bytes())?;
+        output.write_all(b"\n")?;
+        writeln!(output, "{} {}", challenge_groups[0], challenge_groups[1])?;
+        output.flush()
+    })()
+    .map_err(|error| {
+        InstallError::Io(io::Error::new(
+            error.kind(),
+            format!("personal recovery disclosure: {error}"),
+        ))
+    })
 }
 
 impl Inner {

@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{IoSliceMut, Read, Seek, SeekFrom, Write};
+use std::io::{self, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -74,6 +74,8 @@ const REPART_DEFINITION_MAX_BYTES: u64 = 64 * 1024;
 const RECOVERY_KEY_OUTPUT_MAX_BYTES: u64 = 128;
 const LUKS_UUID_OUTPUT_MAX_BYTES: u64 = 64;
 const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
+const REPART_TARGET_READY_ATTEMPTS: usize = 50;
+const REPART_TARGET_READY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const PI_BOOT_CONFIG_MAX_BYTES: usize = 64 * 1024;
 const PI_AUTOBOOT_MAX_BYTES: usize = 512;
@@ -803,13 +805,16 @@ impl Installer {
         let allow_regular_target = self.sources.allow_regular_target_for_tests;
         #[cfg(not(test))]
         let allow_regular_target = false;
-        validate_repart_target(&target, allow_regular_target)?;
+        wait_for_repart_target(&target, allow_regular_target)?;
 
         let recovery_key =
-            run_systemd_cryptenroll(&self.sources.cryptenroll_path, &target, passphrase)?;
+            run_systemd_cryptenroll(&self.sources.cryptenroll_path, &target, passphrase)
+                .map_err(|error| install_error_context(error, "recovery-key enrollment"))?;
         let recovery_keyslot =
-            read_systemd_recovery_keyslot(&self.sources.cryptsetup_path, &target)?;
-        let luks_uuid = read_luks_uuid(&self.sources.cryptsetup_path, &target)?;
+            read_systemd_recovery_keyslot(&self.sources.cryptsetup_path, &target)
+                .map_err(|error| install_error_context(error, "recovery-keyslot inspection"))?;
+        let luks_uuid = read_luks_uuid(&self.sources.cryptsetup_path, &target)
+            .map_err(|error| install_error_context(error, "LUKS UUID inspection"))?;
         Ok((
             recovery_key,
             RecoveryKeyIdentity {
@@ -2846,6 +2851,57 @@ fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<
     Ok(())
 }
 
+/// A successful repart exit is the destructive durability boundary, but the
+/// kernel-to-devtmpfs publication of a newly-created partition can trail that
+/// exit briefly on real virtio/NVMe devices. Retry only discovery errors that
+/// describe that publication window. A symlink, wrong file type, permission
+/// failure or any other boundary violation still fails immediately.
+fn wait_for_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<(), InstallError> {
+    let mut last_error = None;
+    for attempt in 0..REPART_TARGET_READY_ATTEMPTS {
+        match validate_repart_target(path, allow_regular_for_tests) {
+            Ok(()) => return Ok(()),
+            Err(InstallError::Io(error))
+                if attempt + 1 < REPART_TARGET_READY_ATTEMPTS
+                    && repart_target_discovery_is_transient(&error) =>
+            {
+                last_error = Some(error);
+                std::thread::sleep(REPART_TARGET_READY_DELAY);
+            }
+            Err(error) => {
+                return Err(install_error_context(
+                    error,
+                    "post-repartition data-device discovery",
+                ));
+            }
+        }
+    }
+    Err(install_error_context(
+        InstallError::Io(
+            last_error
+                .unwrap_or_else(|| io::Error::other("the data partition did not become ready")),
+        ),
+        "post-repartition data-device discovery",
+    ))
+}
+
+fn repart_target_discovery_is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput | io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(6 | 16 | 19 | 22))
+}
+
+fn install_error_context(error: InstallError, context: &str) -> InstallError {
+    match error {
+        InstallError::Io(source) => InstallError::Io(io::Error::new(
+            source.kind(),
+            format!("{context}: {source}"),
+        )),
+        other => other,
+    }
+}
+
 const FIXED_TOOL_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
 
 /// Drain a fixed tool's stderr without allowing a child to block on a full
@@ -2973,7 +3029,7 @@ fn run_systemd_cryptenroll(
         .arg(target)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| {
         InstallError::Io(std::io::Error::new(
             error.kind(),
@@ -2983,6 +3039,12 @@ fn run_systemd_cryptenroll(
             ),
         ))
     })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        InstallError::Io(io::Error::other(
+            "systemd-cryptenroll did not provide its fixed diagnostic pipe",
+        ))
+    })?;
+    let diagnostic_reader = std::thread::spawn(move || read_fixed_tool_diagnostic(stderr));
     let write_result = child
         .stdin
         .take()
@@ -2995,6 +3057,7 @@ fn run_systemd_cryptenroll(
     if let Err(error) = write_result {
         let _ = child.kill();
         let _ = child.wait();
+        let _ = diagnostic_reader.join();
         return Err(error);
     }
 
@@ -3010,21 +3073,29 @@ fn run_systemd_cryptenroll(
     {
         let _ = child.kill();
         let _ = child.wait();
+        let _ = diagnostic_reader.join();
         return Err(InstallError::Io(error));
     }
     drop(stdout);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > RECOVERY_KEY_OUTPUT_MAX_BYTES {
         let _ = child.kill();
         let _ = child.wait();
+        let _ = diagnostic_reader.join();
         return Err(InstallError::Io(std::io::Error::other(
             "systemd-cryptenroll returned an invalid recovery key",
         )));
     }
     let status = child.wait()?;
+    let (diagnostic, truncated) = diagnostic_reader.join().map_err(|_| {
+        InstallError::Io(io::Error::other(
+            "systemd-cryptenroll diagnostic reader terminated unexpectedly",
+        ))
+    })??;
     if !status.success() {
-        return Err(InstallError::Io(std::io::Error::other(
-            "systemd-cryptenroll did not enroll a recovery key",
-        )));
+        return Err(InstallError::Io(std::io::Error::other(format!(
+            "systemd-cryptenroll did not enroll a recovery key: {}",
+            sanitize_fixed_tool_diagnostic(&diagnostic, truncated)
+        ))));
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| {
         InstallError::Io(std::io::Error::other(
@@ -5333,6 +5404,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn recovery_enrollment_failure_surfaces_a_bounded_tool_diagnostic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let tool = fixture.root.join("systemd-cryptenroll");
+        fs::write(
+            &tool,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'device not ready\\n' >&2\nexit 2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = run_systemd_cryptenroll(
+            &tool,
+            &fixture.sources.dev_root.join("vda4"),
+            b"test-only-passphrase",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("device not ready"));
+        assert!(!error.to_string().contains("test-only-passphrase"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn fixed_block_device_validation_names_a_refused_symlink() {
         use std::os::unix::fs::symlink;
 
@@ -5345,6 +5440,21 @@ mod tests {
         let error = validate_repart_target(&link, true).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
         assert!(error.to_string().contains("vda4-target"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn post_repartition_discovery_waits_for_a_late_device_node() {
+        let fixture = Fixture::new();
+        let target = fixture.sources.dev_root.join("vda4");
+        let published = target.clone();
+        let publisher = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            File::create(published).unwrap();
+        });
+
+        wait_for_repart_target(&target, true).unwrap();
+        publisher.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]
