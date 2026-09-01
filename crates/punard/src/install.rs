@@ -1391,19 +1391,23 @@ impl Installer {
             &plan.disk.device,
             data_partition_number(plan)?,
         )?;
-        validate_repart_target(&partition, false)?;
+        validate_repart_target(&partition, false)
+            .map_err(|error| install_error_context(error, "installed data-partition validation"))?;
         let mapping = if plan.encryption == InstallEncryption::Luks2 {
             let passphrase = inputs
                 .passphrase()
                 .expect("encrypted passphrase validated above");
-            Some(open_luks_mapping(
-                &self.sources.cryptsetup_path,
-                &self.sources.dev_root,
-                &self.sources.sys_class_block,
-                &partition,
-                token,
-                passphrase,
-            )?)
+            Some(
+                open_luks_mapping(
+                    &self.sources.cryptsetup_path,
+                    &self.sources.dev_root,
+                    &self.sources.sys_class_block,
+                    &partition,
+                    token,
+                    passphrase,
+                )
+                .map_err(|error| install_error_context(error, "installed data-volume unlock"))?,
+            )
         } else {
             None
         };
@@ -1411,13 +1415,16 @@ impl Installer {
             .as_ref()
             .map(|mapping| mapping.path.as_path())
             .unwrap_or(partition.as_path());
-        validate_repart_target(source, false)?;
+        validate_repart_target(source, false)
+            .map_err(|error| install_error_context(error, "unlocked data-device validation"))?;
 
         let path = self
             .sources
             .repart_runtime_root
             .join(format!("data-{token}"));
-        create_private_directory(&path)?;
+        create_private_directory(&path).map_err(|error| {
+            install_error_context(error, "installed data mountpoint preparation")
+        })?;
         let mut flags = rustix::mount::MountFlags::NODEV
             | rustix::mount::MountFlags::NOSUID
             | rustix::mount::MountFlags::NOEXEC
@@ -1434,7 +1441,10 @@ impl Installer {
         ) {
             let _ = fs::remove_dir(&path);
             drop(mapping);
-            return Err(rustix_install_io(error));
+            return Err(install_error_context(
+                rustix_install_io(error),
+                "installed data-subvolume mount",
+            ));
         }
         Ok(MountedData::mounted(path, mapping))
     }
@@ -2829,8 +2839,13 @@ fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(
-            i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits())
-                .expect("open flags fit libc::c_int"),
+            i32::try_from(
+                (rustix::fs::OFlags::PATH
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC)
+                    .bits(),
+            )
+            .expect("open flags fit libc::c_int"),
         )
         .open(path)
         .map_err(|error| {
@@ -2842,7 +2857,23 @@ fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<
                 ),
             ))
         })?;
-    let kind = file.metadata()?.file_type();
+    // Validation needs an identity-bearing descriptor, not a read channel.
+    // O_PATH avoids invoking a block driver's open path (device-mapper nodes
+    // may transiently reject that with EINVAL) while fstat still proves the
+    // opened object type. O_NOFOLLOW plus the descriptor-side type check also
+    // closes the lstat/open replacement window above.
+    let kind = file
+        .metadata()
+        .map_err(|error| {
+            InstallError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "could not identify opened block-device path {}: {error}",
+                    path.display()
+                ),
+            ))
+        })?
+        .file_type();
     if !(kind.is_block_device() || allow_regular_for_tests && kind.is_file()) {
         return Err(InstallError::Refused(
             "the confirmed installer target is no longer a block device".into(),
@@ -5440,6 +5471,23 @@ mod tests {
         let error = validate_repart_target(&link, true).unwrap_err();
         assert!(error.to_string().contains("symbolic link"));
         assert!(error.to_string().contains("vda4-target"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixed_block_device_validation_does_not_activate_special_nodes() {
+        let fixture = Fixture::new();
+        let target = fixture.sources.dev_root.join("vda4");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &target,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+
+        let error = validate_repart_target(&target, false).unwrap_err();
+        assert!(matches!(error, InstallError::Refused(_)));
+        assert!(error.to_string().contains("no longer a block device"));
     }
 
     #[cfg(target_os = "linux")]
