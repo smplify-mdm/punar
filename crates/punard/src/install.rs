@@ -5171,6 +5171,15 @@ mod tests {
 
     static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
+    fn sync_uefi_install_pair(manifest: &mut ReleaseManifest) {
+        let slots = manifest
+            .uefi_slots
+            .as_mut()
+            .expect("UEFI fixture carries both slot pairs");
+        slots.a.payload = manifest.payload.clone();
+        slots.a.boot_artifact = manifest.boot_artifact.clone();
+    }
+
     struct Fixture {
         root: PathBuf,
         sources: InstallerSources,
@@ -5290,6 +5299,7 @@ mod tests {
             manifest.architecture = Architecture::Aarch64;
             manifest.boot_platform = BootPlatform::RaspberryPi;
             manifest.boot_artifact.kind = BootArtifactKind::RaspberryPiBootfs;
+            manifest.uefi_slots = None;
             manifest.release_id = format!(
                 "{}-{}-{}-{}-{}",
                 manifest.image_id,
@@ -6538,6 +6548,7 @@ mod tests {
         let mut changed_sources = fixture.sources.clone();
         let mut changed_manifest = changed_sources.release_manifest_override.clone().unwrap();
         changed_manifest.boot_artifact.digest_sha256 = "3".repeat(64);
+        sync_uefi_install_pair(&mut changed_manifest);
         changed_sources.release_manifest_override = Some(changed_manifest);
         let boot_changed = Installer::new(changed_sources)
             .plan(&encrypted_params("/dev/vda"))
@@ -6595,6 +6606,7 @@ mod tests {
         manifest.boot_artifact.filename = "punar.efi".into();
         manifest.boot_artifact.digest_sha256 = sha256_hex(boot_artifact);
         manifest.boot_artifact.size_bytes = boot_artifact.len() as u64;
+        sync_uefi_install_pair(manifest);
         fs::write(release_dir.join(&manifest.payload.filename), payload).unwrap();
         fs::write(
             release_dir.join(&manifest.boot_artifact.filename),
@@ -6639,6 +6651,7 @@ mod tests {
         manifest.boot_artifact.filename = "punar-slot-a.efi".into();
         manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
         manifest.boot_artifact.size_bytes = artifact.len() as u64;
+        sync_uefi_install_pair(manifest);
         fs::write(release_dir.join(&manifest.boot_artifact.filename), artifact).unwrap();
 
         let esp = fixture.root.join("esp");
@@ -6851,6 +6864,7 @@ mod tests {
         manifest.boot_artifact.filename = "punar-slot-a.efi".into();
         manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
         manifest.boot_artifact.size_bytes = artifact.len() as u64;
+        sync_uefi_install_pair(manifest);
         let artifact_path = release_dir.join(&manifest.boot_artifact.filename);
         fs::write(&artifact_path, artifact).unwrap();
 

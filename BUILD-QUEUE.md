@@ -40,14 +40,15 @@ automatic-fallback path is implemented and canonical ARM64 CI-proven. Channel
 transport/promotion, production key custody, and end-to-end production
 repository coverage remain unshipped.
 
-The first three governed-update slices are implemented. `punarctl update status`
+The four typed governed-update methods are implemented in the current tree.
+`punarctl update status`
 obtains bounded local evidence through the read-only `update.status` IPC method
 and reports release identity, actual/desired slot, health signals, rollback
 state, channel provenance, and browser-package provenance without inventing
 unavailable values. Personal devices can select `stable`, `dev`, or `edge`
 through the durable `system.update_channel` capability; enrollment policy
 continues to win through the normal effective-policy engine. The current
-working tree also adds root-only, audited `update.check`: it verifies exact-byte
+tree includes root-only, audited `update.check`: it verifies exact-byte
 Ed25519 channel metadata against the device image/architecture/platform/channel,
 computes rollout eligibility locally, and atomically caches only authenticated
 state. A root-owned optional HTTPS origin now resolves the fixed
@@ -57,9 +58,25 @@ staging, exact signature/target admission, and no downgrade to local media are
 unit-proven. The local-media transport remains only when no network origin is
 configured. Unit and daemon/CLI integration suites pass locally; canonical CI
 and a real production CDN/TLS exercise are still required before calling the
-network discovery path shipped. `update.apply`, `update.rollback`, promotion
-automation, production key custody, and production repository coverage remain
-open.
+network discovery path shipped. Root-human-only `update.apply` re-authenticates
+the exact channel head and release, selects the inactive slot from fixed local
+evidence, verifies an independently root-bound A or B payload/UKI pair, writes
+and physically re-hashes the inactive root, retains the blessed old UKI, and
+installs the counted candidate last. `update.rollback` selects only a retained
+local last-known-good release; both methods are audited, reject caller-supplied
+paths/origins/slots/digests, and deny agent-attributed peers before uid. The
+same public methods dispatch to the existing Raspberry Pi `tryboot` transaction
+and its now-explicit durable rollback. Local integration proves A→B, B→A,
+post-write verification, selector transition, rollback, non-root denial and
+non-overridable agent denial. A real local bundle build from the canonical
+ARM64 image produced two distinct 8 GiB root payloads and two distinct
+root-bound UKIs for release `2026.09.01.1`; both compressed streams reproduced
+their signed uncompressed digests and each UKI exposed exactly one expected
+PARTUUID. That artifact proof used an explicitly labelled ephemeral test key,
+not production signing custody. Full canonical CI is still required for this
+slice. Promotion automation, production key custody, a real production
+repository/CDN exercise, bare-metal power-loss testing and physical Raspberry
+Pi acceptance remain open.
 
 The primary modifier's product name is the **Punar key** (`PUNAR + …` in
 written chords, `Punar` on caps). The raw Hyprland modifier name is internal

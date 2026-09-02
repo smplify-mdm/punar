@@ -17,6 +17,7 @@ ai:
       host:
         user_package: allow
         system_package: approval_required
+        system_update: deny
         firewall: deny
         user_management: deny
 

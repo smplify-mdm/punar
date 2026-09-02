@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Convert one verified generic ARM64 release image into a signed Raspberry Pi
 # *installation* bundle for root slot A plus a slot-neutral Pi boot artifact.
-# This is intentionally separate
-# from build-release-bundle.sh, whose payload and UKI are rebound to inactive
-# slot B for update/rollback proof. Mixing those roles would create duplicate
-# filesystem identities after the first update.
+# This is intentionally separate from build-release-bundle.sh, whose UEFI
+# artifact contains independently rebound A/B root and UKI pairs. Mixing those
+# roles would create duplicate filesystem identities after the first update.
 #
 # Signatures use an ephemeral per-run Ed25519 key until production key custody
 # is supplied. The bundle is therefore software-path evidence, not a release.
@@ -33,6 +32,7 @@ BUILDER_DIGEST="${PUNAR_DEBIAN_BUILDER_BASE##*@}"
 BUILD_INFO="${REPO_ROOT}/os/images/out/arm64-build-info.txt"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
+SNAPSHOT_PIN="${PUNAR_DEBIAN_SNAPSHOT}+rpi-${PUNAR_RPI_FIRMWARE_COMMIT}"
 
 die() {
     echo "error: $*" >&2
@@ -97,6 +97,8 @@ docker run --rm --privileged \
     --env "PUNAR_BOOTFS_NAME=${BOOTFS_NAME}" \
     --env "PUNAR_ROOT_A_BYTES=${ROOT_A_BYTES}" \
     --env "PUNAR_RPI_KERNEL_RELEASE=${PUNAR_RPI_KERNEL_RELEASE}" \
+    --env "PUNAR_VERSION=${VERSION}" \
+    --env "PUNAR_SNAPSHOT_PIN=${SNAPSHOT_PIN}" \
     --env "PUNAR_HOST_UID=${HOST_UID}" \
     --env "PUNAR_HOST_GID=${HOST_GID}" \
     "${BUILDER_TAG}" bash -ceu '
@@ -153,6 +155,26 @@ docker run --rm --privileged \
         mount "${root_loop}" "${work}/root"
         grep -Fqi "UUID=${root_uuid} / ext4" "${work}/root/etc/fstab" \
             || { echo "error: source root A fstab does not bind its filesystem UUID" >&2; exit 1; }
+        stamp_release_identity() {
+            local os_release="$1"
+            [ -f "${os_release}" ]
+            awk "!/^(IMAGE_ID|IMAGE_VERSION|PUNAR_SNAPSHOT_PIN)=/" \
+                "${os_release}" > "${os_release}.punar"
+            {
+                printf "IMAGE_ID=punar-desktop\n"
+                printf "IMAGE_VERSION=%s\n" "${PUNAR_VERSION}"
+                printf "PUNAR_SNAPSHOT_PIN=%s\n" "${PUNAR_SNAPSHOT_PIN}"
+            } >> "${os_release}.punar"
+            chmod 0644 "${os_release}.punar"
+            mv "${os_release}.punar" "${os_release}"
+        }
+        os_release="${work}/root/usr/lib/os-release"
+        stamp_release_identity "${os_release}"
+        if [ ! -L "${work}/root/etc/os-release" ]; then
+            stamp_release_identity "${work}/root/etc/os-release"
+        fi
+        grep -Fxq "IMAGE_VERSION=${PUNAR_VERSION}" "${work}/root/etc/os-release"
+        grep -Fxq "PUNAR_SNAPSHOT_PIN=${PUNAR_SNAPSHOT_PIN}" "${work}/root/etc/os-release"
         mkdir -p "${work}/root/proc" "${work}/root/sys" \
             "${work}/root/dev" "${work}/root/run"
         mount -t proc proc "${work}/root/proc"
@@ -196,7 +218,6 @@ GIT_SHA="${BUILD_GIT_SHA}"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CI_RUN_ID="${GITHUB_RUN_ID:-local-$(date -u +%Y%m%dT%H%M%SZ)}"
 RELEASE_ID="${IMAGE_ID}-${CHANNEL}-${ARCH}-${BOOT_PLATFORM}-${VERSION}"
-SNAPSHOT_PIN="${PUNAR_DEBIAN_SNAPSHOT}+rpi-${PUNAR_RPI_FIRMWARE_COMMIT}"
 
 jq -n \
     --arg release_id "${RELEASE_ID}" \
@@ -225,6 +246,7 @@ jq -n \
         uncompressed_size_bytes: $uncompressed_size, compression: "zstd"},
       boot_artifact: {kind: "raspberry_pi_bootfs", filename: $bootfs_filename,
         digest_sha256: $bootfs_digest, size_bytes: $bootfs_size},
+      uefi_slots: null,
       min_from: null, security: {severity: "none", advisory_ids: []},
       provenance: {git_commit: $git_commit, ci_run_id: $ci_run_id,
         builder_base_digest: $builder_digest, source_date_epoch: $source_date_epoch,

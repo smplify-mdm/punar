@@ -22,6 +22,40 @@
     "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
     "size_bytes": 4
   },
+  "uefi_slots": {
+    "a": {
+      "payload": {
+        "filename": "payload.slot.raw.zst",
+        "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "size_bytes": 4,
+        "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "uncompressed_size_bytes": 8,
+        "compression": "zstd"
+      },
+      "boot_artifact": {
+        "kind": "uki",
+        "filename": "boot.uki.efi",
+        "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size_bytes": 4
+      }
+    },
+    "b": {
+      "payload": {
+        "filename": "payload.slot-b.raw.zst",
+        "digest_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 4,
+        "uncompressed_digest_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "uncompressed_size_bytes": 8,
+        "compression": "zstd"
+      },
+      "boot_artifact": {
+        "kind": "uki",
+        "filename": "boot.slot-b.efi",
+        "digest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "size_bytes": 4
+      }
+    }
+  },
   "min_from": null,
   "security": { "severity": "none", "advisory_ids": [] },
   "provenance": {

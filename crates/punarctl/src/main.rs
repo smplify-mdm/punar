@@ -88,6 +88,7 @@ use punar_common::install::{
     InstallPlanResult, InstallRecoveryAckParams, InstallRecoveryMode, InstallSeedParams,
     InstallStatusResult, InstallTargetsResult,
 };
+use punar_common::update::ReleaseVersion;
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -561,6 +562,26 @@ enum UpdateCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Stage one exact signed channel-head release into the inactive slot.
+    Apply {
+        /// Exact release version reported by `punarctl update check`.
+        version: ReleaseVersion,
+        /// Permit an explicitly requested signed downgrade.
+        #[arg(long)]
+        allow_downgrade: bool,
+        /// Restart after the verified transaction returns successfully.
+        #[arg(long)]
+        reboot: bool,
+    },
+    /// Select a locally retained last-known-good release for the next boot.
+    Rollback {
+        /// Exact retained release; omitted selects the newest previous one.
+        #[arg(long = "to")]
+        to_version: Option<ReleaseVersion>,
+        /// Restart after the selector change returns successfully.
+        #[arg(long)]
+        reboot: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -673,6 +694,72 @@ fn rpc(
 ) -> ExitCode {
     match client.call(method, params) {
         Ok(result) => render_or_json(json, &result, render),
+        Err(error) => fail(&error),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UpdateRestart {
+    Apply,
+    Rollback,
+}
+
+/// Reboot is intentionally a fixed caller-side action, not a daemon RPC. On
+/// Raspberry Pi an apply must request the firmware's one-shot tryboot path;
+/// rollback and UEFI selector changes use a normal restart.
+fn restart_after_update(kind: UpdateRestart) -> ExitCode {
+    let is_pi = Path::new("/proc/device-tree/chosen/bootloader/partition").exists();
+    let mut command = if is_pi && matches!(kind, UpdateRestart::Apply) {
+        let mut command = std::process::Command::new("/usr/bin/reboot");
+        command.arg("0 tryboot");
+        command
+    } else {
+        let mut command = std::process::Command::new("/usr/bin/systemctl");
+        command.arg("reboot");
+        command
+    };
+    match command.status() {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => {
+            eprintln!(
+                "The signed update transaction completed, but the restart command exited with {status}.\nNext step: restart this device manually; the verified boot selection is already durable."
+            );
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!(
+                "The signed update transaction completed, but Punar could not start the fixed restart command ({error}).\nNext step: restart this device manually; the verified boot selection is already durable."
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn update_mutation(
+    client: &Client,
+    style: &Style,
+    json_output: bool,
+    method: &str,
+    params: Value,
+    reboot: bool,
+    restart: UpdateRestart,
+) -> ExitCode {
+    match client.call_with_timeout(method, Some(params), crate::ipc::UPDATE_MUTATION_TIMEOUT) {
+        Ok(result) => {
+            let rendered = match restart {
+                UpdateRestart::Apply => render_or_json(json_output, &result, |value| {
+                    views::update_apply(style, value)
+                }),
+                UpdateRestart::Rollback => render_or_json(json_output, &result, |value| {
+                    views::update_rollback(style, value)
+                }),
+            };
+            if rendered != ExitCode::SUCCESS || !reboot {
+                rendered
+            } else {
+                restart_after_update(restart)
+            }
+        }
         Err(error) => fail(&error),
     }
 }
@@ -3241,6 +3328,31 @@ fn main() -> ExitCode {
                 Some(json!({ "force": force })),
                 |v| views::update_check(&style, v),
             ),
+            UpdateCommand::Apply {
+                version,
+                allow_downgrade,
+                reboot,
+            } => update_mutation(
+                &client,
+                &style,
+                json,
+                "update.apply",
+                json!({
+                    "version": version,
+                    "allow_downgrade": allow_downgrade,
+                }),
+                reboot,
+                UpdateRestart::Apply,
+            ),
+            UpdateCommand::Rollback { to_version, reboot } => update_mutation(
+                &client,
+                &style,
+                json,
+                "update.rollback",
+                json!({ "to_version": to_version }),
+                reboot,
+                UpdateRestart::Rollback,
+            ),
         },
     }
 }
@@ -3630,6 +3742,26 @@ mod tests {
             &["punarctl", "audit", "tail"],
             &["punarctl", "reconcile"],
             &["punarctl", "update", "status"],
+            &["punarctl", "update", "check"],
+            &["punarctl", "update", "check", "--force"],
+            &["punarctl", "update", "apply", "2026.08.27.1"],
+            &[
+                "punarctl",
+                "update",
+                "apply",
+                "2026.08.20.1",
+                "--allow-downgrade",
+                "--reboot",
+            ],
+            &["punarctl", "update", "rollback"],
+            &[
+                "punarctl",
+                "update",
+                "rollback",
+                "--to",
+                "2026.08.20.1",
+                "--reboot",
+            ],
             &["punarctl", "capabilities", "get", "security.firewall"],
             &[
                 "punarctl",
@@ -3660,6 +3792,17 @@ mod tests {
                 Cli::try_parse_from(example.iter()).is_ok(),
                 "failed to parse {example:?}"
             );
+        }
+    }
+
+    #[test]
+    fn update_mutations_require_canonical_release_versions() {
+        for example in [
+            ["punarctl", "update", "apply", "latest"].as_slice(),
+            ["punarctl", "update", "apply", "2026.8.27.1"].as_slice(),
+            ["punarctl", "update", "rollback", "--to", "../old"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(example.iter()).is_err(), "{example:?}");
         }
     }
 

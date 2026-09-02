@@ -194,6 +194,7 @@ fn run(args: RunArgs) -> ExitCode {
     let update_status_sources = punard::update_status::UpdateStatusSources {
         channel_preference: cfg.state_dir.join("update/channel"),
         pending_pi: cfg.state_dir.join("update/pending-pi.json"),
+        pending_uefi: cfg.state_dir.join("update/pending-uefi.json"),
         ..Default::default()
     };
     let live_mode = std::fs::read_to_string("/proc/cmdline")

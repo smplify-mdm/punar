@@ -48,7 +48,8 @@ use punar_common::ipc::{
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
 use punar_common::update::{
-    UpdateChannel, UpdateCheckParams, UpdateCheckResult, UpdateStatusResult,
+    UpdateApplyParams, UpdateApplyResult, UpdateChannel, UpdateCheckParams, UpdateCheckResult,
+    UpdateRollbackParams, UpdateStatusResult,
 };
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
@@ -66,6 +67,7 @@ use crate::enroll::{
     save_enrollment, write_status_summary,
 };
 use crate::install::{InstallAuditEvents, InstallError, Installer, InstallerSources};
+use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
     ApplicationPolicyAction, ApplicationPolicyLayer, EffectiveDocument, Layer, compute_effective,
     evaluate_application_policy, load_policy_dir, write_effective_debug_copy,
@@ -76,6 +78,9 @@ use crate::state::{
 };
 use crate::update_check::{UpdateCheckEngine, UpdateCheckError, UpdateCheckSources};
 use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
+use crate::update_transaction::{
+    UpdateTransactionEngine, UpdateTransactionError, UpdateTransactionSources,
+};
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
 
 mod m9;
@@ -223,6 +228,10 @@ pub struct DaemonConfig {
     /// Fixed authenticated channel source, trust anchors and verified-cache
     /// paths consumed by `update.check`. No field is caller-controlled.
     pub update_check_sources: UpdateCheckSources,
+    /// Fixed UEFI slot/ESP paths for the governed update transaction.
+    pub update_transaction_sources: UpdateTransactionSources,
+    /// Fixed Raspberry Pi firmware/slot paths for the same public method.
+    pub pi_update_sources: PiUpdateSources,
 }
 
 impl DaemonConfig {
@@ -233,6 +242,14 @@ impl DaemonConfig {
             cached_channel: state_dir.join("update/verified-channel.json"),
             cached_signature: state_dir.join("update/verified-channel.json.sig"),
             ..UpdateCheckSources::default()
+        };
+        let update_transaction_sources = UpdateTransactionSources {
+            pending_uefi: state_dir.join("update/pending-uefi.json"),
+            ..UpdateTransactionSources::default()
+        };
+        let pi_update_sources = PiUpdateSources {
+            pending_state: state_dir.join("update/pending-pi.json"),
+            ..PiUpdateSources::default()
         };
         DaemonConfig {
             socket_path,
@@ -262,6 +279,8 @@ impl DaemonConfig {
             installer_sources: InstallerSources::default(),
             update_status_sources: UpdateStatusSources::default(),
             update_check_sources,
+            update_transaction_sources,
+            pi_update_sources,
         }
     }
 }
@@ -387,7 +406,11 @@ struct Inner {
     installer: Installer,
     update_status: UpdateStatusEngine,
     update_check: UpdateCheckEngine,
-    update_check_lock: Mutex<()>,
+    update_transaction: UpdateTransactionEngine,
+    pi_update: PiUpdateEngine,
+    /// Discovery and slot mutation share one lock: a channel head cannot be
+    /// replaced between release selection and staging.
+    update_lock: Mutex<()>,
 }
 
 /// A constructed (not yet listening) daemon.
@@ -432,6 +455,9 @@ impl Daemon {
         let installer = Installer::new(installer_sources);
         let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
         let update_check = UpdateCheckEngine::new(cfg.update_check_sources.clone());
+        let update_transaction =
+            UpdateTransactionEngine::new(cfg.update_transaction_sources.clone());
+        let pi_update = PiUpdateEngine::new(cfg.pi_update_sources.clone());
         if cfg.live_mode {
             installer
                 .initialize_status_file()
@@ -557,7 +583,9 @@ impl Daemon {
                 installer,
                 update_status,
                 update_check,
-                update_check_lock: Mutex::new(()),
+                update_transaction,
+                pi_update,
+                update_lock: Mutex::new(()),
             }),
         };
         // First write of the ipc.md section 9 summary file (rewritten by
@@ -1050,6 +1078,108 @@ fn update_check_ipc_error(error: UpdateCheckError) -> IpcError {
     )
 }
 
+fn update_prepare_ipc_error(error: UpdateCheckError) -> IpcError {
+    if let Some((required_bytes, available_bytes)) = error.insufficient_space() {
+        return IpcError::with_details(
+            ErrorCode::InsufficientSpace,
+            "Punar does not have enough private cache space for the signed release. No root slot or boot entry was changed. Next step: free space under /var and retry.",
+            json!({
+                "stage": error.stage(),
+                "required_bytes": required_bytes,
+                "available_bytes": available_bytes,
+            }),
+        );
+    }
+    update_check_ipc_error(error)
+}
+
+fn update_transaction_ipc_error(error: UpdateTransactionError) -> IpcError {
+    let stage = error.stage();
+    match error {
+        UpdateTransactionError::Trust { .. } => IpcError::with_details(
+            ErrorCode::UntrustedArtifact,
+            "This release could not be verified. Punar did not install its boot artifact. Next step: inspect the signed publication and do not substitute another mirror.",
+            json!({ "stage": stage }),
+        ),
+        UpdateTransactionError::Verify(_) => IpcError::with_details(
+            ErrorCode::VerifyFailed,
+            format!(
+                "Punar wrote the inactive slot but could not verify what the device retained: {error}. The new release was not made bootable. Next step: inspect storage health before retrying."
+            ),
+            json!({ "stage": stage }),
+        ),
+        UpdateTransactionError::InsufficientSpace {
+            required_bytes,
+            available_bytes,
+        } => IpcError::with_details(
+            ErrorCode::InsufficientSpace,
+            "The fixed inactive root slot is too small for this signed release. No boot entry was installed.",
+            json!({
+                "stage": stage,
+                "required_bytes": required_bytes,
+                "available_bytes": available_bytes,
+            }),
+        ),
+        UpdateTransactionError::Conflict(_) => IpcError::with_details(
+            ErrorCode::Conflict,
+            format!(
+                "Punar did not change the boot selector because the device state conflicts with this update: {error}. Next step: inspect `punarctl update status`."
+            ),
+            json!({ "stage": stage }),
+        ),
+        UpdateTransactionError::NotFound(_) => IpcError::with_details(
+            ErrorCode::NotFound,
+            format!(
+                "The requested last-known-good release is not present on the ESP: {error}. No selector was changed."
+            ),
+            json!({ "stage": stage }),
+        ),
+        UpdateTransactionError::Apply(_) | UpdateTransactionError::Io(_) => IpcError::with_details(
+            ErrorCode::ApplyFailed,
+            format!(
+                "Punar could not finish the inactive-slot transaction: {error}. No unverified UKI was selected. Next step: inspect `journalctl -u punard` and retry after correcting the device error."
+            ),
+            json!({ "stage": stage }),
+        ),
+    }
+}
+
+fn pi_update_ipc_error(error: PiUpdateError) -> IpcError {
+    match error {
+        PiUpdateError::Trust(reason) => IpcError::with_details(
+            ErrorCode::UntrustedArtifact,
+            "This Raspberry Pi release could not be verified, so firmware was not pointed at it.",
+            json!({ "stage": "pi_release", "reason": reason }),
+        ),
+        PiUpdateError::Conflict(reason) | PiUpdateError::Refused(reason) => IpcError::with_details(
+            ErrorCode::Conflict,
+            format!("Punar did not change the Raspberry Pi selector: {reason}."),
+            json!({ "stage": "pi_device_state" }),
+        ),
+        PiUpdateError::Invalid(reason) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!("The signed Raspberry Pi update input is invalid: {reason}."),
+            json!({ "stage": "pi_release" }),
+        ),
+        PiUpdateError::Io(error) | PiUpdateError::Install(InstallError::Io(error)) => {
+            IpcError::with_details(
+                ErrorCode::ApplyFailed,
+                format!(
+                    "Raspberry Pi update I/O failed: {error}. Firmware was not committed to the candidate."
+                ),
+                json!({ "stage": "pi_io" }),
+            )
+        }
+        PiUpdateError::Install(error) => IpcError::with_details(
+            ErrorCode::ApplyFailed,
+            format!(
+                "Raspberry Pi update staging failed: {error}. Firmware was not committed to the candidate."
+            ),
+            json!({ "stage": "pi_apply" }),
+        ),
+    }
+}
+
 fn write_personal_recovery_disclosure(
     output: &mut dyn Write,
     recovery_key: &str,
@@ -1232,6 +1362,8 @@ impl Inner {
             Method::AppsUpdate(params) => self.handle_apps_update(peer, params),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
+            Method::UpdateApply(params) => self.handle_update_apply(peer, params),
+            Method::UpdateRollback(params) => self.handle_update_rollback(peer, params),
             Method::InstallTargets => self
                 .installer
                 .targets()
@@ -1314,7 +1446,7 @@ impl Inner {
                 )
             })?;
 
-        let _guard = self.update_check_lock.lock().unwrap();
+        let _guard = self.update_lock.lock().unwrap();
         match self
             .update_check
             .check(channel, &self.device_id, params.force)
@@ -1349,6 +1481,229 @@ impl Inner {
                 }
                 self.log_audit(event);
                 Err(update_check_ipc_error(error))
+            }
+        }
+    }
+
+    fn authorize_system_update(&self, peer: &Peer, action: &str) -> Result<AuditActor, IpcError> {
+        let actor = self.actor_of(peer);
+        if actor.source == PrincipalKind::AiAgent {
+            let ruling = self.ai.lock().unwrap().host_ruling("system_update");
+            // An update/rollback is an OS hard-safety boundary for agents,
+            // not an authority an organization can grant back. Cite a loaded
+            // policy only when it actually denies the named rule; otherwise
+            // cite the non-overridable boundary instead of falsely claiming
+            // that an `allow` ruling caused this denial.
+            let denying_ruling = ruling
+                .as_ref()
+                .filter(|value| value.decision == Decision::Deny);
+            let policy_id = denying_ruling
+                .map(|value| value.policy_id.as_str())
+                .unwrap_or("os-hard-safety");
+            let source_name = denying_ruling
+                .map(|value| value.source_name.as_str())
+                .unwrap_or("Punar OS hard safety constraint");
+            let mut event = AuditEvent::action(
+                &self.device_id,
+                &actor,
+                action,
+                "system_image",
+                Decision::Deny,
+                AuditOutcome::Denied,
+            );
+            event.policy_ids = vec![policy_id.to_string()];
+            self.log_audit(event);
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "An AI agent may not replace or roll back the operating system.\n\
+                     Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
+                     Next step: make the change yourself with `sudo punarctl update apply <version>` or `sudo punarctl update rollback`."
+                ),
+                json!({
+                    "decision": "deny",
+                    "resource": "system_image",
+                    "rule": "host.system_update",
+                    "agent_session_id": actor.agent_session_id,
+                    "policy_ids": [policy_id],
+                }),
+            ));
+        }
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                action,
+                "system_image",
+            ));
+            return Err(IpcError::denied_needs_root(
+                "changing the operating-system boot slots",
+                Some("system_image"),
+                "sudo punarctl update apply <version>",
+            ));
+        }
+        Ok(actor)
+    }
+
+    fn effective_update_channel(&self) -> Result<UpdateChannel, IpcError> {
+        self.effective
+            .lock()
+            .unwrap()
+            .get("system.update_channel")
+            .and_then(|entry| effective_update_channel(&entry.value))
+            .ok_or_else(|| {
+                IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    "Punar cannot select a release because the effective update channel is invalid. No slot was changed. Next step: inspect `punarctl policy explain system.update_channel`.",
+                    json!({ "stage": "effective_channel" }),
+                )
+            })
+    }
+
+    fn handle_update_apply(
+        &self,
+        peer: &Peer,
+        params: &UpdateApplyParams,
+    ) -> Result<Value, IpcError> {
+        const ACTION: &str = "update.apply";
+        let actor = self.authorize_system_update(peer, ACTION)?;
+        let _guard = self.update_lock.lock().unwrap();
+        let result = (|| -> Result<UpdateApplyResult, IpcError> {
+            // Keep even a corrupt/missing effective channel inside the audited
+            // transaction result; successful authorization must never produce
+            // an unaudited update failure.
+            let channel = self.effective_update_channel()?;
+            // Applying is a security boundary, so it must not trust a channel
+            // decision left in the cache by an earlier check. Refresh the
+            // signed head while holding the transaction lock; prepare_release
+            // then re-verifies those exact cached bytes and enforces halt,
+            // rollout, minimum-version and downgrade admission before any slot
+            // is opened for writing.
+            self.update_check
+                .check(channel, &self.device_id, true)
+                .map_err(update_check_ipc_error)?;
+            let is_pi = self.cfg.pi_update_sources.boot_partition_property.exists();
+            let slot = if is_pi {
+                None
+            } else {
+                Some(
+                    self.update_transaction
+                        .inactive_slot()
+                        .map_err(update_transaction_ipc_error)?,
+                )
+            };
+            let prepared = self
+                .update_check
+                .prepare_release(
+                    channel,
+                    &self.device_id,
+                    params.version,
+                    params.allow_downgrade,
+                    slot,
+                )
+                .map_err(update_prepare_ipc_error)?;
+            if is_pi {
+                let target = self
+                    .update_check
+                    .release_target(channel)
+                    .map_err(update_prepare_ipc_error)?;
+                let current = self
+                    .update_check
+                    .current_version()
+                    .map_err(update_prepare_ipc_error)?;
+                let staged = self
+                    .pi_update
+                    .stage_bundle(
+                        &prepared.release_dir,
+                        self.update_check.trusted_keys_dir(),
+                        &target,
+                        current,
+                    )
+                    .map_err(pi_update_ipc_error)?;
+                Ok(UpdateApplyResult {
+                    v: 1,
+                    staged_version: staged.version,
+                    staged_slot: match staged.staged_slot {
+                        crate::pi_update::PiSlot::A => punar_common::update::UpdateSlot::A,
+                        crate::pi_update::PiSlot::B => punar_common::update::UpdateSlot::B,
+                    },
+                    requires_reboot: true,
+                    bytes_written: staged.bytes_written,
+                    verified: staged.verified,
+                })
+            } else {
+                self.update_transaction
+                    .stage(&prepared)
+                    .map_err(update_transaction_ipc_error)
+            }
+        })();
+        match result {
+            Ok(result) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    "system_image",
+                    Decision::Allow,
+                    AuditOutcome::Success,
+                ));
+                Ok(to_value(result))
+            }
+            Err(error) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    "system_image",
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                ));
+                Err(error)
+            }
+        }
+    }
+
+    fn handle_update_rollback(
+        &self,
+        peer: &Peer,
+        params: &UpdateRollbackParams,
+    ) -> Result<Value, IpcError> {
+        const ACTION: &str = "update.rollback";
+        let actor = self.authorize_system_update(peer, ACTION)?;
+        let _guard = self.update_lock.lock().unwrap();
+        let result = if self.cfg.pi_update_sources.boot_partition_property.exists() {
+            self.pi_update
+                .rollback(params.to_version)
+                .map(to_value)
+                .map_err(pi_update_ipc_error)
+        } else {
+            self.update_transaction
+                .rollback(params.to_version)
+                .map(to_value)
+                .map_err(update_transaction_ipc_error)
+        };
+        match result {
+            Ok(value) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    "system_image",
+                    Decision::Allow,
+                    AuditOutcome::Success,
+                ));
+                Ok(value)
+            }
+            Err(error) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    "system_image",
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                ));
+                Err(error)
             }
         }
     }

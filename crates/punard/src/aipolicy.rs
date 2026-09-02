@@ -251,6 +251,7 @@ mod tests {
             Some(&Decision::ApprovalRequired)
         );
         assert_eq!(profile.host.get("user_management"), Some(&Decision::Deny));
+        assert_eq!(profile.host.get("system_update"), Some(&Decision::Deny));
         assert_eq!(
             profile.credentials.get("aws_dev"),
             Some(&CredentialDecision::Request)

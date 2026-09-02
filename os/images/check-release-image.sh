@@ -40,6 +40,35 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
+# A0: update admission needs an immutable, canonical Punar identity before the
+# first network request. Keep distro ID/VERSION_ID for substrate inventory;
+# these image-specific fields identify the signed Punar release.
+OS_RELEASE="${ROOT}/usr/lib/os-release"
+if [ ! -f "${OS_RELEASE}" ]; then
+    fail A0 '/usr/lib/os-release is missing'
+else
+    IMAGE_ID_VALUE=$(sed -n 's/^IMAGE_ID=//p' "${OS_RELEASE}")
+    IMAGE_VERSION_VALUE=$(sed -n 's/^IMAGE_VERSION=//p' "${OS_RELEASE}")
+    SNAPSHOT_VALUE=$(sed -n 's/^PUNAR_SNAPSHOT_PIN=//p' "${OS_RELEASE}")
+    printf '%s\n' "${IMAGE_ID_VALUE}" \
+        | grep -Eq '^punar-[a-z0-9]([a-z0-9-]*[a-z0-9])?$' \
+        || fail A0 'IMAGE_ID is missing, duplicated or invalid'
+    printf '%s\n' "${IMAGE_VERSION_VALUE}" \
+        | grep -Eq '^[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])\.[0-9]+$' \
+        || fail A0 'IMAGE_VERSION is missing, duplicated or non-canonical'
+    printf '%s\n' "${SNAPSHOT_VALUE}" \
+        | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$' \
+        || fail A0 'PUNAR_SNAPSHOT_PIN is missing, duplicated or invalid'
+    ETC_OS_RELEASE="${ROOT}/etc/os-release"
+    if [ ! -f "${ETC_OS_RELEASE}" ]; then
+        fail A0 '/etc/os-release is missing'
+    elif [ "$(sed -n 's/^IMAGE_ID=//p' "${ETC_OS_RELEASE}")" != "${IMAGE_ID_VALUE}" ] \
+        || [ "$(sed -n 's/^IMAGE_VERSION=//p' "${ETC_OS_RELEASE}")" != "${IMAGE_VERSION_VALUE}" ] \
+        || [ "$(sed -n 's/^PUNAR_SNAPSHOT_PIN=//p' "${ETC_OS_RELEASE}")" != "${SNAPSHOT_VALUE}" ]; then
+        fail A0 '/etc/os-release and /usr/lib/os-release disagree on Punar identity'
+    fi
+fi
+
 # A1: every shadow authenticator is locked. An empty field is login-capable
 # with a null-password PAM policy, while any field beginning ! or * is locked.
 if [ ! -f "${ROOT}/etc/shadow" ]; then

@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::install::{InstallApplyParams, InstallPlanParams, InstallRecoveryAckParams};
-use crate::update::UpdateCheckParams;
+use crate::update::{UpdateApplyParams, UpdateCheckParams, UpdateRollbackParams};
 use thiserror::Error;
 
 use crate::approval::{
@@ -178,6 +178,9 @@ pub enum ErrorCode {
     /// A signed update document failed signature, target or trusted-key
     /// validation. Never retried as a transport error and never cached.
     UntrustedArtifact,
+    /// The signed payload is larger than the fixed inactive slot or the
+    /// private download cache's currently available bytes.
+    InsufficientSpace,
     /// M9 (contract section 14.1): the call is **gated**. An approval was
     /// created and **nothing was executed** — this is a refusal to act, not
     /// a queued action. `details` carries `approval_id`, `expires_at`,
@@ -195,7 +198,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// All wire codes, in contract-table order.
-    pub const ALL: [ErrorCode; 14] = [
+    pub const ALL: [ErrorCode; 15] = [
         ErrorCode::MalformedRequest,
         ErrorCode::UnsupportedVersion,
         ErrorCode::UnknownMethod,
@@ -208,6 +211,7 @@ impl ErrorCode {
         ErrorCode::Conflict,
         ErrorCode::UpstreamUnreachable,
         ErrorCode::UntrustedArtifact,
+        ErrorCode::InsufficientSpace,
         ErrorCode::ApprovalRequired,
         ErrorCode::Expired,
     ];
@@ -227,6 +231,7 @@ impl ErrorCode {
             ErrorCode::Conflict => "conflict",
             ErrorCode::UpstreamUnreachable => "upstream_unreachable",
             ErrorCode::UntrustedArtifact => "untrusted_artifact",
+            ErrorCode::InsufficientSpace => "insufficient_space",
             ErrorCode::ApprovalRequired => "approval_required",
             ErrorCode::Expired => "expired",
         }
@@ -804,6 +809,12 @@ pub enum Method {
     /// `update.check` — root-only authenticated discovery. The caller may
     /// request a fresh check but cannot supply an origin, path or key.
     UpdateCheck(UpdateCheckParams),
+    /// `update.apply` — stage the exact verified channel head into the fixed
+    /// inactive slot. Root-only, agent-denied, serialized and audited.
+    UpdateApply(UpdateApplyParams),
+    /// `update.rollback` — select an already-present last-known-good boot
+    /// artifact. Root-only, agent-denied, serialized and audited.
+    UpdateRollback(UpdateRollbackParams),
     /// `install.targets` — live-environment disk discovery. Read-only; the
     /// daemon makes it `unknown_method` on an installed system.
     InstallTargets,
@@ -825,7 +836,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 31] = [
+    pub const NAMES: [&'static str; 33] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -852,6 +863,8 @@ impl Method {
         "apps.update",
         "update.status",
         "update.check",
+        "update.apply",
+        "update.rollback",
         "install.targets",
         "install.plan",
         "install.apply",
@@ -889,6 +902,8 @@ impl Method {
             Method::AppsUpdate(_) => "apps.update",
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
+            Method::UpdateApply(_) => "update.apply",
+            Method::UpdateRollback(_) => "update.rollback",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
             Method::InstallApply(_) => "install.apply",
@@ -945,7 +960,7 @@ impl Method {
             | Method::AppsRemove(_)
             | Method::AppsUpdate(_) => false,
             Method::UpdateStatus => false,
-            Method::UpdateCheck(_) => true,
+            Method::UpdateCheck(_) | Method::UpdateApply(_) | Method::UpdateRollback(_) => true,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
@@ -984,6 +999,8 @@ impl Method {
             Method::AppsRemove(p) => serde_json::to_value(p),
             Method::AppsUpdate(p) => serde_json::to_value(p),
             Method::UpdateCheck(p) => serde_json::to_value(p),
+            Method::UpdateApply(p) => serde_json::to_value(p),
+            Method::UpdateRollback(p) => serde_json::to_value(p),
             Method::InstallPlan(p) => serde_json::to_value(p),
             Method::InstallApply(p) => serde_json::to_value(p),
             Method::InstallRecoveryAck(p) => serde_json::to_value(p),
@@ -1057,6 +1074,10 @@ impl Method {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
             "update.check" => Self::parse_required_params(method, params).map(Method::UpdateCheck),
+            "update.apply" => Self::parse_required_params(method, params).map(Method::UpdateApply),
+            "update.rollback" => {
+                Self::parse_required_params(method, params).map(Method::UpdateRollback)
+            }
             "install.targets" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallTargets)
             }
@@ -1933,6 +1954,7 @@ mod tests {
             "conflict",
             "upstream_unreachable",
             "untrusted_artifact",
+            "insufficient_space",
             "approval_required",
             "expired",
         ];
@@ -2078,6 +2100,11 @@ mod tests {
             }),
             Method::UpdateStatus,
             Method::UpdateCheck(UpdateCheckParams { force: false }),
+            Method::UpdateApply(UpdateApplyParams {
+                version: "2026.08.31.1".parse().unwrap(),
+                allow_downgrade: false,
+            }),
+            Method::UpdateRollback(UpdateRollbackParams { to_version: None }),
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
                 disk: "/dev/vda".to_string(),
@@ -2152,6 +2179,8 @@ mod tests {
                     | "approvals.create"
                     | "approvals.consume"
                     | "update.check"
+                    | "update.apply"
+                    | "update.rollback"
                     | "install.plan"
                     | "install.apply"
                     | "install.recovery_ack"
@@ -2354,6 +2383,51 @@ mod tests {
             );
             let reject = Request::parse_json_line(&line).unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn update_mutations_accept_only_typed_selection_parameters() {
+        let apply = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"update.apply","params":{"version":"2026.08.31.1","allow_downgrade":false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            apply.method,
+            Method::UpdateApply(UpdateApplyParams {
+                allow_downgrade: false,
+                ..
+            })
+        ));
+
+        let rollback = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"update.rollback","params":{"to_version":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            rollback.method,
+            Method::UpdateRollback(UpdateRollbackParams { to_version: None })
+        ));
+
+        for forbidden in [
+            "origin", "url", "path", "key", "slot", "command", "digest", "artifact",
+        ] {
+            let apply = format!(
+                r#"{{"v":1,"id":"1","method":"update.apply","params":{{"version":"2026.08.31.1","allow_downgrade":false,"{forbidden}":"caller-controlled"}}}}"#
+            );
+            assert_eq!(
+                Request::parse_json_line(&apply).unwrap_err().error.code,
+                ErrorCode::InvalidParams,
+                "update.apply accepted {forbidden}"
+            );
+            let rollback = format!(
+                r#"{{"v":1,"id":"1","method":"update.rollback","params":{{"to_version":null,"{forbidden}":"caller-controlled"}}}}"#
+            );
+            assert_eq!(
+                Request::parse_json_line(&rollback).unwrap_err().error.code,
+                ErrorCode::InvalidParams,
+                "update.rollback accepted {forbidden}"
+            );
         }
     }
 

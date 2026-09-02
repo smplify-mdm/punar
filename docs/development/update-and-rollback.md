@@ -1,4 +1,4 @@
-# Update, staged rollout and rollback: design plan
+# Update, staged rollout and rollback: design and implementation status
 
 Spec authority: section 57 (update architecture — *"controlled, signed,
 reversible, and measurable"*, the `Candidate → Canary → Health → 10% → 50%
@@ -30,9 +30,9 @@ Binding prior contracts, not relitigated here:
   trajectory** (Option D.2) and bootc's OCI model as the design benchmark
   for the spec 57 control plane (Option D.4).
 - [`docs/api/ipc.md`](../api/ipc.md) §1–§16 — transport, framing, envelope,
-  the closed method table, the nine-plus error codes, and the twelve-key
-  audit contract. **This document changes none of it**; every addition below
-  is a *proposal* in §8, for the owner of `ipc.md` to land.
+  the closed method table, error codes, and the twelve-key audit contract.
+  The typed update additions in §8 have now landed there; proposals that
+  remain unimplemented are labelled individually below.
 - [`milestone-3.md`](milestone-3.md) / [`milestone-4.md`](milestone-4.md) —
   the typed capability registry, the layered state store
   (OS defaults → `policy.d` org layers → `preferences.json`), the section 42
@@ -53,11 +53,12 @@ Binding prior contracts, not relitigated here:
   and *"qcow2 only"* baseline; the current pipeline document records which of
   those boundaries have since been closed and which remain.
 
-**Ownership note.** This document is a design plan, not an implementation.
-It writes only itself. Milestone 10 is being implemented concurrently in
-`crates/`, `shell/` and `os/images`; nothing here touches those files, and
-every contract addition is staged as a **proposal** (§8) for its owner to
-accept, amend or reject.
+**Status note.** This document began as the implementation plan. The signed
+channel/manifest contracts, typed IPC methods, UEFI A/B transaction engine,
+Raspberry Pi staging/rollback path, release-bundle builders and validation
+fixtures described below are implemented. Production signing-key custody,
+publication infrastructure, physical power-loss testing, physical Raspberry
+Pi acceptance and the explicitly labelled future proposals remain open.
 
 ---
 
@@ -414,28 +415,36 @@ proven by the rollback phase (group E) reading the same store.
 
 ### 4.1 What a release artifact is
 
-Three files per release, per channel:
+For UEFI, two independently root-bound slot pairs plus the signed manifest:
 
 ```text
-punar-<image_id>-<version>.slot.raw.zst     the root-slot payload
-punar-<image_id>-<version>.uki.efi          the UKI for that slot payload
+<image>-<arch>-uefi-<version>.slot-a.raw.zst  root-slot A payload
+<image>-<arch>-uefi-<version>.slot-b.raw.zst  root-slot B payload
+<image>-<arch>-uefi-<version>.slot-a.uki.efi  UKI bound to root slot A
+<image>-<arch>-uefi-<version>.slot-b.uki.efi  UKI bound to root slot B
 release.json                                the manifest — the only thing signed directly
 release.json.sig                            detached signature over release.json
 ```
 
-`release.json` (proposed schema `schemas/update/release-manifest.json`, §8.4):
+Raspberry Pi uses one root payload and one signed boot-filesystem artifact;
+its manifest carries `uefi_slots: null`.
+
+`release.json` (`schemas/update/release-manifest.json`, §8.4):
 
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | Manifest format version |
-| `release_id` | string | `punar-<image_id>-<channel>-<version>` — globally unique |
+| `release_id` | string | `<image_id>-<channel>-<architecture>-<boot_platform>-<version>` — globally unique |
 | `image_id` | string | `punar-dev` / `punar-desktop` — must match the device |
+| `architecture` | string | `x86_64` / `aarch64` — must match the device |
+| `boot_platform` | string | `uefi` / `raspberry_pi` — must match the device boot chain |
 | `version` | string | `YYYY.MM.DD.N`, compared component-wise as integers |
 | `channel` | string | The channel this release was published to. A device refuses a manifest whose channel is not its own — a release cannot be smuggled across channels |
 | `snapshot_pin` | string | The ALA date this was built from (`2026/08/20`) — ADR-001's channel object, made visible on the device |
 | `overlay_pin` | object \| null | The `punar-security` overlay pin set, when present (§9) |
-| `payload` | object | `{ digest_sha256, size_bytes, uncompressed_digest_sha256, uncompressed_size_bytes, compression }`; the first identity covers the downloaded `.zst`, the second covers the exact root-slot bytes |
-| `uki` | object | `{ digest_sha256, size_bytes }` |
+| `payload` | object | Canonical platform payload identity; contains filename, compressed and uncompressed digests/sizes, and `compression: zstd` |
+| `boot_artifact` | object | Canonical platform boot artifact identity: filename, kind, digest and size |
+| `uefi_slots` | object \| null | Exact `a` and `b` payload/UKI pairs on UEFI; `null` on Raspberry Pi |
 | `min_from` | string \| null | Lowest version that may update *to* this release directly (§3.6, §11.3) |
 | `security` | object | `{ severity: "none"\|"important"\|"critical", advisory_ids: [...] }` — drives the §5.3 tone, never an action |
 | `provenance` | object | `{ git_commit, ci_run_id, builder_base_digest, source_date_epoch, built_at }` — spec 59.6 "pinned dependencies", made auditable |
@@ -547,7 +556,7 @@ Spec 38 already puts `spec.update.channel` in `DeviceDesiredState`, and
 typed as an open non-empty string with a comment explaining that narrowing
 it would be speculative. Nothing consumes it today.
 
-**Proposal: add `system.update_channel` to the capability registry** (§8.3).
+**Implemented: `system.update_channel` is in the capability registry** (§8.3).
 The observed state is read from `/var/lib/punar/update/channel`, the apply
 step writes it, the verify step re-reads it. That single move buys:
 
@@ -950,7 +959,7 @@ real and named.
 
 ## 7. Decision 5 — the typed surface
 
-### 7.1 Methods (proposed; the contract text is §8.1)
+### 7.1 Methods (implemented; the contract text is §8.1)
 
 | Method | AuthZ | Mutating | Audited |
 |---|---|---|---|
@@ -1033,13 +1042,13 @@ the user can change it, what the next step is. No `EPERM`.
 - **Agent-attributed peer: denied, fail closed, by the existing M9 path.**
   M9 §5.1 step 2 runs the AI authority path *before* the uid check
   precisely so root-ness cannot bypass AI policy (spec 60). Today no
-  capability maps to an update token, so the generic *"No AI authority rule
-  covers …"* denial fires. **Proposal:** add `host.system_update: deny` to
-  `usr/share/punar/policy/ai-defaults.yaml` so the denial cites a named
-  rule. An explicit `deny` is more honest than a fail-closed silence: it
-  says *someone decided this*, which is exactly what spec 73 asks a
-  restriction to answer. This is a policy-document proposal; it changes no
-  M9 code.
+  capability maps to an update mutation, so `update.apply` and
+  `update.rollback` perform this attribution check directly. The shipped
+  policy now declares `host.system_update: deny`, and the denial cites that
+  named rule. Code additionally treats this as a non-overridable OS hard
+  safety boundary: a higher-ranked document that says `allow` cannot grant
+  an agent boot-selector authority and is not falsely cited as the reason
+  for denial.
 - **Managed device, off-channel version:** `update.apply --version X` where
   X is not on the org's channel is a **policy** denial, not an authz one,
   and it uses M5's org-pinned denial text citing the pinning source.
@@ -1086,13 +1095,14 @@ every other read on the table.
 
 ---
 
-## 8. Proposed contract additions
+## 8. Contract status
 
-Everything in this section is a **proposal** for the owners of `ipc.md`,
-`schemas/`, and the capability registry. Nothing here is written by this
-document into their files.
+The typed update methods, error codes, schemas and capability in this section
+are implemented in `ipc.md`, `schemas/` and the capability registry. The
+runtime status side-contract in §8.5 remains a proposal and is labelled as
+such.
 
-### 8.1 Method table additions (proposed for `ipc.md` §5)
+### 8.1 Method table additions (implemented in `ipc.md` §5)
 
 ```text
 update.status    any connected peer   no   no
@@ -1134,16 +1144,15 @@ update.rollback  root only (+M9)      yes  always
 `{ v, staged_version, staged_slot, requires_reboot: true,
    bytes_written, verified: true }`. Errors: `denied`, `invalid_params`,
 `untrusted_artifact`, `insufficient_space`, `apply_failed`,
-`verify_failed`, `upstream_unreachable`, `approval_required` (only on the
-M9 agent path, if a future policy sets the token to `approval_required`
-rather than `deny`).
+`verify_failed`, `upstream_unreachable`. An agent-attributed peer is always
+`denied`; policy cannot turn OS replacement into an approval prompt.
 
 **`update.rollback`** — params `{ "to_version": "<v>" | null }` (null =
 last-known-good). Result
 `{ v, previous_default, new_default, requires_reboot: true }`.
 Errors: `denied`, `not_found`, `conflict` (nothing to roll back to).
 
-### 8.2 Error-code additions (proposed for `ipc.md` §4)
+### 8.2 Error-code additions (implemented in `ipc.md` §4)
 
 | `code` | Meaning | `details` |
 |---|---|---|
@@ -1156,7 +1165,7 @@ means "apply succeeded but the world did not change") and from
 *trust* failure with a *mechanical* failure would make the one error a
 security operator cares about invisible in the audit log.
 
-### 8.3 Capability registry addition (proposed)
+### 8.3 Capability registry addition (implemented)
 
 | Capability | Observed from | Applied by | Allowed states |
 |---|---|---|---|
@@ -1167,12 +1176,12 @@ unchanged. It joins `security.firewall`, `system.hostname`,
 `time.timezone`; the M9 token map gains `system.update_channel →
 host.system_update` alongside the action-level rule in §7.3.
 
-### 8.4 Schema proposals
+### 8.4 Schema status
 
 | Schema | Change | Status |
 |---|---|---|
-| `schemas/update/release-manifest.json` | **new** — §4.1 | Proposed |
-| `schemas/update/channel-metadata.json` | **new** — §4.1 | Proposed |
+| `schemas/update/release-manifest.json` | **new** — §4.1, including independently root-bound UEFI A/B artifact pairs | Implemented and fixture-validated |
+| `schemas/update/channel-metadata.json` | **new** — §4.1 | Implemented and fixture-validated |
 | `schemas/desired-state/desired-state.json` | `spec.update.pinnedVersion` (string, optional), `spec.update.rollbackPermitted` (bool, optional) | Proposed, **not implemented in the MVP slice** (§5.4, §7.3) |
 | `schemas/audit/audit-event.json` | **none** — new actions and results fit the existing patterns (ipc.md §6) | No change |
 | `schemas/capability/capability-descriptor.json` | **none** — `system.update_channel` is an ordinary descriptor | No change |

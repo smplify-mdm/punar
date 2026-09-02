@@ -64,4 +64,5 @@ pub mod server;
 pub mod state;
 pub mod update_check;
 pub mod update_status;
+pub mod update_transaction;
 pub mod util;

@@ -22,6 +22,40 @@
     "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
     "size_bytes": 100663296
   },
+  "uefi_slots": {
+    "a": {
+      "payload": {
+        "filename": "punar-desktop-aarch64-uefi-2026.08.27.1.slot.raw.zst",
+        "digest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "size_bytes": 734003200,
+        "uncompressed_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "uncompressed_size_bytes": 8589934592,
+        "compression": "zstd"
+      },
+      "boot_artifact": {
+        "kind": "uki",
+        "filename": "punar-desktop-aarch64-uefi-2026.08.27.1.uki.efi",
+        "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size_bytes": 100663296
+      }
+    },
+    "b": {
+      "payload": {
+        "filename": "punar-desktop-aarch64-uefi-2026.08.27.1.slot-b.raw.zst",
+        "digest_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 734003200,
+        "uncompressed_digest_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "uncompressed_size_bytes": 8589934592,
+        "compression": "zstd"
+      },
+      "boot_artifact": {
+        "kind": "uki",
+        "filename": "punar-desktop-aarch64-uefi-2026.08.27.1.slot-b.uki.efi",
+        "digest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "size_bytes": 100663296
+      }
+    }
+  },
   "min_from": null,
   "security": {
     "severity": "none",

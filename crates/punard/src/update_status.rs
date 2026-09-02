@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use crate::install::{ROOT_A_PARTUUID, ROOT_B_PARTUUID};
 use crate::pi_update::{PendingPiUpdate, PiBootObservation, PiSlot};
+use crate::update_transaction::PendingUefiUpdate;
 
 const SMALL_FILE_MAX: u64 = 64 * 1024;
 const PACKAGE_DB_MAX: u64 = 32 * 1024 * 1024;
@@ -31,6 +32,7 @@ pub struct UpdateStatusSources {
     pub pi_tryboot: PathBuf,
     pub health_report: PathBuf,
     pub pending_pi: PathBuf,
+    pub pending_uefi: PathBuf,
     pub channel_preference: PathBuf,
     pub dpkg_status: PathBuf,
     pub pacman_local: PathBuf,
@@ -45,6 +47,7 @@ impl Default for UpdateStatusSources {
             pi_tryboot: PathBuf::from("/proc/device-tree/chosen/bootloader/tryboot"),
             health_report: PathBuf::from("/run/punar/update-health.json"),
             pending_pi: PathBuf::from("/var/lib/punar/update/pending-pi.json"),
+            pending_uefi: PathBuf::from("/var/lib/punar/update/pending-uefi.json"),
             channel_preference: PathBuf::from("/var/lib/punar/update/channel"),
             dpkg_status: PathBuf::from("/var/lib/dpkg/status"),
             pacman_local: PathBuf::from("/var/lib/pacman/local"),
@@ -82,11 +85,17 @@ impl UpdateStatusEngine {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let pending = read_pending_pi(&self.sources.pending_pi);
+        let pending = if self.sources.pi_boot_partition.exists() {
+            read_pending_pi(&self.sources.pending_pi)
+        } else {
+            read_pending_uefi(&self.sources.pending_uefi)
+        };
         let desired = match &pending {
-            PendingRead::Valid(pending) => DesiredReleaseStatus {
-                version: Some(pending.version.to_string()),
-                slot: Some(update_slot(pending.candidate_slot)),
+            PendingRead::Valid {
+                version, candidate, ..
+            } => DesiredReleaseStatus {
+                version: Some(version.to_string()),
+                slot: Some(*candidate),
                 state: DesiredReleaseState::Staged,
                 reason: None,
             },
@@ -108,21 +117,31 @@ impl UpdateStatusEngine {
         };
 
         let rollback = match (&pending, slot, tryboot) {
-            (PendingRead::Valid(pending), current, Some(true))
-                if current == update_slot(pending.candidate_slot) =>
-            {
-                RollbackStatus {
-                    state: RollbackState::Available,
-                    target_version: None,
-                    target_slot: Some(update_slot(pending.previous_slot)),
-                    rollback_unavailable_reason: None,
-                }
-            }
+            (
+                PendingRead::Valid {
+                    previous,
+                    candidate,
+                    ..
+                },
+                current,
+                Some(true),
+            ) if current == *candidate => RollbackStatus {
+                state: RollbackState::Available,
+                target_version: None,
+                target_slot: Some(*previous),
+                rollback_unavailable_reason: None,
+            },
             (PendingRead::Invalid(reason), _, _) => RollbackStatus {
                 state: RollbackState::Unavailable,
                 target_version: None,
                 target_slot: None,
                 rollback_unavailable_reason: Some(reason.clone()),
+            },
+            (PendingRead::Valid { previous, .. }, _, _) => RollbackStatus {
+                state: RollbackState::Available,
+                target_version: None,
+                target_slot: Some(*previous),
+                rollback_unavailable_reason: None,
             },
             _ => RollbackStatus {
                 state: RollbackState::None,
@@ -377,7 +396,11 @@ fn read_health(path: &Path) -> UpdateHealthStatus {
 
 enum PendingRead {
     Absent,
-    Valid(PendingPiUpdate),
+    Valid {
+        version: punar_common::update::ReleaseVersion,
+        previous: UpdateSlot,
+        candidate: UpdateSlot,
+    },
     Invalid(String),
 }
 
@@ -390,9 +413,43 @@ fn read_pending_pi(path: &Path) -> PendingRead {
         Err(reason) => return PendingRead::Invalid(reason),
     };
     match serde_json::from_slice(&bytes) {
-        Ok(pending) => PendingRead::Valid(pending),
+        Ok::<PendingPiUpdate, _>(pending) => PendingRead::Valid {
+            version: pending.version,
+            previous: update_slot(pending.previous_slot),
+            candidate: update_slot(pending.candidate_slot),
+        },
         Err(error) => PendingRead::Invalid(format!(
             "the durable Raspberry Pi update record is invalid: {error}"
+        )),
+    }
+}
+
+fn read_pending_uefi(path: &Path) -> PendingRead {
+    if !path.exists() {
+        return PendingRead::Absent;
+    }
+    let bytes = match read_bounded(path, SMALL_FILE_MAX) {
+        Ok(bytes) => bytes,
+        Err(reason) => return PendingRead::Invalid(reason),
+    };
+    match serde_json::from_slice::<PendingUefiUpdate>(&bytes) {
+        Ok(pending)
+            if pending.schema_version == 1
+                && pending.previous_slot != pending.candidate_slot
+                && pending.previous_slot != UpdateSlot::Unknown
+                && pending.candidate_slot != UpdateSlot::Unknown =>
+        {
+            PendingRead::Valid {
+                version: pending.version,
+                previous: pending.previous_slot,
+                candidate: pending.candidate_slot,
+            }
+        }
+        Ok(_) => {
+            PendingRead::Invalid("the durable UEFI update record is internally inconsistent".into())
+        }
+        Err(error) => PendingRead::Invalid(format!(
+            "the durable UEFI update record is invalid: {error}"
         )),
     }
 }
@@ -481,6 +538,7 @@ mod tests {
             pi_tryboot: root.join("pi-tryboot"),
             health_report: root.join("health.json"),
             pending_pi: root.join("pending-pi.json"),
+            pending_uefi: root.join("pending-uefi.json"),
             channel_preference: root.join("channel"),
             dpkg_status: root.join("dpkg-status"),
             pacman_local: root.join("pacman-local"),
@@ -530,7 +588,7 @@ mod tests {
         let paths = sources(&root);
         fs::write(&paths.os_release, "ID=punar\n").unwrap();
         fs::write(&paths.cmdline, "root=/dev/vda2 rw\n").unwrap();
-        fs::write(&paths.pending_pi, b"not-json").unwrap();
+        fs::write(&paths.pending_uefi, b"not-json").unwrap();
         fs::write(&paths.channel_preference, "nightly\n").unwrap();
 
         let status = UpdateStatusEngine::new(paths).status();

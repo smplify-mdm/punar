@@ -43,6 +43,11 @@ ai:
         # line of policy away rather than a new design.
         user_package: approval_required
         system_package: approval_required
+        # Replacing or rolling back the booted operating-system image is a
+        # human/root act. Unlike an ordinary package request, an agent may not
+        # turn this into an approval prompt: the durable boot selector is a
+        # named, closed denial in the authority model.
+        system_update: deny
         # Not approval_required: creating or elevating local accounts is not
         # something an agent should be able to put in front of a tired human
         # at all (SPEC section 60 — no path to persistent unrestricted root).

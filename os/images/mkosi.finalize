@@ -4,6 +4,55 @@
 # serialized MKOSI_CONFIG available.
 set -eu
 
+# Publish the canonical immutable-image identity consumed by update.status,
+# update.check and rollback validation. Keep the substrate's ID/VERSION_ID for
+# package/inventory diagnostics; IMAGE_* identifies the Punar release layered
+# on top. Release-bundle publication may restamp IMAGE_VERSION in a derived
+# signed slot payload, but the base image is valid before that happens.
+printf '%s\n' "${PUNAR_IMAGE_ID:-}" \
+    | grep -Eq '^punar-[a-z0-9]([a-z0-9-]*[a-z0-9])?$' || {
+    echo 'error: PUNAR_IMAGE_ID is missing or invalid' >&2
+    exit 2
+}
+printf '%s\n' "${PUNAR_IMAGE_VERSION:-}" \
+    | grep -Eq '^[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])\.[0-9]+$' || {
+    echo 'error: PUNAR_IMAGE_VERSION is missing or non-canonical' >&2
+    exit 2
+}
+printf '%s\n' "${PUNAR_SNAPSHOT_PIN:-}" \
+    | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$' || {
+    echo 'error: PUNAR_SNAPSHOT_PIN is missing or invalid' >&2
+    exit 2
+}
+stamp_os_release() {
+    os_release=$1
+    [ -f "${os_release}" ] || {
+        echo "error: substrate os-release is missing: ${os_release}" >&2
+        exit 2
+    }
+    os_release_new="${os_release}.punar"
+    awk '!/^(IMAGE_ID|IMAGE_VERSION|PUNAR_SNAPSHOT_PIN)=/' \
+        "${os_release}" > "${os_release_new}"
+    {
+        printf 'IMAGE_ID=%s\n' "${PUNAR_IMAGE_ID}"
+        printf 'IMAGE_VERSION=%s\n' "${PUNAR_IMAGE_VERSION}"
+        printf 'PUNAR_SNAPSHOT_PIN=%s\n' "${PUNAR_SNAPSHOT_PIN}"
+    } >> "${os_release_new}"
+    chmod 0644 "${os_release_new}"
+    mv "${os_release_new}" "${os_release}"
+}
+
+stamp_os_release "${BUILDROOT}/usr/lib/os-release"
+# Debian currently materializes a second regular /etc/os-release; other
+# substrates commonly use a relative symlink. Stamp the second regular copy,
+# but retain and verify a symlink rather than replacing it.
+if [ -L "${BUILDROOT}/etc/os-release" ]; then
+    grep -Fxq "IMAGE_VERSION=${PUNAR_IMAGE_VERSION}" \
+        "${BUILDROOT}/etc/os-release"
+else
+    stamp_os_release "${BUILDROOT}/etc/os-release"
+fi
+
 # systemd-networkd's vendor [Install] Also= relationship recreates this link
 # after the Punar preset disables wait-online. Normalize that exact generated
 # edge after presets: Punar configures links asynchronously and never lets an

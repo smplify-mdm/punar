@@ -263,6 +263,9 @@ run_mkosi() {
         --source-date-epoch "${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
         --output-directory "${MKOSI_RAW_OUTPUT_DIR}" \
         --environment "SYSTEMD_REPART_MKFS_OPTIONS_BTRFS=--device-uuid=${BTRFS_DEVICE_UUID}" \
+        --environment "PUNAR_IMAGE_ID=punar-desktop" \
+        --environment "PUNAR_IMAGE_VERSION=${PUNAR_BASE_IMAGE_VERSION}" \
+        --environment "PUNAR_SNAPSHOT_PIN=${PUNAR_SNAPSHOT_PIN}" \
         --repart-directory "${MKOSI_REPART_DIR}" \
         "$@" "${MODE}"
 }

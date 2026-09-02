@@ -231,6 +231,24 @@ pub struct BootArtifact {
     pub size_bytes: u64,
 }
 
+/// One independently signed UEFI root/UKI pair. A release carries both slot
+/// bindings because a device may be running either side when it receives the
+/// release; patching a UKI or root filesystem on-device would invalidate the
+/// vendor signature and defeat the exact-byte trust contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UefiSlotArtifact {
+    pub payload: PayloadArtifact,
+    pub boot_artifact: BootArtifact,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UefiSlotArtifacts {
+    pub a: UefiSlotArtifact,
+    pub b: UefiSlotArtifact,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecuritySeverity {
@@ -270,6 +288,10 @@ pub struct ReleaseManifest {
     pub overlay_pin: Option<OverlayPin>,
     pub payload: PayloadArtifact,
     pub boot_artifact: BootArtifact,
+    /// Required for governed UEFI updates and `null` for Raspberry Pi. The
+    /// top-level pair remains the install-media artifact (slot A) so the
+    /// attended installer contract stays backward-compatible.
+    pub uefi_slots: Option<UefiSlotArtifacts>,
     pub min_from: Option<ReleaseVersion>,
     pub security: ReleaseSecurity,
     pub provenance: ReleaseProvenance,
@@ -482,7 +504,58 @@ pub struct UpdateCheckResult {
     pub cached: bool,
 }
 
+/// Strict request payload for `update.apply`. The version must be the head of
+/// the daemon's verified channel document; callers cannot provide an origin,
+/// path, artifact name, digest, key, slot or command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateApplyParams {
+    pub version: ReleaseVersion,
+    pub allow_downgrade: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateApplyResult {
+    pub v: u8,
+    pub staged_version: ReleaseVersion,
+    pub staged_slot: UpdateSlot,
+    pub requires_reboot: bool,
+    pub bytes_written: u64,
+    pub verified: bool,
+}
+
+/// Strict request payload for `update.rollback`. `None` means the most recent
+/// locally present last-known-good release; no remote release is downloaded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRollbackParams {
+    pub to_version: Option<ReleaseVersion>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRollbackResult {
+    pub v: u8,
+    pub previous_default: String,
+    pub new_default: String,
+    pub requires_reboot: bool,
+}
+
 impl ReleaseManifest {
+    pub fn artifacts_for_slot(
+        &self,
+        slot: UpdateSlot,
+    ) -> Option<(&PayloadArtifact, &BootArtifact)> {
+        let slots = self.uefi_slots.as_ref()?;
+        let selected = match slot {
+            UpdateSlot::A => &slots.a,
+            UpdateSlot::B => &slots.b,
+            UpdateSlot::Unknown => return None,
+        };
+        Some((&selected.payload, &selected.boot_artifact))
+    }
+
     pub fn validate(&self) -> Result<(), UpdateTrustError> {
         if self.schema_version != 1 {
             return invalid("unsupported release manifest schema_version");
@@ -529,6 +602,34 @@ impl ReleaseManifest {
         );
         if !boot_matches {
             return invalid("boot artifact kind does not match boot_platform");
+        }
+        match (self.boot_platform, &self.uefi_slots) {
+            (BootPlatform::Uefi, Some(slots)) => {
+                for artifact in [&slots.a, &slots.b] {
+                    validate_payload(&artifact.payload)?;
+                    validate_boot_artifact(&artifact.boot_artifact, BootArtifactKind::Uki)?;
+                }
+                let filenames = [
+                    slots.a.payload.filename.as_str(),
+                    slots.a.boot_artifact.filename.as_str(),
+                    slots.b.payload.filename.as_str(),
+                    slots.b.boot_artifact.filename.as_str(),
+                ];
+                let unique = filenames.iter().collect::<std::collections::HashSet<_>>();
+                if unique.len() != filenames.len() {
+                    return invalid("UEFI slot artifact filenames must be distinct");
+                }
+                if self.payload != slots.a.payload || self.boot_artifact != slots.a.boot_artifact {
+                    return invalid("top-level install artifacts must equal UEFI slot A");
+                }
+            }
+            (BootPlatform::Uefi, None) => {
+                return invalid("UEFI release is missing independently bound A/B artifacts");
+            }
+            (BootPlatform::RaspberryPi, None) => {}
+            (BootPlatform::RaspberryPi, Some(_)) => {
+                return invalid("Raspberry Pi release may not carry UEFI slot artifacts");
+            }
         }
         let mut advisory_ids = std::collections::HashSet::new();
         if self.security.advisory_ids.len() > 256
@@ -583,6 +684,31 @@ impl ReleaseManifest {
         }
         Ok(())
     }
+}
+
+fn validate_payload(payload: &PayloadArtifact) -> Result<(), UpdateTrustError> {
+    validate_filename(&payload.filename)?;
+    validate_sha256_hex(&payload.digest_sha256)?;
+    validate_sha256_hex(&payload.uncompressed_digest_sha256)?;
+    if payload.size_bytes == 0
+        || payload.uncompressed_size_bytes == 0
+        || payload.compression != "zstd"
+    {
+        return invalid("payload size or compression is invalid");
+    }
+    Ok(())
+}
+
+fn validate_boot_artifact(
+    artifact: &BootArtifact,
+    expected_kind: BootArtifactKind,
+) -> Result<(), UpdateTrustError> {
+    validate_filename(&artifact.filename)?;
+    validate_sha256_hex(&artifact.digest_sha256)?;
+    if artifact.size_bytes == 0 || artifact.kind != expected_kind {
+        return invalid("boot artifact kind or size is invalid");
+    }
+    Ok(())
 }
 
 impl ChannelMetadata {
@@ -1015,10 +1141,19 @@ mod tests {
     fn runtime_validation_matches_schema_edges() {
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         manifest.payload.filename = "payload:slot.zst".into();
+        manifest.uefi_slots.as_mut().unwrap().a.payload.filename =
+            manifest.payload.filename.clone();
         assert!(manifest.validate().is_err());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         manifest.payload.uncompressed_digest_sha256 = "not-a-digest".into();
+        manifest
+            .uefi_slots
+            .as_mut()
+            .unwrap()
+            .a
+            .payload
+            .uncompressed_digest_sha256 = manifest.payload.uncompressed_digest_sha256.clone();
         assert!(manifest.validate().is_err());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
@@ -1038,6 +1173,35 @@ mod tests {
                     "not-a-device-id",
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn uefi_manifest_requires_distinct_complete_slot_pairs_and_slot_a_install_alias() {
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        manifest.uefi_slots = None;
+        assert!(manifest.validate().is_err());
+
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        let slot_a_name = manifest
+            .uefi_slots
+            .as_ref()
+            .unwrap()
+            .a
+            .payload
+            .filename
+            .clone();
+        manifest.uefi_slots.as_mut().unwrap().b.payload.filename = slot_a_name;
+        assert!(manifest.validate().is_err());
+
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        manifest.payload.size_bytes += 1;
+        assert!(manifest.validate().is_err());
+
+        let manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        assert_ne!(
+            manifest.artifacts_for_slot(UpdateSlot::A).unwrap(),
+            manifest.artifacts_for_slot(UpdateSlot::B).unwrap()
         );
     }
 

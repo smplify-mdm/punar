@@ -175,6 +175,8 @@ object, fields documented per code below.
 | `approval_required` (M9) | The call is **gated**: an approval was created and **nothing executed**. `punarctl` maps it to **exit code 4**, reserved for this since M3. Message is the section 73 gate text; §14.1. | `approval_id`, `expires_at`, `capability`, `resource`, `decision`, `policy_ids` |
 | `expired` (M9)      | An approval passed `expires_at`, or a presented credential's TTL lapsed. Distinct from `conflict` (= already resolved). §14.1, §16.5. | `expires_at` |
 | `upstream_unreachable` (M5) | The control plane did not answer (connect/call failure or timeout during `enroll.start`). Section-73 message names the stage and the next step; local state is untouched (enrollment is all-or-nothing). Sync failures **outside** `enroll.start` never surface as request errors — they queue per spec section 55 (milestone-5.md section 7). | `stage` |
+| `untrusted_artifact` | A signed update document/artifact failed signature, target, key-set, digest, size, or UKI root-binding validation. It is never retried as a transport error. | `stage` |
+| `insufficient_space` | The private release cache or fixed inactive root slot cannot hold the signed release. | `stage`, `required_bytes`, `available_bytes` |
 
 ## 5. Methods (M3 surface + M4/M5 additions — complete)
 
@@ -210,6 +212,8 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.update` | **human; managed policy decides per installed app** | yes | always |
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
+| `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
+| `update.rollback` | **root human only; agent attribution is a hard denial before uid** | yes, local selector only | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 | `install.apply` | **root human only, live environment only** | yes | always (`success`, `denied`, `failure`) |
@@ -740,8 +744,8 @@ fully successful. An AI-attributed peer cannot invoke the mutation.
 Params: none. Read-only and unaudited. This is the implemented first slice of
 the governed-update contract in
 `docs/development/update-and-rollback.md` §8.1. Authenticated discovery now
-exists as `update.check`; `update.apply` and `update.rollback` do not enter the
-closed method table until their complete authenticated transactions exist.
+exists as `update.check`; the corresponding typed inactive-slot transaction
+and local last-known-good selector are `update.apply` and `update.rollback`.
 
 The result has `v: 1` plus the five system facts required by spec section 57
 (current, desired, channel, health, rollback) and M11's browser provenance:
@@ -837,6 +841,67 @@ selection is audited `success`; authorization denial, unreachable source and
 trust/cache failures are all audited distinctly. This method discovers and
 caches a decision only. It does not download, stage, apply, reboot, bless, or
 roll back a release.
+
+### 5.17a `update.apply`
+
+Strict params:
+
+```json
+{"version":"2026.08.27.1","allow_downgrade":false}
+```
+
+Root-human-only and audited. Agent attribution is evaluated before uid, so a
+process inside a `punar-agent-*.scope` is denied even when its peer uid is 0.
+That denial names `host.system_update`; this is a non-overridable OS hard-safety
+boundary. The caller cannot supply a channel, URL, path, key, slot, artifact,
+digest, executable, command, or boot selector.
+
+The daemon re-authenticates the exact signed channel head and release manifest,
+admits the requested canonical version against the effective channel and local
+cohort, and downloads only the independently signed artifact pair for the
+inactive slot. UEFI releases contain distinct A- and B-bound root/UKI pairs.
+The running kernel command line chooses the active fixed PARTUUID; the opposite
+fixed PARTUUID chooses the destination. Punar verifies compressed and UKI
+digests, verifies the UKI `.cmdline` binds exactly that destination, streams the
+root image, fsyncs it, physically re-reads and hashes it, retains the blessed
+old UKI, installs the new boot-counted UKI last, and durably selects it. On
+Raspberry Pi, the equivalent signed A/B transaction stages the inactive root
+and firmware set for one-shot `tryboot`.
+
+```json
+{"v":1,"staged_version":"2026.08.27.1","staged_slot":"b",
+ "requires_reboot":true,"bytes_written":2147614720,"verified":true}
+```
+
+The daemon never reboots. `punarctl update apply … --reboot` performs the fixed
+caller-side restart only after this successful result (Pi uses `reboot 0
+tryboot`; UEFI uses `systemctl reboot`).
+
+### 5.17b `update.rollback`
+
+Strict params:
+
+```json
+{"to_version":null}
+```
+
+`null` selects the newest previous locally retained blessed release; a
+canonical version selects that exact retained release. The authorization and
+audit boundary is identical to `update.apply`. No repository is contacted and
+no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
+are rollback candidates; counted, unblessed attempts are excluded. On
+Raspberry Pi, the current and previous selectors are validated before a
+durable selector swap. A pending Pi trial must first resolve rather than being
+silently overwritten.
+
+```json
+{"v":1,"previous_default":"punar_2026.08.27.1*.efi",
+ "new_default":"punar_2026.08.20.1*.efi","requires_reboot":true}
+```
+
+The CLI's optional `--reboot` remains a caller-side fixed restart. Failures
+leave an unverified release unselected and return the section-4 typed error
+that identifies the failed stage.
 
 ### 5.18 `install.targets`
 

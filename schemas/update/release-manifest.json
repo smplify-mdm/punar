@@ -16,6 +16,7 @@
     "overlay_pin",
     "payload",
     "boot_artifact",
+    "uefi_slots",
     "min_from",
     "security",
     "provenance",
@@ -48,6 +49,13 @@
     },
     "payload": { "$ref": "#/$defs/payload" },
     "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
+    "uefi_slots": {
+      "description": "Two independently bound root/UKI pairs for alternating UEFI A/B updates; null on Raspberry Pi.",
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/uefi_slots" }
+      ]
+    },
     "min_from": {
       "oneOf": [
         { "type": "null" },
@@ -68,6 +76,13 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "boot_platform": { "const": "uefi" } } },
+      "then": { "properties": { "uefi_slots": { "$ref": "#/$defs/uefi_slots" } } },
+      "else": { "properties": { "uefi_slots": { "type": "null" } } }
+    }
+  ],
   "additionalProperties": false,
   "$defs": {
     "image_id": {
@@ -149,6 +164,24 @@
         "filename": { "$ref": "#/$defs/filename" },
         "digest_sha256": { "$ref": "#/$defs/digest" },
         "size_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "uefi_slot_artifact": {
+      "type": "object",
+      "required": ["payload", "boot_artifact"],
+      "properties": {
+        "payload": { "$ref": "#/$defs/payload" },
+        "boot_artifact": { "$ref": "#/$defs/boot_artifact" }
+      },
+      "additionalProperties": false
+    },
+    "uefi_slots": {
+      "type": "object",
+      "required": ["a", "b"],
+      "properties": {
+        "a": { "$ref": "#/$defs/uefi_slot_artifact" },
+        "b": { "$ref": "#/$defs/uefi_slot_artifact" }
       },
       "additionalProperties": false
     },

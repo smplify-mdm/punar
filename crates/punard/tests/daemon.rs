@@ -26,6 +26,7 @@ use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
 use punard::server::{Daemon, DaemonConfig, DaemonHandle};
 use punard::update_check::UpdateCheckSources;
+use punard::update_transaction::UpdateTransactionSources;
 use serde_json::{Value, json};
 
 static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -227,6 +228,21 @@ fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
     (catalog, flatpak, digest)
 }
 
+fn test_uki(root_partuuid: &str) -> Vec<u8> {
+    let cmdline = format!("root=PARTUUID={root_partuuid} ro quiet\0").into_bytes();
+    let data_offset = 128_u32;
+    let mut image = vec![0_u8; data_offset as usize + cmdline.len()];
+    image[..2].copy_from_slice(b"MZ");
+    image[60..64].copy_from_slice(&64_u32.to_le_bytes());
+    image[64..68].copy_from_slice(b"PE\0\0");
+    image[70..72].copy_from_slice(&1_u16.to_le_bytes());
+    image[88..96].copy_from_slice(b".cmdline");
+    image[104..108].copy_from_slice(&(cmdline.len() as u32).to_le_bytes());
+    image[108..112].copy_from_slice(&data_offset.to_le_bytes());
+    image[data_offset as usize..].copy_from_slice(&cmdline);
+    image
+}
+
 fn configure_update_fixture(
     cfg: &mut DaemonConfig,
     dir: &Path,
@@ -266,6 +282,81 @@ fn configure_update_fixture(
         }
         fs::write(repository.join("channel.json"), document).unwrap();
         fs::write(repository.join("channel.json.sig"), signature).unwrap();
+
+        let release = repository.join("releases/2026.08.27.1");
+        fs::create_dir_all(&release).unwrap();
+        let root_a = vec![0xa1_u8; 4096];
+        let root_b = vec![0xb2_u8; 4096];
+        let uki_a = test_uki(punard::install::ROOT_A_PARTUUID);
+        let uki_b = test_uki(punard::install::ROOT_B_PARTUUID);
+        let payload = |filename: &str, bytes: &[u8]| {
+            json!({
+                "filename": filename,
+                "digest_sha256": punard::util::sha256_hex(bytes),
+                "size_bytes": bytes.len(),
+                "uncompressed_digest_sha256": punard::util::sha256_hex(bytes),
+                "uncompressed_size_bytes": bytes.len(),
+                "compression": "zstd"
+            })
+        };
+        let boot = |filename: &str, bytes: &[u8]| {
+            json!({
+                "kind": "uki",
+                "filename": filename,
+                "digest_sha256": punard::util::sha256_hex(bytes),
+                "size_bytes": bytes.len()
+            })
+        };
+        for (name, bytes) in [
+            ("slot-a.raw.zst", root_a.as_slice()),
+            ("slot-b.raw.zst", root_b.as_slice()),
+            ("slot-a.efi", uki_a.as_slice()),
+            ("slot-b.efi", uki_b.as_slice()),
+        ] {
+            fs::write(release.join(name), bytes).unwrap();
+        }
+        let slot_a_payload = payload("slot-a.raw.zst", &root_a);
+        let slot_a_boot = boot("slot-a.efi", &uki_a);
+        let manifest = serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "release_id": "punar-desktop-stable-aarch64-uefi-2026.08.27.1",
+            "image_id": "punar-desktop",
+            "architecture": "aarch64",
+            "boot_platform": "uefi",
+            "version": "2026.08.27.1",
+            "channel": "stable",
+            "snapshot_pin": "20260820T000000Z",
+            "overlay_pin": null,
+            "payload": slot_a_payload,
+            "boot_artifact": slot_a_boot,
+            "uefi_slots": {
+                "a": {
+                    "payload": payload("slot-a.raw.zst", &root_a),
+                    "boot_artifact": boot("slot-a.efi", &uki_a)
+                },
+                "b": {
+                    "payload": payload("slot-b.raw.zst", &root_b),
+                    "boot_artifact": boot("slot-b.efi", &uki_b)
+                }
+            },
+            "min_from": null,
+            "security": {"severity": "none", "advisory_ids": []},
+            "provenance": {
+                "git_commit": "0123456789abcdef0123456789abcdef01234567",
+                "ci_run_id": "daemon-integration",
+                "builder_base_digest": format!("sha256:{}", "3".repeat(64)),
+                "source_date_epoch": 1787184000,
+                "built_at": "2026-08-27T22:00:00Z"
+            },
+            "sbom": null
+        }))
+        .unwrap();
+        fs::write(release.join("release.json"), &manifest).unwrap();
+        fs::write(
+            release.join("release.json.sig"),
+            signing.sign(&manifest).to_bytes(),
+        )
+        .unwrap();
     }
     cfg.update_check_sources = UpdateCheckSources {
         repository_url_file: dir.join("update-repository.url"),
@@ -280,6 +371,50 @@ fn configure_update_fixture(
         cache_max_age_seconds: 900,
         architecture_override: Some(Architecture::Aarch64),
         boot_platform_override: Some(BootPlatform::Uefi),
+    };
+}
+
+fn configure_update_apply_fixture(cfg: &mut DaemonConfig, dir: &Path) {
+    configure_update_fixture(cfg, dir, true, false);
+    let cmdline = dir.join("update-cmdline");
+    fs::write(
+        &cmdline,
+        format!("root=PARTUUID={} ro\n", punard::install::ROOT_A_PARTUUID),
+    )
+    .unwrap();
+    let root_a = dir.join("root-a");
+    let root_b = dir.join("root-b");
+    for path in [&root_a, &root_b] {
+        let file = fs::File::create(path).unwrap();
+        file.set_len(8192).unwrap();
+    }
+    fs::write(&root_a, vec![0x11_u8; 8192]).unwrap();
+    let esp = dir.join("esp");
+    fs::create_dir_all(esp.join("EFI/Linux")).unwrap();
+    fs::create_dir_all(esp.join("loader")).unwrap();
+    fs::write(
+        esp.join("EFI/Linux/punar_2026.08.20.1.efi"),
+        test_uki(punard::install::ROOT_A_PARTUUID),
+    )
+    .unwrap();
+    fs::write(
+        esp.join("loader/loader.conf"),
+        "preferred punar_2026.08.20.1*.efi\ntimeout 0\neditor no\n",
+    )
+    .unwrap();
+    let zstd = dir.join("zstd");
+    fs::write(&zstd, "#!/bin/sh\nexec /bin/cat\n").unwrap();
+    fs::set_permissions(&zstd, fs::Permissions::from_mode(0o755)).unwrap();
+    cfg.update_transaction_sources = UpdateTransactionSources {
+        cmdline,
+        root_a_partition: root_a,
+        root_b_partition: root_b,
+        esp_partition: dir.join("unused-esp-device"),
+        mount_root: dir.join("update-mounts"),
+        pending_uefi: cfg.state_dir.join("update/pending-uefi.json"),
+        zstd_path: zstd,
+        allow_regular_targets: true,
+        esp_mount_override: Some(esp),
     };
 }
 
@@ -870,6 +1005,265 @@ fn update_check_missing_source_is_visible_and_audited_as_unreachable() {
     let event = td.audit_lines().pop().unwrap();
     assert_eq!(event["action"], "update.check");
     assert_eq!(event["result"], "unreachable");
+}
+
+#[test]
+fn update_apply_and_rollback_are_verified_inactive_slot_transactions() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir)
+    });
+    let root_a_before = fs::read(td.dir.join("root-a")).unwrap();
+    let check = td.call("update.check", Some(json!({"force": true})));
+    assert_eq!(check["result"]["admissible"], true, "{check}");
+
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(
+        applied["result"]["staged_version"], "2026.08.27.1",
+        "{applied}"
+    );
+    assert_eq!(applied["result"]["staged_slot"], "b");
+    assert_eq!(applied["result"]["verified"], true);
+    assert_eq!(applied["result"]["requires_reboot"], true);
+    assert_eq!(fs::read(td.dir.join("root-a")).unwrap(), root_a_before);
+    assert_eq!(
+        &fs::read(td.dir.join("root-b")).unwrap()[..4096],
+        &vec![0xb2_u8; 4096],
+    );
+    let esp = td.dir.join("esp");
+    assert!(
+        esp.join("EFI/Linux/punar_2026.08.20.1.efi").is_file(),
+        "last-known-good UKI must be retained"
+    );
+    assert!(esp.join("EFI/Linux/punar_2026.08.27.1+3-0.efi").is_file());
+    assert!(
+        fs::read_to_string(esp.join("loader/loader.conf"))
+            .unwrap()
+            .contains("preferred punar_2026.08.27.1*.efi")
+    );
+    assert!(td.state_path("update/pending-uefi.json").is_file());
+
+    let rolled_back = td.call("update.rollback", Some(json!({"to_version": null})));
+    assert_eq!(
+        rolled_back["result"]["previous_default"],
+        "punar_2026.08.27.1*.efi"
+    );
+    assert_eq!(
+        rolled_back["result"]["new_default"],
+        "punar_2026.08.20.1*.efi"
+    );
+    assert_eq!(rolled_back["result"]["requires_reboot"], true);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+    assert!(
+        fs::read_to_string(esp.join("loader/loader.conf"))
+            .unwrap()
+            .contains("preferred punar_2026.08.20.1*.efi")
+    );
+    let events = td.audit_lines();
+    for action in ["update.apply", "update.rollback"] {
+        let event = events
+            .iter()
+            .find(|event| event["action"] == action)
+            .unwrap();
+        assert_eq!(event["resource"], "system_image");
+        assert_eq!(event["decision"], "allow");
+        assert_eq!(event["result"], "success");
+    }
+}
+
+#[test]
+fn update_apply_from_slot_b_uses_the_independently_bound_slot_a_pair() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            &cfg.update_transaction_sources.cmdline,
+            format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi"),
+            test_uki(punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+    });
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(applied["result"]["staged_slot"], "a", "{applied}");
+    assert_eq!(applied["result"]["verified"], true);
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert_eq!(
+        &fs::read(td.dir.join("root-a")).unwrap()[..4096],
+        &vec![0xa1_u8; 4096],
+    );
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.27.1+3-0.efi")
+            .is_file()
+    );
+}
+
+#[test]
+fn update_apply_refreshes_the_signed_head_and_honors_a_new_halt() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir)
+    });
+    let check = td.call("update.check", Some(json!({"force": true})));
+    assert_eq!(check["result"]["admissible"], true, "{check}");
+
+    let repository = td.dir.join("update-source");
+    let channel_path = repository.join("channel.json");
+    let mut channel: Value = serde_json::from_slice(&fs::read(&channel_path).unwrap()).unwrap();
+    channel["halted"] = json!(true);
+    let document = serde_json::to_vec_pretty(&channel).unwrap();
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    fs::write(&channel_path, &document).unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&document).to_bytes(),
+    )
+    .unwrap();
+
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(
+        response["error"]["code"], "untrusted_artifact",
+        "{response}"
+    );
+    assert_eq!(response["error"]["details"]["stage"], "channel_admission");
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+}
+
+#[test]
+fn update_apply_denies_non_root_before_release_or_slot_access() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        configure_update_apply_fixture,
+    );
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+}
+
+#[test]
+fn update_apply_denies_root_inside_an_agent_scope_by_named_rule() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 0,
+            gid: 0,
+            pid: Some(4242),
+        }),
+        |cfg, dir| {
+            configure_update_apply_fixture(cfg, dir);
+            let proc_root = dir.join("proc");
+            fs::create_dir_all(proc_root.join("4242")).unwrap();
+            fs::write(
+                proc_root.join("4242/cgroup"),
+                "0::/user.slice/punar-agent-agt_updatetest.scope\n",
+            )
+            .unwrap();
+            cfg.proc_root = proc_root;
+        },
+    );
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(response["error"]["details"]["rule"], "host.system_update");
+    assert_eq!(
+        response["error"]["details"]["policy_ids"],
+        json!(["personal-defaults"])
+    );
+    let event = td
+        .audit_lines()
+        .into_iter()
+        .find(|event| event["action"] == "update.apply")
+        .unwrap();
+    assert_eq!(event["source"], "ai_agent");
+    assert_eq!(event["agent_session_id"], "agt_updatetest");
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["result"], "denied");
+}
+
+#[test]
+fn update_apply_agent_denial_cannot_be_overridden_by_an_allow_policy() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 0,
+            gid: 0,
+            pid: Some(4243),
+        }),
+        |cfg, dir| {
+            configure_update_apply_fixture(cfg, dir);
+            let proc_root = dir.join("proc");
+            fs::create_dir_all(proc_root.join("4243")).unwrap();
+            fs::write(
+                proc_root.join("4243/cgroup"),
+                "0::/user.slice/punar-agent-agt_updateallow.scope\n",
+            )
+            .unwrap();
+            cfg.proc_root = proc_root;
+            cfg.ai_defaults_file = dir.join("ai-allow.yaml");
+            fs::write(
+                &cfg.ai_defaults_file,
+                "ai:\n  agents:\n    default:\n      filesystem: {}\n      host:\n        system_update: allow\n      network: {}\n      credentials: {}\n",
+            )
+            .unwrap();
+        },
+    );
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(response["error"]["details"]["rule"], "host.system_update");
+    assert_eq!(
+        response["error"]["details"]["policy_ids"],
+        json!(["os-hard-safety"])
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Punar OS hard safety constraint")
+    );
+    assert!(!td.state_path("update/pending-uefi.json").exists());
 }
 
 /// M4 semantics (contract section 5.6): reconcile now REMEDIATES drift —

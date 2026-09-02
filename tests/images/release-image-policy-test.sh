@@ -42,6 +42,14 @@ printf '%s\n' \
     'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin' \
     > "${CLEAN}/etc/passwd"
 printf '%s\n' \
+    'ID=punar-test-substrate' \
+    'VERSION_ID=1' \
+    'IMAGE_ID=punar-desktop' \
+    'IMAGE_VERSION=2026.08.20.1' \
+    'PUNAR_SNAPSHOT_PIN=20260820T000000Z' \
+    > "${CLEAN}/usr/lib/os-release"
+cp "${CLEAN}/usr/lib/os-release" "${CLEAN}/etc/os-release"
+printf '%s\n' \
     '[default_session]' \
     'command = "agreety --cmd /usr/lib/punar/session.sh"' \
     'user = "greeter"' > "${CLEAN}/etc/greetd/config.toml"
@@ -94,6 +102,15 @@ expect_fail() {
 }
 
 mutate_a1() { printf '%s\n' 'root::20500:0:99999:7:::' > "${CASE}/etc/shadow"; }
+mutate_a0() {
+    printf '%s\n' \
+        'ID=punar-test-substrate' \
+        'VERSION_ID=1' \
+        'IMAGE_ID=punar-desktop' \
+        'IMAGE_VERSION=latest' \
+        'PUNAR_SNAPSHOT_PIN=20260820T000000Z' \
+        > "${CASE}/usr/lib/os-release"
+}
 mutate_a2() { printf '%s\n' 'punar:x:1000:1000::/home/punar:/bin/sh' >> "${CASE}/etc/passwd"; }
 mutate_a3() { printf '%s\n' 'punar:100000:65536' > "${CASE}/etc/subuid"; }
 mutate_a4() { printf '%s\n' '[initial_session]' >> "${CASE}/etc/greetd/config.toml"; }
@@ -141,21 +158,31 @@ PROFILES='desktop dev' \
 ARCHITECTURE=x86-64 \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
+PUNAR_IMAGE_ID=punar-desktop \
+PUNAR_IMAGE_VERSION=2026.08.20.1 \
+PUNAR_SNAPSHOT_PIN=20260820T000000Z \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
 echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
 
 MINIMAL="${TEST_ROOT}/minimal-dev"
-mkdir -p "${MINIMAL}"
+mkdir -p "${MINIMAL}/usr/lib"
+printf '%s\n' 'ID=punar-test-substrate' > "${MINIMAL}/usr/lib/os-release"
+mkdir -p "${MINIMAL}/etc"
+cp "${MINIMAL}/usr/lib/os-release" "${MINIMAL}/etc/os-release"
 PROFILES='dev' \
 BUILDROOT="${MINIMAL}" \
 ARCHITECTURE=x86-64 \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
+PUNAR_IMAGE_ID=punar-desktop \
+PUNAR_IMAGE_VERSION=2026.08.20.1 \
+PUNAR_SNAPSHOT_PIN=20260820T000000Z \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${MINIMAL}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service" ]
 echo 'ok   mkosi finalize leaves the minimal dev profile free of desktop mount policy'
 
+expect_fail A0 mutate_a0
 expect_fail A1 mutate_a1
 expect_fail A2 mutate_a2
 expect_fail A3 mutate_a3

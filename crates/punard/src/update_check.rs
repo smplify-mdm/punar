@@ -7,15 +7,16 @@
 //! Neither transport lets the caller choose an origin, path or trust key.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use punar_common::update::{
-    Architecture, BootPlatform, ReleaseKeySet, ReleaseTarget, ReleaseVersion, UpdateChannel,
-    UpdateCheckResult, UpdateTrustError, cohort_bucket, verify_channel_metadata,
+    Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, ReleaseTarget, ReleaseVersion,
+    UpdateChannel, UpdateCheckResult, UpdateSlot, UpdateTrustError, cohort_bucket,
+    verify_channel_metadata, verify_reader, verify_release_manifest,
 };
 use thiserror::Error;
 
@@ -27,6 +28,8 @@ const SIGNATURE_MAX: u64 = 64;
 const REPOSITORY_URL_MAX: u64 = 2048;
 const DEFAULT_CACHE_MAX_AGE: u64 = 15 * 60;
 const HTTPS_FETCH_TIMEOUT: Duration = Duration::from_secs(35);
+const RELEASE_FETCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const RELEASE_DOCUMENT_MAX: u64 = 1024 * 1024;
 static FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
@@ -80,6 +83,13 @@ pub enum UpdateCheckError {
     LocalIdentity(String),
     #[error("verified update metadata could not be cached: {0}")]
     Cache(String),
+    #[error(
+        "the private update cache has {available_bytes} bytes available but {required_bytes} are required"
+    )]
+    InsufficientSpace {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
 }
 
 impl UpdateCheckError {
@@ -89,6 +99,7 @@ impl UpdateCheckError {
             Self::Untrusted { stage, .. } => stage,
             Self::LocalIdentity(_) => "local_identity",
             Self::Cache(_) => "verified_cache",
+            Self::InsufficientSpace { .. } => "release_cache_space",
         }
     }
 
@@ -99,6 +110,22 @@ impl UpdateCheckError {
     pub fn is_untrusted(&self) -> bool {
         matches!(self, Self::Untrusted { .. })
     }
+
+    pub fn insufficient_space(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::InsufficientSpace {
+                required_bytes,
+                available_bytes,
+            } => Some((*required_bytes, *available_bytes)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedRelease {
+    pub release_dir: PathBuf,
+    pub manifest: ReleaseManifest,
 }
 
 pub struct UpdateCheckEngine {
@@ -171,7 +198,158 @@ impl UpdateCheckEngine {
         ))
     }
 
-    fn current_version(&self) -> Result<ReleaseVersion, UpdateCheckError> {
+    /// Resolve and cache the exact release named by the already-verified
+    /// channel head. Every origin and path is derived from root-owned state
+    /// and signed metadata; the IPC caller contributes only the version it
+    /// expects to stage.
+    pub fn prepare_release(
+        &self,
+        channel: UpdateChannel,
+        device_id: &str,
+        requested: ReleaseVersion,
+        allow_downgrade: bool,
+        requested_slot: Option<UpdateSlot>,
+    ) -> Result<PreparedRelease, UpdateCheckError> {
+        let current = self.current_version()?;
+        let target = self.release_target(channel)?;
+        let keys = ReleaseKeySet::load_dir(&self.sources.trusted_keys_dir)
+            .map_err(|error| untrusted("trusted_keys", error))?;
+        let channel_document = read_cache(&self.sources.cached_channel, CHANNEL_DOCUMENT_MAX)
+            .map_err(|error| untrusted("cached_metadata", error))?;
+        let channel_signature = read_cache(&self.sources.cached_signature, SIGNATURE_MAX)
+            .map_err(|error| untrusted("cached_signature", error))?;
+        let metadata = verify_channel_metadata(&channel_document, &channel_signature, &keys)
+            .map_err(|error| untrusted("channel_signature", error))?;
+        require_target(&metadata.image_id, &target.image_id, "image_id")?;
+        require_equal(metadata.architecture, target.architecture, "architecture")?;
+        require_equal(
+            metadata.boot_platform,
+            target.boot_platform,
+            "boot_platform",
+        )?;
+        require_equal(metadata.channel, target.channel, "channel")?;
+        if metadata.current != requested {
+            return Err(UpdateCheckError::Untrusted {
+                stage: "channel_version",
+                reason: "the requested version is not the verified channel head".into(),
+            });
+        }
+        if metadata.halted
+            || current < metadata.min_supported_version
+            || cohort_bucket(device_id, metadata.current) >= metadata.rollout_bps
+            || !allow_downgrade && metadata.current <= current
+        {
+            return Err(UpdateCheckError::Untrusted {
+                stage: "channel_admission",
+                reason: "the verified channel does not admit this release on this device".into(),
+            });
+        }
+
+        let manifest_path = Path::new(&metadata.release_manifest);
+        let signature_path = PathBuf::from(format!("{}.sig", metadata.release_manifest));
+        let manifest_document = self.fetch_repository_bytes(
+            &target,
+            manifest_path,
+            RELEASE_DOCUMENT_MAX,
+            "release manifest",
+        )?;
+        let manifest_signature = self.fetch_repository_bytes(
+            &target,
+            &signature_path,
+            SIGNATURE_MAX,
+            "release signature",
+        )?;
+        let manifest = verify_release_manifest(&manifest_document, &manifest_signature, &keys)
+            .map_err(|error| untrusted("manifest_signature", error))?;
+        manifest
+            .admit(&target, current, allow_downgrade)
+            .map_err(|error| untrusted("manifest_admission", error))?;
+        if manifest.version != requested {
+            return Err(UpdateCheckError::Untrusted {
+                stage: "manifest_version",
+                reason: "the signed manifest version does not match the verified channel head"
+                    .into(),
+            });
+        }
+        let (payload, boot_artifact) = match manifest.boot_platform {
+            BootPlatform::Uefi => manifest
+                .artifacts_for_slot(requested_slot.unwrap_or(UpdateSlot::Unknown))
+                .ok_or_else(|| UpdateCheckError::Untrusted {
+                    stage: "slot_artifacts",
+                    reason: "the signed release does not contain the requested UEFI slot pair"
+                        .into(),
+                })?,
+            BootPlatform::RaspberryPi => (&manifest.payload, &manifest.boot_artifact),
+        };
+
+        let cache_parent =
+            self.sources.cached_channel.parent().ok_or_else(|| {
+                UpdateCheckError::Cache("verified channel path has no parent".into())
+            })?;
+        let release_dir = cache_parent
+            .join("releases")
+            .join(manifest.version.to_string());
+        ensure_private_dir(&release_dir)
+            .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+        write_atomic_synced(
+            &release_dir.join("release.json.sig"),
+            &manifest_signature,
+            0o600,
+        )
+        .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+        write_atomic_synced(&release_dir.join("release.json"), &manifest_document, 0o600)
+            .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+
+        let required = payload
+            .size_bytes
+            .checked_add(boot_artifact.size_bytes)
+            .ok_or_else(|| UpdateCheckError::Cache("release cache size overflow".into()))?;
+        let available = available_bytes(&release_dir)
+            .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+        let already_cached = [
+            (&payload.filename, payload.size_bytes),
+            (&boot_artifact.filename, boot_artifact.size_bytes),
+        ]
+        .iter()
+        .filter_map(|(name, expected)| {
+            fs::metadata(release_dir.join(name))
+                .ok()
+                .filter(|metadata| metadata.file_type().is_file() && metadata.len() == *expected)
+                .map(|_| *expected)
+        })
+        .sum::<u64>();
+        let still_required = required.saturating_sub(already_cached);
+        if available < still_required {
+            return Err(UpdateCheckError::InsufficientSpace {
+                required_bytes: still_required,
+                available_bytes: available,
+            });
+        }
+
+        let release_parent = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+        self.fetch_verified_artifact(
+            &target,
+            &release_parent.join(&payload.filename),
+            &release_dir.join(&payload.filename),
+            &payload.digest_sha256,
+            payload.size_bytes,
+            "compressed release payload",
+        )?;
+        self.fetch_verified_artifact(
+            &target,
+            &release_parent.join(&boot_artifact.filename),
+            &release_dir.join(&boot_artifact.filename),
+            &boot_artifact.digest_sha256,
+            boot_artifact.size_bytes,
+            "release boot artifact",
+        )?;
+        Ok(PreparedRelease {
+            release_dir,
+            manifest,
+        })
+    }
+
+    pub(crate) fn current_version(&self) -> Result<ReleaseVersion, UpdateCheckError> {
         let release = read_os_release(&self.sources.os_release).ok_or_else(|| {
             UpdateCheckError::LocalIdentity(format!(
                 "{} is missing or invalid",
@@ -190,7 +368,10 @@ impl UpdateCheckEngine {
             .map_err(|error: UpdateTrustError| UpdateCheckError::LocalIdentity(error.to_string()))
     }
 
-    fn release_target(&self, channel: UpdateChannel) -> Result<ReleaseTarget, UpdateCheckError> {
+    pub(crate) fn release_target(
+        &self,
+        channel: UpdateChannel,
+    ) -> Result<ReleaseTarget, UpdateCheckError> {
         let release = read_os_release(&self.sources.os_release).ok_or_else(|| {
             UpdateCheckError::LocalIdentity(format!(
                 "{} is missing or invalid",
@@ -222,6 +403,10 @@ impl UpdateCheckEngine {
             boot_platform,
             channel,
         })
+    }
+
+    pub(crate) fn trusted_keys_dir(&self) -> &Path {
+        &self.sources.trusted_keys_dir
     }
 
     fn cache_is_fresh(&self) -> bool {
@@ -343,6 +528,209 @@ impl UpdateCheckEngine {
         let _ = fs::remove_file(&temporary);
         bytes
     }
+
+    fn fetch_repository_bytes(
+        &self,
+        target: &ReleaseTarget,
+        relative: &Path,
+        maximum: u64,
+        description: &str,
+    ) -> Result<Vec<u8>, UpdateCheckError> {
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| UpdateCheckError::Untrusted {
+                stage: "repository_path",
+                reason: "signed repository path is not UTF-8".into(),
+            })?;
+        match fs::symlink_metadata(&self.sources.repository_url_file) {
+            Ok(_) => {
+                let base = read_repository_base_url(
+                    &self.sources.repository_url_file,
+                    self.sources.repository_url_owner_uid,
+                )?;
+                let prefix = format!(
+                    "{base}/{}/{}/{}",
+                    target.channel, target.architecture, target.boot_platform
+                );
+                self.fetch_https(&format!("{prefix}/{relative}"), maximum, description)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                read_source(&self.sources.repository_dir.join(relative), maximum)
+            }
+            Err(error) => Err(source_configuration(
+                &self.sources.repository_url_file,
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn fetch_verified_artifact(
+        &self,
+        target: &ReleaseTarget,
+        relative: &Path,
+        destination: &Path,
+        digest: &str,
+        size: u64,
+        description: &str,
+    ) -> Result<(), UpdateCheckError> {
+        if verify_cached_artifact(destination, digest, size).is_ok() {
+            return Ok(());
+        }
+        let temporary = destination.with_extension(format!(
+            "download-{}-{}",
+            std::process::id(),
+            FETCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let fetched = match fs::symlink_metadata(&self.sources.repository_url_file) {
+            Ok(_) => {
+                let base = read_repository_base_url(
+                    &self.sources.repository_url_file,
+                    self.sources.repository_url_owner_uid,
+                )?;
+                let relative = relative
+                    .to_str()
+                    .ok_or_else(|| UpdateCheckError::Untrusted {
+                        stage: "repository_path",
+                        reason: "signed artifact path is not UTF-8".into(),
+                    })?;
+                let url = format!(
+                    "{base}/{}/{}/{}/{relative}",
+                    target.channel, target.architecture, target.boot_platform
+                );
+                self.fetch_https_file(&url, &temporary, size, description)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => copy_private_file(
+                &self.sources.repository_dir.join(relative),
+                &temporary,
+                size,
+            )
+            .map_err(|error| UpdateCheckError::SourceUnavailable(error.to_string())),
+            Err(error) => Err(source_configuration(
+                &self.sources.repository_url_file,
+                error.to_string(),
+            )),
+        };
+        if let Err(error) = fetched {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = verify_cached_artifact(&temporary, digest, size) {
+            let _ = fs::remove_file(&temporary);
+            return Err(untrusted("payload_digest", error));
+        }
+        fs::rename(&temporary, destination)
+            .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+        FileSync::parent(destination).map_err(|error| UpdateCheckError::Cache(error.to_string()))
+    }
+
+    fn fetch_https_file(
+        &self,
+        url: &str,
+        destination: &Path,
+        size: u64,
+        description: &str,
+    ) -> Result<(), UpdateCheckError> {
+        // Curl must never choose the permissions of a cached release
+        // artifact. Pre-create the unpredictable file with the same private
+        // mode as the surrounding cache, and refuse to replace anything that
+        // appeared at the path unexpectedly.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(destination)
+            .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+        let maximum = size.to_string();
+        let output = destination.to_string_lossy().into_owned();
+        let result = run_with_timeout(
+            &self.sources.curl_bin,
+            &[
+                "--disable",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--max-redirs",
+                "0",
+                "--tlsv1.2",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "3500",
+                "--max-filesize",
+                &maximum,
+                "--output",
+                &output,
+                url,
+            ],
+            RELEASE_FETCH_TIMEOUT,
+        );
+        match result {
+            Ok(result) if result.success => Ok(()),
+            Ok(_) => Err(UpdateCheckError::SourceUnavailable(format!(
+                "HTTPS {description} download failed"
+            ))),
+            Err(error) => Err(UpdateCheckError::SourceUnavailable(format!(
+                "HTTPS {description} download could not run: {error}"
+            ))),
+        }
+    }
+}
+
+struct FileSync;
+
+impl FileSync {
+    fn parent(path: &Path) -> io::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("path has no parent"))?;
+        fs::File::open(parent)?.sync_all()
+    }
+}
+
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+fn available_bytes(path: &Path) -> io::Result<u64> {
+    let stat = rustix::fs::statvfs(path).map_err(io::Error::from)?;
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+fn verify_cached_artifact(path: &Path, digest: &str, size: u64) -> Result<(), UpdateTrustError> {
+    let mut file = fs::File::open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(UpdateTrustError::Io(io::Error::other(
+            "cached artifact is not a regular file",
+        )));
+    }
+    verify_reader(&mut file, digest, size)
+}
+
+fn copy_private_file(source: &Path, destination: &Path, expected: u64) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let mut input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
+        .open(source)?;
+    if !input.metadata()?.file_type().is_file() || input.metadata()?.len() != expected {
+        return Err(io::Error::other(
+            "repository artifact has the wrong type or size",
+        ));
+    }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)?;
+    io::copy(&mut input, &mut output)?;
+    output.flush()?;
+    output.sync_all()
 }
 
 fn check_result(
@@ -428,7 +816,7 @@ fn read_repository_base_url(path: &Path, expected_uid: u32) -> Result<String, Up
         ));
     }
     let mut bytes = Vec::new();
-    file.by_ref()
+    std::io::Read::by_ref(&mut file)
         .take(REPOSITORY_URL_MAX + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| source_configuration(path, error.to_string()))?;
@@ -643,6 +1031,34 @@ mod tests {
             .check(UpdateChannel::Stable, "dev_00123", false)
             .unwrap();
         assert!(cached.cached);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn https_artifact_destination_is_private_before_the_downloader_runs() {
+        let root = root("https-mode");
+        let paths = sources(&root);
+        fs::write(
+            &paths.curl_bin,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --output ]; then\n    shift\n    printf data > \"$1\"\n    exit 0\n  fi\n  shift\ndone\nexit 2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&paths.curl_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let engine = UpdateCheckEngine::new(paths);
+        let destination = root.join("artifact.new");
+        engine
+            .fetch_https_file(
+                "https://updates.example.test/artifact",
+                &destination,
+                4,
+                "test artifact",
+            )
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"data");
         fs::remove_dir_all(root).unwrap();
     }
 

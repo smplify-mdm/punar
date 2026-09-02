@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use punar_common::update::{
-    ReleaseKeySet, ReleaseManifest, ReleaseTarget, ReleaseVersion, verify_reader,
-    verify_release_manifest,
+    ReleaseKeySet, ReleaseManifest, ReleaseTarget, ReleaseVersion, UpdateRollbackResult,
+    verify_reader, verify_release_manifest,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -154,6 +154,10 @@ pub struct PiUpdateSources {
     pub boot_a_mount_override: Option<PathBuf>,
     #[cfg(test)]
     pub boot_b_mount_override: Option<PathBuf>,
+    #[cfg(test)]
+    pub root_a_mount_override: Option<PathBuf>,
+    #[cfg(test)]
+    pub root_b_mount_override: Option<PathBuf>,
 }
 
 impl Default for PiUpdateSources {
@@ -181,6 +185,10 @@ impl Default for PiUpdateSources {
             boot_a_mount_override: None,
             #[cfg(test)]
             boot_b_mount_override: None,
+            #[cfg(test)]
+            root_a_mount_override: None,
+            #[cfg(test)]
+            root_b_mount_override: None,
         }
     }
 }
@@ -374,6 +382,19 @@ impl PiUpdateEngine {
         })
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub fn stage_bundle(
+        &self,
+        _release_dir: &Path,
+        _trusted_key_dir: &Path,
+        _target: &ReleaseTarget,
+        _current: ReleaseVersion,
+    ) -> Result<PiStageResult, PiUpdateError> {
+        Err(PiUpdateError::Conflict(
+            "Raspberry Pi update staging is available only on Linux".into(),
+        ))
+    }
+
     /// Bless a one-shot candidate only after firmware, root pairing and the
     /// on-device health report all agree with the durable pending record.
     /// A normal boot, a read-write root, or a partial health result can never
@@ -495,12 +516,146 @@ impl PiUpdateEngine {
         })
     }
 
+    /// Atomically exchange the ordinary and tryboot selectors after proving
+    /// the current selector and its last-known-good backup agree. No release
+    /// is downloaded; an optional version is checked against the local target
+    /// root before the firmware file is changed.
+    #[cfg(target_os = "linux")]
+    pub fn rollback(
+        &self,
+        requested: Option<ReleaseVersion>,
+    ) -> Result<UpdateRollbackResult, PiUpdateError> {
+        if self.sources.pending_state.exists() {
+            return Err(PiUpdateError::Conflict(
+                "a Raspberry Pi tryboot update is still pending; it must be blessed or allowed to fall back before an explicit rollback"
+                    .into(),
+            ));
+        }
+        let observation = PiBootObservation::read(
+            &self.sources.boot_partition_property,
+            &self.sources.tryboot_property,
+        )?;
+        let current = observation.slot;
+        let previous = current.inactive();
+        let mounted = self.mount_selector(false)?;
+        let autoboot_path = mounted.path.join("autoboot.txt");
+        let current_selector = read_small_regular(
+            &autoboot_path,
+            PI_AUTOBOOT_MAX_BYTES,
+            "Raspberry Pi selector",
+        )?;
+        validate_raspberry_pi_autoboot(
+            &current_selector,
+            u8::try_from(current.boot_partition()).expect("Pi partition fits u8"),
+            u8::try_from(previous.boot_partition()).expect("Pi partition fits u8"),
+        )?;
+        let prior_selector = read_small_regular(
+            &mounted.path.join("autoboot.previous"),
+            PI_AUTOBOOT_MAX_BYTES,
+            "previous Raspberry Pi selector",
+        )?;
+        validate_raspberry_pi_autoboot(
+            &prior_selector,
+            u8::try_from(previous.boot_partition()).expect("Pi partition fits u8"),
+            u8::try_from(current.boot_partition()).expect("Pi partition fits u8"),
+        )?;
+
+        if let Some(requested) = requested {
+            let installed = self.root_version(previous)?;
+            if installed != requested {
+                return Err(PiUpdateError::Conflict(format!(
+                    "slot {} contains release {installed}, not requested release {requested}",
+                    previous.boot_partition()
+                )));
+            }
+        }
+
+        // Preserve the currently working direction before swapping. A second
+        // explicit rollback can therefore return to it without trusting stale
+        // data left by an older transaction.
+        let backup_path = mounted.path.join("autoboot.previous");
+        write_atomic_synced(&backup_path, &current_selector, 0o600)?;
+        sync_filesystem(&mounted.path)?;
+        let backup = read_small_regular(
+            &backup_path,
+            PI_AUTOBOOT_MAX_BYTES,
+            "rollback backup Raspberry Pi selector",
+        )?;
+        validate_raspberry_pi_autoboot(
+            &backup,
+            u8::try_from(current.boot_partition()).expect("Pi partition fits u8"),
+            u8::try_from(previous.boot_partition()).expect("Pi partition fits u8"),
+        )?;
+
+        let rolled_back = canonical_autoboot(previous, current);
+        write_atomic_synced(&autoboot_path, &rolled_back, 0o600)?;
+        let reread = read_small_regular(
+            &autoboot_path,
+            PI_AUTOBOOT_MAX_BYTES,
+            "rolled-back Raspberry Pi selector",
+        )?;
+        validate_raspberry_pi_autoboot(
+            &reread,
+            u8::try_from(previous.boot_partition()).expect("Pi partition fits u8"),
+            u8::try_from(current.boot_partition()).expect("Pi partition fits u8"),
+        )?;
+        sync_filesystem(&mounted.path)?;
+        mounted.finish()?;
+        Ok(UpdateRollbackResult {
+            v: 1,
+            previous_default: pi_slot_name(current),
+            new_default: pi_slot_name(previous),
+            requires_reboot: true,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn rollback(
+        &self,
+        _requested: Option<ReleaseVersion>,
+    ) -> Result<UpdateRollbackResult, PiUpdateError> {
+        Err(PiUpdateError::Conflict(
+            "Raspberry Pi rollback is available only on Linux".into(),
+        ))
+    }
+
     fn remove_pending_state(&self) -> Result<(), PiUpdateError> {
         fs::remove_file(&self.sources.pending_state)?;
         if let Some(parent) = self.sources.pending_state.parent() {
             File::open(parent)?.sync_all()?;
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn root_version(&self, slot: PiSlot) -> Result<ReleaseVersion, PiUpdateError> {
+        let mounted = self.mount_root_slot(slot)?;
+        let os_release = [
+            mounted.path.join("etc/os-release"),
+            mounted.path.join("usr/lib/os-release"),
+        ]
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            PiUpdateError::Refused("the rollback root does not publish os-release".into())
+        })?;
+        let fields = crate::update_status::read_os_release(&os_release).ok_or_else(|| {
+            PiUpdateError::Refused("the rollback root has an invalid os-release".into())
+        })?;
+        let version = fields
+            .get("IMAGE_VERSION")
+            .or_else(|| fields.get("VERSION_ID"))
+            .ok_or_else(|| {
+                PiUpdateError::Refused(
+                    "the rollback root does not publish IMAGE_VERSION/VERSION_ID".into(),
+                )
+            })?
+            .parse()
+            .map_err(|error: punar_common::update::UpdateTrustError| {
+                PiUpdateError::Refused(format!("the rollback root version is invalid: {error}"))
+            })?;
+        mounted.finish()?;
+        Ok(version)
     }
 
     #[cfg(target_os = "linux")]
@@ -605,6 +760,42 @@ impl PiUpdateEngine {
             format!("boot-{}", slot.boot_partition()),
             read_only,
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_root_slot(&self, slot: PiSlot) -> Result<MountedPiFs, PiUpdateError> {
+        #[cfg(test)]
+        {
+            let override_path = match slot {
+                PiSlot::A => &self.sources.root_a_mount_override,
+                PiSlot::B => &self.sources.root_b_mount_override,
+            };
+            if let Some(path) = override_path {
+                return MountedPiFs::borrowed(path);
+            }
+        }
+        let path = self
+            .sources
+            .mount_root
+            .join(format!("root-{}", slot.root_partition()));
+        fs::create_dir_all(&path)?;
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let flags = rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW
+            | rustix::mount::MountFlags::RDONLY;
+        if let Err(error) = rustix::mount::mount(
+            self.root_target(slot),
+            &path,
+            "ext4",
+            flags,
+            None::<&std::ffi::CStr>,
+        ) {
+            let _ = fs::remove_dir(&path);
+            return Err(PiUpdateError::Io(error.into()));
+        }
+        Ok(MountedPiFs { path, owned: true })
     }
 
     #[cfg(target_os = "linux")]
@@ -722,6 +913,13 @@ fn canonical_autoboot(normal: PiSlot, try_slot: PiSlot) -> Vec<u8> {
         try_slot.boot_partition()
     )
     .into_bytes()
+}
+
+fn pi_slot_name(slot: PiSlot) -> String {
+    match slot {
+        PiSlot::A => "raspberry_pi:slot_a".to_string(),
+        PiSlot::B => "raspberry_pi:slot_b".to_string(),
+    }
 }
 
 fn validate_pending_state(pending: &PendingPiUpdate) -> Result<(), PiUpdateError> {
@@ -1103,6 +1301,7 @@ mod tests {
                 digest_sha256: sha256_hex(&boot_payload),
                 size_bytes: boot_payload.len() as u64,
             },
+            uefi_slots: None,
             min_from: None,
             security: ReleaseSecurity {
                 severity: SecuritySeverity::None,
@@ -1140,6 +1339,19 @@ mod tests {
         }
         fs::write(&root_a, vec![0x11; 8192]).unwrap();
         fs::write(&boot_a, vec![0x22; 8192]).unwrap();
+        let root_a_mount = root.join("root-a-mount");
+        let root_b_mount = root.join("root-b-mount");
+        for (mount, installed_version) in [
+            (&root_a_mount, "2026.08.30.5"),
+            (&root_b_mount, "2026.08.30.6"),
+        ] {
+            fs::create_dir_all(mount.join("etc")).unwrap();
+            fs::write(
+                mount.join("etc/os-release"),
+                format!("ID=punar\nIMAGE_VERSION={installed_version}\n"),
+            )
+            .unwrap();
+        }
 
         let pending = root.join("state/pending.json");
         let cmdline = root.join("cmdline");
@@ -1163,6 +1375,8 @@ mod tests {
             selector_mount_override: Some(selector.clone()),
             boot_a_mount_override: Some(boot_a_mount),
             boot_b_mount_override: Some(boot_b_mount),
+            root_a_mount_override: Some(root_a_mount),
+            root_b_mount_override: Some(root_b_mount),
         });
         let target = ReleaseTarget {
             image_id: "punar-desktop".into(),
@@ -1239,6 +1453,30 @@ mod tests {
             fs::read(selector.join("autoboot.txt")).unwrap(),
             committed_selector
         );
+
+        let mismatch = engine
+            .rollback(Some("2026.08.30.4".parse().unwrap()))
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("not requested release"));
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            committed_selector,
+            "a version mismatch must not touch the selector"
+        );
+        let rollback = engine
+            .rollback(Some("2026.08.30.5".parse().unwrap()))
+            .unwrap();
+        assert_eq!(rollback.previous_default, "raspberry_pi:slot_b");
+        assert_eq!(rollback.new_default, "raspberry_pi:slot_a");
+        assert!(rollback.requires_reboot);
+        validate_raspberry_pi_autoboot(&fs::read(selector.join("autoboot.txt")).unwrap(), 2, 4)
+            .unwrap();
+        validate_raspberry_pi_autoboot(
+            &fs::read(selector.join("autoboot.previous")).unwrap(),
+            4,
+            2,
+        )
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }

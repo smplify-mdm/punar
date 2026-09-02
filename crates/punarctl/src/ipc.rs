@@ -77,6 +77,10 @@ pub const APP_MUTATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// apps and each backend stays independently bounded; this larger client
 /// window prevents a second large download from being mistaken for a hang.
 pub const APP_UPDATE_ALL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60 + 5 * 60);
+/// A complete system-image transaction may download, write, fsync and
+/// physically re-read several GiB. It remains bounded, but its client budget
+/// must describe storage-speed reality rather than the ordinary RPC budget.
+pub const UPDATE_MUTATION_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Exit codes per Plate D-014 Sect III / docs/api/ipc.md section 7.
 /// 0 = success and 2 = usage (owned by clap) complete the set.

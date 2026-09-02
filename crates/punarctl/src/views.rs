@@ -15,8 +15,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use punar_common::update::{
-    DesiredReleaseState, RollbackState, UpdateCheckResult, UpdateHealthState, UpdateSlot,
-    UpdateStatusResult,
+    DesiredReleaseState, RollbackState, UpdateApplyResult, UpdateCheckResult, UpdateHealthState,
+    UpdateRollbackResult, UpdateSlot, UpdateStatusResult,
 };
 
 use crate::fmt::{self, Row, Slot, Style};
@@ -281,6 +281,101 @@ pub fn update_check(style: &Style, result: &Value) -> Result<String, String> {
                 },
             ),
             Row::new("Evidence", &source, Slot::Neutral, "Ed25519 verified"),
+        ],
+    ));
+    Ok(out)
+}
+
+/// `punarctl update apply`: report the durable, verified staging outcome. The
+/// daemon never reboots; that remains an explicit caller choice.
+pub fn update_apply(style: &Style, result: &Value) -> Result<String, String> {
+    let applied: UpdateApplyResult = parse(result)?;
+    let slot = match applied.staged_slot {
+        UpdateSlot::A => "slot A",
+        UpdateSlot::B => "slot B",
+        UpdateSlot::Unknown => "slot unknown",
+    };
+    let mut out = fmt::masthead(style, "Update staged", &applied.staged_version.to_string());
+    out.push_str(&fmt::section(style, "Transaction", "inactive system image"));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Release",
+                &applied.staged_version.to_string(),
+                Slot::Ok,
+                slot,
+            ),
+            Row::new(
+                "Verification",
+                if applied.verified { "passed" } else { "failed" },
+                if applied.verified {
+                    Slot::Ok
+                } else {
+                    Slot::Bad
+                },
+                "signed source · physical post-write digest",
+            ),
+            Row::new(
+                "Written",
+                &format!("{} bytes", applied.bytes_written),
+                Slot::Neutral,
+                "root payload and boot artifact",
+            ),
+            Row::new(
+                "Restart",
+                if applied.requires_reboot {
+                    "required"
+                } else {
+                    "not required"
+                },
+                if applied.requires_reboot {
+                    Slot::Warn
+                } else {
+                    Slot::Neutral
+                },
+                "use --reboot or restart when ready",
+            ),
+        ],
+    ));
+    Ok(out)
+}
+
+/// `punarctl update rollback`: report only the selector transition. The
+/// target already existed locally and no remote artifact was downloaded.
+pub fn update_rollback(style: &Style, result: &Value) -> Result<String, String> {
+    let rollback: UpdateRollbackResult = parse(result)?;
+    let mut out = fmt::masthead(style, "Update rollback", &rollback.new_default);
+    out.push_str(&fmt::section(style, "Selector", "local last-known-good"));
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                "Previous",
+                &rollback.previous_default,
+                Slot::Neutral,
+                "selector before this request",
+            ),
+            Row::new(
+                "Next boot",
+                &rollback.new_default,
+                Slot::Ok,
+                "already present locally",
+            ),
+            Row::new(
+                "Restart",
+                if rollback.requires_reboot {
+                    "required"
+                } else {
+                    "not required"
+                },
+                if rollback.requires_reboot {
+                    Slot::Warn
+                } else {
+                    Slot::Neutral
+                },
+                "use --reboot or restart when ready",
+            ),
         ],
     ));
     Ok(out)
@@ -4470,6 +4565,45 @@ mod tests {
         assert_eq!(decision_slot("deny"), Slot::Bad);
         assert_eq!(decision_slot("approval_required"), Slot::Warn);
         assert_eq!(decision_slot("something_else"), Slot::Neutral);
+    }
+
+    #[test]
+    fn update_apply_renders_only_the_verified_durable_outcome() {
+        let text = update_apply(
+            &Style::plain(),
+            &json!({
+                "v": 1,
+                "staged_version": "2026.08.27.1",
+                "staged_slot": "b",
+                "requires_reboot": true,
+                "bytes_written": 8192,
+                "verified": true
+            }),
+        )
+        .unwrap();
+        assert!(
+            text.contains("RELEASE       2026.08.27.1   slot B"),
+            "{text}"
+        );
+        assert!(text.contains("PASSED"), "{text}");
+        assert!(text.contains("REQUIRED"), "{text}");
+    }
+
+    #[test]
+    fn update_rollback_names_both_local_selectors() {
+        let text = update_rollback(
+            &Style::plain(),
+            &json!({
+                "v": 1,
+                "previous_default": "punar_2026.08.27.1*.efi",
+                "new_default": "punar_2026.08.20.1*.efi",
+                "requires_reboot": true
+            }),
+        )
+        .unwrap();
+        assert!(text.contains("PUNAR_2026.08.27.1*.EFI"), "{text}");
+        assert!(text.contains("PUNAR_2026.08.20.1*.EFI"), "{text}");
+        assert!(text.contains("already present locally"), "{text}");
     }
 
     /// A purged ledger is not an empty one, and the two never render
