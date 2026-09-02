@@ -444,7 +444,7 @@ its manifest carries `uefi_slots: null`.
 | `overlay_pin` | object \| null | The `punar-security` overlay pin set, when present (§9) |
 | `payload` | object | Canonical platform payload identity; contains filename, compressed and uncompressed digests/sizes, and `compression: zstd` |
 | `boot_artifact` | object | Canonical platform boot artifact identity: filename, kind, digest and size |
-| `uefi_slots` | object \| null | Exact `a` and `b` payload/UKI pairs on UEFI; `null` on Raspberry Pi |
+| `uefi_slots` | object \| null | Exact `a` and `b` payload/UKI pairs for governed UEFI updates; `null` for the slot-A-only installer manifest and on Raspberry Pi. `update.apply` requires the object before staging |
 | `min_from` | string \| null | Lowest version that may update *to* this release directly (§3.6, §11.3) |
 | `security` | object | `{ severity: "none"\|"important"\|"critical", advisory_ids: [...] }` — drives the §5.3 tone, never an action |
 | `provenance` | object | `{ git_commit, ci_run_id, builder_base_digest, source_date_epoch, built_at }` — spec 59.6 "pinned dependencies", made auditable |

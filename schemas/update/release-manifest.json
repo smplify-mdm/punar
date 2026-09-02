@@ -50,7 +50,7 @@
     "payload": { "$ref": "#/$defs/payload" },
     "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
     "uefi_slots": {
-      "description": "Two independently bound root/UKI pairs for alternating UEFI A/B updates; null on Raspberry Pi.",
+      "description": "Two independently bound root/UKI pairs for alternating UEFI A/B updates; null for a slot-A-only installer manifest and on Raspberry Pi. The update transaction requires the object before staging.",
       "oneOf": [
         { "type": "null" },
         { "$ref": "#/$defs/uefi_slots" }
@@ -78,9 +78,8 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "boot_platform": { "const": "uefi" } } },
-      "then": { "properties": { "uefi_slots": { "$ref": "#/$defs/uefi_slots" } } },
-      "else": { "properties": { "uefi_slots": { "type": "null" } } }
+      "if": { "properties": { "boot_platform": { "const": "raspberry_pi" } } },
+      "then": { "properties": { "uefi_slots": { "type": "null" } } }
     }
   ],
   "additionalProperties": false,

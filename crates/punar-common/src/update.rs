@@ -288,9 +288,10 @@ pub struct ReleaseManifest {
     pub overlay_pin: Option<OverlayPin>,
     pub payload: PayloadArtifact,
     pub boot_artifact: BootArtifact,
-    /// Required for governed UEFI updates and `null` for Raspberry Pi. The
-    /// top-level pair remains the install-media artifact (slot A) so the
-    /// attended installer contract stays backward-compatible.
+    /// Required by governed UEFI update staging, optional for a slot-A-only
+    /// UEFI installer manifest, and always `null` for Raspberry Pi. The
+    /// top-level pair is the install-media artifact so the attended installer
+    /// does not need to carry an unused second root image.
     pub uefi_slots: Option<UefiSlotArtifacts>,
     pub min_from: Option<ReleaseVersion>,
     pub security: ReleaseSecurity,
@@ -623,9 +624,10 @@ impl ReleaseManifest {
                     return invalid("top-level install artifacts must equal UEFI slot A");
                 }
             }
-            (BootPlatform::Uefi, None) => {
-                return invalid("UEFI release is missing independently bound A/B artifacts");
-            }
+            // A signed install manifest intentionally carries only the
+            // top-level slot-A pair. The update engine separately requires
+            // artifacts_for_slot(inactive) before it downloads or writes.
+            (BootPlatform::Uefi, None) => {}
             (BootPlatform::RaspberryPi, None) => {}
             (BootPlatform::RaspberryPi, Some(_)) => {
                 return invalid("Raspberry Pi release may not carry UEFI slot artifacts");
@@ -1177,10 +1179,11 @@ mod tests {
     }
 
     #[test]
-    fn uefi_manifest_requires_distinct_complete_slot_pairs_and_slot_a_install_alias() {
+    fn uefi_update_pairs_are_distinct_and_a_slot_a_only_installer_remains_valid() {
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         manifest.uefi_slots = None;
-        assert!(manifest.validate().is_err());
+        assert!(manifest.validate().is_ok());
+        assert!(manifest.artifacts_for_slot(UpdateSlot::B).is_none());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         let slot_a_name = manifest
