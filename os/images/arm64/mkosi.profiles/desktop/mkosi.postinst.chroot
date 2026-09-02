@@ -16,6 +16,14 @@ systemctl --global disable \
     podman-clean-transient.service podman-restart.service \
     podman.service podman.socket >/dev/null 2>&1 || true
 
+# Debian ships the seatd daemon as Hyprland's libseat dependency and its
+# preset enables it. Punar sessions are logind/PAM-owned; remove any
+# package-created enablement link and mask the unused privileged daemon before
+# mkosi applies distribution presets so it cannot become a second seat
+# authority or consume resources at idle.
+systemctl disable seatd.service >/dev/null 2>&1 || true
+systemctl mask seatd.service >/dev/null
+
 # Debian's greetd package does not create the account named by our shared
 # default_session. This locked system account runs agreety/onboarding only.
 if ! getent group greeter >/dev/null 2>&1; then

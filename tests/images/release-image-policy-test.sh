@@ -6,8 +6,18 @@ set -eu
 REPO_ROOT=$(cd -- "$(dirname "$0")/../.." && pwd)
 CHECKER="${REPO_ROOT}/os/images/check-release-image.sh"
 FINALIZE="${REPO_ROOT}/os/images/mkosi.finalize"
+ARM_POSTINSTALL="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/punar-release-policy.XXXXXX")
 trap 'rm -rf "${TEST_ROOT}"' EXIT INT TERM
+
+grep -Fq 'systemctl disable seatd.service' "${ARM_POSTINSTALL}" || {
+    echo 'FAIL ARM adapter: package-created seatd enablement must be removed' >&2
+    exit 1
+}
+grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
+    echo 'FAIL ARM adapter: seatd must remain masked when Debian presets run' >&2
+    exit 1
+}
 
 CLEAN="${TEST_ROOT}/clean"
 CASE="${TEST_ROOT}/case"
