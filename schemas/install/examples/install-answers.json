@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "kind": "punar_unattended_install",
+  "authorization_id": "0123456789abcdef0123456789abcdef",
+  "issued_at": "2026-09-01T07:00:00Z",
+  "expires_at": "2026-09-01T08:00:00Z",
+  "plan_token": "70d834d0a5d234adba171c4a6746561c5ad2ce7c9684a650cab322d89ceee554",
+  "target_serial": "PUNAR-CI-128G",
+  "confirm_destroy_disk": "PUNAR-CI-128G",
+  "release_id": "punar-desktop-stable-x86_64-uefi-2026.09.01.1",
+  "release_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "keymap": "us",
+  "locale": "C.UTF-8",
+  "encryption": "luks2",
+  "recovery_mode": "personal_copy",
+  "passphrase_source": "generated",
+  "recovery_key_ack": "unattended",
+  "oobe_answers_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}

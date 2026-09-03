@@ -216,8 +216,8 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `update.rollback` | **root human only; agent attribution is a hard denial before uid** | yes, local selector only | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
-| `install.apply` | **root human only, live environment only** | yes | always (`success`, `denied`, `failure`) |
-| `install.recovery_ack` | **root human only, live environment only** | recovery checkpoint only | denials; successful custody is `install.recovery_key/enrolled` |
+| `install.apply` | **root attended installer or independently signed unattended provisioner; live environment only** | yes | always (`success`, `denied`, `failure`) |
+| `install.recovery_ack` | **root attended installer or signed unattended provisioner; live environment only** | recovery checkpoint only | denials; successful custody is `install.recovery_key/enrolled` |
 | `install.status` | any connected peer, **live environment only** | no | no |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
@@ -988,7 +988,9 @@ plan token.
 
 ### 5.20 `install.apply` and `install.recovery_ack`
 
-`install.apply` is root-only, live-only and human-only. Agent attribution is
+`install.apply` is root-only and live-only. Its attended lane is human-only;
+its unattended lane additionally requires an independently signed,
+short-lived, exact-plan authorization. Agent attribution is
 checked before uid, descriptor duplication, release reads or disk access, so
 uid 0 inside `punar-agent-*.scope` is denied with `disk_changed: false`. One
 atomic guard admits one transaction per live boot while separate connections
@@ -1009,6 +1011,19 @@ write slot A → direct re-read → install the platform-bound boot artifact →
 seed → read-only final verification. There is no caller-selected path, argv,
 partition option or executable field.
 
+The unattended object omits `passphrase_fd` and adds
+`unattended_answers_fd` plus `unattended_signature_fd`. Both are sealed
+anonymous memfds populated from `answers.json` and `answers.json.sig` on the
+fixed-label `PUNAR_ANSWERS` filesystem. The daemon verifies the detached
+Ed25519 signature over the exact bytes before parsing, then binds the
+authorization to its one-day maximum lifetime, plan token, target serial,
+destructive-confirmation serial, release id, exact release-manifest digest,
+keymap, locale and optional OOBE digest. The trusted answer-signing keys are a
+separate root under `/usr/share/punar/install-answer-keys`; release keys do not
+authorize unattended disk erasure. The schema is
+`schemas/install/answers.json` and structurally forbids passphrases and
+recovery keys.
+
 For personal recovery, `recovery_output_fd` receives exactly three newline-
 terminated records: the literal `PUNAR-RECOVERY-V1`, the eight-group recovery
 key, and two one-based challenge indices separated by one space. The original
@@ -1024,8 +1039,17 @@ key locally, uploads ciphertext only, and does not cross `encrypt` until the
 exact signed receipt verifies. An unavailable control plane is retried at a
 quiet fixed cadence while status remains awaiting; a signature or binding
 failure stops rather than retrying a trust violation. `unattended:true` is
-currently refused before the transaction starts; the signed `PUNAR_ANSWERS`
-custody lane remains an explicit open gate rather than an implied feature.
+admitted only with those two signed-answer descriptors and only for LUKS2 plus
+`personal_copy`. `punard` generates the 256-bit disk passphrase. The private
+recovery channel then carries four newline-terminated records:
+`PUNAR-UNATTENDED-CUSTODY-V1`, the generated passphrase, the recovery key and
+the two challenge indices. The provisioner atomically writes `custody.json`
+to the removable answer filesystem, fsyncs, reopens and compares the exact
+bytes, and only then sends the ordinary sealed-memory recovery
+acknowledgement. Existing custody is never overwritten and no custody secret
+is copied to the installed system. Its strict output contract is
+`schemas/install/custody.json`; unlike `answers.json`, this record is secret
+material and is never an input accepted by `punard`.
 
 On success, the result is the terminal `install.status` object. Failures carry
 `disk_changed`; active failures atomically publish a secret-free terminal

@@ -25,6 +25,10 @@ use punar_common::install::{
     InstallRecoveryMode, InstallStatusResult, InstallTarget, InstallTargetPartition,
     InstallTargetsResult, canonical_json,
 };
+use punar_common::install_answers::{
+    INSTALL_ANSWERS_MAX_BYTES, INSTALL_ANSWERS_SIGNATURE_BYTES, InstallAnswersKeySet,
+    UnattendedInstallAnswers, admit_unattended_install_answers, verify_unattended_install_answers,
+};
 use punar_common::update::{
     Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
     verify_release_manifest,
@@ -105,6 +109,8 @@ pub struct InstallerSources {
     pub release_manifest_path: PathBuf,
     pub release_signature_path: PathBuf,
     pub release_keys_dir: PathBuf,
+    /// Separate authority for short-lived destructive install answers.
+    pub install_answers_keys_dir: PathBuf,
     pub status_path: PathBuf,
     pub zstd_path: PathBuf,
     pub repart_path: PathBuf,
@@ -164,6 +170,7 @@ impl Default for InstallerSources {
             release_manifest_path: PathBuf::from("/run/punar/install/release.json"),
             release_signature_path: PathBuf::from("/run/punar/install/release.json.sig"),
             release_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
+            install_answers_keys_dir: PathBuf::from("/usr/share/punar/install-answer-keys"),
             status_path: PathBuf::from("/run/punar/install.json"),
             zstd_path: PathBuf::from("/usr/bin/zstd"),
             repart_path: PathBuf::from("/usr/bin/systemd-repart"),
@@ -282,6 +289,8 @@ pub struct InstallApplyInputs {
     passphrase: Option<Zeroizing<Vec<u8>>>,
     recovery_output: Option<File>,
     oobe_answers: Option<Zeroizing<Vec<u8>>>,
+    unattended_answers: Option<Zeroizing<Vec<u8>>>,
+    unattended_signature: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl InstallApplyInputs {
@@ -295,6 +304,14 @@ impl InstallApplyInputs {
 
     pub fn oobe_answers(&self) -> Option<&[u8]> {
         self.oobe_answers.as_deref().map(Vec::as_slice)
+    }
+
+    pub fn unattended_answers(&self) -> Option<&[u8]> {
+        self.unattended_answers.as_deref().map(Vec::as_slice)
+    }
+
+    pub fn unattended_signature(&self) -> Option<&[u8]> {
+        self.unattended_signature.as_deref().map(Vec::as_slice)
     }
 }
 
@@ -340,13 +357,31 @@ struct InstallSeedDocument {
     installed_at: String,
     image_version: String,
     disk_encrypted: bool,
+    initiated: InstallInitiator,
     disk_recovery: InstallSeedRecovery,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InstallInitiator {
+    Attended,
+    Unattended,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InstallRecoveryAcknowledgement {
+    Human,
+    Unattended,
+    OrganizationEscrow,
+    None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct InstallSeedRecovery {
     mode: InstallRecoveryMode,
+    acknowledgement: InstallRecoveryAcknowledgement,
 }
 
 impl PlanRegistry {
@@ -987,8 +1022,25 @@ impl Installer {
             installed_at: punar_common::time::utc_now_rfc3339(),
             image_version: format!("{}-{}", manifest.image_id, manifest.version),
             disk_encrypted: plan.encryption == InstallEncryption::Luks2,
+            initiated: if params.unattended {
+                InstallInitiator::Unattended
+            } else {
+                InstallInitiator::Attended
+            },
             disk_recovery: InstallSeedRecovery {
                 mode: plan.recovery_mode,
+                acknowledgement: match (plan.recovery_mode, params.unattended) {
+                    (InstallRecoveryMode::PersonalCopy, true) => {
+                        InstallRecoveryAcknowledgement::Unattended
+                    }
+                    (InstallRecoveryMode::PersonalCopy, false) => {
+                        InstallRecoveryAcknowledgement::Human
+                    }
+                    (InstallRecoveryMode::OrganizationEscrow, _) => {
+                        InstallRecoveryAcknowledgement::OrganizationEscrow
+                    }
+                    (InstallRecoveryMode::None, _) => InstallRecoveryAcknowledgement::None,
+                },
             },
         };
         let mut seed_bytes =
@@ -1805,18 +1857,32 @@ impl Installer {
                 "keymap does not match the keymap inside the confirmed plan".into(),
             ));
         }
-        match (cached.encryption, params.passphrase_fd) {
-            (InstallEncryption::Luks2, None) => {
+        match (cached.encryption, params.unattended, params.passphrase_fd) {
+            (InstallEncryption::Luks2, false, None) => {
                 return Err(InstallError::Invalid(
-                    "an encrypted installation requires passphrase_fd".into(),
+                    "an attended encrypted installation requires passphrase_fd".into(),
                 ));
             }
-            (InstallEncryption::None, Some(_)) => {
+            (InstallEncryption::Luks2, true, Some(_)) => {
+                return Err(InstallError::Invalid(
+                    "an unattended installation generates its passphrase inside punard and must not supply passphrase_fd".into(),
+                ));
+            }
+            (InstallEncryption::None, _, Some(_)) => {
                 return Err(InstallError::Invalid(
                     "an unencrypted installation must not carry passphrase_fd".into(),
                 ));
             }
             _ => {}
+        }
+        if params.unattended
+            && (cached.encryption != InstallEncryption::Luks2
+                || cached.recovery_mode != InstallRecoveryMode::PersonalCopy)
+        {
+            return Err(InstallError::Invalid(
+                "unattended installation requires LUKS2 with removable personal recovery custody"
+                    .into(),
+            ));
         }
         match (cached.recovery_mode, params.recovery_output_fd) {
             (InstallRecoveryMode::PersonalCopy, None) => {
@@ -1857,10 +1923,14 @@ impl Installer {
         params: &InstallApplyParams,
     ) -> Result<InstallApplyInputs, InstallError> {
         validate_apply_params(params)?;
-        let passphrase = params
-            .passphrase_fd
-            .map(|fd| read_peer_descriptor(peer_pid, fd, PASSPHRASE_MAX_BYTES, "passphrase"))
-            .transpose()?;
+        let passphrase = if params.unattended {
+            Some(generate_unattended_passphrase()?)
+        } else {
+            params
+                .passphrase_fd
+                .map(|fd| read_peer_descriptor(peer_pid, fd, PASSPHRASE_MAX_BYTES, "passphrase"))
+                .transpose()?
+        };
         let recovery_output = params
             .recovery_output_fd
             .map(|fd| {
@@ -1877,11 +1947,80 @@ impl Installer {
                 InstallError::Invalid("the OOBE answers descriptor is not valid UTF-8".into())
             })?;
         }
+        let unattended_answers = params
+            .unattended_answers_fd
+            .map(|fd| {
+                read_peer_descriptor(
+                    peer_pid,
+                    fd,
+                    INSTALL_ANSWERS_MAX_BYTES,
+                    "unattended answers",
+                )
+            })
+            .transpose()?;
+        let unattended_signature = params
+            .unattended_signature_fd
+            .map(|fd| {
+                read_peer_descriptor(
+                    peer_pid,
+                    fd,
+                    INSTALL_ANSWERS_SIGNATURE_BYTES,
+                    "unattended answers signature",
+                )
+            })
+            .transpose()?;
         Ok(InstallApplyInputs {
             passphrase,
             recovery_output,
             oobe_answers,
+            unattended_answers,
+            unattended_signature,
         })
+    }
+
+    /// Authenticate and bind the unattended authorization before status is
+    /// opened or any target byte changes. Signature verification happens over
+    /// the exact descriptor bytes before JSON parsing. The answer signer is a
+    /// distinct trust root from the release signer.
+    pub fn verify_unattended_authorization(
+        &self,
+        plan: &InstallPlan,
+        params: &InstallApplyParams,
+        inputs: &InstallApplyInputs,
+    ) -> Result<UnattendedInstallAnswers, InstallError> {
+        if !params.unattended {
+            return Err(InstallError::Invalid(
+                "an attended installation has no unattended authorization".into(),
+            ));
+        }
+        let document = inputs.unattended_answers().ok_or_else(|| {
+            InstallError::Invalid("the unattended answers descriptor was not retained".into())
+        })?;
+        let signature = inputs.unattended_signature().ok_or_else(|| {
+            InstallError::Invalid(
+                "the unattended answers signature descriptor was not retained".into(),
+            )
+        })?;
+        let keys = InstallAnswersKeySet::load_dir(&self.sources.install_answers_keys_dir)
+            .map_err(|error| InstallError::Trust(error.to_string()))?;
+        let answers = verify_unattended_install_answers(document, signature, &keys)
+            .map_err(|error| InstallError::Trust(error.to_string()))?;
+        let manifest_digest = self.release_manifest_document_sha256()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| InstallError::Trust("the system clock predates Unix time".into()))?
+            .as_secs();
+        admit_unattended_install_answers(
+            &answers,
+            now,
+            plan,
+            &params.plan_token,
+            &manifest_digest,
+            &params.seed.locale,
+            inputs.oobe_answers(),
+        )
+        .map_err(|error| InstallError::Trust(error.to_string()))?;
+        Ok(answers)
     }
 
     /// Arm the personal recovery checkpoint and disclose the key only through
@@ -2219,6 +2358,24 @@ impl Installer {
             .map_err(|error| InstallError::Trust(error.to_string()))?;
         verify_release_manifest(&document, &signature, &keys)
             .map_err(|error| InstallError::Trust(error.to_string()))
+    }
+
+    fn release_manifest_document_sha256(&self) -> Result<String, InstallError> {
+        let document = if let Some(manifest) = &self.sources.release_manifest_override {
+            serde_json::to_vec(manifest).map_err(|error| InstallError::Trust(error.to_string()))?
+        } else {
+            let metadata = fs::metadata(&self.sources.release_manifest_path)?;
+            if !metadata.file_type().is_file()
+                || metadata.len() == 0
+                || metadata.len() > 1024 * 1024
+            {
+                return Err(InstallError::Trust(
+                    "the release manifest is not one bounded regular file".into(),
+                ));
+            }
+            fs::read(&self.sources.release_manifest_path)?
+        };
+        Ok(sha256_hex(&document))
     }
 
     fn observe_disks(&self) -> Result<Vec<ObservedDisk>, InstallError> {
@@ -3988,7 +4145,24 @@ fn verify_installed_seed(
         || !punar_common::time::is_rfc3339_timestamp(&seed.installed_at)
         || seed.image_version != expected.image_version
         || seed.disk_encrypted != (plan.encryption == InstallEncryption::Luks2)
+        || seed.initiated
+            != if params.unattended {
+                InstallInitiator::Unattended
+            } else {
+                InstallInitiator::Attended
+            }
         || seed.disk_recovery.mode != plan.recovery_mode
+        || seed.disk_recovery.acknowledgement
+            != match (plan.recovery_mode, params.unattended) {
+                (InstallRecoveryMode::PersonalCopy, true) => {
+                    InstallRecoveryAcknowledgement::Unattended
+                }
+                (InstallRecoveryMode::PersonalCopy, false) => InstallRecoveryAcknowledgement::Human,
+                (InstallRecoveryMode::OrganizationEscrow, _) => {
+                    InstallRecoveryAcknowledgement::OrganizationEscrow
+                }
+                (InstallRecoveryMode::None, _) => InstallRecoveryAcknowledgement::None,
+            }
     {
         return Err(InstallError::Trust(
             "the installed seed does not match the confirmed plan".into(),
@@ -4140,13 +4314,47 @@ fn validate_answers(params: &InstallPlanParams) -> Result<(), InstallError> {
 
 fn validate_apply_params(params: &InstallApplyParams) -> Result<(), InstallError> {
     validate_plan_token(&params.plan_token)?;
-    for (name, fd) in [
+    let descriptors = [
         ("passphrase_fd", params.passphrase_fd),
         ("recovery_output_fd", params.recovery_output_fd),
         ("oobe_answers_fd", params.oobe_answers_fd),
-    ] {
+        ("unattended_answers_fd", params.unattended_answers_fd),
+        ("unattended_signature_fd", params.unattended_signature_fd),
+    ];
+    for (name, fd) in descriptors {
         if let Some(fd) = fd {
             validate_descriptor_number(fd, name)?;
+        }
+    }
+    let supplied = descriptors
+        .iter()
+        .filter_map(|(name, descriptor)| descriptor.map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    for (index, (left_name, left)) in supplied.iter().enumerate() {
+        if let Some((right_name, _)) = supplied[index + 1..]
+            .iter()
+            .find(|(_, right)| right == left)
+        {
+            return Err(InstallError::Invalid(format!(
+                "{left_name} and {right_name} must name distinct descriptors"
+            )));
+        }
+    }
+    match (
+        params.unattended,
+        params.unattended_answers_fd,
+        params.unattended_signature_fd,
+    ) {
+        (true, Some(_), Some(_)) | (false, None, None) => {}
+        (true, _, _) => {
+            return Err(InstallError::Invalid(
+                "unattended installation requires both signed-answer descriptors".into(),
+            ));
+        }
+        (false, _, _) => {
+            return Err(InstallError::Invalid(
+                "signed-answer descriptors are available only to unattended installation".into(),
+            ));
         }
     }
     let locale = params.seed.locale.as_str();
@@ -4161,6 +4369,21 @@ fn validate_apply_params(params: &InstallApplyParams) -> Result<(), InstallError
         ));
     }
     Ok(())
+}
+
+/// Generate a 256-bit disk passphrase inside the privileged transaction.
+/// Both the random bytes and their printable encoding are zeroizing buffers;
+/// no intermediate `String` leaves another heap copy behind.
+fn generate_unattended_passphrase() -> Result<Zeroizing<Vec<u8>>, InstallError> {
+    let mut random = Zeroizing::new(vec![0u8; 32]);
+    File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let mut encoded = Zeroizing::new(Vec::with_capacity(64));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in random.iter().copied() {
+        encoded.push(HEX[usize::from(byte >> 4)]);
+        encoded.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    Ok(encoded)
 }
 
 fn validate_plan_token(plan_token: &str) -> Result<(), InstallError> {
@@ -5165,7 +5388,12 @@ fn gpt_edge_sha256(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use punar_common::audit::{AuditActor, AuditOutcome, AuditWriter};
+    use punar_common::install_answers::{
+        INSTALL_ANSWERS_KIND, UnattendedInstallAnswers, UnattendedPassphraseSource,
+        UnattendedRecoveryAcknowledgement,
+    };
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -5405,6 +5633,8 @@ mod tests {
                 locale: "C.UTF-8".into(),
             },
             oobe_answers_fd: None,
+            unattended_answers_fd: None,
+            unattended_signature_fd: None,
             unattended: false,
         }
     }
@@ -5431,6 +5661,84 @@ mod tests {
                 AuditOutcome::Success,
             ),
         }
+    }
+
+    #[test]
+    fn unattended_authorization_is_signed_and_bound_before_transaction_start() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let signing = SigningKey::from_bytes(&[41; 32]);
+        let keys = fixture.root.join("install-answer-keys");
+        fs::create_dir(&keys).unwrap();
+        fs::write(keys.join("fixture.pub"), signing.verifying_key().to_bytes()).unwrap();
+        fixture.sources.install_answers_keys_dir = keys;
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let manifest_digest = installer.release_manifest_document_sha256().unwrap();
+        let answers = UnattendedInstallAnswers {
+            v: 1,
+            kind: INSTALL_ANSWERS_KIND.into(),
+            authorization_id: "a".repeat(32),
+            issued_at: punar_common::time::rfc3339_utc_from_unix_seconds(now),
+            expires_at: punar_common::time::rfc3339_utc_from_unix_seconds(now + 3600),
+            plan_token: result.plan_token.clone(),
+            target_serial: result.plan.disk.serial.clone(),
+            confirm_destroy_disk: result.plan.disk.serial.clone(),
+            release_id: result.plan.payload.release_id.clone(),
+            release_manifest_sha256: manifest_digest,
+            keymap: result.plan.keymap.clone(),
+            locale: "C.UTF-8".into(),
+            encryption: InstallEncryption::Luks2,
+            recovery_mode: InstallRecoveryMode::PersonalCopy,
+            passphrase_source: UnattendedPassphraseSource::Generated,
+            recovery_key_ack: UnattendedRecoveryAcknowledgement::Unattended,
+            oobe_answers_sha256: None,
+        };
+        let document = serde_json::to_vec(&answers).unwrap();
+        let signature = signing.sign(&document).to_bytes().to_vec();
+        let mut params = apply_params(&result);
+        params.passphrase_fd = None;
+        params.unattended_answers_fd = Some(5);
+        params.unattended_signature_fd = Some(6);
+        params.unattended = true;
+        let inputs = InstallApplyInputs {
+            passphrase: Some(generate_unattended_passphrase().unwrap()),
+            recovery_output: None,
+            oobe_answers: None,
+            unattended_answers: Some(Zeroizing::new(document)),
+            unattended_signature: Some(Zeroizing::new(signature)),
+        };
+
+        let admitted = installer
+            .verify_unattended_authorization(&result.plan, &params, &inputs)
+            .unwrap();
+        assert_eq!(admitted.authorization_id, answers.authorization_id);
+        assert_eq!(installer.status().state, InstallOverallState::Idle);
+        let passphrase = inputs.passphrase().unwrap();
+        assert_eq!(passphrase.len(), 64);
+        assert!(passphrase.iter().all(u8::is_ascii_hexdigit));
+
+        let mut wrong = answers;
+        wrong.confirm_destroy_disk = "ANOTHER-DISK".into();
+        let document = serde_json::to_vec(&wrong).unwrap();
+        let inputs = InstallApplyInputs {
+            passphrase: Some(generate_unattended_passphrase().unwrap()),
+            recovery_output: None,
+            oobe_answers: None,
+            unattended_answers: Some(Zeroizing::new(document.clone())),
+            unattended_signature: Some(Zeroizing::new(signing.sign(&document).to_bytes().to_vec())),
+        };
+        assert!(
+            installer
+                .verify_unattended_authorization(&result.plan, &params, &inputs)
+                .is_err()
+        );
+        assert_eq!(installer.status().state, InstallOverallState::Idle);
     }
 
     #[test]
@@ -6916,6 +7224,8 @@ mod tests {
             passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
             recovery_output: None,
             oobe_answers: Some(Zeroizing::new(answers.to_vec())),
+            unattended_answers: None,
+            unattended_signature: None,
         };
 
         installer
@@ -7040,6 +7350,8 @@ mod tests {
             passphrase: None,
             recovery_output: None,
             oobe_answers: None,
+            unattended_answers: None,
+            unattended_signature: None,
         };
         installer
             .seed_installed_system(&result.plan, &params, &inputs)
@@ -7093,6 +7405,8 @@ mod tests {
             passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
             recovery_output: None,
             oobe_answers: None,
+            unattended_answers: None,
+            unattended_signature: None,
         };
         installer
             .seed_installed_system(&result.plan, &params, &inputs)
@@ -7288,6 +7602,11 @@ mod tests {
         changed = apply_params(&plan);
         changed.seed.locale = "../../etc".into();
         assert!(installer.preflight_apply(&changed).is_err());
+
+        changed = apply_params(&plan);
+        changed.recovery_output_fd = changed.passphrase_fd;
+        let error = installer.preflight_apply(&changed).unwrap_err();
+        assert!(error.to_string().contains("distinct descriptors"));
     }
 
     #[test]
@@ -7416,6 +7735,8 @@ mod tests {
             passphrase: Some(Zeroizing::new(secret.clone())),
             recovery_output: None,
             oobe_answers: None,
+            unattended_answers: None,
+            unattended_signature: None,
         };
 
         installer
@@ -7630,6 +7951,8 @@ mod tests {
             passphrase: Some(Zeroizing::new(passphrase.clone())),
             recovery_output: None,
             oobe_answers: None,
+            unattended_answers: None,
+            unattended_signature: None,
         };
         installer
             .prepare_disk_layout(&result.plan, &inputs)
@@ -7670,6 +7993,8 @@ mod tests {
             passphrase: Some(Zeroizing::new(b"correct horse battery staple".to_vec())),
             recovery_output: None,
             oobe_answers: None,
+            unattended_answers: None,
+            unattended_signature: None,
         };
 
         let error = installer

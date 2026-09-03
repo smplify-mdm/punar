@@ -1,6 +1,6 @@
 # The Punar Installer — design
 
-**Status:** design plan · partition foundation and Pi install-artifact pipeline implemented 2026-08-30
+**Status:** encrypted VM installer proven · signed unattended custody implementation awaiting canonical ISO/QEMU proof, 2026-09-01
 **Spec authority:** §66 (installation), §65 (first-boot UX), §44.2 (disk
 encryption), §44.1 (boot), §49 (enrollment chain), §48 (JIT privilege),
 §5.1/§5.3 (target hardware), §12 (keyboard-first), §60 (hard safety
@@ -20,8 +20,10 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 > write and verify both boot adapters. A real pinned Pi bootfs and matching
 > root-A payload now build and verify as an ephemerally signed install bundle;
 > the attended public apply and recovery-ack orchestration is implemented and
-> locally proven on both architectures. Production signing,
-> encryption-on-the-built-image, the unattended answer lane, update swap and
+> runtime-proven on generic x86_64 KVM, with the same logic unit-proven on
+> ARM64. The signed unattended answer/custody path is implemented and locally
+> contract-tested; its full ISO/QEMU run is not yet canonical. Production signing,
+> encryption-on-the-built-image, update swap and
 > physical-device claims remain open. The purpose here is
 > still to make the first real install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones

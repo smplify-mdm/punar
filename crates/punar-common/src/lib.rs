@@ -72,6 +72,7 @@ mod decision;
 mod descriptor;
 pub mod device;
 pub mod install;
+pub mod install_answers;
 pub mod ipc;
 pub mod ledger;
 pub mod network;

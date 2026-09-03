@@ -20,7 +20,9 @@ copy_text() {
 # rather than a symlink.
 /usr/bin/mkdir -p \
     /sysroot/etc \
+    /sysroot/etc/systemd/system/punar-installer-unattended.service.d \
     /sysroot/usr/lib/punar \
+    /sysroot/usr/share/punar/install-answer-keys \
     /sysroot/usr/lib/systemd/system \
     /sysroot/usr/lib/systemd/system/multi-user.target.d
 copy_text \
@@ -47,5 +49,21 @@ copy_text \
 copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf \
     /sysroot/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf
+
+# The CI signing key is per-run and enters only the volatile live overlay.
+# It is admitted solely when the dedicated QEMU proof port is present; the
+# product consumer, schema, signature verification and custody path are the
+# same code shipped on physical media. Production releases provision their
+# independently controlled key under /usr/share/punar/install-answer-keys.
+ci_port=/dev/virtio-ports/punar.install-unattended-proof
+ci_key=/sys/firmware/qemu_fw_cfg/by_name/opt/punar/install-answer-key/raw
+if [ -c "${ci_port}" ] && [ -r "${ci_key}" ]; then
+    copy_text \
+        "${ci_key}" \
+        /sysroot/usr/share/punar/install-answer-keys/ci.pub
+    copy_text \
+        /usr/lib/punar-live/rootfs/etc/systemd/system/punar-installer-unattended.service.d/90-ci-proof.conf \
+        /sysroot/etc/systemd/system/punar-installer-unattended.service.d/90-ci-proof.conf
+fi
 
 printf 'PUNAR_INSTALL_RUNTIME_STAGE_OK\n'

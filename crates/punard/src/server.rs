@@ -54,6 +54,7 @@ use punar_common::update::{
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use crate::approvals::{self, ApprovalStore};
 use crate::apps::{AppError, AppManager};
@@ -1200,6 +1201,33 @@ fn write_personal_recovery_disclosure(
     })
 }
 
+/// Disclose generated unattended-install custody material exclusively through
+/// the caller's sealed recovery channel. The client must durably write and
+/// re-read both secrets on the signed answer medium before acknowledging the
+/// challenged recovery-key groups.
+fn write_unattended_recovery_disclosure(
+    output: &mut dyn Write,
+    passphrase: &[u8],
+    recovery_key: &str,
+    challenge_groups: [u8; 2],
+) -> Result<(), InstallError> {
+    (|| -> io::Result<()> {
+        output.write_all(b"PUNAR-UNATTENDED-CUSTODY-V1\n")?;
+        output.write_all(passphrase)?;
+        output.write_all(b"\n")?;
+        output.write_all(recovery_key.as_bytes())?;
+        output.write_all(b"\n")?;
+        writeln!(output, "{} {}", challenge_groups[0], challenge_groups[1])?;
+        output.flush()
+    })()
+    .map_err(|error| {
+        InstallError::Io(io::Error::new(
+            error.kind(),
+            format!("unattended recovery disclosure: {error}"),
+        ))
+    })
+}
+
 impl Inner {
     fn log_audit(&self, event: AuditEvent) {
         match self.audit.lock().unwrap().append(&event) {
@@ -1773,11 +1801,11 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "install.apply";
         const RESOURCE: &str = "system_image";
-        let actor = self.actor_of(peer);
-        if self.agent_shaped_peer(peer, &actor).is_some() {
+        let peer_actor = self.actor_of(peer);
+        if self.agent_shaped_peer(peer, &peer_actor).is_some() {
             self.log_audit(AuditEvent::action(
                 &self.device_id,
-                &actor,
+                &peer_actor,
                 ACTION,
                 RESOURCE,
                 Decision::Deny,
@@ -1786,8 +1814,8 @@ impl Inner {
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
                 "An AI agent may not erase a disk or install Punar, even when its process has uid 0.\n\
-                 Policy: os hard safety constraint — install.apply is reserved for the person at the device.\n\
-                 Next step: open the signed Punar installer and confirm the disk yourself.",
+                 Policy: os hard safety constraint — install.apply is reserved for the person at the device or the independently signed PUNAR_ANSWERS provisioner.\n\
+                 Next step: open the signed Punar installer and confirm the disk yourself, or use an authorized answer medium.",
                 json!({
                     "decision": "deny",
                     "resource": RESOURCE,
@@ -1799,7 +1827,7 @@ impl Inner {
         if authorize_mutation(peer) != Decision::Allow {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
-                &actor,
+                &peer_actor,
                 ACTION,
                 RESOURCE,
             ));
@@ -1817,7 +1845,13 @@ impl Inner {
             ));
         };
 
-        match self.execute_install_apply(peer, params, &actor) {
+        // Begin with the authenticated peer. The executor changes this to
+        // the unattended service principal only after the independently
+        // signed authorization has verified; a caller cannot spoof audit
+        // attribution merely by setting `unattended: true`.
+        let mut actor = peer_actor;
+
+        match self.execute_install_apply(peer, params, &mut actor) {
             Ok(events) => {
                 // The installed audit handoff already contains this exact
                 // terminal event and was byte-verified before success. Keep
@@ -1860,14 +1894,8 @@ impl Inner {
         &self,
         peer: &Peer,
         params: &InstallApplyParams,
-        actor: &AuditActor,
+        actor: &mut AuditActor,
     ) -> Result<InstallAuditEvents, InstallError> {
-        if params.unattended {
-            return Err(InstallError::Refused(
-                "unattended installation is not admitted until the signed PUNAR_ANSWERS confirmation and recovery-output custody lane is complete".into(),
-            ));
-        }
-
         let plan = self.installer.preflight_apply(params)?;
         let organization = if plan.recovery_mode == InstallRecoveryMode::OrganizationEscrow {
             let enrollment = self.enrollment.lock().unwrap().clone().ok_or_else(|| {
@@ -1885,6 +1913,12 @@ impl Inner {
             None
         };
         let mut inputs = self.installer.read_apply_inputs(peer.pid, params)?;
+        if params.unattended {
+            let _authorization = self
+                .installer
+                .verify_unattended_authorization(&plan, params, &inputs)?;
+            *actor = AuditActor::service("punar-installer");
+        }
 
         self.installer.start_transaction_status(
             &params.plan_token,
@@ -1901,17 +1935,48 @@ impl Inner {
                     self.installer.enroll_recovery_key(&plan, &inputs)?;
                 let event = install_recovery_event(&self.device_id, actor);
                 self.log_install_event_required(event.clone())?;
-                let output = inputs.recovery_output_mut().ok_or_else(|| {
-                    InstallError::Invalid(
-                        "the personal recovery output descriptor was not retained".into(),
-                    )
-                })?;
-                self.installer.begin_personal_recovery(
-                    &params.plan_token,
-                    recovery_key,
-                    identity.recovery_keyslot,
-                    |text, groups| write_personal_recovery_disclosure(output, text, groups),
-                )?;
+                if params.unattended {
+                    let passphrase = Zeroizing::new(
+                        inputs
+                            .passphrase()
+                            .ok_or_else(|| {
+                                InstallError::Invalid(
+                                    "the generated unattended passphrase was not retained".into(),
+                                )
+                            })?
+                            .to_vec(),
+                    );
+                    let output = inputs.recovery_output_mut().ok_or_else(|| {
+                        InstallError::Invalid(
+                            "the unattended custody output descriptor was not retained".into(),
+                        )
+                    })?;
+                    self.installer.begin_personal_recovery(
+                        &params.plan_token,
+                        recovery_key,
+                        identity.recovery_keyslot,
+                        |text, groups| {
+                            write_unattended_recovery_disclosure(
+                                output,
+                                passphrase.as_slice(),
+                                text,
+                                groups,
+                            )
+                        },
+                    )?;
+                } else {
+                    let output = inputs.recovery_output_mut().ok_or_else(|| {
+                        InstallError::Invalid(
+                            "the personal recovery output descriptor was not retained".into(),
+                        )
+                    })?;
+                    self.installer.begin_personal_recovery(
+                        &params.plan_token,
+                        recovery_key,
+                        identity.recovery_keyslot,
+                        |text, groups| write_personal_recovery_disclosure(output, text, groups),
+                    )?;
+                }
                 self.installer.await_recovery_status(
                     punar_common::install::InstallAwaiting::RecoveryKeyAck,
                 )?;
@@ -2022,7 +2087,7 @@ impl Inner {
             ));
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
-                "Only the human-controlled privileged installer may acknowledge recovery-key custody. Next step: type the challenged groups in the installer window.",
+                "Only the privileged installer or the signed unattended provisioner may acknowledge recovery-key custody. Next step: type the challenged groups in the installer window, or verify the PUNAR_ANSWERS medium remains writable.",
                 json!({ "decision": "deny", "disk_changed": disk_changed }),
             ));
         }
@@ -3959,6 +4024,22 @@ mod tests {
         assert_eq!(
             output,
             b"PUNAR-RECOVERY-V1\naaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh\n2 7\n"
+        );
+    }
+
+    #[test]
+    fn unattended_recovery_disclosure_has_one_exact_secret_channel_grammar() {
+        let mut output = Vec::new();
+        write_unattended_recovery_disclosure(
+            &mut output,
+            b"generated-disk-passphrase",
+            "aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh",
+            [2, 7],
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            b"PUNAR-UNATTENDED-CUSTODY-V1\ngenerated-disk-passphrase\naaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh\n2 7\n"
         );
     }
 

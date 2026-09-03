@@ -2084,6 +2084,37 @@ fn live_installer_targets_are_read_only_and_plan_refusals_are_audited() {
 }
 
 #[test]
+fn unattended_flag_cannot_spoof_the_installer_service_audit_actor() {
+    let daemon = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer::root()),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        configure_empty_live_installer,
+    );
+    let response = daemon.call(
+        "install.apply",
+        Some(json!({
+            "plan_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disk": "/dev/vda",
+            "recovery_output_fd": 4,
+            "keymap": "us",
+            "seed": {"locale": "C.UTF-8"},
+            "unattended_answers_fd": 5,
+            "unattended_signature_fd": 6,
+            "unattended": true
+        })),
+    );
+    assert_eq!(response["error"]["code"], "invalid_params");
+    let event = daemon
+        .audit_lines()
+        .into_iter()
+        .find(|event| event["action"] == "install.apply")
+        .unwrap();
+    assert_eq!(event["source"], "human");
+    assert_ne!(event["user_id"], "punar-installer");
+}
+
+#[test]
 fn live_install_apply_denies_agent_attribution_before_descriptor_or_disk_access() {
     let peer = Peer {
         uid: 0,

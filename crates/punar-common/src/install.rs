@@ -276,11 +276,13 @@ pub struct InstallSeedParams {
 
 /// Strict params for `install.apply`.
 ///
-/// Secret material is deliberately absent. `passphrase_fd` and
-/// `oobe_answers_fd` name sealed anonymous-memory descriptors held open by
-/// the authenticated peer. `recovery_output_fd` names a one-way pipe or Unix
-/// socket used only for the personal recovery disclosure. The daemon
-/// duplicates them without placing secret bytes in a request, process
+/// Secret material is deliberately absent. Attended calls carry a sealed
+/// `passphrase_fd`; unattended calls omit it so `punard` generates the disk
+/// passphrase itself. `oobe_answers_fd`, `unattended_answers_fd` and
+/// `unattended_signature_fd` name sealed anonymous-memory descriptors held
+/// open by the authenticated peer. `recovery_output_fd` names a one-way pipe
+/// or Unix socket used for the personal recovery/custody disclosure. The
+/// daemon duplicates them without placing secret bytes in a request, process
 /// argument, environment variable, result, status document, or audit event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +297,10 @@ pub struct InstallApplyParams {
     pub seed: InstallSeedParams,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oobe_answers_fd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unattended_answers_fd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unattended_signature_fd: Option<u32>,
     pub unattended: bool,
 }
 
@@ -478,10 +484,14 @@ mod tests {
             "recovery_output_fd": 4,
             "keymap": "us",
             "seed": {"locale": "C.UTF-8"},
+            "unattended_answers_fd": 6,
+            "unattended_signature_fd": 7,
             "unattended": false
         });
         let params: InstallApplyParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(params.passphrase_fd, Some(3));
+        assert_eq!(params.unattended_answers_fd, Some(6));
+        assert_eq!(params.unattended_signature_fd, Some(7));
         for forbidden in ["passphrase", "recovery_key", "password", "account"] {
             let mut object = value.as_object().unwrap().clone();
             object.insert(forbidden.into(), Value::String("secret".into()));

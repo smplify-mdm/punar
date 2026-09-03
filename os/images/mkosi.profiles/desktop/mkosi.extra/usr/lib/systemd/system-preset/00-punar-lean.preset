@@ -15,5 +15,10 @@ disable dpkg-db-backup.timer
 # actually used. Do not make it an unconditional graphical-session daemon.
 disable udisks2.service
 
+# The path unit is inert on installed systems because it is conditioned on
+# punar.live=1. In the signed live environment it is the only automatic
+# consumer of independently signed PUNAR_ANSWERS media.
+enable punar-installer-unattended.path
+
 # greetd owns VT1 on a graphical product image.
 disable getty@*.service

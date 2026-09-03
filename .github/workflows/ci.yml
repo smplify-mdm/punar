@@ -270,7 +270,7 @@ jobs:
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
-            tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh \
+            tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh tools/install-test.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
@@ -415,7 +415,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils ovmf python3-jsonschema \
-            btrfs-progs cryptsetup-bin
+            btrfs-progs cryptsetup-bin dosfstools mtools xorriso
 
       - name: Enable KVM access for the runner user
         run: |
@@ -430,7 +430,7 @@ jobs:
           test -n "${installer_iso}"
           ./tools/installer-boot-test.sh "${installer_iso}"
 
-      - name: Install to a disposable encrypted disk and verify I08-I13
+      - name: Signed unattended install, removable custody, and I08-I13/I36 verification
         run: |
           installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-*-x86_64.iso' -print -quit)"
           test -n "${installer_iso}"

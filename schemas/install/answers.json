@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/install/answers.json",
+  "title": "Punar unattended installation authorization",
+  "description": "Exact bytes signed by a distinct unattended-install Ed25519 trust root and stored as answers.json on removable media labelled PUNAR_ANSWERS. This document authorizes one short-lived, plan-bound destructive install. It never contains an encryption passphrase or recovery key.",
+  "type": "object",
+  "required": [
+    "v",
+    "kind",
+    "authorization_id",
+    "issued_at",
+    "expires_at",
+    "plan_token",
+    "target_serial",
+    "confirm_destroy_disk",
+    "release_id",
+    "release_manifest_sha256",
+    "keymap",
+    "locale",
+    "encryption",
+    "recovery_mode",
+    "passphrase_source",
+    "recovery_key_ack"
+  ],
+  "properties": {
+    "v": { "const": 1 },
+    "kind": { "const": "punar_unattended_install" },
+    "authorization_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "Unique 128-bit authorization identifier encoded as lowercase hexadecimal."
+    },
+    "issued_at": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp",
+      "description": "Must be no more than 24 hours after issued_at; punard enforces this semantic bound."
+    },
+    "plan_token": { "$ref": "#/$defs/digest" },
+    "target_serial": { "$ref": "#/$defs/bounded_identity" },
+    "confirm_destroy_disk": {
+      "$ref": "#/$defs/bounded_identity",
+      "description": "Must exactly equal target_serial and the serial in the locally recomputed plan."
+    },
+    "release_id": { "$ref": "#/$defs/bounded_identity" },
+    "release_manifest_sha256": { "$ref": "#/$defs/digest" },
+    "keymap": { "$ref": "#/$defs/keymap_token" },
+    "locale": { "$ref": "#/$defs/simple_token" },
+    "encryption": { "const": "luks2" },
+    "recovery_mode": { "const": "personal_copy" },
+    "passphrase_source": { "const": "generated" },
+    "recovery_key_ack": { "const": "unattended" },
+    "oobe_answers_sha256": { "$ref": "#/$defs/digest" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bounded_identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:+@=-]+$"
+    },
+    "simple_token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.@-]+$"
+    },
+    "keymap_token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_+-]+$"
+    }
+  }
+}

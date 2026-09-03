@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/install/custody.json",
+  "title": "Punar unattended installation custody record",
+  "description": "Secret output written only to the removable PUNAR_ANSWERS filesystem after an authorized unattended install reaches its recovery gate. It must never be copied to the installed system, logs, status, audit events, or image artifacts.",
+  "type": "object",
+  "required": [
+    "v",
+    "kind",
+    "authorization_id",
+    "plan_token",
+    "target_serial",
+    "release_id",
+    "created_at",
+    "disk_passphrase",
+    "recovery_key"
+  ],
+  "properties": {
+    "v": { "const": 1 },
+    "kind": { "const": "punar_unattended_custody" },
+    "authorization_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "plan_token": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target_serial": { "$ref": "#/$defs/bounded_identity" },
+    "release_id": { "$ref": "#/$defs/bounded_identity" },
+    "created_at": {
+      "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+    },
+    "disk_passphrase": {
+      "description": "Daemon-generated 256-bit LUKS passphrase encoded as lowercase hexadecimal.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "recovery_key": {
+      "description": "Normalized 256-bit systemd recovery key in eight modhex64 groups.",
+      "type": "string",
+      "pattern": "^[cbdefghijklnrtuv]{8}(-[cbdefghijklnrtuv]{8}){7}$"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "bounded_identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:+@=-]+$"
+    }
+  }
+}

@@ -88,6 +88,11 @@ use punar_common::install::{
     InstallPlanResult, InstallRecoveryAckParams, InstallRecoveryMode, InstallSeedParams,
     InstallStatusResult, InstallTargetsResult,
 };
+#[cfg(target_os = "linux")]
+use punar_common::install_answers::{
+    INSTALL_ANSWERS_MAX_BYTES, INSTALL_ANSWERS_SIGNATURE_BYTES, InstallAnswersKeySet,
+    UnattendedInstallAnswers, verify_unattended_install_answers,
+};
 use punar_common::update::ReleaseVersion;
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
@@ -199,6 +204,14 @@ enum Command {
     Update {
         #[command(subcommand)]
         command: UpdateCommand,
+    },
+    /// Installer-media operations. The unattended consumer has no
+    /// caller-controlled target, path, command, or secret arguments.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    Install {
+        #[command(subcommand)]
+        command: InstallCommand,
     },
     /// Test probe (SPEC section 74.4): send a raw method name to the
     /// daemon. Adds no server capability — the daemon's closed method
@@ -604,6 +617,14 @@ enum DebugCommand {
     #[cfg(target_os = "linux")]
     #[command(name = "installer-apply-proof", hide = true)]
     InstallerApplyProof,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum InstallCommand {
+    /// Consume one signed PUNAR_ANSWERS medium and durably return generated
+    /// disk custody material to that same removable medium.
+    Unattended,
 }
 
 #[derive(Subcommand)]
@@ -2202,6 +2223,12 @@ fn secrets_get(
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_PORT: &str = "/dev/virtio-ports/punar.install-apply-proof";
 #[cfg(target_os = "linux")]
+const INSTALL_ANSWERS_DEVICE: &str = "/dev/disk/by-label/PUNAR_ANSWERS";
+#[cfg(target_os = "linux")]
+const INSTALL_ANSWERS_MOUNT: &str = "/run/punar/unattended-answers";
+#[cfg(target_os = "linux")]
+const INSTALL_ANSWERS_KEYS: &str = "/usr/share/punar/install-answer-keys";
+#[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_SERIAL: &str = "PUNAR-CI-TARGET";
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_BYTES: u64 = 128 * 1024 * 1024 * 1024;
@@ -2223,6 +2250,194 @@ fn sealed_install_proof_memfd(name: &str, value: &[u8]) -> Result<std::fs::File,
     )
     .map_err(|error| format!("could not seal anonymous memory ({error})"))?;
     Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+struct InstallAnswersMount {
+    path: PathBuf,
+    mounted: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl InstallAnswersMount {
+    fn open() -> Result<Self, String> {
+        use std::os::unix::fs::FileTypeExt;
+
+        let source = Path::new(INSTALL_ANSWERS_DEVICE);
+        let metadata = source
+            .metadata()
+            .map_err(|_| "no removable filesystem labelled PUNAR_ANSWERS is present".to_string())?;
+        if !metadata.file_type().is_block_device() {
+            return Err("PUNAR_ANSWERS does not resolve to one block device".into());
+        }
+
+        let path = PathBuf::from(INSTALL_ANSWERS_MOUNT);
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("could not create the private answer mount ({error})"))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not secure the private answer mount ({error})"))?;
+        if std::fs::read_dir(&path)
+            .map_err(|error| format!("could not inspect the private answer mount ({error})"))?
+            .next()
+            .is_some()
+        {
+            return Err("the private answer mount is not empty".into());
+        }
+
+        let status = std::process::Command::new("/usr/bin/mount")
+            .args([
+                "--no-canonicalize",
+                "-t",
+                "vfat",
+                "-o",
+                "rw,nodev,nosuid,noexec,nosymfollow,umask=0077",
+                INSTALL_ANSWERS_DEVICE,
+                INSTALL_ANSWERS_MOUNT,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not start the fixed answer-media mount ({error})"))?;
+        if !status.success() {
+            return Err("the PUNAR_ANSWERS filesystem could not be mounted read-write".into());
+        }
+        Ok(Self {
+            path,
+            mounted: true,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for InstallAnswersMount {
+    fn drop(&mut self) {
+        if self.mounted {
+            let unmounted = std::process::Command::new("/usr/bin/umount")
+                .arg("--")
+                .arg(&self.path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if unmounted {
+                self.mounted = false;
+                let _ = std::fs::remove_dir(&self.path);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_install_answer_file(
+    path: &Path,
+    maximum: usize,
+    description: &str,
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            i32::try_from(flags.bits())
+                .map_err(|_| "the no-follow open flags are unsupported".to_string())?,
+        )
+        .open(path)
+        .map_err(|error| format!("could not open {description} ({error})"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect {description} ({error})"))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > maximum as u64 {
+        return Err(format!(
+            "{description} must be one non-empty regular file no larger than {maximum} bytes"
+        ));
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    file.take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {description} ({error})"))?;
+    if bytes.len() > maximum {
+        return Err(format!("{description} changed while it was being read"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn optional_install_answer_file(
+    path: &Path,
+    maximum: usize,
+    description: &str,
+) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => read_install_answer_file(path, maximum, description).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("could not inspect {description} ({error})")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct UnattendedCustodyDocument<'a> {
+    v: u8,
+    kind: &'static str,
+    authorization_id: &'a str,
+    plan_token: &'a str,
+    target_serial: &'a str,
+    release_id: &'a str,
+    created_at: &'a str,
+    disk_passphrase: &'a str,
+    recovery_key: &'a str,
+}
+
+/// Commit secret custody to removable answer media, fsync the filesystem and
+/// then re-open and compare the exact bytes. Existing custody is never
+/// overwritten: preservation wins over a convenient retry.
+#[cfg(target_os = "linux")]
+fn write_unattended_custody(directory: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let destination = directory.join("custody.json");
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            return Err(
+                "custody.json already exists; Punar will not overwrite recovery material".into(),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not inspect custody.json ({error})")),
+    }
+    let temporary = directory.join(format!(".custody-{}.tmp", std::process::id()));
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(
+            i32::try_from(flags.bits())
+                .map_err(|_| "the no-follow create flags are unsupported".to_string())?,
+        )
+        .open(&temporary)
+        .map_err(|error| format!("could not create the custody record ({error})"))?;
+    if let Err(error) = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &destination)?;
+        let directory_file = std::fs::File::open(directory)?;
+        rustix::fs::syncfs(&directory_file)?;
+        Ok(())
+    })() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("could not durably commit custody.json ({error})"));
+    }
+    let reopened = read_install_answer_file(
+        &destination,
+        INSTALL_ANSWERS_MAX_BYTES,
+        "the committed custody record",
+    )?;
+    if reopened.as_slice() != bytes {
+        return Err("custody.json did not read back byte-for-byte after its durable commit".into());
+    }
+    Ok(())
 }
 
 /// Resolve the two challenged recovery groups without ever returning the
@@ -2262,6 +2477,28 @@ fn join_installer_apply_proof(
         .join()
         .map_err(|_| "the installer apply client thread terminated unexpectedly".to_string())?
         .map_err(|error| error.message())
+}
+
+#[cfg(target_os = "linux")]
+fn installer_targets_when_ready(client: &Client) -> Result<InstallTargetsResult, String> {
+    let mut target_result = None;
+    for attempt in 0..120 {
+        match client.call("install.targets", None) {
+            Ok(result) => {
+                target_result = Some(result);
+                break;
+            }
+            Err(CallError::Unreachable { .. }) if attempt != 119 => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => return Err(error.message()),
+        }
+    }
+    serde_json::from_value(
+        target_result
+            .ok_or_else(|| "punard did not become reachable within 30 seconds".to_string())?,
+    )
+    .map_err(|error| format!("install.targets returned an invalid result ({error})"))
 }
 
 /// Read one line from the private recovery socket while keeping the VM proof
@@ -2394,24 +2631,7 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
     }
 
     let client = Client::for_target(Target::Punard, socket);
-    let mut target_result = None;
-    for attempt in 0..120 {
-        match client.call("install.targets", None) {
-            Ok(result) => {
-                target_result = Some(result);
-                break;
-            }
-            Err(CallError::Unreachable { .. }) if attempt != 119 => {
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            Err(error) => return Err(error.message()),
-        }
-    }
-    let targets: InstallTargetsResult = serde_json::from_value(
-        target_result
-            .ok_or_else(|| "punard did not become reachable within 30 seconds".to_string())?,
-    )
-    .map_err(|error| format!("install.targets returned an invalid result ({error})"))?;
+    let targets = installer_targets_when_ready(&client)?;
     let [target] = targets.targets.as_slice() else {
         return Err("the apply proof requires exactly one eligible disposable target".into());
     };
@@ -2472,6 +2692,8 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
             locale: "C.UTF-8".into(),
         },
         oobe_answers_fd: None,
+        unattended_answers_fd: None,
+        unattended_signature_fd: None,
         unattended: false,
     };
     let apply_value = serde_json::to_value(&apply_params).map_err(|error| error.to_string())?;
@@ -2581,6 +2803,268 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
         return Err("install.apply did not finish with the confirmed disk and plan".into());
     }
     Ok(plan.plan_token)
+}
+
+/// Production unattended installer-media consumer. Its only mutable external
+/// input is one signed, short-lived authorization on a filesystem with the
+/// fixed PUNAR_ANSWERS label. The target comes from the signed serial plus the
+/// daemon's freshly computed plan; generated secrets return only to that
+/// removable filesystem and must survive a byte-exact read-back before ack.
+#[cfg(target_os = "linux")]
+fn run_installer_unattended(socket: Option<&Path>) -> Result<Value, String> {
+    if rustix::process::getuid().as_raw() != 0 {
+        return Err("unattended installation must run as root in the live environment".into());
+    }
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .map_err(|error| format!("could not read the live kernel command line ({error})"))?;
+    if !cmdline
+        .split_ascii_whitespace()
+        .any(|token| token == "punar.live=1")
+    {
+        return Err("unattended installation is available only from signed installer media".into());
+    }
+
+    let answer_mount = InstallAnswersMount::open()?;
+    let answer_path = answer_mount.path.join("answers.json");
+    let signature_path = answer_mount.path.join("answers.json.sig");
+    let oobe_path = answer_mount.path.join("oobe-answers.json");
+    let answer_bytes =
+        read_install_answer_file(&answer_path, INSTALL_ANSWERS_MAX_BYTES, "answers.json")?;
+    let signature_bytes = read_install_answer_file(
+        &signature_path,
+        INSTALL_ANSWERS_SIGNATURE_BYTES,
+        "answers.json.sig",
+    )?;
+    let keys = InstallAnswersKeySet::load_dir(Path::new(INSTALL_ANSWERS_KEYS))
+        .map_err(|error| format!("unattended-install trust is unavailable ({error})"))?;
+    let answers: UnattendedInstallAnswers =
+        verify_unattended_install_answers(&answer_bytes, &signature_bytes, &keys)
+            .map_err(|error| error.to_string())?;
+    let oobe_bytes = optional_install_answer_file(&oobe_path, 1024 * 1024, "oobe-answers.json")?;
+    if answers.oobe_answers_sha256.is_some() != oobe_bytes.is_some() {
+        return Err(
+            "the signed authorization and answer medium disagree about OOBE answers".into(),
+        );
+    }
+
+    let client = Client::for_target(Target::Punard, socket);
+    let targets = installer_targets_when_ready(&client)?;
+    let matching = targets
+        .targets
+        .iter()
+        .filter(|target| target.serial.as_deref() == Some(answers.target_serial.as_str()))
+        .collect::<Vec<_>>();
+    let [target] = matching.as_slice() else {
+        return Err(
+            "the signed target serial does not identify exactly one locally eligible disk".into(),
+        );
+    };
+    if !target.eligible {
+        return Err("the disk authorized by PUNAR_ANSWERS is not eligible for installation".into());
+    }
+
+    let plan_params = InstallPlanParams {
+        disk: target.device.clone(),
+        keymap: answers.keymap.clone(),
+        encryption: answers.encryption,
+        recovery_mode: answers.recovery_mode,
+    };
+    let plan: InstallPlanResult = serde_json::from_value(
+        client
+            .call(
+                "install.plan",
+                Some(serde_json::to_value(&plan_params).map_err(|error| error.to_string())?),
+            )
+            .map_err(|error| error.message())?,
+    )
+    .map_err(|error| format!("install.plan returned an invalid result ({error})"))?;
+    if plan.plan_token != answers.plan_token
+        || plan.plan.disk.serial != answers.target_serial
+        || plan.plan.payload.release_id != answers.release_id
+        || plan.plan.disk.device != target.device
+    {
+        return Err(
+            "the locally recomputed disk/release plan does not match the signed authorization"
+                .into(),
+        );
+    }
+
+    let answer_fd = sealed_install_proof_memfd("punar-unattended-answers", &answer_bytes)?;
+    let signature_fd = sealed_install_proof_memfd("punar-unattended-signature", &signature_bytes)?;
+    let oobe_fd = oobe_bytes
+        .as_deref()
+        .map(|bytes| sealed_install_proof_memfd("punar-unattended-oobe", bytes))
+        .transpose()?;
+    let (recovery_writer, recovery_reader) = UnixStream::pair()
+        .map_err(|error| format!("could not create the custody disclosure channel ({error})"))?;
+    recovery_reader
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| format!("could not bound the custody disclosure wait ({error})"))?;
+
+    let apply_params = InstallApplyParams {
+        plan_token: plan.plan_token.clone(),
+        disk: target.device.clone(),
+        passphrase_fd: None,
+        recovery_output_fd: Some(
+            u32::try_from(recovery_writer.as_raw_fd())
+                .map_err(|_| "the custody descriptor was out of range".to_string())?,
+        ),
+        keymap: answers.keymap.clone(),
+        seed: InstallSeedParams {
+            locale: answers.locale.clone(),
+        },
+        oobe_answers_fd: oobe_fd
+            .as_ref()
+            .map(|file| u32::try_from(file.as_raw_fd()))
+            .transpose()
+            .map_err(|_| "the OOBE descriptor was out of range".to_string())?,
+        unattended_answers_fd: Some(
+            u32::try_from(answer_fd.as_raw_fd())
+                .map_err(|_| "the signed-answer descriptor was out of range".to_string())?,
+        ),
+        unattended_signature_fd: Some(
+            u32::try_from(signature_fd.as_raw_fd())
+                .map_err(|_| "the signature descriptor was out of range".to_string())?,
+        ),
+        unattended: true,
+    };
+    let apply_value = serde_json::to_value(&apply_params).map_err(|error| error.to_string())?;
+    let apply_socket = socket.map(Path::to_path_buf);
+    let mut apply = Some(std::thread::spawn(move || {
+        let _answer_guard = answer_fd;
+        let _signature_guard = signature_fd;
+        let _oobe_guard = oobe_fd;
+        let _recovery_writer_guard = recovery_writer;
+        Client::for_target(Target::Punard, apply_socket.as_deref()).call_with_timeout(
+            "install.apply",
+            Some(apply_value),
+            Duration::from_secs(60 * 60),
+        )
+    }));
+
+    let mut disclosure = BufReader::new(recovery_reader);
+    let mut header = String::new();
+    let mut passphrase = Zeroizing::new(String::new());
+    let mut recovery_key = Zeroizing::new(String::new());
+    let mut challenge = String::new();
+    let disclosure_deadline = Instant::now() + Duration::from_secs(25 * 60);
+    let mut last_progress = None;
+    for (line, description) in [
+        (&mut header, "the custody protocol header"),
+        (&mut passphrase, "the generated disk passphrase"),
+        (&mut recovery_key, "the recovery key"),
+        (&mut challenge, "the recovery challenge"),
+    ] {
+        read_installer_proof_disclosure_line(
+            &mut disclosure,
+            line,
+            description,
+            &client,
+            &mut apply,
+            disclosure_deadline,
+            &mut last_progress,
+        )?;
+    }
+    if header.trim_end() != "PUNAR-UNATTENDED-CUSTODY-V1" {
+        return Err("the unattended custody protocol version was invalid".into());
+    }
+    while passphrase.ends_with('\r') || passphrase.ends_with('\n') {
+        passphrase.pop();
+    }
+    while recovery_key.ends_with('\r') || recovery_key.ends_with('\n') {
+        recovery_key.pop();
+    }
+    if passphrase.len() != 64
+        || !passphrase
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("the daemon disclosed an invalid generated disk passphrase".into());
+    }
+    let confirmation = install_proof_recovery_confirmation(&recovery_key, &challenge)?;
+
+    // The disclosure is written immediately before punard publishes the
+    // recovery gate. Avoid turning that deliberately tiny scheduling window
+    // into a false unattended-install failure.
+    let mut awaiting_recovery = false;
+    for _ in 0..100 {
+        let status: InstallStatusResult = serde_json::from_value(
+            client
+                .call("install.status", None)
+                .map_err(|error| error.message())?,
+        )
+        .map_err(|error| format!("install.status returned an invalid result ({error})"))?;
+        if status.state == InstallOverallState::Awaiting
+            && status.awaiting == Some(InstallAwaiting::RecoveryKeyAck)
+            && status.plan_token.as_deref() == Some(plan.plan_token.as_str())
+        {
+            awaiting_recovery = true;
+            break;
+        }
+        if status.state == InstallOverallState::Failed {
+            return Err("the unattended installation failed before custody acknowledgement".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !awaiting_recovery {
+        return Err("the installer did not hold the recovery custody checkpoint".into());
+    }
+
+    let created_at = punar_common::time::utc_now_rfc3339();
+    let custody = Zeroizing::new(
+        serde_json::to_vec(&UnattendedCustodyDocument {
+            v: 1,
+            kind: "punar_unattended_custody",
+            authorization_id: &answers.authorization_id,
+            plan_token: &plan.plan_token,
+            target_serial: &answers.target_serial,
+            release_id: &answers.release_id,
+            created_at: &created_at,
+            disk_passphrase: &passphrase,
+            recovery_key: &recovery_key,
+        })
+        .map_err(|error| format!("could not encode the custody record ({error})"))?,
+    );
+    write_unattended_custody(&answer_mount.path, &custody)?;
+
+    let groups = sealed_install_proof_memfd(
+        "punar-unattended-recovery-confirmation",
+        confirmation.as_bytes(),
+    )?;
+    let ack = InstallRecoveryAckParams {
+        plan_token: plan.plan_token.clone(),
+        groups_fd: u32::try_from(groups.as_raw_fd())
+            .map_err(|_| "the recovery confirmation descriptor was out of range".to_string())?,
+    };
+    client
+        .call(
+            "install.recovery_ack",
+            Some(serde_json::to_value(ack).map_err(|error| error.to_string())?),
+        )
+        .map_err(|error| error.message())?;
+
+    let result = join_installer_apply_proof(
+        apply
+            .take()
+            .ok_or_else(|| "the unattended apply client ended too early".to_string())?,
+    )?;
+    let status: InstallStatusResult = serde_json::from_value(result)
+        .map_err(|error| format!("install.apply returned an invalid status ({error})"))?;
+    if status.state != InstallOverallState::Succeeded
+        || status.plan_token.as_deref() != Some(plan.plan_token.as_str())
+        || status.disk.as_deref() != Some(target.device.as_str())
+    {
+        return Err("the unattended installation did not finish on its authorized plan".into());
+    }
+    Ok(json!({
+        "v": 1,
+        "state": "succeeded",
+        "authorization_id": answers.authorization_id,
+        "plan_token": plan.plan_token,
+        "target_serial": answers.target_serial,
+        "release_id": answers.release_id,
+        "custody": "written_and_verified_on_PUNAR_ANSWERS"
+    }))
 }
 
 fn main() -> ExitCode {
@@ -2798,6 +3282,28 @@ fn main() -> ExitCode {
                 Some(json!({"path": path.as_str()})),
                 |v| views::policy_explain(&style, v, path.as_str()),
             ),
+        },
+        #[cfg(target_os = "linux")]
+        Command::Install { command } => match command {
+            InstallCommand::Unattended => match run_installer_unattended(socket.as_deref()) {
+                Ok(result) if json => print_json(&result),
+                Ok(result) => {
+                    println!(
+                        "PUNAR_UNATTENDED_INSTALL_OK authorization_id={} custody=written_and_verified_on_PUNAR_ANSWERS",
+                        result
+                            .get("authorization_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Unattended installation stopped.\nWhy: {error}.\nNext step: keep the target disk unchanged, verify the signed PUNAR_ANSWERS medium, and retry."
+                    );
+                    ExitCode::FAILURE
+                }
+            },
         },
         Command::Debug { command } => match command {
             DebugCommand::Rpc { method, params } => {
@@ -3370,7 +3876,10 @@ mod tests {
         vendor_runtime_tmp, vendor_supervisor_command,
     };
     #[cfg(target_os = "linux")]
-    use super::{install_proof_recovery_confirmation, relay_vendor_callbacks};
+    use super::{
+        install_proof_recovery_confirmation, read_install_answer_file, relay_vendor_callbacks,
+        write_unattended_custody,
+    };
     use serde_json::json;
 
     #[test]
@@ -3571,6 +4080,53 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(forbidden).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unattended_installer_accepts_no_caller_controlled_target_path_or_secret() {
+        assert!(Cli::try_parse_from(["punarctl", "install", "unattended"]).is_ok());
+        for forbidden in [
+            ["punarctl", "install", "unattended", "/dev/vda"],
+            ["punarctl", "install", "unattended", "--passphrase"],
+        ] {
+            assert!(Cli::try_parse_from(forbidden).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unattended_custody_is_durable_read_back_and_never_overwritten() {
+        let root = std::env::temp_dir().join(format!(
+            "punarctl-custody-{}-{}",
+            std::process::id(),
+            punar_common::time::unix_now_millis()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let bytes = br#"{"v":1,"disk_passphrase":"fixture","recovery_key":"fixture"}"#;
+        write_unattended_custody(&root, bytes).unwrap();
+        assert_eq!(std::fs::read(root.join("custody.json")).unwrap(), bytes);
+        assert!(write_unattended_custody(&root, b"replacement").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn answer_reader_refuses_symlinks_and_oversized_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "punarctl-answer-read-{}-{}",
+            std::process::id(),
+            punar_common::time::unix_now_millis()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("real"), b"trusted bytes").unwrap();
+        symlink(root.join("real"), root.join("link")).unwrap();
+        assert!(read_install_answer_file(&root.join("link"), 64, "fixture").is_err());
+        std::fs::write(root.join("large"), [0u8; 65]).unwrap();
+        assert!(read_install_answer_file(&root.join("large"), 64, "fixture").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// clap's self-check: asserts the argument definitions are internally

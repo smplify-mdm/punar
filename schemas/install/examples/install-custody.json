@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "kind": "punar_unattended_custody",
+  "authorization_id": "0123456789abcdef0123456789abcdef",
+  "plan_token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "target_serial": "PUNAR-CI-TARGET",
+  "release_id": "2026.09.03.1",
+  "created_at": "2026-09-03T12:00:00Z",
+  "disk_passphrase": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "recovery_key": "cbdefghi-jklnrtuv-cbdefghi-jklnrtuv-cbdefghi-jklnrtuv-cbdefghi-jklnrtuv"
+}

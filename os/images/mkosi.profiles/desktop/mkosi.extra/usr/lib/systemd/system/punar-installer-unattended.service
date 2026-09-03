@@ -1,0 +1,21 @@
+[Unit]
+Description=Consume signed Punar unattended-install authorization
+Documentation=file:/usr/share/doc/punar/installer.md
+ConditionKernelCommandLine=punar.live=1
+Requires=punard.service
+After=punard.service systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/punarctl install unattended
+RemainAfterExit=yes
+UMask=0077
+NoNewPrivileges=yes
+PrivateMounts=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SYS_ADMIN
+StandardOutput=journal
+StandardError=journal

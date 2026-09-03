@@ -1,0 +1,7 @@
+This directory contains 32-byte raw (or 64-lowercase-hex text) Ed25519 public
+keys trusted only for short-lived, plan-bound unattended installation
+authorizations.
+
+It intentionally ships without a production key. Punar fails closed until
+release engineering provisions the independently controlled Smplify installer
+authorization root. Release-signing keys do not belong in this directory.

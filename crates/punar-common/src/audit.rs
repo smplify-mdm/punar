@@ -231,8 +231,16 @@ impl AuditActor {
     /// "os", which is not a schema-valid `principal_kind`; `service` is the
     /// schema-conformant encoding (module docs).
     pub fn daemon() -> AuditActor {
+        AuditActor::service(USER_ID_DAEMON)
+    }
+
+    /// An OS-owned service principal that initiated a typed operation.
+    /// This is deliberately separate from [`Self::cli_peer`]: unattended
+    /// provisioning must never appear in the audit trail as a person at the
+    /// keyboard merely because its service runs with uid 0.
+    pub fn service(user_id: impl Into<String>) -> AuditActor {
         AuditActor {
-            user_id: USER_ID_DAEMON.to_string(),
+            user_id: user_id.into(),
             source: PrincipalKind::Service,
             agent_session_id: None,
         }

@@ -2123,6 +2123,8 @@ mod tests {
                     locale: "C.UTF-8".into(),
                 },
                 oobe_answers_fd: None,
+                unattended_answers_fd: None,
+                unattended_signature_fd: None,
                 unattended: false,
             }),
             Method::InstallRecoveryAck(InstallRecoveryAckParams {
@@ -2462,6 +2464,22 @@ mod tests {
             Method::InstallApply(InstallApplyParams {
                 passphrase_fd: Some(3),
                 recovery_output_fd: Some(4),
+                ..
+            })
+        ));
+
+        let unattended = Request::parse_json_line(
+            r#"{"v":1,"id":"2","method":"install.apply","params":{"plan_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disk":"/dev/vda","recovery_output_fd":4,"keymap":"us","seed":{"locale":"C.UTF-8"},"unattended_answers_fd":5,"unattended_signature_fd":6,"unattended":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            unattended.method,
+            Method::InstallApply(InstallApplyParams {
+                passphrase_fd: None,
+                recovery_output_fd: Some(4),
+                unattended_answers_fd: Some(5),
+                unattended_signature_fd: Some(6),
+                unattended: true,
                 ..
             })
         ));

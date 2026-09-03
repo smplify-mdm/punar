@@ -1,0 +1,8 @@
+[Unit]
+Description=Wait for signed Punar unattended-install answer media
+Documentation=file:/usr/share/doc/punar/installer.md
+ConditionKernelCommandLine=punar.live=1
+
+[Path]
+PathExists=/dev/disk/by-label/PUNAR_ANSWERS
+Unit=punar-installer-unattended.service

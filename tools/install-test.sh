@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Destructively install the final ISO onto one exact disposable qcow2 target,
-# then inspect the resulting GPT, LUKS2 header and btrfs subvolume topology.
+# Plan against one exact disposable disk, authorize that exact plan with an
+# ephemeral key, then exercise the production signed PUNAR_ANSWERS consumer
+# and inspect the resulting GPT, LUKS2 and btrfs topology. No committed test
+# key or CI-only destructive executor exists.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO=${1:-}
 PROOF_DIR=${2:-"${REPO_ROOT}/os/images/out/installer-install-proof"}
 TARGET_BYTES=$((128 * 1024 * 1024 * 1024))
-CI_PASSPHRASE='punar-ci-only-vm-passphrase'
 
 die() {
     echo "install-test: FAIL: $*" >&2
@@ -17,7 +18,7 @@ die() {
 [ -n "${ISO}" ] || die "usage: $0 INSTALLER_ISO [PROOF_DIR]"
 [ -f "${ISO}" ] || die "installer ISO is missing: ${ISO}"
 for command in qemu-system-x86_64 qemu-img qemu-nbd sfdisk cryptsetup btrfs \
-    blkid jq python3; do
+    blkid jq python3 xorriso mkfs.vfat mcopy sha256sum; do
     command -v "${command}" >/dev/null || die "${command} is required"
 done
 
@@ -54,10 +55,19 @@ TIMEOUT=${PUNAR_INSTALL_TIMEOUT:-${DEFAULT_TIMEOUT}}
 mkdir -p "${PROOF_DIR}"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/punar-install-test.XXXXXX")"
 TARGET_DISK="${WORKDIR}/installed-target.qcow2"
+ANSWER_DISK="${WORKDIR}/punar-answers.img"
+ANSWER_DOCUMENT="${WORKDIR}/answers.json"
+ANSWER_SIGNATURE="${WORKDIR}/answers.json.sig"
+ANSWER_SIGNING_SEED="${WORKDIR}/answers-signing.seed"
+ANSWER_PUBLIC_RAW="${WORKDIR}/answers-signing.pub"
+ANSWER_PUBLIC_HEX="${WORKDIR}/answers-signing.pub.hex"
+RELEASE_DOCUMENT="${WORKDIR}/release.json"
+CUSTODY_DOCUMENT="${WORKDIR}/custody.json"
+SECRET_PATTERNS="${WORKDIR}/secret-patterns.txt"
 VARS_COPY="${WORKDIR}/OVMF_VARS.fd"
 SERIAL_LOG="${PROOF_DIR}/install-serial.log"
 RUNTIME_LOG="${PROOF_DIR}/install-runtime-proof.log"
-APPLY_LOG="${PROOF_DIR}/install-apply-proof.log"
+UNATTENDED_LOG="${PROOF_DIR}/install-unattended-proof.log"
 QEMU_LOG="${PROOF_DIR}/install-qemu.log"
 NBD_DEVICE=/dev/nbd0
 MAPPER_NAME="punar-ci-data-$$"
@@ -88,10 +98,11 @@ trap cleanup EXIT INT TERM
 cp "${OVMF_VARS}" "${VARS_COPY}"
 : > "${SERIAL_LOG}"
 : > "${RUNTIME_LOG}"
-: > "${APPLY_LOG}"
+: > "${UNATTENDED_LOG}"
+: > "${QEMU_LOG}"
 qemu-img create -q -f qcow2 "${TARGET_DISK}" "${TARGET_BYTES}"
 
-echo "==> attended encrypted install (${ACCEL}; disposable ${TARGET_BYTES}-byte target)"
+echo "==> discover and plan the blank target (${ACCEL}; zero target writes)"
 qemu-system-x86_64 \
     -machine "q35,accel=${ACCEL}" \
     -cpu "${CPU}" \
@@ -109,37 +120,136 @@ qemu-system-x86_64 \
     -device virtio-serial-pci \
     -chardev "file,id=runtimeproof,path=${RUNTIME_LOG}" \
     -device "virtserialport,chardev=runtimeproof,name=punar.install-proof" \
-    -chardev "file,id=applyproof,path=${APPLY_LOG}" \
-    -device "virtserialport,chardev=applyproof,name=punar.install-apply-proof" \
     -no-reboot \
-    > "${QEMU_LOG}" 2>&1 &
+    >> "${QEMU_LOG}" 2>&1 &
 QEMU_PID=$!
 started=$(date +%s)
 
 while :; do
-    if grep -aq '^PUNAR_INSTALL_APPLY_FAIL' "${APPLY_LOG}"; then
+    if grep -aq '^PUNAR_INSTALL_RUNTIME_FAIL' "${RUNTIME_LOG}"; then
         tail -n 160 "${SERIAL_LOG}" >&2 || true
         cat "${RUNTIME_LOG}" >&2 || true
-        cat "${APPLY_LOG}" >&2 || true
-        die 'the live installer rejected or failed the destructive proof'
+        die 'the live installer could not produce a read-only target plan'
     fi
-    if grep -aq '^PUNAR_INSTALL_APPLY_OK plan_token=[0-9a-f]\{64\}$' "${APPLY_LOG}"; then
+    if grep -aq '^PUNAR_INSTALL_RUNTIME_END$' "${RUNTIME_LOG}"; then
         break
     fi
     if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
         QEMU_PID=''
         tail -n 160 "${SERIAL_LOG}" >&2 || true
         cat "${RUNTIME_LOG}" >&2 || true
-        cat "${APPLY_LOG}" >&2 || true
         tail -n 100 "${QEMU_LOG}" >&2 || true
-        die 'QEMU exited before install.apply completed'
+        die 'QEMU exited before install.plan completed'
     fi
     now=$(date +%s)
     if [ "$((now - started))" -ge "${TIMEOUT}" ]; then
         tail -n 160 "${SERIAL_LOG}" >&2 || true
         cat "${RUNTIME_LOG}" >&2 || true
-        cat "${APPLY_LOG}" >&2 || true
-        die "timed out after ${TIMEOUT}s waiting for install.apply"
+        die "timed out after ${TIMEOUT}s waiting for install.plan"
+    fi
+    sleep 1
+done
+kill "${QEMU_PID}" 2>/dev/null || true
+wait "${QEMU_PID}" 2>/dev/null || true
+QEMU_PID=''
+
+plan_json=$(sed -n 's/^PUNAR_INSTALL_PLAN_JSON=//p' "${RUNTIME_LOG}" | tail -n 1)
+[ -n "${plan_json}" ] || die 'the runtime proof did not export a plan'
+plan_token=$(printf '%s' "${plan_json}" | jq -er '.plan_token') \
+    || die 'the exported plan has no plan_token'
+target_serial=$(printf '%s' "${plan_json}" | jq -er '.plan.disk.serial') \
+    || die 'the exported plan has no target serial'
+release_id=$(printf '%s' "${plan_json}" | jq -er '.plan.payload.release_id') \
+    || die 'the exported plan has no release id'
+[ "${target_serial}" = PUNAR-CI-TARGET ] \
+    || die 'the exported plan targeted a different disk'
+
+release_tool="${REPO_ROOT}/os/images/cache/cargo-target/release/punar-release-tool"
+[ -x "${release_tool}" ] || die 'the ISO build did not retain punar-release-tool'
+xorriso -osirrox on -indev "${ISO}" -extract /punar/release.json \
+    "${RELEASE_DOCUMENT}" >/dev/null 2>&1 \
+    || die 'could not extract the exact release manifest from the ISO'
+[ "$(jq -er '.release_id' "${RELEASE_DOCUMENT}")" = "${release_id}" ] \
+    || die 'the plan and ISO release ids differ'
+release_manifest_sha256=$(sha256sum "${RELEASE_DOCUMENT}" | awk '{print $1}')
+head -c 32 /dev/urandom > "${ANSWER_SIGNING_SEED}"
+chmod 600 "${ANSWER_SIGNING_SEED}"
+"${release_tool}" public-key "${ANSWER_SIGNING_SEED}" "${ANSWER_PUBLIC_RAW}"
+od -An -tx1 -v "${ANSWER_PUBLIC_RAW}" | tr -d ' \n' > "${ANSWER_PUBLIC_HEX}"
+printf '\n' >> "${ANSWER_PUBLIC_HEX}"
+authorization_id=$(head -c 16 "${ANSWER_SIGNING_SEED}" | od -An -tx1 -v | tr -d ' \n')
+issued_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+expires_at=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+jq -n \
+    --arg authorization_id "${authorization_id}" \
+    --arg issued_at "${issued_at}" \
+    --arg expires_at "${expires_at}" \
+    --arg plan_token "${plan_token}" \
+    --arg target_serial "${target_serial}" \
+    --arg release_id "${release_id}" \
+    --arg release_manifest_sha256 "${release_manifest_sha256}" \
+    '{v:1,kind:"punar_unattended_install",authorization_id:$authorization_id,
+      issued_at:$issued_at,expires_at:$expires_at,plan_token:$plan_token,
+      target_serial:$target_serial,confirm_destroy_disk:$target_serial,
+      release_id:$release_id,release_manifest_sha256:$release_manifest_sha256,
+      keymap:"us",locale:"C.UTF-8",encryption:"luks2",
+      recovery_mode:"personal_copy",passphrase_source:"generated",
+      recovery_key_ack:"unattended"}' > "${ANSWER_DOCUMENT}"
+"${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
+    "${ANSWER_DOCUMENT}" "${ANSWER_SIGNATURE}"
+truncate -s 8M "${ANSWER_DISK}"
+mkfs.vfat -n PUNAR_ANSWERS "${ANSWER_DISK}" >/dev/null
+mcopy -i "${ANSWER_DISK}" "${ANSWER_DOCUMENT}" ::answers.json
+mcopy -i "${ANSWER_DISK}" "${ANSWER_SIGNATURE}" ::answers.json.sig
+
+echo '==> signed unattended encrypted install with removable key custody'
+cp "${OVMF_VARS}" "${VARS_COPY}"
+: > "${SERIAL_LOG}"
+qemu-system-x86_64 \
+    -machine "q35,accel=${ACCEL}" \
+    -cpu "${CPU}" \
+    -m 4096 \
+    -smp 4 \
+    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+    -drive "if=pflash,format=raw,file=${VARS_COPY}" \
+    -cdrom "${ISO}" \
+    -drive "file=${TARGET_DISK},format=qcow2,if=none,id=punartarget" \
+    -device "virtio-blk-pci,drive=punartarget,serial=PUNAR-CI-TARGET" \
+    -drive "file=${ANSWER_DISK},format=raw,if=none,id=punaranswers" \
+    -device "virtio-blk-pci,drive=punaranswers,serial=PUNAR-CI-ANSWERS" \
+    -fw_cfg "name=opt/punar/install-answer-key,file=${ANSWER_PUBLIC_HEX}" \
+    -nic none \
+    -display none \
+    -serial "file:${SERIAL_LOG}" \
+    -monitor none \
+    -device virtio-serial-pci \
+    -chardev "file,id=unattendedproof,path=${UNATTENDED_LOG}" \
+    -device "virtserialport,chardev=unattendedproof,name=punar.install-unattended-proof" \
+    -no-reboot \
+    >> "${QEMU_LOG}" 2>&1 &
+QEMU_PID=$!
+started=$(date +%s)
+while :; do
+    if grep -aq '^PUNAR_UNATTENDED_INSTALL_OK ' "${UNATTENDED_LOG}"; then
+        break
+    fi
+    if grep -aq '^Unattended installation stopped\.' "${UNATTENDED_LOG}"; then
+        tail -n 160 "${SERIAL_LOG}" >&2 || true
+        cat "${UNATTENDED_LOG}" >&2 || true
+        die 'the production unattended installer refused or failed the signed answer medium'
+    fi
+    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        QEMU_PID=''
+        tail -n 160 "${SERIAL_LOG}" >&2 || true
+        cat "${UNATTENDED_LOG}" >&2 || true
+        tail -n 100 "${QEMU_LOG}" >&2 || true
+        die 'QEMU exited before unattended install completed'
+    fi
+    now=$(date +%s)
+    if [ "$((now - started))" -ge "${TIMEOUT}" ]; then
+        tail -n 160 "${SERIAL_LOG}" >&2 || true
+        cat "${UNATTENDED_LOG}" >&2 || true
+        die "timed out after ${TIMEOUT}s waiting for unattended install"
     fi
     sleep 1
 done
@@ -147,6 +257,28 @@ finished=$(date +%s)
 kill "${QEMU_PID}" 2>/dev/null || true
 wait "${QEMU_PID}" 2>/dev/null || true
 QEMU_PID=''
+mcopy -i "${ANSWER_DISK}" ::custody.json "${CUSTODY_DOCUMENT}" \
+    || die 'unattended install did not return custody.json to the answer medium'
+jq -e \
+    --arg authorization_id "${authorization_id}" \
+    --arg plan_token "${plan_token}" \
+    --arg target_serial "${target_serial}" \
+    --arg release_id "${release_id}" \
+    '.v == 1 and .kind == "punar_unattended_custody"
+     and .authorization_id == $authorization_id
+     and .plan_token == $plan_token
+     and .target_serial == $target_serial
+     and .release_id == $release_id
+     and (.disk_passphrase | test("^[0-9a-f]{64}$"))
+     and (.recovery_key | test("^[^-]+(-[^-]+){7}$"))' \
+    "${CUSTODY_DOCUMENT}" >/dev/null \
+    || die 'custody.json is incomplete or not bound to the signed authorization'
+jq -r '.disk_passphrase,.recovery_key' "${CUSTODY_DOCUMENT}" > "${SECRET_PATTERNS}"
+chmod 600 "${SECRET_PATTERNS}"
+if grep -aF -f "${SECRET_PATTERNS}" \
+    "${SERIAL_LOG}" "${RUNTIME_LOG}" "${UNATTENDED_LOG}" "${QEMU_LOG}" >/dev/null; then
+    die 'a generated install secret appeared in live proof output'
+fi
 
 echo '==> inspect installed GPT, LUKS2 and btrfs topology'
 sudo modprobe nbd max_part=8
@@ -233,7 +365,7 @@ if git -C "${REPO_ROOT}" grep -F -- "${luks_uuid}" >/dev/null; then
     die 'the per-device LUKS UUID is a committed literal'
 fi
 
-printf '%s' "${CI_PASSPHRASE}" \
+jq -r '.disk_passphrase' "${CUSTODY_DOCUMENT}" \
     | sudo cryptsetup open --type luks2 --key-file=- \
         "${NBD_DEVICE}p4" "${MAPPER_NAME}"
 MAPPER_OPEN=1
@@ -246,6 +378,19 @@ sudo btrfs subvolume list -o "${MOUNT_DIR}" \
 printf '%s\n' '@home' '@var' '@var-tmp' > "${WORKDIR}/expected-subvolumes.txt"
 cmp -s "${WORKDIR}/expected-subvolumes.txt" "${PROOF_DIR}/btrfs-subvolumes.txt" \
     || die 'the encrypted data volume does not contain exactly @var, @home and @var-tmp'
+sudo jq -e \
+    '.initiated == "unattended"
+     and .disk_recovery.mode == "personal_copy"
+     and .disk_recovery.acknowledgement == "unattended"
+     and .disk_encrypted == true' \
+    "${MOUNT_DIR}/@var/lib/punar/install/seed.json" >/dev/null \
+    || die 'the installed seed does not retain unattended custody provenance'
+[ ! -e "${MOUNT_DIR}/@var/lib/punar/install/custody.json" ] \
+    || die 'custody material was copied onto the installed system'
+if sudo grep -aRF -f "${SECRET_PATTERNS}" \
+    "${MOUNT_DIR}/@var/log" "${MOUNT_DIR}/@var/lib/punar" >/dev/null 2>&1; then
+    die 'a generated install secret appeared in installed logs or state'
+fi
 
 sudo umount "${MOUNT_DIR}"
 DATA_MOUNTED=0
@@ -254,7 +399,7 @@ MAPPER_OPEN=0
 sudo qemu-nbd --disconnect "${NBD_DEVICE}" >/dev/null
 NBD_ATTACHED=0
 
-printf 'I08-I13 PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
+printf 'I08-I13,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
     "${TARGET_BYTES}" "${luks_uuid}" "$((finished - started))" \
     > "${PROOF_DIR}/result.txt"
-echo "install-test: PASS (I08-I13; $((finished - started))s, ${ACCEL})"
+echo "install-test: PASS (I08-I13 + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"

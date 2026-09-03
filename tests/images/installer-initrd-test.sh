@@ -37,6 +37,9 @@ APPLY_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.s
 APPLY_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.path"
 RUNTIME_WANTS="${RUNTIME_ROOT}/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf"
 RUNTIME_SCRIPT="${RUNTIME_ROOT}/usr/lib/punar/installer-runtime-proof.sh"
+CI_UNATTENDED_DROPIN="${RUNTIME_ROOT}/etc/systemd/system/punar-installer-unattended.service.d/90-ci-proof.conf"
+UNATTENDED_UNIT="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system/punar-installer-unattended.service"
+UNATTENDED_PATH="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system/punar-installer-unattended.path"
 FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
 INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
 ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
@@ -46,7 +49,8 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${LIVE_FSTAB}" \
     "${LIVE_CRYPTTAB}" "${RUNTIME_UNIT}" \
     "${RUNTIME_PATH}" "${APPLY_UNIT}" "${APPLY_PATH}" \
-    "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}"; do
+    "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}" "${CI_UNATTENDED_DROPIN}" \
+    "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 assert_line "${DESKTOP_CONF}" '         dosfstools'
@@ -102,7 +106,19 @@ assert_line "${APPLY_UNIT}" 'StandardOutput=file:/dev/virtio-ports/punar.install
 assert_line "${APPLY_PATH}" 'PathExists=/dev/virtio-ports/punar.install-apply-proof'
 assert_line "${APPLY_PATH}" 'Unit=punar-installer-apply-proof.service'
 assert_line "${RUNTIME_WANTS}" \
-    'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path'
+    'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path punar-installer-unattended.path'
+assert_line "${UNATTENDED_PATH}" 'ConditionKernelCommandLine=punar.live=1'
+assert_line "${UNATTENDED_PATH}" 'PathExists=/dev/disk/by-label/PUNAR_ANSWERS'
+assert_line "${UNATTENDED_PATH}" 'Unit=punar-installer-unattended.service'
+assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
+assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
+assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'
+assert_line "${CI_UNATTENDED_DROPIN}" \
+    'StandardOutput=file:/dev/virtio-ports/punar.install-unattended-proof'
+grep -Fq 'opt/punar/install-answer-key/raw' "${STAGE_SCRIPT}" \
+    || fail 'volatile CI staging does not consume the per-run fw_cfg public key'
+grep -Fq '/sysroot/usr/share/punar/install-answer-keys/ci.pub' "${STAGE_SCRIPT}" \
+    || fail 'the per-run answer key is not staged into the volatile live trust directory'
 grep -Fq 'PUNAR_INSTALL_RUNTIME_STAGE_OK' "${STAGE_SCRIPT}" \
     || fail 'runtime proof staging has no serial completion marker'
 if grep -Eq '/usr/bin/(cp|ln)([[:space:]]|$)' "${STAGE_SCRIPT}"; then

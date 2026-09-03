@@ -507,8 +507,10 @@ attended personal, organization-escrow and explicit unencrypted branches were
 wired to that executor and installed-audit handoff. Agent attribution is
 denied before uid, descriptors and disk access; one compare-exchange guard
 admits one writer while status and acknowledgement remain responsive on other
-connections. `unattended:true` is still refused before transaction start until
-the signed answer-disk custody lane exists. The live-only
+connections. `unattended:true` now requires an exact-byte Ed25519 authorization
+from the distinct install-answer trust root and binds it to the short-lived
+plan, physical serial, release manifest, locale and optional OOBE digest before
+transaction start. The live-only
 `install.status` read side now exposes the same secret-free fixed nine-phase
 state through IPC and an atomically replaced, world-readable
 `/run/punar/install.json`; installed mode neither serves the method nor creates
@@ -578,8 +580,13 @@ read-only and compared byte-for-byte with owner/mode checks before install
 success. ARM64 tests prove the required three-event trail, secret-field
 refusal and post-write tamper refusal. The public attended orchestration and
 privileged generic-x86 installer VM are now runtime-proven through I08–I13.
-The unattended signed-answer lane remains refused by design and I35 stays open
-until its separate custody path exists.
+The unattended signed-answer lane now generates the disk passphrase inside
+`punard`, returns it and the recovery key only over the private disclosure
+socket, and will not cross the recovery gate until `punarctl` atomically writes,
+fsyncs, reopens and byte-verifies `custody.json` on `PUNAR_ANSWERS`. The answer
+schema, strict parser, no-secret negative fixture, service trigger, dedicated
+custody output schema and local tests are green. I36's full ISO/QEMU
+answer-media and secrecy run is pending canonical CI.
 The origin is fail-closed too: `install.plan` does not return a usable token
 unless its success event has been durably appended, so a full/unwritable audit
 filesystem is discovered while the target disk is still byte-identical.
@@ -715,7 +722,8 @@ handoff, A/B-shaped release storage, compact responsive focus scrolling and
 the no-secret-frame ARM64 release gate are implemented and passed on
 2026-08-30. The destructive encrypted installer, recovery acknowledgement and
 installed-image proof are now closed in canonical KVM CI on 2026-09-01. Still
-open are the unattended answer-media lane, the remaining negative/power-loss
+open are canonical proof of the newly implemented unattended answer-media lane,
+the remaining negative/power-loss
 matrix, x86 substrate parity, logout/login human acceptance and physical
 hardware.
 
