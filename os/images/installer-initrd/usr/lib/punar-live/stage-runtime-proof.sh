@@ -47,6 +47,12 @@ copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-apply-proof.path \
     /sysroot/usr/lib/systemd/system/punar-installer-apply-proof.path
 copy_text \
+    /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-refusal-proof.service \
+    /sysroot/usr/lib/systemd/system/punar-installer-refusal-proof.service
+copy_text \
+    /usr/lib/punar-live/rootfs/usr/lib/systemd/system/punar-installer-refusal-proof.path \
+    /sysroot/usr/lib/systemd/system/punar-installer-refusal-proof.path
+copy_text \
     /usr/lib/punar-live/rootfs/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf \
     /sysroot/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Prove installer admission refusals against disposable VM disks
+ConditionKernelCommandLine=punar.live=1
+Requires=punard.service
+After=punard.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/punarctl debug installer-refusal-proof
+StandardOutput=file:/dev/virtio-ports/punar.install-refusal-proof
+StandardError=inherit
+RemainAfterExit=yes

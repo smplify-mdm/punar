@@ -35,6 +35,8 @@ RUNTIME_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-pro
 RUNTIME_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-runtime-proof.path"
 APPLY_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.service"
 APPLY_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-apply-proof.path"
+REFUSAL_UNIT="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-refusal-proof.service"
+REFUSAL_PATH="${RUNTIME_ROOT}/usr/lib/systemd/system/punar-installer-refusal-proof.path"
 RUNTIME_WANTS="${RUNTIME_ROOT}/usr/lib/systemd/system/multi-user.target.d/90-punar-installer-runtime-proof.conf"
 RUNTIME_SCRIPT="${RUNTIME_ROOT}/usr/lib/punar/installer-runtime-proof.sh"
 CI_UNATTENDED_DROPIN="${RUNTIME_ROOT}/etc/systemd/system/punar-installer-unattended.service.d/90-ci-proof.conf"
@@ -50,6 +52,7 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SWITCH_ROOT_PROOF}" "${STAGE_SCRIPT}" "${LIVE_FSTAB}" \
     "${LIVE_CRYPTTAB}" "${RUNTIME_UNIT}" \
     "${RUNTIME_PATH}" "${APPLY_UNIT}" "${APPLY_PATH}" \
+    "${REFUSAL_UNIT}" "${REFUSAL_PATH}" \
     "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}" "${CI_UNATTENDED_DROPIN}" \
     "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}" "${INSTALL_TEST}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
@@ -106,8 +109,14 @@ assert_line "${APPLY_UNIT}" 'ExecStart=/usr/bin/punarctl debug installer-apply-p
 assert_line "${APPLY_UNIT}" 'StandardOutput=file:/dev/virtio-ports/punar.install-apply-proof'
 assert_line "${APPLY_PATH}" 'PathExists=/dev/virtio-ports/punar.install-apply-proof'
 assert_line "${APPLY_PATH}" 'Unit=punar-installer-apply-proof.service'
+assert_line "${REFUSAL_UNIT}" 'ConditionKernelCommandLine=punar.live=1'
+assert_line "${REFUSAL_UNIT}" 'Requires=punard.service'
+assert_line "${REFUSAL_UNIT}" 'ExecStart=/usr/bin/punarctl debug installer-refusal-proof'
+assert_line "${REFUSAL_UNIT}" 'StandardOutput=file:/dev/virtio-ports/punar.install-refusal-proof'
+assert_line "${REFUSAL_PATH}" 'PathExists=/dev/virtio-ports/punar.install-refusal-proof'
+assert_line "${REFUSAL_PATH}" 'Unit=punar-installer-refusal-proof.service'
 assert_line "${RUNTIME_WANTS}" \
-    'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path punar-installer-unattended.path'
+    'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path punar-installer-refusal-proof.path punar-installer-unattended.path'
 assert_line "${UNATTENDED_PATH}" 'ConditionKernelCommandLine=punar.live=1'
 assert_line "${UNATTENDED_PATH}" 'PathExists=/dev/disk/by-label/PUNAR_ANSWR'
 assert_line "${UNATTENDED_PATH}" 'Unit=punar-installer-unattended.service'
@@ -126,6 +135,14 @@ grep -Fq -- '.confirm_destroy_disk = "PUNAR-CI-WRONG-DISK"' "${INSTALL_TEST}" \
 # shellcheck disable=SC2016
 grep -Fq -- 'cmp -s "${TARGET_PREFIX_BEFORE}" "${TARGET_PREFIX_AFTER}"' "${INSTALL_TEST}" \
     || fail 'the signed-answer refusal does not prove the target prefix remained byte-identical'
+grep -Fq -- 'PUNAR_INSTALL_REFUSALS_OK I36a=invalid_params I36b=invalid_params I36d=denied' "${INSTALL_TEST}" \
+    || fail 'the privileged VM gate does not require all three admission-refusal verdicts'
+grep -Fq -- 'cmp -s "${ADMISSION_LARGE_PREFIX_BEFORE}" "${ADMISSION_LARGE_PREFIX_AFTER}"' "${INSTALL_TEST}" \
+    || fail 'the admission-refusal boot does not compare the large target prefix'
+grep -Fq -- 'cmp -s "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX_AFTER}"' "${INSTALL_TEST}" \
+    || fail 'the admission-refusal boot does not compare the small target prefix'
+grep -Fq -- 'admission-prefix-sha256.txt' "${INSTALL_TEST}" \
+    || fail 'the admission-refusal proof does not retain before/after SHA-256 evidence'
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'

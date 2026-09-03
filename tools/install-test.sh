@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO=${1:-}
 PROOF_DIR=${2:-"${REPO_ROOT}/os/images/out/installer-install-proof"}
 TARGET_BYTES=$((128 * 1024 * 1024 * 1024))
+SMALL_TARGET_BYTES=$((20 * 1024 * 1024 * 1024))
 
 die() {
     echo "install-test: FAIL: $*" >&2
@@ -55,6 +56,7 @@ TIMEOUT=${PUNAR_INSTALL_TIMEOUT:-${DEFAULT_TIMEOUT}}
 mkdir -p "${PROOF_DIR}"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/punar-install-test.XXXXXX")"
 TARGET_DISK="${WORKDIR}/installed-target.qcow2"
+SMALL_TARGET_DISK="${WORKDIR}/undersized-target.qcow2"
 ANSWER_DISK="${WORKDIR}/punar-answers.img"
 ANSWER_DOCUMENT="${WORKDIR}/answers.json"
 ANSWER_SIGNATURE="${WORKDIR}/answers.json.sig"
@@ -73,9 +75,15 @@ RUNTIME_LOG="${PROOF_DIR}/install-runtime-proof.log"
 UNATTENDED_LOG="${PROOF_DIR}/install-unattended-proof.log"
 REFUSAL_LOG="${PROOF_DIR}/install-refusal-proof.log"
 REFUSAL_SERIAL_LOG="${PROOF_DIR}/install-refusal-serial.log"
+ADMISSION_REFUSAL_LOG="${PROOF_DIR}/install-admission-refusal-proof.log"
+ADMISSION_REFUSAL_SERIAL_LOG="${PROOF_DIR}/install-admission-refusal-serial.log"
 QEMU_LOG="${PROOF_DIR}/install-qemu.log"
 TARGET_PREFIX_BEFORE="${WORKDIR}/target-prefix-before.bin"
 TARGET_PREFIX_AFTER="${WORKDIR}/target-prefix-after.bin"
+ADMISSION_LARGE_PREFIX_BEFORE="${WORKDIR}/admission-large-prefix-before.bin"
+ADMISSION_LARGE_PREFIX_AFTER="${WORKDIR}/admission-large-prefix-after.bin"
+ADMISSION_SMALL_PREFIX_BEFORE="${WORKDIR}/admission-small-prefix-before.bin"
+ADMISSION_SMALL_PREFIX_AFTER="${WORKDIR}/admission-small-prefix-after.bin"
 NBD_DEVICE=/dev/nbd0
 MAPPER_NAME="punar-ci-data-$$"
 MOUNT_DIR="${WORKDIR}/data-top"
@@ -108,8 +116,11 @@ cp "${OVMF_VARS}" "${VARS_COPY}"
 : > "${UNATTENDED_LOG}"
 : > "${REFUSAL_LOG}"
 : > "${REFUSAL_SERIAL_LOG}"
+: > "${ADMISSION_REFUSAL_LOG}"
+: > "${ADMISSION_REFUSAL_SERIAL_LOG}"
 : > "${QEMU_LOG}"
 qemu-img create -q -f qcow2 "${TARGET_DISK}" "${TARGET_BYTES}"
+qemu-img create -q -f qcow2 "${SMALL_TARGET_DISK}" "${SMALL_TARGET_BYTES}"
 
 echo "==> discover and plan the blank target (${ACCEL}; zero target writes)"
 qemu-system-x86_64 \
@@ -172,6 +183,79 @@ release_id=$(printf '%s' "${plan_json}" | jq -er '.plan.payload.release_id') \
     || die 'the exported plan has no release id'
 [ "${target_serial}" = PUNAR-CI-TARGET ] \
     || die 'the exported plan targeted a different disk'
+
+echo '==> prove undersized, stale-plan and managed-agent refusals (zero target writes)'
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${TARGET_DISK}" "of=${ADMISSION_LARGE_PREFIX_BEFORE}" >/dev/null
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${SMALL_TARGET_DISK}" "of=${ADMISSION_SMALL_PREFIX_BEFORE}" >/dev/null
+cp "${OVMF_VARS}" "${VARS_COPY}"
+qemu-system-x86_64 \
+    -machine "q35,accel=${ACCEL}" \
+    -cpu "${CPU}" \
+    -m 4096 \
+    -smp 4 \
+    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+    -drive "if=pflash,format=raw,file=${VARS_COPY}" \
+    -cdrom "${ISO}" \
+    -drive "file=${TARGET_DISK},format=qcow2,if=none,id=punartarget" \
+    -device "virtio-blk-pci,drive=punartarget,serial=PUNAR-CI-TARGET" \
+    -drive "file=${SMALL_TARGET_DISK},format=qcow2,if=none,id=punarsmall" \
+    -device "virtio-blk-pci,drive=punarsmall,serial=PUNAR-CI-SMALL" \
+    -nic none \
+    -display none \
+    -serial "file:${ADMISSION_REFUSAL_SERIAL_LOG}" \
+    -monitor none \
+    -device virtio-serial-pci \
+    -chardev "file,id=admissionproof,path=${ADMISSION_REFUSAL_LOG}" \
+    -device "virtserialport,chardev=admissionproof,name=punar.install-refusal-proof" \
+    -no-reboot \
+    >> "${QEMU_LOG}" 2>&1 &
+QEMU_PID=$!
+started=$(date +%s)
+while :; do
+    if grep -aq '^PUNAR_INSTALL_REFUSALS_OK I36a=invalid_params I36b=invalid_params I36d=denied ' \
+        "${ADMISSION_REFUSAL_LOG}"; then
+        break
+    fi
+    if grep -aq '^PUNAR_INSTALL_REFUSALS_FAIL ' "${ADMISSION_REFUSAL_LOG}"; then
+        tail -n 160 "${ADMISSION_REFUSAL_SERIAL_LOG}" >&2 || true
+        cat "${ADMISSION_REFUSAL_LOG}" >&2 || true
+        die 'the privileged live environment could not prove all installer admission refusals'
+    fi
+    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        QEMU_PID=''
+        tail -n 160 "${ADMISSION_REFUSAL_SERIAL_LOG}" >&2 || true
+        cat "${ADMISSION_REFUSAL_LOG}" >&2 || true
+        tail -n 100 "${QEMU_LOG}" >&2 || true
+        die 'QEMU exited before the installer admission refusals completed'
+    fi
+    now=$(date +%s)
+    if [ "$((now - started))" -ge "${TIMEOUT}" ]; then
+        tail -n 160 "${ADMISSION_REFUSAL_SERIAL_LOG}" >&2 || true
+        cat "${ADMISSION_REFUSAL_LOG}" >&2 || true
+        die "timed out after ${TIMEOUT}s waiting for installer admission refusals"
+    fi
+    sleep 1
+done
+kill "${QEMU_PID}" 2>/dev/null || true
+wait "${QEMU_PID}" 2>/dev/null || true
+QEMU_PID=''
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${TARGET_DISK}" "of=${ADMISSION_LARGE_PREFIX_AFTER}" >/dev/null
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${SMALL_TARGET_DISK}" "of=${ADMISSION_SMALL_PREFIX_AFTER}" >/dev/null
+cmp -s "${ADMISSION_LARGE_PREFIX_BEFORE}" "${ADMISSION_LARGE_PREFIX_AFTER}" \
+    || die 'an admission refusal changed the 128 GiB target'
+cmp -s "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX_AFTER}" \
+    || die 'the undersized-disk refusal changed the 20 GiB target'
+sha256sum \
+    "${ADMISSION_LARGE_PREFIX_BEFORE}" "${ADMISSION_LARGE_PREFIX_AFTER}" \
+    "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX_AFTER}" \
+    > "${PROOF_DIR}/admission-prefix-sha256.txt"
+printf '%s\n' \
+    'I36a,I36b,I36d PASS typed_verdicts=invalid_params,invalid_params,denied first_mib=byte_identical' \
+    > "${PROOF_DIR}/admission-refusal-result.txt"
 
 release_tool="${REPO_ROOT}/os/images/cache/cargo-target/release/punar-release-tool"
 [ -x "${release_tool}" ] || die 'the ISO build did not retain punar-release-tool'
@@ -483,7 +567,7 @@ MAPPER_OPEN=0
 sudo qemu-nbd --disconnect "${NBD_DEVICE}" >/dev/null
 NBD_ATTACHED=0
 
-printf 'I08-I13,I36c,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
+printf 'I08-I13,I36a-I36d,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
     "${TARGET_BYTES}" "${luks_uuid}" "$((finished - started))" \
     > "${PROOF_DIR}/result.txt"
-echo "install-test: PASS (I08-I13 + I36c refusal + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
+echo "install-test: PASS (I08-I13 + I36a-I36d refusals + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"

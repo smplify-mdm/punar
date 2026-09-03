@@ -96,6 +96,8 @@ use punar_common::install_answers::{
 use punar_common::update::ReleaseVersion;
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::fmt::Style;
@@ -617,6 +619,12 @@ enum DebugCommand {
     #[cfg(target_os = "linux")]
     #[command(name = "installer-apply-proof", hide = true)]
     InstallerApplyProof,
+    /// Exercise the three pre-write installer refusals against exact
+    /// disposable VM targets. Like the positive proof, this accepts no
+    /// caller-controlled target or payload and requires its own QEMU port.
+    #[cfg(target_os = "linux")]
+    #[command(name = "installer-refusal-proof", hide = true)]
+    InstallerRefusalProof,
 }
 
 #[cfg(target_os = "linux")]
@@ -2223,6 +2231,8 @@ fn secrets_get(
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_PORT: &str = "/dev/virtio-ports/punar.install-apply-proof";
 #[cfg(target_os = "linux")]
+const INSTALL_REFUSAL_PROOF_PORT: &str = "/dev/virtio-ports/punar.install-refusal-proof";
+#[cfg(target_os = "linux")]
 const INSTALL_ANSWERS_DEVICE: &str = "/dev/disk/by-label/PUNAR_ANSWR";
 #[cfg(target_os = "linux")]
 const INSTALL_ANSWERS_MOUNT: &str = "/run/punar/unattended-answers";
@@ -2232,6 +2242,10 @@ const INSTALL_ANSWERS_KEYS: &str = "/usr/share/punar/install-answer-keys";
 const INSTALL_APPLY_PROOF_SERIAL: &str = "PUNAR-CI-TARGET";
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const INSTALL_REFUSAL_PROOF_SERIAL: &str = "PUNAR-CI-SMALL";
+#[cfg(target_os = "linux")]
+const INSTALL_REFUSAL_PROOF_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_PASSPHRASE: &[u8] = b"punar-ci-only-vm-passphrase";
 
@@ -2501,6 +2515,99 @@ fn installer_targets_when_ready(client: &Client) -> Result<InstallTargetsResult,
     .map_err(|error| format!("install.targets returned an invalid result ({error})"))
 }
 
+#[cfg(target_os = "linux")]
+fn require_installer_proof_environment(port: &Path, description: &str) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if rustix::process::getuid().as_raw() != 0 {
+        return Err(format!(
+            "the installer {description} proof must run as root"
+        ));
+    }
+    let metadata = port
+        .metadata()
+        .map_err(|_| format!("the dedicated installer {description} proof port is absent"))?;
+    if !metadata.file_type().is_char_device() {
+        return Err(format!(
+            "the installer {description} proof endpoint is not a character device"
+        ));
+    }
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .map_err(|error| format!("could not read the live kernel command line ({error})"))?;
+    if !cmdline
+        .split_ascii_whitespace()
+        .any(|token| token == "punar.live=1")
+    {
+        return Err(format!(
+            "the installer {description} proof is available only in the live environment"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn disk_prefix_sha256(device: &str) -> Result<String, String> {
+    const PREFIX_BYTES: u64 = 1024 * 1024;
+
+    let file = std::fs::File::open(device)
+        .map_err(|error| format!("could not open {device} for a prefix digest ({error})"))?;
+    let mut bytes = Vec::with_capacity(PREFIX_BYTES as usize);
+    file.take(PREFIX_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read the first MiB of {device} ({error})"))?;
+    if bytes.len() != PREFIX_BYTES as usize {
+        return Err(format!("{device} did not expose a complete first MiB"));
+    }
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+#[cfg(target_os = "linux")]
+fn require_server_error(
+    result: Result<Value, CallError>,
+    expected_code: &str,
+    expected_message: &str,
+    description: &str,
+) -> Result<(), String> {
+    let error = result
+        .err()
+        .ok_or_else(|| format!("{description} was unexpectedly accepted"))?;
+    let server = error
+        .server()
+        .ok_or_else(|| format!("{description} did not receive a daemon verdict"))?;
+    if server.code != expected_code {
+        return Err(format!(
+            "{description} returned {} instead of {expected_code}",
+            server.code
+        ));
+    }
+    if !server.message.contains(expected_message) {
+        return Err(format!(
+            "{description} did not name its exact refusal condition"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_idle_installer(client: &Client, description: &str) -> Result<(), String> {
+    let status: InstallStatusResult = serde_json::from_value(
+        client
+            .call("install.status", None)
+            .map_err(|error| error.message())?,
+    )
+    .map_err(|error| format!("install.status returned an invalid result ({error})"))?;
+    if status.state != InstallOverallState::Idle
+        || status.phase.is_some()
+        || status.plan_token.is_some()
+        || status.disk.is_some()
+    {
+        return Err(format!(
+            "{description} changed the installer transaction state"
+        ));
+    }
+    Ok(())
+}
+
 /// Read one line from the private recovery socket while keeping the VM proof
 /// observable. Only the public phase/state vocabulary is emitted; recovery
 /// material, descriptor numbers, disk paths and failure details never become
@@ -2609,26 +2716,7 @@ fn read_installer_proof_disclosure_line(
 /// boundary.
 #[cfg(target_os = "linux")]
 fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
-    use std::os::unix::fs::FileTypeExt;
-
-    if rustix::process::getuid().as_raw() != 0 {
-        return Err("the installer apply proof must run as root".into());
-    }
-    let port = Path::new(INSTALL_APPLY_PROOF_PORT);
-    let metadata = port
-        .metadata()
-        .map_err(|_| "the dedicated installer apply proof port is absent".to_string())?;
-    if !metadata.file_type().is_char_device() {
-        return Err("the installer apply proof endpoint is not a character device".into());
-    }
-    let cmdline = std::fs::read_to_string("/proc/cmdline")
-        .map_err(|error| format!("could not read the live kernel command line ({error})"))?;
-    if !cmdline
-        .split_ascii_whitespace()
-        .any(|token| token == "punar.live=1")
-    {
-        return Err("the installer apply proof is available only in the live environment".into());
-    }
+    require_installer_proof_environment(Path::new(INSTALL_APPLY_PROOF_PORT), "apply")?;
 
     let client = Client::for_target(Target::Punard, socket);
     let targets = installer_targets_when_ready(&client)?;
@@ -2803,6 +2891,184 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
         return Err("install.apply did not finish with the confirmed disk and plan".into());
     }
     Ok(plan.plan_token)
+}
+
+/// Prove the three pre-write installer refusals against real block devices
+/// inside the privileged live environment. A digest is taken immediately
+/// around every refused call, while the host repeats the same comparison
+/// across the complete VM boot. The command accepts no disk argument: QEMU
+/// must present both exact serial/size identities and the dedicated port.
+#[cfg(target_os = "linux")]
+fn run_installer_refusal_proof(socket: Option<&Path>) -> Result<String, String> {
+    require_installer_proof_environment(Path::new(INSTALL_REFUSAL_PROOF_PORT), "refusal")?;
+
+    let client = Client::for_target(Target::Punard, socket);
+    let targets = installer_targets_when_ready(&client)?;
+    if targets.targets.len() != 2 {
+        return Err("the refusal proof requires exactly two disposable targets".into());
+    }
+    let large = targets
+        .targets
+        .iter()
+        .find(|target| target.serial.as_deref() == Some(INSTALL_APPLY_PROOF_SERIAL))
+        .ok_or_else(|| "the refusal proof's 128 GiB target is absent".to_string())?;
+    let small = targets
+        .targets
+        .iter()
+        .find(|target| target.serial.as_deref() == Some(INSTALL_REFUSAL_PROOF_SERIAL))
+        .ok_or_else(|| "the refusal proof's 20 GiB target is absent".to_string())?;
+    if large.size_bytes != INSTALL_APPLY_PROOF_BYTES
+        || !large.eligible
+        || !large.partitions.is_empty()
+        || small.size_bytes != INSTALL_REFUSAL_PROOF_BYTES
+        || small.eligible
+        || !small.partitions.is_empty()
+    {
+        return Err("the refusal proof targets do not match the exact blank CI disks".into());
+    }
+
+    // I36a: the 20 GiB target is rejected with the exact layout arithmetic.
+    let expected_capacity = format!(
+        "Punar needs 33 GiB plus partition metadata ({} bytes), and this disk has {} bytes. 17 GiB is the operating system, its boot files and rollback copy; 16 GiB is the floor for user data.",
+        targets.minimum_disk_bytes, INSTALL_REFUSAL_PROOF_BYTES
+    );
+    if small.ineligible_reason.as_deref() != Some(expected_capacity.as_str()) {
+        return Err("the 20 GiB target did not publish the exact capacity arithmetic".into());
+    }
+    let small_before = disk_prefix_sha256(&small.device)?;
+    let small_plan = InstallPlanParams {
+        disk: small.device.clone(),
+        keymap: "us".into(),
+        encryption: InstallEncryption::Luks2,
+        recovery_mode: InstallRecoveryMode::PersonalCopy,
+    };
+    require_server_error(
+        client.call(
+            "install.plan",
+            Some(serde_json::to_value(small_plan).map_err(|error| error.to_string())?),
+        ),
+        "invalid_params",
+        &expected_capacity,
+        "the undersized-disk plan",
+    )?;
+    let small_after = disk_prefix_sha256(&small.device)?;
+    if small_after != small_before {
+        return Err("the undersized-disk refusal changed the target's first MiB".into());
+    }
+    require_idle_installer(&client, "the undersized-disk refusal")?;
+
+    let plan_params = InstallPlanParams {
+        disk: large.device.clone(),
+        keymap: "us".into(),
+        encryption: InstallEncryption::Luks2,
+        recovery_mode: InstallRecoveryMode::PersonalCopy,
+    };
+    let plan: InstallPlanResult = serde_json::from_value(
+        client
+            .call(
+                "install.plan",
+                Some(serde_json::to_value(&plan_params).map_err(|error| error.to_string())?),
+            )
+            .map_err(|error| error.message())?,
+    )
+    .map_err(|error| format!("install.plan returned an invalid result ({error})"))?;
+    if plan.plan.disk.device != large.device
+        || plan.plan.disk.serial != INSTALL_APPLY_PROOF_SERIAL
+        || plan.plan.disk.size_bytes != INSTALL_APPLY_PROOF_BYTES
+    {
+        return Err("the refusal proof plan is not bound to the 128 GiB target".into());
+    }
+
+    let apply_params = InstallApplyParams {
+        plan_token: plan.plan_token.clone(),
+        disk: large.device.clone(),
+        passphrase_fd: None,
+        recovery_output_fd: None,
+        keymap: "us".into(),
+        seed: InstallSeedParams {
+            locale: "C.UTF-8".into(),
+        },
+        oobe_answers_fd: None,
+        unattended_answers_fd: None,
+        unattended_signature_fd: None,
+        unattended: false,
+    };
+
+    // I36b: a syntactically valid token not minted by this boot is rejected
+    // before descriptor access or any transaction-state transition.
+    let large_before = disk_prefix_sha256(&large.device)?;
+    let replacement = if plan.plan_token.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    let mut wrong_token = apply_params.clone();
+    wrong_token.plan_token = format!("{replacement}{}", &plan.plan_token[1..]);
+    require_server_error(
+        client.call(
+            "install.apply",
+            Some(serde_json::to_value(wrong_token).map_err(|error| error.to_string())?),
+        ),
+        "invalid_params",
+        "plan_token was not produced by this live environment during this boot",
+        "the mismatched-plan apply",
+    )?;
+    let mismatched_after = disk_prefix_sha256(&large.device)?;
+    if mismatched_after != large_before {
+        return Err("the mismatched-plan refusal changed the target's first MiB".into());
+    }
+    require_idle_installer(&client, "the mismatched-plan refusal")?;
+
+    // I36d: put the real client process in a kernel-named managed-agent
+    // scope. The daemon must return its M9 hard-safety denial before it even
+    // looks at the deliberately descriptor-free apply inputs.
+    let managed_agent_before = disk_prefix_sha256(&large.device)?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not resolve the running punarctl ({error})"))?;
+    let scope_name = format!("punar-agent-agt_installerproof{}", std::process::id());
+    let params_json = serde_json::to_string(&apply_params).map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new("/usr/bin/systemd-run");
+    // A scope is synchronous and its child inherits our captured stdio.
+    // systemd-run explicitly forbids the service-only --pipe/--wait flags
+    // together with --scope.
+    command.args(["--scope", "--collect", "--quiet"]);
+    command.arg(format!("--unit={scope_name}"));
+    command.arg("--").arg(executable);
+    if let Some(socket) = socket {
+        command.arg("--socket").arg(socket);
+    }
+    let output = command
+        .args(["debug", "rpc", "install.apply", "--params"])
+        .arg(params_json)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not launch the managed-agent apply probe ({error})"))?;
+    let verdict = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.code() != Some(3)
+        || !verdict.contains("An AI agent may not erase a disk or install Punar")
+        || !verdict.contains("os hard safety constraint")
+    {
+        return Err(format!(
+            "the managed-agent apply did not return the M9 denied verdict (status {:?})",
+            output.status.code()
+        ));
+    }
+    let managed_agent_after = disk_prefix_sha256(&large.device)?;
+    if managed_agent_after != managed_agent_before {
+        return Err("the managed-agent refusal changed the target's first MiB".into());
+    }
+    require_idle_installer(&client, "the managed-agent refusal")?;
+
+    Ok(format!(
+        "I36a=invalid_params I36b=invalid_params I36d=denied \
+         I36a_before={small_before} I36a_after={small_after} \
+         I36b_before={large_before} I36b_after={mismatched_after} \
+         I36d_before={managed_agent_before} I36d_after={managed_agent_after}"
+    ))
 }
 
 /// Production unattended installer-media consumer. Its only mutable external
@@ -3346,6 +3612,19 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
+            #[cfg(target_os = "linux")]
+            DebugCommand::InstallerRefusalProof => {
+                match run_installer_refusal_proof(socket.as_deref()) {
+                    Ok(proof) => {
+                        println!("PUNAR_INSTALL_REFUSALS_OK {proof}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        println!("PUNAR_INSTALL_REFUSALS_FAIL {error}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
         },
         // M9 (contract section 14): the approval gate, from the human
         // side. `resolve` is human-only in the daemon, and this CLI never
@@ -4077,6 +4356,18 @@ mod tests {
         for forbidden in [
             ["punarctl", "debug", "installer-apply-proof", "/dev/vda"],
             ["punarctl", "debug", "installer-apply-proof", "--passphrase"],
+        ] {
+            assert!(Cli::try_parse_from(forbidden).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installer_refusal_proof_accepts_no_caller_controlled_target_or_request() {
+        assert!(Cli::try_parse_from(["punarctl", "debug", "installer-refusal-proof"]).is_ok());
+        for forbidden in [
+            ["punarctl", "debug", "installer-refusal-proof", "/dev/vda"],
+            ["punarctl", "debug", "installer-refusal-proof", "--params"],
         ] {
             assert!(Cli::try_parse_from(forbidden).is_err());
         }

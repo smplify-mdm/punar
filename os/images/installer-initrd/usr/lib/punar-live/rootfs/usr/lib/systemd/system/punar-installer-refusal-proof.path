@@ -1,0 +1,7 @@
+[Unit]
+Description=Wait for the VM-only installer refusal proof channel
+ConditionKernelCommandLine=punar.live=1
+
+[Path]
+PathExists=/dev/virtio-ports/punar.install-refusal-proof
+Unit=punar-installer-refusal-proof.service

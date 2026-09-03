@@ -21,4 +21,5 @@ punar-common = { workspace = true }
 rustix = { workspace = true, features = ["event", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 zeroize = { workspace = true }
