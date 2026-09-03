@@ -67,7 +67,9 @@ use crate::enroll::{
     compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
     save_enrollment, write_status_summary,
 };
-use crate::install::{InstallAuditEvents, InstallError, Installer, InstallerSources};
+use crate::install::{
+    INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
+};
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
     ApplicationPolicyAction, ApplicationPolicyLayer, EffectiveDocument, Layer, compute_effective,
@@ -1917,7 +1919,15 @@ impl Inner {
             let _authorization = self
                 .installer
                 .verify_unattended_authorization(&plan, params, &inputs)?;
-            *actor = AuditActor::service("punar-installer");
+            *actor = AuditActor::service(INSTALLER_SERVICE_ACTOR_ID);
+            self.log_install_event_required(AuditEvent::action(
+                &self.device_id,
+                actor,
+                "install.plan",
+                "system_disk",
+                Decision::Allow,
+                AuditOutcome::Success,
+            ))?;
         }
 
         self.installer.start_transaction_status(

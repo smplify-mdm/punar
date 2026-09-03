@@ -33,7 +33,7 @@ use punar_common::update::{
     Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
     verify_release_manifest,
 };
-use punar_common::{AuditEvent, Decision, Redacted};
+use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted};
 use punar_recovery::{
     PersonalRecoveryConfirmation, PersonalRecoveryView, RecoveryBinding, SecretRecoveryKey,
 };
@@ -52,6 +52,7 @@ pub const PI_BOOT_B_PARTUUID: &str = "706d6f54-d8b9-4276-9f4f-f1ac379a482e";
 pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
 pub const ROOT_B_PARTUUID: &str = "2b1b91a9-cf2c-4e9c-a723-5ec997971662";
 pub const DATA_PARTUUID: &str = "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9";
+pub const INSTALLER_SERVICE_ACTOR_ID: &str = "punar-installer";
 
 const ESP_TYPE_GUID: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 const X86_ROOT_TYPE_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
@@ -3909,17 +3910,26 @@ fn validate_install_terminal_event(
     validate_event_schema(event).map_err(|_| {
         InstallError::Trust("an installation terminal event is not schema-conformant".into())
     })?;
+    let recognized_actor = match event.source {
+        PrincipalKind::Human => event
+            .user_id
+            .as_ref()
+            .is_some_and(|value| !value.is_empty()),
+        PrincipalKind::Service => event.user_id.as_deref() == Some(INSTALLER_SERVICE_ACTOR_ID),
+        _ => false,
+    };
     if event.device_id != device_id
         || event.action != action
         || event.resource.as_deref() != Some(resource)
         || event.decision != Decision::Allow
         || event.result != result
-        || event.source != punar_common::PrincipalKind::Human
+        || !recognized_actor
         || event.agent_session_id.as_deref() != Some(punar_common::audit::AGENT_SESSION_NONE)
         || event.project_id.as_deref() != Some(punar_common::audit::PROJECT_ID_SYSTEM)
     {
         return Err(InstallError::Trust(
-            "an installation terminal event is not bound to this human-authorized install".into(),
+            "an installation terminal event is not bound to a recognized installer principal"
+                .into(),
         ));
     }
     Ok(())
@@ -3965,7 +3975,7 @@ fn require_install_audit_events(
         event.action == "install.plan"
             && event.resource.as_deref() == Some("system_disk")
             && event.decision == Decision::Allow
-            && event.source == punar_common::PrincipalKind::Human
+            && event.source == terminal.apply_success.source
             && event.user_id == terminal.apply_success.user_id
             && event.agent_session_id.as_deref() == Some(punar_common::audit::AGENT_SESSION_NONE)
             && event.result == "success"
@@ -4017,13 +4027,12 @@ fn build_installed_audit_handoff(
         "system_image",
         "success",
     )?;
-    if terminal
-        .recovery_enrolled
-        .as_ref()
-        .is_some_and(|event| event.user_id != terminal.apply_success.user_id)
-    {
+    if terminal.recovery_enrolled.as_ref().is_some_and(|event| {
+        event.user_id != terminal.apply_success.user_id
+            || event.source != terminal.apply_success.source
+    }) {
         return Err(InstallError::Trust(
-            "the installation terminal events belong to different human actors".into(),
+            "the installation terminal events belong to different authorized actors".into(),
         ));
     }
     let mut bytes = read_bounded_regular(
@@ -5639,11 +5648,10 @@ mod tests {
         }
     }
 
-    fn terminal_audit_events() -> InstallAuditEvents {
-        let actor = AuditActor::cli_peer("root");
+    fn terminal_audit_events_for(actor: &AuditActor) -> InstallAuditEvents {
         let mut recovery_enrolled = AuditEvent::action(
             "dev_fixture001",
-            &actor,
+            actor,
             "install.recovery_key",
             "system_disk",
             Decision::Allow,
@@ -5654,13 +5662,17 @@ mod tests {
             recovery_enrolled: Some(recovery_enrolled),
             apply_success: AuditEvent::action(
                 "dev_fixture001",
-                &actor,
+                actor,
                 "install.apply",
                 "system_image",
                 Decision::Allow,
                 AuditOutcome::Success,
             ),
         }
+    }
+
+    fn terminal_audit_events() -> InstallAuditEvents {
+        terminal_audit_events_for(&AuditActor::cli_peer("root"))
     }
 
     #[test]
@@ -5953,6 +5965,63 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no recovery-enrollment event"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unattended_audit_requires_the_exact_authorized_service_plan_actor() {
+        let fixture = Fixture::new();
+        let service_actor = AuditActor::service(INSTALLER_SERVICE_ACTOR_ID);
+        let terminal = terminal_audit_events_for(&service_actor);
+
+        let error = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing a required installation event")
+        );
+
+        let mut audit = AuditWriter::open(&fixture.sources.live_audit_path).unwrap();
+        audit
+            .append(&AuditEvent::action(
+                "dev_fixture001",
+                &service_actor,
+                "install.plan",
+                "system_disk",
+                Decision::Allow,
+                AuditOutcome::Success,
+            ))
+            .unwrap();
+        drop(audit);
+        let handoff = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &terminal,
+            true,
+        )
+        .unwrap();
+        let events = parse_validated_audit(&handoff, "dev_fixture001").unwrap();
+        assert!(events.iter().any(|event| {
+            event.action == "install.plan"
+                && event.source == PrincipalKind::Service
+                && event.user_id.as_deref() == Some(INSTALLER_SERVICE_ACTOR_ID)
+        }));
+
+        let unrecognized = terminal_audit_events_for(&AuditActor::service("other-installer"));
+        let error = build_installed_audit_handoff(
+            &fixture.sources.live_audit_path,
+            "dev_fixture001",
+            &unrecognized,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("recognized installer principal"));
     }
 
     #[cfg(target_os = "linux")]
