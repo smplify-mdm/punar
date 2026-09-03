@@ -119,6 +119,8 @@ grep -Fq -- "mkfs.vfat -n ${ANSWER_LABEL}" "${INSTALL_TEST}" \
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'
+assert_line "${UNATTENDED_UNIT}" 'ProtectSystem=strict'
+assert_line "${UNATTENDED_UNIT}" 'ReadWritePaths=/run/punar'
 assert_line "${CI_UNATTENDED_DROPIN}" \
     'StandardOutput=file:/dev/virtio-ports/punar.install-unattended-proof'
 grep -Fq 'opt/punar/install-answer-key/raw' "${STAGE_SCRIPT}" \

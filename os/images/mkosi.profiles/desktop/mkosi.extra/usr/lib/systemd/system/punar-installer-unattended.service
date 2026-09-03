@@ -15,6 +15,7 @@ PrivateMounts=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
+ReadWritePaths=/run/punar
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=CAP_SYS_ADMIN
 StandardOutput=journal
