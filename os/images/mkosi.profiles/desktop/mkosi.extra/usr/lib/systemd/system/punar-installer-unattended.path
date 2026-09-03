@@ -4,5 +4,5 @@ Documentation=file:/usr/share/doc/punar/installer.md
 ConditionKernelCommandLine=punar.live=1
 
 [Path]
-PathExists=/dev/disk/by-label/PUNAR_ANSWERS
+PathExists=/dev/disk/by-label/PUNAR_ANSWR
 Unit=punar-installer-unattended.service

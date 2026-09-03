@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.punar.dev/v1alpha1/install/answers.json",
   "title": "Punar unattended installation authorization",
-  "description": "Exact bytes signed by a distinct unattended-install Ed25519 trust root and stored as answers.json on removable media labelled PUNAR_ANSWERS. This document authorizes one short-lived, plan-bound destructive install. It never contains an encryption passphrase or recovery key.",
+  "description": "Exact bytes signed by a distinct unattended-install Ed25519 trust root and stored as answers.json on removable media labelled PUNAR_ANSWR. This document authorizes one short-lived, plan-bound destructive install. It never contains an encryption passphrase or recovery key.",
   "type": "object",
   "required": [
     "v",

@@ -35,7 +35,7 @@ pub enum UnattendedRecoveryAcknowledgement {
     Unattended,
 }
 
-/// Strict signed bytes stored as `answers.json` on `PUNAR_ANSWERS` media.
+/// Strict signed bytes stored as `answers.json` on `PUNAR_ANSWR` media.
 ///
 /// `confirm_destroy_disk` deliberately repeats `target_serial`: it preserves
 /// the same destructive-confirmation grammar as the attended screen while the

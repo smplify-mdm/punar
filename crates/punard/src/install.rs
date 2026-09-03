@@ -57,7 +57,7 @@ const ESP_TYPE_GUID: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 const X86_ROOT_TYPE_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
 const ARM_ROOT_TYPE_GUID: &str = "b921b045-1df0-41c3-af44-4c6f280d3fae";
 const DATA_TYPE_GUID: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
-const ANSWERS_LABEL: &str = "PUNAR_ANSWERS";
+const ANSWERS_LABEL: &str = "PUNAR_ANSWR";
 const GIB: u64 = 1024 * 1024 * 1024;
 const ALIGNMENT: u64 = 1024 * 1024;
 const ESP_SIZE: u64 = GIB;
@@ -1681,7 +1681,7 @@ impl Installer {
             })?;
         if observed.protected {
             return Err(InstallError::Refused(
-                "the selected disk carries the live system or PUNAR_ANSWERS and cannot be erased"
+                "the selected disk carries the live system or PUNAR_ANSWR and cannot be erased"
                     .into(),
             ));
         }

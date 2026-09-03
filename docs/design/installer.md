@@ -1330,7 +1330,7 @@ and shared strict types are now authoritative for the attended lane.
   filesystems. Read-only. It excludes the medium the installer booted from,
   by device, because offering to erase the thing you are running from is a
   bug with a UI — **and it excludes any device carrying a filesystem labelled
-  `PUNAR_ANSWERS`** for the same reason one level up: the unattended path's
+  `PUNAR_ANSWR`** for the same reason one level up: the unattended path's
   answer disk is an input to the install, and an install that erases its own
   answer file has destroyed the record of what it was told to do. In CI the
   1 MiB answer disk would also fail the 33 GiB floor, but relying on a size
@@ -1796,7 +1796,7 @@ workflow beside `boot-test.sh`. Nothing in it needs a network.
 ```text
 1  Build the ISO                       tools/build-image.sh (PUNAR_IMAGES=iso)
 2  Create a blank 128 GiB sparse qcow2 the §5.1 minimum, exactly
-3  Create the answer disk              a 1 MiB vfat image labelled PUNAR_ANSWERS
+3  Create the answer disk              an 8 MiB vfat image labelled PUNAR_ANSWR
                                        carrying answers.json
 4  Boot the ISO in QEMU (OVMF, virtio) serial console captured
 5  Wait for PUNAR_INSTALL_DONE
@@ -1808,7 +1808,7 @@ workflow beside `boot-test.sh`. Nothing in it needs a network.
 
 **Unattended without a second artefact.** The same ISO is used. The
 installer reads `answers.json` only when all of: `punar.live=1` is on the
-cmdline; a filesystem labelled `PUNAR_ANSWERS` is present; the file
+cmdline; a filesystem labelled `PUNAR_ANSWR` is present; the file
 validates against `schemas/install/answers.json`; and its
 `confirm_destroy_disk` field **matches the target disk's serial** — the same
 device-specific token a human types at stage 06. The install record says

@@ -916,7 +916,7 @@ GPT/alignment floor remains visible with `eligible: false` and the full
 17 GiB OS + 16 GiB data-floor arithmetic. The following never appear:
 
 - any disk or partition backing a current mount (the live boot medium);
-- any disk carrying a filesystem labelled `PUNAR_ANSWERS`;
+- any disk carrying a filesystem labelled `PUNAR_ANSWR`;
 - loop, ram, zram, device-mapper, md, optical and floppy pseudo targets.
 
 The implementation is discovery only. It opens no target device for writing.
@@ -1014,7 +1014,7 @@ partition option or executable field.
 The unattended object omits `passphrase_fd` and adds
 `unattended_answers_fd` plus `unattended_signature_fd`. Both are sealed
 anonymous memfds populated from `answers.json` and `answers.json.sig` on the
-fixed-label `PUNAR_ANSWERS` filesystem. The daemon verifies the detached
+fixed-label `PUNAR_ANSWR` filesystem. The daemon verifies the detached
 Ed25519 signature over the exact bytes before parsing, then binds the
 authorization to its one-day maximum lifetime, plan token, target serial,
 destructive-confirmation serial, release id, exact release-manifest digest,

@@ -1814,7 +1814,7 @@ impl Inner {
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
                 "An AI agent may not erase a disk or install Punar, even when its process has uid 0.\n\
-                 Policy: os hard safety constraint — install.apply is reserved for the person at the device or the independently signed PUNAR_ANSWERS provisioner.\n\
+                 Policy: os hard safety constraint — install.apply is reserved for the person at the device or the independently signed PUNAR_ANSWR provisioner.\n\
                  Next step: open the signed Punar installer and confirm the disk yourself, or use an authorized answer medium.",
                 json!({
                     "decision": "deny",
@@ -2087,7 +2087,7 @@ impl Inner {
             ));
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
-                "Only the privileged installer or the signed unattended provisioner may acknowledge recovery-key custody. Next step: type the challenged groups in the installer window, or verify the PUNAR_ANSWERS medium remains writable.",
+                "Only the privileged installer or the signed unattended provisioner may acknowledge recovery-key custody. Next step: type the challenged groups in the installer window, or verify the PUNAR_ANSWR medium remains writable.",
                 json!({ "decision": "deny", "disk_changed": disk_changed }),
             ));
         }

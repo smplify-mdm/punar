@@ -583,7 +583,7 @@ privileged generic-x86 installer VM are now runtime-proven through I08–I13.
 The unattended signed-answer lane now generates the disk passphrase inside
 `punard`, returns it and the recovery key only over the private disclosure
 socket, and will not cross the recovery gate until `punarctl` atomically writes,
-fsyncs, reopens and byte-verifies `custody.json` on `PUNAR_ANSWERS`. The answer
+fsyncs, reopens and byte-verifies `custody.json` on `PUNAR_ANSWR`. The answer
 schema, strict parser, no-secret negative fixture, service trigger, dedicated
 custody output schema and local tests are green. I36's full ISO/QEMU
 answer-media and secrecy run is pending canonical CI.
@@ -729,7 +729,7 @@ hardware.
 
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying
-`PUNAR_ANSWERS`. The fake-sysfs test exercises both directions; keep it when
+`PUNAR_ANSWR`. The fake-sysfs test exercises both directions; keep it when
 the ISO lane adds real media.
 
 ### 6.2 `punarctl app`, Flatpak, and the Chrome command

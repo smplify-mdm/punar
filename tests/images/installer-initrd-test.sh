@@ -43,6 +43,7 @@ UNATTENDED_PATH="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/l
 FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
 INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
 ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
+INSTALL_TEST="${REPO_ROOT}/tools/install-test.sh"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
@@ -50,7 +51,7 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${LIVE_CRYPTTAB}" "${RUNTIME_UNIT}" \
     "${RUNTIME_PATH}" "${APPLY_UNIT}" "${APPLY_PATH}" \
     "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}" "${CI_UNATTENDED_DROPIN}" \
-    "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}"; do
+    "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}" "${INSTALL_TEST}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 assert_line "${DESKTOP_CONF}" '         dosfstools'
@@ -108,8 +109,13 @@ assert_line "${APPLY_PATH}" 'Unit=punar-installer-apply-proof.service'
 assert_line "${RUNTIME_WANTS}" \
     'Wants=punar-installer-runtime-proof.path punar-installer-apply-proof.path punar-installer-unattended.path'
 assert_line "${UNATTENDED_PATH}" 'ConditionKernelCommandLine=punar.live=1'
-assert_line "${UNATTENDED_PATH}" 'PathExists=/dev/disk/by-label/PUNAR_ANSWERS'
+assert_line "${UNATTENDED_PATH}" 'PathExists=/dev/disk/by-label/PUNAR_ANSWR'
 assert_line "${UNATTENDED_PATH}" 'Unit=punar-installer-unattended.service'
+ANSWER_LABEL=$(sed -n 's|^PathExists=/dev/disk/by-label/||p' "${UNATTENDED_PATH}")
+[ "${#ANSWER_LABEL}" -le 11 ] \
+    || fail 'the FAT answer-media label exceeds the on-disk 11-character limit'
+grep -Fq -- "mkfs.vfat -n ${ANSWER_LABEL}" "${INSTALL_TEST}" \
+    || fail 'the QEMU answer medium does not use the product path-unit label'
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'

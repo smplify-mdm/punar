@@ -622,7 +622,7 @@ enum DebugCommand {
 #[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum InstallCommand {
-    /// Consume one signed PUNAR_ANSWERS medium and durably return generated
+    /// Consume one signed PUNAR_ANSWR medium and durably return generated
     /// disk custody material to that same removable medium.
     Unattended,
 }
@@ -2223,7 +2223,7 @@ fn secrets_get(
 #[cfg(target_os = "linux")]
 const INSTALL_APPLY_PROOF_PORT: &str = "/dev/virtio-ports/punar.install-apply-proof";
 #[cfg(target_os = "linux")]
-const INSTALL_ANSWERS_DEVICE: &str = "/dev/disk/by-label/PUNAR_ANSWERS";
+const INSTALL_ANSWERS_DEVICE: &str = "/dev/disk/by-label/PUNAR_ANSWR";
 #[cfg(target_os = "linux")]
 const INSTALL_ANSWERS_MOUNT: &str = "/run/punar/unattended-answers";
 #[cfg(target_os = "linux")]
@@ -2266,9 +2266,9 @@ impl InstallAnswersMount {
         let source = Path::new(INSTALL_ANSWERS_DEVICE);
         let metadata = source
             .metadata()
-            .map_err(|_| "no removable filesystem labelled PUNAR_ANSWERS is present".to_string())?;
+            .map_err(|_| "no removable filesystem labelled PUNAR_ANSWR is present".to_string())?;
         if !metadata.file_type().is_block_device() {
-            return Err("PUNAR_ANSWERS does not resolve to one block device".into());
+            return Err("PUNAR_ANSWR does not resolve to one block device".into());
         }
 
         let path = PathBuf::from(INSTALL_ANSWERS_MOUNT);
@@ -2299,7 +2299,7 @@ impl InstallAnswersMount {
             .status()
             .map_err(|error| format!("could not start the fixed answer-media mount ({error})"))?;
         if !status.success() {
-            return Err("the PUNAR_ANSWERS filesystem could not be mounted read-write".into());
+            return Err("the PUNAR_ANSWR filesystem could not be mounted read-write".into());
         }
         Ok(Self {
             path,
@@ -2807,7 +2807,7 @@ fn run_installer_apply_proof(socket: Option<&Path>) -> Result<String, String> {
 
 /// Production unattended installer-media consumer. Its only mutable external
 /// input is one signed, short-lived authorization on a filesystem with the
-/// fixed PUNAR_ANSWERS label. The target comes from the signed serial plus the
+/// fixed PUNAR_ANSWR label. The target comes from the signed serial plus the
 /// daemon's freshly computed plan; generated secrets return only to that
 /// removable filesystem and must survive a byte-exact read-back before ack.
 #[cfg(target_os = "linux")]
@@ -2860,7 +2860,7 @@ fn run_installer_unattended(socket: Option<&Path>) -> Result<Value, String> {
         );
     };
     if !target.eligible {
-        return Err("the disk authorized by PUNAR_ANSWERS is not eligible for installation".into());
+        return Err("the disk authorized by PUNAR_ANSWR is not eligible for installation".into());
     }
 
     let plan_params = InstallPlanParams {
@@ -3063,7 +3063,7 @@ fn run_installer_unattended(socket: Option<&Path>) -> Result<Value, String> {
         "plan_token": plan.plan_token,
         "target_serial": answers.target_serial,
         "release_id": answers.release_id,
-        "custody": "written_and_verified_on_PUNAR_ANSWERS"
+        "custody": "written_and_verified_on_PUNAR_ANSWR"
     }))
 }
 
@@ -3289,7 +3289,7 @@ fn main() -> ExitCode {
                 Ok(result) if json => print_json(&result),
                 Ok(result) => {
                     println!(
-                        "PUNAR_UNATTENDED_INSTALL_OK authorization_id={} custody=written_and_verified_on_PUNAR_ANSWERS",
+                        "PUNAR_UNATTENDED_INSTALL_OK authorization_id={} custody=written_and_verified_on_PUNAR_ANSWR",
                         result
                             .get("authorization_id")
                             .and_then(Value::as_str)
@@ -3299,7 +3299,7 @@ fn main() -> ExitCode {
                 }
                 Err(error) => {
                     eprintln!(
-                        "Unattended installation stopped.\nWhy: {error}.\nNext step: keep the target disk unchanged, verify the signed PUNAR_ANSWERS medium, and retry."
+                        "Unattended installation stopped.\nWhy: {error}.\nNext step: keep the target disk unchanged, verify the signed PUNAR_ANSWR medium, and retry."
                     );
                     ExitCode::FAILURE
                 }

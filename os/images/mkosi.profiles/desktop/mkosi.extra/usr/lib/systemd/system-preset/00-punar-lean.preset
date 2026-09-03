@@ -17,7 +17,7 @@ disable udisks2.service
 
 # The path unit is inert on installed systems because it is conditioned on
 # punar.live=1. In the signed live environment it is the only automatic
-# consumer of independently signed PUNAR_ANSWERS media.
+# consumer of independently signed PUNAR_ANSWR media.
 enable punar-installer-unattended.path
 
 # greetd owns VT1 on a graphical product image.

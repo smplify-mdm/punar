@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.punar.dev/v1alpha1/install/custody.json",
   "title": "Punar unattended installation custody record",
-  "description": "Secret output written only to the removable PUNAR_ANSWERS filesystem after an authorized unattended install reaches its recovery gate. It must never be copied to the installed system, logs, status, audit events, or image artifacts.",
+  "description": "Secret output written only to the removable PUNAR_ANSWR filesystem after an authorized unattended install reaches its recovery gate. It must never be copied to the installed system, logs, status, audit events, or image artifacts.",
   "type": "object",
   "required": [
     "v",

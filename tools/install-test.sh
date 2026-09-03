@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Plan against one exact disposable disk, authorize that exact plan with an
-# ephemeral key, then exercise the production signed PUNAR_ANSWERS consumer
+# ephemeral key, then exercise the production signed PUNAR_ANSWR consumer
 # and inspect the resulting GPT, LUKS2 and btrfs topology. No committed test
 # key or CI-only destructive executor exists.
 set -euo pipefail
@@ -198,7 +198,7 @@ jq -n \
 "${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
     "${ANSWER_DOCUMENT}" "${ANSWER_SIGNATURE}"
 truncate -s 8M "${ANSWER_DISK}"
-mkfs.vfat -n PUNAR_ANSWERS "${ANSWER_DISK}" >/dev/null
+mkfs.vfat -n PUNAR_ANSWR "${ANSWER_DISK}" >/dev/null
 mcopy -i "${ANSWER_DISK}" "${ANSWER_DOCUMENT}" ::answers.json
 mcopy -i "${ANSWER_DISK}" "${ANSWER_SIGNATURE}" ::answers.json.sig
 
