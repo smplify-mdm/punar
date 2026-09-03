@@ -116,6 +116,8 @@ ANSWER_LABEL=$(sed -n 's|^PathExists=/dev/disk/by-label/||p' "${UNATTENDED_PATH}
     || fail 'the FAT answer-media label exceeds the on-disk 11-character limit'
 grep -Fq -- "mkfs.vfat -n ${ANSWER_LABEL}" "${INSTALL_TEST}" \
     || fail 'the QEMU answer medium does not use the product path-unit label'
+grep -Fq -- "jq -jr '.disk_passphrase'" "${INSTALL_TEST}" \
+    || fail 'the QEMU proof appends a byte to the generated LUKS passphrase'
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'

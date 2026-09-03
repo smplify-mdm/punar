@@ -365,7 +365,9 @@ if git -C "${REPO_ROOT}" grep -F -- "${luks_uuid}" >/dev/null; then
     die 'the per-device LUKS UUID is a committed literal'
 fi
 
-jq -r '.disk_passphrase' "${CUSTODY_DOCUMENT}" \
+# `jq -r` appends a line feed, which would change the LUKS passphrase. Keep
+# custody extraction byte-exact: the generated passphrase itself has no LF.
+jq -jr '.disk_passphrase' "${CUSTODY_DOCUMENT}" \
     | sudo cryptsetup open --type luks2 --key-file=- \
         "${NBD_DEVICE}p4" "${MAPPER_NAME}"
 MAPPER_OPEN=1
