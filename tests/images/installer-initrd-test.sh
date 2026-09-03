@@ -118,6 +118,12 @@ grep -Fq -- "mkfs.vfat -n ${ANSWER_LABEL}" "${INSTALL_TEST}" \
     || fail 'the QEMU answer medium does not use the product path-unit label'
 grep -Fq -- "jq -jr '.disk_passphrase'" "${INSTALL_TEST}" \
     || fail 'the QEMU proof appends a byte to the generated LUKS passphrase'
+grep -Fq -- '.confirm_destroy_disk = "PUNAR-CI-WRONG-DISK"' "${INSTALL_TEST}" \
+    || fail 'the QEMU proof does not exercise a signed mismatched destruction confirmation'
+# Assert the literal variable-bearing source line.
+# shellcheck disable=SC2016
+grep -Fq -- 'cmp -s "${TARGET_PREFIX_BEFORE}" "${TARGET_PREFIX_AFTER}"' "${INSTALL_TEST}" \
+    || fail 'the signed-answer refusal does not prove the target prefix remained byte-identical'
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'

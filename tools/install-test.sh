@@ -58,6 +58,9 @@ TARGET_DISK="${WORKDIR}/installed-target.qcow2"
 ANSWER_DISK="${WORKDIR}/punar-answers.img"
 ANSWER_DOCUMENT="${WORKDIR}/answers.json"
 ANSWER_SIGNATURE="${WORKDIR}/answers.json.sig"
+REFUSAL_ANSWER_DISK="${WORKDIR}/punar-refusal-answers.img"
+REFUSAL_ANSWER_DOCUMENT="${WORKDIR}/refusal-answers.json"
+REFUSAL_ANSWER_SIGNATURE="${WORKDIR}/refusal-answers.json.sig"
 ANSWER_SIGNING_SEED="${WORKDIR}/answers-signing.seed"
 ANSWER_PUBLIC_RAW="${WORKDIR}/answers-signing.pub"
 ANSWER_PUBLIC_HEX="${WORKDIR}/answers-signing.pub.hex"
@@ -68,7 +71,11 @@ VARS_COPY="${WORKDIR}/OVMF_VARS.fd"
 SERIAL_LOG="${PROOF_DIR}/install-serial.log"
 RUNTIME_LOG="${PROOF_DIR}/install-runtime-proof.log"
 UNATTENDED_LOG="${PROOF_DIR}/install-unattended-proof.log"
+REFUSAL_LOG="${PROOF_DIR}/install-refusal-proof.log"
+REFUSAL_SERIAL_LOG="${PROOF_DIR}/install-refusal-serial.log"
 QEMU_LOG="${PROOF_DIR}/install-qemu.log"
+TARGET_PREFIX_BEFORE="${WORKDIR}/target-prefix-before.bin"
+TARGET_PREFIX_AFTER="${WORKDIR}/target-prefix-after.bin"
 NBD_DEVICE=/dev/nbd0
 MAPPER_NAME="punar-ci-data-$$"
 MOUNT_DIR="${WORKDIR}/data-top"
@@ -99,6 +106,8 @@ cp "${OVMF_VARS}" "${VARS_COPY}"
 : > "${SERIAL_LOG}"
 : > "${RUNTIME_LOG}"
 : > "${UNATTENDED_LOG}"
+: > "${REFUSAL_LOG}"
+: > "${REFUSAL_SERIAL_LOG}"
 : > "${QEMU_LOG}"
 qemu-img create -q -f qcow2 "${TARGET_DISK}" "${TARGET_BYTES}"
 
@@ -197,6 +206,79 @@ jq -n \
       recovery_key_ack:"unattended"}' > "${ANSWER_DOCUMENT}"
 "${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
     "${ANSWER_DOCUMENT}" "${ANSWER_SIGNATURE}"
+
+echo '==> refuse a signed answer for the wrong destruction confirmation (zero target writes)'
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${TARGET_DISK}" "of=${TARGET_PREFIX_BEFORE}" >/dev/null
+jq '.confirm_destroy_disk = "PUNAR-CI-WRONG-DISK"' \
+    "${ANSWER_DOCUMENT}" > "${REFUSAL_ANSWER_DOCUMENT}"
+"${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
+    "${REFUSAL_ANSWER_DOCUMENT}" "${REFUSAL_ANSWER_SIGNATURE}"
+truncate -s 8M "${REFUSAL_ANSWER_DISK}"
+mkfs.vfat -n PUNAR_ANSWR "${REFUSAL_ANSWER_DISK}" >/dev/null
+mcopy -i "${REFUSAL_ANSWER_DISK}" "${REFUSAL_ANSWER_DOCUMENT}" ::answers.json
+mcopy -i "${REFUSAL_ANSWER_DISK}" "${REFUSAL_ANSWER_SIGNATURE}" ::answers.json.sig
+
+cp "${OVMF_VARS}" "${VARS_COPY}"
+qemu-system-x86_64 \
+    -machine "q35,accel=${ACCEL}" \
+    -cpu "${CPU}" \
+    -m 4096 \
+    -smp 4 \
+    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+    -drive "if=pflash,format=raw,file=${VARS_COPY}" \
+    -cdrom "${ISO}" \
+    -drive "file=${TARGET_DISK},format=qcow2,if=none,id=punartarget" \
+    -device "virtio-blk-pci,drive=punartarget,serial=PUNAR-CI-TARGET" \
+    -drive "file=${REFUSAL_ANSWER_DISK},format=raw,if=none,id=punaranswers" \
+    -device "virtio-blk-pci,drive=punaranswers,serial=PUNAR-CI-ANSWERS" \
+    -fw_cfg "name=opt/punar/install-answer-key,file=${ANSWER_PUBLIC_HEX}" \
+    -nic none \
+    -display none \
+    -serial "file:${REFUSAL_SERIAL_LOG}" \
+    -monitor none \
+    -device virtio-serial-pci \
+    -chardev "file,id=refusalproof,path=${REFUSAL_LOG}" \
+    -device "virtserialport,chardev=refusalproof,name=punar.install-unattended-proof" \
+    -no-reboot \
+    >> "${QEMU_LOG}" 2>&1 &
+QEMU_PID=$!
+started=$(date +%s)
+while :; do
+    if grep -aq '^PUNAR_UNATTENDED_INSTALL_OK ' "${REFUSAL_LOG}"; then
+        die 'a mismatched destruction confirmation was accepted'
+    fi
+    if grep -aq '^Unattended installation stopped\.' "${REFUSAL_LOG}"; then
+        break
+    fi
+    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        QEMU_PID=''
+        tail -n 160 "${REFUSAL_SERIAL_LOG}" >&2 || true
+        cat "${REFUSAL_LOG}" >&2 || true
+        tail -n 100 "${QEMU_LOG}" >&2 || true
+        die 'QEMU exited before the mismatched destruction confirmation was refused'
+    fi
+    now=$(date +%s)
+    if [ "$((now - started))" -ge "${TIMEOUT}" ]; then
+        tail -n 160 "${REFUSAL_SERIAL_LOG}" >&2 || true
+        cat "${REFUSAL_LOG}" >&2 || true
+        die "timed out after ${TIMEOUT}s waiting for the signed-answer refusal"
+    fi
+    sleep 1
+done
+kill "${QEMU_PID}" 2>/dev/null || true
+wait "${QEMU_PID}" 2>/dev/null || true
+QEMU_PID=''
+grep -aFq 'the target serial does not match the authorized disk' "${REFUSAL_LOG}" \
+    || die 'the signed-answer refusal did not name the mismatched target serial'
+qemu-img dd -f qcow2 bs=1M count=1 \
+    "if=${TARGET_DISK}" "of=${TARGET_PREFIX_AFTER}" >/dev/null
+cmp -s "${TARGET_PREFIX_BEFORE}" "${TARGET_PREFIX_AFTER}" \
+    || die 'the refused signed answer changed the target disk'
+printf '%s\n' \
+    'I36c PASS signed_wrong_confirm_destroy_disk=refused first_mib=byte_identical' \
+    > "${PROOF_DIR}/refusal-result.txt"
+
 truncate -s 8M "${ANSWER_DISK}"
 mkfs.vfat -n PUNAR_ANSWR "${ANSWER_DISK}" >/dev/null
 mcopy -i "${ANSWER_DISK}" "${ANSWER_DOCUMENT}" ::answers.json
@@ -401,7 +483,7 @@ MAPPER_OPEN=0
 sudo qemu-nbd --disconnect "${NBD_DEVICE}" >/dev/null
 NBD_ATTACHED=0
 
-printf 'I08-I13,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
+printf 'I08-I13,I36c,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
     "${TARGET_BYTES}" "${luks_uuid}" "$((finished - started))" \
     > "${PROOF_DIR}/result.txt"
-echo "install-test: PASS (I08-I13 + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
+echo "install-test: PASS (I08-I13 + I36c refusal + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
