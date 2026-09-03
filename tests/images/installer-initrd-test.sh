@@ -118,6 +118,8 @@ grep -Fq -- "mkfs.vfat -n ${ANSWER_LABEL}" "${INSTALL_TEST}" \
     || fail 'the QEMU answer medium does not use the product path-unit label'
 grep -Fq -- "jq -jr '.disk_passphrase'" "${INSTALL_TEST}" \
     || fail 'the QEMU proof appends a byte to the generated LUKS passphrase'
+grep -Fq -- '.diskRecovery.acknowledgement == "unattended"' "${INSTALL_TEST}" \
+    || fail 'the QEMU proof does not inspect the typed camelCase installed seed'
 grep -Fq -- '.confirm_destroy_disk = "PUNAR-CI-WRONG-DISK"' "${INSTALL_TEST}" \
     || fail 'the QEMU proof does not exercise a signed mismatched destruction confirmation'
 # Assert the literal variable-bearing source line.

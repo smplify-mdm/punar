@@ -464,9 +464,9 @@ cmp -s "${WORKDIR}/expected-subvolumes.txt" "${PROOF_DIR}/btrfs-subvolumes.txt" 
     || die 'the encrypted data volume does not contain exactly @var, @home and @var-tmp'
 sudo jq -e \
     '.initiated == "unattended"
-     and .disk_recovery.mode == "personal_copy"
-     and .disk_recovery.acknowledgement == "unattended"
-     and .disk_encrypted == true' \
+     and .diskRecovery.mode == "personal_copy"
+     and .diskRecovery.acknowledgement == "unattended"
+     and .diskEncrypted == true' \
     "${MOUNT_DIR}/@var/lib/punar/install/seed.json" >/dev/null \
     || die 'the installed seed does not retain unattended custody provenance'
 [ ! -e "${MOUNT_DIR}/@var/lib/punar/install/custody.json" ] \
