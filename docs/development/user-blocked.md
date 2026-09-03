@@ -47,8 +47,9 @@ start early.
 (§44.1), hardware-backed device identity, and the honest removal of the
 `SIMULATED` tag from boot-integrity and disk-encryption compliance rows.
 
-**Meanwhile:** LUKS2 design is documented; the VM proves the policy and
-compliance plumbing; nothing claims TPM.
+**Meanwhile:** attended and signed-unattended KVM installs create and inspect
+real LUKS2 storage, exercise passphrase and recovery custody, and scan for
+literal secret leakage. Nothing claims TPM-assisted unlock or measured boot.
 
 **Proof when unblocked:** unlock without a passphrase on real hardware after
 a measured boot, plus a deliberate PCR mismatch refusing to unlock.

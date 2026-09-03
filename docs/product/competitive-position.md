@@ -1,6 +1,6 @@
 # Competitive position — Punar vs Omarchy
 
-**Status:** analysis · written 2026-08-25 · owner: product
+**Status:** historical baseline · frozen 2026-08-25 · owner: product
 **Brief received, verbatim:** *"We need to be better than omarchy.org in every way."*
 **Evidence base:** [`docs/product/research/omarchy.md`](research/omarchy.md) (verified
 2026-08-25, marker-tagged) for Omarchy; [`IMPLEMENTATION_STATUS.md`](../../IMPLEMENTATION_STATUS.md),
@@ -9,6 +9,14 @@ traceability matrix), [`docs/development/user-blocked.md`](../development/user-b
 [`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md),
 [`docs/design/DESIGN_LANGUAGE.md`](../design/DESIGN_LANGUAGE.md), ADR-001/002/003, and the
 image definition at `os/images/mkosi.profiles/desktop/mkosi.conf` for Punar.
+
+> **Do not use this frozen snapshot as Punar's current readiness report.** It
+> intentionally preserves the evidence available on 2026-08-25; later work has
+> closed its installer, onboarding, application, update/rollback and desktop
+> claims. Current implementation and canonical-run evidence live in
+> [`BUILD-QUEUE.md`](../../BUILD-QUEUE.md). Refreshing the full comparison
+> requires a new same-date Omarchy research pass rather than silently mixing
+> old competitor evidence with new Punar evidence.
 
 This document is written to be useful to a founder deciding where the next month goes.
 It is therefore honest in both directions. Where Punar's status is

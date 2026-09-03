@@ -584,9 +584,19 @@ The unattended signed-answer lane now generates the disk passphrase inside
 `punard`, returns it and the recovery key only over the private disclosure
 socket, and will not cross the recovery gate until `punarctl` atomically writes,
 fsyncs, reopens and byte-verifies `custody.json` on `PUNAR_ANSWR`. The answer
-schema, strict parser, no-secret negative fixture, service trigger, dedicated
-custody output schema and local tests are green. I36's full ISO/QEMU
-answer-media and secrecy run is pending canonical CI.
+schema, strict parser, no-secret negative fixture, service trigger and dedicated
+custody output schema are green. **CANONICAL KVM PROOF:** [run
+33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301),
+installer job 100844884825, built the 4,427,239,424-byte ISO (SHA-256
+`75ae64c1b018ec0672615903bcf2481e6949c0f8a9876d17542522480fac934e`),
+booted it as both optical and raw hybrid media, refused a correctly signed
+answer whose destruction confirmation named the wrong disk with the first MiB
+byte-identical, completed the encrypted unattended install in 91 seconds,
+returned and byte-verified removable custody, unlocked the installed LUKS2
+volume with that exact generated passphrase, inspected GPT/LUKS2/btrfs and the
+installed seed, and found neither generated secret in live or installed
+logs/state. This closes I36c and I36's unattended custody/secrecy half in a VM;
+I36a/b/d still need to join the same privileged VM fixture.
 The origin is fail-closed too: `install.plan` does not return a usable token
 unless its success event has been durably appended, so a full/unwritable audit
 filesystem is discovered while the target disk is still byte-identical.
@@ -721,11 +731,11 @@ stdin password delivery and immediate clearing, the real greeter's one-use PAM
 handoff, A/B-shaped release storage, compact responsive focus scrolling and
 the no-secret-frame ARM64 release gate are implemented and passed on
 2026-08-30. The destructive encrypted installer, recovery acknowledgement and
-installed-image proof are now closed in canonical KVM CI on 2026-09-01. Still
-open are canonical proof of the newly implemented unattended answer-media lane,
-the remaining negative/power-loss
-matrix, x86 substrate parity, logout/login human acceptance and physical
-hardware.
+installed-image proof were closed in canonical KVM CI on 2026-09-01; signed
+unattended answer media, removable custody, literal-secret scanning and I36c's
+zero-write refusal were closed by run 33814941301 on 2026-09-03. Still open are
+the remaining I36a/b/d privileged-VM refusals, the power-loss matrix, x86
+substrate parity, logout/login human acceptance and physical hardware.
 
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying

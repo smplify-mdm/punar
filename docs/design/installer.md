@@ -1,6 +1,6 @@
 # The Punar Installer — design
 
-**Status:** encrypted VM installer proven · signed unattended custody implementation awaiting canonical ISO/QEMU proof, 2026-09-01
+**Status:** attended and signed-unattended encrypted VM installers proven · physical and production trust gates remain open, 2026-09-03
 **Spec authority:** §66 (installation), §65 (first-boot UX), §44.2 (disk
 encryption), §44.1 (boot), §49 (enrollment chain), §48 (JIT privilege),
 §5.1/§5.3 (target hardware), §12 (keyboard-first), §60 (hard safety
@@ -21,11 +21,11 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 > root-A payload now build and verify as an ephemerally signed install bundle;
 > the attended public apply and recovery-ack orchestration is implemented and
 > runtime-proven on generic x86_64 KVM, with the same logic unit-proven on
-> ARM64. The signed unattended answer/custody path is implemented and locally
-> contract-tested; its full ISO/QEMU run is not yet canonical. Production signing,
-> encryption-on-the-built-image, update swap and
-> physical-device claims remain open. The purpose here is
-> still to make the first real install possible without inventing a second
+> ARM64. Canonical [run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) also runtime-proved the signed unattended
+> answer/custody path, exact generated-passphrase unlock and literal-secret
+> scans on x86_64 KVM. Production signing and distribution, Secure Boot/TPM
+> custody, and physical-device claims remain open. The purpose here is
+> still to make the first physical install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones
 > building.
 
@@ -41,17 +41,17 @@ it solid.
 
 | # | Mechanism | Line | Standing |
 |---|---|---|---|
-| 01 | ISO built by the pinned mkosi pipeline, offline live boot, no network | **solid through I05** | **VERIFIED 2026-08-31:** canonical run 33442898971 built the final hybrid ISO, passed its artifact contract, and booted its live root with `-nic none` in both optical and raw-drive forms. The destructive install remains dashed. |
-| 02 | ADR-003 partition layout created on a device | *dashed* | **Implemented and content-checked in the directly built ARM64 VM image**: I08–I11/I13's unencrypted-layout equivalents pass and the image boots. It is not an installed device and not encrypted. Solid only when the real installer lane passes I08–I13. This gives execution-trust V3 an artefact to target without claiming the installer exists. |
-| 03 | LUKS2 by default, passphrase unlock | *dashed* | Designed here (§5). Solid when I12 and I19 pass. |
+| 01 | ISO built by the pinned mkosi pipeline, offline live boot, no network | **solid through I05** | **VERIFIED 2026-08-31:** canonical run 33442898971 built the final hybrid ISO, passed its artifact contract, and booted its live root with `-nic none` in both optical and raw-drive forms. |
+| 02 | ADR-003 partition layout created on a device | **solid in generic x86_64 KVM** | Canonical installer runs create and independently inspect the four-partition target. Native Raspberry Pi and physical-device installation remain separate claims. |
+| 03 | LUKS2 by default, passphrase unlock | **solid in generic x86_64 KVM** | [Run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) completed an encrypted unattended install and unlocked the inspected volume with the exact generated custody passphrase. TPM-assisted unlock remains dashed. |
 | 04 | **TPM-assisted unlock** | *dashed* | **SIMULATED and deliberately not enrolled.** User-blocked item 2. §5.4 argues why enrolling against a software TPM would be worse than not enrolling at all. |
 | 05 | **Secure Boot / signed UKI** | *dashed* | **SIMULATED.** User-blocked item 1. The installer's live-mode gate (§7.1) is only as strong as the signature over the UKI that carries it — stated, not hidden. |
-| 06 | **Release-manifest signature verification at install** | *dashed* | Mechanism designed and exercised with per-run ephemeral keys; **custody is user-blocked item 7**. Device fails closed on an empty trusted-key set. |
-| 07 | Recovery key generated, shown once, never logged | *dashed* | Designed here (§5.3). Solid when I36's secrecy half passes. |
-| 08 | Typed install surface, no generic root shell | *dashed* | Designed here (§7). Solid when I33–I35 pass. The *existing* negative assertion (`system.exec` → `unknown_method`) is already **PROVEN IN CI** and is extended, not replaced. |
+| 06 | **Release-manifest signature verification at install** | **solid mechanism; non-production trust root** | Exercised end to end with per-run ephemeral keys; **production custody is user-blocked item 7**. Device fails closed on an empty trusted-key set. |
+| 07 | Recovery key generated, disclosed once, never logged | **solid for attended and signed-unattended KVM lanes** | [Run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) returned custody only to `PUNAR_ANSWR` and found both generated secrets zero times in live and installed logs/state. Physical recovery remains open. |
+| 08 | Typed install surface, no generic root shell | **solid in the VM installer** | I33–I35 and the unknown-method negatives are CI-proven. No generic execution primitive exists in the live environment. |
 | 09 | Dev conveniences absent from a release image | *dashed* | Designed here (§8) as **both** a profile split and a build-time assertion. Solid when the build fails on violation *and* I22–I28 pass. |
 | 10 | **Hardware coverage** | *dashed* | The *report mechanism* (§9.3) is provable in QEMU. **Coverage itself is unknowable until user-blocked item 3.** No row in this document claims a machine works. |
-| 11 | The installer→first-boot seam (`seed.json`, the accountless image) | *dashed* | Designed against `onboarding.md` §4.2–4.4 (§6.4). Solid when I29–I32 pass — and it is the one row whose failure mode is *silence on both sides*, which is why it gets four assertions. |
+| 11 | The installer→first-boot seam (`seed.json`, the accountless image) | **solid in generic x86_64 KVM** | The installed seed is digest-bound, reopened read-only, typed, and externally inspected; onboarding consumes the same accountless-image seam. Physical first-boot acceptance remains open. |
 | 12 | **`onboarding.md` §1.8 Layer 2 recovery** (a fourth UKI, `punar-recover`) | *dashed* | **Does not exist.** ESP room is reserved and the artefact is not built. Recorded here because onboarding §4.4 requirement 5 asked this document to decide, and this is the decision. |
 | 13 | **Bare-metal boot, USB boot, real firmware** | *dashed* | **NOT PROVEN AND NOT PROVABLE HERE.** QEMU + OVMF + virtio proves the software stack and nothing about hardware. |
 | 14 | **The ISO build steps against the pinned toolchain** (comma-composed profiles, `Format=uki`, the `xorriso` hybrid idiom, `libisoburn` in the snapshot) | **solid** | **VERIFIED 2026-08-31:** F1–F4 and the finished artifact are exercised by canonical run 33442898971. |
@@ -1467,19 +1467,19 @@ Unit tests prove the three required installation events, secret-field refusal
 and post-write tamper refusal. Typed IPC and daemon integration tests prove the
 strict descriptor-only shapes, installed/live mode gate and that an
 agent-attributed uid-0 request is denied while status stays idle and the
-fixture disk tree stays byte-identical. I35 still requires the public
-unattended install lane and a full privileged install VM.
+fixture disk tree stays byte-identical. I35 is closed for the attended and
+signed-unattended generic-x86 KVM lanes.
 `install.plan` also treats its success audit append as a precondition to
 returning the plan token: an audit I/O failure is reported with
 `disk_changed: false`, rather than being discovered after destructive work.
-The privileged real-vfat, LUKS and btrfs mounts still need the live installer
-VM gate. Raspberry Pi boot-filesystem installation is now component-proven as
+The privileged real-vfat, LUKS and btrfs mounts are proven by the live x86_64
+installer VM gate. Raspberry Pi boot-filesystem installation is component-proven as
 the bounded raw-write/reread/read-only-validation primitive above, and its
 build-side FAT assembly/pin validator now exists. Root-payload module staging,
 matching initramfs generation and signed install-manifest wiring are now
-proven by the release bundle. The unattended answer/custody lane, privileged
-full-install VM and real-board fault injection remain unimplemented, so this
-checkpoint is not yet an installability or Raspberry Pi support claim.
+proven by the release bundle. Signed unattended answer/custody is now proven on
+generic x86_64 KVM; native Raspberry Pi unattended installation and real-board
+fault injection remain open, so this is not a Raspberry Pi support claim.
 
 Five external binaries, all from the image, all with fixed argv, all with
 validated parameters. No `chroot`. No `arch-chroot`. No `pacstrap`. No
