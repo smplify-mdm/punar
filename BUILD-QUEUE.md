@@ -760,10 +760,17 @@ sizes, publishers, and a `containment: sandboxed` **safety label** nothing in
 the project could verify — a §1.22 violation on the one field that tells a user
 an app cannot reach their files.
 
-**Settled:** Flatpak is the mechanism, because ADR-003 forces it —
-`/var/lib/flatpak` is the only place a user-installed app survives an image
-swap. **Not settled:** whether `/var/lib/flatpak` and `/usr/local` are actually
-on shared storage. §1.7 of the design proposes it; **it is not built.**
+**Settled and built:** Flatpak is the primary third-party mechanism, because
+ADR-003 requires app state to survive an image swap. The generated `fstab`
+mounts the encrypted/shared `@var` subvolume at `/var`, so
+`/var/lib/flatpak` is outside both immutable root slots. The image-layout gate
+reopens that subvolume and verifies that slot A contains none of the mutable
+trees. The signed catalog, typed install/remove/update methods, visual
+Application Library, installed-state reconciliation, and cross-workspace Open
+behavior are implemented. The remaining application work is native vendor-UI
+compatibility on both architectures, managed per-app configuration adapters,
+generic user-created web apps/browser contexts, and physical-device testing—not
+the persistence location.
 
 **Also:** the UX reviewer's objection stands — spec §12.2's worked example is
 typing `> install Firefox` into the **command centre**, and non-negotiable 17
