@@ -59,6 +59,18 @@ grep -Fxq 'Release=unstable' "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
     || fail "amd64 candidate does not track pinned sid"
 grep -Fxq 'Architecture=x86-64' "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
     || fail "amd64 candidate architecture is not x86-64"
+for config in \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
+    "${REPO_ROOT}/os/images/arm64/mkosi.conf"; do
+    grep -Fxq 'ExtraTrees=../debian-mkosi.extra' "${config}" \
+        || fail "${config#"${REPO_ROOT}/"} does not compose the shared Debian adapter tree"
+done
+for adapter in \
+    usr/lib/systemd/system/greetd.service.d/punar-vt.conf \
+    usr/share/punar/platform/debian-chromium-flags; do
+    [ -f "${REPO_ROOT}/os/images/debian-mkosi.extra/${adapter}" ] \
+        || fail "shared Debian adapter is missing ${adapter}"
+done
 grep -Fxq '         linux-image-amd64' "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
     || fail "amd64 candidate lacks Debian's kernel metapackage"
 grep -Fq 'console=ttyS0' \
