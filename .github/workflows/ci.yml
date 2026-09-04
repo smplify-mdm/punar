@@ -521,7 +521,12 @@ jobs:
             os/images/cache/debian-amd64-pkgs
             os/images/cache/cargo-amd64-debian
             os/images/cache/cargo-target-amd64-debian
-          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'os/images/mkosi.profiles/desktop/**', 'Cargo.lock') }}
+          # Do not hash the staged desktop tree directly: it deliberately
+          # contains absolute systemd enablement symlinks, which GitHub's
+          # hashFiles walker rejects before the build can start. The commit
+          # SHA invalidates changed shared desktop inputs; the restore prefix
+          # still reuses the latest snapshot-bounded package/Cargo cache.
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: punar-debian-amd64-
 
       - name: Build pinned Debian amd64 minimal + desktop candidates
