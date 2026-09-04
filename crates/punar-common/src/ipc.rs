@@ -53,6 +53,7 @@ use serde_json::{Value, json};
 
 use crate::install::{InstallApplyParams, InstallPlanParams, InstallRecoveryAckParams};
 use crate::update::{UpdateApplyParams, UpdateCheckParams, UpdateRollbackParams};
+use crate::webapp::WebAppManifest;
 use thiserror::Error;
 
 use crate::approval::{
@@ -563,6 +564,55 @@ pub struct AppsUpdateParams {
     pub all: bool,
 }
 
+// -- M11 user-created web apps and browser contexts ------------------------
+
+/// List the caller's own root-recorded web apps and contexts. Artifacts are
+/// omitted by default because their base64 icon bytes make the response much
+/// larger; `punarctl web-apps sync` opts in deliberately.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsListParams {
+    #[serde(default)]
+    pub include_artifacts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsGetParams {
+    pub id: String,
+    #[serde(default)]
+    pub include_artifacts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsInstallParams {
+    pub app: WebAppManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsUninstallParams {
+    pub id: String,
+    #[serde(default)]
+    pub purge_data: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsContextCreateParams {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAppsContextDeleteParams {
+    pub id: String,
+    #[serde(default)]
+    pub purge_data: bool,
+}
+
 // -- M9 approval + privilege params (contract section 14) -------------------
 
 /// Params for `approvals.get`.
@@ -802,6 +852,20 @@ pub enum Method {
     /// to the exact identities pinned by the signed image catalog. Human only
     /// and always audited.
     AppsUpdate(AppsUpdateParams),
+    /// `webapps.list` — the caller's own installed web apps and browser
+    /// contexts. Optional derived artifacts are explicitly requested.
+    WebAppsList(WebAppsListParams),
+    /// `webapps.get` — one caller-owned record, optionally with artifacts.
+    WebAppsGet(WebAppsGetParams),
+    /// `webapps.install` — create one persistent, typed launcher identity.
+    /// Own-uid human self-service; always audited by the daemon.
+    WebAppsInstall(WebAppsInstallParams),
+    /// `webapps.uninstall` — remove one caller-owned launcher identity.
+    WebAppsUninstall(WebAppsUninstallParams),
+    /// `webapps.context_create` — create one caller-owned storage context.
+    WebAppsContextCreate(WebAppsContextCreateParams),
+    /// `webapps.context_delete` — remove an unused caller-owned context.
+    WebAppsContextDelete(WebAppsContextDeleteParams),
     /// `update.status` — read-only, local release/channel/health/rollback
     /// evidence. Any admitted peer may inspect it; no check or mutation is
     /// hidden behind this method.
@@ -836,7 +900,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 33] = [
+    pub const NAMES: [&'static str; 39] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -861,6 +925,12 @@ impl Method {
         "apps.install",
         "apps.remove",
         "apps.update",
+        "webapps.list",
+        "webapps.get",
+        "webapps.install",
+        "webapps.uninstall",
+        "webapps.context_create",
+        "webapps.context_delete",
         "update.status",
         "update.check",
         "update.apply",
@@ -900,6 +970,12 @@ impl Method {
             Method::AppsInstall(_) => "apps.install",
             Method::AppsRemove(_) => "apps.remove",
             Method::AppsUpdate(_) => "apps.update",
+            Method::WebAppsList(_) => "webapps.list",
+            Method::WebAppsGet(_) => "webapps.get",
+            Method::WebAppsInstall(_) => "webapps.install",
+            Method::WebAppsUninstall(_) => "webapps.uninstall",
+            Method::WebAppsContextCreate(_) => "webapps.context_create",
+            Method::WebAppsContextDelete(_) => "webapps.context_delete",
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
             Method::UpdateApply(_) => "update.apply",
@@ -959,6 +1035,14 @@ impl Method {
             | Method::AppsInstall(_)
             | Method::AppsRemove(_)
             | Method::AppsUpdate(_) => false,
+            // User-created web apps and contexts are explicitly own-uid
+            // self-service. The handlers still deny an agent-attributed peer.
+            Method::WebAppsList(_)
+            | Method::WebAppsGet(_)
+            | Method::WebAppsInstall(_)
+            | Method::WebAppsUninstall(_)
+            | Method::WebAppsContextCreate(_)
+            | Method::WebAppsContextDelete(_) => false,
             Method::UpdateStatus => false,
             Method::UpdateCheck(_) | Method::UpdateApply(_) | Method::UpdateRollback(_) => true,
             Method::InstallTargets => false,
@@ -998,6 +1082,12 @@ impl Method {
             Method::AppsInstall(p) => serde_json::to_value(p),
             Method::AppsRemove(p) => serde_json::to_value(p),
             Method::AppsUpdate(p) => serde_json::to_value(p),
+            Method::WebAppsList(p) => serde_json::to_value(p),
+            Method::WebAppsGet(p) => serde_json::to_value(p),
+            Method::WebAppsInstall(p) => serde_json::to_value(p),
+            Method::WebAppsUninstall(p) => serde_json::to_value(p),
+            Method::WebAppsContextCreate(p) => serde_json::to_value(p),
+            Method::WebAppsContextDelete(p) => serde_json::to_value(p),
             Method::UpdateCheck(p) => serde_json::to_value(p),
             Method::UpdateApply(p) => serde_json::to_value(p),
             Method::UpdateRollback(p) => serde_json::to_value(p),
@@ -1070,6 +1160,23 @@ impl Method {
             "apps.install" => Self::parse_required_params(method, params).map(Method::AppsInstall),
             "apps.remove" => Self::parse_required_params(method, params).map(Method::AppsRemove),
             "apps.update" => Self::parse_required_params(method, params).map(Method::AppsUpdate),
+            "webapps.list" => match params {
+                None => Ok(Method::WebAppsList(WebAppsListParams::default())),
+                Some(value) => Self::parse_params(method, value).map(Method::WebAppsList),
+            },
+            "webapps.get" => Self::parse_required_params(method, params).map(Method::WebAppsGet),
+            "webapps.install" => {
+                Self::parse_required_params(method, params).map(Method::WebAppsInstall)
+            }
+            "webapps.uninstall" => {
+                Self::parse_required_params(method, params).map(Method::WebAppsUninstall)
+            }
+            "webapps.context_create" => {
+                Self::parse_required_params(method, params).map(Method::WebAppsContextCreate)
+            }
+            "webapps.context_delete" => {
+                Self::parse_required_params(method, params).map(Method::WebAppsContextDelete)
+            }
             "update.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
@@ -2098,6 +2205,35 @@ mod tests {
                 id: None,
                 all: true,
             }),
+            Method::WebAppsList(WebAppsListParams::default()),
+            Method::WebAppsGet(WebAppsGetParams {
+                id: "notes".to_string(),
+                include_artifacts: true,
+            }),
+            Method::WebAppsInstall(WebAppsInstallParams {
+                app: WebAppManifest {
+                    v: 1,
+                    id: "notes".to_string(),
+                    name: "Notes".to_string(),
+                    start_url: "file:///usr/share/punar/fixtures/webapps/notes/index.html"
+                        .to_string(),
+                    context: "personal".to_string(),
+                    workspace: "notes".to_string(),
+                    icon: crate::webapp::WebAppIconRequest::Generated,
+                },
+            }),
+            Method::WebAppsUninstall(WebAppsUninstallParams {
+                id: "notes".to_string(),
+                purge_data: false,
+            }),
+            Method::WebAppsContextCreate(WebAppsContextCreateParams {
+                id: "atlas".to_string(),
+                name: "Atlas".to_string(),
+            }),
+            Method::WebAppsContextDelete(WebAppsContextDeleteParams {
+                id: "atlas".to_string(),
+                purge_data: true,
+            }),
             Method::UpdateStatus,
             Method::UpdateCheck(UpdateCheckParams { force: false }),
             Method::UpdateApply(UpdateApplyParams {
@@ -2367,6 +2503,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(reject.error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn webapp_params_are_strict_typed_and_never_accept_commands() {
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"webapps.install","params":{"app":{"v":1,"id":"notes","name":"Notes","start_url":"file:///usr/share/punar/notes.html","context":"personal","workspace":"notes","icon":{"kind":"generated"}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(request.method, Method::WebAppsInstall(_)));
+
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"webapps.list","params":{"include_artifacts":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.method,
+            Method::WebAppsList(WebAppsListParams {
+                include_artifacts: true
+            })
+        ));
+
+        for line in [
+            r#"{"v":1,"id":"1","method":"webapps.install","params":{"app":{"v":1,"id":"notes","name":"Notes","start_url":"https://notes.example","context":"personal","workspace":"notes","icon":{"kind":"generated"},"command":"sh -c evil"}}}"#,
+            r#"{"v":1,"id":"1","method":"webapps.context_create","params":{"id":"atlas","name":"Atlas","uid":0}}"#,
+            r#"{"v":1,"id":"1","method":"webapps.uninstall","params":{"id":"notes","purge_data":false,"path":"/etc"}}"#,
+        ] {
+            let reject = Request::parse_json_line(line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{line}");
+        }
     }
 
     #[test]

@@ -42,7 +42,7 @@ is named inline.
 | Hyprland compositor (Wayland) | **in** | spec §57 committed stack; tiling + keyboard-first |
 | punar-shell bar + command center (Quickshell/QML) | **in** | spec §53; must implement `command-approval.html` design, not approximate it |
 | Terminal: foot | **in** | lightweight native Wayland terminal; keyboard-first |
-| Browser: chromium (upstream, unpatched) | **in** | spec §48: upstream Chromium + thin integration; launch/window integration only in M1 |
+| Browser: chromium (upstream, unpatched) | **in** | spec §48: M1 shipped the browser and direct launch; M11 later replaced that direct launch with the thin context/web-app integration layer |
 | Git, Neovim, Podman (+crun, netavark, aardvark-dns) | **in** | spec §76 M1 deliverables; CLI tools, no UI work needed |
 | Keyboard grammar (PUNAR-based binds, no-mouse operation) | **in** | M1 acceptance criterion |
 | pipewire + wireplumber + pipewire-pulse (socket-activated) | **in** | minimal audio so chromium doesn't stall; no pulseaudio per budgets |
@@ -56,6 +56,11 @@ is named inline.
 | Secure Boot / signed UKIs, vendor mirror, ISO | **deferred** | carried M0 pipeline limitations, unchanged by M1 |
 | Real-hardware boot (linux-firmware) | **deferred** | VM-only dev image remains VM-only; firmware is the largest single package |
 | Web-app install flow | **deferred → M11** | spec §76 |
+
+**M11 amendment:** the deferred web-app flow is now implemented. `PUNAR+B`
+and the default HTTP handlers enter through `punarctl web-apps browse`, while
+installed web apps use typed records, generated launchers and per-context
+Chromium profile roots. This M1 table remains the historical scope record.
 
 ## 2. Verified package manifest
 
@@ -160,7 +165,7 @@ manager beyond greetd; no uwsm; the real QML greeter is deferred (§1).
    `exec-once = hyprpolkitagent`,
    `exec-once = /usr/lib/punar/desktop-ready.sh` (§7), plus the keyboard
    grammar binds (PUNAR+Return foot, PUNAR+Space command center, PUNAR+B
-   chromium, PUNAR+arrows/HJKL focus, etc. — exact grammar owned by the
+   browser in the active context, PUNAR+arrows/HJKL focus, etc. — exact grammar owned by the
    shell workstream, but it lives in this config).
 6. Seat/session management: systemd-logind via greetd's PAM session;
    Hyprland's libseat uses the logind backend. The seatd daemon is never

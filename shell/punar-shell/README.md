@@ -563,7 +563,7 @@ action half survives truncation.
 
 | Kind | Mechanism | Printed action |
 | --- | --- | --- |
-| `app` | `DesktopEntry.execute()` — the argv Quickshell parsed from `Exec`, never a shell string | `Launch(chromium)` |
+| `app` | `DesktopEntry.execute()` — the argv Quickshell parsed from `Exec`, never a shell string | `Launch(punar-browser)` |
 | `project` | Hyprland `workspace <id>` (+ `renameworkspace <id> <name>` when allocating) | `OpenProject(atlas) · Workspace 2` |
 | `surface` | `qs -p <shellDir> ipc call <target> open`, routed by `IpcHandler.target` | `Surface(systemcontrol) · Punar S` |
 | `layout` | `/usr/lib/punar/punar-layout.sh <preset>` | `SetLayout(columns)` |

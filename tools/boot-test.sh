@@ -211,7 +211,7 @@
 #   A missing/corrupt export or screenshot is a warning, not a failure —
 #   the guest treats a failed grim the same way (its absence is a signal),
 #   and the RAM gate rests on the serial numbers. The exercise verdicts
-#   are the exception: a delivered PUNAR_M2..M10_FAIL or PUNAR_M12_FAIL
+#   are the exception: a delivered PUNAR_M2..M12_FAIL
 #   fails here.
 #
 # KVM is used when /dev/kvm is present, accessible and native to the guest
@@ -233,7 +233,7 @@
 #                          (default: 1200 KVM, 2400 TCG)
 #   PUNAR_EXPORT_TIMEOUT   desktop: seconds to wait for the export sentinel
 #                          — must also cover the isolated surface-cost and
-#                          M2..M10 and M12 exercises, which run between the RAM result
+#                          M2..M12 exercises, which run between the RAM result
 #                          and the export (default: 4200 hardware, 9600 TCG)
 #   PUNAR_PROOF_DIR        desktop: where to land the collected files
 #                          (default: os/images/out/desktop-proof)
@@ -682,6 +682,10 @@ run_desktop() {
           "${PROOF_DIR}"/m10-*.jsonl \
           "${PROOF_DIR}"/m10-*.txt \
           "${PROOF_DIR}/punar-m10.png" \
+          "${PROOF_DIR}/m11-report.txt" \
+          "${PROOF_DIR}"/m11-*.json \
+          "${PROOF_DIR}"/m11-*.txt \
+          "${PROOF_DIR}/punar-m11.png" \
           "${PROOF_DIR}/m12-report.txt" \
           "${PROOF_DIR}"/m12-*.json \
           "${PROOF_DIR}"/m12-*.txt \
@@ -807,6 +811,7 @@ run_desktop() {
                      m8-report.txt punar-m8.png \
                      m9-report.txt punar-m9.png \
                      m10-report.txt punar-m10.png \
+                     m11-report.txt punar-m11.png \
                      m12-report.txt punar-m12.png; do
                 if [ -f "${guest_dir}/${f}" ]; then
                     cp "${guest_dir}/${f}" "${PROOF_DIR}/${f}"
@@ -856,6 +861,7 @@ run_desktop() {
                      "${guest_dir}"/m9-*.json "${guest_dir}"/m9-*.txt \
                      "${guest_dir}"/m10-*.json "${guest_dir}"/m10-*.jsonl \
                      "${guest_dir}"/m10-*.txt \
+                     "${guest_dir}"/m11-*.json "${guest_dir}"/m11-*.txt \
                      "${guest_dir}"/m12-*.json "${guest_dir}"/m12-*.txt; do
                 if [ -f "${f}" ]; then
                     cp "${f}" "${PROOF_DIR}/"
@@ -901,6 +907,13 @@ run_desktop() {
     if [ -f "${PROOF_DIR}/runtime-report.txt" ]; then
         grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_)[A-Z0-9_]*=[^[:space:]]+$' \
             "${PROOF_DIR}/runtime-report.txt" >> "${PROOF_DIR}/ram-report.txt" || true
+    fi
+    if [ -f "${PROOF_DIR}/m11-report.txt" ]; then
+        # Browser memory is a recorded user-experience measurement, not a
+        # service or idle-RAM gate. Keep it beside the budget facts without
+        # silently turning a Chromium release into an OS pass/fail limit.
+        grep -E '^PUNAR_M11_(WEBAPP_RSS|CONTEXT_DELTA)_MB=[0-9]+$' \
+            "${PROOF_DIR}/m11-report.txt" >> "${PROOF_DIR}/ram-report.txt" || true
     fi
 
     preserve_serial_log
@@ -1308,7 +1321,37 @@ run_desktop() {
         echo "==> M10 exercise: no report under TCG (informational only; emulated runs are not M10-gated)"
     fi
 
-    # Phase 13: M12 per-cgroup egress and privacy gate. The guest proves an
+    # Phase 13: M11 browser/web-app gate. The guest installs from both typed
+    # offline sources, proves the root-owned record and derived user
+    # artifacts, launches real native Chromium app windows in two storage
+    # contexts, reads live sandbox facts from /proc, captures the UI, repairs
+    # an intentionally deleted launcher, and removes every process/artifact.
+    local m11_report="${PROOF_DIR}/m11-report.txt"
+    if [ -f "${m11_report}" ]; then
+        if grep -q 'PUNAR_M11_FAIL' "${m11_report}"; then
+            echo "error: M11 exercise reported PUNAR_M11_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${m11_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_M11_OK' "${m11_report}"; then
+            echo "==> M11 exercise: PUNAR_M11_OK ($(grep -c '^ok' "${m11_report}" || true) assertions passed)"
+        else
+            echo "error: m11-report.txt carries no PUNAR_M11_OK/PUNAR_M11_FAIL verdict" >&2
+            tail -n 20 "${m11_report}" >&2 || true
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_M11_FAIL' "${SERIAL_LOG}"; then
+        echo "error: M11 exercise reported PUNAR_M11_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_M11_OK' "${SERIAL_LOG}"; then
+        echo "==> M11 exercise: PUNAR_M11_OK (verdict from serial console)"
+    elif [ "${HARDWARE_ACCEL}" -eq 1 ]; then
+        echo "error: no m11-report.txt and no M11 verdict on serial — the M11 exercise did not run" >&2
+        exit 1
+    else
+        echo "==> M11 exercise: no report under TCG (informational only; emulated runs are not M11-gated)"
+    fi
+
+    # Phase 14: M12 per-cgroup egress and privacy gate. The guest proves an
     # allowed socket, a fast rejected socket, and the identical same-user
     # out-of-scope control against real listeners; then joins the kernel
     # counters to the local view, destination-free audit record, purgeable
@@ -1403,23 +1446,23 @@ run_desktop() {
     #
     # It runs FIRST in the guest and is gated LAST here, and the split is
     # deliberate. Gating it first meant a single surfaces failure exited the
-    # script before any M2..M10 verdict was parsed, so a run that lost one
-    # assertion reported nothing about the other 561 — the operator had to
+    # script before the milestone verdicts were parsed, so a run that lost one
+    # assertion reported nothing about the other exercises — the operator had to
     # download artifacts to learn whether the milestones had passed. Every
     # milestone verdict now prints before this gate is applied.
     #
     # It is the check that answers
     # "can a person actually use this machine" — the shell surfaces
     # open and close on a live session, the browser starts as a NATIVE
-    # Wayland client with /etc/chromium-flags.conf applied (read back from
-    # the process's own argv, not from the file), the system can open a link
+    # Wayland client with Punar's closed argv applied (read back from the
+    # process itself), the system can open a link
     # at all (xdg-open present, resolving to a desktop entry that exists),
     # an UNENROLLED device carries no chromium managed policy, and the lock
     # screen's PAM stack exists so locking is not a one-way door.
     #
     # Everything above it — qmllint, `hyprland --config ok` — is static. This
     # is the only gate that fails when a surface parses perfectly and then
-    # refuses to open. Same hard-gate contract as M2-M10: a delivered FAIL or
+    # refuses to open. Same hard-gate contract as M2-M12: a delivered FAIL or
     # a truncated report fails this script; a missing report is fatal under
     # KVM and informational under TCG.
     local surfaces_report="${PROOF_DIR}/surfaces-report.txt"
@@ -1475,6 +1518,33 @@ run_desktop() {
         fi
     else
         warn "desktop-test: no m10-detection-summary.json in the export; the host-side schema replay was skipped"
+    fi
+
+    # M11 repeats the in-guest jq assertions with the repository's exact
+    # schemas. The VM intentionally carries no Python schema runtime.
+    local m11_record="${PROOF_DIR}/m11-webapp-record.json"
+    local m11_context="${PROOF_DIR}/m11-context-active.json"
+    if [ -s "${m11_record}" ] && [ -s "${m11_context}" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            if docker run --rm -v "${REPO_ROOT}:/w" -v "${PROOF_DIR}:/proof:ro" \
+                    -w /w python:3.12-slim sh -c \
+                    "pip install -q jsonschema pyyaml referencing && \
+                     python tools/validate_schemas.py \
+                       --document /proof/m11-webapp-record.json \
+                       --schema schemas/browser/web-app.json && \
+                     python tools/validate_schemas.py \
+                       --document /proof/m11-context-active.json \
+                       --schema schemas/browser/browser-context-state.json"; then
+                echo "==> M11 records validate against the web-app and browser-context schemas"
+            else
+                echo "error: exported M11 browser records do not validate against their shipped schemas" >&2
+                exit 1
+            fi
+        else
+            warn "desktop-test: docker is unavailable, so exported M11 records were not schema-replayed (the in-guest jq assertions still ran)"
+        fi
+    else
+        warn "desktop-test: M11 schema evidence is incomplete; host-side replay was skipped"
     fi
 
     echo "==> PASS: desktop gate complete (accel=${ACCEL}, ${desktop_marker} after ${desktop_ok_secs}s)"

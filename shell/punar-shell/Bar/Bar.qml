@@ -73,6 +73,9 @@ Scope {
     // The brand is the pointer-accessible application launcher. This keeps
     // the desktop operable when a VM client or host reserves PUNAR+Space.
     signal commandCenterRequested()
+    // The context pill is a door to System Control's Applications pane.
+    // Bar still does not reach into a sibling surface directly.
+    signal browserContextRequested()
 
     // Active Hyprland workspace in the masthead grammar (M2 named project
     // workspaces): a named workspace shows its NAME, an unnamed one falls
@@ -117,11 +120,15 @@ Scope {
     // Empty string when nothing is focused (an empty workspace), and the
     // label binds `visible` to that: a bare desktop reads "PUNAR · 1" exactly
     // as it did before, with no trailing separator left hanging.
-    readonly property string focusedApp: {
+    readonly property string focusedAppId: {
         var top = ToplevelManager.activeToplevel;
         if (!top)
             return "";
-        var cls = String(top.appId).trim();
+        return String(top.appId).trim();
+    }
+
+    readonly property string focusedApp: {
+        var cls = root.focusedAppId;
         if (cls === "")
             return "";
         var name = Apps.displayNameForAppId(cls);
@@ -135,6 +142,12 @@ Scope {
         if (ws === null)
             return "1";
         return WorkspaceState.isNamed(ws) ? ws.name : String(ws.id);
+    }
+
+    readonly property bool browserContextVisible: {
+        var appId = root.focusedAppId.toLowerCase();
+        return appId.indexOf("punar-webapp-") === 0
+            || root.focusedApp.toLowerCase() === "browser";
     }
 
     // ---- M9: the live privilege grant (Plate D-012 Sect I.03) ----
@@ -374,6 +387,50 @@ Scope {
                 anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 6
+
+                // Context is shown only while it explains the focused
+                // browser-backed window. Keeping it absent for terminals,
+                // files, and the bare desktop preserves the calm default
+                // bar; clicking it opens the management surface.
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.browserContextVisible
+                    width: browserContextRow.implicitWidth + 16
+                    height: browserContextRow.implicitHeight + 6
+                    radius: Theme.radiusTag
+                    color: browserContextMouse.containsMouse
+                        ? Theme.shellMuted : "transparent"
+                    border.width: Theme.hairline
+                    border.color: Theme.shellBorder
+
+                    Row {
+                        id: browserContextRow
+                        anchors.centerIn: parent
+                        spacing: 6
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 5
+                            height: 5
+                            radius: 2.5
+                            color: Theme.shellFg
+                        }
+                        MetaLabel {
+                            anchors.verticalCenter: parent.verticalCenter
+                            font.pixelSize: 9
+                            font.letterSpacing: Theme.tracking(9, 0.12)
+                            text: "Context · " + BrowserContext.active
+                        }
+                    }
+
+                    MouseArea {
+                        id: browserContextMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.browserContextRequested()
+                    }
+                }
 
                 // D-016's one new child. Zero pixels on a calm machine.
                 StatusCluster {

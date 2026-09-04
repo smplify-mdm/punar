@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/browser/browser-context-state.json",
+  "title": "Active browser context state",
+  "description": "User-owned preference selecting the browser storage context for the next unpinned launch. It is state isolation within one Unix uid, not a security boundary.",
+  "type": "object",
+  "required": ["version", "updated", "active", "active_cause", "bindings"],
+  "properties": {
+    "version": {"const": 1},
+    "updated": {"$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"},
+    "active": {"$ref": "#/$defs/id"},
+    "active_cause": {"type": "string", "pattern": "^(default|manual|workspace:[A-Za-z0-9][A-Za-z0-9 _-]{0,31})$"},
+    "bindings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["workspace", "context"],
+        "properties": {
+          "workspace": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"},
+          "context": {"$ref": "#/$defs/id"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"}
+  }
+}

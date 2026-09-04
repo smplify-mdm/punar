@@ -82,6 +82,7 @@ DeferredSurfaceBase {
         onSystemTimeZoneChanged: function(timeZone) {
             root.systemTimeZoneChanged(timeZone);
         }
+        onCloseRequested: root.dismiss()
     }
 
     // ---------------------------------------------------------------
@@ -299,7 +300,10 @@ DeferredSurfaceBase {
         property string tone: "" // "" = no status, so no colour (§2)
         property string tag: ""
         property bool actionable: false
+        property string secondaryLabel: ""
+        property string secondaryTone: ""
         signal triggered
+        signal secondaryTriggered
 
         implicitHeight: Math.max(30, rowName.implicitHeight + 18)
 
@@ -349,9 +353,12 @@ DeferredSurfaceBase {
         }
         Meta {
             id: rowMeta
-            anchors.right: parent.right
+            anchors.right: secondaryButton.visible ? secondaryButton.left : parent.right
+            anchors.rightMargin: secondaryButton.visible ? 10 : 0
             anchors.verticalCenter: parent.verticalCenter
-            width: Math.max(0, parent.width * 0.52 - (rowLine.tag === "" ? 0 : rowTag.width + 10))
+            width: Math.max(0, parent.width * 0.52
+                - (rowLine.tag === "" ? 0 : rowTag.width + 10)
+                - (secondaryButton.visible ? secondaryButton.width + 10 : 0))
             font.pixelSize: 9
             font.weight: 500
             font.letterSpacing: Theme.tracking(9, 0.1)
@@ -361,10 +368,44 @@ DeferredSurfaceBase {
             elide: Text.ElideLeft
         }
 
+        Rectangle {
+            id: secondaryButton
+
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: rowLine.secondaryLabel !== ""
+            width: visible ? secondaryText.implicitWidth + 14 : 0
+            height: 23
+            radius: Theme.radiusTag
+            color: "transparent"
+            border.width: Theme.hairline
+            border.color: rowLine.secondaryTone === "danger"
+                ? Theme.shellDestructive : Theme.shellFg
+
+            Meta {
+                id: secondaryText
+                anchors.centerIn: parent
+                font.pixelSize: 8
+                color: rowLine.secondaryTone === "danger"
+                    ? Theme.shellDestructive : Theme.shellFg
+                text: rowLine.secondaryLabel
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: rowLine.secondaryTriggered()
+            }
+        }
+
         MouseArea {
             id: rowLineMouse
 
-            anchors.fill: parent
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: secondaryButton.visible ? secondaryButton.left : parent.right
             enabled: rowLine.actionable
             hoverEnabled: rowLine.actionable
             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -581,6 +622,8 @@ DeferredSurfaceBase {
             return;
         root.open = false;
         ctl.reasonForCapability = "";
+        ctl.webAppComposerVisible = false;
+        ctl.webAppRemoveArmed = "";
         ctl.query = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
@@ -602,6 +645,11 @@ DeferredSurfaceBase {
 
     function ipcModel(id: string): string {
         return JSON.stringify(ctl.buildView(id));
+    }
+
+    function showSection(id: string): void {
+        ctl.select(id);
+        root.show();
     }
 
     Timer {
@@ -1275,6 +1323,224 @@ DeferredSurfaceBase {
                         }
                     }
 
+                    // D-013's web-app install card, integrated into the
+                    // Applications pane. The two strings leave through one
+                    // fixed argv vector; punard validates URL, name, context,
+                    // and organization policy before writing any artifact.
+                    Item {
+                        id: webAppComposer
+
+                        width: parent.width
+                        visible: ctl.view.webAppComposer === true
+                        height: visible ? webAppComposerColumn.implicitHeight + 30 : 0
+
+                        onVisibleChanged: if (visible)
+                            webAppNameInput.forceActiveFocus()
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radius
+                            color: Theme.shellMuted
+                            border.width: Theme.hairline
+                            border.color: Theme.shellBorder
+                        }
+
+                        Column {
+                            id: webAppComposerColumn
+
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.leftMargin: 16
+                            anchors.rightMargin: 16
+                            anchors.topMargin: 15
+                            spacing: 9
+
+                            Meta {
+                                width: parent.width
+                                font.pixelSize: 10
+                                color: ctl.view.webAppInstallAllowed === true
+                                    ? Theme.shellFg : Theme.shellStatusWarn
+                                text: ctl.view.webAppInstallAllowed === true
+                                    ? "Install website as app"
+                                    : "Website installs restricted by policy"
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "A dedicated window and launcher, using the selected browser context. Punar downloads no manifest or icon."
+                                font.family: Theme.fontSans
+                                font.pixelSize: 12
+                                color: Theme.shellInk3
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Rectangle {
+                                width: parent.width
+                                height: 38
+                                radius: Theme.radiusTag
+                                color: Theme.shellSurface
+                                border.width: webAppNameInput.activeFocus ? 2 : Theme.hairline
+                                border.color: webAppNameInput.activeFocus ? Theme.shellFg : Theme.shellBorder
+
+                                TextInput {
+                                    id: webAppNameInput
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    enabled: ctl.view.webAppInstallAllowed === true
+                                    activeFocusOnTab: webAppComposer.visible
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    color: Theme.shellFg
+                                    selectionColor: Theme.shellFg
+                                    selectedTextColor: Theme.shellSurface
+                                    text: ctl.webAppName
+                                    onTextEdited: ctl.webAppName = text
+                                    Accessible.role: Accessible.EditableText
+                                    Accessible.name: "Web application name"
+                                    Keys.onEscapePressed: {
+                                        ctl.webAppComposerVisible = false;
+                                        win.focusRail();
+                                    }
+                                    Keys.onUpPressed: ctl.cycleWebAppContext(-1)
+                                    Keys.onDownPressed: ctl.cycleWebAppContext(1)
+                                }
+
+                                Text {
+                                    anchors.fill: webAppNameInput
+                                    visible: webAppNameInput.text === ""
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: "Name · e.g. Linear"
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    color: Theme.shellInputBorder
+                                    Accessible.ignored: true
+                                }
+                            }
+
+                            Rectangle {
+                                width: parent.width
+                                height: 38
+                                radius: Theme.radiusTag
+                                color: Theme.shellSurface
+                                border.width: webAppUrlInput.activeFocus ? 2 : Theme.hairline
+                                border.color: webAppUrlInput.activeFocus ? Theme.shellFg : Theme.shellBorder
+
+                                TextInput {
+                                    id: webAppUrlInput
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    enabled: ctl.view.webAppInstallAllowed === true
+                                    activeFocusOnTab: webAppComposer.visible
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    color: Theme.shellFg
+                                    selectionColor: Theme.shellFg
+                                    selectedTextColor: Theme.shellSurface
+                                    text: ctl.webAppUrl
+                                    onTextEdited: ctl.webAppUrl = text
+                                    Accessible.role: Accessible.EditableText
+                                    Accessible.name: "Web application HTTPS address"
+                                    Keys.onPressed: function (event) {
+                                        if (event.key === Qt.Key_Escape) {
+                                            ctl.webAppComposerVisible = false;
+                                            win.focusRail();
+                                            event.accepted = true;
+                                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                            ctl.submitWebApp();
+                                            event.accepted = true;
+                                        } else if (event.key === Qt.Key_Up) {
+                                            ctl.cycleWebAppContext(-1);
+                                            event.accepted = true;
+                                        } else if (event.key === Qt.Key_Down) {
+                                            ctl.cycleWebAppContext(1);
+                                            event.accepted = true;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    anchors.fill: webAppUrlInput
+                                    visible: webAppUrlInput.text === ""
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: "HTTPS address · https://linear.app"
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    color: Theme.shellInputBorder
+                                    Accessible.ignored: true
+                                }
+                            }
+
+                            Flow {
+                                width: parent.width
+                                spacing: 8
+
+                                Meta {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "Storage context"
+                                }
+
+                                Repeater {
+                                    model: ctl.browserContexts
+
+                                    Rectangle {
+                                        id: contextChoice
+
+                                        required property var modelData
+                                        readonly property bool selected: String(modelData.id) === ctl.webAppContext
+
+                                        width: contextChoiceLabel.implicitWidth + 16
+                                        height: 24
+                                        radius: Theme.radiusTag
+                                        color: contextChoice.selected ? Theme.shellFg : Theme.shellSurface
+                                        border.width: Theme.hairline
+                                        border.color: Theme.shellFg
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: "Use " + String(contextChoice.modelData.name)
+                                            + " browser storage context"
+
+                                        Meta {
+                                            id: contextChoiceLabel
+                                            anchors.centerIn: parent
+                                            color: contextChoice.selected ? Theme.shellSurface : Theme.shellFg
+                                            text: String(contextChoice.modelData.name)
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: ctl.webAppContext = String(contextChoice.modelData.id)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column {
+                                width: parent.width
+                                spacing: 7
+
+                                ActionTag {
+                                    hotkey: "↵"
+                                    label: ctl.lastActionPending ? "Installing…" : "Install"
+                                    tone: "ghost"
+                                    enabled: ctl.view.webAppInstallAllowed === true && !ctl.lastActionPending
+                                    opacity: enabled ? 1 : 0.45
+                                    onTriggered: if (enabled)
+                                        ctl.submitWebApp()
+                                }
+                                Meta {
+                                    width: parent.width
+                                    text: "Contexts isolate browser state, not OS privilege"
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+                    }
+
                     // Lists.
                     Repeater {
                         model: ctl.view.rows === undefined ? [] : ctl.view.rows
@@ -1288,8 +1554,12 @@ DeferredSurfaceBase {
                             tone: modelData.tone === undefined ? "" : modelData.tone
                             tag: modelData.tag === undefined ? "" : modelData.tag
                             actionable: modelData.action !== undefined
+                            secondaryLabel: modelData.secondaryLabel === undefined ? "" : modelData.secondaryLabel
+                            secondaryTone: modelData.secondaryTone === undefined ? "" : modelData.secondaryTone
                             onTriggered: if (modelData.action !== undefined)
                                 ctl.runAction(modelData.action)
+                            onSecondaryTriggered: if (modelData.secondaryAction !== undefined)
+                                ctl.runAction(modelData.secondaryAction)
                         }
                     }
 

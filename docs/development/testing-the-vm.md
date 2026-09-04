@@ -117,7 +117,7 @@ Command on an Apple keyboard).
 |---|---|---|
 | **Start here** | `PUNAR + /` | The shortcut help. It is generated from `hyprctl binds -j` — the live table, not a written copy. **If this page and any document disagree, this page is right.** |
 | Terminal | `PUNAR + Return` | foot, Geist Mono, panel surface |
-| Browser | `PUNAR + B` | Chromium, native Wayland |
+| Browser | `PUNAR + B` | Browser in the active context, native Wayland |
 | Find and open an app | `PUNAR + Space` | The launcher lists installed and available applications immediately; type to filter, then click a row or press Enter. If macOS reserves Command+Space, use `PUNAR + SHIFT + Space` or click **PUNAR** in the top-left bar. |
 | Choose a wallpaper | `PUNAR + Space` | Type `wallpaper`; Stillpoint, Daybreak, Winterline, Earthrise, and the lean Field vector are explicit typed actions |
 | System control | `PUNAR + S` | The settings surface. Choose **Applications** to browse the live installed list and signed local catalog. Click an installed row to open it, click an available row to inspect it, or press `O` to browse everything in Command Center. |

@@ -14,7 +14,7 @@
 //      (socket2 events) and the session audio graph through
 //      Quickshell.Services.Pipewire. All event-driven; none polled.
 //
-//   2. punarctl READS, on open only — an event, never a clock. Four
+//   2. punarctl READS, on open only — an event, never a clock. Five
 //      fixed-argv processes whose stdout is collected and parsed:
 //        punarctl status --json           device identity, capability
 //                                         count, the §52 compliance block
@@ -22,6 +22,8 @@
 //        punarctl policy effective --json the §40 information set for
 //                                         every governed path
 //        punarctl privilege status --json the §48 grants held right now
+//        punarctl web-apps list --json    installed web apps, contexts and
+//                                         the effective install policy
 //      A daemon that is not running answers nothing, and the surface then
 //      says AWAITING PUNARD instead of inventing a value.
 //
@@ -31,7 +33,7 @@
 //      report is drawn dashed with its milestone. This surface never
 //      starts a service in order to have something to draw.
 //
-// MUTATION — the shell is never a second control plane. Every write leaves
+// MUTATION — the shell is never a second control plane. Governed writes leave
 // as `punarctl` with FIXED ARGV (never a shell string), and the panel
 // re-reads afterwards rather than assuming it worked. Three writes exist,
 // and each is the real spec path rather than a settings shortcut:
@@ -50,6 +52,10 @@
 //       switch that would be refused.
 //   [R] REVOKE           →  punarctl privilege revoke <grant_id>
 //       Privilege is never permanent and never invisible.
+// Browser-context selection is the deliberate exception: BrowserContext owns
+// that user preference and writes its schema-bound file directly. On a named
+// workspace, choosing a context binds it to that workspace; no daemon, timer,
+// browser launch or privileged mutation is involved.
 //
 // The exact argv is printed under the action row and the daemon's
 // §73-voice refusal is rendered verbatim, because spec §10 says the panel
@@ -78,6 +84,16 @@ Scope {
     property string timezoneQuery: ""
     property var timezoneNames: ["UTC"]
 
+    // Applications also owns Punar's small browser-integration surface.
+    // The inventory is fetched only when that pane is selected. The form is
+    // explicit about the two user-provided values; neither becomes a shell
+    // string, and the daemon remains the validator and policy authority.
+    property bool webAppComposerVisible: false
+    property string webAppName: ""
+    property string webAppUrl: ""
+    property string webAppContext: "personal"
+    property string webAppRemoveArmed: ""
+
     // The capability awaiting a typed reason ([E] · §48 requires one).
     // "" = nothing armed. Cleared by Esc, by moving the selection and by
     // closing the panel — a request never stays armed behind the reader.
@@ -93,6 +109,8 @@ Scope {
     property string lastActionError: ""
     property bool lastActionPending: false
     property string pendingTimeZone: ""
+    property bool pendingWebAppInstall: false
+    property string pendingWebAppRemoval: ""
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
@@ -107,6 +125,7 @@ Scope {
     // explicitly. The resident shell owns the clock and is the only object
     // that can guarantee an immediate refresh of the visible masthead.
     signal systemTimeZoneChanged(string timeZone)
+    signal closeRequested
 
     // ---------------------------------------------------------------
     // Small helpers. Tones are STRINGS here ("ok"/"warn"/"bad"/"") —
@@ -269,6 +288,9 @@ Scope {
     Probe {
         id: grantsProbe
     }
+    Probe {
+        id: webAppsProbe
+    }
 
     // The mutation channel — separate from the probes so a write never
     // races a read, and so its exit code and stderr can be shown.
@@ -297,9 +319,23 @@ Scope {
             // the visible clock uninformed on the shipped Qt build.
             if (exitCode === 0 && changedTimeZone !== "")
                 data.systemTimeZoneChanged(changedTimeZone);
+            if (data.pendingWebAppInstall) {
+                if (exitCode === 0) {
+                    data.webAppName = "";
+                    data.webAppUrl = "";
+                    data.webAppComposerVisible = false;
+                }
+                data.pendingWebAppInstall = false;
+            }
+            if (data.pendingWebAppRemoval !== "") {
+                data.pendingWebAppRemoval = "";
+                data.webAppRemoveArmed = "";
+            }
             // Never trust the write: re-read the control plane and let
             // the registry say what actually happened.
             data.refreshProbes();
+            if (data.selectedId === "applications")
+                data.refreshWebApps();
         })
     }
 
@@ -318,6 +354,9 @@ Scope {
             data.lastActionPending = false;
             data.lastActionExit = 127;
             data.lastActionError = "punarctl is not installed on this machine.";
+            data.pendingWebAppInstall = false;
+            data.pendingWebAppRemoval = "";
+            data.webAppRemoveArmed = "";
         }
     }
 
@@ -326,6 +365,10 @@ Scope {
         capsProbe.ask(["punarctl", "capabilities", "--json"]);
         policyProbe.ask(["punarctl", "policy", "effective", "--json"]);
         grantsProbe.ask(["punarctl", "privilege", "status", "--json"]);
+    }
+
+    function refreshWebApps(): void {
+        webAppsProbe.ask(["punarctl", "--json", "web-apps", "list"]);
     }
 
     // ---------------------------------------------------------------
@@ -365,6 +408,20 @@ Scope {
     }
 
     readonly property bool hasLiveGrant: data.grantList.length > 0
+
+    readonly property var webAppsData: data.obj(webAppsProbe.payload)
+    readonly property var webAppList: {
+        var payload = data.webAppsData;
+        return payload !== null && Array.isArray(payload.apps) ? payload.apps : [];
+    }
+    readonly property var browserContexts: {
+        var payload = data.webAppsData;
+        return payload !== null && Array.isArray(payload.contexts) ? payload.contexts : [];
+    }
+    readonly property var webAppPolicy: {
+        var payload = data.webAppsData;
+        return payload !== null ? data.obj(payload.policy) : null;
+    }
 
     function capFor(path: string): var {
         var list = data.capabilityList;
@@ -694,6 +751,50 @@ Scope {
             data.aiPanelRequested();
         } else if (kind === "applicationBrowser") {
             data.applicationRequested(null, "");
+        } else if (kind === "webAppComposer") {
+            data.webAppComposerVisible = !data.webAppComposerVisible;
+            data.webAppContext = BrowserContext.active;
+        } else if (kind === "browserBrowse") {
+            try {
+                Quickshell.execDetached(["punarctl", "web-apps", "browse"]);
+                data.closeRequested();
+            } catch (e) {
+                data.lastActionArgv = "punarctl web-apps browse";
+                data.lastActionExit = 127;
+                data.lastActionError = "The Browser launcher is not installed on this machine.";
+            }
+        } else if (kind === "webApplication") {
+            var appId = String(a.appId);
+            try {
+                Quickshell.execDetached(["punarctl", "web-apps", "launch", appId]);
+                data.closeRequested();
+            } catch (e) {
+                data.lastActionArgv = "punarctl web-apps launch " + appId;
+                data.lastActionExit = 127;
+                data.lastActionError = "That web application could not be launched.";
+            }
+        } else if (kind === "webAppRemove") {
+            var removeId = String(a.appId);
+            if (data.webAppRemoveArmed !== removeId) {
+                data.webAppRemoveArmed = removeId;
+                return;
+            }
+            if (mutation.running)
+                return;
+            data.pendingWebAppRemoval = removeId;
+            data.runMutation(["punarctl", "--json", "web-apps", "uninstall", removeId, "--yes"]);
+        } else if (kind === "webContext") {
+            var contextId = String(a.contextId);
+            if (BrowserContext.bindToFocusedWorkspace(contextId)) {
+                data.webAppContext = contextId;
+                data.lastActionArgv = "Browser context preference · " + contextId;
+                data.lastActionExit = 0;
+                data.lastActionError = "";
+            } else {
+                data.lastActionArgv = "Browser context preference · " + contextId;
+                data.lastActionExit = 1;
+                data.lastActionError = "The browser context preference could not be saved.";
+            }
         } else if (kind === "application") {
             data.applicationRequested(a.entry, "");
         } else if (kind === "catalogApplication") {
@@ -720,6 +821,40 @@ Scope {
         if (path === "" || reason.trim() === "")
             return;
         data.runMutation(["punarctl", "privilege", "request", "--capability", path, "--reason", reason.trim(), "--duration", "15"]);
+    }
+
+    function submitWebApp(): void {
+        if (mutation.running)
+            return;
+        var name = data.webAppName.trim();
+        var url = data.webAppUrl.trim();
+        var context = data.webAppContext;
+        if (name === "" || url === "") {
+            data.lastActionArgv = "punarctl web-apps install";
+            data.lastActionExit = 2;
+            data.lastActionError = "Enter both a name and an HTTPS address.";
+            return;
+        }
+        data.pendingWebAppInstall = true;
+        data.runMutation([
+            "punarctl", "--json", "web-apps", "install", url,
+            "--name", name, "--context", context
+        ]);
+    }
+
+    function cycleWebAppContext(delta: int): void {
+        var contexts = data.browserContexts;
+        if (contexts.length === 0)
+            return;
+        var index = 0;
+        for (var i = 0; i < contexts.length; ++i) {
+            if (String(contexts[i].id) === data.webAppContext) {
+                index = i;
+                break;
+            }
+        }
+        index = (index + delta + contexts.length) % contexts.length;
+        data.webAppContext = String(contexts[index].id);
     }
 
     function actionByHotkey(key: string): var {
@@ -749,6 +884,12 @@ Scope {
         data.reasonForCapability = "";
         if (itemId !== "datetime")
             data.timezoneQuery = "";
+        if (itemId === "applications") {
+            data.webAppContext = BrowserContext.active;
+            data.refreshWebApps();
+        } else {
+            data.webAppComposerVisible = false;
+        }
     }
 
     function refreshAll(): void {
@@ -1011,10 +1152,65 @@ Scope {
         // in the signed root slot. Neither path performs network I/O merely
         // because the reader opened System Control.
         var rows = [];
+
+        // Browser contexts are real daemon inventory; the active marker is
+        // the user-owned state read by BrowserContext. Managed rows appear
+        // only when the daemon returned them while enrolled.
+        var contexts = data.browserContexts;
+        for (var c = 0; c < contexts.length; ++c) {
+            var context = contexts[c];
+            var active = String(context.id) === BrowserContext.active;
+            var simulated = Array.isArray(context.simulated)
+                && context.simulated.indexOf("certificate_roots") !== -1;
+            rows.push({
+                name: "Browser context · " + String(context.name),
+                meta: active
+                    ? "Active · " + BrowserContext.activeCause
+                        + (simulated ? " · Certificate roots simulated" : "")
+                    : "Select for new browser windows"
+                        + (simulated ? " · Certificate roots simulated" : ""),
+                tone: active ? "ok" : "",
+                tag: context.derived === true ? "Managed" : "Context",
+                action: {
+                    kind: "webContext",
+                    contextId: String(context.id)
+                }
+            });
+        }
+
+        var webApps = data.webAppList;
+        for (var w = 0; w < webApps.length; ++w) {
+            var webApp = webApps[w];
+            rows.push({
+                name: String(webApp.name),
+                meta: "Web app · " + String(webApp.context) + " · select to open",
+                tone: "",
+                tag: webApp.managed === true ? "Managed" : "Web app",
+                action: {
+                    kind: "webApplication",
+                    appId: String(webApp.id)
+                },
+                secondaryLabel: data.webAppRemoveArmed === String(webApp.id)
+                    ? "Confirm remove" : "Remove",
+                secondaryTone: "danger",
+                secondaryAction: {
+                    kind: "webAppRemove",
+                    appId: String(webApp.id)
+                }
+            });
+        }
+
         var installed = Apps.search("", 0);
         var knownIds = ({});
+        var nativeInstalledCount = 0;
         for (var i = 0; i < installed.length; i++) {
             var installedId = Apps.bareId(installed[i]);
+            // These were rendered from punard's authoritative web-app
+            // records above. Their generated desktop entries are launch
+            // artifacts, not a second application identity.
+            if (installedId.indexOf("punar-webapp-") === 0)
+                continue;
+            nativeInstalledCount++;
             knownIds[installedId] = true;
             rows.push({
                 name: Apps.displayName(installed[i]),
@@ -1049,18 +1245,35 @@ Scope {
 
         var version = Catalog.document && typeof Catalog.document.catalogVersion === "string"
             ? Catalog.document.catalogVersion : "unavailable";
+        var policy = data.webAppPolicy;
+        var userInstalls = policy === null || policy.allow_user_install === true;
         return {
             title: "Applications",
-            sub: "System · " + installed.length + " installed · " + availableCount + " available · catalog " + version,
+            sub: "System · " + nativeInstalledCount + " native · " + webApps.length
+                + " web apps · " + availableCount + " available · catalog " + version,
             pill: {
                 label: Status.enrolled ? "Policy applies" : "User installs allowed"
             },
             rows: rows,
             emptyRows: "No installed or catalog applications are visible",
+            webAppComposer: data.webAppComposerVisible,
+            webAppInstallAllowed: userInstalls,
             note: Status.enrolled
                 ? "Installed entries come from this live session; available entries come from the signed image catalog. Organization policy is evaluated by punard before any install."
-                : "Installed entries come from this live session; available entries come from the signed image catalog. Opening the browser below fetches nothing until you choose an application.",
+                : "Browser contexts isolate cookies, storage, sign-ins, history, and extensions—not operating-system privilege. Opening this pane performs no network request.",
             actions: [
+                {
+                    hotkey: "W",
+                    label: data.webAppComposerVisible ? "Hide website form" : "Install website as app",
+                    tone: "ghost",
+                    kind: "webAppComposer"
+                },
+                {
+                    hotkey: "B",
+                    label: "Open Browser",
+                    tone: "ghost",
+                    kind: "browserBrowse"
+                },
                 {
                     hotkey: "O",
                     label: "Browse and install",

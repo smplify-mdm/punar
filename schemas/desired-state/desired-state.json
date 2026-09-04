@@ -132,22 +132,46 @@
             },
             "denied": {
               "title": "Denied applications",
-              "description": "Applications that must not be installed (spec section 46).",
+              "description": "Native packages or canonical web origins that must not be installed (spec section 46; milestone 11 section 4.4). Exactly one identity kind is present per entry.",
               "type": "array",
               "items": {
                 "title": "Denied application entry",
-                "description": "A denied-application entry; the spec section 46 example shows an object with a 'package' field.",
+                "description": "A denied native package or browser origin. Origin policy is enforced by Chromium's root-owned managed policy file; package policy remains the native lifecycle gate.",
                 "type": "object",
                 "properties": {
                   "package": {
                     "title": "Denied package name",
                     "description": "Package name of an application that must not be installed (spec section 46).",
                     "$ref": "#/$defs/package_name"
+                  },
+                  "origin": {
+                    "title": "Denied web origin",
+                    "description": "Canonical lower-case HTTPS origin, with no path, query, fragment, credentials, or trailing slash. The local file:// value exists only for offline fixture policy.",
+                    "$ref": "#/$defs/web_origin"
                   }
                 },
-                "required": ["package"],
+                "oneOf": [
+                  {"required": ["package"]},
+                  {"required": ["origin"]}
+                ],
                 "additionalProperties": false
               }
+            },
+            "web_apps": {
+              "title": "Required browser-backed applications",
+              "description": "Strict, offline Punar web-app records required by organization policy (milestone 11 section 4.6). The daemon derives and matches each origin from start_url; no manifest is fetched from the network.",
+              "type": "object",
+              "properties": {
+                "required": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "https://schemas.punar.org/browser/web-app-manifest.json"
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "required": ["required"],
+              "additionalProperties": false
             },
             "allowUserInstall": {
               "title": "Allow user installs",
@@ -156,6 +180,40 @@
             }
           },
           "required": ["required"],
+          "additionalProperties": false
+        },
+        "browser": {
+          "title": "Chromium mandatory policy",
+          "description": "Optional root-owned Chromium managed-policy block (milestone 11 section 6). This is a closed vocabulary mirrored by browser/integration/policy-allowlist.json; security-hardening values are one-direction pins and cannot be weakened by an organization layer.",
+          "type": "object",
+          "minProperties": 1,
+          "properties": {
+            "ExtensionInstallBlocklist": {"$ref": "#/$defs/browser_string_list"},
+            "ExtensionInstallAllowlist": {"$ref": "#/$defs/browser_string_list"},
+            "ExtensionInstallForcelist": {"$ref": "#/$defs/browser_string_list"},
+            "ExtensionSettings": {"type": "object"},
+            "WebAppInstallForceList": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {"$ref": "#/$defs/chromium_web_app_install"}
+            },
+            "WebAppSettings": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {"$ref": "#/$defs/chromium_web_app_setting"}
+            },
+            "WebAppInstallByUserEnabled": {"type": "boolean"},
+            "URLBlocklist": {"$ref": "#/$defs/browser_string_list"},
+            "URLAllowlist": {"$ref": "#/$defs/browser_string_list"},
+            "DownloadRestrictions": {"type": "integer", "minimum": 0, "maximum": 4},
+            "DownloadDirectory": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "PromptForDownloadLocation": {"type": "boolean"},
+            "CACertificates": {"$ref": "#/$defs/browser_string_list"},
+            "SitePerProcess": {"const": true},
+            "RemoteDebuggingAllowed": {"const": false},
+            "SSLErrorOverrideAllowed": {"const": false},
+            "InsecurePrivateNetworkRequestsAllowed": {"const": false}
+          },
           "additionalProperties": false
         },
         "ai": {
@@ -230,6 +288,40 @@
       "description": "Application package name, e.g. 'git', 'podman', '1password', 'tailscale' (spec sections 38, 46). Kept as a non-empty string: the spec pins application semantics, not a package-name grammar (section 46), and tightening later would be a breaking change.",
       "type": "string",
       "minLength": 1
+    },
+    "web_origin": {
+      "title": "Canonical web origin",
+      "type": "string",
+      "pattern": "^(https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?|https://\\[[0-9a-f:]+\\](?::[0-9]{1,5})?|file://)$"
+    },
+    "browser_string_list": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2048}
+    },
+    "chromium_web_app_install": {
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(https://|file:///)", "not": {"pattern": "(--|\\\\|\\s)"}},
+        "default_launch_container": {"enum": ["tab", "window"]},
+        "create_desktop_shortcut": {"type": "boolean"},
+        "fallback_app_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "custom_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "install_as_shortcut": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "chromium_web_app_setting": {
+      "type": "object",
+      "required": ["manifest_id"],
+      "properties": {
+        "manifest_id": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "run_on_os_login": {"enum": ["allowed", "blocked", "run_windowed"]},
+        "prevent_close_after_run_on_os_login": {"type": "boolean"},
+        "force_unregister_os_integration": {"type": "boolean"}
+      },
+      "additionalProperties": false
     }
   }
 }

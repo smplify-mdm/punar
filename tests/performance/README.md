@@ -252,10 +252,10 @@ whole gap to 1024 MB.
    toasts and the OSD must receive events while closed; and the lock screen
    must never pay first-use construction latency.
 
-2. **Xwayland, 42.6 MB, with plausibly zero clients.** Chromium now runs native
-   Wayland (`--ozone-platform-hint=auto` in `/etc/chromium-flags.conf`), foot is
-   Wayland, and nothing else shipped is an X11 client. Hyprland starts XWayland
-   eagerly when `xwayland:enabled` is true.
+2. **Xwayland, 42.6 MB, with plausibly zero clients.** The generic Browser now
+   runs Chromium natively on Wayland through `punarctl`'s closed argv builder;
+   foot is Wayland, and nothing else shipped is an X11 client. Hyprland starts
+   XWayland eagerly when `xwayland:enabled` is true.
 
    **Deliberately not switched off.** It is a one-line config change for a
    measured 3.3% of the total, and the cost is that no X11 application can ever

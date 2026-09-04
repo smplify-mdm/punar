@@ -79,7 +79,7 @@ Binding prior contracts, **not relitigated**:
   `FULL`/`PARTIAL`/`UNSUPPORTED`, *"silence is not support"*) and §8
   (unmanaged-first — org chrome appears only when enrolled).
 
-M1 put upstream Chromium 151.0.7922.169-1 in the image and bound it to
+M1 put snapshot-pinned upstream Chromium in the image and bound it to
 `PUNAR+B`. That is a browser on a desktop, not browser *integration*: nothing
 about it is Punar's, nothing about it is inventoried, and nothing about it
 follows a project. **M11 builds the integration layer the spec has described
@@ -153,9 +153,10 @@ and any runtime browser updater (§7 is design only); web-app notifications
 (no `org.freedesktop.Notifications` implementation exists in the image until
 M13 — §4.9 says `UNSUPPORTED`, not silence); file associations and deep-link
 scheme handlers; certificate-root deployment (`SIMULATED` — the plate already
-draws it dashed and M11 does not undash it); relay/proxy policy (M12,
-`punar-netd`); browser network destinations in the access ledger (**M12 —
-unchanged by this milestone**); approval-gated installs for AI agents (M11
+draws it dashed and M11 does not undash it); per-context relay/proxy policy
+(**Phase 2** — M12 later shipped project/principal enforcement, not a
+same-uid browser-context route); browser network destinations in the access
+ledger (**Phase 2**); approval-gated installs for AI agents (M11
 refuses them outright instead, §4.4); extension *inventory* and per-site
 permission surfacing (no read API without a fork); and any attempt to draw
 Punar chrome over Chromium's own window content.
@@ -166,7 +167,7 @@ Punar chrome over Chromium's own window content.
 
 | # | Decision |
 |---|---|
-| 1 | **No fork, no patch, no build flag, no preload — and this is checkable.** Chromium stays exactly the pinned snapshot package (`chromium 151.0.7922.169-1`, M1 §2.1). The integration layer is argv + files + records. `m11-check` asserts the installed package's own file list is unmodified against the package database and that no Punar-owned file names a Chromium build option. §3.1, §12 group 1. |
+| 1 | **No fork, no patch, no build flag, no preload — and this is checkable.** Chromium stays exactly the architecture substrate's snapshot-pinned vendor package. The integration layer is argv + files + records. `m11-check` asserts the real browser binary is owned by that package manager and that no Punar-owned entry point names a weakening option. §3.1, §12 group 1. |
 | 2 | **No new binary and no new daemon.** The launcher shim *is* `punarctl web-apps launch <id>`, which builds argv as a `Vec<String>` and `execve`s `chromium` (the M3 fixed-argv law, M6 podman precedent). Consequence: `PUNAR_SERVICE_UNITS` in `idle-ram.sh` is **unchanged**, the services-RSS gate is structurally untouched, and the `.desktop` files Punar writes never contain the token `chromium` — so a Chromium flag has no syntactic place to hide in them. §3.2, §4.5, §9.1. |
 | 3 | **The argv builder is a closed allowlist, compiled in.** `punarctl` may emit exactly seven Chromium flags (`--app=`, `--user-data-dir=`, `--class=`, `--ozone-platform-hint=auto`, `--no-first-run`, `--no-default-browser-check`, `--disable-features=` **only** with the fixed value `PunarNone` — see §8.2) and nothing else, ever. A unit test asserts the const array; a record field can never become a flag because every record field is validated against a regex before it reaches argv. §3.3, §8.2. |
 | 4 | **Web-app install is a typed capability with two front doors, one implementation** (spec 10, 12.2). `punarctl web-apps install …` and the command center's D-013 install card both call the **same** `webapps.install` method on `punard` over the existing socket; the card is a renderer of the CLI's typed action, invoked with fixed argv via `Quickshell.execDetached` — the M9 approval-overlay pattern verbatim. No second code path, no shell string. §4.2, §10.2. |
@@ -180,7 +181,7 @@ Punar chrome over Chromium's own window content.
 | 12 | **A context is a Chromium profile directory selected with `--user-data-dir`, not `--profile-directory`.** `--user-data-dir` is the only option under which "own cookies · storage · sign-ins" is unconditionally true; `--profile-directory` shares one browser process and would make the plate's copy a half-truth. The cost is real and stated: each live context is a whole browser process tree. §5.2. |
 | 13 | **The isolation claim is a table, not an adjective.** Cookies, localStorage/IndexedDB/CacheStorage, sign-in state, history, and per-profile extensions: **isolated**. Same uid, same filesystem access, same kernel, one shared GPU process where the platform shares it, and no protection against a post-sandbox-escape renderer: **not isolated, and not claimed**. Certificates and network policy appear in the plate's managed row and are marked `SIMULATED`/`M12` respectively. §5.4. |
 | 14 | **`personal` always exists, is never deletable, and is the fallback.** Context ids match `^[a-z0-9][a-z0-9-]{0,31}$`; `personal` is reserved and pre-created; `org-<org_id>` is reserved and **derived from `/var/lib/punar/enrollment.json`** — it appears on enrollment, disappears on unenrollment, and no `webapps.context_create` call can mint or remove it. Unmanaged-first as a data rule, not a CSS rule (DESIGN_LANGUAGE §8). §5.3, §5.6. |
-| 15 | **"The workspace brings its context forward" means the binding changes, not that windows migrate or a browser starts.** Switching to workspace `atlas` rewrites `~/.local/state/punar/browser-context.json` (shell-written, `FileView` + `atomicWrites`, debounced 1 s — the M2 pattern, inotify, zero polling), so the *next* `PUNAR+B` or context-less web-app launch uses `atlas`. Existing windows are not moved and nothing is auto-launched, because auto-starting a browser on a workspace switch is both slow and rude. The picker prints the cause. §5.5. |
+| 15 | **"The workspace brings its context forward" means the binding changes, not that windows migrate or a browser starts.** Switching to workspace `atlas` rewrites `~/.local/state/punar/browser-context.json` (shell-written, `FileView` + `atomicWrites`, applied on Hyprland's workspace event — inotify, zero polling), so the *next* `PUNAR+B` or context-less web-app launch uses `atlas`. Existing windows are not moved and nothing is auto-launched, because auto-starting a browser on a workspace switch is both slow and rude. The picker prints the cause. §5.5. |
 | 16 | **The workspace→context binding is a sibling file, never a new property of `workspace-state.json`.** The shipped M2 schema is not extended (M8 Decision-0 law, fourth application). New file, new tiny schema `schemas/browser/browser-context-state.json`. §5.5. |
 | 17 | **`browser.policy` is a new typed capability in punard's registry** — the M3 backend shape applied to a file. `desired_state ∈ {managed, unmanaged}`; the backend renders the effective policy document's `applications`/`browser` blocks into `/etc/chromium/policies/managed/punar-managed.json` (`0644 root:root`), then **verifies by re-reading and hashing**. It joins the M4 reconcile loop, so hand-editing that file is drift and gets remediated within one reconcile period — the firewall demo's shape, a second time, for the mechanism that actually enforces spec 62. §6. |
 | 18 | **The policy writer has a closed key allowlist, and it is data.** `browser/integration/policy-allowlist.json` names every Chromium policy key punard may write, one per spec-62 family; an effective-policy block naming anything else is refused with a section-73 message, not written best-effort. Reviewed like `signatures/suspected.json` (M7 §7.1 / M10 decision 22 precedent). §6.3. |
@@ -484,9 +485,8 @@ a masthead titlebar reading `LINEAR · ATLAS`. What M11 delivers:
    `/usr/share/punar/fixtures/acme/` already exists from M5).
 3. **The effective policy document.** `applications.web_apps.required[]`
    entries are records; `punarctl web-apps sync` installs the missing ones.
-   In M11 this is **user-triggered sync only** — reconcile-driven auto-install
-   is §15's, because making `punard`'s reconcile loop write into user homes
-   is a bigger decision than this milestone should smuggle in.
+   The session runs this bounded sync once at login, and the user can run it
+   explicitly for repair. Reconcile still never writes into user homes.
 
 `--fetch-manifest` is **DESIGN-ONLY**. Its absence is the reason the CI check
 is offline-safe without any pretending: there is nothing to stub, because
@@ -509,8 +509,8 @@ With no `--icon`, Punar renders a monogram:
   `flate2`, no `image` — no new dependency in `Cargo.lock` for a milestone
   whose whole thesis is a small auditable layer.
 
-Why this matters for the check: `m11-check` installs the same app twice into
-two contexts and asserts the two icons' `sha256sum` are **equal** — a real
+Why this matters for the check: `m11-check` removes and reinstalls the same
+identity and asserts the two icons' `sha256sum` are **equal** — a real
 determinism assertion using the only comparison tool the image has.
 (The image has no `diffutils`; `sha256sum` is the house comparison.)
 
@@ -608,7 +608,7 @@ warm.** Only the active context and any explicitly opened ones are running.
 | Filesystem access available to an escaped renderer | **no** | a renderer that has escaped the sandbox runs as the user and can read the other context's profile — *not claimed* |
 | Kernel namespaces, cgroups, or a security boundary between contexts | **no** | *not claimed, and never described as isolation* |
 | Certificates / certificate roots | **`SIMULATED`** | the managed row in D-013 carries a dashed `SIMULATED` tag; M11 does not deploy a real root and does not undash it |
-| Network policy / routing | **M12** | `punar-netd` does not exist; nothing about a context routes differently today |
+| Network policy / routing | **PHASE 2** | M12 later shipped project/principal network enforcement, but browser contexts are not separate managed cgroups; nothing about a context routes differently today |
 
 The install card's copy — *"A separate context isolates state, not security —
 no claim beyond that"* — is this table compressed to one sentence, and it is
@@ -634,8 +634,8 @@ the sentence M11 ships.
 
 Schema: `schemas/browser/browser-context-state.json`. Writer: `punar-shell`,
 on the Hyprland workspace event it already subscribes to, via `FileView` with
-`atomicWrites: true`, debounced 1 s — the M2 `workspaces.json` mechanism
-exactly. **Event-driven, inotify-backed, no timer, no polling loop**
+`atomicWrites: true`; the CLI and shell see one another's changes through
+inotify. **Event-driven, no timer, no polling loop**
 (spec 6.3). `punarctl web-apps context use <id>` is the manual writer and sets
 `active_cause: "manual"`.
 
@@ -698,8 +698,9 @@ already produces drift remediation and audit events, and already renders in
 `punarctl compliance`. Adding a method would be building a second version of
 it.
 
-So: `browser.policy` becomes the registry's fourth capability, alongside
-`security.firewall`, `system.hostname`, `time.timezone`.
+So: `browser.policy` becomes the registry's fifth capability, alongside
+`security.firewall`, `system.hostname`, `time.timezone`, and the later-added
+`system.update_channel` capability.
 
 | Descriptor field | Value |
 |---|---|
@@ -736,7 +737,8 @@ enforces spec 62. That is the strongest single assertion in this milestone.
 {"v": 1, "families": {
   "extensions":  ["ExtensionInstallBlocklist", "ExtensionInstallAllowlist",
                   "ExtensionInstallForcelist", "ExtensionSettings"],
-  "web_apps":    ["WebAppInstallForceList", "WebAppSettings"],
+  "web_apps":    ["WebAppInstallForceList", "WebAppSettings",
+                  "WebAppInstallByUserEnabled"],
   "urls":        ["URLBlocklist", "URLAllowlist"],
   "downloads":   ["DownloadRestrictions", "DownloadDirectory",
                   "PromptForDownloadLocation"],
@@ -774,9 +776,9 @@ enforcement points, and Punar says which is which:
 
 | Spec 46 concept | Web-app enforcement | Native-package enforcement |
 |---|---|---|
-| `denied` origin | `URLBlocklist` + `WebAppSettings` in the managed file — **real, root-owned, unbypassable by the user** | out of scope for M11 |
+| `denied` origin | `URLBlocklist` in the managed file — **real, root-owned, unbypassable by the user**. `WebAppSettings` controls installed-app behavior such as run-on-login; it is not misrepresented as an origin deny control. | out of scope for M11 |
 | `required` web app | `WebAppInstallForceList` (Chromium installs it) **and** a Punar record via `web-apps sync` (so it gets Punar's launcher, icon and context) | out of scope |
-| `allowUserInstall: false` | courtesy refusal in `webapps.install` (§4.4) **plus** a `URLAllowlist` allowlist-only posture in the managed file, which is the part that binds | out of scope |
+| `allowUserInstall: false` | courtesy refusal in `webapps.install` (§4.4) **plus** Chromium's `WebAppInstallByUserEnabled: false`, which is the root-owned control that binds. Navigation policy remains a separate `URLBlocklist`/`URLAllowlist` decision. | out of scope |
 
 Native package policy remains unclaimed. §14.
 
@@ -1023,7 +1025,8 @@ baseline to gate against.
   binding is inotify-driven through the shell's existing `FileView`
   (spec 6.3).
 - Writes are per-user-action only: an install writes one record and three
-  small artifacts; a context switch writes one small JSON, debounced 1 s.
+  small artifacts; a context switch writes one small JSON on Hyprland's
+  workspace event, with no polling loop.
   Chromium's own profile I/O is Chromium's (spec 6.4 budgets *Punar's*
   telemetry, ledger and logs — and M11 adds none).
 
@@ -1040,7 +1043,7 @@ punarctl web-apps install <url> --name <name> [--icon <path>] [--context <ctx>] 
 punarctl web-apps install --from-manifest <path> [--context <ctx>]
 punarctl web-apps uninstall <id> [--purge-data]
 punarctl web-apps launch <id> [--context <ctx>]      # the .desktop Exec target
-punarctl web-apps browse [--context <ctx>]           # PUNAR+B target
+punarctl web-apps browse [--context <ctx>] [URL...]  # PUNAR+B/default-handler target
 punarctl web-apps sync
 punarctl web-apps context list [--json]
 punarctl web-apps context create <id> [--name <display>]
@@ -1076,7 +1079,8 @@ next touched — **not by M11's implementation, which owns no mockup file.**
 
 ### 10.2 Shell (Plate D-013; spec 12.2)
 
-Two additions to `punar-shell`, both following existing patterns:
+Two additions to `punar-shell`, both following existing patterns and housed
+in System Control's Applications pane:
 
 - **The install card** — the D-013 install-card grammar is the M9 approval-
   card grammar with different content: mono masthead, 2 px rule, one plain
@@ -1086,7 +1090,7 @@ Two additions to `punar-shell`, both following existing patterns:
   `Esc` cancels (spec 12.1). It fires
   `Quickshell.execDetached(["punarctl","web-apps","install", …])` — fixed
   argv, no shell string (spec 12.2).
-- **The context picker** — a command-center section listing contexts with
+- **The context picker** — the Applications list begins with contexts and
   their isolation meta and the active row's cause. It writes
   `browser-context.json` directly (it is the file's owner, §5.5) and, when
   enrolled, renders the derived `org-acme` row with the `MANAGED` pill and
@@ -1164,12 +1168,12 @@ Result:
 ```
 
 `artifacts` is what `punarctl` writes into the user's home. It is **derived**
-— punard can regenerate it from the record at any time, which is what
-`webapps.list` with `--artifacts` (a `punarctl`-side flag driving
-`webapps.get`) provides for `sync`. `icon_png_b64` is bounded: generated
-monograms are ~2 KB, and the method refuses a supplied icon larger than
-64 KB, so the response line stays well-bounded even though responses have no
-4096-byte cap.
+— punard can regenerate it from the record at any time. `sync` first fetches
+the compact inventory and then asks `webapps.get` for one bounded artifact
+bundle at a time, avoiding a many-app response amplification. The deliberately
+dependency-free RGB monogram is 196,947 bytes (~192 KiB) before base64; a
+supplied icon is capped at 64 KiB. Responses have no 4096-byte request-line
+cap, but the one-record-at-a-time shape keeps memory and framing bounded.
 
 Errors: `denied` (agent-attributed, or policy — `details.policy_ids` cites
 the source, `details.reason ∈ {agent_attributed, denied_origin,
@@ -1183,13 +1187,14 @@ Params: none, or `{"include_artifacts": true}`. Result:
 
 ```json
 {"apps": [ {...}, ... ],
+ "required_web_apps": [ {...strict local manifest...}, ... ],
  "contexts": [
    {"id":"personal","name":"Personal","derived":false,"deletable":false,
     "isolates":["cookies","storage","sign_ins","history","extensions"],
     "profile_path_rel":"punar/browser/contexts/personal"},
    {"id":"org-acme","name":"Acme Work","derived":true,"deletable":false,
     "isolates":["cookies","storage","sign_ins","history","extensions"],
-    "simulated":["certificate_roots"], "not_yet_observed":[{"category":"network_policy","milestone":"M12"}],
+    "simulated":["certificate_roots"], "not_yet_observed":[{"category":"per_context_network_policy","milestone":"phase_2"}],
     "source":"enrollment"}
  ],
  "policy": {"managed": true, "policy_ids": ["eng-baseline-v12"],
@@ -1201,6 +1206,11 @@ from `enrollment.json` at request time — never persisted as a user context.
 `simulated[]` and `not_yet_observed[]` reuse M8/M10's honesty vocabulary
 verbatim, so a surface that already knows how to render `NOT YET OBSERVED ·
 MILESTONE 12` needs no new code.
+
+`required_web_apps` is empty in personal mode. While enrolled it contains
+only the precedence-winning, non-denied manifests from
+`applications.web_apps.required[]`; it is the typed input used by the
+user-triggered `punarctl web-apps sync` path described in §4.6.
 
 ### 11.5 §21.4 `webapps.uninstall` / `context_create` / `context_delete`
 
@@ -1220,7 +1230,7 @@ No new methods. `browser.policy` joins the registry, so
 `capabilities.list` / `capabilities.get` / `capabilities.set` / `reconcile` /
 `policy.effective` / `policy.explain` / `compliance` all cover it with **zero
 protocol change** — the point of having a capability layer. `status`'s
-`capabilities_total` goes 3 → 4 and its `compliance.capabilities[]` gains a
+`capabilities_total` goes 4 → 5 and its `compliance.capabilities[]` gains a
 row. Both are additive result changes already permitted by §3.3.
 
 `capabilities.set` on `browser.policy` keeps its exact M3 request shape,
@@ -1302,14 +1312,26 @@ group 7**, which is the drift demo and needs the real timer to fire.
 
 ### Groups and assertions
 
+The numbered list below is the **complete M11 acceptance target**. The first
+landed in-VM gate proves the personal-mode install, launch, isolation,
+sandbox, reconstruction and removal path (groups 1–5 and the applicable
+parts of groups 8 and 10), plus the managed context, denied-origin,
+non-weakening policy, timer-driven drift repair and unenrollment path from
+groups 6–7, and the direct browser command, audit-window privacy, and offline
+update-status checks. An actual injected `PUNAR+B` keystroke and the
+invalid-policy refusal remain required before M11 may be marked complete.
+Their Rust and schema contracts are host-tested, but that is not a substitute
+for the missing live assertions.
+
 **1 · Preflight and the never-touched invariants.**
 
 1. `punard.service` active; `browser.policy` present in `punarctl
    capabilities` with `allowed_desired_states` exactly `["managed","unmanaged"]`;
-   `status --json` reports `capabilities_total: 4`.
-2. Chromium is the pinned package and unmodified: `pacman -Qi chromium`
-   reports `151.0.7922.169-1`, and `pacman -Qkk chromium` reports **zero**
-   modified files. (This is the machine-checkable form of "we did not fork.")
+   `status --json` reports `capabilities_total: 5`.
+2. Chromium is the substrate's snapshot-pinned package: `pacman -Qo` or
+   `dpkg-query -S` owns `/usr/lib/chromium/chromium`, and the installed
+   package/version is exported with the proof. (This is the cross-architecture
+   machine-checkable provenance form of "we did not fork.")
 3. `punar-m11-check.service` has no `[Install]` section and no `.wants`
    symlink anywhere under `/usr/lib/systemd`.
 4. **The grep invariant.** `grep -a -F -f
@@ -1335,7 +1357,7 @@ group 7**, which is the drift demo and needs the real timer to fire.
    `chromium`**.
 9. Icon exists at the hicolor path; is a valid PNG (magic bytes); record's
    `icon.sha256` equals `sha256sum` of the file.
-10. **Determinism:** install the same app into a second context (`atlas`) and
+10. **Determinism:** uninstall and reinstall the same generated-icon app and
     assert the two generated icons' `sha256sum` are **equal**.
 11. Install source 2: `punarctl web-apps install --from-manifest
     /usr/share/punar/fixtures/webapps/notes/punar-webapp.json --context atlas`
@@ -1454,11 +1476,11 @@ group 7**, which is the drift demo and needs the real timer to fire.
 
 **9 · Update reporting, offline.**
 
-40. `punarctl update status` exits 0, prints a `BROWSER` block naming
-    `chromium 151.0.7922.169-1`, `snapshot (2026/08/20)` and
-    `Security channel · not configured`; and still prints the unchanged
-    system-orchestration stub text. No network syscall is attempted (the VM
-    has none, so any attempt would show as an error line — asserted absent).
+40. `punarctl update status` exits 0 and prints the locally installed
+    Chromium engine plus the effective security-channel posture alongside
+    the governed system-update evidence. No network syscall is attempted
+    (the VM has none, so any attempt would show as an error line — asserted
+    absent).
 
 **10 · Budgets and cleanliness.**
 
@@ -1534,8 +1556,8 @@ has an inventory.
 | `browser.policy` capability + reconcile drift remediation | ✅ | §6 |
 | Closed policy-key allowlist with one-directional hardening pins | ✅ | §6.3 |
 | Certificate-root deployment | **`SIMULATED`** | Fixture root only; the plate's dashed tag stays dashed |
-| Relay / proxy policy in the managed file | ✗ | **M12** (`punar-netd`) |
-| Browser network destinations in the access ledger | ✗ | **M12 — unchanged by this milestone** |
+| Relay / proxy policy in the managed file | ✗ | **PHASE 2** — M12 shipped project/principal policy, not browser-context routing |
+| Browser network destinations in the access ledger | ✗ | **PHASE 2** — M12's observer does not attribute unscoped browser contexts |
 | Web-app notifications | ✗ | **`UNSUPPORTED`** — no notification daemon until M13 (§4.9) |
 | File associations, deep-link scheme handlers | ✗ | §4.9, tracked §15 |
 | Chromium per-site permission surfacing; extension inventory | ✗ | No read API without a fork |
@@ -1573,7 +1595,9 @@ has an inventory.
 8. **Gating `PUNAR_M11_WEBAPP_RSS_MB`** — once real-hardware baselines exist
    and the number is not dominated by llvmpipe under TCG.
 9. **Per-context network policy** — the row that makes D-013's `ACME WORK`
-   meta line fully true, and it is M12's by name.
+   meta line fully true. M12 shipped project/principal enforcement, but a
+   browser context is not yet bound to one of those managed cgroups; this is
+   Phase-2 work rather than a completed M12 claim.
 
 ---
 
@@ -1591,13 +1615,15 @@ Written down here so no surface has to discover them:
 - **Certificate roots are `SIMULATED`.** The fixture root is a test artifact.
   No real CA is deployed, no real chain is validated against a Punar-supplied
   anchor, and the plate's dashed tag is correct.
-- **Nothing about a context routes differently.** There is no per-context
-  network policy, no proxy, no relay. That is M12, and the picker's meta row
-  says `M12`, not silence.
+- **Nothing about a context routes differently.** M12's project/principal
+  network policy does not make a same-uid Chromium profile a routing
+  boundary. There is no per-context proxy or relay; the picker says
+  `NOT YET OBSERVED · PHASE 2`, not silence.
 - **Punar observes no browser traffic.** Not destinations, not domains, not
   requests. The access ledger's `network_destinations` stays
-  **`NOT YET OBSERVED · MILESTONE 12`** and this milestone does not move it
-  one inch.
+  **`NOT YET OBSERVED · PHASE 2`** for unscoped browser contexts; M12's
+  delivered managed-principal observer does not turn a Chromium profile into
+  a separately attributable principal.
 - **Notifications from web apps will not appear** until M13. The coverage
   table says `UNSUPPORTED`; a user who installs Slack as a web app in M11
   gets a window, not a badge.

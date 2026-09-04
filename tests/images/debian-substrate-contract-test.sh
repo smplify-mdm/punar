@@ -62,15 +62,17 @@ grep -Fxq 'Architecture=x86-64' "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf"
 for config in \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
     "${REPO_ROOT}/os/images/arm64/mkosi.conf"; do
+    relative_config="${config#"${REPO_ROOT}"/}"
     grep -Fxq 'ExtraTrees=../debian-mkosi.extra' "${config}" \
-        || fail "${config#"${REPO_ROOT}/"} does not compose the shared Debian adapter tree"
+        || fail "${relative_config} does not compose the shared Debian adapter tree"
+    grep -Fxq '         systemd-repart' "${config}" \
+        || fail "${relative_config} lacks the fixed-layout installer binary package"
 done
-for adapter in \
-    usr/lib/systemd/system/greetd.service.d/punar-vt.conf \
-    usr/share/punar/platform/debian-chromium-flags; do
-    [ -f "${REPO_ROOT}/os/images/debian-mkosi.extra/${adapter}" ] \
-        || fail "shared Debian adapter is missing ${adapter}"
-done
+adapter=usr/lib/systemd/system/greetd.service.d/punar-vt.conf
+[ -f "${REPO_ROOT}/os/images/debian-mkosi.extra/${adapter}" ] \
+    || fail "shared Debian adapter is missing ${adapter}"
+[ ! -e "${REPO_ROOT}/os/images/debian-mkosi.extra/usr/share/punar/platform/debian-chromium-flags" ] \
+    || fail "obsolete mutable Chromium flag adapter is still shipped"
 grep -Fxq '         linux-image-amd64' "${REPO_ROOT}/os/images/amd64-debian/mkosi.conf" \
     || fail "amd64 candidate lacks Debian's kernel metapackage"
 grep -Fq 'console=ttyS0' \

@@ -52,6 +52,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "schemas"
 FIXTURES = REPO / "fixtures"
 CATALOG = REPO / "catalog"
+BROWSER_INTEGRATION = REPO / "browser/integration"
 # Staged runtime data shipped inside the desktop image (M7 adapters, signature
 # heuristics). Validated in place so the file the image ships is the file the
 # schema checked -- no copy to drift.
@@ -93,6 +94,9 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("schemas/update/examples/release-manifest*", "schemas/update/release-manifest.json"),
     ("schemas/update/examples/channel-metadata*", "schemas/update/channel-metadata.json"),
     ("schemas/workspace/examples/*", "schemas/workspace/workspace-state.json"),
+    ("schemas/browser/examples/browser-context-state*", "schemas/browser/browser-context-state.json"),
+    ("schemas/browser/examples/web-app-manifest*", "schemas/browser/web-app-manifest.json"),
+    ("schemas/browser/examples/web-app.*", "schemas/browser/web-app.json"),
     # --- fixtures/<domain>/{valid,invalid}/ ---------------------------------
     ("fixtures/ai-agent/*/agent-definition.*", "schemas/ai-agent/agent-definition.json"),
     ("fixtures/ai-agent/*/ledger-summary.*", "schemas/ai-agent/ledger-summary.json"),
@@ -116,6 +120,9 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/update/*/release-manifest*", "schemas/update/release-manifest.json"),
     ("fixtures/update/*/channel-metadata*", "schemas/update/channel-metadata.json"),
     ("fixtures/workspace/*/workspace-state.*", "schemas/workspace/workspace-state.json"),
+    # --- M11 offline browser integration fixture ---------------------------
+    ("browser/integration/fixtures/*/punar-webapp.json", "schemas/browser/web-app-manifest.json"),
+    ("browser/integration/policy-allowlist.json", None),
     # --- seed data: fixtures/agents/ (fixtures/agents/README.md table) ------
     ("fixtures/agents/claude-code.registry-record.json", "schemas/ai-agent/registry-record.json"),
     ("fixtures/agents/claude-code.json", "schemas/ai-agent/agent-definition.json"),
@@ -327,6 +334,7 @@ def main() -> int:
         + [p for p in STAGED_AGENTS.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
         + [p for p in STAGED_NETWORK.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
         + [p for p in CATALOG.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
+        + [p for p in BROWSER_INTEGRATION.rglob("*") if p.is_file() and p.suffix in DOC_SUFFIXES]
     )
     for dp in doc_paths:
         relpath = rel(dp)

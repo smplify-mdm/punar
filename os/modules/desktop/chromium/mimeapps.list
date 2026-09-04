@@ -11,19 +11,18 @@
 # one): handlers are read from $XDG_CONFIG_HOME/mimeapps.list first, then from
 # each $XDG_CONFIG_DIRS entry, which defaults to /etc/xdg. A user who sets
 # their own default browser therefore WINS over this file rather than fighting
-# it, which is the same additive rule as chromium-flags.conf beside it: Punar
-# states a default, the user states a preference, and the preference is not
-# something Punar has to be asked for permission to override.
+# it: Punar states a default, the user states a preference, and the preference
+# is not something Punar has to be asked for permission to override.
 #
-# The desktop id below is the one the chromium package installs
-# (usr/share/applications/chromium.desktop, verified against the pinned
-# snapshot); a missing desktop id here fails OPEN — xdg-open falls through to
-# the next handler rather than erroring — so surfaces-check.sh asserts the
-# resolved handler on the running system instead of trusting this text.
+# The browser id below is Punar's generic product entry. Its Exec target is the
+# closed browser argv builder, so links, the key binding, the command center,
+# and curated web fallbacks all select the same browser context and security
+# defaults. A missing desktop id here fails OPEN, so the live image check
+# asserts both resolution and file presence rather than trusting this text.
 
 [Default Applications]
-x-scheme-handler/http=chromium.desktop
-x-scheme-handler/https=chromium.desktop
-text/html=chromium.desktop
-application/xhtml+xml=chromium.desktop
+x-scheme-handler/http=punar-browser.desktop
+x-scheme-handler/https=punar-browser.desktop
+text/html=punar-browser.desktop
+application/xhtml+xml=punar-browser.desktop
 inode/directory=thunar.desktop

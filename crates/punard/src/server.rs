@@ -16,7 +16,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use punar_common::aipolicy::{AiAuthority, AiRuling};
 use punar_common::approval::{
@@ -44,12 +44,17 @@ use punar_common::ipc::{
     PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams, PrivilegeRevokeParams,
     PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry, ReconcileResult,
     RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT, StatusResult,
+    WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams, WebAppsInstallParams,
+    WebAppsListParams, WebAppsUninstallParams,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
 use punar_common::update::{
     UpdateApplyParams, UpdateApplyResult, UpdateChannel, UpdateCheckParams, UpdateCheckResult,
     UpdateRollbackParams, UpdateStatusResult,
+};
+use punar_common::webapp::{
+    BrowserContext, NotYetObserved, WebAppManifest, origin_from_start_url, validate_context_id,
 };
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted, Risk};
 use punar_policy::{Classification, EffectiveEntry, Provenance};
@@ -59,6 +64,7 @@ use zeroize::Zeroizing;
 use crate::approvals::{self, ApprovalStore};
 use crate::apps::{AppError, AppManager};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
+use crate::browser_policy::{persist_rendered_browser_policy, render_effective_browser_policy};
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
@@ -72,8 +78,9 @@ use crate::install::{
 };
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
-    ApplicationPolicyAction, ApplicationPolicyLayer, EffectiveDocument, Layer, compute_effective,
-    evaluate_application_policy, load_policy_dir, write_effective_debug_copy,
+    ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason, EffectiveDocument,
+    Layer, compute_effective, evaluate_application_policy, evaluate_webapp_policy, load_policy_dir,
+    write_effective_debug_copy,
 };
 use crate::state::{
     MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
@@ -85,6 +92,7 @@ use crate::update_transaction::{
     UpdateTransactionEngine, UpdateTransactionError, UpdateTransactionSources,
 };
 use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
+use crate::webapps::{WebAppError, WebAppManager};
 
 mod m9;
 
@@ -219,6 +227,9 @@ pub struct DaemonConfig {
     /// Cross-architecture integration-test seam. Production always leaves
     /// this unset and uses the compiled target architecture.
     pub app_arch_override: Option<String>,
+    /// Root-private, freshly rendered Chromium policy source consumed by
+    /// the `browser.policy` capability backend.
+    pub browser_policy_source: PathBuf,
     /// Installer methods are registered only in a UKI carrying the exact
     /// `punar.live=1` command-line token. Installed systems leave this false.
     pub live_mode: bool,
@@ -254,6 +265,7 @@ impl DaemonConfig {
             pending_state: state_dir.join("update/pending-pi.json"),
             ..PiUpdateSources::default()
         };
+        let browser_policy_source = state_dir.join("browser-policy/rendered.json");
         DaemonConfig {
             socket_path,
             state_dir,
@@ -278,6 +290,7 @@ impl DaemonConfig {
             app_catalog_path: None,
             flatpak_bin: PathBuf::from("/usr/bin/flatpak"),
             app_arch_override: None,
+            browser_policy_source,
             live_mode: false,
             installer_sources: InstallerSources::default(),
             update_status_sources: UpdateStatusSources::default(),
@@ -406,6 +419,10 @@ struct Inner {
     /// Flatpak has its own transaction lock, but serializing at the typed
     /// API also makes our inspect→mutate→verify chain indivisible.
     app_mutation: Mutex<()>,
+    /// User-created web-app records are separate from native package state,
+    /// but their human-paced mutations still serialize per daemon.
+    webapps: WebAppManager,
+    webapp_mutation: Mutex<()>,
     installer: Installer,
     update_status: UpdateStatusEngine,
     update_check: UpdateCheckEngine,
@@ -445,6 +462,7 @@ impl Daemon {
             cfg.app_arch_override.as_deref(),
         )
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let webapps = WebAppManager::new(cfg.state_dir.join("web-apps"));
         if let Err(error) = apps.reconcile_vendor_desktop_integration() {
             // A corrupt or full mutable app volume must not take down the
             // device control plane at boot. The signed catalog itself already
@@ -517,6 +535,11 @@ impl Daemon {
                  (its capability lands in a later milestone)"
             );
         }
+        persist_rendered_browser_policy(
+            &cfg.browser_policy_source,
+            &loaded.applications,
+            &loaded.browsers,
+        )?;
 
         let effective = compute_effective(
             &registry,
@@ -583,6 +606,8 @@ impl Daemon {
                 slot_freed: Condvar::new(),
                 apps,
                 app_mutation: Mutex::new(()),
+                webapps,
+                webapp_mutation: Mutex::new(()),
                 installer,
                 update_status,
                 update_check,
@@ -957,6 +982,36 @@ fn app_ipc_error(error: AppError) -> IpcError {
         code,
         format!("{what}.\nWhy: {error}.\nNext step: {next}."),
         json!({ "component": "application_catalog" }),
+    )
+}
+
+fn webapp_ipc_error(error: WebAppError) -> IpcError {
+    let (code, next) = match &error {
+        WebAppError::Invalid(_) => (
+            ErrorCode::InvalidParams,
+            "correct the web-app name, URL, context, workspace, or icon and retry",
+        ),
+        WebAppError::NotFound(_) => (
+            ErrorCode::NotFound,
+            "list your web apps and browser contexts, then retry with an existing id",
+        ),
+        WebAppError::Conflict(_) => (
+            ErrorCode::Conflict,
+            "choose a different id or remove the conflicting reference first",
+        ),
+        WebAppError::Denied(_) => (
+            ErrorCode::Denied,
+            "use a user-created context, or change the organization enrollment that owns it",
+        ),
+        WebAppError::Io(_) => (
+            ErrorCode::ApplyFailed,
+            "verify free space and /var/lib/punar permissions, then retry",
+        ),
+    };
+    IpcError::with_details(
+        code,
+        format!("Punar could not complete the web-app request.\nWhy: {error}.\nNext step: {next}."),
+        json!({ "component": "web_app_inventory" }),
     )
 }
 
@@ -1390,6 +1445,16 @@ impl Inner {
             Method::AppsInstall(params) => self.handle_apps_install(peer, params),
             Method::AppsRemove(params) => self.handle_apps_remove(peer, params),
             Method::AppsUpdate(params) => self.handle_apps_update(peer, params),
+            Method::WebAppsList(params) => self.handle_webapps_list(peer, params),
+            Method::WebAppsGet(params) => self.handle_webapps_get(peer, params),
+            Method::WebAppsInstall(params) => self.handle_webapps_install(peer, params),
+            Method::WebAppsUninstall(params) => self.handle_webapps_uninstall(peer, params),
+            Method::WebAppsContextCreate(params) => {
+                self.handle_webapps_context_create(peer, params)
+            }
+            Method::WebAppsContextDelete(params) => {
+                self.handle_webapps_context_delete(peer, params)
+            }
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::UpdateApply(params) => self.handle_update_apply(peer, params),
@@ -2487,6 +2552,482 @@ impl Inner {
         }))
     }
 
+    fn webapp_event(
+        &self,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        decision: Decision,
+        result: &str,
+        policy_ids: Vec<String>,
+    ) -> AuditEvent {
+        AuditEvent {
+            event_id: next_event_id(),
+            timestamp: utc_now_rfc3339(),
+            device_id: self.device_id.clone(),
+            user_id: Some(actor.user_id.clone()),
+            agent_session_id: Some(
+                actor
+                    .agent_session_id
+                    .clone()
+                    .unwrap_or_else(|| AGENT_SESSION_NONE.to_string()),
+            ),
+            project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+            source: actor.source,
+            action: action.to_string(),
+            resource: Some(resource.to_string()),
+            decision,
+            policy_ids: if policy_ids.is_empty() {
+                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
+            } else {
+                policy_ids
+            },
+            result: result.to_string(),
+        }
+    }
+
+    fn webapp_human_actor(
+        &self,
+        peer: &Peer,
+        action: &str,
+        resource: &str,
+    ) -> Result<AuditActor, IpcError> {
+        let actor = self.actor_of(peer);
+        if actor.source != PrincipalKind::AiAgent {
+            return Ok(actor);
+        }
+        self.log_audit(self.webapp_event(
+            &actor,
+            action,
+            resource,
+            Decision::Deny,
+            "denied",
+            vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()],
+        ));
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            "An AI agent cannot create, change, or remove a persistent web-app identity.\n\
+             Policy: personal defaults — these mutations require the person at the device.\n\
+             Next step: use `punarctl web-apps` yourself, or choose the web app in Command Center.",
+            json!({
+                "decision": "deny",
+                "reason": "agent_attributed",
+                "policy_ids": ["personal-defaults"]
+            }),
+        ))
+    }
+
+    fn webapp_policy_summary(&self) -> (bool, Vec<String>, bool) {
+        let enrollment = self.enrollment.lock().unwrap().clone();
+        let Some(enrollment) = enrollment else {
+            return (
+                false,
+                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()],
+                true,
+            );
+        };
+        let policy_ids = enrollment.policy_ids();
+        let allow_user_install = self
+            .application_policy
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|layer| layer.allow_user_install.is_some())
+            .min_by_key(|layer| layer.provenance.rank)
+            .and_then(|layer| layer.allow_user_install)
+            .unwrap_or(false);
+        (true, policy_ids, allow_user_install)
+    }
+
+    fn effective_required_webapps(&self) -> Vec<WebAppManifest> {
+        let layers = self.application_policy.lock().unwrap();
+        let mut ids = BTreeSet::new();
+        for layer in layers.iter() {
+            ids.extend(layer.required_web_apps.keys().cloned());
+        }
+
+        let mut required = Vec::new();
+        for id in ids {
+            let Some((_, manifest)) = layers
+                .iter()
+                .filter_map(|layer| layer.required_web_apps.get(&id).map(|app| (layer, app)))
+                .min_by_key(|(layer, _)| layer.provenance.rank)
+            else {
+                continue;
+            };
+            let Ok(origin) = origin_from_start_url(&manifest.start_url) else {
+                continue;
+            };
+            let decision =
+                evaluate_webapp_policy(&layers, &id, &origin, ApplicationPolicyAction::Install);
+            if decision.allowed && decision.reason == ApplicationPolicyReason::RequiredWebApp {
+                required.push(manifest.clone());
+            }
+        }
+        required.sort_by(|a, b| a.id.cmp(&b.id));
+        required
+    }
+
+    fn webapp_contexts_with_enrollment(
+        &self,
+        uid: u32,
+        include_artifacts: bool,
+    ) -> Result<Value, IpcError> {
+        let mut local = self
+            .webapps
+            .list(uid, include_artifacts)
+            .map_err(webapp_ipc_error)?;
+        if let Some(enrollment) = self.enrollment.lock().unwrap().clone() {
+            let id = format!("org-{}", enrollment.org.id);
+            validate_context_id(&id).map_err(|reason| {
+                IpcError::with_details(
+                    ErrorCode::Internal,
+                    "The enrolled organization has an invalid browser-context identity.\n\
+                     Policy: fail closed — Punar will not derive a filesystem path from it.\n\
+                     Next step: correct the organization id in Smplify and re-enroll.",
+                    json!({ "component": "enrollment", "reason": reason }),
+                )
+            })?;
+            local.contexts.push(BrowserContext {
+                id: id.clone(),
+                name: enrollment.org.display_name,
+                derived: true,
+                deletable: false,
+                isolates: vec![
+                    "cookies".into(),
+                    "storage".into(),
+                    "sign_ins".into(),
+                    "history".into(),
+                    "extensions".into(),
+                ],
+                profile_path_rel: format!("punar/browser/contexts/{id}"),
+                simulated: vec!["certificate_roots".into()],
+                not_yet_observed: vec![NotYetObserved {
+                    category: "per_context_network_policy".into(),
+                    milestone: "phase_2".into(),
+                }],
+                source: Some("enrollment".into()),
+            });
+            local.contexts.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        let (managed, policy_ids, allow_user_install) = self.webapp_policy_summary();
+        let required_web_apps = self.effective_required_webapps();
+        Ok(json!({
+            "apps": local.apps,
+            "contexts": local.contexts,
+            "required_web_apps": required_web_apps,
+            "policy": {
+                "managed": managed,
+                "policy_ids": policy_ids,
+                "allow_user_install": allow_user_install,
+            }
+        }))
+    }
+
+    fn handle_webapps_list(
+        &self,
+        peer: &Peer,
+        params: &WebAppsListParams,
+    ) -> Result<Value, IpcError> {
+        self.webapp_contexts_with_enrollment(peer.uid, params.include_artifacts)
+    }
+
+    fn handle_webapps_get(
+        &self,
+        peer: &Peer,
+        params: &WebAppsGetParams,
+    ) -> Result<Value, IpcError> {
+        self.webapps
+            .get(peer.uid, &params.id, params.include_artifacts)
+            .map(to_value)
+            .map_err(webapp_ipc_error)
+    }
+
+    fn webapp_install_policy(
+        &self,
+        id: &str,
+        origin: &str,
+        action: ApplicationPolicyAction,
+    ) -> Result<(bool, bool, Vec<String>), IpcError> {
+        if self.enrollment.lock().unwrap().is_none() {
+            return Ok((
+                false,
+                false,
+                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()],
+            ));
+        }
+        let decision =
+            evaluate_webapp_policy(&self.application_policy.lock().unwrap(), id, origin, action);
+        let policy_id = decision
+            .provenance
+            .as_ref()
+            .map(|source| source.policy_id.clone())
+            .unwrap_or_else(|| "organization-application-policy".into());
+        if decision.allowed {
+            return Ok((
+                true,
+                decision.reason == ApplicationPolicyReason::RequiredWebApp,
+                vec![policy_id],
+            ));
+        }
+        let reason = decision.reason.as_str();
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "Your organization did not allow this persistent web-app change.\n\
+                 Policy: {policy_id} — applications policy for origin {origin} ({reason}).\n\
+                 Next step: choose an allowed app or contact your administrator."
+            ),
+            json!({
+                "application": id,
+                "origin": origin,
+                "decision": "deny",
+                "reason": reason,
+                "policy_ids": [policy_id],
+                "enforcement": "courtesy_gate"
+            }),
+        ))
+    }
+
+    fn handle_webapps_install(
+        &self,
+        peer: &Peer,
+        params: &WebAppsInstallParams,
+    ) -> Result<Value, IpcError> {
+        let action = "webapp.install";
+        let resource = format!("webapp:{}", params.app.id);
+        let actor = self.webapp_human_actor(peer, action, &resource)?;
+        let origin = origin_from_start_url(&params.app.start_url).map_err(|reason| {
+            IpcError::with_details(
+                ErrorCode::InvalidParams,
+                "The web app start URL is not a safe HTTPS or local fixture URL.\n\
+                 Policy: Punar browser input boundary — URLs cannot carry credentials, whitespace, or flag-like tokens.\n\
+                 Next step: use a canonical https:// URL and retry.",
+                json!({ "param": "app.start_url", "reason": reason }),
+            )
+        })?;
+        let (policy_file_managed, required, policy_ids) = match self.webapp_install_policy(
+            &params.app.id,
+            &origin,
+            ApplicationPolicyAction::Install,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let ids = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("policy_ids"))
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Deny,
+                    "denied",
+                    ids,
+                ));
+                return Err(error);
+            }
+        };
+        let derived_context = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|enrollment| params.app.context == format!("org-{}", enrollment.org.id));
+        let _guard = self.webapp_mutation.lock().unwrap();
+        match self.webapps.install(
+            peer.uid,
+            &params.app,
+            policy_ids.clone(),
+            required,
+            policy_file_managed,
+            derived_context,
+        ) {
+            Ok(result) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    "installed",
+                    policy_ids,
+                ));
+                Ok(to_value(result))
+            }
+            Err(error) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    "failure",
+                    policy_ids,
+                ));
+                Err(webapp_ipc_error(error))
+            }
+        }
+    }
+
+    fn handle_webapps_uninstall(
+        &self,
+        peer: &Peer,
+        params: &WebAppsUninstallParams,
+    ) -> Result<Value, IpcError> {
+        let action = "webapp.uninstall";
+        let resource = format!("webapp:{}", params.id);
+        let actor = self.webapp_human_actor(peer, action, &resource)?;
+        let installed = self
+            .webapps
+            .get(peer.uid, &params.id, false)
+            .map_err(webapp_ipc_error)?;
+        let (_policy_file_managed, _required, policy_ids) = match self.webapp_install_policy(
+            &params.id,
+            &installed.app.origin,
+            ApplicationPolicyAction::Remove,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Deny,
+                    "denied",
+                    vec![],
+                ));
+                return Err(error);
+            }
+        };
+        let _guard = self.webapp_mutation.lock().unwrap();
+        match self
+            .webapps
+            .uninstall(peer.uid, &params.id, params.purge_data)
+        {
+            Ok(result) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    if params.purge_data {
+                        "purged"
+                    } else {
+                        "uninstalled"
+                    },
+                    policy_ids,
+                ));
+                Ok(result)
+            }
+            Err(error) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    "failure",
+                    policy_ids,
+                ));
+                Err(webapp_ipc_error(error))
+            }
+        }
+    }
+
+    fn handle_webapps_context_create(
+        &self,
+        peer: &Peer,
+        params: &WebAppsContextCreateParams,
+    ) -> Result<Value, IpcError> {
+        let action = "webapp.context_create";
+        let resource = format!("browser-context:{}", params.id);
+        let actor = self.webapp_human_actor(peer, action, &resource)?;
+        let (_managed, policy_ids, _allow) = self.webapp_policy_summary();
+        let _guard = self.webapp_mutation.lock().unwrap();
+        match self
+            .webapps
+            .context_create(peer.uid, &params.id, &params.name)
+        {
+            Ok(context) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    "created",
+                    policy_ids,
+                ));
+                Ok(json!({ "context": context }))
+            }
+            Err(error) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    "failure",
+                    policy_ids,
+                ));
+                Err(webapp_ipc_error(error))
+            }
+        }
+    }
+
+    fn handle_webapps_context_delete(
+        &self,
+        peer: &Peer,
+        params: &WebAppsContextDeleteParams,
+    ) -> Result<Value, IpcError> {
+        let action = "webapp.context_delete";
+        let resource = format!("browser-context:{}", params.id);
+        let actor = self.webapp_human_actor(peer, action, &resource)?;
+        let (_managed, policy_ids, _allow) = self.webapp_policy_summary();
+        let _guard = self.webapp_mutation.lock().unwrap();
+        match self
+            .webapps
+            .context_delete(peer.uid, &params.id, params.purge_data)
+        {
+            Ok(result) => {
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    Decision::Allow,
+                    if params.purge_data {
+                        "purged"
+                    } else {
+                        "deleted"
+                    },
+                    policy_ids,
+                ));
+                Ok(result)
+            }
+            Err(error) => {
+                let denied = matches!(error, WebAppError::Denied(_));
+                self.log_audit(self.webapp_event(
+                    &actor,
+                    action,
+                    &resource,
+                    if denied {
+                        Decision::Deny
+                    } else {
+                        Decision::Allow
+                    },
+                    if denied { "denied" } else { "failure" },
+                    policy_ids,
+                ));
+                Err(webapp_ipc_error(error))
+            }
+        }
+    }
+
     fn handle_status(&self) -> StatusResult {
         let hostname = self
             .registry
@@ -3391,6 +3932,21 @@ impl Inner {
                 json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
             ))
         })?;
+        // Validate the complete effective Chromium document before the
+        // enrollment commit point. Unknown or weakening policy therefore
+        // cannot leave a partially enrolled device or touch /etc.
+        render_effective_browser_policy(&loaded.applications, &loaded.browsers).map_err(|e| {
+            cleanup_staging();
+            fail_audit(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "The fetched browser policy could not be rendered safely: {e}.\n\
+                     Policy: browser/integration/policy-allowlist.json — enrollment is all-or-nothing.\n\
+                     Next step: correct the browser policy in Smplify; nothing was changed."
+                ),
+                json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
+            ))
+        })?;
         for unmapped in &loaded.unmapped {
             eprintln!(
                 "punard: enrollment policy: no registered capability for {unmapped}; \
@@ -3417,6 +3973,23 @@ impl Inner {
         }
         cleanup_staging();
 
+        let rollback_files = |files: &[String]| {
+            for file in files {
+                let _ = std::fs::remove_file(policy_dir.join(file));
+            }
+        };
+
+        if let Err(e) = persist_rendered_browser_policy(
+            &self.cfg.browser_policy_source,
+            &loaded.applications,
+            &loaded.browsers,
+        ) {
+            rollback_files(&policy_files);
+            return Err(fail_audit(
+                self.internal(&format!("rendered browser policy store: {e}")),
+            ));
+        }
+
         let enrollment = Enrollment {
             version: 1,
             org,
@@ -3428,13 +4001,9 @@ impl Inner {
             remote_query_scopes,
             last_query: None,
         };
-        let rollback_files = |files: &[String]| {
-            for file in files {
-                let _ = std::fs::remove_file(policy_dir.join(file));
-            }
-        };
         if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
             rollback_files(&policy_files);
+            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
             return Err(fail_audit(
                 self.internal(&format!("device token store: {e}")),
             ));
@@ -3442,6 +4011,7 @@ impl Inner {
         if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), &enrollment) {
             rollback_files(&policy_files);
             let _ = std::fs::remove_file(self.cfg.state_dir.join("device-token"));
+            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
             return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
         }
 
@@ -3612,6 +4182,9 @@ impl Inner {
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
         self.application_policy.lock().unwrap().clear();
+        if let Err(e) = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]) {
+            eprintln!("punard: enroll.stop could not remove rendered browser policy: {e}");
+        }
         self.reload_ai_authority();
         // M10 trigger 3, the other half: unenrolling changes what may be
         // asked back to *nothing*, and answering a stale view afterwards

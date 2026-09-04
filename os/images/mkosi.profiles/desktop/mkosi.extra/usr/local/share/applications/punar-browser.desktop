@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Browser
+GenericName=Web Browser
+Comment=Browse in the active Punar context
+Exec=punarctl web-apps browse %U
+TryExec=punarctl
+Icon=chromium
+Terminal=false
+StartupNotify=true
+StartupWMClass=chromium
+Categories=Network;WebBrowser;
+Keywords=browser;web;internet;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+X-Punar-Product-Name=Browser

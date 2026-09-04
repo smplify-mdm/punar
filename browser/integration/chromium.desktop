@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Browser
+Exec=punarctl web-apps browse %U
+TryExec=punarctl
+Icon=chromium
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=chromium
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+X-Punar-Implementation-Alias=chromium

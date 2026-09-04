@@ -1,0 +1,34 @@
+{
+  "v": 1,
+  "families": {
+    "extensions": [
+      "ExtensionInstallBlocklist",
+      "ExtensionInstallAllowlist",
+      "ExtensionInstallForcelist",
+      "ExtensionSettings"
+    ],
+    "web_apps": [
+      "WebAppInstallForceList",
+      "WebAppSettings",
+      "WebAppInstallByUserEnabled"
+    ],
+    "urls": [
+      "URLBlocklist",
+      "URLAllowlist"
+    ],
+    "downloads": [
+      "DownloadRestrictions",
+      "DownloadDirectory",
+      "PromptForDownloadLocation"
+    ],
+    "cert_roots": [
+      "CACertificates"
+    ],
+    "hardening": [
+      "SitePerProcess",
+      "RemoteDebuggingAllowed",
+      "SSLErrorOverrideAllowed",
+      "InsecurePrivateNetworkRequestsAllowed"
+    ]
+  }
+}

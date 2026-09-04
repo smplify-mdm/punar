@@ -785,7 +785,7 @@ fn an_enrolled_device_answers_an_authorized_query_within_one_reconcile_pass() {
     let status = rig.daemon.result("enroll.status", None);
     assert_eq!(status["last_query"]["scope"], "inventory");
     assert_eq!(status["last_query"]["decision"], "allow");
-    assert!(status.to_string().find("payload").is_none(), "{status}");
+    assert!(!status.to_string().contains("payload"), "{status}");
 }
 
 /// The answer that reaches the control plane is the data owner's bytes.

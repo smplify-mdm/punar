@@ -69,7 +69,7 @@ PUNAR + SHIFT + Q            Window actions (close normally or confirm a
                              force quit for the exact focused app)
 PUNAR + Return               Terminal (a detached footclient; falls back to
                              foot only if the foot server is down)
-PUNAR + B                    Browser (chromium, Wayland ozone)
+PUNAR + B                    Browser in the active storage context
 ```
 
 ### Multi-monitor (spec §15)
@@ -268,7 +268,9 @@ the pointer:
 9. `PUNAR+SHIFT+TAB` — cycles back through open workspaces.
 10. `PUNAR+T` twice — scratchpad terminal summoned and dismissed.
 11. `PUNAR+Space` — command center opens; Escape closes it (shell contract).
-12. `PUNAR+B` — chromium launches (first paint may be slow under llvmpipe).
+12. `PUNAR+B` — Browser launches through the closed Punar argv builder; its
+    `--user-data-dir` matches the active context (first paint may be slow
+    under llvmpipe).
 13. `Print` — screenshot lands in the clipboard (`wl-paste --list-types`
     from the terminal shows `image/png`).
 14. `PUNAR+Q` — focused window closes.

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name={{name}}
+Comment=Punar web app · context {{context}}
+Exec=punarctl web-apps launch {{id}}
+Icon=punar-webapp-{{id}}
+Terminal=false
+StartupNotify=true
+StartupWMClass=punar-webapp-{{id}}
+Categories=Network;
+X-Punar-WebApp-Id={{id}}
+X-Punar-WebApp-Context={{context}}

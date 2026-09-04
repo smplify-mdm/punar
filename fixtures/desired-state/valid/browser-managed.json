@@ -1,0 +1,48 @@
+{
+  "apiVersion": "smplify.io/v1alpha1",
+  "kind": "DeviceDesiredState",
+  "metadata": {
+    "organization": "acme",
+    "device": "dev_browser1"
+  },
+  "spec": {
+    "security": {
+      "diskEncryption": {"required": true},
+      "secureBoot": {"required": true},
+      "firewall": {"enabled": true}
+    },
+    "applications": {
+      "required": ["git"],
+      "denied": [
+        {"origin": "https://social.example"}
+      ],
+      "web_apps": {
+        "required": [
+          {
+            "v": 1,
+            "id": "linear",
+            "name": "Linear",
+            "start_url": "https://linear.app/inbox",
+            "context": "org-acme",
+            "workspace": "atlas",
+            "icon": {"kind": "generated"}
+          }
+        ]
+      },
+      "allowUserInstall": false
+    },
+    "browser": {
+      "ExtensionInstallBlocklist": ["*"],
+      "ExtensionInstallAllowlist": ["approved-extension-id"],
+      "DownloadRestrictions": 1,
+      "PromptForDownloadLocation": true,
+      "SitePerProcess": true,
+      "RemoteDebuggingAllowed": false,
+      "SSLErrorOverrideAllowed": false,
+      "InsecurePrivateNetworkRequestsAllowed": false
+    },
+    "ai": {"policy": "engineering-standard"},
+    "network": {"privateRelay": {"enabled": false}},
+    "update": {"channel": "stable"}
+  }
+}

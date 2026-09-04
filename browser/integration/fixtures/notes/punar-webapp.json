@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "notes-fixture",
+  "name": "Notes Fixture",
+  "start_url": "file:///usr/share/punar/fixtures/webapps/notes/index.html#punar-ctx-probe-atlas",
+  "context": "atlas",
+  "workspace": "atlas",
+  "icon": {
+    "kind": "file",
+    "path": "/usr/share/punar/fixtures/webapps/notes/icon.png"
+  }
+}

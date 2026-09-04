@@ -510,8 +510,7 @@ impl AppManager {
         let observed = self.installed_commit(app_id)?;
         if observed.as_deref() != Some(commit.as_str()) {
             return Err(AppError::Verification(format!(
-                "Flatpak reported success, but {app_id} is at {:?} instead of the pinned commit",
-                observed
+                "Flatpak reported success, but {app_id} is at {observed:?} instead of the pinned commit"
             )));
         }
         Ok(json!({

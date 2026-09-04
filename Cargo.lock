@@ -684,6 +684,7 @@ dependencies = [
 name = "punarctl"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "punar-common",
  "rustix",

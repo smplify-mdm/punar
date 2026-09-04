@@ -570,6 +570,13 @@ systemctl start punar-m9-check.service \
 systemctl start punar-m10-check.service \
     || echo "punar: idle-ram: punar-m10-check.service failed to start" >&2
 
+# M11 browser/web-app exercise: strictly after M10 has restored personal
+# state, and still before the export. Every Chromium process starts after the
+# idle/service-memory windows above and is torn down by the check. Browser
+# integration adds no resident daemon and PUNAR_SERVICE_UNITS stays unchanged.
+systemctl start punar-m11-check.service \
+    || echo "punar: idle-ram: punar-m11-check.service failed to start" >&2
+
 # M12 network/privacy exercise: strictly after every earlier AI-ledger test
 # has torn down its managed session, and still before the single artifact
 # export. The idle RAM and combined service-PSS windows already closed; the

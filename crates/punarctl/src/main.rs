@@ -66,6 +66,7 @@ mod model;
 mod peer;
 mod views;
 mod watch;
+mod webapps;
 
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 #[cfg(target_os = "linux")]
@@ -144,6 +145,11 @@ enum Command {
     App {
         #[command(subcommand)]
         command: AppCommand,
+    },
+    /// Create, launch, and remove browser-backed applications and contexts.
+    WebApps {
+        #[command(subcommand)]
+        command: webapps::WebAppsCommand,
     },
     /// Show whether tracked settings still match, and what was put back.
     Compliance,
@@ -988,12 +994,15 @@ fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
                     why: "the curated web-app launch contract is invalid".to_string(),
                 });
             }
-            let mut command = std::process::Command::new("/usr/bin/chromium");
-            command
-                .arg(format!("--app={url}"))
-                .arg(format!("--class=punar-webapp-{id}"))
-                .arg("--ozone-platform-hint=auto");
-            command
+            return match webapps::spawn_catalog_web(client, id, url) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(why) => {
+                    eprintln!(
+                        "The application could not start.\nWhy: {why}.\nNext step: inspect it with `punarctl app show {id}`."
+                    );
+                    ExitCode::FAILURE
+                }
+            };
         }
         Some("flatpak") => {
             if !uris.is_empty() {
@@ -3516,6 +3525,7 @@ fn main() -> ExitCode {
                 app_update(&client, &style, json, id.as_deref(), all, yes)
             }
         },
+        Command::WebApps { command } => webapps::run(command, &client, &style, json),
         Command::Audit { command } => match command {
             AuditCommand::Tail { n } => {
                 let hostname = local_hostname();

@@ -7,9 +7,8 @@ pragma ComponentBehavior: Bound
 // a launcher actually needs and the plate asks for:
 //
 //   1. RANKED SEARCH. `search(query)` scores name/generic-name/keywords/
-//      comment/id and returns entries best-first, so "chrom" reaches
-//      Chromium before "Chromium (Safe Mode)" or anything that merely
-//      mentions chromium in a comment.
+//      comment/id and returns entries best-first, so "browser" reaches the
+//      one generic Punar entry rather than a vendor implementation helper.
 //   2. ROLE RESOLUTION. `browser` and `terminal` resolve the entry that
 //      plays that role on THIS machine — by id first (`chromium` is what
 //      the punar-desktop image installs), then by heuristic name, then by
@@ -56,6 +55,9 @@ Singleton {
     readonly property var hiddenProductEntryIds: [
         "footclient",
         "foot-server",
+        "chromium",
+        "chromium-browser",
+        "org.chromium.chromium",
         "thunar-settings",
         "thunar-bulk-rename",
         "xfce4-about",
@@ -81,12 +83,11 @@ Singleton {
         root.catalogInstallRevision++;
     }
 
-    // Role candidates, most-specific first. Ids are freedesktop desktop-file
-    // ids without the `.desktop` suffix. `chromium` is the id Arch's
-    // chromium package installs and the one the punar-desktop image ships
-    // (os/images/mkosi.profiles/desktop/mkosi.conf), so the browser the
-    // image contains is reachable by name, by role, and by one keystroke.
-    readonly property var browserIds: ["chromium", "chromium-browser", "org.chromium.Chromium", "firefox", "org.mozilla.firefox", "firefox-esr"]
+    // Role candidates, most-specific first. `punar-browser` is the generic
+    // product entry shipped by Punar; vendor browser entries remain fallbacks
+    // for user-installed alternatives, never duplicate rows for the built-in
+    // implementation.
+    readonly property var browserIds: ["punar-browser", "firefox", "org.mozilla.firefox", "firefox-esr", "chromium", "chromium-browser", "org.chromium.Chromium"]
     readonly property var terminalIds: ["foot", "footclient", "org.codeberg.dnkl.foot"]
 
     readonly property string browserCategory: "WebBrowser"
@@ -112,7 +113,7 @@ Singleton {
         if (value === "foot" || value === "footclient" || value === "foot-server"
                 || value === "org.codeberg.dnkl.foot")
             return "Terminal";
-        if (value === "chromium" || value === "chromium-browser" || value === "org.chromium.chromium")
+        if (value === "punar-browser" || value === "chromium" || value === "chromium-browser" || value === "org.chromium.chromium")
             return "Browser";
         if (value === "nvim")
             return "Terminal Editor";

@@ -737,11 +737,11 @@ esac
 # shortcuts surface. Lua-native binds intentionally expose `__lua` plus an
 # opaque callback id through `hyprctl binds`; their stable runtime contract is
 # the key and human description, while actual close behavior is proven below.
-launch_row="$(ipc commandcenter query chromium | tr -d '\r\n\"')"
-check_eq "command center finds installed Chromium" "app · Launch(chromium)" "${launch_row}"
+launch_row="$(ipc commandcenter query browser | tr -d '\r\n\"')"
+check_eq "command center finds the generic Browser" "app · Launch(punar-browser)" "${launch_row}"
 
 launch_result="$(ipc commandcenter run | tr -d '\r\n\"')"
-check_eq "command center invokes the selected installed app" "app · Launch(chromium)" "${launch_result}"
+check_eq "command center invokes the selected installed app" "app · Launch(punar-browser)" "${launch_result}"
 
 # The live binding table is the discoverable source of truth; require the
 # close action to be present there rather than trusting a config-file grep.
@@ -754,16 +754,10 @@ else
     FAILED=1
 fi
 
-# The browser must also be a NATIVE WAYLAND client, with our flags. This is
-# the assertion that proves /etc/chromium-flags.conf was found, parsed
-# and applied — not that it exists. The launcher silently SKIPS any line with
-# unbalanced quotes, so a file that is present and readable can still apply
-# nothing at all; only the running process settles it.
-#
-# It also proves the flags reach a launch path that is NOT the browser keybind.
-# DesktopEntry.execute() uses packaged chromium.desktop, exactly as xdg-open
-# does. Before this file existed the ozone hint lived on the PUNAR+B bind alone
-# and this assertion would have failed.
+# The browser must also be a NATIVE WAYLAND client with the closed Punar argv.
+# Read the live process because a desktop file can exist while pointing at a
+# stale or bypass launcher. This path is the generic Browser entry used by the
+# command center, xdg-open and PUNAR+B; all three reach the same builder.
 chromium_client() {
     hyprctl -j clients 2>/dev/null \
         | jq -e '[ .[] | select(.class | ascii_downcase | test("chromium")) ] | length >= 1'
@@ -784,10 +778,15 @@ if wait_for 180 chromium_client; then
         for flag in --no-first-run --no-default-browser-check; do
             case " ${cargs} " in
                 *" ${flag} "*) note "ok   chromium argv carries ${flag}" ;;
-                *) note "FAIL chromium argv missing ${flag} — /etc/chromium-flags.conf was not applied"
+                *) note "FAIL chromium argv missing ${flag} — closed browser defaults were not applied"
                    FAILED=1 ;;
             esac
         done
+        case " ${cargs} " in
+            *" /usr/lib/chromium/chromium "*) note "ok   browser bypasses mutable distribution flag wrappers" ;;
+            *) note "FAIL browser did not execute the fixed Chromium binary path"
+               FAILED=1 ;;
+        esac
         printf '%s\n' "${cargs}" > /run/punar/surfaces-chromium-argv.txt
     else
         note "FAIL could not read chromium argv (pid='${cpid}')"
@@ -1035,7 +1034,7 @@ fi
 
 for scheme in x-scheme-handler/https x-scheme-handler/http text/html; do
     handler="$(xdg-mime query default "${scheme}" 2>/dev/null | tr -d '[:space:]')"
-    check_eq "default handler for ${scheme}" "chromium.desktop" "${handler}"
+    check_eq "default handler for ${scheme}" "punar-browser.desktop" "${handler}"
 done
 
 directory_handler="$(xdg-mime query default inode/directory 2>/dev/null | tr -d '[:space:]')"
@@ -1043,10 +1042,18 @@ check_eq "default handler for directories" "thunar.desktop" "${directory_handler
 
 # The handler must name a desktop entry that EXISTS. xdg-open fails through a
 # dangling handler silently, which looks identical to having no default at all.
-if [ -f /usr/share/applications/chromium.desktop ]; then
-    note "ok   chromium.desktop present at /usr/share/applications"
+if [ -f /usr/local/share/applications/punar-browser.desktop ]; then
+    note "ok   punar-browser.desktop present at /usr/local/share/applications"
 else
-    note "FAIL chromium.desktop missing — the default handler is dangling"
+    note "FAIL punar-browser.desktop missing — the default handler is dangling"
+    FAILED=1
+fi
+if [ -f /usr/local/share/applications/chromium.desktop ] \
+        && grep -Fxq 'NoDisplay=true' /usr/local/share/applications/chromium.desktop \
+        && grep -Fxq 'Exec=punarctl web-apps browse %U' /usr/local/share/applications/chromium.desktop; then
+    note "ok   vendor Chromium desktop id is hidden and routes through Punar"
+else
+    note "FAIL vendor Chromium desktop id is not safely shadowed"
     FAILED=1
 fi
 

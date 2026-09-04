@@ -27,6 +27,15 @@ punar_user_data="${XDG_DATA_HOME:-${HOME}/.local/share}"
 XDG_DATA_DIRS="${punar_user_data}/flatpak/exports/share:/var/lib/flatpak/exports/share:/var/lib/punar-applications:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XDG_DATA_DIRS
 
+# Hyprland loads the user-created web-app workspace rules at startup. The
+# inventory remains root-owned; this is only a rebuildable user artifact.
+punar_user_config="${XDG_CONFIG_HOME:-${HOME}/.config}"
+if [ ! -e "${punar_user_config}/hypr/punar-webapps.conf" ]; then
+    umask 077
+    mkdir -p "${punar_user_config}/hypr"
+    : > "${punar_user_config}/hypr/punar-webapps.conf"
+fi
+
 # Installed vendor apps may own a custom URI scheme (Claude's OAuth callback
 # is `claude:`). punard writes only the signed-catalog associations into this
 # root-owned directory. It follows the normal XDG precedence: a user's own
@@ -54,6 +63,19 @@ if command -v dbus-update-activation-environment >/dev/null 2>&1; then
     dbus-update-activation-environment --systemd XDG_CONFIG_DIRS XDG_DATA_DIRS \
         || printf '%s\n' \
             'punar-session: could not pre-import application handler paths' >&2
+fi
+
+# Rebuild user-owned web-app launchers from the root-owned inventory before
+# the compositor reads their workspace rules. This also adopts any required
+# applications delivered by policy while the user was signed out. A corrupt
+# record or unavailable daemon never traps the user outside the desktop: the
+# bounded failure is visible in the session log and `punarctl web-apps sync`
+# remains the explicit repair command.
+if command -v punarctl >/dev/null 2>&1; then
+    if ! timeout 20 punarctl web-apps sync >/dev/null; then
+        printf '%s\n' \
+            'punar-session: web-app inventory could not be synchronized; run punarctl web-apps sync for details' >&2
+    fi
 fi
 
 # Installed by the image staging step.

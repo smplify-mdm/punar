@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/browser/web-app.json",
+  "title": "Punar web application record",
+  "description": "Root-owned inventory record for one browser-backed application. The daemon assigns origin, install provenance, policy citations, and the verified icon digest; user-home launchers are derived from this record.",
+  "type": "object",
+  "required": ["v", "id", "name", "start_url", "origin", "context", "icon", "workspace", "installed_at", "installed_by", "policy_ids", "managed"],
+  "properties": {
+    "v": {"const": 1},
+    "id": {"$ref": "#/$defs/id"},
+    "name": {"$ref": "#/$defs/display_name"},
+    "start_url": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(https://|file:///)", "not": {"pattern": "(--|\\\\|\\s)"}},
+    "origin": {"type": "string", "pattern": "^(https://[A-Za-z0-9.\\-\\[\\]:]+|file://)$"},
+    "context": {"$ref": "#/$defs/id"},
+    "icon": {
+      "type": "object",
+      "required": ["kind", "sha256", "path_rel"],
+      "properties": {
+        "kind": {"enum": ["generated", "file"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "path_rel": {"type": "string", "pattern": "^icons/hicolor/256x256/apps/punar-webapp-[a-z0-9][a-z0-9-]{0,31}\\.png$"}
+      },
+      "additionalProperties": false
+    },
+    "workspace": {"$ref": "#/$defs/display_name"},
+    "installed_at": {"$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"},
+    "installed_by": {
+      "type": "object",
+      "required": ["uid", "source"],
+      "properties": {
+        "uid": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "source": {"enum": ["cli", "policy"]}
+      },
+      "additionalProperties": false
+    },
+    "policy_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 128}, "maxItems": 32, "uniqueItems": true},
+    "managed": {"type": "boolean"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
+    "display_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"}
+  }
+}

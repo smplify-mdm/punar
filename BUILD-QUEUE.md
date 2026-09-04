@@ -20,7 +20,7 @@ bare-metal claim. The recently closed gates are recorded here:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **CORE DoD VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) passed both 122-assertion desktop-surface suites. Clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app install/context support remains M11 work. |
+| 7 | launch browser / **web app** | **CORE DoD VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) passed both 122-assertion desktop-surface suites. Clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app installation, isolated browser contexts and managed Chromium policy are implemented in the current working tree; they remain **LOCAL-ONLY** until the new M11 VM gate passes both architecture lanes. |
 | 19 | enforce project network rule | **VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_M12_OK` with 66 assertions on both x86_64 KVM and ARM64 TCG. A same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This proves generic UEFI/QEMU behavior, not internet, VPN, Raspberry Pi or physical-NIC behavior. |
 | 20 | display local network activity | **VERIFIED IN CANONICAL DUAL-ARCH CI:** the same run joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. Both screenshots and reports exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
 | 25 | demonstrate rollback/update mechanism | **VERIFIED IN CANONICAL ARM64 CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_UPDATE_AUTO_ROLLBACK_OK attempts=3 fallback_slot=A`. Signed apply had already verified inactive-slot write/readback/hash and health-gated blessing. The four-boot proof exhausted an impossible pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. |
@@ -821,11 +821,11 @@ mounts the encrypted/shared `@var` subvolume at `/var`, so
 `/var/lib/flatpak` is outside both immutable root slots. The image-layout gate
 reopens that subvolume and verifies that slot A contains none of the mutable
 trees. The signed catalog, typed install/remove/update methods, visual
-Application Library, installed-state reconciliation, and cross-workspace Open
-behavior are implemented. The remaining application work is native vendor-UI
-compatibility on both architectures, managed per-app configuration adapters,
-generic user-created web apps/browser contexts, and physical-device testing—not
-the persistence location.
+Application Library, installed-state reconciliation, cross-workspace Open
+behavior, and generic user-created web apps/browser contexts are implemented.
+The remaining application work is the new browser/context VM gate, native
+vendor-UI compatibility on both architectures, managed per-app configuration
+adapters, and physical-device testing—not the persistence location.
 
 **Also:** the UX reviewer's objection stands — spec §12.2's worked example is
 typing `> install Firefox` into the **command centre**, and non-negotiable 17
@@ -919,9 +919,13 @@ authorization page; both architecture profiles now include that backend and a
 static gate prevents its removal. A rebuilt image plus a complete callback
 round-trip and canonical dual-architecture CI are still required before closing
 that compatibility gate.
-Generic web-app
-creation, persistent launchers, browser contexts and the complete M11 check
-remain open. M12's implementation, daemon/CLI/image integration and event-driven
+The current working tree now implements generic web-app creation, persistent
+launchers, isolated browser contexts, closed managed Chromium policy,
+workspace-aware selection, clean uninstall/purge, and the complete M11 image
+exercise. Host Rust, schema, shell, QML parser and static contract suites pass;
+the feature remains **LOCAL-ONLY** until a rebuilt image produces the M11
+runtime report and screenshot on both architectures. M12's implementation,
+daemon/CLI/image integration and event-driven
 reconciliation are complete: the same canonical run emitted `PUNAR_M12_OK`
 with 66 assertions on x86_64 and ARM64 and closed DoD items 19 and 20 for
 generic UEFI/QEMU. Physical NIC, Raspberry Pi and real relay behavior remain

@@ -12,4 +12,5 @@ singleton SurfaceTiming 1.0 SurfaceTiming.qml
 singleton HyprlandActions 1.0 HyprlandActions.qml
 singleton WallpaperState 1.0 WallpaperState.qml
 singleton WorkspaceState 1.0 WorkspaceState.qml
+singleton BrowserContext 1.0 BrowserContext.qml
 DeferredSurfaceBase 1.0 DeferredSurfaceBase.qml

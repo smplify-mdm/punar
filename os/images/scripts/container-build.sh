@@ -109,6 +109,7 @@ stage_desktop_extra() {
     rm -rf "${extra}/etc/xdg" "${extra}/etc/fonts" \
            "${extra}/usr/share/fonts" "${extra}/usr/share/punar/shell" \
            "${extra}/usr/share/punar/theme" \
+           "${extra}/usr/share/punar/browser" \
            "${extra}/usr/share/punar/network" \
            "${extra}/usr/share/punar/repart.d" \
            "${extra}/usr/share/punar/fixtures" \
@@ -117,6 +118,7 @@ stage_desktop_extra() {
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
+             "${extra}/usr/share/punar/browser" \
              "${extra}/usr/share/punar/network/zones" \
              "${extra}/usr/share/punar/repart.d/install" \
              "${extra}/usr/share/punar/repart.d/install-raspberry-pi" \
@@ -150,16 +152,19 @@ stage_desktop_extra() {
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"
-    # Chromium launch defaults + the system default-handler map.
-    # /etc/chromium-flags.conf is ADDITIVE with the user's own file (both are
-    # read, in order) — the opposite of foot.ini's first-found-wins rule, so
-    # this is a floor and not a cage. /etc/xdg/mimeapps.list is what makes
-    # xdg-open answer an http(s) URL at all; a user's ~/.config/mimeapps.list
-    # outranks it. Neither is enterprise policy: writing
-    # /etc/chromium/policies/managed/ would brand an UNENROLLED device
-    # "Managed by your organization" (DESIGN_LANGUAGE.md section 8).
-    cp "${mod}/chromium/chromium-flags.conf" "${extra}/etc/chromium-flags.conf"
+    # Browser defaults and the system default-handler map. Every product entry
+    # routes through punarctl's closed argv builder; no wrapper flag file is
+    # staged. The local chromium.desktop shadows the package's vendor-named
+    # entry as NoDisplay so people see one generic Browser, while explicit
+    # desktop-id launches cannot bypass Punar's context selection. User-level
+    # mime defaults still outrank /etc/xdg in the normal XDG order. Enterprise
+    # policy is rendered only after enrollment, never here.
     cp "${mod}/chromium/mimeapps.list" "${extra}/etc/xdg/mimeapps.list"
+    install -d "${extra}/usr/local/share/applications"
+    install -m 0644 "${REPO_ROOT}/browser/integration/punar-browser.desktop" \
+        "${extra}/usr/local/share/applications/punar-browser.desktop"
+    install -m 0644 "${REPO_ROOT}/browser/integration/chromium.desktop" \
+        "${extra}/usr/local/share/applications/chromium.desktop"
     # fontconfig defaults (sorts before 60-latin so preferences win).
     cp "${mod}/fonts/50-punar-fonts.conf" "${extra}/etc/fonts/conf.d/"
     # Vendored fonts, OFL.txt alongside each family (license requirement).
@@ -248,6 +253,25 @@ stage_desktop_extra() {
         "${extra}/usr/share/punar/catalog/icons/"
     install -m 0644 "${REPO_ROOT}"/catalog/icons/*.png \
         "${extra}/usr/share/punar/catalog/icons/"
+
+    # M11 Chromium integration policy vocabulary. The daemon compiles these
+    # same bytes as its fail-closed parser input; staging the source file
+    # makes the active vocabulary inspectable on-device and gives the VM
+    # security check a byte-identical review target.
+    install -m 0644 "${REPO_ROOT}/browser/integration/policy-allowlist.json" \
+        "${extra}/usr/share/punar/browser/policy-allowlist.json"
+    install -m 0644 "${REPO_ROOT}/browser/integration/forbidden-tokens.txt" \
+        "${extra}/usr/share/punar/browser/forbidden-tokens.txt"
+    install -m 0644 "${REPO_ROOT}/browser/integration/desktop-entry.template" \
+        "${extra}/usr/share/punar/browser/desktop-entry.template"
+    install -d "${extra}/usr/share/punar/fixtures/webapps/notes"
+    install -m 0644 "${REPO_ROOT}/browser/integration/fixtures/notes/index.html" \
+        "${extra}/usr/share/punar/fixtures/webapps/notes/index.html"
+    install -m 0644 "${REPO_ROOT}/browser/integration/fixtures/notes/punar-webapp.json" \
+        "${extra}/usr/share/punar/fixtures/webapps/notes/punar-webapp.json"
+    base64 --decode "${REPO_ROOT}/browser/integration/fixtures/notes/icon.png.b64" \
+        > "${extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
+    chmod 0644 "${extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
 
     # M12 network policy data. Zone definitions are product vocabulary;
     # membership is site data and deliberately starts empty. A missing CIDR

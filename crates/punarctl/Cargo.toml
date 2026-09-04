@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 clap = { workspace = true }
 punar-common = { workspace = true }
 # rustix (M9, docs/development/milestone-9.md section 4.3): inotify +

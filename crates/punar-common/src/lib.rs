@@ -81,6 +81,7 @@ pub mod query;
 mod redacted;
 pub mod time;
 pub mod update;
+pub mod webapp;
 
 pub use agent::{AgentClassification, AgentStatus, RegistryRecord};
 pub use approval::{Approval, ApprovalEnvelope, ApprovalKind, ApprovalStatus, Grant, Requester};

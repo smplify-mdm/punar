@@ -14,10 +14,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use punar_common::webapp::{WebAppManifest, origin_from_start_url, validate_manifest};
 use punar_policy::{Classification, EffectiveEntry, LayerValue, Provenance, SourceKind, merge};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::browser_policy::{
+    BrowserPolicyLayer, CAPABILITY_ID as BROWSER_POLICY_CAPABILITY, extract_browser_policy,
+};
 use crate::capability::Registry;
 use crate::state::{OsDefaultsStore, PreferencesStore};
 use crate::util::write_atomic;
@@ -85,6 +89,12 @@ pub struct ApplicationPolicyLayer {
     pub provenance: Provenance,
     pub required: BTreeSet<String>,
     pub denied: BTreeSet<String>,
+    /// Browser-backed applications are keyed by their stable Punar id, but
+    /// authorization matches both id and derived origin so an id cannot be
+    /// reused to smuggle a different site through a required-app exception.
+    pub required_web_apps: BTreeMap<String, WebAppManifest>,
+    /// Canonical HTTPS origins (or the local fixture origin `file://`).
+    pub denied_origins: BTreeSet<String>,
     pub allow_user_install: Option<bool>,
 }
 
@@ -99,7 +109,9 @@ pub enum ApplicationPolicyAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationPolicyReason {
     Required,
+    RequiredWebApp,
     Denied,
+    DeniedOrigin,
     UserInstallAllowed,
     UserInstallBlocked,
     NoManagedPolicy,
@@ -110,7 +122,9 @@ impl ApplicationPolicyReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Required => "required",
+            Self::RequiredWebApp => "required_web_app",
             Self::Denied => "denied",
+            Self::DeniedOrigin => "denied_origin",
             Self::UserInstallAllowed => "user_install_allowed",
             Self::UserInstallBlocked => "user_install_blocked",
             Self::NoManagedPolicy => "no_managed_policy",
@@ -134,6 +148,9 @@ pub struct LoadedPolicies {
     /// SPEC section 46 application layers, retained separately because app
     /// membership is not a scalar capability value.
     pub applications: Vec<ApplicationPolicyLayer>,
+    /// Raw, allowlisted Chromium policy opinions with provenance. The final
+    /// managed document is rendered only after all layers are loaded.
+    pub browsers: Vec<BrowserPolicyLayer>,
     /// `spec.*` paths that have no registered capability yet — logged once
     /// at load and ignored (they land with their capabilities, M5+).
     pub unmapped: Vec<String>,
@@ -213,8 +230,28 @@ pub fn load_policy_dir(dir: &Path) -> io::Result<LoadedPolicies> {
         };
         match &envelope.policy {
             Some(payload) => {
-                if let Some(application) = extract_application_policy(payload, &provenance)? {
+                let application = extract_application_policy(payload, &provenance)?;
+                let browser = extract_browser_policy(payload, &provenance)?;
+                let browser_managed = application.as_ref().is_some_and(|layer| {
+                    !layer.required_web_apps.is_empty()
+                        || !layer.denied_origins.is_empty()
+                        || layer.allow_user_install.is_some()
+                }) || browser.is_some();
+                if let Some(application) = application {
                     loaded.applications.push(application);
+                }
+                if let Some(browser) = browser {
+                    loaded.browsers.push(browser);
+                }
+                if browser_managed {
+                    loaded.layers.push((
+                        BROWSER_POLICY_CAPABILITY.to_string(),
+                        LayerValue {
+                            value: json!("managed"),
+                            provenance: provenance.clone(),
+                            classification: Classification::AutoRemediate,
+                        },
+                    ));
                 }
                 let flat = flatten_desired_state(payload);
                 for (cap_path, value) in flat.mapped {
@@ -279,7 +316,10 @@ fn extract_application_policy(
         ));
     };
     for key in object.keys() {
-        if !matches!(key.as_str(), "required" | "denied" | "allowUserInstall") {
+        if !matches!(
+            key.as_str(),
+            "required" | "denied" | "allowUserInstall" | "web_apps"
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("spec.applications contains unsupported field {key:?}"),
@@ -319,22 +359,21 @@ fn extract_application_policy(
                     "spec.applications.denied entries must be objects",
                 ));
             };
-            if entry.len() != 1 || !entry.contains_key("package") {
+            if entry.len() != 1 || (!entry.contains_key("package") && !entry.contains_key("origin"))
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "spec.applications.denied entries contain only package",
+                    "spec.applications.denied entries contain exactly one of package or origin",
                 ));
             }
-            let id = non_empty_catalog_id(
-                entry.get("package").expect("checked above"),
-                "spec.applications.denied.package",
-                path,
-            )?;
-            if !denied.insert(id.clone()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("spec.applications.denied contains duplicate {id:?}"),
-                ));
+            if let Some(package) = entry.get("package") {
+                let id = non_empty_catalog_id(package, "spec.applications.denied.package", path)?;
+                if !denied.insert(id.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("spec.applications.denied contains duplicate {id:?}"),
+                    ));
+                }
             }
         }
     }
@@ -343,6 +382,95 @@ fn extract_application_policy(
             io::ErrorKind::InvalidData,
             format!("spec.applications cannot require and deny {conflict:?}"),
         ));
+    }
+
+    let mut required_web_apps = BTreeMap::new();
+    if let Some(web_apps) = object.get("web_apps") {
+        let Some(web_apps) = web_apps.as_object() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "spec.applications.web_apps must be an object",
+            ));
+        };
+        if web_apps.keys().any(|key| key != "required") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "spec.applications.web_apps contains only required",
+            ));
+        }
+        let Some(entries) = web_apps.get("required").and_then(Value::as_array) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "spec.applications.web_apps.required must be an array",
+            ));
+        };
+        for entry in entries {
+            let manifest: WebAppManifest =
+                serde_json::from_value(entry.clone()).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "spec.applications.web_apps.required has an invalid record: {error}"
+                        ),
+                    )
+                })?;
+            validate_manifest(&manifest).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("spec.applications.web_apps.required is invalid: {error}"),
+                )
+            })?;
+            if required_web_apps
+                .insert(manifest.id.clone(), manifest)
+                .is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "spec.applications.web_apps.required contains a duplicate id",
+                ));
+            }
+        }
+    }
+
+    let mut denied_origins = BTreeSet::new();
+    if let Some(entries) = object.get("denied").and_then(Value::as_array) {
+        for entry in entries.iter().filter_map(Value::as_object) {
+            if let Some(value) = entry.get("origin") {
+                let Some(origin) = value.as_str() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "spec.applications.denied.origin must be a string",
+                    ));
+                };
+                let canonical = origin_from_start_url(origin).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("spec.applications.denied.origin is invalid: {error}"),
+                    )
+                })?;
+                if canonical != origin {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("spec.applications.denied.origin must be canonical {canonical:?}"),
+                    ));
+                }
+                if !denied_origins.insert(canonical.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("spec.applications.denied contains duplicate origin {canonical:?}"),
+                    ));
+                }
+            }
+        }
+    }
+    for manifest in required_web_apps.values() {
+        let origin = origin_from_start_url(&manifest.start_url).expect("validated manifest");
+        if denied_origins.contains(&origin) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("spec.applications cannot require and deny origin {origin:?}"),
+            ));
+        }
     }
 
     let allow_user_install = match object.get("allowUserInstall") {
@@ -359,6 +487,8 @@ fn extract_application_policy(
         provenance: provenance.clone(),
         required,
         denied,
+        required_web_apps,
+        denied_origins,
         allow_user_install,
     }))
 }
@@ -447,6 +577,85 @@ pub fn evaluate_application_policy(
     }
 }
 
+/// Resolve a browser-backed application lifecycle request by canonical
+/// origin. This is deliberately distinct from native catalog-id policy:
+/// Chromium enforces origins, and a caller-controlled app id is not an
+/// origin security boundary.
+pub fn evaluate_webapp_policy(
+    layers: &[ApplicationPolicyLayer],
+    id: &str,
+    origin: &str,
+    action: ApplicationPolicyAction,
+) -> ApplicationPolicyDecision {
+    let mut membership: Option<(&ApplicationPolicyLayer, bool)> = None;
+    for layer in layers {
+        let required = layer.required_web_apps.get(id).is_some_and(|manifest| {
+            origin_from_start_url(&manifest.start_url).ok().as_deref() == Some(origin)
+        });
+        let denied = layer.denied_origins.contains(origin);
+        if required || denied {
+            match membership {
+                Some((winner, _)) if winner.provenance.rank <= layer.provenance.rank => {}
+                _ => membership = Some((layer, required)),
+            }
+        }
+    }
+    if let Some((layer, required)) = membership {
+        return match (action, required) {
+            (ApplicationPolicyAction::Install, true) => ApplicationPolicyDecision {
+                allowed: true,
+                reason: ApplicationPolicyReason::RequiredWebApp,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Install, false) => ApplicationPolicyDecision {
+                allowed: false,
+                reason: ApplicationPolicyReason::DeniedOrigin,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Remove, true) => ApplicationPolicyDecision {
+                allowed: false,
+                reason: ApplicationPolicyReason::RequiredWebApp,
+                provenance: Some(layer.provenance.clone()),
+            },
+            (ApplicationPolicyAction::Remove, false) => ApplicationPolicyDecision {
+                allowed: true,
+                reason: ApplicationPolicyReason::UserRemovalAllowed,
+                provenance: Some(layer.provenance.clone()),
+            },
+        };
+    }
+
+    if action == ApplicationPolicyAction::Remove {
+        return ApplicationPolicyDecision {
+            allowed: true,
+            reason: ApplicationPolicyReason::UserRemovalAllowed,
+            provenance: None,
+        };
+    }
+
+    let install_policy = layers
+        .iter()
+        .filter(|layer| layer.allow_user_install.is_some())
+        .min_by_key(|layer| layer.provenance.rank);
+    match install_policy {
+        Some(layer) if layer.allow_user_install == Some(true) => ApplicationPolicyDecision {
+            allowed: true,
+            reason: ApplicationPolicyReason::UserInstallAllowed,
+            provenance: Some(layer.provenance.clone()),
+        },
+        Some(layer) => ApplicationPolicyDecision {
+            allowed: false,
+            reason: ApplicationPolicyReason::UserInstallBlocked,
+            provenance: Some(layer.provenance.clone()),
+        },
+        None => ApplicationPolicyDecision {
+            allowed: false,
+            reason: ApplicationPolicyReason::NoManagedPolicy,
+            provenance: None,
+        },
+    }
+}
+
 /// Result of flattening one `DeviceDesiredState` payload.
 #[derive(Debug, Default, PartialEq)]
 pub struct FlattenedSpec {
@@ -490,7 +699,7 @@ pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
                     }
                 }
             }
-            ("applications", Some(_)) => {}
+            ("applications", Some(_)) | ("browser", Some(_)) => {}
             ("update", Some(update)) => {
                 for (key, setting) in update {
                     match (key.as_str(), setting.as_str()) {
@@ -685,7 +894,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load_policy_dir(&dir).unwrap();
-        assert_eq!(loaded.layers.len(), 2);
+        assert_eq!(loaded.layers.len(), 3);
         let (path, layer) = loaded
             .layers
             .iter()
@@ -703,13 +912,27 @@ mod tests {
             .find(|(path, _)| path == "system.update_channel")
             .unwrap();
         assert_eq!(update.value, json!("stable"));
+        let (_, browser) = loaded
+            .layers
+            .iter()
+            .find(|(path, _)| path == BROWSER_POLICY_CAPABILITY)
+            .unwrap();
+        assert_eq!(browser.value, json!("managed"));
         assert_eq!(loaded.applications.len(), 1);
         assert_eq!(
             loaded.applications[0].required,
             BTreeSet::from(["git".to_string(), "podman".to_string()])
         );
         assert!(loaded.applications[0].denied.is_empty());
-        assert_eq!(loaded.applications[0].allow_user_install, None);
+        assert!(loaded.applications[0].required_web_apps.is_empty());
+        assert_eq!(
+            loaded.applications[0].denied_origins,
+            BTreeSet::from(["https://social.example".to_string()])
+        );
+        assert_eq!(loaded.applications[0].allow_user_install, Some(false));
+        assert_eq!(loaded.browsers.len(), 1);
+        assert_eq!(loaded.browsers[0].provenance.policy_id, "eng-baseline-v12");
+        assert_eq!(loaded.browsers[0].policies["SitePerProcess"], json!(true));
         assert!(!loaded.unmapped.is_empty(), "acme spec has unmapped paths");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -725,6 +948,8 @@ mod tests {
             },
             required: BTreeSet::from(["claude-desktop".into()]),
             denied: BTreeSet::from(["discord".into()]),
+            required_web_apps: BTreeMap::new(),
+            denied_origins: BTreeSet::new(),
             allow_user_install: Some(false),
         };
         let role = ApplicationPolicyLayer {
@@ -736,6 +961,8 @@ mod tests {
             },
             required: BTreeSet::new(),
             denied: BTreeSet::new(),
+            required_web_apps: BTreeMap::new(),
+            denied_origins: BTreeSet::new(),
             allow_user_install: Some(true),
         };
         let layers = [role, baseline];
@@ -776,6 +1003,102 @@ mod tests {
         let missing = evaluate_application_policy(&[], "spotify", ApplicationPolicyAction::Install);
         assert!(!missing.allowed);
         assert_eq!(missing.reason, ApplicationPolicyReason::NoManagedPolicy);
+    }
+
+    #[test]
+    fn webapp_policy_matches_canonical_origin_and_exact_required_identity() {
+        let required = WebAppManifest {
+            v: 1,
+            id: "linear".into(),
+            name: "Linear".into(),
+            start_url: "https://linear.app/inbox".into(),
+            context: "org-acme".into(),
+            workspace: "atlas".into(),
+            icon: punar_common::webapp::WebAppIconRequest::Generated,
+        };
+        let layer = ApplicationPolicyLayer {
+            provenance: Provenance {
+                kind: SourceKind::OrganizationBaseline,
+                rank: 2,
+                policy_id: "browser-baseline".into(),
+                source_name: "Browser Baseline".into(),
+            },
+            required: BTreeSet::new(),
+            denied: BTreeSet::new(),
+            required_web_apps: BTreeMap::from([("linear".into(), required)]),
+            denied_origins: BTreeSet::from(["https://social.example".into()]),
+            allow_user_install: Some(false),
+        };
+
+        let allowed = evaluate_webapp_policy(
+            std::slice::from_ref(&layer),
+            "linear",
+            "https://linear.app",
+            ApplicationPolicyAction::Install,
+        );
+        assert!(allowed.allowed);
+        assert_eq!(allowed.reason, ApplicationPolicyReason::RequiredWebApp);
+
+        let spoofed = evaluate_webapp_policy(
+            std::slice::from_ref(&layer),
+            "linear",
+            "https://evil.example",
+            ApplicationPolicyAction::Install,
+        );
+        assert!(!spoofed.allowed);
+        assert_eq!(spoofed.reason, ApplicationPolicyReason::UserInstallBlocked);
+
+        let denied = evaluate_webapp_policy(
+            std::slice::from_ref(&layer),
+            "chat",
+            "https://social.example",
+            ApplicationPolicyAction::Install,
+        );
+        assert!(!denied.allowed);
+        assert_eq!(denied.reason, ApplicationPolicyReason::DeniedOrigin);
+
+        let removal = evaluate_webapp_policy(
+            &[layer],
+            "linear",
+            "https://linear.app",
+            ApplicationPolicyAction::Remove,
+        );
+        assert!(!removal.allowed);
+        assert_eq!(removal.reason, ApplicationPolicyReason::RequiredWebApp);
+    }
+
+    #[test]
+    fn policy_loader_accepts_required_webapps_and_denied_origins() {
+        let dir = tmp("load-webapps");
+        let mut envelope = acme_combined();
+        envelope["policy"]["spec"]["applications"] = json!({
+            "required": ["git"],
+            "denied": [{"origin": "https://social.example"}],
+            "web_apps": {"required": [{
+                "v": 1,
+                "id": "linear",
+                "name": "Linear",
+                "start_url": "https://linear.app/inbox",
+                "context": "org-acme",
+                "workspace": "atlas",
+                "icon": {"kind": "generated"}
+            }]},
+            "allowUserInstall": false
+        });
+        std::fs::write(
+            dir.join("browser.json"),
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_policy_dir(&dir).unwrap();
+        let applications = &loaded.applications[0];
+        assert!(applications.required_web_apps.contains_key("linear"));
+        assert!(
+            applications
+                .denied_origins
+                .contains("https://social.example")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

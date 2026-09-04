@@ -20,7 +20,20 @@
       }
     },
     "applications": {
-      "required": ["git", "podman"]
+      "required": ["git", "podman"],
+      "denied": [
+        {"origin": "https://social.example"}
+      ],
+      "allowUserInstall": false
+    },
+    "browser": {
+      "ExtensionInstallBlocklist": ["*"],
+      "DownloadRestrictions": 1,
+      "PromptForDownloadLocation": true,
+      "SitePerProcess": true,
+      "RemoteDebuggingAllowed": false,
+      "SSLErrorOverrideAllowed": false,
+      "InsecurePrivateNetworkRequestsAllowed": false
     },
     "ai": {
       "policy": "engineering-standard"

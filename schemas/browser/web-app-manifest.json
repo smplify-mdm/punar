@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.org/browser/web-app-manifest.json",
+  "title": "Punar web application install manifest",
+  "description": "A caller- or policy-supplied, fully offline web-app install document. Timestamps, provenance, policy citations, the canonical origin, and the final icon digest are assigned by the daemon and therefore absent here.",
+  "type": "object",
+  "required": ["v", "id", "name", "start_url", "context", "workspace", "icon"],
+  "properties": {
+    "v": {"const": 1},
+    "id": {"$ref": "#/$defs/id"},
+    "name": {"$ref": "#/$defs/display_name"},
+    "start_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(https://|file:///)",
+      "not": {"pattern": "(--|\\\\|\\s)"}
+    },
+    "context": {"$ref": "#/$defs/id"},
+    "workspace": {"$ref": "#/$defs/display_name"},
+    "icon": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {"kind": {"const": "generated"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": {"const": "file"},
+            "path": {"type": "string", "minLength": 1, "maxLength": 4096}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
+    "display_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$"}
+  }
+}

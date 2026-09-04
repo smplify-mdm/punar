@@ -1,0 +1,9 @@
+[Unit]
+Description=Punar M11 browser, web-app and context exercise (CI)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=18min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/m11-check.sh

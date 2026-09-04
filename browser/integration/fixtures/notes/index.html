@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Punar Notes</title>
+<style>
+  :root { color-scheme: light; font-family: ui-monospace, monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: #faf9f6; color: #111; display: grid; place-items: center; }
+  main { width: min(720px, calc(100vw - 48px)); border-top: 2px solid #111; padding: 32px 0; }
+  small { letter-spacing: .18em; text-transform: uppercase; color: #666; }
+  h1 { font: 500 clamp(36px, 7vw, 72px)/1.02 system-ui, sans-serif; margin: 18px 0 12px; }
+  p { color: #555; line-height: 1.6; }
+  #probe { color: #236d2b; }
+</style>
+<main>
+  <small>Punar · local web app</small>
+  <h1>Notes, in its own context.</h1>
+  <p>This page is bundled with the image and makes no network requests.</p>
+  <p id="probe">Context probe not set.</p>
+</main>
+<script>
+  const value = location.hash.slice(1) || "punar-ctx-probe-personal";
+  localStorage.setItem("punar-ctx-probe", value);
+  document.querySelector("#probe").textContent = value;
+</script>
+</html>

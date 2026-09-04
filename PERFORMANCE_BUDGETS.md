@@ -202,6 +202,9 @@ at the 10-minute mark, and the reported value is the mean over the window
   new daemon, and only then reconsider the topology
   (`docs/development/milestone-9.md` §11,
   `docs/development/milestone-12.md` §12).
+- M11 adds no resident service: Browser and installed web apps run as user
+  applications in the session slice. Their one-context PSS and second-context
+  delta are recorded separately and do not masquerade as service or idle RAM.
 - Cross-check metric: systemd cgroup accounting —
   `systemctl show -p MemoryCurrent <unit>` (i.e. cgroup v2
   `memory.current`), summed across the same units. This includes kernel-side

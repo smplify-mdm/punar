@@ -65,6 +65,7 @@ ShellRoot {
     // (milestone-2.md §6).
     Component.onCompleted: {
         WorkspaceState.init();
+        BrowserContext.init();
         WallpaperState.init();
         SurfaceTiming.init();
     }
@@ -159,6 +160,7 @@ ShellRoot {
         onBarCreated: readyMarker.running = true
         onCommandCenterRequested: commandCenterSurface.openSurface()
         onWindowActionsRequested: windowActionsSurface.openSurface()
+        onBrowserContextRequested: systemControlSurface.openSection("applications")
     }
 
     // The normal close path is always available directly on PUNAR+Q. This
@@ -270,7 +272,27 @@ ShellRoot {
     DeferredSurface {
         id: systemControlSurface
         surfaceName: "systemcontrol"
+        property string requestedSection: ""
+
+        function openSection(section: string): void {
+            systemControlSurface.requestedSection = section;
+            var loadedSurface = systemControlSurface.ensureLoaded(false);
+            if (loadedSurface !== null) {
+                systemControlSurface.requestedSection = "";
+                loadedSurface.showSection(section);
+                return;
+            }
+            systemControlSurface.openWhenLoaded = true;
+        }
+
         sourceComponent: SystemControl {
+            Component.onCompleted: {
+                if (systemControlSurface.requestedSection !== "") {
+                    var section = systemControlSurface.requestedSection;
+                    systemControlSurface.requestedSection = "";
+                    showSection(section);
+                }
+            }
             onAiPanelRequested: shellRoot.showAiPanel()
             onSystemTimeZoneChanged: function(timeZone) {
                 LocalTime.systemTimeZoneChanged(timeZone);
@@ -302,6 +324,9 @@ ShellRoot {
         }
         function open(): void {
             systemControlSurface.openSurface();
+        }
+        function section(id: string): void {
+            systemControlSurface.openSection(id);
         }
         function close(): void {
             systemControlSurface.closeSurface();

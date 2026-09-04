@@ -12,8 +12,8 @@ CI diff them against the design tokens.
 | Module | File(s) | Install path in image |
 |---|---|---|
 | `foot/` | `foot.ini` | `/etc/xdg/foot/foot.ini` |
-| `chromium/` | `chromium-flags.conf` | `/etc/chromium-flags.conf` |
 | `chromium/` | `mimeapps.list` | `/etc/xdg/mimeapps.list` |
+| `browser/integration/` | `punar-browser.desktop`, `chromium.desktop` | `/usr/local/share/applications/` |
 | `hypr/` | `punar-terminal-app.sh` | `/usr/lib/punar/punar-terminal-app.sh` |
 | `fonts/` | `instrument-sans/*` (2 variable TTFs + OFL.txt) | `/usr/share/fonts/punar/instrument-sans/` |
 | `fonts/` | `geist-mono/*` (3 static TTFs + OFL.txt) | `/usr/share/fonts/punar/geist-mono/` |
@@ -41,36 +41,15 @@ integration step must honor:
 
 ## Chromium (`chromium/`)
 
-Two files, and the reason they are worth reading together is that they have
-**opposite override semantics to `foot.ini` above** — the same shape of
-mistake in either direction produces a broken default.
-
-### `chromium-flags.conf` -> `/etc/chromium-flags.conf`
-
-Verified 2026-08-26 by reading the strings of the compiled `/usr/bin/chromium`
-launcher from chromium 151.0.7922.173-1 in the pinned snapshot, rather than
-from documentation:
-
-> Custom flags are read in order from the following files:
-> `/etc/chromium-flags.conf`, `$XDG_CONFIG_HOME/chromium-flags.conf`.
-> Arguments are split on whitespace and shell quoting rules apply but no
-> further parsing is performed. Lines starting with a hash symbol (#) are
-> skipped. Lines with unbalanced quotes are skipped as well.
-
-- **Both files are read, in order.** A user's `~/.config/chromium-flags.conf`
-  *adds to* these defaults. This is the opposite of foot's first-found-wins
-  rule: a user overriding one flag does not lose the rest, so Punar's defaults
-  are a floor and not a cage.
-- **An unbalanced quote makes a line vanish silently** — no warning, no error.
-  Every line in the file is therefore unquoted, and `surfaces-check.sh` asserts
-  the flags on the *running browser's argv* rather than asserting the file's
-  text, because a present, readable, well-formed-looking file can still apply
-  nothing.
-
-The `--ozone-platform-hint=auto` flag is why the file exists. It previously
-lived on the `PUNAR+B` keybind, which meant exactly one launch path got a
-native Wayland browser while the application launcher, `xdg-open` and any
-future web-app launcher went through `chromium.desktop` and got XWayland.
+Punar deliberately ships **no Chromium wrapper flag file**. Both supported
+distribution wrappers accept flags from mutable system/user paths, which would
+make a reviewed launcher only one argv source among several. The generic
+`punar-browser.desktop`, its hidden `chromium.desktop` compatibility shadow,
+`PUNAR+B`, web-app launchers, and curated web fallbacks all route through
+`punarctl`'s closed builder and execute `/usr/lib/chromium/chromium` directly.
+That one path supplies the native-Wayland and first-run defaults, chooses the
+active browser context, validates any navigation URL, and inserts Chromium's
+`--` option delimiter before it.
 
 **No enterprise policy.** Chromium also reads `/etc/chromium/policies/managed/`.
 Punar does not write there on an unmanaged device: a managed policy makes the
@@ -92,7 +71,7 @@ Resolution order is `$XDG_CONFIG_HOME/mimeapps.list`, then each
 browser **outranks** this file. A dangling desktop id here fails *open* —
 `xdg-open` falls through rather than erroring, which looks identical to having
 no default — so the check asserts the resolved handler and the existence of
-`chromium.desktop` on the running system. The same file now declares
+`punar-browser.desktop` on the running system. The same file now declares
 `thunar.desktop` for `inode/directory`; the image ships Thunar plus GVfs and
 the SMB backend, so graphical local folders and `smb://` shares are a default
 workstation capability rather than a catalog prerequisite.

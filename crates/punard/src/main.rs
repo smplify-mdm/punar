@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use punar_common::DeviceClass;
+use punard::backends::browser_policy::BrowserPolicyBackend;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
 use punard::backends::timezone::TimezoneBackend;
@@ -164,6 +165,10 @@ fn build_registry(args: &RunArgs) -> Registry {
                 args.state_dir.join("update/verified-channel.json"),
                 args.state_dir.join("update/verified-channel.json.sig"),
             ],
+        )),
+        Box::new(BrowserPolicyBackend::new(
+            args.state_dir.join("browser-policy/rendered.json"),
+            PathBuf::from("/etc/chromium/policies/managed/punar-managed.json"),
         )),
     ])
 }

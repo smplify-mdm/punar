@@ -53,13 +53,6 @@ install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
 ln -sfn ../punar-update-health.service \
     /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
-# Debian's Chromium wrapper reads /etc/chromium.d rather than Arch's
-# /etc/chromium-flags.conf directly. Keep the product defaults in one source
-# and adapt the launcher mechanism without writing enterprise policy.
-install -d -m 0755 /etc/chromium.d
-install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
-    /etc/chromium.d/punar-flags
-
 # Debian packages nft under /usr/sbin; product services use the shared
 # cross-distribution /usr/bin contract.
 ln -sfn /usr/sbin/nft /usr/bin/nft

@@ -36,12 +36,6 @@ install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
 ln -sfn ../punar-update-health.service \
     /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
-# Debian's Chromium wrapper reads this drop-in instead of Arch's direct flags
-# file. Keep the product defaults in the shared source and adapt only launch.
-install -d -m 0755 /etc/chromium.d
-install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
-    /etc/chromium.d/punar-flags
-
 ln -sfn /usr/sbin/nft /usr/bin/nft
 ln -sfn /usr/bin/fdfind /usr/bin/fd
 ln -sfn /usr/bin/batcat /usr/bin/bat

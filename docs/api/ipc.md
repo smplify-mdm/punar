@@ -210,6 +210,9 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `apps.install` | **human; managed policy decides when enrolled** | yes | always |
 | `apps.remove` | **human; managed policy decides when enrolled** | yes | always |
 | `apps.update` | **human; managed policy decides per installed app** | yes | always |
+| `webapps.list` / `webapps.get` | any connected peer; own uid only | no | no |
+| `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always |
+| `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always |
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
@@ -244,7 +247,7 @@ Params: none.
   "mode": "personal",
   "enrolled": false,
   "hostname": "punar-desktop",
-  "capabilities_total": 4,
+  "capabilities_total": 5,
   "last_reconcile": "2026-08-25T07:00:13Z",
   "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
   "device": {
@@ -286,7 +289,8 @@ preferences; no org involved before M5):
     {"capability": "security.firewall", "state": "compliant"},
     {"capability": "system.hostname",   "state": "compliant"},
     {"capability": "time.timezone",     "state": "compliant"},
-    {"capability": "system.update_channel", "state": "compliant"}
+    {"capability": "system.update_channel", "state": "compliant"},
+    {"capability": "browser.policy", "state": "compliant"}
   ],
   "drift_remediated_total": 2,
   "last_remediation_at": "2026-08-25T09:14:02Z"
@@ -331,6 +335,9 @@ registry was `security.firewall`, `system.hostname`, and `time.timezone`
 (backends: docs/development/milestone-3.md section 4).
 `system.update_channel` is now the fourth capability: the same layered
 preference/organization-policy machinery governs `stable`, `dev`, or `edge`.
+`browser.policy` is the fifth: its only desired states are `managed` and
+`unmanaged`; live observation returns `drifted` when Chromium's root-owned
+mandatory-policy file does not match the freshly rendered effective policy.
 
 ### 5.3 `capabilities.get`
 
@@ -3005,3 +3012,50 @@ must carry `simulated: true`, the limited knowledge claimed for each role,
 `property_not_held` explaining that both roles remain one local process under
 one operator, and `real_relay_milestone: "phase_2"`. No surface may shorten
 that to “protected” or imply independent trust boundaries exist.
+
+---
+
+## 22. Web applications and browser contexts (M11)
+
+These methods live on the existing punard socket and retain the v1 envelope.
+There is no launch or generic-execution RPC: launching happens in the user's
+session through `punarctl`'s closed Chromium argv builder.
+
+| Method | Params | Result |
+|---|---|---|
+| `webapps.list` | absent or `{"include_artifacts":true}` | caller-owned `apps`, `contexts`, effective `required_web_apps`, and install-policy summary |
+| `webapps.get` | `{"id":"notes","include_artifacts":false}` | one caller-owned record, optionally with derived artifacts |
+| `webapps.install` | `{"app":{...strict local manifest...}}` | complete record, verified icon/launcher artifacts, and enforcement disclosure |
+| `webapps.uninstall` | `{"id":"notes","purge_data":false}` | removed record and the kept/purged profile path |
+| `webapps.context_create` | `{"id":"atlas","name":"Atlas"}` | created context |
+| `webapps.context_delete` | `{"id":"atlas","purge_data":false}` | deleted context and profile disposition |
+
+All records are scoped from `SO_PEERCRED`; no request accepts a uid. Mutation
+from an agent-attributed peer is denied and audited. `personal` always exists
+and cannot be deleted. `org-*` is reserved and synthesized from active
+enrollment rather than persisted as user state. Contexts isolate Chromium
+cookies, storage, sign-ins, history, and extensions; they do not claim a
+separate uid, kernel boundary, or protection from a browser sandbox escape.
+
+Install accepts only HTTPS or absolute `file:///` URLs, never fetches a
+manifest or icon, and accepts no executable or command field. The record is
+private root-owned state under `/var/lib/punar/web-apps/<uid>/`; `.desktop`,
+icon, profile, and compositor-rule files in the user's home are rebuildable
+artifacts. Supplied PNGs are regular, caller-owned (or signed-fixture-owned),
+no-follow, checksum-valid, at most 64 KiB, and at most 1024×1024.
+
+Audit additions use `webapp.install`, `webapp.uninstall`,
+`webapp.context_create`, and `webapp.context_delete`, with resources
+`webapp:<id>` or `browser-context:<id>`. URLs, page content, cookies, browser
+storage, and icon bytes never enter the audit event.
+
+While enrolled, `required_web_apps` contains only the winning, non-denied
+`applications.web_apps.required[]` manifests from effective policy.
+`punarctl web-apps sync` uses this typed list to install missing records or
+adopt an exact pre-existing identity as managed; a conflicting id is refused
+rather than overwritten. Personal devices receive an empty list.
+
+An enrolled `org-*` context reports
+`not_yet_observed:[{"category":"per_context_network_policy","milestone":"phase_2"}]`.
+M12's delivered project/principal network enforcement does not make a
+same-uid Chromium profile a separately routed cgroup.

@@ -1,0 +1,29 @@
+--no-sandbox
+--disable-setuid-sandbox
+--disable-gpu-sandbox
+--disable-namespace-sandbox
+--disable-seccomp-filter-sandbox
+--test-type
+--disable-site-isolation-trials
+--disable-features=IsolateOrigins
+--disable-features=site-per-process
+--single-process
+--process-per-site
+--remote-debugging-port
+--remote-debugging-pipe
+--remote-allow-origins
+--ignore-certificate-errors
+--ignore-certificate-errors-spki-list
+--allow-insecure-localhost
+--unsafely-treat-insecure-origin-as-secure
+--load-extension
+--disable-extensions-except
+--allow-legacy-extension-manifests
+--disable-web-security
+--allow-running-insecure-content
+"SitePerProcess": false
+"RemoteDebuggingAllowed": true
+"SSLErrorOverrideAllowed": true
+CertificateTransparencyEnforcementDisabledFor
+"InsecureContentAllowedForUrls"
+"InsecurePrivateNetworkRequestsAllowed": true

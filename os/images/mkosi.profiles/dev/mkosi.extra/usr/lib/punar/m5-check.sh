@@ -310,22 +310,22 @@ else
     FAILED=1
 fi
 tail -n 1 "${RC_FILE}" > "${RUN_DIR}/m5-received-compliance-last.json" 2>/dev/null
-jq_check "last received compliance: device id matches, overall compliant, four named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
+jq_check "last received compliance: device id matches, overall compliant, five named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
     "${RUN_DIR}/m5-received-compliance-last.json" \
     "(keys | sort) == [\"device_id\", \"received_at\", \"report\"]
      and .device_id == \"${DEVICE_ID}\"
      and (.report | keys | sort) == [\"categories\", \"overall\"]
      and .report.overall == \"compliant\"
-     and (.report.categories | length) == 4
+     and (.report.categories | length) == 5
      and ([.report.categories[].category] | sort
-          == [\"security.firewall\", \"system.hostname\", \"system.update_channel\", \"time.timezone\"])
+          == [\"browser.policy\", \"security.firewall\", \"system.hostname\", \"system.update_channel\", \"time.timezone\"])
      and (.report.categories | all((keys | sort) == [\"category\", \"state\"]))"
 
 # --- 10. inventory: sent once at enroll, then hash-gated ---------------------
 ri_count="$(line_count "${RI_FILE}")"
 check_eq "received-inventory.jsonl line count (sent at enroll only)" 1 "${ri_count}"
 tail -n 1 "${RI_FILE}" > "${RUN_DIR}/m5-received-inventory-last.json" 2>/dev/null
-jq_check "received inventory: os/kernel non-empty, 4 capability rows, exact key allowlists (device info + capability states, nothing behavioral)" \
+jq_check "received inventory: os/kernel non-empty, 5 capability rows, exact key allowlists (device info + capability states, nothing behavioral)" \
     "${RUN_DIR}/m5-received-inventory-last.json" \
     "(keys | sort) == [\"device_id\", \"inventory\", \"received_at\"]
      and .device_id == \"${DEVICE_ID}\"
@@ -333,7 +333,7 @@ jq_check "received inventory: os/kernel non-empty, 4 capability rows, exact key 
      and (.inventory.os | keys | sort) == [\"id\", \"pretty_name\", \"version_id\"]
      and (.inventory.os.id | length) > 0
      and (.inventory.kernel | length) > 0
-     and (.inventory.capabilities | length) == 4
+     and (.inventory.capabilities | length) == 5
      and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"current_state\", \"supported\"]))"
 "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-b.json" 2>&1
 rc_count_b="$(line_count "${RC_FILE}")"
