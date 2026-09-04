@@ -29,10 +29,6 @@ hl.on("hyprland.start", function()
     hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE XDG_CONFIG_DIRS XDG_DATA_DIRS")
     hl.exec_cmd(shell)
     hl.exec_cmd(layoutScript .. " restore")
-    -- User-created web-app rules are derived from punard's root-owned
-    -- inventory. session.sh guarantees this file exists before Hyprland;
-    -- `punarctl web-apps sync` refreshes and reloads it after each change.
-    hl.exec_cmd("hyprctl keyword source ${XDG_CONFIG_HOME:-${HOME}/.config}/hypr/punar-webapps.conf")
     hl.exec_cmd("systemctl --user start hyprpolkitagent.service")
     hl.exec_cmd("foot --server")
 end)
@@ -83,6 +79,22 @@ require("/etc/xdg/hypr/punar-binds.lua")({
     notes_class = "punar-notes",
     scratchpad_script = "/usr/lib/punar/punar-scratchpad.sh",
 })
+
+-- User-created web-app rules are derived from punard's root-owned inventory.
+-- session.sh guarantees this file exists before Hyprland starts, and a later
+-- `punarctl web-apps sync` performs a full config reload so removed rules
+-- cannot remain live. The fragment contains only validated ids/workspaces and
+-- calls `hl.window_rule`; it has no commands or browser arguments.
+local configHome = os.getenv("XDG_CONFIG_HOME")
+if not configHome or configHome == "" then
+    configHome = (os.getenv("HOME") or "") .. "/.config"
+end
+local webAppRules = configHome .. "/hypr/punar-webapps.lua"
+local webAppRulesFile = io.open(webAppRules, "r")
+if webAppRulesFile then
+    webAppRulesFile:close()
+    dofile(webAppRules)
+end
 
 -- The product file is empty. The development profile overlays it with one
 -- hyprland.start hook for VM/CI readiness evidence.

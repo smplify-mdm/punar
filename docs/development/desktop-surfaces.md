@@ -433,7 +433,7 @@ renderer.
 | Default handler | `/etc/xdg/mimeapps.list` → `punar-browser.desktop` | `http`, `https`, `text/html` |
 | `xdg-open` | `xdg-utils` package | Newly present |
 
-**Why every path enters through `punarctl`.** `--ozone-platform-hint=auto`
+**Why every path enters through `punarctl`.** `--ozone-platform=wayland`
 used to live on the chord, then in a distribution wrapper flag file. The first
 made only one path native Wayland; the second allowed mutable files to append
 unreviewed flags. The generic Browser entry, its hidden vendor-id compatibility

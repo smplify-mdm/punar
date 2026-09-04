@@ -1480,7 +1480,8 @@ DeferredSurfaceBase {
                                 spacing: 8
 
                                 Meta {
-                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: 24
+                                    verticalAlignment: Text.AlignVCenter
                                     text: "Storage context"
                                 }
 

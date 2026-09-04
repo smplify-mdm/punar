@@ -379,8 +379,8 @@ impl WebAppManager {
             icon_png_b64: base64_encode(icon),
             icon_path_rel: app.icon.path_rel.clone(),
             window_rule: format!(
-                "windowrule = match:class ^(punar-webapp-{})$, workspace name:{}",
-                app.id, app.workspace
+                "hl.window_rule({{ name = \"punar-webapp-{}\", match = {{ class = \"^punar-webapp-{}$\" }}, workspace = \"name:{}\" }})",
+                app.id, app.id, app.workspace
             ),
         }
     }
@@ -400,7 +400,7 @@ impl WebAppManager {
         let opened_path = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
             .unwrap_or_else(|_| path.to_path_buf());
         let trusted_fixture = opened_path.starts_with(&self.trusted_fixture_root);
-        if metadata.uid() != uid && !(metadata.uid() == 0 && trusted_fixture) {
+        if !icon_owner_allowed(metadata.uid(), uid, trusted_fixture) {
             return Err(WebAppError::Invalid(
                 "icon must be owned by the caller or come from Punar's signed fixture tree".into(),
             ));
@@ -450,6 +450,10 @@ impl WebAppManager {
     fn icon_blob_path(&self, uid: u32, digest: &str) -> PathBuf {
         self.icons_dir(uid).join(format!("{digest}.png"))
     }
+}
+
+fn icon_owner_allowed(owner_uid: u32, caller_uid: u32, trusted_fixture: bool) -> bool {
+    owner_uid == caller_uid || (owner_uid == 0 && trusted_fixture)
 }
 
 fn validate_stored_record(record: &WebAppRecord) -> Result<(), WebAppError> {
@@ -778,6 +782,10 @@ mod tests {
         assert!(!result.artifacts.desktop_entry.contains("chromium"));
         assert!(result.artifacts.icon_png_b64.starts_with("iVBORw0KGgo"));
         assert_eq!(
+            result.artifacts.window_rule,
+            "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^punar-webapp-notes$\" }, workspace = \"name:notes\" })"
+        );
+        assert_eq!(
             fs::metadata(manager.app_path(1000, "notes"))
                 .unwrap()
                 .mode()
@@ -883,15 +891,27 @@ mod tests {
         app.icon = WebAppIconRequest::File {
             path: icon.to_string_lossy().into_owned(),
         };
+        // Hosted CI does not run this test as uid 0; use the actual owner for
+        // the filesystem half and prove the root-only fixture exception with
+        // the pure truth table below.
+        let caller_uid = fs::metadata(&icon).unwrap().uid();
         manager
-            .install(1000, &app, vec![], false, false, false)
+            .install(caller_uid, &app, vec![], false, false, false)
             .unwrap();
         fs::write(&icon, &one_pixel_png[..one_pixel_png.len() - 5]).unwrap();
         app.id = "broken".into();
         assert!(matches!(
-            manager.install(1000, &app, vec![], false, false, false),
+            manager.install(caller_uid, &app, vec![], false, false, false),
             Err(WebAppError::Invalid(_))
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn icon_owner_policy_allows_only_the_caller_or_a_root_owned_fixture() {
+        assert!(icon_owner_allowed(1000, 1000, false));
+        assert!(icon_owner_allowed(0, 1000, true));
+        assert!(!icon_owner_allowed(0, 1000, false));
+        assert!(!icon_owner_allowed(1001, 1000, true));
     }
 }

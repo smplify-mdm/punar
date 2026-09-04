@@ -13,7 +13,7 @@ use std::io::{IsTerminal, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
@@ -44,7 +44,7 @@ const ALLOWED_FLAG_PREFIXES: [&str; 7] = [
     "--app=",
     "--user-data-dir=",
     "--class=",
-    "--ozone-platform-hint=auto",
+    "--ozone-platform=wayland",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=PunarNone",
@@ -717,11 +717,15 @@ fn sync(client: &Client) -> WebResult<usize> {
     };
     let rules_path = hypr_rules_path()?;
     atomic_write(&rules_path, rules.as_bytes(), DESKTOP_FILE_MODE)?;
-    // Reload only this derived fragment when a compositor is present. The
-    // fixed argv carries no user-controlled dispatcher or shell text.
+    // The supported Lua config provider cannot accept `hyprctl keyword
+    // source`. Reload the complete config so it evaluates the derived Lua
+    // fragment from a clean rule set. This command is a fixed argv and a
+    // missing compositor (for example, pre-session repair) is harmless.
     let _ = Command::new("hyprctl")
-        .args(["keyword", "source"])
-        .arg(&rules_path)
+        .arg("reload")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     for context in &list.contexts {
         ensure_profile(&context.profile_path_rel)?;
@@ -980,7 +984,9 @@ fn chromium_args_for_target(
         args.push(format!("--class=punar-webapp-{id}").into());
     }
     args.extend([
-        OsString::from("--ozone-platform-hint=auto"),
+        // Punar is Wayland-only. `auto` selected X11 when this command was
+        // launched from a system exercise despite a valid Wayland socket.
+        OsString::from("--ozone-platform=wayland"),
         OsString::from("--no-first-run"),
         OsString::from("--no-default-browser-check"),
         OsString::from(format!("--disable-features={FIXED_DISABLE_FEATURES}")),
@@ -1139,7 +1145,7 @@ fn context_state_path() -> WebResult<PathBuf> {
     Ok(state_home()?.join("punar/browser-context.json"))
 }
 fn hypr_rules_path() -> WebResult<PathBuf> {
-    Ok(config_home()?.join("hypr/punar-webapps.conf"))
+    Ok(config_home()?.join("hypr/punar-webapps.lua"))
 }
 
 fn safe_relative(base: &Path, relative: &str) -> WebResult<PathBuf> {
@@ -1278,6 +1284,7 @@ mod tests {
         let args =
             chromium_args_for_profile(Some(&app()), Path::new("/home/alice/atlas"), true).unwrap();
         assert_eq!(args.len(), 7);
+        assert!(args.contains(&OsString::from("--ozone-platform=wayland")));
         for arg in args {
             let arg = arg.to_string_lossy();
             assert!(

@@ -125,7 +125,8 @@ stage_desktop_extra() {
              "${extra}/usr/share/punar/repart.d/install-encrypted" \
              "${extra}/usr/share/punar/repart.d/install-streaming" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
-             "${dev_extra}/usr/share/punar/fixtures/projects/atlas"
+             "${dev_extra}/usr/share/punar/fixtures/projects/atlas" \
+             "${dev_extra}/usr/share/punar/fixtures/webapps/notes"
 
     # Hyprland config. Lua is the supported provider from 0.55 onward; 0.56
     # warns on every legacy .conf session and 0.57 removes that parser.
@@ -264,14 +265,16 @@ stage_desktop_extra() {
         "${extra}/usr/share/punar/browser/forbidden-tokens.txt"
     install -m 0644 "${REPO_ROOT}/browser/integration/desktop-entry.template" \
         "${extra}/usr/share/punar/browser/desktop-entry.template"
-    install -d "${extra}/usr/share/punar/fixtures/webapps/notes"
+    # The offline page is test input, not product content. Keep it in the dev
+    # overlay so desktop CI can prove storage isolation while release trees
+    # continue to satisfy the no-fixtures policy.
     install -m 0644 "${REPO_ROOT}/browser/integration/fixtures/notes/index.html" \
-        "${extra}/usr/share/punar/fixtures/webapps/notes/index.html"
+        "${dev_extra}/usr/share/punar/fixtures/webapps/notes/index.html"
     install -m 0644 "${REPO_ROOT}/browser/integration/fixtures/notes/punar-webapp.json" \
-        "${extra}/usr/share/punar/fixtures/webapps/notes/punar-webapp.json"
+        "${dev_extra}/usr/share/punar/fixtures/webapps/notes/punar-webapp.json"
     base64 --decode "${REPO_ROOT}/browser/integration/fixtures/notes/icon.png.b64" \
-        > "${extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
-    chmod 0644 "${extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
+        > "${dev_extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
+    chmod 0644 "${dev_extra}/usr/share/punar/fixtures/webapps/notes/icon.png"
 
     # M12 network policy data. Zone definitions are product vocabulary;
     # membership is site data and deliberately starts empty. A missing CIDR

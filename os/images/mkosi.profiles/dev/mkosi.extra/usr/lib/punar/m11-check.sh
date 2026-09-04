@@ -228,7 +228,7 @@ for path in /etc/chromium-flags.conf "${PUNAR_HOME}/.config/chromium-flags.conf"
 done
 
 : > "${RUN_DIR}/m11-forbidden-matches.txt"
-for path in /usr/bin/punarctl /usr/local/share/applications \
+for path in /usr/local/share/applications \
     /usr/share/applications "${PUNAR_HOME}/.local/share/applications" \
     /etc/chromium/policies/managed "${PUNAR_HOME}/.config/hypr" \
     /usr/lib/punar; do
@@ -516,7 +516,7 @@ printf '\n' >> "${MANAGED_POLICY}"
 "${CTL}" --json capabilities get browser.policy \
     > "${RUN_DIR}/m11-browser-drift.json" 2>&1
 jq_check "manual policy corruption is observed as drift" \
-    "${RUN_DIR}/m11-browser-drift.json" '.current_state == "drifted"'
+    "${RUN_DIR}/m11-browser-drift.json" '.descriptor.current_state == "drifted"'
 if systemctl start "${TIMER}" >/dev/null 2>&1; then
     note "ok   scheduled reconcile timer armed for browser-policy drift"
 else

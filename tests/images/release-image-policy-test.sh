@@ -7,6 +7,7 @@ REPO_ROOT=$(cd -- "$(dirname "$0")/../.." && pwd)
 CHECKER="${REPO_ROOT}/os/images/check-release-image.sh"
 FINALIZE="${REPO_ROOT}/os/images/mkosi.finalize"
 ARM_POSTINSTALL="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot"
+DESKTOP_STAGER="${REPO_ROOT}/os/images/scripts/container-build.sh"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/punar-release-policy.XXXXXX")
 trap 'rm -rf "${TEST_ROOT}"' EXIT INT TERM
 
@@ -18,6 +19,21 @@ grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
     echo 'FAIL ARM adapter: seatd must remain masked when Debian presets run' >&2
     exit 1
 }
+
+# Browser pages used to exercise storage isolation are dev/CI input. Catch a
+# destination regression here in seconds rather than after the release image
+# has downloaded packages and reached its final tree scan.
+grep -Fq "\"\${dev_extra}/usr/share/punar/fixtures/webapps/notes/index.html\"" \
+    "${DESKTOP_STAGER}" || {
+    echo 'FAIL desktop staging: the M11 fixture is not in the dev overlay' >&2
+    exit 1
+}
+if grep -Fq "\"\${extra}/usr/share/punar/fixtures/webapps/notes/" \
+    "${DESKTOP_STAGER}"; then
+    echo 'FAIL desktop staging: an M11 fixture entered the release tree' >&2
+    exit 1
+fi
+echo 'ok   browser exercise fixtures are confined to the dev overlay'
 
 CLEAN="${TEST_ROOT}/clean"
 CASE="${TEST_ROOT}/case"

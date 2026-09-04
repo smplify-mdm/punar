@@ -240,6 +240,9 @@ jobs:
           ./tests/images/tree-manifest-test.sh
           python3 -m py_compile tools/tree_manifest.py
 
+      - name: Validate governed browser and Lua-rule contract
+        run: ./tests/desktop/browser-integration-contract-test.sh
+
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
@@ -332,6 +335,7 @@ jobs:
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/app-launcher-contract-test.sh \
+            tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
@@ -370,6 +374,9 @@ jobs:
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      - name: Test governed browser and Lua-rule contract
+        run: ./tests/desktop/browser-integration-contract-test.sh
 
       - name: Test cross-architecture developer baseline
         run: ./tests/images/developer-baseline-contract-test.sh

@@ -169,7 +169,7 @@ Punar chrome over Chromium's own window content.
 |---|---|
 | 1 | **No fork, no patch, no build flag, no preload — and this is checkable.** Chromium stays exactly the architecture substrate's snapshot-pinned vendor package. The integration layer is argv + files + records. `m11-check` asserts the real browser binary is owned by that package manager and that no Punar-owned entry point names a weakening option. §3.1, §12 group 1. |
 | 2 | **No new binary and no new daemon.** The launcher shim *is* `punarctl web-apps launch <id>`, which builds argv as a `Vec<String>` and `execve`s `chromium` (the M3 fixed-argv law, M6 podman precedent). Consequence: `PUNAR_SERVICE_UNITS` in `idle-ram.sh` is **unchanged**, the services-RSS gate is structurally untouched, and the `.desktop` files Punar writes never contain the token `chromium` — so a Chromium flag has no syntactic place to hide in them. §3.2, §4.5, §9.1. |
-| 3 | **The argv builder is a closed allowlist, compiled in.** `punarctl` may emit exactly seven Chromium flags (`--app=`, `--user-data-dir=`, `--class=`, `--ozone-platform-hint=auto`, `--no-first-run`, `--no-default-browser-check`, `--disable-features=` **only** with the fixed value `PunarNone` — see §8.2) and nothing else, ever. A unit test asserts the const array; a record field can never become a flag because every record field is validated against a regex before it reaches argv. §3.3, §8.2. |
+| 3 | **The argv builder is a closed allowlist, compiled in.** `punarctl` may emit exactly seven Chromium flags (`--app=`, `--user-data-dir=`, `--class=`, `--ozone-platform=wayland`, `--no-first-run`, `--no-default-browser-check`, `--disable-features=` **only** with the fixed value `PunarNone` — see §8.2) and nothing else, ever. A unit test asserts the const array; a record field can never become a flag because every record field is validated against a regex before it reaches argv. The explicit Wayland selection is required because Chromium chose X11 from a system exercise even with a valid Wayland socket when the earlier `auto` hint was used. §3.3, §8.2. |
 | 4 | **Web-app install is a typed capability with two front doors, one implementation** (spec 10, 12.2). `punarctl web-apps install …` and the command center's D-013 install card both call the **same** `webapps.install` method on `punard` over the existing socket; the card is a renderer of the CLI's typed action, invoked with fixed argv via `Quickshell.execDetached` — the M9 approval-overlay pattern verbatim. No second code path, no shell string. §4.2, §10.2. |
 | 5 | **punard decides and remembers; punarctl materializes.** The record of truth is root-owned (`/var/lib/punar/web-apps/<uid>/apps/<id>.json`, `0600 root:root`), because inventory an administrator may be told about must not be forgeable by the thing being inventoried. The `.desktop` entry, the icon and the profile directory live in the user's home and are **derived artifacts**, rebuildable at any time by `punarctl web-apps sync`. punard never reads or writes a user's home. §4.3. |
 | 6 | **`webapps.*` mutations are uid-scoped self-service, not root-only** — the `privilege.request` precedent (any connected peer, mutating, always audited). A peer may install, uninstall and define contexts **only within its own uid's scope**; there is no cross-uid verb and no wildcard. Root is not required because installing a web app on your own machine is not a privileged act (law 5). §4.4, §11.2. |
@@ -255,7 +255,7 @@ const ALLOWED_CHROMIUM_FLAGS: [&str; 7] = [
     "--app=",                    // value: the record's start_url, re-validated
     "--user-data-dir=",          // value: the context profile dir, absolute
     "--class=",                  // value: "punar-webapp-<id>"
-    "--ozone-platform-hint=auto",// exact, no value form
+    "--ozone-platform=wayland",  // exact, no value form
     "--no-first-run",            // exact
     "--no-default-browser-check",// exact
     "--disable-features=PunarNone", // see §8.2 — present ONLY as this literal
@@ -446,17 +446,18 @@ X-Punar-WebApp-Context=personal
 - `StartupWMClass=punar-webapp-notes` matches the `--class=` the launcher
   passes. The compositor now has a stable identity.
 - One compositor rule per app, written into
-  `~/.config/hypr/punar-webapps.conf` (a file Punar owns, sourced by the
-  M1 config), using the 0.56 field grammar M2 established:
+  `~/.config/hypr/punar-webapps.lua` (a file Punar owns, loaded by the
+  supported Lua config), using the 0.56 Lua API M2 established:
 
-  ```text
-  windowrule = match:class ^(punar-webapp-notes)$, workspace name:atlas
+  ```lua
+  hl.window_rule({ name = "punar-webapp-notes", match = { class = "^punar-webapp-notes$" }, workspace = "name:atlas" })
   ```
 
   Workspace assignment (spec 31) is therefore the same mechanism M2 already
   ships for scratchpads — no special case in the window grammar, exactly as
   D-013 Sect IV register 02 promises.
-- `PUNAR+B` is retargeted from `chromium --ozone-platform-hint=auto` to
+- `PUNAR+B` is retargeted from the historical
+  `chromium --ozone-platform-hint=auto` command to
   `punarctl web-apps browse`, which opens a normal browser window **in the
   active context**. This is a behavior change to an M1 binding and is listed
   in §13.
@@ -520,7 +521,7 @@ determinism assertion using the only comparison tool the image has.
 
 1. `webapps.uninstall` drops the record (audited, `result: "uninstalled"`).
 2. `punarctl` removes, as the user: the `.desktop` entry, the icon, and the
-   `windowrule` line from `punar-webapps.conf`.
+   `hl.window_rule` call from `punar-webapps.lua`.
 3. The **context profile directory is kept** unless `--purge-data`, and the
    CLI prints, in section-73 voice: *"Removed Notes. Its browser data is
    kept at ~/.local/share/punar/browser/contexts/personal — it is shared
@@ -533,7 +534,7 @@ determinism assertion using the only comparison tool the image has.
 
 `m11-check` asserts cleanliness with `find`: after uninstall, zero paths
 matching `*punar-webapp-notes*` exist under `/home/punar` or
-`/var/lib/punar`, and `punar-webapps.conf` contains no `notes` rule.
+`/var/lib/punar`, and `punar-webapps.lua` contains no `notes` rule.
 
 ### 4.9 Spec 31's eleven requirements — the explicit coverage statement
 
@@ -930,15 +931,23 @@ Arch's `/usr/bin/chromium` is a **shell wrapper** that sources
 exec'ing the real binary. Any design that only audits its own launcher misses
 that entirely. The complete enumeration `m11-check` scans:
 
-1. `/usr/bin/punarctl` (`grep -a`, binary-safe)
-2. `/usr/share/applications/*.desktop`
-3. `/home/punar/.local/share/applications/*.desktop`
-4. `/etc/chromium/policies/managed/*` and `/etc/chromium/policies/recommended/` (the latter must not exist)
-5. `/etc/chromium-flags.conf` and `/home/punar/.config/chromium-flags.conf` (**must not exist**)
-6. `/usr/share/punar/**` (shell QML, Hyprland configs, fixtures, check scripts)
-7. `/home/punar/.config/hypr/**` (including `punar-webapps.conf`)
-8. `/usr/lib/punar/*.sh`
+1. `/usr/share/applications/*.desktop`
+2. `/home/punar/.local/share/applications/*.desktop`
+3. `/etc/chromium/policies/managed/*` and `/etc/chromium/policies/recommended/` (the latter must not exist)
+4. `/etc/chromium-flags.conf` and `/home/punar/.config/chromium-flags.conf` (**must not exist**)
+5. `/usr/share/punar/**` (shell QML, Hyprland configs, fixtures, check scripts)
+6. `/home/punar/.config/hypr/**` (including `punar-webapps.lua`)
+7. `/usr/lib/punar/*.sh`
+8. The exact `punarctl web-apps launch --dry-run` result
 9. The live `/proc/<pid>/cmdline` of every running Chromium process during the exercise
+
+The compiled `punarctl` byte stream is deliberately not a textual entry
+point: the same binary also supervises bubblewrap-contained native Electron
+packages, whose internal argv vocabulary is unrelated to the M11 Chromium
+builder. The unit-tested closed builder, exact dry-run result, and live
+process tree are the semantic browser surfaces; scanning arbitrary string
+literals from another subcommand produced a false positive without proving a
+browser launch.
 
 A hit anywhere is `PUNAR_M11_FAIL`. **A grep-able invariant is worth more
 than a claim**, and enumerating item 5 is the difference between an invariant
@@ -1161,7 +1170,7 @@ Result:
    "desktop_path_rel": "applications/punar-webapp-notes.desktop",
    "icon_png_b64": "iVBORw0KGgo…",
    "icon_path_rel": "icons/hicolor/256x256/apps/punar-webapp-notes.png",
-   "window_rule": "windowrule = match:class ^(punar-webapp-notes)$, workspace name:atlas"
+   "window_rule": "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^punar-webapp-notes$\" }, workspace = \"name:atlas\" })"
  },
  "enforcement": {"point": "policy_file", "managed": false,
                  "note": "This check is advisory on an unmanaged device."}}
@@ -1520,7 +1529,7 @@ M11 creates six, and one deliberate non-staleness.
 |---|---|---|---|
 | 1 | `crates/punarctl/src/main.rs`, `Command::Update` — *"this stub stays until a milestone claims it"* | **M11 claims the browser half.** Any unit test or check asserting `punarctl update status` exits `FAILURE`, or asserting the stub text is the *whole* output, is now wrong. | Assert `update status` exits **0**, prints a `BROWSER` block with the pinned version and `Security channel · not configured`, **and** still prints the system-orchestration stub text. The stub sentence must be narrowed in the source to name only orchestration. |
 | 2 | `docs/development/keyboard-grammar.md` — `PUNAR + B  Browser (chromium, Wayland ozone)` and walkthrough step 12 *"chromium launches"* | `PUNAR+B` no longer execs `chromium` directly; it goes through `punarctl web-apps browse` and honors the active context. | The binding line becomes *"Browser in the active context"*; walkthrough step 12 asserts a browser window whose `--user-data-dir` is the active context's profile — the invariant, not the binary name. |
-| 3 | `os/modules/desktop/hypr/hyprland.conf` line 94, `$browser = chromium --ozone-platform-hint=auto` | The value changes to the context-aware launcher; the `--ozone-platform-hint` flag moves into `punarctl`'s allowlisted argv. | `$browser = punarctl web-apps browse`. Any doc or comment quoting the old value must be updated with it. No committed check greps this line today — verified — so this is a docs-and-config change, not a check change. |
+| 3 | Historical legacy config, `$browser = chromium --ozone-platform-hint=auto` | The value changes to the context-aware launcher; explicit `--ozone-platform=wayland` lives in `punarctl`'s allowlisted argv. | `browser = "punarctl web-apps browse"`. Any doc or comment quoting the old value must be updated with it. |
 | 4 | `docs/development/milestone-1.md` §2.1 — *"Browser: chromium (upstream, unpatched) … launch/window integration only in M1"* | The *"only in M1"* caveat is fulfilled. | An **M11 amendment note** in the M1 row (the M3-amended-under-M4 convention). M1 is a build record; it is annotated, never rewritten. |
 | 5 | `docs/design/mockups/webapps-browser.html` Sect IV — 01 claims M1 ships *"Chromium with the Punar integration layer; install flow writes the launcher entry"*, 03 claims contexts land in *"M3–M4"*, 04 claims the managed context row lands in *"M5"* | **All three are false as shipped.** M1 shipped Chromium with no integration layer; M3–M4 shipped no contexts; M5 shipped no managed context row. M11 does all three. | Sect IV 01/03/04 should read **M11**. Sect III 04's dashed `SIMULATED` cert-roots tag **stays dashed** — M11 does not deploy a real root and must not undash it. The Sect II 04 "Notifications" register must gain a `PARTIAL`/deferred mark (§4.9: `UNSUPPORTED` in M11). The Sect III caption *"Same registry as `punarctl app list`"* becomes `punarctl web-apps list` (§10.1). **M11's implementation owns no mockup file** — this is a tracked design-doc delta for whoever next touches the plate, and it must not be silently left as-is. |
 | 6 | `PERFORMANCE_BUDGETS.md` §2.3 — *"Units summed as of M7"* | Not stale, and that is the point: **M11 adds no unit.** Recorded here because a reader encountering "browser integration" may reasonably assume a browser daemon appeared and try to add one. | Add an explicit M11 line: *"M11 adds no service unit — web apps run in the user's session slice by design (milestone-11.md §9.1)."* `m11-check` assertion 41 enforces it. |

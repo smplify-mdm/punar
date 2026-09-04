@@ -30,10 +30,10 @@ export XDG_DATA_DIRS
 # Hyprland loads the user-created web-app workspace rules at startup. The
 # inventory remains root-owned; this is only a rebuildable user artifact.
 punar_user_config="${XDG_CONFIG_HOME:-${HOME}/.config}"
-if [ ! -e "${punar_user_config}/hypr/punar-webapps.conf" ]; then
+if [ ! -e "${punar_user_config}/hypr/punar-webapps.lua" ]; then
     umask 077
     mkdir -p "${punar_user_config}/hypr"
-    : > "${punar_user_config}/hypr/punar-webapps.conf"
+    : > "${punar_user_config}/hypr/punar-webapps.lua"
 fi
 
 # Installed vendor apps may own a custom URI scheme (Claude's OAuth callback
