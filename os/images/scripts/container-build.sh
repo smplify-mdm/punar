@@ -729,7 +729,11 @@ echo "==> Build complete"
 # entry inside the pinned builder.
 if [[ "${PUNAR_HOST_UID:-}" =~ ^[0-9]+$ ]] \
     && [[ "${PUNAR_HOST_GID:-}" =~ ^[0-9]+$ ]]; then
-    chown -R "${PUNAR_HOST_UID}:${PUNAR_HOST_GID}" out
+    # actions/cache runs as the host runner after this privileged container
+    # exits. mkosi's package-manager keyring contains mode-0700 directories;
+    # return generated cache ownership too so a successful build does not end
+    # with a misleading tar "Permission denied" warning and discard the cache.
+    chown -R "${PUNAR_HOST_UID}:${PUNAR_HOST_GID}" out cache
 fi
 
 ls -lh out/

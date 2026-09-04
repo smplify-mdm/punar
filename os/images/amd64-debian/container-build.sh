@@ -98,6 +98,7 @@ chown "${HOST_UID}:${HOST_GID}" \
     "${QCOW}" \
     "${IMAGES_DIR}/out/SHA256SUMS.debian-amd64" \
     "${IMAGES_DIR}/out/debian-amd64-build-info.txt"
+chown -R "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/cache/debian-amd64"
 
 echo "==> Debian/amd64 candidate image build complete"
 ls -lh "${QCOW}" "${IMAGES_DIR}/out/SHA256SUMS.debian-amd64"

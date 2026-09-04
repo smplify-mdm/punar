@@ -373,6 +373,18 @@ install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
     "${IMAGES_DIR}/out/arm64-update-rollback-proof" \
     "${IMAGES_DIR}/out/arm64-desktop-proof"
 
+# mkosi/apt create private root-owned metadata directories. The cache archive
+# is written later by the unprivileged Actions runner, so return ownership of
+# generated inputs after the privileged build has finished with them.
+for cache_path in \
+    "${IMAGES_DIR}/cache/debian-arm64" \
+    "${IMAGES_DIR}/cache/debian-arm64-pkgs" \
+    "${IMAGES_DIR}/cache/cargo-arm64" \
+    "${IMAGES_DIR}/cache/cargo-target-arm64"; do
+    [ ! -e "${cache_path}" ] \
+        || chown -R "${HOST_UID}:${HOST_GID}" "${cache_path}"
+done
+
 echo "==> Native ARM64 image build complete"
 ls -lh "${IMAGES_DIR}/out/arm64-build-info.txt" \
     "${IMAGES_DIR}/out/SHA256SUMS.arm64"
