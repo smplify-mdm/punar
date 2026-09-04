@@ -137,8 +137,10 @@ grep -Fq -- 'cmp -s "${TARGET_PREFIX_BEFORE}" "${TARGET_PREFIX_AFTER}"' "${INSTA
     || fail 'the signed-answer refusal does not prove the target prefix remained byte-identical'
 grep -Fq -- 'PUNAR_INSTALL_REFUSALS_OK I36a=invalid_params I36b=invalid_params I36d=denied' "${INSTALL_TEST}" \
     || fail 'the privileged VM gate does not require all three admission-refusal verdicts'
+# shellcheck disable=SC2016
 grep -Fq -- 'cmp -s "${ADMISSION_LARGE_PREFIX_BEFORE}" "${ADMISSION_LARGE_PREFIX_AFTER}"' "${INSTALL_TEST}" \
     || fail 'the admission-refusal boot does not compare the large target prefix'
+# shellcheck disable=SC2016
 grep -Fq -- 'cmp -s "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX_AFTER}"' "${INSTALL_TEST}" \
     || fail 'the admission-refusal boot does not compare the small target prefix'
 grep -Fq -- 'admission-prefix-sha256.txt' "${INSTALL_TEST}" \
