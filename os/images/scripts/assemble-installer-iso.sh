@@ -30,6 +30,15 @@ REPO_ROOT="$(cd "${IMAGES_DIR}/../.." && pwd)"
 # shellcheck source=/dev/null
 . "${IMAGES_DIR}/snapshot.env"
 
+# The Arch release lane remains the default caller. Migration lanes may supply
+# their own authenticated snapshot, builder image and native release-tool
+# location without copying the security-sensitive ISO assembler.
+RELEASE_SNAPSHOT_PIN="${PUNAR_RELEASE_SNAPSHOT_PIN:-${PUNAR_SNAPSHOT_DATE}}"
+RELEASE_BUILDER_BASE="${PUNAR_RELEASE_BUILDER_BASE:-${PUNAR_BUILDER_BASE}}"
+RELEASE_SOURCE_DATE_EPOCH="${PUNAR_RELEASE_SOURCE_DATE_EPOCH:-1787184000}"
+RELEASE_TOOL="${PUNAR_RELEASE_TOOL:-${IMAGES_DIR}/cache/cargo-target/release/punar-release-tool}"
+RELEASE_BUILDER_DIGEST="${RELEASE_BUILDER_BASE##*@}"
+
 [[ "${VERSION}" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] \
     || { echo "error: installer version must be YYYY.MM.DD.N" >&2; exit 2; }
 [[ "${GIT_SHA}" =~ ^[0-9a-f]{40}$ ]] \
@@ -37,8 +46,12 @@ REPO_ROOT="$(cd "${IMAGES_DIR}/../.." && pwd)"
 [ -f "${RELEASE_RAW}" ] || { echo "error: release raw image is missing: ${RELEASE_RAW}" >&2; exit 2; }
 [ -f "${INSTALLER_RAW}" ] || { echo "error: installer raw image is missing: ${INSTALLER_RAW}" >&2; exit 2; }
 command -v xorriso >/dev/null || { echo "error: xorriso is not installed in the pinned builder" >&2; exit 2; }
-
-RELEASE_TOOL="${IMAGES_DIR}/cache/cargo-target/release/punar-release-tool"
+[ -n "${RELEASE_SNAPSHOT_PIN}" ] \
+    || { echo "error: release snapshot pin is empty" >&2; exit 2; }
+[[ "${RELEASE_SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]] \
+    || { echo "error: release source-date epoch is invalid" >&2; exit 2; }
+[[ "${RELEASE_BUILDER_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || { echo "error: release builder image is not digest-pinned" >&2; exit 2; }
 [ -x "${RELEASE_TOOL}" ] \
     || { echo "error: punar-release-tool was not built for ISO assembly" >&2; exit 2; }
 
@@ -109,7 +122,7 @@ ROOT_LOOP="$(losetup --find --show --read-only "${SLOT_RAW}")"
 mount -o ro "${ROOT_LOOP}" "${WORK}/root"
 python3 "${REPO_ROOT}/tools/tree_manifest.py" \
     "${WORK}/root" "${WORK}/iso-root/punar/tree-manifest.json"
-mkfs.erofs -zlz4hc -T1787184000 --all-time -L PUNAR-LIVE \
+mkfs.erofs -zlz4hc -T"${RELEASE_SOURCE_DATE_EPOCH}" --all-time -L PUNAR-LIVE \
     "${WORK}/iso-root/punar/live.erofs" "${WORK}/root"
 BOOTLOADER="${WORK}/root/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
 [ -f "${BOOTLOADER}" ] || { echo "error: systemd-bootx64.efi is absent from release root" >&2; exit 1; }
@@ -170,46 +183,73 @@ SLOT_UKI_DIGEST="$(sha256sum "${SLOT_UKI}" | cut -d' ' -f1)"
 PAYLOAD_SIZE="$(stat -c %s "${PAYLOAD}")"
 SLOT_UKI_SIZE="$(stat -c %s "${SLOT_UKI}")"
 
-python3 - "${WORK}/iso-root/punar/release.json" <<PY
+python3 - \
+    "${WORK}/iso-root/punar/release.json" \
+    "${VERSION}" \
+    "${PAYLOAD_NAME}" "${PAYLOAD_DIGEST}" "${PAYLOAD_SIZE}" \
+    "${UNCOMPRESSED_DIGEST}" "${ROOT_BYTES}" \
+    "${SLOT_UKI_NAME}" "${SLOT_UKI_DIGEST}" "${SLOT_UKI_SIZE}" \
+    "${RELEASE_SNAPSHOT_PIN}" "${GIT_SHA}" "${CI_RUN_ID}" \
+    "${RELEASE_BUILDER_DIGEST}" "${RELEASE_SOURCE_DATE_EPOCH}" \
+    "${BUILT_AT}" <<'PY'
 import json
 import sys
 
+(
+    output_path,
+    version,
+    payload_name,
+    payload_digest,
+    payload_size,
+    uncompressed_digest,
+    root_bytes,
+    slot_uki_name,
+    slot_uki_digest,
+    slot_uki_size,
+    snapshot_pin,
+    git_sha,
+    ci_run_id,
+    builder_digest,
+    source_date_epoch,
+    built_at,
+) = sys.argv[1:]
+
 document = {
     "schema_version": 1,
-    "release_id": "punar-desktop-stable-x86_64-uefi-${VERSION}",
+    "release_id": f"punar-desktop-stable-x86_64-uefi-{version}",
     "image_id": "punar-desktop",
     "architecture": "x86_64",
     "boot_platform": "uefi",
-    "version": "${VERSION}",
+    "version": version,
     "channel": "stable",
-    "snapshot_pin": "${PUNAR_SNAPSHOT_DATE}",
+    "snapshot_pin": snapshot_pin,
     "overlay_pin": None,
     "payload": {
-        "filename": "${PAYLOAD_NAME}",
-        "digest_sha256": "${PAYLOAD_DIGEST}",
-        "size_bytes": ${PAYLOAD_SIZE},
-        "uncompressed_digest_sha256": "${UNCOMPRESSED_DIGEST}",
-        "uncompressed_size_bytes": ${ROOT_BYTES},
+        "filename": payload_name,
+        "digest_sha256": payload_digest,
+        "size_bytes": int(payload_size),
+        "uncompressed_digest_sha256": uncompressed_digest,
+        "uncompressed_size_bytes": int(root_bytes),
         "compression": "zstd",
     },
     "boot_artifact": {
         "kind": "uki",
-        "filename": "${SLOT_UKI_NAME}",
-        "digest_sha256": "${SLOT_UKI_DIGEST}",
-        "size_bytes": ${SLOT_UKI_SIZE},
+        "filename": slot_uki_name,
+        "digest_sha256": slot_uki_digest,
+        "size_bytes": int(slot_uki_size),
     },
     "min_from": None,
     "security": {"severity": "none", "advisory_ids": []},
     "provenance": {
-        "git_commit": "${GIT_SHA}",
-        "ci_run_id": "${CI_RUN_ID}",
-        "builder_base_digest": "${PUNAR_BUILDER_BASE##*@}",
-        "source_date_epoch": 1787184000,
-        "built_at": "${BUILT_AT}",
+        "git_commit": git_sha,
+        "ci_run_id": ci_run_id,
+        "builder_base_digest": builder_digest,
+        "source_date_epoch": int(source_date_epoch),
+        "built_at": built_at,
     },
     "sbom": None,
 }
-with open(sys.argv[1], "w", encoding="utf-8", newline="\n") as stream:
+with open(output_path, "w", encoding="utf-8", newline="\n") as stream:
     json.dump(document, stream, sort_keys=True, separators=(",", ":"))
     stream.write("\n")
 PY

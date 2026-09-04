@@ -18,8 +18,8 @@ case "${MODE}" in
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${MODE})" >&2; exit 2 ;;
 esac
 case "${IMAGES}" in
-    minimal|desktop|release|all) ;;
-    *) echo "error: PUNAR_AMD64_DEBIAN_IMAGES must be minimal, desktop, release, or all (got: ${IMAGES})" >&2; exit 2 ;;
+    minimal|desktop|release|iso|all) ;;
+    *) echo "error: PUNAR_AMD64_DEBIAN_IMAGES must be minimal, desktop, release, iso, or all (got: ${IMAGES})" >&2; exit 2 ;;
 esac
 
 MKOSI_REPART_DIR="$(mktemp -d /run/punar-mkosi-repart-amd64-debian.XXXXXX)"
@@ -85,6 +85,19 @@ stage_punar_binaries() {
         "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra" \
         "${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra" \
         'Advanced Micro Devices X86-64'
+}
+
+stage_installer_build_tool() {
+    local cargo_target="${IMAGES_DIR}/cache/cargo-target-amd64-debian"
+    echo "==> Building native Debian/amd64 release verifier for ISO assembly"
+    (
+        cd "${REPO_ROOT}"
+        CARGO_HOME="${IMAGES_DIR}/cache/cargo-amd64-debian" \
+            CARGO_TARGET_DIR="${cargo_target}" \
+            cargo build --release --locked \
+                -p punar-common --bin punar-release-tool
+    )
+    [ -x "${cargo_target}/release/punar-release-tool" ]
 }
 
 stage_env_base_oci() {
@@ -237,11 +250,13 @@ convert_output() {
     rm -f -- "${tmp_qcow}"
     qemu-img convert -O qcow2 -c "${raw}" "${tmp_qcow}"
     mv -f -- "${tmp_qcow}" "${qcow}"
+    CHECKSUM_ARTIFACTS+=("${image_id}.qcow2")
     truncate --size 0 -- "${raw}"
     rm -f -- "${raw}" "${MKOSI_RAW_OUTPUT_DIR}/${image_id}"
 }
 
 BUILT=()
+CHECKSUM_ARTIFACTS=()
 reset_staged_architecture_content
 
 if [ "${IMAGES}" = minimal ] || [ "${IMAGES}" = all ]; then
@@ -256,11 +271,15 @@ if [ "${IMAGES}" = minimal ] || [ "${IMAGES}" = all ]; then
 fi
 
 if [ "${IMAGES}" = desktop ] || [ "${IMAGES}" = release ] \
+    || [ "${IMAGES}" = iso ] \
     || [ "${IMAGES}" = all ]; then
     stage_desktop_content
     if [ "${MODE}" = build ]; then
         stage_punar_binaries
         stage_env_base_oci
+        if [ "${IMAGES}" = iso ]; then
+            stage_installer_build_tool
+        fi
     fi
     if [ "${IMAGES}" = desktop ] || [ "${IMAGES}" = all ]; then
         run_mkosi punar-desktop-debian-x86_64 \
@@ -274,11 +293,42 @@ if [ "${IMAGES}" = desktop ] || [ "${IMAGES}" = release ] \
     fi
 fi
 
-if [ "${IMAGES}" = release ]; then
+if [ "${IMAGES}" = release ] || [ "${IMAGES}" = iso ]; then
     run_mkosi punar-release-debian-x86_64 \
         --profile desktop,hardware-x86 \
         --image-id punar-release-debian-x86_64
+    if [ "${IMAGES}" = iso ] && [ "${MODE}" = summary ]; then
+        run_mkosi punar-installer-root-debian-x86_64 \
+            --profile desktop,hardware-x86,installer \
+            --image-id punar-installer-root-debian-x86_64
+    fi
     if [ "${MODE}" = build ]; then
+        if [ "${IMAGES}" = iso ]; then
+            run_mkosi punar-installer-root-debian-x86_64 \
+                --profile desktop,hardware-x86,installer \
+                --image-id punar-installer-root-debian-x86_64
+            installer_version="${PUNAR_INSTALLER_VERSION:?PUNAR_INSTALLER_VERSION is required for an ISO build}"
+            installer_name="punar-installer-debian-${installer_version}-x86_64.iso"
+            installer_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            installer_ci_run_id="${PUNAR_CI_RUN_ID:-local-${PUNAR_GIT_SHA:0:12}}"
+            PUNAR_RELEASE_SNAPSHOT_PIN="${PUNAR_DEBIAN_SNAPSHOT}" \
+            PUNAR_RELEASE_BUILDER_BASE="${PUNAR_DEBIAN_BUILDER_BASE}" \
+            PUNAR_RELEASE_SOURCE_DATE_EPOCH="${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" \
+            PUNAR_RELEASE_TOOL="${IMAGES_DIR}/cache/cargo-target-amd64-debian/release/punar-release-tool" \
+                "${IMAGES_DIR}/scripts/assemble-installer-iso.sh" \
+                    "${MKOSI_RAW_OUTPUT_DIR}/punar-release-debian-x86_64.raw" \
+                    "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root-debian-x86_64.raw" \
+                    "${installer_version}" \
+                    "${IMAGES_DIR}/out/${installer_name}" \
+                    "${PUNAR_GIT_SHA}" "${installer_built_at}" "${installer_ci_run_id}"
+            truncate --size 0 -- \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root-debian-x86_64.raw"
+            rm -f -- \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root-debian-x86_64.raw" \
+                "${MKOSI_RAW_OUTPUT_DIR}/punar-installer-root-debian-x86_64"
+            BUILT+=("${installer_name}")
+            CHECKSUM_ARTIFACTS+=("${installer_name}")
+        fi
         convert_output punar-release-debian-x86_64
         BUILT+=(punar-release-debian-x86_64)
     fi
@@ -310,7 +360,7 @@ fi
 } > "${IMAGES_DIR}/out/debian-amd64-build-info.txt"
 (
     cd "${IMAGES_DIR}/out"
-    sha256sum -- "${BUILT[@]/%/.qcow2}" > SHA256SUMS.debian-amd64
+    sha256sum -- "${CHECKSUM_ARTIFACTS[@]}" > SHA256SUMS.debian-amd64
 )
 
 HOST_UID="${PUNAR_HOST_UID:-0}"
@@ -325,8 +375,8 @@ install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
 chown "${HOST_UID}:${HOST_GID}" \
     "${IMAGES_DIR}/out/SHA256SUMS.debian-amd64" \
     "${IMAGES_DIR}/out/debian-amd64-build-info.txt"
-for image_id in "${BUILT[@]}"; do
-    chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out/${image_id}.qcow2"
+for artifact in "${CHECKSUM_ARTIFACTS[@]}"; do
+    chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out/${artifact}"
 done
 for cache_path in \
     "${IMAGES_DIR}/cache/debian-amd64" \
@@ -339,6 +389,6 @@ done
 
 echo "==> Debian/amd64 candidate image build complete"
 ls -lh "${IMAGES_DIR}/out/SHA256SUMS.debian-amd64"
-for image_id in "${BUILT[@]}"; do
-    ls -lh "${IMAGES_DIR}/out/${image_id}.qcow2"
+for artifact in "${CHECKSUM_ARTIFACTS[@]}"; do
+    ls -lh "${IMAGES_DIR}/out/${artifact}"
 done

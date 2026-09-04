@@ -17,8 +17,8 @@ case "${PUNAR_BUILD_MODE}" in
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${PUNAR_BUILD_MODE})" >&2; exit 2 ;;
 esac
 case "${PUNAR_AMD64_DEBIAN_IMAGES}" in
-    minimal|desktop|release|all) ;;
-    *) echo "error: PUNAR_AMD64_DEBIAN_IMAGES must be minimal, desktop, release, or all (got: ${PUNAR_AMD64_DEBIAN_IMAGES})" >&2; exit 2 ;;
+    minimal|desktop|release|iso|all) ;;
+    *) echo "error: PUNAR_AMD64_DEBIAN_IMAGES must be minimal, desktop, release, iso, or all (got: ${PUNAR_AMD64_DEBIAN_IMAGES})" >&2; exit 2 ;;
 esac
 
 command -v docker >/dev/null 2>&1 \
@@ -28,6 +28,12 @@ BUILDER_TAG="punar-debian-builder:${PUNAR_DEBIAN_SNAPSHOT}-amd64"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 GIT_SHA="${GITHUB_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)}"
+if [ -z "${PUNAR_INSTALLER_VERSION:-}" ]; then
+    COMMIT_DAY="$(git -C "${REPO_ROOT}" show -s --format=%cd --date=format:%Y.%m.%d "${GIT_SHA}" 2>/dev/null || date -u +%Y.%m.%d)"
+    COMMIT_NUMBER="$(git -C "${REPO_ROOT}" rev-list --count "${GIT_SHA}" 2>/dev/null || echo 1)"
+    PUNAR_INSTALLER_VERSION="${COMMIT_DAY}.${COMMIT_NUMBER}"
+fi
+PUNAR_CI_RUN_ID="${GITHUB_RUN_ID:-local-${GIT_SHA:0:12}}"
 
 echo "==> Building pinned Debian/amd64 builder"
 echo "    base:     ${PUNAR_DEBIAN_BUILDER_BASE}"
@@ -60,6 +66,8 @@ docker run --rm --privileged \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
     --env "PUNAR_AMD64_DEBIAN_IMAGES=${PUNAR_AMD64_DEBIAN_IMAGES}" \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
+    --env "PUNAR_INSTALLER_VERSION=${PUNAR_INSTALLER_VERSION}" \
+    --env "PUNAR_CI_RUN_ID=${PUNAR_CI_RUN_ID}" \
     --env "PUNAR_HOST_UID=${HOST_UID}" \
     --env "PUNAR_HOST_GID=${HOST_GID}" \
     "${BUILDER_TAG}" \

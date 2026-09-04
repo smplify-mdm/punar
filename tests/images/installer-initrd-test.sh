@@ -221,5 +221,12 @@ grep -Fq "\"/boot/grub/grub.cfg=\${WORK}/grub.cfg\"" "${ASSEMBLER}" \
     || fail 'standalone optical GRUB does not embed its configuration at the canonical path'
 grep -Fq 'chain normal configfile"' "${ASSEMBLER}" \
     || fail 'standalone optical GRUB cannot execute its embedded configuration'
+for variable in PUNAR_RELEASE_SNAPSHOT_PIN PUNAR_RELEASE_BUILDER_BASE \
+    PUNAR_RELEASE_SOURCE_DATE_EPOCH PUNAR_RELEASE_TOOL; do
+    grep -Fq "${variable}" "${ASSEMBLER}" \
+        || fail "installer assembly cannot accept substrate provenance override ${variable}"
+done
+grep -Fq 'release builder image is not digest-pinned' "${ASSEMBLER}" \
+    || fail 'installer assembly does not reject mutable builder provenance'
 
 echo 'installer-initrd-test: PASS'

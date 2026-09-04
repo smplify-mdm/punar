@@ -35,6 +35,9 @@ RUN printf '%s\n' \
         e2fsprogs \
         btrfs-progs \
         erofs-utils \
+        xorriso \
+        grub-common \
+        grub-efi-amd64-bin \
         cpio \
         zstd \
         git \

@@ -94,6 +94,24 @@ grep -Fq -- '--profile desktop,hardware-x86,dev' \
 grep -Fq -- '--profile desktop,hardware-x86' \
     "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
     || fail "amd64 release candidate omits the bare-hardware support floor"
+grep -Fq -- '--profile desktop,hardware-x86,installer' \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    || fail "amd64 installer candidate omits the product and hardware profiles"
+grep -Fxq \
+    'KernelCommandLine=console=tty0 rd.systemd.gpt_auto=0 systemd.getty_auto=no punar.live=1' \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/installer/mkosi.conf" \
+    || fail "amd64 installer candidate lacks the bounded live-root command line"
+for package in xorriso grub-common grub-efi-amd64-bin; do
+    grep -Eq "^[[:space:]]+${package}( \\\\)?$" \
+        "${REPO_ROOT}/os/images/builder-debian/Containerfile" \
+        || fail "Debian builder lacks ISO assembly package ${package}"
+done
+for variable in PUNAR_RELEASE_SNAPSHOT_PIN PUNAR_RELEASE_BUILDER_BASE \
+    PUNAR_RELEASE_SOURCE_DATE_EPOCH PUNAR_RELEASE_TOOL; do
+    grep -Fq "${variable}=" \
+        "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+        || fail "amd64 installer does not pass ${variable} to the shared assembler"
+done
 
 # The migration lane must not overwrite the canonical artifact while the
 # baseline remains the release authority.
@@ -111,6 +129,9 @@ grep -Fq -- '--env "PUNAR_AMD64_DEBIAN_IMAGES=${PUNAR_AMD64_DEBIAN_IMAGES}"' \
 grep -Fq 'PUNAR_ENABLED_UNITS_MANIFEST=expected-enabled-units.x86_64-debian.txt' \
     "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
     || fail "candidate does not select its Debian-specific unit manifest"
+grep -Fq 'minimal|desktop|release|iso|all' \
+    "${REPO_ROOT}/tools/build-amd64-debian-image.sh" \
+    || fail "host wrapper does not expose the Debian installer build selector"
 grep -Fxq 'Distribution=arch' "${REPO_ROOT}/os/images/mkosi.conf" \
     || fail "shipping x86 baseline changed before Debian runtime proof"
 
