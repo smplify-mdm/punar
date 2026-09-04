@@ -327,6 +327,20 @@ MB hard ceiling but is not accepted as a new target baseline. The process
 attribution is retained in artifact `9925605057`; the regression requires
 attribution and reduction rather than a threshold change.
 
+The regression is now bounded to commit `a8fb51d` (the physical-x86 firmware
+floor), not to the resident desktop or Punar services. The last pre-change
+window at `0601677` measured 1113 MB with about 375 MiB `Unevictable`; the
+first post-change window measured 1359 MB with about 611 MiB `Unevictable`.
+The desktop UKI simultaneously grew from 217.3 MiB to 444.3 MiB. In mkosi 26,
+leaving `KernelInitrdModules=` unset selects the complete installed module
+tree; once firmware exists, its dependency pass also puts firmware for that
+tree in the module initrd. The candidate fix explicitly selects mkosi's
+architecture-aware `default` boot set on Arch x86_64, Debian x86_64 and generic
+Debian ARM64. Full module and firmware trees remain in the installed root for
+post-root hardware discovery. This explanation is source/config proven; its
+UKI size and stabilized-RAM effect are pending the next canonical runtime run,
+so neither result nor the 1024 MB target is predeclared here.
+
 The ARM rows are from the latest local native Apple-HVF run of
 `punar-desktop-arm64.qcow2`, SHA-256
 `cf522bfff438411c2467a66ce65fc23ff6998ce67ce38798cd88c38b48d19133`,

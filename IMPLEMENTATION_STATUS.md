@@ -33,6 +33,14 @@ unaccepted performance regression requiring attribution. The exact current
 image is
 `sha256:b601c4d8bee6cea7811d7f5cb2ad04f2c3390e3df178893a7c6b76049b0d06bc`.
 
+Bisection now bounds that regression to physical-x86 firmware commit
+`a8fb51d`: `Unevictable` and UKI size rose together (about 375→611 MiB and
+217.3→444.3 MiB respectively). The source now explicitly selects mkosi 26's
+architecture-aware default early-boot modules on all generic image lanes,
+without removing any module or firmware from the installed root. Static
+policy tests and mkosi summaries pass; only the next canonical build/boot can
+promote the expected UKI/RAM reduction into a result.
+
 The pinned-Debian x86_64 migration candidate is now independently green in
 [run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),
 job `100922123462`, at source commit `f679a26`. The 355,205,120-byte minimal

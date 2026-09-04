@@ -4,10 +4,12 @@ This directory holds the CI enforcement harness that
 [`PERFORMANCE_BUDGETS.md`](../../PERFORMANCE_BUDGETS.md) §5 designed. The
 desktop gate measures whole-system RAM, combined service PSS, each Punar
 service's cgroup CPU and writes, whole-guest CPU/block writes for context,
-and live zram state over one shared stabilized-idle window. RAM and service
-PSS, CPU, first-party writes, connected-idle state and zram are runtime-proven
-and gated. Boot-regression gating, the cgroup-memory cross-check, JSON history
-and bare-metal baselines remain open.
+and live zram state over one shared stabilized-idle window. Exact start/end
+`meminfo` plus per-process PSS/locked/anonymous/file/shared attribution make
+kernel/driver and process movement diagnosable without changing the metric or
+threshold. RAM and service PSS, CPU, first-party writes, connected-idle state
+and zram are runtime-proven and gated. Boot-regression gating, the cgroup-memory
+cross-check, JSON history and bare-metal baselines remain open.
 
 ## How the gate works
 
@@ -145,6 +147,8 @@ not the cross-architecture TCG path this caveat describes.
 | `ram-samples.txt` | raw per-sample `epoch used-MB` lines from the guest window. |
 | `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters plus live zram facts. |
 | `ram-processes.txt` | Per-process PSS ranking at stabilized idle. |
+| `ram-process-memory.txt` | Window-end per-process PSS, locked, anonymous, file and shared-memory attribution plus whole-process totals and the non-process accounting remainder. The remainder is diagnostic, not a budget metric. |
+| `ram-meminfo-start.txt`, `ram-meminfo-end.txt` | Exact `/proc/meminfo` snapshots bracketing the stabilized five-minute window. |
 | `meminfo` | `/proc/meminfo` snapshot taken at desktop-ready. |
 | `serial.log` | full serial console log — preserved on failure too. |
 

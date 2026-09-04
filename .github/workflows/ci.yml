@@ -224,8 +224,14 @@ jobs:
       - name: Validate stabilized-idle performance gate branches
         run: ./tests/performance/check-budgets-test.sh
 
+      - name: Validate stabilized-window memory attribution wiring
+        run: ./tests/performance/memory-attribution-contract-test.sh
+
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
+
+      - name: Validate bounded early-boot module policy
+        run: ./tests/images/initrd-module-policy-test.sh
 
       - name: Validate installer live-root and tree-manifest contracts
         run: |
@@ -309,6 +315,7 @@ jobs:
             tests/images/check-repart-layout.sh \
             tests/images/installer-initrd-test.sh \
             tests/images/installer-iso-contract-test.sh \
+            tests/images/initrd-module-policy-test.sh \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
@@ -318,6 +325,7 @@ jobs:
             tests/images/vendor-sandbox-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
+            tests/performance/memory-attribution-contract-test.sh \
             os/modules/desktop/hypr/punar-layout.sh \
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
@@ -947,6 +955,9 @@ jobs:
             os/images/out/desktop-proof/ram-report.txt
             os/images/out/desktop-proof/ram-samples.txt
             os/images/out/desktop-proof/ram-processes.txt
+            os/images/out/desktop-proof/ram-process-memory.txt
+            os/images/out/desktop-proof/ram-meminfo-start.txt
+            os/images/out/desktop-proof/ram-meminfo-end.txt
             os/images/out/desktop-proof/runtime-report.txt
             os/images/out/desktop-proof/meminfo
             os/images/out/desktop-proof/wifi-report.txt

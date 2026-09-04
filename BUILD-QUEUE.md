@@ -208,8 +208,14 @@ the 1116 MB historical result, below the 1536 MB hard ceiling but above the
 target. The same-commit Debian/x86_64 candidate measured **1214/1220 MB**,
 159 MB lower than the shipping Arch lane but still 190 MB above target. The
 process inventories are retained in artifacts `9925605057` and `9925733843`;
-the next performance pass must attribute the kernel/non-process remainder and
-reduce it rather than moving either threshold.
+the next performance pass must reduce the kernel/non-process remainder rather
+than moving either threshold. Bisection now identifies physical-x86 firmware
+commit `a8fb51d`: `Unevictable` rose by about 236 MiB while the desktop UKI
+grew from 217.3 MiB to 444.3 MiB. The candidate image policy now asks mkosi 26
+for its bounded, architecture-aware default boot-module set while retaining
+the full module and firmware trees in the installed root. Static policy and
+mkosi-summary checks pass; exact UKI/RAM improvement awaits canonical boot and
+stabilized-idle proof.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); toasts and OSD (must receive events while closed);

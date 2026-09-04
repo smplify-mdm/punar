@@ -149,6 +149,8 @@
 #     punar-m5-personal.png         grim capture, restored personal bar (M5)
 #     ram-report.txt                key=value idle-RAM + services-RSS numbers
 #     ram-samples.txt, meminfo      raw guest measurement data
+#     ram-meminfo-{start,end}.txt   exact stabilized-window memory snapshots
+#     ram-process-memory.txt        PSS/locked/anon/file/shmem attribution
 #     surfaces-costs.txt            three isolated construction/first-map/PSS
 #                                   samples for each lazy-load candidate
 #     surfaces-report.txt           live production-shell surface verdict
@@ -633,6 +635,9 @@ run_desktop() {
           "${PROOF_DIR}/ram-report.txt" \
           "${PROOF_DIR}/ram-samples.txt" \
           "${PROOF_DIR}/ram-processes.txt" \
+          "${PROOF_DIR}/ram-process-memory.txt" \
+          "${PROOF_DIR}/ram-meminfo-start.txt" \
+          "${PROOF_DIR}/ram-meminfo-end.txt" \
           "${PROOF_DIR}/runtime-report.txt" \
           "${PROOF_DIR}/meminfo" \
           "${PROOF_DIR}/wifi-report.txt" \
@@ -782,7 +787,8 @@ run_desktop() {
             else
                 warn "desktop-test: export received but contains no screenshot.png (grim failed in guest?)"
             fi
-            for f in ram-samples.txt ram-processes.txt runtime-report.txt \
+            for f in ram-samples.txt ram-processes.txt ram-process-memory.txt \
+                     ram-meminfo-start.txt ram-meminfo-end.txt runtime-report.txt \
                      idle-counters-start.txt idle-counters-end.txt \
                      idle-system-cpu-start.txt idle-system-cpu-end.txt \
                      idle-block-write-start.txt idle-block-write-end.txt \

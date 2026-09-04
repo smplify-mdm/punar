@@ -238,10 +238,14 @@ behavior suite are runtime-gated in CI. Hardware selection has deterministic
 fake-sysfs coverage (no device, virtio, AMD, mixed virtio+Intel and
 simpledrm+VC4), including the software-only motion overlay, while the VM's M2
 exercise proves the live virtio branch.
-No real GPU has run Punar yet, and `linux-firmware` remains absent, so this is
-not a bare-metal support claim. Config validation still includes `mkosi
-summary`, exact-version `Hyprland --verify-config`, foot checks and pinned
-shellcheck; milestone-1.md §6 records the rendering fallback chain.
+The x86 desktop now carries pinned firmware, microcode and Intel/AMD graphics
+packages in every immutable root slot. The base explicitly limits the UKI to
+mkosi 26's architecture-aware default boot modules; the complete module and
+firmware trees remain available after root mount instead of being duplicated
+into pinned early-boot memory. No real GPU or physical x86 machine has run
+Punar yet, so this is still not a bare-metal support claim. Config validation
+includes `mkosi summary`, exact-version `Hyprland --verify-config`, foot checks
+and pinned shellcheck; milestone-1.md §6 records the rendering fallback chain.
 
 ## The M3 control plane in the image (Milestone 3)
 

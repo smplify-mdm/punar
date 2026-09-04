@@ -132,6 +132,7 @@ emit_fact "PUNAR_NETWORK_ONLINE=${network_online}"
 
 counter_start="${RUN_DIR}/idle-counters-start.txt"
 counter_end="${RUN_DIR}/idle-counters-end.txt"
+cp /proc/meminfo "${RUN_DIR}/ram-meminfo-start.txt"
 window_start_ms="$(monotonic_ms)"
 capture_service_counters "${counter_start}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-start.txt"
@@ -160,6 +161,7 @@ window_end_ms="$(monotonic_ms)"
 capture_service_counters "${counter_end}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-end.txt"
 block_write_sectors > "${RUN_DIR}/idle-block-write-end.txt"
+cp /proc/meminfo "${RUN_DIR}/ram-meminfo-end.txt"
 window_ms=$((window_end_ms - window_start_ms))
 if [ "${window_ms}" -le 0 ]; then
     window_ms=1
@@ -327,23 +329,71 @@ else
     emit_fact "PUNAR_ZRAM_SWAP_ACTIVE=no"
 fi
 
-ram_procs="${RUN_DIR:-/run/punar}/ram-processes.txt"
+ram_procs="${RUN_DIR}/ram-processes.txt"
+ram_process_memory="${RUN_DIR}/ram-process-memory.txt"
+ram_process_raw="${RUN_DIR}/ram-process-memory.raw"
+: > "${ram_process_raw}"
+for pid_dir in /proc/[0-9]*; do
+    pid="${pid_dir#/proc/}"
+    memory_fields="$(awk '
+        BEGIN { pss = locked = anon = file = shmem = 0; got_pss = 0 }
+        /^Pss:/       { pss = $2; got_pss = 1 }
+        /^Locked:/    { locked = $2 }
+        /^Pss_Anon:/  { anon = $2 }
+        /^Pss_File:/  { file = $2 }
+        /^Pss_Shmem:/ { shmem = $2 }
+        END {
+            if (got_pss) printf "%s %s %s %s %s\n", pss, locked, anon, file, shmem
+        }
+    ' "${pid_dir}/smaps_rollup" 2>/dev/null)"
+    [ -n "${memory_fields}" ] || continue
+    read -r pss locked pss_anon pss_file pss_shmem <<EOF
+${memory_fields}
+EOF
+    comm="$(tr -d '\0' < "${pid_dir}/comm" 2>/dev/null)"
+    [ -n "${comm}" ] || comm="?"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${pss}" "${locked}" "${pss_anon}" "${pss_file}" \
+        "${pss_shmem}" "${pid}" "${comm}" >> "${ram_process_raw}"
+done
 {
     echo "# Per-process PSS at stabilized idle — the attribution for PUNAR_RAM_MEAN_MB."
     echo "# PSS (proportional set size): shared pages divided among their sharers, so"
     echo "# this column SUMS meaningfully. Sorted descending, kB."
-    for pid_dir in /proc/[0-9]*; do
-        pid="${pid_dir#/proc/}"
-        pss="$(awk '/^Pss:/ {print $2}' "${pid_dir}/smaps_rollup" 2>/dev/null)"
-        [ -n "${pss}" ] || continue
-        comm="$(tr -d '\0' < "${pid_dir}/comm" 2>/dev/null)"
-        [ -n "${comm}" ] || comm="?"
-        printf '%s\t%s\t%s\n' "${pss}" "${pid}" "${comm}"
-    done | sort -rn -k1,1
+    sort -rn -k1,1 "${ram_process_raw}" \
+        | awk -F '\t' '{printf "%s\t%s\t%s\n", $1, $6, $7}'
 } > "${ram_procs}" 2>/dev/null || true
-if [ -s "${ram_procs}" ]; then
-    total_pss="$(awk -F'\t' '/^[0-9]/ {t += $1} END {printf "%d", (t + 1023) / 1024}' "${ram_procs}")"
-    echo "PUNAR_RAM_PSS_TOTAL_MB=${total_pss} (sum of per-process PSS; see ram-processes.txt)"
+{
+    echo "# Stabilized-window-end per-process memory attribution, sorted by PSS."
+    echo "# Columns (kB except pid/name): PSS LOCKED PSS_ANON PSS_FILE PSS_SHMEM PID COMM"
+    sort -rn -k1,1 "${ram_process_raw}"
+} > "${ram_process_memory}" 2>/dev/null || true
+rm -f -- "${ram_process_raw}"
+
+if [ -s "${ram_process_memory}" ]; then
+    read -r total_pss_kb total_locked_kb total_anon_kb total_file_kb total_shmem_kb <<EOF
+$(awk -F '\t' '/^[0-9]/ {
+    pss += $1; locked += $2; anon += $3; file += $4; shmem += $5
+} END {printf "%d %d %d %d %d\n", pss, locked, anon, file, shmem}' "${ram_process_memory}")
+EOF
+    mem_used_end_kb="$(awk '
+        /^MemTotal:/ { total = $2 }
+        /^MemAvailable:/ { available = $2 }
+        END { print total - available }
+    ' "${RUN_DIR}/ram-meminfo-end.txt")"
+    accounting_remainder_kb=$((mem_used_end_kb - total_pss_kb))
+    {
+        echo "# MEM_USED_END_KB=${mem_used_end_kb} (MemTotal - MemAvailable)"
+        echo "# PROCESS_PSS_TOTAL_KB=${total_pss_kb}"
+        echo "# PROCESS_LOCKED_TOTAL_KB=${total_locked_kb}"
+        echo "# PROCESS_PSS_ANON_TOTAL_KB=${total_anon_kb}"
+        echo "# PROCESS_PSS_FILE_TOTAL_KB=${total_file_kb}"
+        echo "# PROCESS_PSS_SHMEM_TOTAL_KB=${total_shmem_kb}"
+        echo "# NON_PROCESS_ACCOUNTING_REMAINDER_KB=${accounting_remainder_kb}"
+        echo "# The remainder includes kernel/driver memory and metric-accounting differences."
+    } >> "${ram_process_memory}"
+    total_pss=$(((total_pss_kb + 1023) / 1024))
+    echo "PUNAR_RAM_PSS_TOTAL_MB=${total_pss} (sum of per-process PSS; see ram-process-memory.txt)"
     echo "# top five by PSS:"
     awk -F'\t' '/^[0-9]/ {printf "#   %6.1f MB  %s\n", $1/1024, $3}' "${ram_procs}" | head -5
 fi
