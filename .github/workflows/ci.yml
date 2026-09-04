@@ -654,7 +654,9 @@ jobs:
         run: |
           installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-debian-*-x86_64.iso' -print -quit)"
           test -n "${installer_iso}"
-          ./tools/install-test.sh "${installer_iso}"
+          ./tools/install-test.sh "${installer_iso}" \
+            os/images/out/installer-install-proof \
+            os/images/cache/cargo-target-amd64-debian/release/punar-release-tool
 
       - name: Verify Debian installer checksum
         run: |

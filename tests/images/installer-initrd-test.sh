@@ -46,6 +46,7 @@ FINALIZER="${REPO_ROOT}/os/images/mkosi.finalize"
 INITRD_BUILDER="${REPO_ROOT}/os/images/scripts/build-installer-initrd.sh"
 ASSEMBLER="${REPO_ROOT}/os/images/scripts/assemble-installer-iso.sh"
 INSTALL_TEST="${REPO_ROOT}/tools/install-test.sh"
+WORKFLOW="${REPO_ROOT}/.github/workflows/ci.yml"
 
 for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${SYSROOT}" "${READY}" "${RUNTIME_STAGE}" "${TARGET}" \
@@ -54,7 +55,8 @@ for file in "${MEDIUM}" "${LOWER}" "${OVERLAY}" "${PREP}" \
     "${RUNTIME_PATH}" "${APPLY_UNIT}" "${APPLY_PATH}" \
     "${REFUSAL_UNIT}" "${REFUSAL_PATH}" \
     "${RUNTIME_WANTS}" "${RUNTIME_SCRIPT}" "${CI_UNATTENDED_DROPIN}" \
-    "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}" "${INSTALL_TEST}"; do
+    "${UNATTENDED_UNIT}" "${UNATTENDED_PATH}" "${INSTALL_TEST}" \
+    "${WORKFLOW}"; do
     [ -f "${file}" ] || fail "missing ${file#"${REPO_ROOT}/"}"
 done
 assert_line "${DESKTOP_CONF}" '         dosfstools'
@@ -145,6 +147,13 @@ grep -Fq -- 'cmp -s "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX
     || fail 'the admission-refusal boot does not compare the small target prefix'
 grep -Fq -- 'admission-prefix-sha256.txt' "${INSTALL_TEST}" \
     || fail 'the admission-refusal proof does not retain before/after SHA-256 evidence'
+grep -Fq 'RELEASE_TOOL=${3:-${PUNAR_RELEASE_TOOL:-' "${INSTALL_TEST}" \
+    || fail 'the install proof cannot accept a substrate-native release verifier'
+grep -Fq 'release verifier is missing or not executable' "${INSTALL_TEST}" \
+    || fail 'the install proof does not fail closed on a missing release verifier'
+grep -Fq 'os/images/cache/cargo-target-amd64-debian/release/punar-release-tool' \
+    "${WORKFLOW}" \
+    || fail 'the Debian installer lane does not pass its native release verifier to the install proof'
 assert_line "${UNATTENDED_UNIT}" 'ExecStart=/usr/bin/punarctl install unattended'
 assert_line "${UNATTENDED_UNIT}" 'PrivateMounts=yes'
 assert_line "${UNATTENDED_UNIT}" 'CapabilityBoundingSet=CAP_SYS_ADMIN'

@@ -173,6 +173,17 @@ systemcontrol_models_ready() {
             and ([.rows[] | select(.tag == "Available") | .name] as $available
                 | all($available[]; . as $name
                     | any($catalog[0].apps[]; .name == $name)))
+            # Package-owned helper launchers are implementation details, not
+            # products. Prove the running image filters the exact known ids
+            # while retaining the useful hardware viewer under a plain name.
+            and (all(.rows[] | select(.tag == "Installed");
+                .action.entry.id as $id
+                | (["footclient", "foot-server", "thunar-settings",
+                  "thunar-bulk-rename", "xfce4-about", "bssh", "bvnc",
+                  "avahi-discover"] | index($id)) == null))
+            and any(.rows[]; .tag == "Installed"
+                and .action.entry.id == "lstopo"
+                and .name == "Hardware Information")
             and any(.actions[]; .hotkey == "O" and .kind == "applicationBrowser")' \
             /run/punar/surfaces-systemcontrol-applications.json >/dev/null 2>&1
 }

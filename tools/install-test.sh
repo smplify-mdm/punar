@@ -8,6 +8,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO=${1:-}
 PROOF_DIR=${2:-"${REPO_ROOT}/os/images/out/installer-install-proof"}
+RELEASE_TOOL=${3:-${PUNAR_RELEASE_TOOL:-"${REPO_ROOT}/os/images/cache/cargo-target/release/punar-release-tool"}}
 TARGET_BYTES=$((128 * 1024 * 1024 * 1024))
 SMALL_TARGET_BYTES=$((20 * 1024 * 1024 * 1024))
 
@@ -16,8 +17,11 @@ die() {
     exit 1
 }
 
-[ -n "${ISO}" ] || die "usage: $0 INSTALLER_ISO [PROOF_DIR]"
+[ "$#" -le 3 ] || die "usage: $0 INSTALLER_ISO [PROOF_DIR] [PUNAR_RELEASE_TOOL]"
+[ -n "${ISO}" ] || die "usage: $0 INSTALLER_ISO [PROOF_DIR] [PUNAR_RELEASE_TOOL]"
 [ -f "${ISO}" ] || die "installer ISO is missing: ${ISO}"
+[ -x "${RELEASE_TOOL}" ] \
+    || die "release verifier is missing or not executable: ${RELEASE_TOOL}"
 for command in qemu-system-x86_64 qemu-img qemu-nbd sfdisk cryptsetup btrfs \
     blkid jq python3 xorriso mkfs.vfat mcopy sha256sum; do
     command -v "${command}" >/dev/null || die "${command} is required"
@@ -257,8 +261,6 @@ printf '%s\n' \
     'I36a,I36b,I36d PASS typed_verdicts=invalid_params,invalid_params,denied first_mib=byte_identical' \
     > "${PROOF_DIR}/admission-refusal-result.txt"
 
-release_tool="${REPO_ROOT}/os/images/cache/cargo-target/release/punar-release-tool"
-[ -x "${release_tool}" ] || die 'the ISO build did not retain punar-release-tool'
 xorriso -osirrox on -indev "${ISO}" -extract /punar/release.json \
     "${RELEASE_DOCUMENT}" >/dev/null 2>&1 \
     || die 'could not extract the exact release manifest from the ISO'
@@ -267,7 +269,7 @@ xorriso -osirrox on -indev "${ISO}" -extract /punar/release.json \
 release_manifest_sha256=$(sha256sum "${RELEASE_DOCUMENT}" | awk '{print $1}')
 head -c 32 /dev/urandom > "${ANSWER_SIGNING_SEED}"
 chmod 600 "${ANSWER_SIGNING_SEED}"
-"${release_tool}" public-key "${ANSWER_SIGNING_SEED}" "${ANSWER_PUBLIC_RAW}"
+"${RELEASE_TOOL}" public-key "${ANSWER_SIGNING_SEED}" "${ANSWER_PUBLIC_RAW}"
 od -An -tx1 -v "${ANSWER_PUBLIC_RAW}" | tr -d ' \n' > "${ANSWER_PUBLIC_HEX}"
 printf '\n' >> "${ANSWER_PUBLIC_HEX}"
 authorization_id=$(head -c 16 "${ANSWER_SIGNING_SEED}" | od -An -tx1 -v | tr -d ' \n')
