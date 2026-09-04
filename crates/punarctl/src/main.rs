@@ -2636,20 +2636,23 @@ fn read_installer_proof_disclosure_line(
     loop {
         match disclosure.read_line(line) {
             Ok(0) => {
-                if apply.as_ref().is_some_and(|handle| handle.is_finished()) {
-                    let result = join_installer_apply_proof(
-                        apply.take().expect("the finished apply handle is present"),
-                    );
-                    return match result {
-                        Err(error) => Err(error),
-                        Ok(_) => Err(format!(
-                            "install.apply ended before {description} was disclosed"
-                        )),
-                    };
-                }
-                return Err(format!(
-                    "the recovery disclosure channel closed before {description}"
-                ));
+                // The local writer guard lives until the apply thread exits.
+                // EOF therefore means the thread is at most one scheduler
+                // handoff from completion; `is_finished()` can still be
+                // false in that tiny window. Join it so the daemon's exact
+                // fail-closed verdict is never replaced by a generic channel
+                // message.
+                let Some(handle) = apply.take() else {
+                    return Err(format!(
+                        "the recovery disclosure channel closed before {description}"
+                    ));
+                };
+                return match join_installer_apply_proof(handle) {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(format!(
+                        "install.apply ended before {description} was disclosed"
+                    )),
+                };
             }
             Ok(_) => return Ok(()),
             Err(error)
@@ -4166,10 +4169,58 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use super::{
-        install_proof_recovery_confirmation, read_install_answer_file, relay_vendor_callbacks,
-        write_unattended_custody,
+        install_proof_recovery_confirmation, read_install_answer_file,
+        read_installer_proof_disclosure_line, relay_vendor_callbacks, write_unattended_custody,
     };
+    #[cfg(target_os = "linux")]
+    use crate::ipc::{CallError, Client, Target, WireError};
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disclosure_eof_surfaces_the_daemon_verdict_across_thread_teardown() {
+        use std::io::BufReader;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (writer, reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let handle = std::thread::spawn(move || {
+            // Reproduce the observed ordering: closing the final writer wakes
+            // the reader before the apply thread is marked finished.
+            drop(writer);
+            std::thread::sleep(Duration::from_millis(50));
+            Err(CallError::Server(WireError {
+                code: "invalid_params".into(),
+                message: "the target serial does not match the authorized disk".into(),
+                details: None,
+            }))
+        });
+        let client = Client::for_target(
+            Target::Punard,
+            Some(Path::new("/run/punar/not-used-by-this-test.sock")),
+        );
+        let mut apply = Some(handle);
+        let mut line = String::new();
+        let mut progress = None;
+        let result = read_installer_proof_disclosure_line(
+            &mut BufReader::new(reader),
+            &mut line,
+            "the custody protocol header",
+            &client,
+            &mut apply,
+            Instant::now() + Duration::from_secs(1),
+            &mut progress,
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "the target serial does not match the authorized disk"
+        );
+        assert!(apply.is_none());
+    }
 
     #[test]
     fn vendor_sandbox_mounts_system_resolver_read_only() {

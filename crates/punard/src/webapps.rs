@@ -15,8 +15,9 @@ use punar_common::time::utc_now_rfc3339;
 use punar_common::webapp::{
     BrowserContext, MAX_ICON_BYTES, WebAppArtifacts, WebAppEnforcement, WebAppIcon, WebAppIconKind,
     WebAppIconRequest, WebAppInstallResult, WebAppInstallSource, WebAppInstalledBy, WebAppManifest,
-    WebAppRecord, origin_from_start_url, personal_context, render_monogram_png,
-    validate_context_id, validate_display_name, validate_id, validate_manifest,
+    WebAppRecord, chromium_wayland_app_id, origin_from_start_url, personal_context,
+    render_monogram_png, validate_context_id, validate_display_name, validate_id,
+    validate_manifest,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -230,7 +231,7 @@ impl WebAppManager {
                 remove_synced(&self.icon_blob_path(uid, &previous.icon.sha256))?;
             }
         }
-        let artifacts = self.artifacts_for_bytes(&app, &icon_png);
+        let artifacts = self.artifacts_for_bytes(&app, &icon_png)?;
         Ok(WebAppInstallResult {
             app,
             artifacts,
@@ -369,20 +370,33 @@ impl WebAppManager {
                 "stored icon bytes do not match the inventory digest".into(),
             ));
         }
-        Ok(self.artifacts_for_bytes(app, &icon))
+        self.artifacts_for_bytes(app, &icon)
     }
 
-    fn artifacts_for_bytes(&self, app: &WebAppRecord, icon: &[u8]) -> WebAppArtifacts {
-        WebAppArtifacts {
-            desktop_entry: desktop_entry(app),
+    fn artifacts_for_bytes(
+        &self,
+        app: &WebAppRecord,
+        icon: &[u8],
+    ) -> Result<WebAppArtifacts, WebAppError> {
+        let native_class = chromium_wayland_app_id(&app.start_url).map_err(WebAppError::Invalid)?;
+        let stable_class = format!("punar-webapp-{}", app.id);
+        let class_pattern = format!(
+            "^({}|{})$",
+            regex_escape(&stable_class),
+            regex_escape(&native_class)
+        );
+        Ok(WebAppArtifacts {
+            desktop_entry: desktop_entry(app, &native_class),
             desktop_path_rel: format!("applications/punar-webapp-{}.desktop", app.id),
             icon_png_b64: base64_encode(icon),
             icon_path_rel: app.icon.path_rel.clone(),
             window_rule: format!(
-                "hl.window_rule({{ name = \"punar-webapp-{}\", match = {{ class = \"^punar-webapp-{}$\" }}, workspace = \"name:{}\" }})",
-                app.id, app.id, app.workspace
+                "hl.window_rule({{ name = \"punar-webapp-{}\", match = {{ class = \"{}\" }}, workspace = \"name:{}\" }})",
+                app.id,
+                lua_double_quote_escape(&class_pattern),
+                app.workspace
             ),
-        }
+        })
     }
 
     fn read_caller_icon(&self, uid: u32, path: &Path) -> Result<Vec<u8>, WebAppError> {
@@ -525,7 +539,7 @@ fn context_record(id: &str, name: &str, deletable: bool) -> BrowserContext {
     }
 }
 
-fn desktop_entry(app: &WebAppRecord) -> String {
+fn desktop_entry(app: &WebAppRecord, native_class: &str) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
@@ -536,12 +550,30 @@ fn desktop_entry(app: &WebAppRecord) -> String {
          Icon=punar-webapp-{}\n\
          Terminal=false\n\
          StartupNotify=true\n\
-         StartupWMClass=punar-webapp-{}\n\
+         StartupWMClass={}\n\
          Categories=Network;\n\
          X-Punar-WebApp-Id={}\n\
          X-Punar-WebApp-Context={}\n",
-        app.name, app.context, app.id, app.id, app.id, app.id, app.context
+        app.name, app.context, app.id, app.id, native_class, app.id, app.context
     )
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn lua_double_quote_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -780,10 +812,13 @@ mod tests {
                 .contains("Exec=punarctl web-apps launch notes")
         );
         assert!(!result.artifacts.desktop_entry.contains("chromium"));
+        assert!(result.artifacts.desktop_entry.contains(
+            "StartupWMClass=chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default"
+        ));
         assert!(result.artifacts.icon_png_b64.starts_with("iVBORw0KGgo"));
         assert_eq!(
             result.artifacts.window_rule,
-            "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^punar-webapp-notes$\" }, workspace = \"name:notes\" })"
+            "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^(punar-webapp-notes|chrome-__usr_share_punar_fixtures_webapps_notes_index\\\\.html-Default)$\" }, workspace = \"name:notes\" })"
         );
         assert_eq!(
             fs::metadata(manager.app_path(1000, "notes"))
@@ -799,6 +834,15 @@ mod tests {
             result.artifacts.desktop_entry
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_class_patterns_escape_regex_and_lua_syntax() {
+        assert_eq!(regex_escape(r#"a.b[1]|(x)\y$"#), r#"a\.b\[1\]\|\(x\)\\y\$"#);
+        assert_eq!(
+            lua_double_quote_escape(r#"^a\.b"quoted"$"#),
+            r#"^a\\.b\"quoted\"$"#
+        );
     }
 
     #[test]

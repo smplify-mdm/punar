@@ -26,3 +26,11 @@ the reviewed argv. Navigation values are validated and follow a `--` delimiter.
 
 Browser contexts isolate Chromium state inside one Unix account. They are not
 separate users, kernel boundaries, or protection from a browser sandbox escape.
+
+On native Ozone/Wayland, Chromium app-mode windows publish an xdg app id
+derived from the validated start URL and the `Default` profile basename;
+`--class` is not that window identity. `punard` reproduces Chromium's upstream
+derivation for `StartupWMClass` and compositor matching, while retaining the
+stable `punar-webapp-<id>` class as an X11/compatibility alternative. The M11
+runtime gate starts on another workspace and verifies the native client is
+actually routed to its assigned workspace.

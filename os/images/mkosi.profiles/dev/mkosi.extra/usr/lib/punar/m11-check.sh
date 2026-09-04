@@ -27,6 +27,7 @@ TIMER=punard-reconcile.timer
 DRIFT_BUDGET_SECS=375
 AUDIT_LOG=/var/log/punar/audit.jsonl
 NOTES_URL=file:///usr/share/punar/fixtures/webapps/notes/index.html
+NOTES_NATIVE_CLASS=chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default
 FIXTURE_MANIFEST=/usr/share/punar/fixtures/webapps/notes/punar-webapp.json
 FAILED=0
 NOTES_JOB=""
@@ -274,7 +275,8 @@ check_eq "web-app record mode/owner" "600 root root" \
 check_eq "desktop entry mode/owner" "644 punar punar" \
     "$(stat -c '%a %U %G' "${DESKTOP}" 2>/dev/null || echo absent)"
 grep_row "desktop entry launches only the typed id" "${DESKTOP}" "Exec=punarctl web-apps launch notes"
-grep_row "desktop entry and compositor share a stable class" "${DESKTOP}" "StartupWMClass=punar-webapp-notes"
+grep_row "desktop entry names Chromium's native Wayland identity" "${DESKTOP}" \
+    "StartupWMClass=${NOTES_NATIVE_CLASS}"
 if grep -qi chromium "${DESKTOP}" 2>/dev/null; then
     note "FAIL derived desktop entry contains a Chromium token"
     FAILED=1
@@ -317,12 +319,18 @@ else
 fi
 
 # 3. Native app window and live Chromium sandbox evidence.
+# Start elsewhere so landing on Atlas proves the rule acted; merely observing
+# an Atlas window while Atlas was already focused would be a false positive.
+as_punar hyprctl dispatch "hl.dsp.focus({ workspace = '2' })" >/dev/null 2>&1 || true
+check_eq "web-app launch starts from workspace 2" 2 \
+    "$(as_punar hyprctl -j activeworkspace 2>/dev/null | jq -r '.id // 0')"
 as_punar "${CTL}" web-apps launch notes > "${RUN_DIR}/m11-notes-launch.txt" 2>&1 &
 NOTES_JOB=$!
 waited=0
 while [ "${waited}" -lt 150 ]; do
     as_punar hyprctl -j clients 2>/dev/null | jq -e \
-        '.[] | select(.class == "punar-webapp-notes" or .initialClass == "punar-webapp-notes")' \
+        --arg class "${NOTES_NATIVE_CLASS}" \
+        '.[] | select(.class == $class or .initialClass == $class)' \
         >/dev/null 2>&1 && break
     sleep 1
     waited=$((waited + 1))
@@ -330,7 +338,7 @@ done
 as_punar hyprctl -j clients > "${RUN_DIR}/m11-clients.json" 2>&1
 jq_check "installed web app is a native compositor client on its workspace" \
     "${RUN_DIR}/m11-clients.json" \
-    '[.[] | select((.class == "punar-webapp-notes" or .initialClass == "punar-webapp-notes") and (.workspace.name | ascii_downcase) == "atlas")] | length == 1'
+    '[.[] | select((.class == "chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default" or .initialClass == "chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default") and (.workspace.name | ascii_downcase) == "atlas" and .xwayland == false)] | length == 1'
 
 PERSONAL_PROFILE="${CONTEXT_ROOT}/personal"
 ATLAS_PROFILE="${CONTEXT_ROOT}/atlas"

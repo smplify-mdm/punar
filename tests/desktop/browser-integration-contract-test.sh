@@ -6,6 +6,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WEBAPPS="${REPO_ROOT}/crates/punarctl/src/webapps.rs"
 DAEMON_WEBAPPS="${REPO_ROOT}/crates/punard/src/webapps.rs"
+COMMON_WEBAPPS="${REPO_ROOT}/crates/punar-common/src/webapp.rs"
 SESSION="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh"
 HYPR_CONFIG="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
 M11_CHECK="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m11-check.sh"
@@ -45,6 +46,18 @@ contains "${WEBAPPS}" 'join("hypr/punar-webapps.lua")'
 contains "${WEBAPPS}" '.arg("reload")'
 refuses "${WEBAPPS}" '.args(["keyword", "source"])'
 contains "${DAEMON_WEBAPPS}" 'hl.window_rule({{ name = \"punar-webapp-{}\"'
+
+# Native Ozone/Wayland app-mode windows ignore --class for their xdg app id.
+# Keep the observed upstream URL/profile identity and the anti-false-positive
+# workspace proof wired into the fast contract so an old assertion cannot
+# quietly return while the expensive VM job is skipped.
+contains "${COMMON_WEBAPPS}" 'pub fn chromium_wayland_app_id'
+contains "${COMMON_WEBAPPS}" 'chrome-{sanitized}-Default'
+contains "${DAEMON_WEBAPPS}" 'chromium_wayland_app_id(&app.start_url)'
+contains "${M11_CHECK}" 'NOTES_NATIVE_CLASS=chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default'
+contains "${M11_CHECK}" 'web-app launch starts from workspace 2'
+contains "${M11_CHECK}" '.xwayland == false'
+refuses "${M11_CHECK}" '.class == "punar-webapp-notes"'
 
 # The compiled CLI also contains the independent native-vendor sandbox
 # vocabulary. Scanning arbitrary binary strings is not a browser invariant;

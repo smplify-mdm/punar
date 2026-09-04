@@ -176,7 +176,7 @@ Punar chrome over Chromium's own window content.
 | 7 | **An agent-attributed peer may not install a web app.** `webapps.install` refuses peers carrying an `agent_session_id` (the M7/M8 attribution path) with a section-73 message naming the human path. It does **not** raise an approval: an installed web app is a persistent launcher identity, and M11 declines to invent a new approval `kind` while M9 is landing. Approval-gated install is tracked in §15. §4.4. |
 | 8 | **The install flow fetches nothing.** Three record sources: an explicit `--name` (+ optional `--icon`), a local `--from-manifest <path>` reading Punar's own tiny `punar-webapp.json`, or an org-supplied record in the effective policy document. `--fetch-manifest` is **DESIGN-ONLY**: putting an HTTP client that parses attacker-controlled JSON inside a root daemon deserves its own milestone. This is also what makes the CI check offline-safe without pretending. §4.6. |
 | 9 | **Icons are generated, not downloaded.** With no `--icon`, Punar renders a deterministic **monogram** PNG from the app name and origin in the design language (paper ground `#FAF9F6`, ink glyph, 2 px rule), written by a ~120-line dependency-free PNG writer in `punar-common` (stored-deflate IDAT + CRC32 — no zlib crate, no image crate). Deterministic bytes: the same name+origin yields the same sha256, which is exactly how `m11-check` asserts it without `cmp` or `diff`. §4.7. |
-| 10 | **Window identity is `punar-webapp-<id>`, set with Chromium's own `--class` and mirrored in `StartupWMClass`.** That single string is what the compositor matches, what the workspace rule targets, what the overview prints, and what `punarctl web-apps list` shows. It is a Chromium feature Punar composes, not a Punar mechanism. §4.5. |
+| 10 | **Native Wayland window identity is Chromium-derived, not `--class`.** For an app-mode Ozone window Chromium derives the xdg app id from `{URL host}_{URL path}`, its executable name, and the `Default` profile basename (for the fixture: `chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default`). `punard` reproduces that upstream algorithm from the already validated start URL, mirrors the result in `StartupWMClass`, and emits a compositor rule matching it. The rule also accepts the stable `punar-webapp-<id>` value passed with `--class` for X11 and compatibility; native Wayland evidence must show the derived id. §4.5. |
 | 11 | **Punar does not repaint Chromium's window, and the D-013 masthead is therefore `PARTIAL`.** The frame, the absence of a URL bar (a consequence of `--app=`, upstream's feature) and the context tag on Punar's own surfaces are `FULL`. The exact `LINEAR · ATLAS` string *inside* the compositor decoration is not: the window title belongs to the page, and taking it away is a fork-shaped change. Coverage stated, delta tracked, no claim beyond the evidence. §4.5, §13. |
 | 12 | **A context is a Chromium profile directory selected with `--user-data-dir`, not `--profile-directory`.** `--user-data-dir` is the only option under which "own cookies · storage · sign-ins" is unconditionally true; `--profile-directory` shares one browser process and would make the plate's copy a half-truth. The cost is real and stated: each live context is a whole browser process tree. §5.2. |
 | 13 | **The isolation claim is a table, not an adjective.** Cookies, localStorage/IndexedDB/CacheStorage, sign-in state, history, and per-profile extensions: **isolated**. Same uid, same filesystem access, same kernel, one shared GPU process where the platform shares it, and no protection against a post-sandbox-escape renderer: **not isolated, and not claimed**. Certificates and network policy appear in the plate's managed row and are marked `SIMULATED`/`M12` respectively. §5.4. |
@@ -209,8 +209,9 @@ choice**.
 |---|---|---|
 | `--app=<url>` | Chromium (app mode) | Opens a window with no omnibox, no tab strip, no bookmarks bar. This is *the* thing that makes an installed web app look native. Punar supplies the URL from the record and nothing else. |
 | `--user-data-dir=<path>` | Chromium (profile root) | Selects the storage context. Separate cookie jar, storage, sign-ins, history, extension set, and a separate browser process tree. |
-| `--class=<name>` | Chromium (Linux/Ozone WM identity) | Sets the Wayland `app_id` / X11 `WM_CLASS`, giving the compositor a real window identity to match rules against. |
-| `StartupWMClass=` in a `.desktop` file | freedesktop Desktop Entry Specification | Lets the shell and compositor tie a launcher entry to the window it produces. |
+| `--class=<name>` | Chromium (Linux compatibility identity) | Supplies the stable `punar-webapp-<id>` X11/compatibility class. Chromium app-mode windows on native Ozone/Wayland do **not** use it as their xdg app id. |
+| URL/profile-derived xdg app id | Chromium (`GenerateApplicationNameFromURL` → Linux shortcut filename → `GetXdgAppIdForWebApp`) | Gives a native Wayland app-mode window its real compositor identity. `punard` reproduces the constrained ASCII derivation from the validated URL rather than trusting a page-controlled title. |
+| `StartupWMClass=` in a `.desktop` file | freedesktop Desktop Entry Specification | Carries the derived native identity so launchers can associate the entry with the window it produces. |
 | Enterprise policy JSON in `/etc/chromium/policies/managed/` | Chromium (managed policy, all platforms) | The **enforcement** point for spec 62's "policy may control extensions, allowed web apps, browser contexts, certificate roots, relay policy, download restrictions". Root-owned; a non-root user cannot write it. |
 | The multi-process sandbox, site isolation, cert verification, extension model | Chromium | Nothing. Explicitly, provably nothing (§8). |
 | PWA support, WebGPU, WebRTC, passkeys, extension compatibility | Chromium | Inherited by staying upstream — spec 30.1's platform floor is met by *not* reimplementing it. |
@@ -433,7 +434,7 @@ Exec=punarctl web-apps launch notes
 Icon=punar-webapp-notes
 Terminal=false
 StartupNotify=true
-StartupWMClass=punar-webapp-notes
+StartupWMClass=chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default
 Categories=Network;
 X-Punar-WebApp-Id=notes
 X-Punar-WebApp-Context=personal
@@ -443,14 +444,18 @@ X-Punar-WebApp-Context=personal
   not name Chromium. `punarctl`'s clap parser rejects unknown arguments, so
   a hand-edited `Exec=` line with extra tokens fails loudly rather than
   reaching argv.
-- `StartupWMClass=punar-webapp-notes` matches the `--class=` the launcher
-  passes. The compositor now has a stable identity.
+- Chromium derives the fixture's native Wayland app id as
+  `chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default`.
+  `punard` computes that value from the validated URL and writes it as
+  `StartupWMClass`; page titles never participate in identity. The stable
+  `--class=punar-webapp-notes` remains a compatibility identity for X11 and
+  versions that honor it.
 - One compositor rule per app, written into
   `~/.config/hypr/punar-webapps.lua` (a file Punar owns, loaded by the
   supported Lua config), using the 0.56 Lua API M2 established:
 
   ```lua
-  hl.window_rule({ name = "punar-webapp-notes", match = { class = "^punar-webapp-notes$" }, workspace = "name:atlas" })
+  hl.window_rule({ name = "punar-webapp-notes", match = { class = "^(punar-webapp-notes|chrome-__usr_share_punar_fixtures_webapps_notes_index\\.html-Default)$" }, workspace = "name:atlas" })
   ```
 
   Workspace assignment (spec 31) is therefore the same mechanism M2 already
@@ -468,7 +473,7 @@ a masthead titlebar reading `LINEAR · ATLAS`. What M11 delivers:
 | Element of the plate | Coverage | Mechanism / reason |
 |---|---|---|
 | No URL bar, no tab strip | `FULL` | `--app=` — upstream's feature. |
-| Window has a real, stable identity | `FULL` | `--class` + `StartupWMClass`. |
+| Window has a real, stable identity | `FULL` | Chromium-derived native xdg app id + `StartupWMClass`; stable `--class` is a compatibility alternative. |
 | Tiles, tabs, workspace-assigns, answers Punar-keys | `FULL` | It is an ordinary Wayland window; M2's grammar applies unchanged. |
 | Context tag on Punar surfaces (overview, command center, `punarctl web-apps list`) | `FULL` | Those surfaces read the Punar record. |
 | The literal `LINEAR · ATLAS` string inside the compositor's window decoration | `PARTIAL` | The window title belongs to the page. Forcing it means either patching Chromium (law 1) or painting over its window (§3.4). Deferred to M13 polish as a compositor-decoration question; tracked in §15. |
@@ -544,7 +549,7 @@ DESIGN_LANGUAGE §7: *"silence is not support."* So:
 |---|---|---|
 | launcher entry | `FULL` | §4.5 |
 | icon | `FULL` | §4.7 (generated; fetched icons DESIGN-ONLY) |
-| window identity | `FULL` | `--class` + `StartupWMClass` |
+| window identity | `FULL` | Chromium-derived native xdg app id + `StartupWMClass`; `--class` retained for compatibility |
 | notifications | **`UNSUPPORTED`** | The image contains no `org.freedesktop.Notifications` implementation. M10 ships only the alert sliver it needs; the notification centre is M13. Chromium web notifications will therefore silently fail, and pretending otherwise would be a spec 1.22 violation. Tracked in §15. |
 | file associations | **`UNSUPPORTED`** | No `MimeType=` wiring, no portal handler arbitration. §15. |
 | deep links | **`UNSUPPORTED`** | `x-scheme-handler` registration without default-handler arbitration is worse than nothing. §15. |
@@ -1170,7 +1175,7 @@ Result:
    "desktop_path_rel": "applications/punar-webapp-notes.desktop",
    "icon_png_b64": "iVBORw0KGgo…",
    "icon_path_rel": "icons/hicolor/256x256/apps/punar-webapp-notes.png",
-   "window_rule": "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^punar-webapp-notes$\" }, workspace = \"name:atlas\" })"
+   "window_rule": "hl.window_rule({ name = \"punar-webapp-notes\", match = { class = \"^(punar-webapp-notes|chrome-__usr_share_punar_fixtures_webapps_notes_index\\\\.html-Default)$\" }, workspace = \"name:atlas\" })"
  },
  "enforcement": {"point": "policy_file", "managed": false,
                  "note": "This check is advisory on an unmanaged device."}}
@@ -1361,7 +1366,8 @@ for the missing live assertions.
    `0600 root:root`, and validates in-VM with `jq` against the ten required
    fields (host-side JSON-Schema validation happens in CI on the exported
    copy — the VM has no schema validator, the M10 precedent).
-8. `.desktop` entry exists, mode `0644`, contains `StartupWMClass=punar-webapp-notes`,
+8. `.desktop` entry exists, mode `0644`, contains
+   `StartupWMClass=chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default`,
    `Exec=punarctl web-apps launch notes`, and **does not contain the token
    `chromium`**.
 9. Icon exists at the hicolor path; is a valid PNG (magic bytes); record's
@@ -1389,12 +1395,14 @@ for the missing live assertions.
 
 **4 · The window is native (the money shot).**
 
-16. Launch: `runuser` the session pattern, `punarctl web-apps launch notes`.
+16. Focus workspace 2, then launch with the `runuser` session pattern:
+    `punarctl web-apps launch notes`.
     Wait for the window with `hyprctl -j clients` (bounded, `sleep 1` loop —
     the m2/m4 shape for awaiting an event, not a product polling loop).
-17. `hyprctl -j clients` shows a client with `class == "punar-webapp-notes"`
-    on workspace named `atlas` — window identity **and** workspace assignment,
-    proved from the compositor.
+17. `hyprctl -j clients` shows a native client (`xwayland == false`) with
+    `class == "chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default"`
+    on workspace named `atlas` — Chromium's actual window identity **and** an
+    observed move away from workspace 2, proved from the compositor.
 18. The live process's `/proc/<pid>/cmdline` contains `--app=file:///…` and
     `--user-data-dir=/home/punar/.local/share/punar/browser/contexts/personal`,
     and contains **no** forbidden token.
@@ -1556,7 +1564,7 @@ has an inventory.
 | Upstream-current Chromium in the image | ✅ | Already shipped by M1; M11 asserts it is unmodified |
 | `--app=` window, no URL bar | ✅ | Composed |
 | Per-context `--user-data-dir` | ✅ | §5.2 |
-| `.desktop` + `StartupWMClass` + `--class` window identity | ✅ | §4.5 |
+| `.desktop` + derived native xdg app id + `StartupWMClass` (`--class` compatibility alias) | ✅ | §4.5 |
 | Workspace assignment via compositor rule | ✅ | §4.5 |
 | Generated deterministic icon | ✅ | §4.7 |
 | Offline install (2 local sources) | ✅ | §4.6 |

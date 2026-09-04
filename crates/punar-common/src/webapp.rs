@@ -259,6 +259,72 @@ pub fn origin_from_start_url(value: &str) -> Result<String, String> {
     Err("start URL must use https:// or file:///".to_string())
 }
 
+/// Reproduce the native Wayland application id Chromium assigns to a
+/// `--app=<url>` shortcut window on Linux.
+///
+/// Chromium does not use `--class` for these native Ozone/Wayland windows. It
+/// derives the xdg app id from `{host}_{path}`, the executable name and the
+/// default profile basename instead. Keeping this derivation beside the URL
+/// validator lets the compositor rule target the identity the upstream browser
+/// actually publishes, without launching Chromium or trusting page-controlled
+/// titles.
+pub fn chromium_wayland_app_id(value: &str) -> Result<String, String> {
+    origin_from_start_url(value)?;
+
+    let (host, path) = if let Some(rest) = value.strip_prefix("https://") {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let host = if authority.starts_with('[') {
+            authority
+                .find(']')
+                .map(|end| &authority[..=end])
+                .unwrap_or(authority)
+        } else {
+            authority
+                .rsplit_once(':')
+                .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
+                .map(|(host, _)| host)
+                .unwrap_or(authority)
+        };
+        let suffix = &rest[authority_end..];
+        let path = if suffix.starts_with('/') {
+            suffix.split(['?', '#']).next().unwrap_or("/")
+        } else {
+            "/"
+        };
+        (host.to_ascii_lowercase(), path)
+    } else {
+        let path = value
+            .strip_prefix("file://")
+            .expect("origin validation accepted only HTTPS or file URLs")
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("/");
+        (String::new(), path)
+    };
+
+    let app_name = format!("{host}_{path}");
+    // `ReplaceIllegalCharactersInPath` is the last upstream step before the
+    // shortcut filename becomes the xdg app id. Punar's URL grammar is ASCII
+    // and already rejects controls, formatting characters, whitespace and
+    // backslashes, so this is the complete remaining intersection with
+    // Chromium's filename-illegal set.
+    let sanitized: String = app_name
+        .chars()
+        .map(|character| {
+            if matches!(
+                character,
+                '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|'
+            ) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    Ok(format!("chrome-{sanitized}-Default"))
+}
+
 fn validate_https_authority(authority: &str) -> Result<(), String> {
     if authority.starts_with('[') {
         let Some(close) = authority.find(']') else {
@@ -592,6 +658,28 @@ mod tests {
         ] {
             assert!(origin_from_start_url(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    #[test]
+    fn chromium_wayland_identity_matches_the_upstream_shortcut_algorithm() {
+        assert_eq!(
+            chromium_wayland_app_id("https://linear.app").unwrap(),
+            "chrome-linear.app__-Default"
+        );
+        assert_eq!(
+            chromium_wayland_app_id("https://Example.COM:8443/inbox/today?view=all").unwrap(),
+            "chrome-example.com__inbox_today-Default"
+        );
+        assert_eq!(
+            chromium_wayland_app_id("file:///usr/share/punar/fixtures/webapps/notes/index.html")
+                .unwrap(),
+            "chrome-__usr_share_punar_fixtures_webapps_notes_index.html-Default"
+        );
+        assert_eq!(
+            chromium_wayland_app_id("https://example.com/a:b*c").unwrap(),
+            "chrome-example.com__a_b_c-Default"
+        );
+        assert!(chromium_wayland_app_id("http://example.com").is_err());
     }
 
     #[test]
