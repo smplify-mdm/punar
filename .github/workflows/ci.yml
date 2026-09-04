@@ -26,6 +26,11 @@
 #                 boot, full graphical behavior suite, and RAM budgets. This
 #                 remains a separately named migration artifact until it has
 #                 also crossed installer and bare-metal gates.
+#   debian-amd64-installer
+#                 after desktop parity passes, builds the pinned-sid release
+#                 and hybrid installer, then runs the same final-byte,
+#                 optical/raw boot, signed unattended, custody and refusal
+#                 gates as the shipping installer.
 #   arm64-image   native Debian-snapshot minimal + desktop builds on an ARM
 #                 runner, then AArch64 UEFI boot and the same graphical,
 #                 behavior, privacy and RAM gates as x86_64. This proves the
@@ -578,6 +583,88 @@ jobs:
             os/images/out/debian-amd64-build-info.txt
             os/images/out/debian-amd64-boot-proof/**
             os/images/out/debian-amd64-desktop-proof/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  debian-amd64-installer:
+    name: debian-amd64-installer (hybrid ISO + install/refusal parity)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    needs: debian-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      # This exact key is populated by the prerequisite desktop job. Keeping
+      # installer proof behind desktop parity avoids building a second full
+      # product tree when the substrate cannot yet launch the shell.
+      - name: Restore Debian amd64 package and Cargo inputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            os/images/cache/debian-amd64
+            os/images/cache/debian-amd64-pkgs
+            os/images/cache/cargo-amd64-debian
+            os/images/cache/cargo-target-amd64-debian
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: punar-debian-amd64-
+
+      - name: Build pinned Debian amd64 release and hybrid installer
+        run: PUNAR_AMD64_DEBIAN_IMAGES=iso ./tools/build-amd64-debian-image.sh
+
+      - name: Verify final Debian installer artifact contract
+        run: |
+          source os/images/amd64-debian/snapshot.env
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-debian-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          docker run --rm --privileged \
+            -v "$PWD:/work" -w /work \
+            "punar-debian-builder:${PUNAR_DEBIAN_SNAPSHOT}-amd64" \
+            ./tests/images/installer-iso-contract-test.sh "/work/${installer_iso}" \
+              /work/os/images/cache/cargo-target-amd64-debian/release/punar-release-tool
+
+      - name: Install QEMU, OVMF and installation-verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf python3-jsonschema \
+            btrfs-progs cryptsetup-bin dosfstools mtools xorriso
+
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot Debian installer as optical media and raw hybrid drive
+        run: |
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-debian-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          ./tools/installer-boot-test.sh "${installer_iso}"
+
+      - name: Debian signed unattended install, custody and refusal verification
+        run: |
+          installer_iso="$(find os/images/out -maxdepth 1 -type f -name 'punar-installer-debian-*-x86_64.iso' -print -quit)"
+          test -n "${installer_iso}"
+          ./tools/install-test.sh "${installer_iso}"
+
+      - name: Verify Debian installer checksum
+        run: |
+          cd os/images/out
+          sha256sum -c SHA256SUMS.debian-amd64
+
+      - name: Upload Debian installer and proof
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-installer-debian-x86_64-candidate
+          path: |
+            os/images/out/punar-installer-debian-*-x86_64.iso
+            os/images/out/punar-release-debian-x86_64.qcow2
+            os/images/out/SHA256SUMS.debian-amd64
+            os/images/out/debian-amd64-build-info.txt
+            os/images/out/installer-boot-proof/**
+            os/images/out/installer-install-proof/**
           if-no-files-found: warn
           retention-days: 7
 
