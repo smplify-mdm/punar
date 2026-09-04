@@ -147,6 +147,8 @@ grep -Fq -- 'cmp -s "${ADMISSION_SMALL_PREFIX_BEFORE}" "${ADMISSION_SMALL_PREFIX
     || fail 'the admission-refusal boot does not compare the small target prefix'
 grep -Fq -- 'admission-prefix-sha256.txt' "${INSTALL_TEST}" \
     || fail 'the admission-refusal proof does not retain before/after SHA-256 evidence'
+# Literal source-contract fragment intentionally contains shell syntax.
+# shellcheck disable=SC2016
 grep -Fq 'RELEASE_TOOL=${3:-${PUNAR_RELEASE_TOOL:-' "${INSTALL_TEST}" \
     || fail 'the install proof cannot accept a substrate-native release verifier'
 grep -Fq 'release verifier is missing or not executable' "${INSTALL_TEST}" \

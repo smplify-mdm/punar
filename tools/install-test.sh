@@ -290,7 +290,7 @@ jq -n \
       keymap:"us",locale:"C.UTF-8",encryption:"luks2",
       recovery_mode:"personal_copy",passphrase_source:"generated",
       recovery_key_ack:"unattended"}' > "${ANSWER_DOCUMENT}"
-"${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
+"${RELEASE_TOOL}" sign "${ANSWER_SIGNING_SEED}" \
     "${ANSWER_DOCUMENT}" "${ANSWER_SIGNATURE}"
 
 echo '==> refuse a signed answer for the wrong destruction confirmation (zero target writes)'
@@ -298,7 +298,7 @@ qemu-img dd -f qcow2 bs=1M count=1 \
     "if=${TARGET_DISK}" "of=${TARGET_PREFIX_BEFORE}" >/dev/null
 jq '.confirm_destroy_disk = "PUNAR-CI-WRONG-DISK"' \
     "${ANSWER_DOCUMENT}" > "${REFUSAL_ANSWER_DOCUMENT}"
-"${release_tool}" sign "${ANSWER_SIGNING_SEED}" \
+"${RELEASE_TOOL}" sign "${ANSWER_SIGNING_SEED}" \
     "${REFUSAL_ANSWER_DOCUMENT}" "${REFUSAL_ANSWER_SIGNATURE}"
 truncate -s 8M "${REFUSAL_ANSWER_DISK}"
 mkfs.vfat -n PUNAR_ANSWR "${REFUSAL_ANSWER_DISK}" >/dev/null
