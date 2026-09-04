@@ -585,18 +585,26 @@ The unattended signed-answer lane now generates the disk passphrase inside
 socket, and will not cross the recovery gate until `punarctl` atomically writes,
 fsyncs, reopens and byte-verifies `custody.json` on `PUNAR_ANSWR`. The answer
 schema, strict parser, no-secret negative fixture, service trigger and dedicated
-custody output schema are green. **CANONICAL KVM PROOF:** [run
-33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301),
-installer job 100844884825, built the 4,427,239,424-byte ISO (SHA-256
-`75ae64c1b018ec0672615903bcf2481e6949c0f8a9876d17542522480fac934e`),
-booted it as both optical and raw hybrid media, refused a correctly signed
-answer whose destruction confirmation named the wrong disk with the first MiB
-byte-identical, completed the encrypted unattended install in 91 seconds,
-returned and byte-verified removable custody, unlocked the installed LUKS2
-volume with that exact generated passphrase, inspected GPT/LUKS2/btrfs and the
-installed seed, and found neither generated secret in live or installed
-logs/state. This closes I36c and I36's unattended custody/secrecy half in a VM;
-I36a/b/d still need to join the same privileged VM fixture.
+custody output schema are green. **CANONICAL KVM PROOF:** all nine jobs in
+[run 33822526403](https://github.com/smplify-mdm/punar/actions/runs/33822526403)
+passed on 2026-09-04. Installer job
+[100868070423](https://github.com/smplify-mdm/punar/actions/runs/33822526403/job/100868070423)
+built the 4,427,489,280-byte ISO (SHA-256
+`3cd4ec6de7372ae3fe0c323edd6c9a425e09e3444837a08ad50d84399d129c32`;
+artifact `9919314120`), booted it as both optical and raw hybrid media, and
+completed I08–I13 plus every I36 refusal and the unattended custody/secrecy
+lane in 104 seconds under KVM. I36a refused the exact 20 GiB disk with the
+33 GiB arithmetic; I36b refused a syntactically valid stale plan token as
+`invalid_params`; I36c refused a correctly signed answer whose destruction
+confirmation named the wrong disk; and I36d refused an agent-attributed apply
+through the M9 authority path as `denied`. Guest-side SHA-256 checks immediately
+before and after each refusal and host-side first-MiB comparisons around the
+whole boot found both target disks byte-identical. The successful lane returned
+and byte-verified removable custody, unlocked the installed LUKS2 volume with
+the exact generated passphrase, inspected GPT/LUKS2/btrfs and the installed
+seed, and found neither generated secret in live or installed logs/state. This
+closes I36 in the privileged generic-x86 VM fixture; physical-device and
+production key-custody claims remain open.
 The origin is fail-closed too: `install.plan` does not return a usable token
 unless its success event has been durably appended, so a full/unwritable audit
 filesystem is discovered while the target disk is still byte-identical.
@@ -733,9 +741,10 @@ the no-secret-frame ARM64 release gate are implemented and passed on
 2026-08-30. The destructive encrypted installer, recovery acknowledgement and
 installed-image proof were closed in canonical KVM CI on 2026-09-01; signed
 unattended answer media, removable custody, literal-secret scanning and I36c's
-zero-write refusal were closed by run 33814941301 on 2026-09-03. Still open are
-the remaining I36a/b/d privileged-VM refusals, the power-loss matrix, x86
-substrate parity, logout/login human acceptance and physical hardware.
+zero-write refusal landed on 2026-09-03. Run 33822526403 closed I36a/b/d and
+re-proved I36c plus the full unattended path on 2026-09-04. Still open are the
+power-loss matrix, x86 substrate parity, logout/login human acceptance and
+physical hardware.
 
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying

@@ -1,6 +1,6 @@
 # The Punar Installer — design
 
-**Status:** attended and signed-unattended encrypted VM installers proven · physical and production trust gates remain open, 2026-09-03
+**Status:** attended and signed-unattended encrypted VM installers proven, including I36's complete refusal/secrecy matrix · physical and production trust gates remain open, 2026-09-04
 **Spec authority:** §66 (installation), §65 (first-boot UX), §44.2 (disk
 encryption), §44.1 (boot), §49 (enrollment chain), §48 (JIT privilege),
 §5.1/§5.3 (target hardware), §12 (keyboard-first), §60 (hard safety
@@ -21,9 +21,10 @@ Plate **D-008** [`mockups/first-boot.html`](mockups/first-boot.html).
 > root-A payload now build and verify as an ephemerally signed install bundle;
 > the attended public apply and recovery-ack orchestration is implemented and
 > runtime-proven on generic x86_64 KVM, with the same logic unit-proven on
-> ARM64. Canonical [run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) also runtime-proved the signed unattended
-> answer/custody path, exact generated-passphrase unlock and literal-secret
-> scans on x86_64 KVM. Production signing and distribution, Secure Boot/TPM
+> ARM64. All nine jobs in canonical [run 33822526403](https://github.com/smplify-mdm/punar/actions/runs/33822526403) passed; its installer job runtime-proved the complete I36
+> refusal/secrecy matrix, signed unattended answer/custody path, exact
+> generated-passphrase unlock and literal-secret scans on x86_64 KVM.
+> Production signing and distribution, Secure Boot/TPM
 > custody, and physical-device claims remain open. The purpose here is
 > still to make the first physical install possible without inventing a second
 > privileged path around the one this project spent thirteen milestones
@@ -43,11 +44,11 @@ it solid.
 |---|---|---|---|
 | 01 | ISO built by the pinned mkosi pipeline, offline live boot, no network | **solid through I05** | **VERIFIED 2026-08-31:** canonical run 33442898971 built the final hybrid ISO, passed its artifact contract, and booted its live root with `-nic none` in both optical and raw-drive forms. |
 | 02 | ADR-003 partition layout created on a device | **solid in generic x86_64 KVM** | Canonical installer runs create and independently inspect the four-partition target. Native Raspberry Pi and physical-device installation remain separate claims. |
-| 03 | LUKS2 by default, passphrase unlock | **solid in generic x86_64 KVM** | [Run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) completed an encrypted unattended install and unlocked the inspected volume with the exact generated custody passphrase. TPM-assisted unlock remains dashed. |
+| 03 | LUKS2 by default, passphrase unlock | **solid in generic x86_64 KVM** | [Run 33822526403](https://github.com/smplify-mdm/punar/actions/runs/33822526403) completed an encrypted unattended install and unlocked the inspected volume with the exact generated custody passphrase. TPM-assisted unlock remains dashed. |
 | 04 | **TPM-assisted unlock** | *dashed* | **SIMULATED and deliberately not enrolled.** User-blocked item 2. §5.4 argues why enrolling against a software TPM would be worse than not enrolling at all. |
 | 05 | **Secure Boot / signed UKI** | *dashed* | **SIMULATED.** User-blocked item 1. The installer's live-mode gate (§7.1) is only as strong as the signature over the UKI that carries it — stated, not hidden. |
 | 06 | **Release-manifest signature verification at install** | **solid mechanism; non-production trust root** | Exercised end to end with per-run ephemeral keys; **production custody is user-blocked item 7**. Device fails closed on an empty trusted-key set. |
-| 07 | Recovery key generated, disclosed once, never logged | **solid for attended and signed-unattended KVM lanes** | [Run 33814941301](https://github.com/smplify-mdm/punar/actions/runs/33814941301) returned custody only to `PUNAR_ANSWR` and found both generated secrets zero times in live and installed logs/state. Physical recovery remains open. |
+| 07 | Recovery key generated, disclosed once, never logged | **solid for attended and signed-unattended KVM lanes** | [Run 33822526403](https://github.com/smplify-mdm/punar/actions/runs/33822526403) returned custody only to `PUNAR_ANSWR` and found both generated secrets zero times in live and installed logs/state. Physical recovery remains open. |
 | 08 | Typed install surface, no generic root shell | **solid in the VM installer** | I33–I35 and the unknown-method negatives are CI-proven. No generic execution primitive exists in the live environment. |
 | 09 | Dev conveniences absent from a release image | *dashed* | Designed here (§8) as **both** a profile split and a build-time assertion. Solid when the build fails on violation *and* I22–I28 pass. |
 | 10 | **Hardware coverage** | *dashed* | The *report mechanism* (§9.3) is provable in QEMU. **Coverage itself is unknowable until user-blocked item 3.** No row in this document claims a machine works. |
@@ -1766,8 +1767,9 @@ sizes; invokes only fixed-argv `modinfo`; rejects a missing usable graphics
 binding before confirmation; returns the selected-disk report beside
 `install.plan`; and writes a fresh report during `seed`. Final verification
 reopens that file read-only and compares its exact durable digest before an
-installation may become `succeeded`. The remaining proof is the privileged
-installer VM and then the published physical matrix—not another parser.
+installation may become `succeeded`. The privileged installer VM now proves
+that handoff as part of I08–I13; the published physical matrix remains—not
+another parser.
 
 ### 9.4 The honesty paragraph
 
@@ -1911,6 +1913,21 @@ untested — a seam is exactly where a property gets dropped by both sides.
 | # | Assertion |
 |---|---|
 | I36 | Four refusals, each leaving the target disk byte-identical (sha256 of its first 1 MiB before and after): (a) a 20 GiB disk is refused with the arithmetic in the message; (b) an `install.apply` whose `plan_token` does not match is refused `invalid_params`; (c) an answer file whose `confirm_destroy_disk` does not match the serial is refused; (d) `install.apply` from an agent-attributed peer is **denied by the M9 AI path**, with zero bytes written. **And:** the literal recovery key and the literal passphrase appear **zero times** in the live journal, the installed journal, `/var/log/**` and the audit log. |
+
+**Canonical VM evidence (2026-09-04):** all nine jobs in
+[run 33822526403](https://github.com/smplify-mdm/punar/actions/runs/33822526403)
+passed. Installer job
+[100868070423](https://github.com/smplify-mdm/punar/actions/runs/33822526403/job/100868070423)
+emitted `install-test: PASS (I08-I13 + I36a-I36d refusals + unattended I36
+custody/secrecy; 104s, kvm)`. It built the 4,427,489,280-byte ISO with SHA-256
+`3cd4ec6de7372ae3fe0c323edd6c9a425e09e3444837a08ad50d84399d129c32`
+(artifact `9919314120`). I36a/b/d ran inside a dedicated live-environment boot;
+the guest hashed each selected disk's first MiB immediately before and after
+the refusal, while the host independently compared both complete before/after
+prefixes around the boot. I36c and the successful encrypted unattended lane
+then re-ran in the same job, including exact-passphrase unlock and literal
+secret scans. This is privileged generic-x86 KVM evidence, not physical-media,
+Secure Boot, TPM or production-key-custody evidence.
 
 **The four assertions this document's own body cites and an earlier draft
 never listed** *(added 2026-08-26 — §6.5.1 and §7.2 referenced I37 and I38 in
