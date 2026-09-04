@@ -9,6 +9,7 @@ ARM_PROFILE="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf"
 HYPR_LUA="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
 HYPR_LEGACY="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.conf"
 SESSION="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh"
+USER_ENVIRONMENT="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/environment.d/60-punar-applications.conf"
 PUNARCTL="${REPO_ROOT}/crates/punarctl/src/main.rs"
 
 fail() {
@@ -32,6 +33,7 @@ contains "${BRIDGE}" 'https://*|http://*'
 contains "${HYPR_LUA}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
 contains "${HYPR_LEGACY}" 'XDG_CONFIG_DIRS XDG_DATA_DIRS'
 contains "${SESSION}" 'dbus-update-activation-environment --systemd XDG_CONFIG_DIRS XDG_DATA_DIRS'
+contains "${USER_ENVIRONMENT}" 'XDG_CONFIG_DIRS=/etc/xdg:/var/lib/punar-applications/config'
 contains "${PUNARCTL}" '"vendor-session"'
 contains "${PUNARCTL}" 'VENDOR_SESSION_SOCKET'
 contains "${PUNARCTL}" 'std::fs::Permissions::from_mode(0o600)'

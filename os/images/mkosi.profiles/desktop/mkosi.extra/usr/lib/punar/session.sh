@@ -33,7 +33,15 @@ export XDG_DATA_DIRS
 # ~/.config/mimeapps.list remains first and can deliberately choose another
 # handler. Administrator defaults in the inherited directories also outrank
 # the product fallback, which exists only while the app is installed.
-XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:/var/lib/punar-applications/config"
+# `/usr/lib/environment.d/60-punar-applications.conf` also seeds the product
+# fallback before the user manager starts.  This session assignment preserves
+# any administrator/user value and refreshes a manager that predates the
+# current image after an A/B update.
+XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
+case ":${XDG_CONFIG_DIRS}:" in
+    *:/var/lib/punar-applications/config:*) ;;
+    *) XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS}:/var/lib/punar-applications/config" ;;
+esac
 export XDG_CONFIG_DIRS
 
 # Import the mutable desktop-entry and URI-handler roots before Hyprland (and
