@@ -1,4 +1,4 @@
-# Native aarch64 image builder for the pinned-Debian migration lane.
+# Native image builder for the pinned-Debian amd64 and arm64 migration lanes.
 #
 # The base is digest-pinned and apt itself is redirected to the same timestamp
 # before any package is installed. HTTP is intentional for the bootstrap:

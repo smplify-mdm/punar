@@ -1,0 +1,28 @@
+#!/bin/sh
+# Disposable Debian/amd64 CI identity. Product release images never compose
+# this profile; release onboarding remains the sole human-account authority.
+set -eu
+
+groupadd --force punar
+
+supplementary=""
+for group in sudo video input dialout; do
+    if getent group "${group}" >/dev/null 2>&1; then
+        if [ -n "${supplementary}" ]; then
+            supplementary="${supplementary},${group}"
+        else
+            supplementary="${group}"
+        fi
+    fi
+done
+
+# Dollar signs are literal crypt delimiters.
+# shellcheck disable=SC2016
+useradd --create-home --gid punar --groups "${supplementary}" \
+    --shell /bin/bash \
+    --password '$6$punar-amd64-dev$O5E56OGsvxj4gLgGeiWW55oQ.Vbgch4.lQXHWeu.gsfMTkItrlXBrnfrH4Un8zb1jULZzpU2Fbdt79mZG2JSQ.' \
+    punar
+
+rm -f /etc/subuid /etc/subgid
+printf '%s\n' 'punar:100000:65536' > /etc/subuid
+printf '%s\n' 'punar:100000:65536' > /etc/subgid

@@ -22,6 +22,9 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
+#   debian-amd64  pinned-sid candidate build and QEMU/OVMF smoke test. This
+#                 remains a separately named migration artifact until it has
+#                 crossed the full desktop/installer/performance gates.
 #   arm64-image   native Debian-snapshot minimal + desktop builds on an ARM
 #                 runner, then AArch64 UEFI boot and the same graphical,
 #                 behavior, privacy and RAM gates as x86_64. This proves the
@@ -271,6 +274,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh tools/install-test.sh \
+            tools/build-amd64-debian-image.sh \
             tools/build-arm64-image.sh tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
@@ -286,6 +290,8 @@ jobs:
             tools/render-repart-definitions.sh \
             tools/render-mkosi-repart.sh \
             os/images/mkosi.finalize \
+            os/images/amd64-debian/container-build.sh \
+            os/images/amd64-debian/mkosi.profiles/dev/mkosi.postinst.chroot \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
             os/images/scripts/assemble-installer-iso.sh \
@@ -301,6 +307,7 @@ jobs:
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/tree-manifest-test.sh \
             tests/images/developer-baseline-contract-test.sh \
+            tests/images/debian-substrate-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
@@ -349,6 +356,9 @@ jobs:
 
       - name: Test cross-architecture developer baseline
         run: ./tests/images/developer-baseline-contract-test.sh
+
+      - name: Test common Debian substrate migration contract
+        run: ./tests/images/debian-substrate-contract-test.sh
 
       - name: Test native-vendor OAuth sandbox contract
         run: ./tests/images/vendor-sandbox-contract-test.sh
@@ -491,6 +501,62 @@ jobs:
           cd os/images/out
           sha256sum -c --ignore-missing SHA256SUMS
 
+  debian-amd64:
+    name: debian-amd64 (candidate build + QEMU smoke test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate common Debian substrate migration contract
+        run: ./tests/images/debian-substrate-contract-test.sh
+
+      - name: Cache Debian amd64 package downloads
+        uses: actions/cache@v4
+        with:
+          path: os/images/cache/debian-amd64
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**') }}
+          restore-keys: punar-debian-amd64-
+
+      - name: Build pinned Debian amd64 candidate
+        run: ./tools/build-amd64-debian-image.sh
+
+      - name: Install QEMU and OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Boot candidate and require the deterministic marker
+        run: |
+          ./tools/boot-test.sh \
+            os/images/out/punar-dev-debian-x86_64.qcow2 \
+            os/images/out/debian-amd64-boot-proof
+
+      - name: Verify candidate checksum
+        run: |
+          cd os/images/out
+          sha256sum -c SHA256SUMS.debian-amd64
+
+      - name: Upload candidate and boot proof
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: punar-dev-debian-x86_64-candidate
+          path: |
+            os/images/out/punar-dev-debian-x86_64.qcow2
+            os/images/out/SHA256SUMS.debian-amd64
+            os/images/out/debian-amd64-build-info.txt
+            os/images/out/debian-amd64-boot-proof/**
+          if-no-files-found: warn
+          retention-days: 7
+
   arm64-image:
     name: arm64-image (native build + desktop M2..M10 + M12 gate)
     runs-on: ubuntu-24.04-arm
@@ -512,7 +578,7 @@ jobs:
             os/images/cache/debian-arm64-pkgs
             os/images/cache/cargo-arm64
             os/images/cache/cargo-target-arm64
-          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/**', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
+          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/**', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
           restore-keys: punar-arm64-debian-${{ runner.arch }}-
 
       - name: Build native ARM64 minimal + desktop images
