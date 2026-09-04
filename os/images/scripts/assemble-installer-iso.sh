@@ -46,8 +46,8 @@ RELEASE_BUILDER_DIGEST="${RELEASE_BUILDER_BASE##*@}"
 [ -f "${RELEASE_RAW}" ] || { echo "error: release raw image is missing: ${RELEASE_RAW}" >&2; exit 2; }
 [ -f "${INSTALLER_RAW}" ] || { echo "error: installer raw image is missing: ${INSTALLER_RAW}" >&2; exit 2; }
 command -v xorriso >/dev/null || { echo "error: xorriso is not installed in the pinned builder" >&2; exit 2; }
-[ -n "${RELEASE_SNAPSHOT_PIN}" ] \
-    || { echo "error: release snapshot pin is empty" >&2; exit 2; }
+[[ "${RELEASE_SNAPSHOT_PIN}" =~ ^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$ ]] \
+    || { echo "error: release snapshot pin is invalid" >&2; exit 2; }
 [[ "${RELEASE_SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]] \
     || { echo "error: release source-date epoch is invalid" >&2; exit 2; }
 [[ "${RELEASE_BUILDER_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] \
