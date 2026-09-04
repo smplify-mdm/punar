@@ -3,9 +3,11 @@
 - Status: **Accepted for implementation** — 2026-08-27. ARM64/Raspberry Pi
   support is an accepted product requirement, and the selected common
   substrate is Debian pinned sid. The migration overlap is temporary: the
-  verified x86_64/Arch desktop remains the regression baseline while its
-  complete package and boot adapters cross to Debian; maintaining two
-  production substrates is not an accepted end state.
+  verified x86_64/Arch desktop remains the regression baseline until the
+  Debian installer and physical qualification gates close. The complete
+  package, boot and desktop adapters have now crossed to Debian in canonical
+  x86_64 KVM CI; maintaining two production substrates is not an accepted end
+  state.
 - Amendment: §A records what the second review corrected, including an error of
   mine in the original evidence. Read §A before §Options; two of the original
   recommendations are struck.
@@ -43,11 +45,28 @@ the two largest unknowns in the proposal. On 2026-08-27:
   passed locally.
 
 This evidence accepts the substrate and generic UEFI ARM64 desktop direction.
-The architecture-aware full CI sequence is wired but has not yet produced its
-first canonical green run. It does **not** prove Raspberry Pi
-firmware/peripherals, a real GPU, Secure Boot, A/B updates, an installer or any
-physical machine. Those remain separate runtime gates; ADR-006 owns the
-Pi-native boot selector.
+Subsequent canonical CI and local Apple-HVF runs have proved native ARM64
+image construction, minimal boot, the complete desktop behavior suite and A/B
+automatic fallback. It does **not** prove Raspberry Pi firmware/peripherals,
+a real GPU, Secure Boot or any physical machine. Those remain separate runtime
+gates; ADR-006 owns the Pi-native boot selector.
+
+On 2026-09-04, commit `f679a26` closed the corresponding x86_64
+desktop/runtime migration gate in
+[run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),
+job `100922123462`. The pinned-sid minimal candidate booted under KVM in 10
+seconds, and the desktop candidate reached its ready marker in 18 seconds,
+passed M2–M10/M12, 129 shell assertions and the formal stabilized-idle budget
+gate. The exact desktop image is 1,578,369,024 bytes with SHA-256
+`f09141e463ab3254365a30e5dbfa2b6cb27a27980b40df1ee75bb7dba97daf83`;
+its window measured 1214/1220 MB and 10 MB combined first-party service PSS.
+This is common-substrate VM parity, not a cutover or bare-metal support claim:
+the Debian encrypted-installer parity job and physical x86 matrix remain
+explicitly downstream. The first installer job built and structurally
+validated its final 3,220,754,432-byte ISO, but did not launch QEMU because the
+container-created output directory was not writable by the host runner. The
+ownership boundary is fixed and contract-guarded; it is not counted as runtime
+parity until the corrected optical/raw and install/refusal rerun passes.
 
 
 ## A. Amendment — what the second adversarial review corrected

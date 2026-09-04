@@ -1,4 +1,4 @@
-# Image pipeline (Milestones 0–10 + native ARM64 migration lane)
+# Image pipeline (Milestones 0–10 + M12 + common Debian migration lanes)
 
 How Punar's VM images are built and boot-tested, locally and in CI. The
 pipeline now exposes three compositions from one config tree
@@ -39,16 +39,17 @@ pipeline now exposes three compositions from one config tree
 The shipping x86_64 substrate follows
 [ADR-001](../architecture/adr/ADR-001-distribution-substrate.md): minimal Arch
 package payload, vendor-pinned snapshot channels and mkosi-built images. The
-ADR-003 A/B disk foundation is now present in directly built images; update
-write/bless/rollback remains a trajectory. [ADR-005](../architecture/adr/ADR-005-arm64-support.md)
-accepts Debian pinned sid as the common destination; the separate native
-ARM64 lane now produces both a minimal image and a complete generic-QEMU
-desktop. The desktop has crossed the M2–M10 exercises locally; its first
-canonical native CI run is still pending. The outputs are unsigned VM-only
-qcow2s that
-satisfy spec 76 Milestone 0
-("reproducible build and VM boot") and spec 66 MVP ("VM image; repeatable
-build; development VM"). CI facts and precedents come from
+ADR-003 A/B disk foundation is present in directly built images, and signed
+inactive-slot apply, counted boot, health-gated blessing and automatic fallback
+are runtime-proven with development keys. [ADR-005](../architecture/adr/ADR-005-arm64-support.md)
+accepts Debian pinned sid as the common destination. Native ARM64 and parallel
+x86_64 lanes now produce minimal and complete generic-QEMU desktops from that
+one snapshot; canonical KVM run 33840661515 closed x86 desktop/runtime parity.
+The Arch artifacts remain the shipping regression baseline until Debian
+installer parity and the explicit cutover record land. None of these VM gates
+is a Secure Boot, production-key-custody or bare-hardware claim. The pipeline
+satisfies spec 76 Milestone 0 ("reproducible build and VM boot") and spec 66
+MVP ("VM image; repeatable build; development VM"). CI facts and precedents come from
 [research/crosscutting.md](../architecture/research/crosscutting.md).
 
 ## Initial M0/M1 verification snapshot (spec 1.22)
@@ -100,8 +101,10 @@ CI run is the arbiter.
 | `tools/build-image.sh` | Host-side wrapper: builds the builder container and runs the containerized path with the repository mounted for desktop staging. `tools/build-image.sh [dev|desktop|release|all]` (default `all`). |
 | `tools/boot-test.sh` | QEMU/OVMF headless boot smoke test against the serial console marker. |
 | `os/images/arm64/`, `os/images/builder-debian/` | Native ARM64 minimal + desktop lane: digest-pinned Debian base upgraded wholly from one immutable sid snapshot, AA64 systemd-boot disk definitions, Debian desktop/package/PAM adapters, native AArch64 Punar binaries, per-architecture offline OCI fixture, deterministic development credentials and disposable-cache exclusions. This proves generic UEFI/QEMU, not Raspberry Pi hardware. |
+| `os/images/amd64-debian/`, `os/images/debian-mkosi.extra/` | Parallel x86_64 common-substrate lane plus the shared Debian package/PAM/Chromium/application-handler adapters. It builds minimal, desktop, release and hybrid-installer compositions from the same pinned sid snapshot as ARM64. Canonical run 33840661515 proves minimal boot and complete desktop/performance parity; the downstream installer and physical-x86 gates remain distinct. |
 | `tools/build-arm64-image.sh`, `tools/boot-test-arm64.sh`, `tools/demo-arm64-vm.sh` | Native ARM64 build wrapper, cheap AArch64 UEFI smoke test, and localhost-only interactive desktop launcher. The boot paths select HVF/KVM when available, otherwise label a TCG fallback, and retain serial proof. The architecture-aware `tools/boot-test.sh` runs the same full desktop gate on ARM64 and x86_64. |
-| `.github/workflows/ci.yml` | Native Rust/contracts on pinned x86_64 and ARM64 runners; shipping x86 image/boot/desktop jobs; native ARM64 minimal boot plus full desktop M2–M10/RAM job. |
+| `tools/build-amd64-debian-image.sh` | Containerized x86_64 Debian migration builder. `PUNAR_AMD64_DEBIAN_IMAGES=minimal|desktop|release|iso|all` selects the candidate composition; CI keeps it independently named until cutover. |
+| `.github/workflows/ci.yml` | Native Rust/contracts on pinned x86_64 and ARM64 runners; shipping x86 image/boot/desktop/installer jobs; native ARM64 build/boot/rollback and conditional graphical gate; parallel Debian x86 desktop and downstream installer parity jobs. |
 
 ## How a build works
 
@@ -422,7 +425,7 @@ the in-VM m6-check is the authoritative `podman run` proof.
 
 ## CI (canonical)
 
-`.github/workflows/ci.yml`, six job groups on pinned `ubuntu-24.04` or
+`.github/workflows/ci.yml`, nine job groups on pinned `ubuntu-24.04` or
 `ubuntu-24.04-arm` — not
 `ubuntu-latest`, because GitHub is migrating `-latest` labels during 2026 and
 an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
@@ -445,17 +448,30 @@ an OS pipeline should not float (crosscutting.md §2.1). Public-repo runners:
    and degrades to TCG rather than failing.
 5. **arm64-image** — runs natively on `ubuntu-24.04-arm`, builds the minimal
    and desktop images from digest/timestamp-pinned Debian inputs, verifies both
-   checksums, smoke-boots the minimal disk, then runs the same M2–M10 desktop
+   checksums, smoke-boots the minimal disk, then runs the same M2–M10/M12 desktop
    and idle-RAM harness through AArch64 UEFI/KVM. It retains both qcow2s and
    exported runtime proof. This is a generic ARM VM gate, not Raspberry Pi or
    bare-metal evidence.
 6. **desktop-test** — needs `image`; boots `punar-desktop` through
    `tools/boot-test.sh --mode desktop` (PUNAR_DESKTOP_OK → idle-RAM →
-   M2/M3/M4/M5 exercises → export → the four report gates), then the
+   M2–M10/M12 exercises → export → host schema/report gates), then the
    PERFORMANCE_BUDGETS.md gates, then uploads the screenshot artifact
-   (M1 idle + M2 overview + M5 enrolled/personal) and the report artifact
-   (ram-report + m2/m3/m4/m5 reports and snapshots, including the M5
-   mock received-state copies + serial.log).
+   and the complete runtime-report artifact.
+7. **installer-image** — builds the shipping x86_64 release root and hybrid
+   installer, validates final bytes, boots the same ISO as optical and raw
+   media, and executes the encrypted install, installed-system boot, signed
+   unattended custody and byte-identical refusal gates.
+8. **debian-amd64** — builds independently named pinned-sid minimal and
+   desktop candidates, smoke-boots the former, then requires the latter to
+   pass the same complete behavior, surface and stabilized-idle gates as the
+   shipping x86 image. Run 33840661515 is the first fully green instance.
+9. **debian-amd64-installer** — depends on Debian desktop parity, then builds
+   the Debian release/hybrid installer and repeats the shipping installer
+   artifact, optical/raw boot, unattended custody, refusal and installed-root
+   verification sequence before a substrate cutover can be considered. Its
+   first run built and validated the ISO but exposed a clean-checkout Docker
+   ownership defect before QEMU launch; the builder now pre-creates both proof
+   paths for, and returns `out/` to, the invoking host identity.
 
 ## Local use (arm64 Mac)
 
@@ -497,17 +513,19 @@ What to expect, honestly:
   config for the target install, which may hit the same failure in a full
   local build — untested, because full local builds are out of scope; if it
   bites you, that is the expected place.
-- A local boot test on the Mac runs under TCG only (Apple Silicon cannot
-  hardware-virtualize x86); boot takes minutes. Not yet attempted locally
-  (no qemu installed on the maintainer host).
+- A local x86 boot test on the Apple-Silicon Mac runs under TCG only; it is
+  useful for interaction/debugging but too slow to establish performance.
+  Native x86 KVM CI remains the canonical x86 runtime and budget evidence.
 - The native ARM64 lane does not use Rosetta. On Apple Silicon it builds in a
   `linux/arm64` container and boots QEMU's generic `virt` machine with HVF.
   Two clean 2026-08-27 **minimal** builds were byte-identical. A fresh native
   desktop run reached `PUNAR_BOOT_OK` in 7.997 seconds and
   `PUNAR_DESKTOP_OK` in 12.091 seconds; its M2–M10 services each passed
   locally. This is generic UEFI/QEMU desktop proof, not Raspberry Pi
-  firmware/peripherals or real-GPU evidence; the first canonical ARM desktop
-  CI run is pending.
+  firmware/peripherals or real-GPU evidence. Hosted ARM CI now builds and
+  smoke-boots every candidate; it executes the full graphical gate only when
+  that runner exposes usable KVM and records an explicit accelerator skip
+  otherwise, because TCG cannot complete the bounded desktop fixture.
 - Cheap config iteration without building:
   `PUNAR_BUILD_MODE=summary ./tools/build-image.sh` — runs the desktop
   staging plus `mkosi summary` for both images inside the builder container
@@ -526,32 +544,43 @@ snapshots.
 
 ## Current limitations / future work
 
-- **Unsigned.** No Secure Boot, no signed UKIs, no sbctl key management yet.
-  ADR-001 commits to mkosi v26 `uki-signed` variants + vendor keys; Milestone
-  0 output is explicitly unsigned. Any SB/TPM demo in a VM must be labeled
-  simulated (spec 1.22).
-- **ALA direct, no vendor mirror.** Build inputs come straight from
-  archive.archlinux.org. ADR-001 requires a Smplify-owned snapshot mirror and
-  a signed vendor repo before anything user-facing; this pipeline pins but
-  does not yet own its inputs. No user machine ever points at ALA.
-- **No rollback layout.** Plain single-root disk (mkosi default layout), not
-  the openSUSE-style btrfs+snapper bootable-snapshot layout ADR-001 specifies
-  for MVP, and no A/B partitions. The A/B trajectory only needs this
-  pipeline's *output* to become the A/B payload later; nothing here blocks it.
-- **Installer media now exists; installation proof does not.** Canonical run
-  33442898971 built and verified the 4.12 GiB hybrid x86_64 ISO and booted its
-  live root under OVMF as both optical media and a raw drive. The destructive
-  install, encrypted installed-system boot, physical USB and bare-hardware
-  qualification remain separate work.
-- **No budget measurement harness.** The boot marker's meminfo lines are a
-  coarse signal, not the Milestone 0 resource baseline; a proper idle-RAM/CPU
-  measurement pass against PERFORMANCE_BUDGETS.md is separate work.
-- **Reproducibility unproven.** Input-pinned by construction, but no
-  build-to-build binary diff has been performed.
+- **No production Secure Boot or TPM custody.** The A/B payloads and boot
+  artifacts are digest-bound and the update/installer proofs use explicit
+  development signing roots, but Punar does not yet possess production UEFI
+  db keys, HSM/KMS custody, TPM sealing or physical recovery evidence. Any
+  Secure Boot/TPM demo without that chain remains simulated (spec 1.22).
+- **Direct public snapshots, no production vendor mirror.** The shipping Arch
+  baseline consumes ALA and the common-substrate candidates consume
+  `snapshot.debian.org`, each at a fixed timestamp. ADR-001 still requires a
+  Smplify-owned signed release repository/CDN before user-facing delivery; no
+  installed machine points at either build-time archive.
+- **A/B exists and works in VMs; power-loss/hardware qualification does not.**
+  Direct images carry fixed A/B root slots plus shared state. Signed inactive-
+  slot write/readback, counted boot, health-gated blessing and automatic
+  fallback are runtime-proven, including the Raspberry Pi `tryboot` software
+  transaction. Sudden-power-loss tests and physical x86/Pi boot-selector
+  acceptance remain mandatory.
+- **Installer proof is complete for the shipping generic-x86 VM fixture.**
+  Canonical run 33822526403 boots the hybrid ISO as optical and raw media,
+  performs an encrypted install, boots and inspects the installed system, and
+  proves signed unattended custody plus I36 refusal-without-write cases. The
+  parallel Debian installer gate, physical USB controllers/storage/firmware,
+  Secure Boot, TPM enrollment and real recovery remain separate work.
+- **The performance harness is live; physical baselines and boot regression
+  history remain open.** Stabilized RAM, service PSS, idle CPU, first-party
+  writes and zram gate every native VM lane. A cgroup-memory cross-check,
+  three-cold-boot regression baseline and representative bare-metal matrix are
+  still required.
+- **Reproducibility is bounded rather than overstated.** Two clean ARM64
+  minimal builds were byte-identical. Full btrfs qcow2 output is input-pinned
+  but not bit-identical because the pinned toolchain assigns fresh subvolume
+  UUIDs; promotion therefore signs exact produced artifacts rather than
+  claiming deterministic full-disk bytes.
 - **Builder container not cached in CI.** Rebuilt each run from the pinned
   snapshot (correct, just slower); GHCR caching is an easy later win.
-- **ARM64 scope is generic-VM today.** Native minimal and desktop builds,
-  package/PAM/Chromium/OCI adapters, generic UEFI boot and local M2–M10
-  behavior are proven. The first canonical ARM desktop CI run, Raspberry Pi
-  image layout, real-board fault injection, firmware coverage and real GPU
+- **ARM64 scope is generic-VM plus Pi artifact software today.** Native
+  minimal/desktop builds, package/PAM/Chromium/OCI adapters, generic UEFI
+  boot, desktop behavior, A/B fallback and the Pi boot/root artifact builder
+  are proven. Raspberry Pi boot, real-board fault injection, firmware and
+  peripheral matrix coverage, watchdog/power-loss behavior and VC4 GPU
   validation remain open.

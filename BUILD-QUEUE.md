@@ -201,6 +201,16 @@ samples passed locally on ARM64. This meets the clean-VM target without disablin
 audio, portals, polkit, alerts, approvals, the lock surface, or security
 services. It remains VM-path evidence, not a bare-metal performance result.
 
+The current-commit rerun is intentionally not hidden: shipping Arch image
+`b601c4…d06bc` measured **1373/1376 MB** in run 33840661515 while its four
+first-party services remained 10 MB. That is a 257 MB mean regression from
+the 1116 MB historical result, below the 1536 MB hard ceiling but above the
+target. The same-commit Debian/x86_64 candidate measured **1214/1220 MB**,
+159 MB lower than the shipping Arch lane but still 190 MB above target. The
+process inventories are retained in artifacts `9925605057` and `9925733843`;
+the next performance pass must attribute the kernel/non-process remainder and
+reduce it rather than moving either threshold.
+
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); toasts and OSD (must receive events while closed);
 lock (must never hesitate).
@@ -370,6 +380,36 @@ post-login desktop; it never persists a password or recovery-code frame. This
 closes the clean first-account journey for generic QEMU ARM64, not the
 installer, encryption-at-install, x86 release-image parity or physical ARM.
 
+**Common-substrate x86 desktop milestone, canonical CI 2026-09-04:** commit
+`f679a26`, [run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),
+job `100922123462`, moved the generic x86_64 minimal and desktop compositions
+through the same pinned Debian sid snapshot as ARM64. The 355,205,120-byte
+minimal candidate (`sha256:2085c8dba6a6b7e05ab75a85f5738a9f9f4e367f9fa90b2e76e94402c085345d`)
+reached `PUNAR_BOOT_OK` in 10 seconds. The 1,578,369,024-byte desktop candidate
+(`sha256:f09141e463ab3254365a30e5dbfa2b6cb27a27980b40df1ee75bb7dba97daf83`)
+reached `PUNAR_DESKTOP_OK` in 18 seconds, passed every M2–M10/M12 exercise,
+all 129 desktop-surface assertions, 5 wireless-posture assertions and 15
+isolated surface-cost samples. Its stabilized KVM window measured **1214 MB
+mean / 1220 MB max**, 10 MB combined first-party service PSS, 0.00% maximum
+first-party CPU, 73,728 first-party write bytes and active zstd zram. The
+surface proof explicitly confirms the user systemd manager sees Punar's
+mutable application-handler defaults, closing the D-Bus portal/OAuth startup
+race found by the preceding run. Artifact `9925733843` is the seven-day CI
+candidate/proof bundle. The same run built and structurally validated a
+3,220,754,432-byte Debian hybrid ISO
+(`sha256:a239f1240483f327806dfd230b6be285030c328b4dbe123e157d9740f3c930c3`)
+plus a 1,576,796,160-byte release qcow2
+(`sha256:197d776d3c97312103e8842080bad9b7746208bc6330d4432b0e1f709ceee59e`).
+The first downstream runtime attempt did not start QEMU: Docker had left the
+clean-checkout output directory owned by root, so the host runner could not
+create `installer-boot-proof`. The builder now returns the parent and both
+installer proof directories to the host identity, with a static regression
+contract. Optical/raw boot, encrypted installation and refusal parity remain
+unproven until the corrected canonical rerun passes. Artifact `9926088074`
+retains the exact failed-at-the-boundary candidate for diagnosis. The Arch x86
+images remain the shipping regression baseline until installer parity
+completes and the cutover is recorded.
+
 The hosted `ubuntu-24.04-arm` pool does not consistently expose `/dev/kvm`.
 Canonical run 33294648139 proved native image build, checksum, minimal ARM boot,
 and automatic rollback, then twice spent one host hour under TCG advancing only
@@ -396,13 +436,17 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
 
 **Next sequence:**
 
-1. Land the native ARM64 desktop lane and require its first complete
-   `ubuntu-24.04-arm` M2–M10 + RAM gate to pass. Keep the x86_64 desktop gate
-   green in the same change.
-2. Move x86_64 to the same pinned Debian substrate after the ARM lane is
-   canonical. The current Arch image remains the regression baseline until
-   that crossing is runtime-proven; two production substrates are not
-   accepted.
+1. **Completed:** the native ARM64 desktop lane builds and the full Apple-HVF
+   M2–M10/M12 plus RAM proof is recorded. Hosted ARM CI continues to run the
+   graphical gate only when KVM is actually exposed and labels TCG skips.
+2. **Desktop/runtime parity completed:** x86_64 now builds and boots the same
+   pinned Debian substrate and passed the complete KVM desktop/performance
+   gate in run 33840661515. The first downstream encrypted-installer job built
+   and validated its final ISO, then exposed a host/container proof-directory
+   ownership defect before QEMU launch. That boundary is fixed and
+   regression-guarded; the corrected runtime rerun plus physical x86
+   acceptance remain mandatory before cutover can become a hardware-support
+   claim.
 3. **Install-artifact component completed locally 2026-08-30.** The builder
    pins the official firmware commit plus critical and tree digests; stages
    all 1,909 byte-identical loadable modules into release root A; regenerates

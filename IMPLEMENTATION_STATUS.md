@@ -4,7 +4,7 @@ Tracks progress against the milestone plan in
 [`docs/product/SPEC_v0.2.md`](docs/product/SPEC_v0.2.md) section 76. The spec
 is authoritative; this file only records status.
 
-Last updated: 2026-08-31.
+Last updated: 2026-09-04.
 
 ## Current clean-VM status — all 26 spec §80 items demonstrated
 
@@ -25,6 +25,38 @@ Its x86 KVM lane measured 1116/1118 MB, 10 MB combined service PSS, 0.00%
 maximum first-party CPU and 73,728 first-party write bytes while exporting the
 complete behavioral proof.
 
+The shipping Arch lane at current commit `f679a26` remained behaviorally
+green in run 33840661515, but its new 1373/1376 MB observation is 257 MB above
+that historical mean. First-party service PSS remained 10 MB and the formal
+1536 MB ceiling passed, so this is not a release-gate failure; it is still an
+unaccepted performance regression requiring attribution. The exact current
+image is
+`sha256:b601c4d8bee6cea7811d7f5cb2ad04f2c3390e3df178893a7c6b76049b0d06bc`.
+
+The pinned-Debian x86_64 migration candidate is now independently green in
+[run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),
+job `100922123462`, at source commit `f679a26`. The 355,205,120-byte minimal
+image (`sha256:2085c8dba6a6b7e05ab75a85f5738a9f9f4e367f9fa90b2e76e94402c085345d`)
+reached `PUNAR_BOOT_OK` in 10 seconds. The 1,578,369,024-byte desktop image
+(`sha256:f09141e463ab3254365a30e5dbfa2b6cb27a27980b40df1ee75bb7dba97daf83`)
+reached `PUNAR_DESKTOP_OK` in 18 seconds, passed M2–M10 and M12, all 129
+desktop-surface assertions, 5 wireless-posture assertions and 15 isolated
+surface-cost samples. Its canonical KVM window measured 1214/1220 MB, 10 MB
+combined service PSS, 0.00% maximum first-party CPU, 73,728 first-party write
+bytes and active 7,934 MB zstd zram. This proves desktop/runtime parity for
+the common Debian substrate. The downstream job built and structurally
+validated the 3,220,754,432-byte Debian hybrid ISO
+`a239f1240483f327806dfd230b6be285030c328b4dbe123e157d9740f3c930c3`
+and 1,576,796,160-byte release qcow2
+`197d776d3c97312103e8842080bad9b7746208bc6330d4432b0e1f709ceee59e`,
+but a root-owned clean-checkout output directory prevented the host runner
+from creating its proof folder before QEMU launched. Source now returns that
+directory and both installer-proof paths to the invoking identity and the
+common-substrate contract guards the boundary. The corrected Debian installer
+runtime rerun and physical x86 qualification remain separate gates; artifact
+`9926088074` preserves the exact candidate from the failed-at-the-boundary
+attempt.
+
 The reduction applies only to unaccelerated virtual adapters: Qt Quick uses
 its built-in software adaptation and Mesa's llvmpipe pool is bounded. Real
 DRM drivers—including Raspberry Pi VC4—explicitly clear both overrides. This
@@ -32,7 +64,7 @@ meets spec §80's clean-VM definition of done; it is not a Raspberry Pi,
 physical x86/ARM, installer, or production-readiness claim. Those remain
 separate acceptance work.
 
-## Architecture target expansion — generic ARM64 VM built; Raspberry Pi open
+## Architecture target expansion — common Debian VM substrate proven; physical hardware open
 
 The product owner has made ARM64 support and Raspberry Pi a requirement. The
 authoritative spec now treats x86_64 and ARM64 as first-class targets.
@@ -40,11 +72,14 @@ authoritative spec now treats x86_64 and ARM64 as first-class targets.
 The generic UEFI ARM64 path now builds a pinned Debian-snapshot release image,
 boots it natively with Apple HVF, and runs the shared desktop plus M2–M10
 functional exercises. [ADR-005](docs/architecture/adr/ADR-005-arm64-support.md)
-is **accepted for implementation** and records that evidence. This is not a
-Raspberry Pi claim: no Pi firmware/peripheral boot, GPU, Wi-Fi, installer,
-Secure Boot, Pi-native A/B rollback or physical-device gate has passed. ADR-006 owns the
-Pi-native boot selector because ADR-003's UEFI/UKI mechanism cannot simply be
-assumed on native Pi firmware.
+is **accepted for implementation** and records that evidence. The x86_64
+minimal and desktop compositions have now crossed the same pinned-sid build,
+boot, behavior and performance gates in canonical KVM CI, eliminating the
+largest software-parity unknown in the common-substrate migration. This is not
+a Raspberry Pi or bare-metal claim: no physical Pi firmware/peripheral boot,
+GPU, Wi-Fi, Secure Boot, watchdog/power-loss or physical-device gate has
+passed. ADR-006 owns the Pi-native boot selector because ADR-003's UEFI/UKI
+mechanism cannot simply be assumed on native Pi firmware.
 
 ## M0 — Foundation evaluation: done (acceptance met)
 

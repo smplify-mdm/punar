@@ -131,6 +131,19 @@ for variable in PUNAR_RELEASE_SNAPSHOT_PIN PUNAR_RELEASE_BUILDER_BASE \
         "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
         || fail "amd64 installer does not pass ${variable} to the shared assembler"
 done
+for proof_dir in installer-boot-proof installer-install-proof; do
+    # shellcheck disable=SC2016  # Literal source contract; expansion is a defect.
+    grep -Fq '"${IMAGES_DIR}/out/'"${proof_dir}"'"' \
+        "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+        || fail "amd64 installer builder does not return ${proof_dir} to the host runner"
+done
+# A clean Docker build creates out/ as root. The proof directories above make
+# today's tests work; returning the parent prevents the same boundary defect
+# when another host-side report is added.
+# shellcheck disable=SC2016  # Literal source contract; expansion is a defect.
+grep -Fq 'chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out"' \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    || fail "amd64 builder leaves the output directory owned by the container"
 
 # The migration lane must not overwrite the canonical artifact while the
 # baseline remains the release authority.

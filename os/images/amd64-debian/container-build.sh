@@ -371,7 +371,13 @@ HOST_GID="${PUNAR_HOST_GID:-0}"
     || { echo "error: invalid PUNAR_HOST_GID: ${HOST_GID}" >&2; exit 2; }
 install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
     "${IMAGES_DIR}/out/debian-amd64-boot-proof" \
-    "${IMAGES_DIR}/out/debian-amd64-desktop-proof"
+    "${IMAGES_DIR}/out/debian-amd64-desktop-proof" \
+    "${IMAGES_DIR}/out/installer-boot-proof" \
+    "${IMAGES_DIR}/out/installer-install-proof"
+# Docker creates out/ as root on a clean checkout. Runtime proof tools create
+# temporary files beneath it as the host runner, so return the directory—not
+# only the built artifacts—to the invoking identity.
+chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out"
 chown "${HOST_UID}:${HOST_GID}" \
     "${IMAGES_DIR}/out/SHA256SUMS.debian-amd64" \
     "${IMAGES_DIR}/out/debian-amd64-build-info.txt"
