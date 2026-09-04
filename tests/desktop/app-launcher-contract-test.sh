@@ -79,6 +79,24 @@ contains "${SURFACES}" '["footclient", "foot-server", "thunar-settings",'
 contains "${SURFACES}" '(["footclient", "foot-server", "thunar-settings",'
 contains "${SURFACES}" '); .name == "Hardware Information")'
 
+# System Control's Applications summary distinguishes native applications,
+# installed web apps, and catalog availability. Keep the runtime gate aligned
+# with that user-facing model and require it to reconcile every advertised
+# count instead of accepting a stale aggregate "installed" phrase.
+contains "${SURFACES}" 'capture("^System · (?<native>[0-9]+) native · (?<web>[0-9]+) web apps · (?<available>[0-9]+) available · catalog (?<version>[^ ]+)$")'
+# These are literal jq source-contract fragments, not shell expressions.
+# shellcheck disable=SC2016
+contains "${SURFACES}" '($summary.native | tonumber) == ([.rows[] | select(.tag == "Installed")] | length)'
+# shellcheck disable=SC2016
+contains "${SURFACES}" '($summary.web | tonumber) == ([.rows[] | select(.action.kind == "webApplication")] | length)'
+# shellcheck disable=SC2016
+contains "${SURFACES}" '($summary.available | tonumber) == ([.rows[] | select(.tag == "Available")] | length)'
+# shellcheck disable=SC2016
+contains "${SURFACES}" '$summary.version == $catalog[0].catalogVersion'
+if grep -Fq -- 'contains(" installed · ")' "${SURFACES}"; then
+    fail "surface gate still expects the retired aggregate installed summary"
+fi
+
 python3 - "${APPS}" <<'PY'
 import sys
 

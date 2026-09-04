@@ -1,12 +1,14 @@
 # Reviewed from the pinned Debian 20260820T000000Z ARM64 release root on
-# 2026-08-29. Includes system and user unit wants under /usr and /etc.
+# 2026-09-04. Includes system and user unit wants under /usr and /etc.
 # Deliberately absent: rootful/user Podman APIs and lifecycle timers,
 # netavark helpers, nftables.service (punard owns the ruleset), UDisks direct
 # graphical-target enablement (D-Bus activation remains available), Foot
 # server, PipeWire filter-chain, systemd-homed, tty1 getty, dpkg backup timer,
 # and systemd-networkd-wait-online. The four systemd-boot links are Debian's
 # reviewed boot-manager integration for loader refresh, random seeding,
-# failure-state cleanup, and the privileged bootctl socket.
+# failure-state cleanup, and the privileged bootctl socket. The three
+# systemd-repart links are the reviewed Debian vendor enablement used for
+# deterministic first-boot partition materialization and installer parity.
 etc/systemd/system/multi-user.target.wants/e2scrub_reap.service -> /usr/lib/systemd/system/e2scrub_reap.service
 etc/systemd/system/multi-user.target.wants/iwd.service -> /usr/lib/systemd/system/iwd.service
 etc/systemd/system/multi-user.target.wants/punard-reconcile.timer -> /usr/lib/systemd/system/punard-reconcile.timer
@@ -58,6 +60,7 @@ usr/lib/systemd/system/factory-reset.target.wants/systemd-factory-reset-request.
 usr/lib/systemd/system/getty.target.wants/getty-static.service -> ../getty-static.service
 usr/lib/systemd/system/graphical.target.wants/greetd.service -> /usr/lib/systemd/system/greetd.service
 usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service -> ../punar-shm-hardening.service
+usr/lib/systemd/system/initrd-root-fs.target.wants/systemd-repart.service -> ../systemd-repart.service
 usr/lib/systemd/system/initrd.target.wants/dracut-cmdline.service -> ../dracut-cmdline.service
 usr/lib/systemd/system/initrd.target.wants/dracut-initqueue.service -> ../dracut-initqueue.service
 usr/lib/systemd/system/initrd.target.wants/dracut-mount.service -> ../dracut-mount.service
@@ -95,6 +98,7 @@ usr/lib/systemd/system/sockets.target.wants/systemd-journald.socket -> ../system
 usr/lib/systemd/system/sockets.target.wants/systemd-logind-varlink.socket -> ../systemd-logind-varlink.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-mute-console.socket -> ../systemd-mute-console.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-networkd.socket -> ../systemd-networkd.socket
+usr/lib/systemd/system/sockets.target.wants/systemd-repart.socket -> ../systemd-repart.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-sysext.socket -> ../systemd-sysext.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket -> ../systemd-udevd-control.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket -> ../systemd-udevd-kernel.socket
@@ -122,6 +126,7 @@ usr/lib/systemd/system/sysinit.target.wants/systemd-journald.service -> ../syste
 usr/lib/systemd/system/sysinit.target.wants/systemd-machine-id-commit.service -> ../systemd-machine-id-commit.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-modules-load.service -> ../systemd-modules-load.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-random-seed.service -> ../systemd-random-seed.service
+usr/lib/systemd/system/sysinit.target.wants/systemd-repart.service -> ../systemd-repart.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-sysctl.service -> ../systemd-sysctl.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-sysusers.service -> ../systemd-sysusers.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup-dev-early.service -> ../systemd-tmpfiles-setup-dev-early.service

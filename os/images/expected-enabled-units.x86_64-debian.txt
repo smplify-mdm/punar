@@ -1,7 +1,8 @@
-# Initial Debian/amd64 release manifest candidate. The package set and preset
-# policy intentionally match the pinned Debian/ARM64 lane, so this starts from
-# that runtime-reviewed unit graph. The native amd64 desktop build must compare
-# the actual tree and update this file from evidence before parity is claimed.
+# Debian/amd64 release manifest candidate. The package set and preset policy
+# intentionally match the pinned Debian/ARM64 lane. The three systemd-repart
+# links are the reviewed Debian vendor enablement used for deterministic
+# first-boot partition materialization and installer parity. The native amd64
+# desktop build must still compare the complete tree before parity is claimed.
 etc/systemd/system/multi-user.target.wants/e2scrub_reap.service -> /usr/lib/systemd/system/e2scrub_reap.service
 etc/systemd/system/multi-user.target.wants/iwd.service -> /usr/lib/systemd/system/iwd.service
 etc/systemd/system/multi-user.target.wants/punard-reconcile.timer -> /usr/lib/systemd/system/punard-reconcile.timer
@@ -53,6 +54,7 @@ usr/lib/systemd/system/factory-reset.target.wants/systemd-factory-reset-request.
 usr/lib/systemd/system/getty.target.wants/getty-static.service -> ../getty-static.service
 usr/lib/systemd/system/graphical.target.wants/greetd.service -> /usr/lib/systemd/system/greetd.service
 usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service -> ../punar-shm-hardening.service
+usr/lib/systemd/system/initrd-root-fs.target.wants/systemd-repart.service -> ../systemd-repart.service
 usr/lib/systemd/system/initrd.target.wants/dracut-cmdline.service -> ../dracut-cmdline.service
 usr/lib/systemd/system/initrd.target.wants/dracut-initqueue.service -> ../dracut-initqueue.service
 usr/lib/systemd/system/initrd.target.wants/dracut-mount.service -> ../dracut-mount.service
@@ -90,6 +92,7 @@ usr/lib/systemd/system/sockets.target.wants/systemd-journald.socket -> ../system
 usr/lib/systemd/system/sockets.target.wants/systemd-logind-varlink.socket -> ../systemd-logind-varlink.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-mute-console.socket -> ../systemd-mute-console.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-networkd.socket -> ../systemd-networkd.socket
+usr/lib/systemd/system/sockets.target.wants/systemd-repart.socket -> ../systemd-repart.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-sysext.socket -> ../systemd-sysext.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket -> ../systemd-udevd-control.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket -> ../systemd-udevd-kernel.socket
@@ -117,6 +120,7 @@ usr/lib/systemd/system/sysinit.target.wants/systemd-journald.service -> ../syste
 usr/lib/systemd/system/sysinit.target.wants/systemd-machine-id-commit.service -> ../systemd-machine-id-commit.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-modules-load.service -> ../systemd-modules-load.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-random-seed.service -> ../systemd-random-seed.service
+usr/lib/systemd/system/sysinit.target.wants/systemd-repart.service -> ../systemd-repart.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-sysctl.service -> ../systemd-sysctl.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-sysusers.service -> ../systemd-sysusers.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup-dev-early.service -> ../systemd-tmpfiles-setup-dev-early.service

@@ -295,7 +295,7 @@ if [ "${IMAGES}" = "minimal" ] || [ "${IMAGES}" = "all" ]; then
     run_mkosi punar-dev-arm64 --profile dev
     if [ "${MODE}" = "build" ]; then
         convert_output punar-dev-arm64
-        BUILT+=(punar-dev-arm64)
+        BUILT+=("punar-dev-arm64")
     fi
 fi
 
@@ -313,18 +313,18 @@ if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "release" ] \
             --hostname punar-desktop-arm64
         if [ "${MODE}" = "build" ]; then
             convert_output punar-desktop-arm64
-            BUILT+=(punar-desktop-arm64)
+            BUILT+=("punar-desktop-arm64")
         fi
     fi
 fi
 
-if [ "${IMAGES}" = "release" ]; then
+if [ "${IMAGES}" = "release" ] || [ "${IMAGES}" = "all" ]; then
     run_mkosi punar-release-arm64 \
         --profile desktop \
         --image-id punar-release-arm64
     if [ "${MODE}" = "build" ]; then
         convert_output punar-release-arm64
-        BUILT+=(punar-release-arm64)
+        BUILT+=("punar-release-arm64")
     fi
 fi
 
@@ -346,7 +346,7 @@ fi
     if [ "${IMAGES}" = "desktop" ] || [ "${IMAGES}" = "all" ]; then
         echo "desktop-artifact: CI exercise image; contains dev fixtures and must not be shown as a product demo"
     fi
-    if [ "${IMAGES}" = "release" ]; then
+    if [ "${IMAGES}" = "release" ] || [ "${IMAGES}" = "all" ]; then
         echo "release-artifact: product image; release-image policy rejects dev fixtures and synthetic test harnesses"
     fi
 } > "${IMAGES_DIR}/out/arm64-build-info.txt"

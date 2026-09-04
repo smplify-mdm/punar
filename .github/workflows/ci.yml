@@ -726,6 +726,7 @@ jobs:
           sha256sum --check SHA256SUMS.arm64
           qemu-img info punar-dev-arm64.qcow2
           qemu-img info punar-desktop-arm64.qcow2
+          qemu-img info punar-release-arm64.qcow2
 
       - name: Detect native ARM64 acceleration
         id: arm_accel
@@ -763,6 +764,13 @@ jobs:
           ./tests/performance/check-budgets.sh \
             os/images/out/arm64-desktop-proof/ram-report.txt
 
+      - name: Fixture-free native ARM64 onboarding gate
+        if: steps.arm_accel.outputs.available == 'true'
+        run: |
+          ./tools/test-release-onboarding-arm64.sh \
+            os/images/out/punar-release-arm64.qcow2 \
+            os/images/out/arm64-release-onboarding-proof
+
       - name: Record unavailable native ARM64 desktop proof
         if: steps.arm_accel.outputs.available != 'true'
         run: |
@@ -784,9 +792,11 @@ jobs:
           path: |
             os/images/out/punar-dev-arm64.qcow2
             os/images/out/punar-desktop-arm64.qcow2
+            os/images/out/punar-release-arm64.qcow2
             os/images/out/SHA256SUMS.arm64
             os/images/out/arm64-build-info.txt
             os/images/out/arm64-boot-proof/serial.log
+            os/images/out/arm64-release-onboarding-proof/**
             os/images/out/arm64-update-rollback-proof/**
             os/images/out/arm64-desktop-proof/**
           if-no-files-found: warn

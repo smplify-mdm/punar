@@ -161,7 +161,16 @@ systemcontrol_models_ready() {
             and all(.[]; .stateKey == "Drift" and .compliance == "Matches")' \
             /run/punar/surfaces-systemcontrol-firewall.json >/dev/null 2>&1 \
         && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json '.title == "Applications"
-            and (.sub | contains(" installed · ") and contains(" available · catalog "))
+            # The summary is user-facing state, not decoration. Prove each
+            # advertised count against the live rows and the version against
+            # the signed catalog. This intentionally follows the richer
+            # native/web/available wording rather than the retired aggregate
+            # "installed" label.
+            and ((.sub | capture("^System · (?<native>[0-9]+) native · (?<web>[0-9]+) web apps · (?<available>[0-9]+) available · catalog (?<version>[^ ]+)$")) as $summary
+                | (($summary.native | tonumber) == ([.rows[] | select(.tag == "Installed")] | length))
+                and (($summary.web | tonumber) == ([.rows[] | select(.action.kind == "webApplication")] | length))
+                and (($summary.available | tonumber) == ([.rows[] | select(.tag == "Available")] | length))
+                and ($summary.version == $catalog[0].catalogVersion))
             and any(.rows[]; .tag == "Installed")
             # Every catalog product must be represented by either its
             # installed row or its available row. Derive this from the signed
