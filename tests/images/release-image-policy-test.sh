@@ -46,6 +46,10 @@ mkdir -p "${CLEAN}/etc/greetd" "${CLEAN}/etc/sudoers.d" \
     "${CLEAN}/usr/lib/systemd/user/default.target.wants" \
     "${CLEAN}/usr/lib/punar" "${CLEAN}/usr/bin" \
     "${CLEAN}/usr/share/punar"
+for installer_tool in zstd systemd-repart systemd-cryptenroll cryptsetup bootctl; do
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "${CLEAN}/usr/bin/${installer_tool}"
+    chmod 0755 "${CLEAN}/usr/bin/${installer_tool}"
+done
 printf '%s\n' 'hl.config({ misc = { disable_hyprland_logo = true } })' \
     > "${CLEAN}/etc/xdg/hypr/hyprland.lua"
 printf '%s\n' 'hl.config({ animations = { enabled = false } })' \
@@ -151,6 +155,7 @@ mutate_a11() {
     printf '%s\n' '{"session_id":"agt_fixture"}' \
         > "${CASE}/var/lib/punar/agents/registry.jsonl"
 }
+mutate_a12() { chmod 0644 "${CASE}/usr/bin/systemd-cryptenroll"; }
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -240,5 +245,6 @@ echo 'ok   A8 scopes live mode to the installer profile'
 expect_fail A9 mutate_a9
 expect_fail A10 mutate_a10
 expect_fail A11 mutate_a11
+expect_fail A12 mutate_a12
 
 echo PUNAR_RELEASE_IMAGE_POLICY_TEST_OK

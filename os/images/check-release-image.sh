@@ -273,6 +273,20 @@ if [ -d "${ROOT}/var/lib/punar/agents/ledger" ] \
     fail A11 'seeded agent ledger records exist'
 fi
 
+# A12: every release tree is also the live installer's userspace. Validate
+# the exact fixed tools punard executes before an ISO can wrap a tree that
+# boots correctly but cannot complete its mandatory encrypted install.
+for installer_tool in \
+    usr/bin/zstd \
+    usr/bin/systemd-repart \
+    usr/bin/systemd-cryptenroll \
+    usr/bin/cryptsetup \
+    usr/bin/bootctl; do
+    if [ ! -x "${ROOT}/${installer_tool}" ]; then
+        fail A12 "required installer executable is missing: ${installer_tool}"
+    fi
+done
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

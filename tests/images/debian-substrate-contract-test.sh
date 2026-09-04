@@ -89,6 +89,10 @@ amd64_desktop_packages="$(package_set \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf")"
 [ "${arm_desktop_packages}" = "${amd64_desktop_packages}" ] \
     || fail "Debian desktop package adapters have drifted across architectures"
+for package in systemd-cryptsetup cryptsetup btrfs-progs dosfstools; do
+    printf '%s\n' "${amd64_desktop_packages}" | grep -Fxq "${package}" \
+        || fail "Debian desktop release lacks installer runtime package ${package}"
+done
 grep -Fxq '           mkosi.extra' \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf" \
     || fail "amd64 desktop does not compose its architecture-local extra tree"
