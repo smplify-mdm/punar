@@ -27,6 +27,23 @@ read_adapter() {
     )
 }
 
+package_set() {
+    awk '
+        /^[[:space:]]*Packages=/ {
+            collecting = 1
+            sub(/^[[:space:]]*Packages=/, "")
+            if (length($0)) print $0
+            next
+        }
+        collecting && /^[[:space:]]+[^[:space:]#]/ {
+            sub(/^[[:space:]]+/, "")
+            print
+            next
+        }
+        collecting { exit }
+    ' "$1" | LC_ALL=C sort -u
+}
+
 [ -f "${COMMON}" ] || fail "shared Debian snapshot pin is missing"
 arm_values="$(read_adapter "${ARM}")"
 amd64_values="$(read_adapter "${AMD64}")"
@@ -52,11 +69,48 @@ if grep -Eq '^Hostname=.*_' \
     fail "amd64 candidate hostname contains a systemd-invalid underscore"
 fi
 
+arm_desktop_packages="$(package_set \
+    "${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf")"
+amd64_desktop_packages="$(package_set \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf")"
+[ "${arm_desktop_packages}" = "${amd64_desktop_packages}" ] \
+    || fail "Debian desktop package adapters have drifted across architectures"
+grep -Fxq '           mkosi.extra' \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf" \
+    || fail "amd64 desktop does not compose its architecture-local extra tree"
+grep -Fxq 'Repositories=contrib,non-free,non-free-firmware' \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/hardware-x86/mkosi.conf" \
+    || fail "amd64 hardware profile does not enable Debian's signed firmware components"
+for package in firmware-linux firmware-iwlwifi firmware-realtek \
+    firmware-sof-signed intel-microcode amd64-microcode \
+    mesa-vulkan-drivers intel-media-va-driver-non-free; do
+    grep -Eq "^(Packages=|[[:space:]]+)${package}$" \
+        "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/hardware-x86/mkosi.conf" \
+        || fail "amd64 hardware profile lacks ${package}"
+done
+grep -Fq -- '--profile desktop,hardware-x86,dev' \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    || fail "amd64 desktop candidate omits the bare-hardware support floor"
+grep -Fq -- '--profile desktop,hardware-x86' \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    || fail "amd64 release candidate omits the bare-hardware support floor"
+
 # The migration lane must not overwrite the canonical artifact while the
 # baseline remains the release authority.
-grep -Fq 'punar-dev-debian-x86_64.qcow2' \
+grep -Fq 'run_mkosi punar-dev-debian-x86_64' \
     "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
     || fail "candidate output is not independently named"
+# shellcheck disable=SC2016  # Literal source contracts; expansion is a defect.
+grep -Fq 'PUNAR_AMD64_DEBIAN_IMAGES="${PUNAR_AMD64_DEBIAN_IMAGES:-minimal}"' \
+    "${REPO_ROOT}/tools/build-amd64-debian-image.sh" \
+    || fail "host wrapper does not expose the candidate image selector"
+# shellcheck disable=SC2016  # Literal source contracts; expansion is a defect.
+grep -Fq -- '--env "PUNAR_AMD64_DEBIAN_IMAGES=${PUNAR_AMD64_DEBIAN_IMAGES}"' \
+    "${REPO_ROOT}/tools/build-amd64-debian-image.sh" \
+    || fail "host wrapper does not pass the candidate image selector"
+grep -Fq 'PUNAR_ENABLED_UNITS_MANIFEST=expected-enabled-units.x86_64-debian.txt' \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    || fail "candidate does not select its Debian-specific unit manifest"
 grep -Fxq 'Distribution=arch' "${REPO_ROOT}/os/images/mkosi.conf" \
     || fail "shipping x86 baseline changed before Debian runtime proof"
 

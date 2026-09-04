@@ -11,9 +11,14 @@ BUILDER_DIR="${REPO_ROOT}/os/images/builder-debian"
 . "${TARGET_DIR}/snapshot.env"
 
 PUNAR_BUILD_MODE="${PUNAR_BUILD_MODE:-build}"
+PUNAR_AMD64_DEBIAN_IMAGES="${PUNAR_AMD64_DEBIAN_IMAGES:-minimal}"
 case "${PUNAR_BUILD_MODE}" in
     build|summary) ;;
     *) echo "error: PUNAR_BUILD_MODE must be build or summary (got: ${PUNAR_BUILD_MODE})" >&2; exit 2 ;;
+esac
+case "${PUNAR_AMD64_DEBIAN_IMAGES}" in
+    minimal|desktop|release|all) ;;
+    *) echo "error: PUNAR_AMD64_DEBIAN_IMAGES must be minimal, desktop, release, or all (got: ${PUNAR_AMD64_DEBIAN_IMAGES})" >&2; exit 2 ;;
 esac
 
 command -v docker >/dev/null 2>&1 \
@@ -47,12 +52,13 @@ else
     echo "warning: host is not x86_64; the canonical native CI lane owns runtime proof" >&2
 fi
 
-echo "==> Running Debian/amd64 mkosi (${PUNAR_BUILD_MODE})"
+echo "==> Running Debian/amd64 mkosi (${PUNAR_BUILD_MODE}; images: ${PUNAR_AMD64_DEBIAN_IMAGES})"
 docker run --rm --privileged \
     --platform linux/amd64 \
     --volume "${REPO_ROOT}:/work" \
     --workdir /work/os/images/amd64-debian \
     --env "PUNAR_BUILD_MODE=${PUNAR_BUILD_MODE}" \
+    --env "PUNAR_AMD64_DEBIAN_IMAGES=${PUNAR_AMD64_DEBIAN_IMAGES}" \
     --env "PUNAR_GIT_SHA=${GIT_SHA}" \
     --env "PUNAR_HOST_UID=${HOST_UID}" \
     --env "PUNAR_HOST_GID=${HOST_GID}" \

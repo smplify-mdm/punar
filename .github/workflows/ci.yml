@@ -22,9 +22,10 @@
 #                 shares the pacman package cache with the desktop build, and
 #                 the M0 boot gate must stay regression-isolated per PR.
 #   boot-test     QEMU/OVMF boot smoke test of punar-dev (PUNAR_BOOT_OK)
-#   debian-amd64  pinned-sid candidate build and QEMU/OVMF smoke test. This
+#   debian-amd64  pinned-sid minimal + desktop candidate build, QEMU/OVMF
+#                 boot, full graphical behavior suite, and RAM budgets. This
 #                 remains a separately named migration artifact until it has
-#                 crossed the full desktop/installer/performance gates.
+#                 also crossed installer and bare-metal gates.
 #   arm64-image   native Debian-snapshot minimal + desktop builds on an ARM
 #                 runner, then AArch64 UEFI boot and the same graphical,
 #                 behavior, privacy and RAM gates as x86_64. This proves the
@@ -291,6 +292,7 @@ jobs:
             tools/render-mkosi-repart.sh \
             os/images/mkosi.finalize \
             os/images/amd64-debian/container-build.sh \
+            os/images/amd64-debian/mkosi.profiles/desktop/mkosi.postinst.chroot \
             os/images/amd64-debian/mkosi.profiles/dev/mkosi.postinst.chroot \
             os/images/arm64/container-build.sh \
             os/images/scripts/container-build.sh \
@@ -502,24 +504,28 @@ jobs:
           sha256sum -c --ignore-missing SHA256SUMS
 
   debian-amd64:
-    name: debian-amd64 (candidate build + QEMU smoke test)
+    name: debian-amd64 (candidate build + desktop/performance gate)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 135
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate common Debian substrate migration contract
         run: ./tests/images/debian-substrate-contract-test.sh
 
-      - name: Cache Debian amd64 package downloads
+      - name: Cache Debian amd64 package and Cargo inputs
         uses: actions/cache@v4
         with:
-          path: os/images/cache/debian-amd64
-          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**') }}
+          path: |
+            os/images/cache/debian-amd64
+            os/images/cache/debian-amd64-pkgs
+            os/images/cache/cargo-amd64-debian
+            os/images/cache/cargo-target-amd64-debian
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'os/images/mkosi.profiles/desktop/**', 'Cargo.lock') }}
           restore-keys: punar-debian-amd64-
 
-      - name: Build pinned Debian amd64 candidate
-        run: ./tools/build-amd64-debian-image.sh
+      - name: Build pinned Debian amd64 minimal + desktop candidates
+        run: PUNAR_AMD64_DEBIAN_IMAGES=all ./tools/build-amd64-debian-image.sh
 
       - name: Install QEMU and OVMF firmware
         run: |
@@ -533,27 +539,40 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Boot candidate and require the deterministic marker
+      - name: Boot minimal candidate and require the deterministic marker
         run: |
           ./tools/boot-test.sh \
             os/images/out/punar-dev-debian-x86_64.qcow2 \
             os/images/out/debian-amd64-boot-proof
+
+      - name: Debian amd64 desktop behavior gate
+        run: |
+          ./tools/boot-test.sh --mode desktop \
+            os/images/out/punar-desktop-debian-x86_64.qcow2 \
+            os/images/out/debian-amd64-desktop-proof
+
+      - name: Debian amd64 stabilized-idle performance gate
+        run: |
+          ./tests/performance/check-budgets.sh \
+            os/images/out/debian-amd64-desktop-proof/ram-report.txt
 
       - name: Verify candidate checksum
         run: |
           cd os/images/out
           sha256sum -c SHA256SUMS.debian-amd64
 
-      - name: Upload candidate and boot proof
+      - name: Upload candidates and runtime proof
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: punar-dev-debian-x86_64-candidate
+          name: punar-debian-x86_64-candidates
           path: |
             os/images/out/punar-dev-debian-x86_64.qcow2
+            os/images/out/punar-desktop-debian-x86_64.qcow2
             os/images/out/SHA256SUMS.debian-amd64
             os/images/out/debian-amd64-build-info.txt
             os/images/out/debian-amd64-boot-proof/**
+            os/images/out/debian-amd64-desktop-proof/**
           if-no-files-found: warn
           retention-days: 7
 

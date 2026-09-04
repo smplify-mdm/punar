@@ -100,14 +100,23 @@ done
     exit 2
 }
 
-case "${ARCHITECTURE}" in
-    x86-64|x86_64) manifest_name=expected-enabled-units.x86_64.txt ;;
-    arm64|aarch64) manifest_name=expected-enabled-units.arm64.txt ;;
-    *)
-        echo "error: no release enabled-unit manifest for ${ARCHITECTURE}" >&2
+if [ -n "${PUNAR_ENABLED_UNITS_MANIFEST:-}" ]; then
+    printf '%s\n' "${PUNAR_ENABLED_UNITS_MANIFEST}" \
+        | grep -Eq '^expected-enabled-units\.[A-Za-z0-9_.-]+\.txt$' || {
+        echo "error: invalid enabled-unit manifest name: ${PUNAR_ENABLED_UNITS_MANIFEST}" >&2
         exit 2
-        ;;
-esac
+    }
+    manifest_name=${PUNAR_ENABLED_UNITS_MANIFEST}
+else
+    case "${ARCHITECTURE}" in
+        x86-64|x86_64) manifest_name=expected-enabled-units.x86_64.txt ;;
+        arm64|aarch64) manifest_name=expected-enabled-units.arm64.txt ;;
+        *)
+            echo "error: no release enabled-unit manifest for ${ARCHITECTURE}" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 MANIFEST=''
 for candidate in \

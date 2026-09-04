@@ -1,0 +1,50 @@
+#!/bin/sh
+# Debian/amd64 product adapter. Human users and credentials remain onboarding
+# state; this script only normalizes the pinned substrate to product contracts.
+set -eu
+
+if ! getent group punar >/dev/null 2>&1; then
+    groupadd --system punar
+fi
+
+systemctl --global disable \
+    podman-auto-update.service podman-auto-update.timer \
+    podman-clean-transient.service podman-restart.service \
+    podman.service podman.socket >/dev/null 2>&1 || true
+
+# Debian enables seatd from a package preset. Punar uses logind/PAM as the one
+# seat authority, so remove and mask the unused privileged daemon.
+systemctl disable seatd.service >/dev/null 2>&1 || true
+systemctl mask seatd.service >/dev/null
+
+if ! getent group greeter >/dev/null 2>&1; then
+    groupadd --system greeter
+fi
+if ! getent passwd greeter >/dev/null 2>&1; then
+    useradd --system --gid greeter --home-dir /var/lib/greetd \
+        --no-create-home --shell /usr/sbin/nologin greeter
+fi
+install -d -m 0750 -o greeter -g greeter /var/lib/greetd
+
+flatpak remote-add --system --if-not-exists --from flathub \
+    /usr/share/punar/catalog/remotes/flathub.flatpakrepo
+
+ln -sfn ../run/punar/subuid /etc/subuid
+ln -sfn ../run/punar/subgid /etc/subgid
+
+install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
+ln -sfn ../punar-update-health.service \
+    /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
+
+# Debian's Chromium wrapper reads this drop-in instead of Arch's direct flags
+# file. Keep the product defaults in the shared source and adapt only launch.
+install -d -m 0755 /etc/chromium.d
+install -m 0644 /usr/share/punar/platform/debian-chromium-flags \
+    /etc/chromium.d/punar-flags
+
+ln -sfn /usr/sbin/nft /usr/bin/nft
+ln -sfn /usr/bin/fdfind /usr/bin/fd
+ln -sfn /usr/bin/batcat /usr/bin/bat
+
+fc-cache --system-only -f \
+    || echo "warning: fc-cache failed; runtime scan will cover it" >&2
