@@ -37,7 +37,6 @@ RUN printf '%s\n' \
         erofs-utils \
         xorriso \
         grub-common \
-        grub-efi-amd64-bin \
         cpio \
         zstd \
         git \
@@ -45,6 +44,9 @@ RUN printf '%s\n' \
         rustc \
         ca-certificates \
         debian-archive-keyring \
+    && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
+        apt-get install -y --no-install-recommends grub-efi-amd64-bin; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

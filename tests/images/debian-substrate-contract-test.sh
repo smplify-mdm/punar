@@ -101,11 +101,18 @@ grep -Fxq \
     'KernelCommandLine=console=tty0 rd.systemd.gpt_auto=0 systemd.getty_auto=no punar.live=1' \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/installer/mkosi.conf" \
     || fail "amd64 installer candidate lacks the bounded live-root command line"
-for package in xorriso grub-common grub-efi-amd64-bin; do
+for package in xorriso grub-common; do
     grep -Eq "^[[:space:]]+${package}( \\\\)?$" \
         "${REPO_ROOT}/os/images/builder-debian/Containerfile" \
         || fail "Debian builder lacks ISO assembly package ${package}"
 done
+# shellcheck disable=SC2016  # Literal Dockerfile guard; expansion is a defect.
+grep -Fq 'if [ "$(dpkg --print-architecture)" = amd64 ]; then' \
+    "${REPO_ROOT}/os/images/builder-debian/Containerfile" \
+    || fail "Debian builder does not scope x86 GRUB modules to amd64"
+grep -Fq 'apt-get install -y --no-install-recommends grub-efi-amd64-bin' \
+    "${REPO_ROOT}/os/images/builder-debian/Containerfile" \
+    || fail "Debian amd64 builder lacks the standalone EFI GRUB modules"
 for variable in PUNAR_RELEASE_SNAPSHOT_PIN PUNAR_RELEASE_BUILDER_BASE \
     PUNAR_RELEASE_SOURCE_DATE_EPOCH PUNAR_RELEASE_TOOL; do
     grep -Fq "${variable}=" \
