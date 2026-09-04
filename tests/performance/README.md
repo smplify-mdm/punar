@@ -199,6 +199,7 @@ regression against a previously-met target would still be wrong.
 | [33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989) | **1116 MB** | 20 s | x86 KVM with the unaccelerated-renderer policy; 10 MB four-service PSS; full gate green |
 | local native ARM64, `c2d39a…c1e1` | 1205 / 1210 MB | 18 s | two connected Apple-HVF windows; 18 MB first-party PSS |
 | local native ARM64, `cf522b…d19133` | **1004 MB** | 16 s | Qt raster adaptation + two-worker llvmpipe cap on unaccelerated adapters; 24 MB four-service PSS; all runtime suites green |
+| local native ARM64, `a21e03a…c960ff` | **933 MB** | 19 s | bounded architecture-aware initrd; full installed firmware/modules retained; 25 MB four-service PSS; all runtime suites green |
 
 **Attribution, measured rather than guessed.** The two runs above bracket the
 networking change exactly: everything else identical, `1265 → 1277`. Wired

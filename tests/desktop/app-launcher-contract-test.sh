@@ -77,7 +77,7 @@ contains "${APPS}" 'if (value === "lstopo")'
 contains "${APPS}" 'return "Hardware Information";'
 contains "${SURFACES}" '["footclient", "foot-server", "thunar-settings",'
 contains "${SURFACES}" '(["footclient", "foot-server", "thunar-settings",'
-contains "${SURFACES}" 'and .name == "Hardware Information")'
+contains "${SURFACES}" '); .name == "Hardware Information")'
 
 python3 - "${APPS}" <<'PY'
 import sys

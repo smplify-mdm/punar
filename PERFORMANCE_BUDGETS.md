@@ -373,16 +373,20 @@ baseline.
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1373 MB** (target missed; ceiling met; regression under investigation) | KVM VM, shipping Arch x86_64, 8 GiB / 4 vCPU | `f679a26` / 2026-09-04 |
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1214 MB** (target missed; ceiling met) | KVM VM, Debian x86_64 candidate, 8 GiB / 4 vCPU | `f679a26` / 2026-09-04 |
 | Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **1004 MB** (target met) | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle RAM (mean) | 2.2 | < 1.0 GB (target) / 1.5 GB (hard ceiling) | **933 MB** (target met) | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected; bounded initrd | `762a4a4` / 2026-09-04 |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1118 MB** | KVM VM, 8 GiB / 4 vCPU | `e29edbd` / 2026-08-31 |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1376 MB** | KVM VM, shipping Arch x86_64, 8 GiB / 4 vCPU | `f679a26` / 2026-09-04 |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1220 MB** | KVM VM, Debian x86_64 candidate, 8 GiB / 4 vCPU | `f679a26` / 2026-09-04 |
 | Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **1005 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle RAM (max) | 2.2 | 1.5 GB (hard ceiling) | **939 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected; bounded initrd | `762a4a4` / 2026-09-04 |
 | Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **10 MB** | KVM VM, 8 GiB / 4 vCPU | `e29edbd` / 2026-08-31 |
 | Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **10 MB** | KVM VM, shipping Arch x86_64 | `f679a26` / 2026-09-04 |
 | Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **10 MB** | KVM VM, Debian x86_64 candidate | `f679a26` / 2026-09-04 |
 | Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **24 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected | `cf522b…d19133` / 2026-08-31 |
+| Punar services PSS (sum: punard + punar-agentd + punar-secrets + punar-netd) | 2.3 | < 100 MB (target) / < 150 MB (MVP ceiling) | **25 MB** | Apple-HVF ARM64 VM, 8 GiB / 4 vCPU, connected; bounded initrd | `762a4a4` / 2026-09-04 |
 | Punar services cgroup memory (sum, cross-check) | 2.3 | informational | not yet measured | — | — |
 | Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.01%** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.01%** | Apple-HVF ARM64 VM, connected; bounded initrd | `762a4a4` / 2026-09-04 |
 | Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
 | Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM shipping Arch x86_64, connected | `f679a26` / 2026-09-04 |
 | Idle CPU, max first-party cgroup | 2.4 | < 0.5% of one core | **0.00%** | KVM Debian x86_64 candidate, connected | `f679a26` / 2026-09-04 |
@@ -391,6 +395,7 @@ baseline.
 | Idle CPU, whole guest | 2.4 | informational | **0.06% across available CPUs** | KVM shipping Arch x86_64, connected | `f679a26` / 2026-09-04 |
 | Idle CPU, whole guest | 2.4 | informational | **0.02% across available CPUs** | KVM Debian x86_64 candidate, connected | `f679a26` / 2026-09-04 |
 | Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | Apple-HVF ARM64 VM, connected | `cf522b…d19133` / 2026-08-31 |
+| Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | Apple-HVF ARM64 VM, connected; bounded initrd | `762a4a4` / 2026-09-04 |
 | Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM x86_64 VM, connected | `e29edbd` / 2026-08-31 |
 | Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM shipping Arch x86_64, connected | `f679a26` / 2026-09-04 |
 | Idle writes, first-party services | 2.5 | ≤ 98,304 B / 5 min | **73,728 B** | KVM Debian x86_64 candidate, connected | `f679a26` / 2026-09-04 |
@@ -399,6 +404,7 @@ baseline.
 | Idle writes, whole guest | 2.5 | informational | **4,456,448 B** | KVM shipping Arch x86_64, connected | `f679a26` / 2026-09-04 |
 | Idle writes, whole guest | 2.5 | informational | **4,173,824 B** | KVM Debian x86_64 candidate, connected | `f679a26` / 2026-09-04 |
 | Live zram | 2.2 / 1.6 | present and active | **7,923 MB, zstd, active** | Apple-HVF ARM64 VM | `cf522b…d19133` / 2026-08-31 |
+| Live zram | 2.2 / 1.6 | present and active | **7,923 MB, zstd, active** | Apple-HVF ARM64 VM, bounded initrd | `762a4a4` / 2026-09-04 |
 | Live zram | 2.2 / 1.6 | present and active | **7,925 MB, zstd, active** | KVM shipping Arch x86_64 | `f679a26` / 2026-09-04 |
 | Live zram | 2.2 / 1.6 | present and active | **7,934 MB, zstd, active** | KVM Debian x86_64 candidate | `f679a26` / 2026-09-04 |
 | Boot to userspace complete | 2.6 | tracked; regression-gated once baselined | not yet measured | — | — |
@@ -406,6 +412,7 @@ baseline.
 | Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **21 s single-run host proxy; not yet a baseline** | KVM shipping Arch x86_64 | `f679a26` / 2026-09-04 |
 | Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **18 s single-run host proxy; not yet a baseline** | KVM Debian x86_64 candidate | `f679a26` / 2026-09-04 |
 | Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **16 s single-run host proxy; not yet a baseline** | Apple-HVF ARM64 VM | `cf522b…d19133` / 2026-08-31 |
+| Boot to usable desktop | 2.6 | tracked; regression-gated once baselined | **19 s single-run host proxy; not yet a baseline** | Apple-HVF ARM64 VM, bounded initrd | `762a4a4` / 2026-09-04 |
 
 Waivers granted: none.
 
@@ -499,3 +506,4 @@ A `tests/performance/` harness that:
 | 2026-08-29 | Replaced the older x86 baseline with canonical dual-architecture run 33273700091 at `fe45b9d`: x86_64 KVM measured 1311/1319 MB RAM, 9 MB four-service PSS, 0.00% maximum first-party CPU, 73,728 first-party write bytes and a 20 s single-run desktop marker; both architecture lanes emitted `PUNAR_M12_OK`. The 1,024 MB target remains missed and the 1,536 MB hard ceiling remains met; no waiver. |
 | 2026-08-31 | The native Apple-HVF ARM64 candidate with source content committed as `e29edbd` selected Qt's raster adaptation and `LP_NUM_THREADS=2` only for unaccelerated virtual adapters. The exact canonical window (`cf522b…d19133`) improved from 1210/1213 MB to **1004/1005 MB**, meeting the unchanged 1,024 MB target; 24 MB combined service PSS, 0.01% maximum first-party CPU, 73,728 first-party write bytes and active zram also passed. M2–M10/M12, 122 desktop-surface assertions and 15 isolated surface samples all passed. Hardware GPU paths explicitly clear both overrides, so this closes the clean-VM budget item but is not a Raspberry Pi or bare-metal performance claim. No waiver. |
 | 2026-08-31 | Canonical x86 KVM [run 33381573989](https://github.com/smplify-mdm/punar/actions/runs/33381573989) at `e29edbd` measured **1116/1118 MB**, down from 1311/1319 MB on the preceding exact method. It also passed 10 MB four-service PSS, 0.00% maximum first-party CPU, 73,728 first-party write bytes, active zram and the complete behavioral export. The x86 VM remains above the 1,024 MB target but below the 1,536 MB ceiling; no waiver. |
+| 2026-09-04 | Exact local Apple-HVF ARM64 candidate `a21e03a…c960ff` from `762a4a4` bounded the UKI to mkosi's architecture-aware default early-boot modules while retaining the full installed module and firmware trees. It measured **933/939 MB**, 25 MB combined PSS, 0.01% maximum first-party CPU, 73,728 first-party write bytes and active zram; M2–M10/M12, 129 surface assertions and 15 isolated surface samples all passed. This is a 71 MB (7.1%) mean improvement over the preceding 1004 MB comparable ARM64 result. It is native-virtualization evidence, not physical-Pi or bare-metal evidence; canonical x86/CI confirmation remains pending. No waiver. |

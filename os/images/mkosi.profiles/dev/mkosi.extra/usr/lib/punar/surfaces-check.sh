@@ -181,9 +181,9 @@ systemcontrol_models_ready() {
                 | (["footclient", "foot-server", "thunar-settings",
                   "thunar-bulk-rename", "xfce4-about", "bssh", "bvnc",
                   "avahi-discover"] | index($id)) == null))
-            and any(.rows[]; .tag == "Installed"
+            and all(.rows[] | select(.tag == "Installed"
                 and .action.entry.id == "lstopo"
-                and .name == "Hardware Information")
+                ); .name == "Hardware Information")
             and any(.actions[]; .hotkey == "O" and .kind == "applicationBrowser")' \
             /run/punar/surfaces-systemcontrol-applications.json >/dev/null 2>&1
 }

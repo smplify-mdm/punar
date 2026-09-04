@@ -214,8 +214,13 @@ commit `a8fb51d`: `Unevictable` rose by about 236 MiB while the desktop UKI
 grew from 217.3 MiB to 444.3 MiB. The candidate image policy now asks mkosi 26
 for its bounded, architecture-aware default boot-module set while retaining
 the full module and firmware trees in the installed root. Static policy and
-mkosi-summary checks pass; exact UKI/RAM improvement awaits canonical boot and
-stabilized-idle proof.
+mkosi-summary checks pass. The exact local Apple-HVF ARM64 candidate
+`a21e03a…c960ff` from `762a4a4` reduced the UKI to 79.6 MiB and measured
+**933/939 MB** after the canonical stabilized window, with 25 MB combined
+first-party PSS, 0.01% maximum first-party CPU, 73,728 first-party write bytes,
+active zram, all M2–M10/M12 checks, 129 surface assertions and 15 isolated
+surface samples passing. This is native-VM proof; canonical x86 CI and
+physical-device evidence remain open.
 
 **Never lazy-load:** bar and wallpaper (always visible); approval and alerts
 (must appear **unbidden**); toasts and OSD (must receive events while closed);

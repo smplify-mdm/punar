@@ -38,8 +38,13 @@ Bisection now bounds that regression to physical-x86 firmware commit
 217.3→444.3 MiB respectively). The source now explicitly selects mkosi 26's
 architecture-aware default early-boot modules on all generic image lanes,
 without removing any module or firmware from the installed root. Static
-policy tests and mkosi summaries pass; only the next canonical build/boot can
-promote the expected UKI/RAM reduction into a result.
+policy tests and mkosi summaries pass. The exact local Apple-HVF ARM64 image
+`a21e03a73f5719e6af0f12dca6b32290a4312e09dda57326fd80ebce30c960ff`
+from `762a4a4` is 975,896,576 bytes, carries a 79.6 MiB UKI, and measured
+**933/939 MB** with 25 MB combined first-party PSS. The formal RAM, CPU,
+write and zram gate passed, as did M2–M10/M12, 129 desktop-surface assertions
+and 15 isolated surface samples. Canonical x86 CI and physical-device proof
+remain open; this native-VM result is not a bare-metal claim.
 
 The pinned-Debian x86_64 migration candidate is now independently green in
 [run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),
