@@ -53,6 +53,16 @@ Singleton {
     // list, never a fuzzy name filter.
     readonly property var rawEntries: DesktopEntries.applications.values
     readonly property var entries: root.productEntries(root.rawEntries)
+    readonly property var hiddenProductEntryIds: [
+        "footclient",
+        "foot-server",
+        "thunar-settings",
+        "thunar-bulk-rename",
+        "xfce4-about",
+        "bssh",
+        "bvnc",
+        "avahi-discover"
+    ]
 
     // DesktopEntries updates asynchronously after an installer writes or
     // removes a desktop file. Keep the result of the just-completed typed
@@ -86,7 +96,7 @@ Singleton {
         var out = [];
         for (var i = 0; i < entries.length; i++) {
             var id = root.bareId(entries[i]);
-            if (id === "footclient" || id === "foot-server" || id === "thunar-settings")
+            if (root.hiddenProductEntryIds.indexOf(id) !== -1)
                 continue;
             out.push(entries[i]);
         }
@@ -112,6 +122,8 @@ Singleton {
             return "Files";
         if (value === "htop")
             return "System Monitor";
+        if (value === "lstopo")
+            return "Hardware Information";
         return "";
     }
 

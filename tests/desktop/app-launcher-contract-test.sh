@@ -64,6 +64,18 @@ contains "${COMMAND}" '["punarctl", "--json", "app", "list"]'
 contains "${COMMAND}" '["punarctl", "--json", "app", "update", "--all", "--yes"]'
 contains "${COMMAND}" 'root.appUpdateMessage = "Updating " + root.appUpdatesAvailable'
 
+# Package helper launchers are not separate products. Keep the filter exact so
+# ordinary third-party applications remain discoverable, and give the useful
+# hardware viewer a product name instead of exposing its implementation name.
+for helper_id in \
+    footclient foot-server thunar-settings thunar-bulk-rename \
+    xfce4-about bssh bvnc avahi-discover; do
+    contains "${APPS}" "\"${helper_id}\""
+done
+contains "${APPS}" 'if (root.hiddenProductEntryIds.indexOf(id) !== -1)'
+contains "${APPS}" 'if (value === "lstopo")'
+contains "${APPS}" 'return "Hardware Information";'
+
 python3 - "${APPS}" <<'PY'
 import sys
 
