@@ -301,9 +301,11 @@ fi
     echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if [ "${IMAGES}" = desktop ] || [ "${IMAGES}" = all ]; then
         echo "desktop-artifact: CI exercise image; contains dev fixtures and must not be shown as a product demo"
+        echo "hardware-profile: signed Debian snapshot firmware/microcode for the selected Intel/AMD matrix; physical qualification remains open"
     fi
     if [ "${IMAGES}" = release ]; then
         echo "release-artifact: product image; release-image policy rejects dev fixtures and synthetic test harnesses"
+        echo "hardware-profile: signed Debian snapshot firmware/microcode for the selected Intel/AMD matrix; physical qualification remains open"
     fi
 } > "${IMAGES_DIR}/out/debian-amd64-build-info.txt"
 (
