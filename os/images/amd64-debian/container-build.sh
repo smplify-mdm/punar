@@ -49,7 +49,7 @@ mkosi --force \
     --repart-directory "${MKOSI_REPART_DIR}" \
     --profile dev \
     --image-id punar-dev-debian-x86_64 \
-    --hostname punar-dev-debian-x86_64 \
+    --hostname punar-dev-debian-x86-64 \
     "${MODE}"
 
 if [ "${MODE}" = summary ]; then

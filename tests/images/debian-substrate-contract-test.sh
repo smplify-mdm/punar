@@ -47,6 +47,10 @@ grep -Fxq '         linux-image-amd64' "${REPO_ROOT}/os/images/amd64-debian/mkos
 grep -Fq 'console=ttyS0' \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/dev/mkosi.conf" \
     || fail "amd64 dev candidate cannot reach the x86 serial boot harness"
+if grep -Eq '^Hostname=.*_' \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/dev/mkosi.conf"; then
+    fail "amd64 candidate hostname contains a systemd-invalid underscore"
+fi
 
 # The migration lane must not overwrite the canonical artifact while the
 # baseline remains the release authority.
