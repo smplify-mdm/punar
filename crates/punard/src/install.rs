@@ -163,6 +163,13 @@ pub struct InstallerSources {
 
 impl Default for InstallerSources {
     fn default() -> Self {
+        // Arch installs cryptsetup in /usr/bin while Debian installs the same
+        // fixed administrative tool in /usr/sbin. Resolve only those two
+        // absolute, package-owned locations; never fall back to PATH.
+        let cryptsetup_path = ["/usr/bin/cryptsetup", "/usr/sbin/cryptsetup"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).is_file())
+            .unwrap_or("/usr/bin/cryptsetup");
         Self {
             sys_class_block: PathBuf::from("/sys/class/block"),
             dev_root: PathBuf::from("/dev"),
@@ -176,7 +183,7 @@ impl Default for InstallerSources {
             zstd_path: PathBuf::from("/usr/bin/zstd"),
             repart_path: PathBuf::from("/usr/bin/systemd-repart"),
             cryptenroll_path: PathBuf::from("/usr/bin/systemd-cryptenroll"),
-            cryptsetup_path: PathBuf::from("/usr/bin/cryptsetup"),
+            cryptsetup_path: PathBuf::from(cryptsetup_path),
             bootctl_path: PathBuf::from("/usr/bin/bootctl"),
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),

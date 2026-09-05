@@ -280,12 +280,15 @@ for installer_tool in \
     usr/bin/zstd \
     usr/bin/systemd-repart \
     usr/bin/systemd-cryptenroll \
-    usr/bin/cryptsetup \
     usr/bin/bootctl; do
     if [ ! -x "${ROOT}/${installer_tool}" ]; then
         fail A12 "required installer executable is missing: ${installer_tool}"
     fi
 done
+if [ ! -x "${ROOT}/usr/bin/cryptsetup" ] \
+    && [ ! -x "${ROOT}/usr/sbin/cryptsetup" ]; then
+    fail A12 'required installer executable is missing: usr/{bin,sbin}/cryptsetup'
+fi
 
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \

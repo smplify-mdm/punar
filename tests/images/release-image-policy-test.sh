@@ -44,12 +44,14 @@ mkdir -p "${CLEAN}/etc/greetd" "${CLEAN}/etc/sudoers.d" \
     "${CLEAN}/usr/lib/systemd/system/sysinit.target.wants" \
     "${CLEAN}/etc/systemd/system/punard.service.wants" \
     "${CLEAN}/usr/lib/systemd/user/default.target.wants" \
-    "${CLEAN}/usr/lib/punar" "${CLEAN}/usr/bin" \
+    "${CLEAN}/usr/lib/punar" "${CLEAN}/usr/bin" "${CLEAN}/usr/sbin" \
     "${CLEAN}/usr/share/punar"
-for installer_tool in zstd systemd-repart systemd-cryptenroll cryptsetup bootctl; do
+for installer_tool in zstd systemd-repart systemd-cryptenroll bootctl; do
     printf '%s\n' '#!/bin/sh' 'exit 0' > "${CLEAN}/usr/bin/${installer_tool}"
     chmod 0755 "${CLEAN}/usr/bin/${installer_tool}"
 done
+printf '%s\n' '#!/bin/sh' 'exit 0' > "${CLEAN}/usr/sbin/cryptsetup"
+chmod 0755 "${CLEAN}/usr/sbin/cryptsetup"
 printf '%s\n' 'hl.config({ misc = { disable_hyprland_logo = true } })' \
     > "${CLEAN}/etc/xdg/hypr/hyprland.lua"
 printf '%s\n' 'hl.config({ animations = { enabled = false } })' \

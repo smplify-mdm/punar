@@ -9,10 +9,16 @@
 # failure-state cleanup, and the privileged bootctl socket. The three
 # systemd-repart links are the reviewed Debian vendor enablement used for
 # deterministic first-boot partition materialization and installer parity.
+# The nine cryptsetup/integrity/verity target links are passive Debian vendor
+# wiring needed by the mandatory encrypted installer; without crypttab or
+# matching devices they start no daemon and grant no additional authority.
 etc/systemd/system/multi-user.target.wants/e2scrub_reap.service -> /usr/lib/systemd/system/e2scrub_reap.service
 etc/systemd/system/multi-user.target.wants/iwd.service -> /usr/lib/systemd/system/iwd.service
 etc/systemd/system/multi-user.target.wants/punard-reconcile.timer -> /usr/lib/systemd/system/punard-reconcile.timer
+etc/systemd/system/multi-user.target.wants/remote-cryptsetup.target -> /usr/lib/systemd/system/remote-cryptsetup.target
 etc/systemd/system/multi-user.target.wants/remote-fs.target -> /usr/lib/systemd/system/remote-fs.target
+etc/systemd/system/multi-user.target.wants/remote-integritysetup.target -> /usr/lib/systemd/system/remote-integritysetup.target
+etc/systemd/system/multi-user.target.wants/remote-veritysetup.target -> /usr/lib/systemd/system/remote-veritysetup.target
 etc/systemd/system/multi-user.target.wants/systemd-networkd.service -> /usr/lib/systemd/system/systemd-networkd.service
 etc/systemd/system/sockets.target.wants/polkit-agent-helper.socket -> /usr/lib/systemd/system/polkit-agent-helper.socket
 etc/systemd/system/sockets.target.wants/systemd-factory-reset.socket -> /usr/lib/systemd/system/systemd-factory-reset.socket
@@ -60,6 +66,9 @@ usr/lib/systemd/system/factory-reset.target.wants/systemd-factory-reset-request.
 usr/lib/systemd/system/getty.target.wants/getty-static.service -> ../getty-static.service
 usr/lib/systemd/system/graphical.target.wants/greetd.service -> /usr/lib/systemd/system/greetd.service
 usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service -> ../punar-shm-hardening.service
+usr/lib/systemd/system/initrd-root-device.target.wants/remote-cryptsetup.target -> ../remote-cryptsetup.target
+usr/lib/systemd/system/initrd-root-device.target.wants/remote-integritysetup.target -> ../remote-integritysetup.target
+usr/lib/systemd/system/initrd-root-device.target.wants/remote-veritysetup.target -> ../remote-veritysetup.target
 usr/lib/systemd/system/initrd-root-fs.target.wants/systemd-repart.service -> ../systemd-repart.service
 usr/lib/systemd/system/initrd.target.wants/dracut-cmdline.service -> ../dracut-cmdline.service
 usr/lib/systemd/system/initrd.target.wants/dracut-initqueue.service -> ../dracut-initqueue.service
@@ -103,10 +112,12 @@ usr/lib/systemd/system/sockets.target.wants/systemd-sysext.socket -> ../systemd-
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket -> ../systemd-udevd-control.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket -> ../systemd-udevd-kernel.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-udevd-varlink.socket -> ../systemd-udevd-varlink.socket
+usr/lib/systemd/system/sysinit.target.wants/cryptsetup.target -> ../cryptsetup.target
 usr/lib/systemd/system/sysinit.target.wants/dev-hugepages.mount -> ../dev-hugepages.mount
 usr/lib/systemd/system/sysinit.target.wants/dev-mqueue.mount -> ../dev-mqueue.mount
 usr/lib/systemd/system/sysinit.target.wants/dracut-shutdown.service -> ../dracut-shutdown.service
 usr/lib/systemd/system/sysinit.target.wants/imports.target -> ../imports.target
+usr/lib/systemd/system/sysinit.target.wants/integritysetup.target -> ../integritysetup.target
 usr/lib/systemd/system/sysinit.target.wants/kmod-static-nodes.service -> ../kmod-static-nodes.service
 usr/lib/systemd/system/sysinit.target.wants/ldconfig.service -> ../ldconfig.service
 usr/lib/systemd/system/sysinit.target.wants/proc-sys-fs-binfmt_misc.automount -> ../proc-sys-fs-binfmt_misc.automount
@@ -135,6 +146,7 @@ usr/lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup.service -> ..
 usr/lib/systemd/system/sysinit.target.wants/systemd-udev-trigger.service -> ../systemd-udev-trigger.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-udevd.service -> ../systemd-udevd.service
 usr/lib/systemd/system/sysinit.target.wants/systemd-update-done.service -> ../systemd-update-done.service
+usr/lib/systemd/system/sysinit.target.wants/veritysetup.target -> ../veritysetup.target
 usr/lib/systemd/system/system-install.target.wants/systemd-sysinstall.service -> ../systemd-sysinstall.service
 usr/lib/systemd/system/timers.target.wants/punar-agentd-scan.timer -> ../punar-agentd-scan.timer
 usr/lib/systemd/system/timers.target.wants/systemd-tmpfiles-clean.timer -> ../systemd-tmpfiles-clean.timer
