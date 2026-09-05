@@ -21,5 +21,7 @@ RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
 
-[Install]
-WantedBy=graphical.target
+# Deliberately no install section: the ARM64 image vendors the
+# graphical.target.wants link under /usr/lib (postinst). An install section
+# would let Debian's preset-all add a second enablement under /etc, which the
+# reviewed enabled-units manifest (release-image policy A9) refuses.

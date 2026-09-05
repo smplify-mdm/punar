@@ -29,10 +29,15 @@ grep -Fxq 'After=multi-user.target punard.service punar-agentd.service' \
 grep -Fxq 'DefaultDependencies=no' "${HEALTH_SERVICE}"
 grep -Fxq 'Conflicts=shutdown.target' "${HEALTH_SERVICE}"
 grep -Fxq 'Before=boot-complete.target shutdown.target' "${HEALTH_SERVICE}"
-grep -Fxq 'WantedBy=graphical.target' "${HEALTH_SERVICE}"
+# Vendor-linked only: an [Install] section would let preset-all add an /etc
+# enablement that the reviewed enabled-units manifest (A9) refuses.
+if grep -Eq '^\[Install\]' "${HEALTH_SERVICE}"; then
+    echo "error: the Pi reconcile oneshot must be vendor-linked from /usr/lib, not [Install]-enabled" >&2
+    exit 1
+fi
 grep -Fxq 'TimeoutStartSec=900' "${HEALTH_SERVICE}"
-if grep -Fq 'WantedBy=multi-user.target' "${HEALTH_SERVICE}"; then
-    echo "error: the Pi reconcile oneshot must not be wanted by multi-user.target (it orders after it)" >&2
+if grep -Fq 'WantedBy=' "${HEALTH_SERVICE}"; then
+    echo "error: the Pi reconcile oneshot must not declare WantedBy (it is vendor-linked and orders after multi-user.target)" >&2
     exit 1
 fi
 grep -Fq '/usr/lib/systemd/system/graphical.target.wants/punar-pi-update-health.service' \
