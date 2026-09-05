@@ -77,6 +77,7 @@ AUDIT_LOG=/var/log/punar/audit.jsonl
 ADAPTERS_DIR=/usr/share/punar/agents/adapters
 SUSPECTED=/usr/share/punar/agents/signatures/suspected.json
 MOCK_AGENT=/usr/lib/punar/punar-mock-agent
+BWRAP=/usr/bin/bwrap
 FIXTURE_SRC=/usr/lib/punar/foo-agent-fixture.sh
 PUNAR_HOME=/home/punar
 ATLAS="${PUNAR_HOME}/atlas"
@@ -84,6 +85,9 @@ DOWNLOADS="${PUNAR_HOME}/Downloads"
 FOO_AGENT="${DOWNLOADS}/foo-agent"
 FIXTURE_DIR=/usr/share/punar/fixtures/projects/atlas
 TOUCH_FILE="${ATLAS}/.punar-agent-touch"
+ISOLATION_RESULTS="${ATLAS}/.punar-agent-isolation-results"
+HOST_SSH_SECRET="${PUNAR_HOME}/.ssh/m7-host-secret"
+OTHER_PROJECT_SECRET="${PUNAR_HOME}/other-project/m7-secret"
 LAUNCH_OUT="${RUN_DIR}/m7-launch.txt"
 FAILED=0
 SID=""
@@ -218,6 +222,20 @@ check_eq "agentd socket directory (root-owned, not the peer-writable /run/punar)
     "750 root punar" "$(stat -c '%a %U %G' "${AGENTD_RUN_DIR}" 2>/dev/null)"
 check_eq "registry state directory mode/owner" "700 root root" \
     "$(stat -c '%a %U %G' "${REGISTRY_DIR}" 2>/dev/null)"
+if [ "$(readlink -f "${BWRAP}" 2>/dev/null)" = "${BWRAP}" ] && \
+        [ "$(stat -c '%U' "${BWRAP}" 2>/dev/null)" = root ] && \
+        [ -x "${BWRAP}" ]; then
+    bwrap_mode="$(stat -c '%a' "${BWRAP}" 2>/dev/null)"
+    if [ $((0${bwrap_mode:-777} & 0022)) -eq 0 ]; then
+        note "ok   bubblewrap is pinned, root-owned, executable and not group/world-writable"
+    else
+        note "FAIL ${BWRAP} is group/world-writable (mode ${bwrap_mode:-unknown})"
+        FAILED=1
+    fi
+else
+    note "FAIL ${BWRAP} is missing, non-canonical, non-executable, or not root-owned"
+    FAILED=1
+fi
 # Nobody must not reach the new socket either (same mechanism m3-check
 # proved for punard, asserted here for the second daemon).
 if ! runuser -u nobody -- "${CTL}" agents list >/dev/null 2>&1; then
@@ -261,6 +279,12 @@ if [ ! -f "${ATLAS}/project-environment.yaml" ]; then
     note "info Atlas project re-created from the staged fixture (m6-check did not leave one)"
 fi
 rm -f "${TOUCH_FILE}"
+rm -f "${ISOLATION_RESULTS}"
+install -d -m 700 -o punar -g punar "${PUNAR_HOME}/.ssh" \
+    "${PUNAR_HOME}/other-project"
+printf '%s\n' 'host ssh sentinel — must not enter agent namespace' > "${HOST_SSH_SECRET}"
+printf '%s\n' 'other project sentinel — must not enter agent namespace' > "${OTHER_PROJECT_SECRET}"
+chown punar:punar "${HOST_SSH_SECRET}" "${OTHER_PROJECT_SECRET}"
 
 # PUNAR_AGENT_MOCK=1 is the ONLY thing that substitutes the mock command;
 # nothing in the image sets it. The session blocks (the mock waits for a
@@ -281,6 +305,7 @@ rm -f "${TOUCH_FILE}"
 # punar-env's exit code, `--collect` reaps the unit afterwards.
 as_punar systemd-run --user --pipe --wait --collect --quiet \
     --unit=punar-m7-launch --setenv=PUNAR_AGENT_MOCK=1 \
+    --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
     -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code \
     > "${LAUNCH_OUT}" 2>&1 &
 LAUNCH_PID=$!
@@ -332,7 +357,7 @@ grep_row "authority block cites the personal policy (unmanaged-first)" \
 # declaration that names the milestone still owed. Pinning M9/M12 here was a
 # future-milestone placeholder in a check script, and three of the six
 # recorded regressions of this class had exactly that shape.
-ENFORCE_RE='(applied( \(bind mount\))?|enforced( \(agent scope\))?|declared · (M[0-9]+[+]?|enforced( M[0-9]+)?|applied))'
+ENFORCE_RE='(applied( \(bind mount\))?|enforced( \((agent scope|mount namespace)\))?|narrowed · private session home|declared · (not mounted|M[0-9]+[+]?|enforced( M[0-9]+)?|applied))'
 grep_re "filesystem row states where its declaration stands" \
     "${LAUNCH_OUT}" "^ +filesystem +project +read_write +${ENFORCE_RE}$"
 grep_re "network row states where its declaration stands" \
@@ -408,6 +433,31 @@ else
 fi
 check_eq "workspace touch file owner (the session runs as the human, not root)" \
     "punar" "$(stat -c '%U' "${TOUCH_FILE}" 2>/dev/null)"
+
+# ADR-004 hostile child evidence from the real VM namespace. The sentinels
+# exist on the host before launch, so "absent" proves they were not mounted;
+# the control sockets are what prevent adapter-driven self-end/readiness.
+# The mock writes this file only after the gate has exec'd bwrap, which is
+# after the REGISTRY line above, so wait for it (bounded); an absent file
+# still fails every row below.
+waited=0
+while [ "${waited}" -lt 30 ] && [ ! -f "${ISOLATION_RESULTS}" ]; do
+    sleep 1
+    waited=$((waited + 1))
+done
+for expected in \
+    agentd_socket=absent \
+    netd_socket=absent \
+    punard_socket=absent \
+    secrets_socket=absent \
+    dbus_socket=absent \
+    real_ssh=absent \
+    other_project=absent \
+    usr_mount=read_only \
+    uts=isolated \
+    pid=isolated; do
+    grep_row "managed namespace proves ${expected}" "${ISOLATION_RESULTS}" "${expected}"
+done
 
 # --- 5. scope attribution (spec 22) ------------------------------------------
 as_punar systemctl --user show "${SCOPE}" -p ActiveState -p Description \

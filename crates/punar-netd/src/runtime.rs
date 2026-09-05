@@ -10,10 +10,15 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::agentd::{AgentdClient, AgentdError, SessionSnapshot, SkippedSession};
+use crate::agentd::{
+    AgentdClient, AgentdError, SessionSnapshot, SkippedSession, managed_scope_path,
+};
 use crate::deny::DenyLogReader;
 use punar_common::agent::{LedgerNetworkDestination, LedgerNetworkParams, LedgerNetworkSource};
 use punar_common::ledger::{ResourceCategory, ResourceClass};
+use punar_common::network::{
+    NetworkSessionEnforcement, NetworkSessionReadyResult, NetworkSessionReadyState,
+};
 
 use crate::model::{Decision, ZoneDefinition, ZoneKind, ZoneMembership};
 use crate::nft::{CounterBinding, NftError, SessionBinding, counter_bindings, render_table};
@@ -44,6 +49,14 @@ pub enum RuntimeError {
     EnforcementUnavailable(String),
     #[error("no active managed session names project {0:?}")]
     ProjectNotActive(String),
+    #[error("the readiness-gate peer is not in session {session_id:?}: {reason}")]
+    SessionGateNotAttributed { session_id: String, reason: String },
+    #[error("managed session {session_id:?} is not ready: {reason}")]
+    SessionNotReady { session_id: String, reason: String },
+    #[error(
+        "the exact nftables cgroup rule for session {session_id:?} was not observed after apply: {reason}"
+    )]
+    SessionRuleNotVerified { session_id: String, reason: String },
     #[error("connection side-file write failed: {0}")]
     SideFile(io::Error),
     #[error(transparent)]
@@ -295,6 +308,97 @@ impl Runtime {
 
     pub fn apply(&mut self) -> Result<ApplyResult, RuntimeError> {
         self.reconcile().map(|result| result.applied)
+    }
+
+    /// Synchronous pre-exec barrier for a trusted launcher already inside
+    /// the managed session scope.
+    ///
+    /// There is deliberately no retry, count comparison, or status-based
+    /// release here. One request must prove all three facts: the socket peer
+    /// is in the exact named scope, agentd currently reports that exact
+    /// session as active+managed, and the exact cgroup selector/jump can be
+    /// read back from the kernel after the atomic transaction. Any missing
+    /// fact is an error and the caller must not execute untrusted code.
+    pub fn session_ready(
+        &mut self,
+        session_id: &str,
+        peer_pid: u32,
+    ) -> Result<(NetworkSessionReadyResult, ReconcileResult), RuntimeError> {
+        let before = gate_scope_path(&self.proc_root, peer_pid, session_id)?;
+        // Unlike background reconciliation, this path is the authority that
+        // releases untrusted code. Validate the production executable and
+        // its complete path before invoking it at all.
+        self.nft.validate_trusted_binary()?;
+        let outcome = self.reconcile()?;
+        let (project, cgroup_path) = self
+            .installed_sessions
+            .get(session_id)
+            .map(|session| (session.project.clone(), session.cgroup_path.clone()))
+            .ok_or_else(|| {
+                let reason = outcome
+                    .applied
+                    .skipped_sessions
+                    .iter()
+                    .find(|session| session.session_id == session_id)
+                    .map(|session| session.reason.clone())
+                    .unwrap_or_else(|| {
+                        "punar-agentd did not return this exact active managed session".into()
+                    });
+                RuntimeError::SessionNotReady {
+                    session_id: session_id.to_string(),
+                    reason,
+                }
+            })?;
+        if before != cgroup_path {
+            return Err(RuntimeError::SessionGateNotAttributed {
+                session_id: session_id.to_string(),
+                reason: "the socket peer and agentd's registered process are in different cgroups"
+                    .into(),
+            });
+        }
+
+        match self.nft.verify_session_rule(session_id, &cgroup_path) {
+            Ok(true) => {}
+            Ok(false) => {
+                let error = RuntimeError::SessionRuleNotVerified {
+                    session_id: session_id.to_string(),
+                    reason: "the kernel table lacked the exact cgroup selector, jump target, or target chain"
+                        .into(),
+                };
+                self.last_apply_error = Some(error.to_string());
+                return Err(error);
+            }
+            Err(error) => {
+                let error = RuntimeError::SessionRuleNotVerified {
+                    session_id: session_id.to_string(),
+                    reason: error.to_string(),
+                };
+                self.last_apply_error = Some(error.to_string());
+                return Err(error);
+            }
+        }
+
+        // Re-prove after the kernel read. A gate moved out of the scope while
+        // policy was being applied must not use an acknowledgment for the
+        // cgroup it left.
+        let after = gate_scope_path(&self.proc_root, peer_pid, session_id)?;
+        if after != cgroup_path {
+            return Err(RuntimeError::SessionGateNotAttributed {
+                session_id: session_id.to_string(),
+                reason: "the socket peer left or changed cgroup during readiness verification"
+                    .into(),
+            });
+        }
+
+        Ok((
+            NetworkSessionReadyResult {
+                session_id: session_id.to_string(),
+                project,
+                state: NetworkSessionReadyState::Ready,
+                enforcement: NetworkSessionEnforcement::NftablesCgroupV2,
+            },
+            outcome,
+        ))
     }
 
     /// Re-read authoritative agent state, atomically replace the nft table,
@@ -636,6 +740,22 @@ impl Runtime {
             "enforcement": self.enforcement_status()
         }))
     }
+}
+
+fn gate_scope_path(
+    proc_root: &Path,
+    peer_pid: u32,
+    session_id: &str,
+) -> Result<String, RuntimeError> {
+    managed_scope_path(proc_root, peer_pid, session_id)
+        .map_err(|reason| RuntimeError::SessionGateNotAttributed {
+            session_id: session_id.to_string(),
+            reason,
+        })?
+        .ok_or_else(|| RuntimeError::SessionGateNotAttributed {
+            session_id: session_id.to_string(),
+            reason: format!("peer pid {peer_pid} is not in the exact named scope"),
+        })
 }
 
 #[derive(Debug)]
@@ -1098,6 +1218,36 @@ mod tests {
             },
         )]);
         assert!(session_transitions(&installed, &installed, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn readiness_gate_peer_must_be_inside_the_exact_named_scope() {
+        let root = root();
+        fs::create_dir_all(root.join("42")).unwrap();
+        fs::write(
+            root.join("42/cgroup"),
+            "0::/user.slice/punar-agent-agt_4f21c09ab3e1.scope\n",
+        )
+        .unwrap();
+        assert_eq!(
+            gate_scope_path(&root, 42, "agt_4f21c09ab3e1").unwrap(),
+            "/user.slice/punar-agent-agt_4f21c09ab3e1.scope"
+        );
+
+        fs::write(
+            root.join("42/cgroup"),
+            "0::/user.slice/punar-agent-agt_4f21c09ab3e1.scope-evil\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            gate_scope_path(&root, 42, "agt_4f21c09ab3e1"),
+            Err(RuntimeError::SessionGateNotAttributed { .. })
+        ));
+        assert!(matches!(
+            gate_scope_path(&root, 43, "agt_4f21c09ab3e1"),
+            Err(RuntimeError::SessionGateNotAttributed { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn session(root: &Path) -> (ManagedSession, ProjectLocator) {

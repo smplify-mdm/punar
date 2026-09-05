@@ -29,6 +29,10 @@
 # loopback TCP connection open and records the exit/time of an identical
 # denied probe. The addresses and port are fixed test fixtures; no product
 # behavior reads this result file.
+#
+# ADR-004 addition: PUNAR_MOCK_AGENT_ISOLATION=1 records hostile filesystem
+# probes from *inside* the actual managed namespace. It is enabled only by the
+# M7 image gate; production adapters never receive this variable.
 
 set -u
 
@@ -48,6 +52,37 @@ if touch "./$TOUCH_FILE" 2>/dev/null; then
     echo "Workspace write: ./$TOUCH_FILE"
 else
     echo "Workspace write: refused (./$TOUCH_FILE not writable)" >&2
+fi
+
+if [ "${PUNAR_MOCK_AGENT_ISOLATION:-0}" = "1" ]; then
+    ISOLATION_RESULTS=".punar-agent-isolation-results"
+    {
+        [ ! -e /run/punar-agentd/agentd.sock ] && echo "agentd_socket=absent" \
+            || echo "agentd_socket=EXPOSED"
+        [ ! -e /run/punar-netd/netd.sock ] && echo "netd_socket=absent" \
+            || echo "netd_socket=EXPOSED"
+        [ ! -e /run/punard/punard.sock ] && echo "punard_socket=absent" \
+            || echo "punard_socket=EXPOSED"
+        [ ! -e /run/punar-secrets/secrets.sock ] && echo "secrets_socket=absent" \
+            || echo "secrets_socket=EXPOSED"
+        [ ! -e "${XDG_RUNTIME_DIR}/bus" ] && echo "dbus_socket=absent" \
+            || echo "dbus_socket=EXPOSED"
+        [ ! -e "${HOME}/.ssh/m7-host-secret" ] && echo "real_ssh=absent" \
+            || echo "real_ssh=EXPOSED"
+        [ ! -e /home/punar/other-project/m7-secret ] && echo "other_project=absent" \
+            || echo "other_project=EXPOSED"
+        if awk '$5 == "/usr" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' \
+                /proc/self/mountinfo; then
+            echo "usr_mount=read_only"
+        else
+            echo "usr_mount=NOT_READ_ONLY"
+        fi
+        [ "$(uname -n)" = "punar-agent" ] && echo "uts=isolated" \
+            || echo "uts=NOT_ISOLATED"
+        [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ] && echo "pid=isolated" \
+            || echo "pid=NOT_ISOLATED"
+    } > "./${ISOLATION_RESULTS}"
+    echo "Isolation: hostile probe results written to ./${ISOLATION_RESULTS}"
 fi
 
 # Deterministic child processes for the M8 ledger exercise. Opt-in only.
@@ -83,10 +118,10 @@ if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
     else
         echo "Children: could not create ./$FIFO — no process-class evidence generated" >&2
     fi
-    # Two real, short-lived children that punard REFUSES. Both are gone long
-    # before any sampling pass, so they can only ever be proven by the audit
-    # stream — which is exactly the point: the ledger's two evidence paths
-    # are independent.
+    # Older M8 fixtures called punard directly from the agent namespace here.
+    # ADR-004 intentionally removes that broad control socket until a
+    # session-aware mediation contract exists. Do not turn a connect failure
+    # into fake approval/denial evidence: report the missing producer plainly.
     #
     # M9 changed what the FIRST one proves, and the label says so rather than
     # keeping the old sentence. Before M9 an agent's capability mutation was
@@ -95,7 +130,9 @@ if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
     # `approval_required` (exit 4). Nothing is applied either way — that is
     # the invariant this line demonstrates — but "denied" would now be the
     # wrong word for it.
-    if punarctl capabilities set security.firewall enabled >/dev/null 2>&1; then
+    if [ ! -S /run/punard/punard.sock ]; then
+        echo "Children: punard mediation unavailable — control socket intentionally absent under ADR-004"
+    elif punarctl capabilities set security.firewall enabled >/dev/null 2>&1; then
         echo "Children: capabilities.set was ALLOWED — expected an approval gate from an agent peer" >&2
     else
         echo "Children: capabilities.set gated by punard (approval required, nothing applied)"
@@ -105,7 +142,9 @@ if [ "${PUNAR_MOCK_AGENT_CHILDREN:-0}" = "1" ]; then
     # approved call at a time; a time window is a human affordance (SPEC
     # sections 48, 60). A refusal that policy can never turn into a yes is
     # the right shape for a fixture that must stay a denial.
-    if punarctl privilege request --capability security.firewall \
+    if [ ! -S /run/punard/punard.sock ]; then
+        echo "Children: privilege evidence unavailable — direct punard access is intentionally absent"
+    elif punarctl privilege request --capability security.firewall \
             --reason "mock agent asks for a privilege window" >/dev/null 2>&1; then
         echo "Children: privilege.request was ALLOWED for an agent — a grant must never be issued to an AI" >&2
     else

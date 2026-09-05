@@ -34,6 +34,48 @@ pub struct NetworkApplyParams {
     pub project: Option<String>,
 }
 
+/// Internal pre-exec barrier for one managed agent session.
+///
+/// The caller supplies only the unguessable session identity. `punar-netd`
+/// obtains the session, project, and cgroup again from `punar-agentd`, and
+/// binds the request to the calling process with `SO_PEERCRED`; accepting a
+/// pid, cgroup, project, or policy claim here would turn the readiness gate
+/// into an attribution bypass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSessionReadyParams {
+    pub session_id: String,
+}
+
+/// Closed success state for [`NetworkSessionReadyResult`]. There is no
+/// "pending" success: the request either proves the exact kernel rule or
+/// returns an error and the launcher must not execute the adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkSessionReadyState {
+    Ready,
+}
+
+/// Kernel mechanism proved by the pre-exec readiness barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkSessionEnforcement {
+    NftablesCgroupV2,
+}
+
+/// Authoritative acknowledgment returned only after the exact session's
+/// cgroup match and jump target have been read back from netd's nftables
+/// table. Counts and aggregate service status deliberately cannot satisfy
+/// this contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSessionReadyResult {
+    pub session_id: String,
+    pub project: String,
+    pub state: NetworkSessionReadyState,
+    pub enforcement: NetworkSessionEnforcement,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayPreference {
@@ -55,18 +97,22 @@ pub enum NetworkMethod {
     Policy(NetworkProjectParams),
     Explain(NetworkExplainParams),
     Apply(NetworkApplyParams),
+    /// `network.session_ready` — internal, fail-closed pre-exec barrier.
+    /// The socket peer must itself be in the exact named session scope.
+    SessionReady(NetworkSessionReadyParams),
     RelayStatus,
     RelaySet(RelaySetParams),
 }
 
 impl NetworkMethod {
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "network.status",
         "network.connections",
         "network.zones",
         "network.policy",
         "network.explain",
         "network.apply",
+        "network.session_ready",
         "relay.status",
         "relay.set",
     ];
@@ -79,6 +125,7 @@ impl NetworkMethod {
             Self::Policy(_) => "network.policy",
             Self::Explain(_) => "network.explain",
             Self::Apply(_) => "network.apply",
+            Self::SessionReady(_) => "network.session_ready",
             Self::RelayStatus => "relay.status",
             Self::RelaySet(_) => "relay.set",
         }
@@ -90,6 +137,7 @@ impl NetworkMethod {
             Self::Policy(params) => serde_json::to_value(params),
             Self::Explain(params) => serde_json::to_value(params),
             Self::Apply(params) => serde_json::to_value(params),
+            Self::SessionReady(params) => serde_json::to_value(params),
             Self::RelaySet(params) => serde_json::to_value(params),
         };
         Some(value.expect("network params serialize infallibly"))
@@ -105,6 +153,7 @@ impl NetworkMethod {
             "network.policy" => Self::parse_required(method, params).map(Self::Policy),
             "network.explain" => Self::parse_required(method, params).map(Self::Explain),
             "network.apply" => Self::parse_optional(method, params).map(Self::Apply),
+            "network.session_ready" => Self::parse_required(method, params).map(Self::SessionReady),
             "relay.status" => Self::expect_no_params(method, params).map(|()| Self::RelayStatus),
             "relay.set" => Self::parse_required(method, params).map(Self::RelaySet),
             unknown
@@ -147,6 +196,13 @@ impl NetworkMethod {
                 Some(project) => validate_project(project).map_err(invalid),
                 None => Ok(()),
             },
+            Self::SessionReady(params) => {
+                if crate::agent::session_id_ok(&params.session_id) {
+                    Ok(())
+                } else {
+                    Err(invalid("session_id must match ^agt_[A-Za-z0-9]+$"))
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -280,6 +336,9 @@ mod tests {
                 zone: "corp_prod".into(),
             }),
             NetworkMethod::Apply(NetworkApplyParams { project: None }),
+            NetworkMethod::SessionReady(NetworkSessionReadyParams {
+                session_id: "agt_4f21c09ab3e1".into(),
+            }),
             NetworkMethod::RelayStatus,
             NetworkMethod::RelaySet(RelaySetParams {
                 mode: RelayPreference::PrivateRelay,
@@ -324,9 +383,41 @@ mod tests {
                 Some(json!({"project": "atlas", "zone": "Corp Prod"})),
             ),
             ("relay.set", Some(json!({"mode": "enterprise_route"}))),
+            (
+                "network.session_ready",
+                Some(json!({"session_id": "../scope", "process_id": 42})),
+            ),
         ] {
             let error = NetworkMethod::from_wire(method, params).unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidParams);
         }
+    }
+
+    #[test]
+    fn session_ready_result_has_no_pending_or_aggregate_shortcut() {
+        let result = NetworkSessionReadyResult {
+            session_id: "agt_4f21c09ab3e1".into(),
+            project: "atlas".into(),
+            state: NetworkSessionReadyState::Ready,
+            enforcement: NetworkSessionEnforcement::NftablesCgroupV2,
+        };
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "session_id": "agt_4f21c09ab3e1",
+                "project": "atlas",
+                "state": "ready",
+                "enforcement": "nftables_cgroup_v2"
+            })
+        );
+        let error = NetworkMethod::from_wire(
+            "network.session_ready",
+            Some(json!({
+                "session_id": "agt_4f21c09ab3e1",
+                "installed_sessions": 1
+            })),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 }

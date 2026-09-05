@@ -21,6 +21,7 @@ LAUNCH_OUT="${RUN_DIR}/m12-launch.txt"
 PROBE_RESULTS="${ATLAS}/.punar-agent-net-results"
 PROBE_READY="${ATLAS}/.punar-agent-net-ready"
 PROBE_FIFO="${ATLAS}/.punar-agent-net-go"
+ISOLATION_RESULTS="${ATLAS}/.punar-agent-isolation-results"
 FAILED=0
 SID=""
 TAG=""
@@ -165,16 +166,20 @@ as_punar timeout 2 /bin/bash -c 'exec 8<>/dev/tcp/127.0.0.7/9418' >/dev/null 2>&
 check_true "same-user out-of-scope control reaches 127.0.0.7:9418" "$?"
 
 # 4. Launch the real managed-session path with only the dev mock binary
-# substituted. The FIFO prevents either probe from racing policy attachment.
+# substituted. ADR-004's trusted gate now prevents adapter exec until netd has
+# read back the exact kernel rule. The FIFO below schedules the traffic probes
+# deterministically; it is no longer the policy-attachment barrier.
 mkdir -p "${ATLAS}"
 cp "${FIXTURE}/project-environment.yaml" "${FIXTURE}/project-network-policy.json" "${ATLAS}/"
 chown -R punar:punar "${ATLAS}"
-rm -f "${PROBE_FIFO}" "${PROBE_RESULTS}" "${PROBE_READY}" "${LAUNCH_OUT}"
+rm -f "${PROBE_FIFO}" "${PROBE_RESULTS}" "${PROBE_READY}" \
+    "${ISOLATION_RESULTS}" "${LAUNCH_OUT}"
 mkfifo -m 600 "${PROBE_FIFO}"
 chown punar:punar "${PROBE_FIFO}"
 as_punar systemd-run --user --pipe --wait --collect --quiet \
     --unit=punar-m12-launch --setenv=PUNAR_AGENT_MOCK=1 \
     --setenv=PUNAR_MOCK_AGENT_NET=1 \
+    --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
     -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code \
     > "${LAUNCH_OUT}" 2>&1 &
 LAUNCH_PID=$!
@@ -231,6 +236,25 @@ else
     FAILED=1
 fi
 
+# The mock's namespace probe lands after the gate execs bwrap; wait for it
+# (bounded) rather than racing it. An absent file still fails both rows.
+waited=0
+while [ "${waited}" -lt 30 ] && [ ! -f "${ISOLATION_RESULTS}" ]; do
+    sleep 1
+    waited=$((waited + 1))
+done
+grep_row "adapter namespace hides lifecycle control socket" \
+    "${ISOLATION_RESULTS}" "agentd_socket=absent"
+grep_row "adapter namespace hides network-readiness control socket" \
+    "${ISOLATION_RESULTS}" "netd_socket=absent"
+
+jq -c --arg sid "${SID}" \
+    'select(.action == "network.session_ready" and .resource == $sid and .result == "success")' \
+    "${AUDIT}" 2>/dev/null | tail -n 1 > "${RUN_DIR}/m12-session-ready-audit.json"
+jq_check "launcher gate obtained exact-session kernel readiness before mock probes" \
+    "${RUN_DIR}/m12-session-ready-audit.json" \
+    '.action == "network.session_ready" and .decision == "allow" and .result == "success"'
+
 "${CTL}" network policy atlas --json > "${RUN_DIR}/m12-policy.json" 2>&1
 jq_check "strict policy compiles allow dev and deny production" "${RUN_DIR}/m12-policy.json" \
     '([.rules[] | select(.zone == "corp_dev" and .decision == "allow")] | length == 1) and ([.rules[] | select(.zone == "corp_prod" and .decision == "deny")] | length == 1)'
@@ -254,7 +278,8 @@ as_punar "${ENV_BIN}" -C "${ATLAS}" status --json > "${RUN_DIR}/m12-env-status.j
 jq_check "environment JSON reports network enforcement as enforced" \
     "${RUN_DIR}/m12-env-status.json" '.enforcement.network == "enforced"'
 
-# Explicit apply is also an observation trigger.
+# Explicit apply remains an observation trigger exercise. It is not what
+# released the adapter: the readiness audit above already proves that event.
 "${CTL}" network apply atlas > "${RUN_DIR}/m12-apply.txt" 2>&1
 check_true "root policy apply succeeds" "$?"
 printf 'go\n' > "${PROBE_FIFO}"

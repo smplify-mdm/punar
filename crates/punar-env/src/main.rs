@@ -18,8 +18,10 @@
 //! mints the `agt_` session identity, launches the agent in a transient
 //! systemd scope named after it (SPEC section 22 attribution), registers
 //! the session with `punar-agentd`, and deregisters when it ends
-//! (docs/development/milestone-7.md section 5). Authority is displayed,
-//! never enforced, and every row says so (SPEC 1.22).
+//! (docs/development/milestone-7.md section 5). Managed host agents also run
+//! inside a bubblewrap mount/PID/IPC/UTS boundary: the declared project grade
+//! is enforced, while network and credential rows retain their own explicit
+//! enforcement state (SPEC 1.22).
 //!
 //! Exit codes (Plate D-014): 0 success · 1 runtime/podman/registry error ·
 //! 2 usage (clap). `shell` and `agent` pass their child's exit code
@@ -31,7 +33,9 @@ mod adapter;
 mod agentd;
 mod authority;
 mod engine;
+mod isolation;
 mod manifest;
+mod netd;
 mod podman;
 mod render;
 mod session;
@@ -67,6 +71,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal pre-exec barrier used only as the fixed command inside a
+    /// managed systemd scope. It never accepts an executable or shell text.
+    #[command(name = "__agent-gate", hide = true)]
+    AgentGate {
+        #[arg(long, value_name = "PATH")]
+        spec: PathBuf,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        nonce: String,
+    },
     /// Scaffold a punar-env.yaml manifest; idempotent — never rewrites.
     Init {
         /// Project name (default: the directory name, lowercased).
@@ -111,6 +126,23 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, EnvError> {
     refuse_root()?;
+
+    // The trusted gate runs before project/manifest/Podman setup.  Its only
+    // input is the private, exact-session specification prepared by the outer
+    // launcher; third-party adapter code is still unable to execute here.
+    if let Command::AgentGate {
+        spec,
+        session_id,
+        nonce,
+    } = &cli.command
+    {
+        if cli.json || cli.dir.is_some() {
+            return Err(EnvError::Usage(
+                "the internal managed-agent gate does not accept --json or --dir".to_string(),
+            ));
+        }
+        return session::run_agent_gate(spec, session_id, nonce);
+    }
     let dir = project_dir(cli.dir)?;
 
     // init resolves (or scaffolds) the manifest itself.
@@ -127,6 +159,7 @@ fn run(cli: Cli) -> Result<u8, EnvError> {
     let podman = CliPodman;
 
     match cli.command {
+        Command::AgentGate { .. } => unreachable!("handled before project resolution"),
         Command::Init { .. } => unreachable!("handled above"),
         Command::Up => {
             let out = engine::op_up(&podman, &dir, &m)?;
@@ -167,7 +200,7 @@ fn run(cli: Cli) -> Result<u8, EnvError> {
         Command::Agent { name } => {
             // The managed launch path (M7): the agent's own exit code is
             // passed through verbatim, exactly like `shell`.
-            session::op_agent(&podman, &dir, &m, &name, cli.json)
+            session::op_agent(&dir, &m, &name, cli.json)
         }
     }
 }
@@ -243,6 +276,16 @@ mod tests {
             &["punar-env", "--json", "status"],
             &["punar-env", "destroy"],
             &["punar-env", "agent", "claude-code"],
+            &[
+                "punar-env",
+                "__agent-gate",
+                "--spec",
+                "/run/user/1000/punar-agent-sessions/agt_4f21c09ab3e1/gate.json",
+                "--session-id",
+                "agt_4f21c09ab3e1",
+                "--nonce",
+                "00112233445566778899aabbccddeeff",
+            ],
             &["punar-env", "-C", "/home/punar/atlas", "up"],
             &["punar-env", "--dir", "/home/punar/atlas", "status"],
         ];
@@ -256,6 +299,19 @@ mod tests {
             ["punar-env", "provision"].as_slice(),
             ["punar-env", "agent"].as_slice(),
             ["punar-env", "shell", "--tty"].as_slice(),
+            ["punar-env", "__agent-gate", "--spec", "/tmp/gate"].as_slice(),
+            [
+                "punar-env",
+                "__agent-gate",
+                "--spec",
+                "/tmp/gate",
+                "--session-id",
+                "agt_4f21c09ab3e1",
+                "--nonce",
+                "00112233445566778899aabbccddeeff",
+                "/bin/sh",
+            ]
+            .as_slice(),
         ] {
             assert!(Cli::try_parse_from(bad.iter()).is_err(), "{bad:?}");
         }

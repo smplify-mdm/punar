@@ -262,6 +262,24 @@ as_punar() {
         "HOME=${PUNAR_HOME}" "$@"
 }
 
+# in_scope <cmd...> — run one command INSIDE the managed agent session's
+# scope cgroup (M9's in-agent-scope.sh), so punard attributes it to the agent
+# from the kernel's own /proc/<pid>/cgroup and nothing is declared. ADR-004
+# put the adapter itself in a mount namespace where punard's socket is
+# deliberately absent, so the agent-originated calls this exercise needs can
+# no longer come from the mock; they come from here instead, and the
+# attribution path punard reads is byte-for-byte the same scope cgroup.
+IN_SCOPE=/usr/lib/punar/in-agent-scope.sh
+# Deliberately unwritable until the real scope is resolved: joining it fails
+# with exit 97, so an unresolved scope can never turn into an out-of-scope
+# call that the exit-code checks below would misread as the agent path.
+SCOPE_PROCS=/nonexistent/punar-agent-scope/cgroup.procs
+in_scope() {
+    as_punar systemd-run --user --pipe --wait --collect --quiet \
+        --unit="punar-m8-agent-$(date -u +%s%N)" \
+        -- "${IN_SCOPE}" "${SCOPE_PROCS}" "$@"
+}
+
 # --- 1. preflight: daemon, ledger store, class table -------------------------
 check_eq "punar-agentd.service is active" "active" \
     "$(systemctl is-active "${AGENTD_UNIT}" 2>&1)"
@@ -339,16 +357,16 @@ grep_row "the evidence children were generated (dev/CI stand-in, labelled as one
     "${LAUNCH_OUT}" "PUNAR_MOCK_AGENT_CHILDREN=1"
 grep_row "the shell and git children blocked on the fifo (no busy loop, spec 6.3)" \
     "${LAUNCH_OUT}" "blocked on ./.punar-agent-fifo"
-# M9 amendment, stated rather than quietly re-worded: an agent's capability
-# mutation is no longer DENIED, it is GATED (the personal AI authority
-# document says `firewall: approval_required`). Nothing is applied either
-# way, which is the invariant M8 cared about; the Level-4 denied_access
-# producer is now the privilege-window refusal below, which policy can never
-# turn into a yes (SPEC sections 48, 60).
-grep_row "punard GATED the agent's capability mutation behind an approval (M9)" \
-    "${LAUNCH_OUT}" "capabilities.set gated by punard"
-grep_row "punard REFUSED the agent a privilege window (the Level-4 producer)" \
-    "${LAUNCH_OUT}" "privilege.request refused for an AI agent"
+# ADR-004 amendment, stated rather than quietly re-worded: the adapter now
+# runs in a private mount namespace where punard's control socket does not
+# exist, so the mock cannot make the agent-originated calls itself. It must
+# say so plainly rather than manufacture a "denial" out of a connect failure.
+# The calls M8's Level-4 evidence rests on are made in group 3b below from a
+# process the kernel places in the SAME scope cgroup.
+grep_row "the sandboxed mock reports punard's control socket as intentionally absent (ADR-004)" \
+    "${LAUNCH_OUT}" "punard mediation unavailable"
+grep_row "the sandboxed mock reports direct privilege access as intentionally absent (ADR-004)" \
+    "${LAUNCH_OUT}" "privilege evidence unavailable"
 
 # --- 3. source A: the scope cgroup, read directly ----------------------------
 as_punar "${CTL}" --json agents list > "${RUN_DIR}/m8-agents-list.json" 2>/dev/null
@@ -396,6 +414,27 @@ else
     note "FAIL could not resolve the scope cgroup for pid '${AGENT_PID:-none}' (cgroup path '${CGROUP_PATH:-none}')"
     FAILED=1
 fi
+
+# --- 3b. the agent-originated calls, from the scope cgroup -------------------
+# M9 amendment, still true: an agent's capability mutation is not DENIED, it
+# is GATED (the personal AI authority document says `firewall:
+# approval_required`). Nothing is applied either way, which is the invariant
+# M8 cares about; the Level-4 denied_access producer is the privilege-window
+# refusal, which policy can never turn into a yes (SPEC sections 48, 60).
+# Both calls now run through in_scope: a failed cgroup join exits 97, which
+# no assertion below accepts, so a missing scope cannot pass vacuously.
+if [ -n "${SCOPE_FS}" ]; then
+    SCOPE_PROCS="${SCOPE_FS}/cgroup.procs"
+fi
+in_scope "${CTL}" capabilities set security.firewall enabled \
+    > "${RUN_DIR}/m8-agent-set.txt" 2>&1
+check_eq "an agent-originated capabilities.set is GATED by punard (exit 4 approval_required, nothing applied)" \
+    4 "$?"
+in_scope "${CTL}" privilege request --capability security.firewall \
+    --reason "mock agent asks for a privilege window" \
+    > "${RUN_DIR}/m8-agent-privilege.txt" 2>&1
+check_eq "an agent-originated privilege.request is REFUSED outright by punard (exit 3, the Level-4 producer)" \
+    3 "$?"
 
 # --- 4. one sampling pass ----------------------------------------------------
 as_punar "${CTL}" --json agents scan > "${RUN_DIR}/m8-scan.json" 2>/dev/null

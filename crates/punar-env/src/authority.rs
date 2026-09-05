@@ -35,9 +35,13 @@ pub const PERSONAL_DEFAULTS: &str = punar_common::audit::POLICY_PERSONAL_DEFAULT
 /// is named (the organization) without inventing an id it did not send.
 pub const ORGANIZATION_POLICY: &str = "organization-policy";
 
-/// Enforcement labels, per permission category (ipc.md section 10.3's
-/// example rows carry exactly these strings).
-const ENFORCEMENT_FILESYSTEM: &str = "declared · M9";
+/// Enforcement labels, per permission category. The project row is a
+/// Bubblewrap bind decision. A declared home grade is explicitly narrowed to
+/// the fresh per-session replacement; other filesystem zones remain
+/// declarations and are absent from the managed-agent mount namespace.
+const ENFORCEMENT_FILESYSTEM_PROJECT: &str = "enforced (mount namespace)";
+const ENFORCEMENT_FILESYSTEM_OTHER: &str = "declared · not mounted";
+const ENFORCEMENT_FILESYSTEM_HOME: &str = "narrowed · private session home";
 const ENFORCEMENT_NETWORK: &str = "enforced (agent scope)";
 const ENFORCEMENT_CREDENTIALS: &str = "declared · M9";
 
@@ -142,7 +146,12 @@ pub fn summary(m: &Manifest, citation: &Citation) -> AuthoritySummary {
         rows.push(AuthorityRow {
             zone: format!("filesystem.{zone}"),
             decision: grade.as_str().to_string(),
-            enforcement: ENFORCEMENT_FILESYSTEM.to_string(),
+            enforcement: match zone {
+                "project" => ENFORCEMENT_FILESYSTEM_PROJECT,
+                "home" => ENFORCEMENT_FILESYSTEM_HOME,
+                _ => ENFORCEMENT_FILESYSTEM_OTHER,
+            }
+            .to_string(),
         });
     }
     for (zone, decision) in m.permissions.network.iter() {
@@ -221,7 +230,28 @@ mod tests {
             "enforced (agent scope)"
         );
         assert_eq!(by_zone("credentials.github").enforcement, "declared · M9");
-        assert_eq!(by_zone("filesystem.project").enforcement, "declared · M9");
+        assert_eq!(
+            by_zone("filesystem.project").enforcement,
+            "enforced (mount namespace)"
+        );
+    }
+
+    #[test]
+    fn non_project_filesystem_declarations_are_honestly_absent() {
+        let mut manifest = atlas();
+        manifest
+            .permissions
+            .filesystem
+            .0
+            .push(("home".to_string(), crate::manifest::FilesystemAccess::Read));
+        let summary = summary(&manifest, &Citation::personal());
+        let home = summary
+            .rows
+            .iter()
+            .find(|row| row.zone == "filesystem.home")
+            .expect("home row");
+        assert_eq!(home.decision, "read");
+        assert_eq!(home.enforcement, "narrowed · private session home");
     }
 
     #[test]

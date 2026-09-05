@@ -203,16 +203,6 @@ impl AgentDefinition {
             mock: false,
         }
     }
-
-    /// The version probe argv, if the adapter declares one. Never used in
-    /// mock mode — a mock session's version is the literal `"mock"`.
-    pub fn version_argv(&self) -> Option<&[String]> {
-        if self.adapter_config.version_command.is_empty() {
-            None
-        } else {
-            Some(&self.adapter_config.version_command)
-        }
-    }
 }
 
 /// The chosen command plus whether it is the stand-in — the caller must
@@ -362,7 +352,8 @@ mod tests {
         assert_eq!(launch.method, "managed");
         assert_eq!(launch.command, "punar-env agent claude-code");
         assert_eq!(d.adapter_config.command, vec!["claude"]);
-        assert_eq!(d.version_argv().unwrap(), ["claude", "--version"]);
+        // Declared, but never executed before the ADR-004 boundary.
+        assert_eq!(d.adapter_config.version_command, ["claude", "--version"]);
         assert_eq!(d.adapter_config.signature.comm, vec!["claude"]);
     }
 
@@ -378,7 +369,10 @@ mod tests {
         assert_eq!(d.adapter_config.command, vec!["/bin/sh"]);
         assert!(d.adapter_config.signature.comm.is_empty());
         assert!(d.adapter_config.signature.exe_glob.is_empty());
-        assert!(d.version_argv().is_none(), "no version probe declared");
+        assert!(
+            d.adapter_config.version_command.is_empty(),
+            "no version probe declared"
+        );
         // Matched by `name`, not filename: the file is generic.json.
         assert_eq!(
             found.source.file_name().unwrap().to_string_lossy(),

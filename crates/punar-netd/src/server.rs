@@ -26,6 +26,7 @@ use crate::util::{lookup_gid, username_or_uid};
 use crate::watch;
 
 pub const ACTION_NETWORK_APPLY: &str = "network.apply";
+pub const ACTION_NETWORK_SESSION_READY: &str = "network.session_ready";
 pub const ACTION_NETWORK_DENY: &str = "network.deny";
 pub const ACTION_RELAY_SET: &str = "relay.set";
 pub const DEVICE_ID_UNKNOWN: &str = "dev_unknown";
@@ -472,6 +473,45 @@ impl Inner {
                 let result = result.map_err(runtime_error)?.applied;
                 serde_json::to_value(result).map_err(|error| internal(error.to_string()))
             }
+            NetworkMethod::SessionReady(params) => {
+                // No uid-0 exception and no caller-supplied pid. The fixed
+                // gate proves its own location through the socket peer pid;
+                // an out-of-scope CLI invocation cannot release an adapter.
+                let Some(peer_pid) = peer.pid.filter(|pid| *pid > 0).map(|pid| pid as u32) else {
+                    self.audit_denial(peer, ACTION_NETWORK_SESSION_READY, &params.session_id);
+                    return Err(denied(
+                        "The managed-session network barrier requires a Linux SO_PEERCRED pid from the gate process inside the session scope. No root or status-based bypass exists. Next step: launch the agent through `punar-env agent <name>`.",
+                    ));
+                };
+                let result = self
+                    .runtime
+                    .lock()
+                    .unwrap()
+                    .session_ready(&params.session_id, peer_pid);
+                match &result {
+                    Ok((_, outcome)) => {
+                        self.audit_transitions(outcome);
+                        self.audit_network_denials(outcome.denial_events.iter());
+                        self.audit_outcome(
+                            peer,
+                            ACTION_NETWORK_SESSION_READY,
+                            &params.session_id,
+                            AuditOutcome::Success,
+                        );
+                    }
+                    Err(RuntimeError::SessionGateNotAttributed { .. }) => {
+                        self.audit_denial(peer, ACTION_NETWORK_SESSION_READY, &params.session_id);
+                    }
+                    Err(_) => self.audit_outcome(
+                        peer,
+                        ACTION_NETWORK_SESSION_READY,
+                        &params.session_id,
+                        AuditOutcome::Failure,
+                    ),
+                }
+                let (ready, _) = result.map_err(runtime_error)?;
+                serde_json::to_value(ready).map_err(|error| internal(error.to_string()))
+            }
             NetworkMethod::RelayStatus => {
                 serde_json::to_value(self.runtime.lock().unwrap().relay_status())
                     .map_err(|error| internal(error.to_string()))
@@ -568,6 +608,27 @@ fn runtime_error(error: RuntimeError) -> IpcError {
             ),
             json!({"reason": reason}),
         ),
+        RuntimeError::SessionGateNotAttributed { session_id, reason } => IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "The network readiness request was denied because its socket peer is not the trusted gate inside session {session_id}: {reason}. No policy was inferred and the adapter must not start. Next step: launch the agent through `punar-env agent <name>`."
+            ),
+            json!({"session_id": session_id, "reason": reason}),
+        ),
+        RuntimeError::SessionNotReady { session_id, reason } => IpcError::with_details(
+            ErrorCode::NotFound,
+            format!(
+                "Managed session {session_id} is not ready in the authoritative agent registry: {reason}. The adapter must not start. Next step: check `systemctl status punar-agentd.service` and retry the launch."
+            ),
+            json!({"session_id": session_id, "reason": reason}),
+        ),
+        RuntimeError::SessionRuleNotVerified { session_id, reason } => IpcError::with_details(
+            ErrorCode::VerifyFailed,
+            format!(
+                "Network policy apply returned, but the exact kernel rule for session {session_id} could not be verified: {reason}. The adapter must not start. Next step: check `nft -j list table inet punar-net` and the punar-netd journal."
+            ),
+            json!({"session_id": session_id, "reason": reason}),
+        ),
         RuntimeError::Agentd(error) => IpcError::with_details(
             ErrorCode::UpstreamUnreachable,
             format!(
@@ -604,7 +665,10 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use punar_common::agent::{AgentsListResult, ScanTrigger};
+    use punar_common::agent::{
+        AgentClassification, AgentStatus, AgentsListResult, ListedSession, RegistryRecord,
+        ScanTrigger,
+    };
 
     use crate::agentd::AgentdClient;
     use crate::model::{RelayMode, ZoneDefinition, ZoneKind};
@@ -649,6 +713,47 @@ mod tests {
             stream
                 .write_all(response.to_json_line().as_bytes())
                 .unwrap();
+        })
+    }
+
+    fn managed_agentd(socket: PathBuf, responses: usize) -> JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "agents.list");
+                let list = AgentsListResult {
+                    scanned_at: "2026-08-29T00:00:00Z".into(),
+                    last_scan_at: "2026-08-29T00:00:00Z".into(),
+                    last_scan_trigger: ScanTrigger::Manual,
+                    changed: None,
+                    sessions: vec![ListedSession::bare(RegistryRecord {
+                        session_id: "agt_4f21c09ab3e1".into(),
+                        agent: "claude-code".into(),
+                        version: "1".into(),
+                        process_id: 42,
+                        user: "punar".into(),
+                        project: "atlas".into(),
+                        environment: "host".into(),
+                        status: AgentStatus::Active,
+                        classification: AgentClassification::Managed,
+                        started_at: "2026-08-29T00:00:00Z".into(),
+                    })],
+                    detections: vec![],
+                };
+                let response = Response::result(
+                    request["id"].as_str().unwrap(),
+                    serde_json::to_value(list).unwrap(),
+                );
+                stream
+                    .write_all(response.to_json_line().as_bytes())
+                    .unwrap();
+            }
         })
     }
 
@@ -782,6 +887,13 @@ mod tests {
         assert_eq!(capture["error"]["code"], "unknown_method");
         let apply = call(&mut stream, "3", "network.apply", Some(json!({})));
         assert_eq!(apply["error"]["code"], "denied");
+        let ready = call(
+            &mut stream,
+            "ready",
+            "network.session_ready",
+            Some(json!({"session_id": "agt_4f21c09ab3e1"})),
+        );
+        assert_eq!(ready["error"]["code"], "denied");
         let relay = call(
             &mut stream,
             "4",
@@ -813,7 +925,145 @@ mod tests {
                 && event["decision"] == "allow"
                 && event["result"] == "success"
         }));
+        assert!(events.iter().any(|event| {
+            event["action"] == "network.session_ready"
+                && event["decision"] == "deny"
+                && event["result"] == "denied"
+        }));
         assert!(!audit_body.contains("destination"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_ready_is_an_exact_peer_agentd_and_kernel_barrier() {
+        let root = root();
+        let cgroup = "/user.slice/punar-agent-agt_4f21c09ab3e1.scope";
+        for pid in [42, 77] {
+            std::fs::create_dir_all(root.join(format!("proc/{pid}"))).unwrap();
+            std::fs::write(
+                root.join(format!("proc/{pid}/cgroup")),
+                format!("0::{cgroup}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(root.join("atlas")).unwrap();
+        std::fs::write(
+            root.join("atlas/project-environment.yaml"),
+            "project: { name: atlas }\npermissions:\n  network:\n    internet: allow\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("atlas/project-network-policy.json"),
+            r#"{"project_id":"atlas","rules":[{"zone":"internet","decision":"allow"}]}"#,
+        )
+        .unwrap();
+
+        let transaction_dir = root.join("transactions");
+        std::fs::create_dir_all(&transaction_dir).unwrap();
+        std::fs::set_permissions(&transaction_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let nft = root.join("nft");
+        std::fs::write(
+            &nft,
+            r#"#!/bin/sh
+if [ "$1" = -j ]; then
+  printf '%s\n' '{"nftables":[{"chain":{"family":"inet","table":"punar-net","name":"egress"}},{"chain":{"family":"inet","table":"punar-net","name":"s_4f21c09ab3e1"}},{"rule":{"family":"inet","table":"punar-net","chain":"egress","expr":[{"match":{"op":"==","left":{"socket":{"key":"cgroupv2","level":2}},"right":"user.slice/punar-agent-agt_4f21c09ab3e1.scope"}},{"jump":{"target":"s_4f21c09ab3e1"}}]}}]}'
+fi
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&nft, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let nft = std::fs::canonicalize(nft).unwrap();
+        let trusted = std::fs::metadata(&transaction_dir).unwrap();
+        let trusted_uid = trusted.uid();
+        let trusted_gid = trusted.gid();
+        let passwd = root.join("passwd");
+        let group = root.join("group");
+        std::fs::write(
+            &passwd,
+            format!("punar:x:1000:1000:Punar:{}:/bin/bash\n", root.display()),
+        )
+        .unwrap();
+        std::fs::write(&group, format!("punar:x:{trusted_gid}:punar\n")).unwrap();
+        let agentd_socket = root.join("agentd.sock");
+        let agentd_thread = managed_agentd(agentd_socket.clone(), 3);
+        let zones = index_zones(vec![ZoneDefinition {
+            name: "internet".into(),
+            display_name: Some("Internet".into()),
+            description: None,
+            kind: ZoneKind::Internet,
+            relay_mode: Some(RelayMode::Direct),
+        }])
+        .unwrap();
+        let runtime = Runtime::new(RuntimeInputs {
+            data: NetworkData {
+                zones,
+                memberships: BTreeMap::new(),
+            },
+            agentd: AgentdClient::new(agentd_socket, root.join("proc"), Duration::from_secs(1)),
+            projects: ProjectLocator::new(passwd.clone()),
+            nft: NftExecutor::new(nft, transaction_dir, trusted_uid, Duration::from_secs(1)),
+            proc_root: root.join("proc"),
+            connections_file: root.join("run/connections.json"),
+            relay: RelayStore::open(root.join("state/relay.json")).unwrap(),
+            deny_log: None,
+            status_file: root.join("status.json"),
+        });
+        let socket = root.join("run/netd.sock");
+        let audit = root.join("audit.jsonl");
+        let config = NetdConfig {
+            socket_path: socket.clone(),
+            audit_path: audit.clone(),
+            device_id_path: root.join("device-id"),
+            passwd_file: passwd,
+            group_file: group,
+            group: "punar".into(),
+            console_uid: 1000,
+            peer_source: PeerSource::Fixed(Peer {
+                uid: 1000,
+                gid: 1000,
+                pid: Some(77),
+            }),
+            max_connections: 4,
+            io_timeout: Duration::from_secs(1),
+            agent_doorbell: None,
+            watch_wake_root: root.join("watch"),
+        };
+        let handle = Daemon::new(config, runtime).unwrap().spawn().unwrap();
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let ready = call(
+            &mut stream,
+            "ready",
+            "network.session_ready",
+            Some(json!({"session_id": "agt_4f21c09ab3e1"})),
+        );
+        assert_eq!(ready["result"]["session_id"], "agt_4f21c09ab3e1", "{ready}");
+        assert_eq!(ready["result"]["project"], "atlas", "{ready}");
+        assert_eq!(ready["result"]["state"], "ready", "{ready}");
+        assert_eq!(
+            ready["result"]["enforcement"], "nftables_cgroup_v2",
+            "{ready}"
+        );
+
+        std::fs::write(
+            root.join("proc/77/cgroup"),
+            "0::/user.slice/not-the-session.scope\n",
+        )
+        .unwrap();
+        let escaped = call(
+            &mut stream,
+            "escaped",
+            "network.session_ready",
+            Some(json!({"session_id": "agt_4f21c09ab3e1"})),
+        );
+        assert_eq!(escaped["error"]["code"], "denied");
+        drop(stream);
+        handle.stop();
+        agentd_thread.join().unwrap();
+        let audit = std::fs::read_to_string(audit).unwrap();
+        assert!(audit.contains("\"action\":\"network.session_ready\""));
+        assert!(audit.contains("\"result\":\"success\""));
+        assert!(audit.contains("\"result\":\"denied\""));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

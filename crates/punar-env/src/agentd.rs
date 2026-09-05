@@ -26,19 +26,15 @@ use punar_common::ipc::{PROTOCOL_VERSION, Response, ResponseBody};
 /// Contract socket path (`punar_common::agent::AGENTD_SOCKET_PATH`).
 pub const DEFAULT_SOCKET: &str = punar_common::agent::AGENTD_SOCKET_PATH;
 
-/// Test/dev override for [`DEFAULT_SOCKET`]. Never set in the image.
-pub const SOCKET_ENV: &str = "PUNAR_AGENTD_SOCKET";
-
 /// Client response budget (contract section 2, applied to the sibling
 /// socket by section 10.1).
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The socket to talk to, honoring the test override.
+/// The authoritative production socket.  This launch boundary deliberately
+/// does not honor an environment override: the invoking user controls their
+/// environment before confinement, so an override could impersonate agentd.
 pub fn socket_path() -> PathBuf {
-    std::env::var_os(SOCKET_ENV)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET))
+    PathBuf::from(DEFAULT_SOCKET)
 }
 
 /// Everything one `agents.*` call can fail with.
@@ -87,7 +83,7 @@ impl Client {
         Client { socket }
     }
 
-    /// The client for this system (contract path, or the test override).
+    /// The client for the system's fixed contract path.
     pub fn discover() -> Client {
         Client::new(socket_path())
     }

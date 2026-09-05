@@ -22,6 +22,7 @@ gets one row in the index below.
 | [ADR-001](docs/architecture/adr/ADR-001-distribution-substrate.md) | Distribution Substrate | Accepted | 2026-08-24 |
 | [ADR-002](docs/architecture/adr/ADR-002-first-party-binaries.md) | Distribution of First-Party Binaries | Accepted | 2026-08-25 |
 | [ADR-003](docs/architecture/adr/ADR-003-ab-slots-over-snapper.md) | A/B root slots as the rollback mechanism (supersedes ADR-001's MVP snapper choice) | Accepted | 2026-08-25 |
+| [ADR-004](docs/architecture/adr/ADR-004-managed-agent-isolation.md) | Managed host-agent filesystem and process isolation (Bubblewrap behind a kernel-proven pre-exec gate) | Accepted — bounded first slice; image/runtime proof open | 2026-09-04 |
 | [ADR-005](docs/architecture/adr/ADR-005-arm64-support.md) | ARM64 support and its consequence for the distribution substrate | Proposed | 2026-08-26 |
 | [ADR-006](docs/architecture/adr/ADR-006-raspberry-pi-native-ab.md) | Native Raspberry Pi `tryboot` for A/B rollback | Accepted for implementation | 2026-08-26 |
 | [ADR-007](docs/architecture/adr/ADR-007-network-enforcement-boundary.md) | Per-principal network enforcement and nftables table ownership | Accepted | 2026-08-29 |
