@@ -593,10 +593,12 @@ ESP_MOUNTED=1
     || die 're-read recovery-slot-B UKI does not match signed release metadata'
 grep -Fxq "preferred punar_${version}*.efi" "${ESP_MOUNT_DIR}/loader/loader.conf" \
     || die 'installed loader preference does not select slot A'
+# The ESP is mounted read-only; objcopy needs an explicit output path or it
+# writes its working copy beside the input and fails on the mount.
 objcopy --dump-section ".cmdline=${WORKDIR}/installed-slot-a.cmdline" \
-    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_a}"
+    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_a}" "${WORKDIR}/installed-slot-a.copy.efi"
 objcopy --dump-section ".cmdline=${WORKDIR}/installed-slot-b.cmdline" \
-    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_b}"
+    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_b}" "${WORKDIR}/installed-slot-b.copy.efi"
 tr -d '\000' < "${WORKDIR}/installed-slot-a.cmdline" \
     | tr ' ' '\n' | grep -Fqx 'root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea' \
     || die 'installed slot-A UKI does not bind slot A'
