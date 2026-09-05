@@ -80,7 +80,7 @@
         "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4",
         "partuuid": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9",
         "offset_bytes": 18254659584,
-        "size_bytes": 109744291840,
+        "size_bytes": 109745319936,
         "filesystem": "btrfs",
         "encrypted": true
       }
@@ -88,7 +88,7 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "1f228f79dbb9e335dd20dcd9f84cb26da649c62ae8875a0e84afad073bf13b59",
+  "plan_token": "ab5000191f2012c40436e690f97ef066c50e692623fbc921d0167706992e4d7f",
   "hardware_report": {
     "v": 1,
     "generated_at": "2026-08-30T18:45:00Z",

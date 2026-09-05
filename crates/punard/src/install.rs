@@ -69,6 +69,25 @@ const ROOT_SIZE: u64 = 8 * GIB;
 const DATA_MINIMUM: u64 = 16 * GIB;
 const TARGET_DISK_BYTES: u64 = 128_000_000_000;
 const GPT_LBAS: u64 = 34;
+/// The backup GPT that `systemd-repart` reserves at the end of the disk: one
+/// header sector plus the 128-entry table (16 KiB, sector-rounded). The last
+/// usable byte precedes it, and repart rounds a grown final partition down to
+/// its 4096-byte grain. A canonical 128 GiB KVM install (run 33936233572,
+/// `installer-install-proof/sfdisk.json`) ends PUNAR-DATA at byte
+/// 137438932992 = align_down(disk - 33 * 512, 4096); the planner must agree
+/// exactly, because the post-repartition GPT check compares every field.
+const GPT_ENTRY_TABLE_BYTES: u64 = 128 * 128;
+const REPART_GRAIN: u64 = 4096;
+
+fn gpt_trailer_bytes(sector_bytes: u64) -> u64 {
+    sector_bytes + align_up(GPT_ENTRY_TABLE_BYTES, sector_bytes).unwrap_or(GPT_ENTRY_TABLE_BYTES)
+}
+
+fn repart_usable_end(disk_bytes: u64, sector_bytes: u64) -> Option<u64> {
+    disk_bytes
+        .checked_sub(gpt_trailer_bytes(sector_bytes))
+        .map(|value| align_down(value, REPART_GRAIN.max(sector_bytes)))
+}
 const PLAN_REGISTRY_LIMIT: usize = 16;
 const PASSPHRASE_MAX_BYTES: usize = 4096;
 const OOBE_ANSWERS_MAX_BYTES: usize = 1024 * 1024;
@@ -5015,9 +5034,9 @@ fn partition_plan(
     }
     let first = align_up(GPT_LBAS * sector_bytes, ALIGNMENT)
         .ok_or_else(|| InstallError::Invalid("disk geometry overflow".into()))?;
-    let usable_end = disk_bytes
-        .checked_sub(GPT_LBAS * sector_bytes)
-        .map(|value| align_down(value, ALIGNMENT))
+    // The final partition grows to systemd-repart's own last usable byte,
+    // not to the planner's MiB grid: see `repart_usable_end`.
+    let usable_end = repart_usable_end(disk_bytes, sector_bytes)
         .ok_or_else(|| InstallError::Refused("disk is too small for a GPT".into()))?;
     let root_a = first + ESP_SIZE;
     let (selector, boot_a, boot_b, platform_root_a, root_b, data) = match boot_platform {
@@ -5243,8 +5262,9 @@ fn root_b_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
 
 fn minimum_disk_bytes(sector_bytes: u64, boot_platform: BootPlatform) -> u64 {
     let start = align_up(GPT_LBAS * sector_bytes, ALIGNMENT).unwrap_or(ALIGNMENT);
-    start
-        .saturating_add(fixed_install_bytes(boot_platform) + DATA_MINIMUM + GPT_LBAS * sector_bytes)
+    start.saturating_add(
+        fixed_install_bytes(boot_platform) + DATA_MINIMUM + gpt_trailer_bytes(sector_bytes),
+    )
 }
 
 fn align_up(value: u64, alignment: u64) -> Option<u64> {
@@ -7678,6 +7698,20 @@ mod tests {
         assert!(data >= DATA_MINIMUM);
         assert_eq!(partitions[1].type_guid, X86_ROOT_TYPE_GUID);
         assert!(partitions[3].encrypted);
+
+        // The canonical 128 GiB KVM target (run 33936233572 sfdisk.json):
+        // repart ended PUNAR-DATA at byte 137438932992, size 119184273408.
+        let (partitions, data) = partition_plan(
+            137_438_953_472,
+            512,
+            Architecture::X86_64,
+            BootPlatform::Uefi,
+            InstallEncryption::Luks2,
+        )
+        .unwrap();
+        assert_eq!(partitions[3].offset_bytes, 18_254_659_584);
+        assert_eq!(data, 119_184_273_408);
+        assert_eq!(partitions[3].offset_bytes + data, 137_438_932_992);
     }
 
     #[test]
