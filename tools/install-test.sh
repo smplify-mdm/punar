@@ -22,7 +22,7 @@ die() {
 [ -f "${ISO}" ] || die "installer ISO is missing: ${ISO}"
 [ -x "${RELEASE_TOOL}" ] \
     || die "release verifier is missing or not executable: ${RELEASE_TOOL}"
-for command in qemu-system-x86_64 qemu-img qemu-nbd sfdisk cryptsetup btrfs \
+for command in qemu-system-x86_64 qemu-img qemu-nbd sfdisk partx cryptsetup btrfs \
     blkid jq python3 xorriso mkfs.vfat mcopy sha256sum; do
     command -v "${command}" >/dev/null || die "${command} is required"
 done
@@ -454,11 +454,28 @@ sudo modprobe nbd max_part=8
     || die "${NBD_DEVICE} is already attached"
 sudo qemu-nbd --connect="${NBD_DEVICE}" "${TARGET_DISK}"
 NBD_ATTACHED=1
-sudo udevadm settle
-for partition in 1 2 3 4; do
-    [ -b "${NBD_DEVICE}p${partition}" ] \
-        || die "installed partition ${partition} was not discovered"
+# qemu-nbd may return before the kernel has scanned the newly attached GPT;
+# udevadm settle waits for queued events but does not initiate that scan. Force
+# a bounded refresh so a valid installed disk cannot fail nondeterministically
+# merely because /dev/nbd0pN appeared a fraction of a second later.
+partitions_ready=0
+for ((attempt = 0; attempt < 10; attempt++)); do
+    sudo partx --add "${NBD_DEVICE}" >/dev/null 2>&1 || true
+    sudo udevadm settle
+    partitions_ready=1
+    for partition in 1 2 3 4; do
+        if [ ! -b "${NBD_DEVICE}p${partition}" ]; then
+            partitions_ready=0
+            break
+        fi
+    done
+    [ "${partitions_ready}" -eq 1 ] && break
+    sleep 1
 done
+if [ "${partitions_ready}" -ne 1 ]; then
+    sudo partx --show "${NBD_DEVICE}" >&2 || true
+    die 'installed partitions 1 through 4 were not discovered after a bounded refresh'
+fi
 
 sudo sfdisk --json "${NBD_DEVICE}" \
     | tee "${PROOF_DIR}/sfdisk.json" >/dev/null

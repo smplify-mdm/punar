@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMMON="${REPO_ROOT}/os/images/debian-snapshot.env"
 ARM="${REPO_ROOT}/os/images/arm64/snapshot.env"
 AMD64="${REPO_ROOT}/os/images/amd64-debian/snapshot.env"
+INSTALL_TEST="${REPO_ROOT}/tools/install-test.sh"
 
 fail() {
     echo "debian-substrate-contract-test: FAIL: $*" >&2
@@ -143,6 +144,11 @@ for proof_dir in installer-boot-proof installer-install-proof; do
         "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
         || fail "amd64 installer builder does not return ${proof_dir} to the host runner"
 done
+# shellcheck disable=SC2016  # Literal source contract; expansion is a defect.
+grep -Fq 'sudo partx --add "${NBD_DEVICE}"' "${INSTALL_TEST}" \
+    || fail 'installed-image proof does not force NBD partition discovery'
+grep -Fq 'attempt < 10' "${INSTALL_TEST}" \
+    || fail 'installed-image NBD refresh is not bounded'
 # A clean Docker build creates out/ as root. The proof directories above make
 # today's tests work; returning the parent prevents the same boundary defect
 # when another host-side report is added.
