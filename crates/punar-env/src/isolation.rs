@@ -31,6 +31,13 @@ pub const BWRAP_PATH: &str = "/usr/bin/bwrap";
 pub const SYSTEMD_RUN_PATH: &str = "/usr/bin/systemd-run";
 pub const SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
 pub const PUNAR_ENV_PATH: &str = "/usr/bin/punar-env";
+/// coreutils `env`, used only for its signal-disposition options: the gate
+/// execs Bubblewrap through `env --ignore-signal=TERM` so a scope stop cannot
+/// kill the monitor before the adapter, and the adapter starts behind
+/// `env --default-signal=TERM` so it alone sees the default disposition.
+/// punar-env forbids unsafe code, and setting a disposition is otherwise a
+/// raw `signal(2)` call; `env` is a canonical root-owned tool like the rest.
+pub const ENV_PATH: &str = "/usr/bin/env";
 
 /// A stable path inside every managed-agent namespace.
 pub const SANDBOX_WORKSPACE: &str = "/workspace";
@@ -366,6 +373,13 @@ fn bubblewrap_argv(
 
     push_pair(&mut args, "--chdir", SANDBOX_WORKSPACE);
     push_arg(&mut args, "--");
+    // The adapter starts behind canonical `env` (read-only /usr is in the
+    // namespace), which restores the default SIGTERM disposition the gate
+    // ignored before exec'ing Bubblewrap and then execs the adapter argv
+    // verbatim: no shell, no PATH lookup, no environment change.
+    push_arg(&mut args, ENV_PATH);
+    push_arg(&mut args, "--default-signal=TERM");
+    push_arg(&mut args, "--");
     args.extend(command.argv().iter().cloned());
     args
 }
@@ -567,6 +581,7 @@ pub fn require_launch_tools() -> Result<(), EnvError> {
         ("systemd-run", SYSTEMD_RUN_PATH),
         ("systemctl", SYSTEMCTL_PATH),
         ("punar-env gate", PUNAR_ENV_PATH),
+        ("coreutils env", ENV_PATH),
     ] {
         validate_trusted_executable(Path::new(path), 0, Path::new("/")).map_err(|reason| {
             EnvError::Runtime(format!(
@@ -1091,6 +1106,13 @@ mod tests {
         }));
         let separator = argv.iter().rposition(|item| item == "--").unwrap();
         assert_eq!(&argv[separator + 1..], [SANDBOX_AGENT, "--argument"]);
+        // The signal-reset stage sits between Bubblewrap's separator and the
+        // adapter, so only the adapter regains the default SIGTERM.
+        assert_eq!(
+            &argv[separator - 2..separator],
+            [ENV_PATH, "--default-signal=TERM"]
+        );
+        assert_eq!(argv[separator - 3], "--");
     }
 
     #[test]

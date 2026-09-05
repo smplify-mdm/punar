@@ -1011,7 +1011,17 @@ chain instead of rejecting every symlink; and the Arch image has no
 `hostname` binary, so the namespace probe uses `uname -n`. The readback now
 lists only the `egress` and `s_<tag>` chains under an explicit 1 MiB bound,
 gate handoff files are published atomically, and a project must live at
-`~/<project.name>` because that is where punar-netd locates its policy. Because the sandboxed mock can no longer reach punard, the M8
+`~/<project.name>` because that is where punar-netd locates its policy.
+First runtime evidence (2026-09-05): the canonical x86 KVM desktop gate and
+a local Apple-HVF ARM64 run of the same image (idle RAM 945/948 MB) passed
+every M7 namespace assertion — agentd, netd, punard, secrets and D-Bus
+sockets absent, real `~/.ssh` and another project absent, `/usr` read-only,
+UTS and PID isolated — and failed exactly one: punar-env returned 143 after
+the scope stop because Bubblewrap's outer monitor died from the group-wide
+SIGTERM before the adapter could act. The gate now execs Bubblewrap through
+canonical `env --ignore-signal=TERM` and the adapter starts behind
+`env --default-signal=TERM`, so the session ends with the adapter's own exit
+status; M8/M12 on a rebuilt image remain the outstanding clean-VM proof. Because the sandboxed mock can no longer reach punard, the M8
 gate now makes its two agent-originated calls from a process moved into the
 same scope cgroup (M9's `in-agent-scope.sh`) and asserts the mock's explicit
 "mediation unavailable" report instead. Known limits are in the ADR: whole

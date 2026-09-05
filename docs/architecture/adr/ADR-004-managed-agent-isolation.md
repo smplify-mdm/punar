@@ -117,6 +117,16 @@ home and never the user's real home. The row is explicitly rendered as
   the registry row's `exe`/`comm` therefore show `bwrap`, while attribution,
   ADR-007 matching, stop behavior and lifecycle stay attached to the same
   scope cgroup (the monitor exits with the adapter's status).
+- Ending a session is `systemctl --user stop <scope>`, which signals every
+  process in the cgroup. The gate execs Bubblewrap through canonical
+  `/usr/bin/env --ignore-signal=TERM`, so the outer monitor and its PID-1
+  reaper survive the stop and report the adapter's own exit status, and the
+  adapter starts behind `env --default-signal=TERM` inside the namespace so
+  it alone regains the default disposition. `env` is validated like every
+  other fixed tool; punar-env forbids unsafe code, which rules out a raw
+  `signal(2)` call. Without this the monitor died first and
+  `--die-with-parent` SIGKILLed the namespace before the adapter could act
+  (the first x86 and ARM64 M7 gates saw exit 143 instead of the adapter's 0).
 - The project directory must be exactly `~/<project.name>`: punar-netd
   locates the session's manifest and policy there, and any other layout would
   be enforced as `deny_all` behind a daemon-side warning while the launch

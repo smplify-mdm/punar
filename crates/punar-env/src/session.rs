@@ -43,8 +43,8 @@ use crate::agentd::{self, AgentdError};
 use crate::authority::{self, Citation};
 use crate::engine::{EnvError, project_grade};
 use crate::isolation::{
-    self, BWRAP_PATH, PUNAR_ENV_PATH, SANDBOX_WORKSPACE, SYSTEMCTL_PATH, SYSTEMD_RUN_PATH,
-    SessionIsolation,
+    self, BWRAP_PATH, ENV_PATH, PUNAR_ENV_PATH, SANDBOX_WORKSPACE, SYSTEMCTL_PATH,
+    SYSTEMD_RUN_PATH, SessionIsolation,
 };
 use crate::manifest::{FilesystemAccess, Manifest};
 use crate::netd;
@@ -827,10 +827,25 @@ pub fn run_agent_gate(path: &Path, session_id: &str, nonce: &str) -> Result<u8, 
         return Err(error);
     }
 
-    // Bubblewrap is the sole executable target and receives a completely
-    // empty inherited environment. This prevents LD_PRELOAD/loader variables
-    // from running user code before Bubblewrap applies `--clearenv` itself.
-    let error = Command::new(BWRAP_PATH)
+    // `systemctl --user stop <scope>` signals every process in the cgroup at
+    // once. Bubblewrap's outer monitor has no SIGTERM handling and would die
+    // on the spot, and `--die-with-parent` would then SIGKILL the whole PID
+    // namespace before the adapter could act on its own SIGTERM; the session
+    // would end as "killed by signal 15" whatever the adapter did. Ignored
+    // dispositions survive exec and fork, so canonical `env
+    // --ignore-signal=TERM` in front of Bubblewrap makes the monitor and its
+    // reaper outlive the stop, and `env --default-signal=TERM` in front of
+    // the adapter (see bubblewrap_argv) restores the default for the adapter
+    // alone, the process the signal is for.
+    //
+    // Bubblewrap remains the sole sandbox executable and receives a
+    // completely empty inherited environment: `env` here only changes the
+    // disposition and execs the fixed path. This keeps LD_PRELOAD/loader
+    // variables from running user code before Bubblewrap applies
+    // `--clearenv` itself.
+    let error = Command::new(ENV_PATH)
+        .arg("--ignore-signal=TERM")
+        .arg(BWRAP_PATH)
         .args(&spec.sandbox_argv[1..])
         .env_clear()
         .exec();
