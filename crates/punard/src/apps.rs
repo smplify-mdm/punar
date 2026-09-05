@@ -8,6 +8,7 @@
 //! demand, verified against a digest promoted in the signed catalog, and only
 //! their data archive is extracted: maintainer scripts are never executed.
 
+use crate::util::SpawnBusyRetry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
@@ -1230,7 +1231,7 @@ fn run_capture_with_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_busy_retry()
         .map_err(backend_io)?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -1287,7 +1288,7 @@ fn extract_member_to_file(
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_busy_retry()
         .map_err(backend_io)?;
     wait_quiet_child(bin, &mut child, timeout)
 }
@@ -1371,7 +1372,7 @@ fn extract_payload(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_busy_retry()
         .map_err(backend_io)?;
     wait_quiet_child(bin, &mut child, timeout)
 }
@@ -1882,7 +1883,7 @@ fn run_quiet_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Resul
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_busy_retry()
         .map_err(|e| AppError::Backend(e.to_string()))?;
     let started = Instant::now();
     loop {

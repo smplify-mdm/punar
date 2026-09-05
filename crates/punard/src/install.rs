@@ -8,6 +8,7 @@
 //! plan-bound `install.apply` and paired descriptor-only recovery acknowledgement;
 //! the unattended answer-disk lane remains separately gated.
 
+use crate::util::SpawnBusyRetry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CStr, OsString};
 use std::fs::{self, File};
@@ -1035,7 +1036,7 @@ impl Installer {
             .stdin(Stdio::from(payload))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn_busy_retry()?;
         let mut decompressed = child.stdout.take().ok_or_else(|| {
             InstallError::Io(std::io::Error::other(
                 "zstd did not provide its fixed output pipe",
@@ -3118,7 +3119,8 @@ fn run_bootctl(binary: &Path, esp: &Path) -> Result<(), InstallError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .spawn_busy_retry()?
+        .wait()?;
     if !status.success() {
         return Err(InstallError::Io(std::io::Error::other(
             "bootctl did not install the fixed removable-media bootloader",
@@ -3746,7 +3748,7 @@ fn run_systemd_repart(
     }
     command.arg(definitions_arg).arg(target);
 
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = command.spawn_busy_retry().map_err(|error| {
         InstallError::Io(std::io::Error::new(
             error.kind(),
             format!(
@@ -3805,7 +3807,7 @@ fn run_systemd_cryptenroll(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = command.spawn_busy_retry().map_err(|error| {
         InstallError::Io(std::io::Error::new(
             error.kind(),
             format!(
@@ -3892,7 +3894,7 @@ fn read_systemd_recovery_keyslot(binary: &Path, target: &Path) -> Result<u8, Ins
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = command.spawn_busy_retry().map_err(|error| {
         InstallError::Io(std::io::Error::new(
             error.kind(),
             format!(
@@ -3969,7 +3971,7 @@ fn read_luks_uuid(binary: &Path, target: &Path) -> Result<String, InstallError> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = command.spawn_busy_retry().map_err(|error| {
         InstallError::Io(std::io::Error::new(
             error.kind(),
             format!(
@@ -4139,7 +4141,7 @@ fn run_cryptsetup_open(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn_busy_retry()?;
     let write_result = child
         .stdin
         .take()
@@ -4170,7 +4172,8 @@ fn close_luks_mapping(binary: &Path, name: &str) -> Result<(), InstallError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .spawn_busy_retry()?
+        .wait()?;
     if !status.success() {
         return Err(InstallError::Io(std::io::Error::other(
             "cryptsetup did not close the installed data volume",

@@ -5,6 +5,7 @@
 //! firmware's read-only device-tree facts choose the inactive slot. No caller
 //! supplies a block-device path or command line.
 
+use crate::util::SpawnBusyRetry;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -840,7 +841,7 @@ impl PiUpdateEngine {
             .stdin(Stdio::from(payload))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn_busy_retry()?;
         let mut output = child.stdout.take().ok_or_else(|| {
             PiUpdateError::Io(std::io::Error::other(
                 "zstd did not provide its fixed output pipe",

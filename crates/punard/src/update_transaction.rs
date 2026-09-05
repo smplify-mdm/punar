@@ -6,6 +6,7 @@
 //! the exact root/UKI pair. The UKI is installed only after the root payload
 //! has been written, fsynced, physically re-read and re-hashed.
 
+use crate::util::SpawnBusyRetry;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
@@ -649,7 +650,7 @@ fn write_root_payload(
         .stdin(Stdio::from(source))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_busy_retry()?;
     let mut output = child.stdout.take().ok_or_else(|| {
         UpdateTransactionError::Apply("zstd did not expose its fixed output pipe".into())
     })?;

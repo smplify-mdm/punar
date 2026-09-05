@@ -137,6 +137,37 @@ pub fn remove_synced(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `ETXTBSY` from `execve`: the target was still open for writing somewhere
+/// (a just-published fixture in a multithreaded test binary, or a package
+/// update racing a launch). It is transient by definition, so a bounded
+/// retry is the correct response; anything else is returned unchanged.
+const EXECUTABLE_FILE_BUSY_ERRNO: i32 = 26;
+const SPAWN_BUSY_ATTEMPTS: usize = 8;
+const SPAWN_BUSY_BACKOFF: Duration = Duration::from_millis(10);
+
+pub trait SpawnBusyRetry {
+    /// [`Command::spawn`] with a bounded retry on `ETXTBSY` only.
+    fn spawn_busy_retry(&mut self) -> io::Result<std::process::Child>;
+}
+
+impl SpawnBusyRetry for Command {
+    fn spawn_busy_retry(&mut self) -> io::Result<std::process::Child> {
+        for attempt in 0..SPAWN_BUSY_ATTEMPTS {
+            match self.spawn() {
+                Ok(child) => return Ok(child),
+                Err(error)
+                    if error.raw_os_error() == Some(EXECUTABLE_FILE_BUSY_ERRNO)
+                        && attempt + 1 < SPAWN_BUSY_ATTEMPTS =>
+                {
+                    std::thread::sleep(SPAWN_BUSY_BACKOFF);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded spawn loop always returns on its final attempt")
+    }
+}
+
 /// Outcome of a bounded subprocess run.
 #[derive(Debug)]
 pub struct CommandResult {
@@ -155,7 +186,7 @@ pub fn run_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> io::Res
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn_busy_retry()?;
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {

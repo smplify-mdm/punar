@@ -5,6 +5,7 @@
 //! only subprocess is fixed-argv `modinfo`, used to read module firmware
 //! metadata from the already-installed kernel tree.
 
+use crate::util::SpawnBusyRetry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -401,7 +402,7 @@ fn read_module_firmware(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_busy_retry()
     {
         Ok(child) => child,
         Err(error)
