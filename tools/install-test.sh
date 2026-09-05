@@ -674,6 +674,68 @@ if sudo grep -aRF -f "${SECRET_PATTERNS}" \
     die 'a generated install secret appeared in installed logs or state'
 fi
 
+# I35 (docs/design/installer.md): the audit handoff is what the installed
+# system inherits on first boot. punard already re-reads and re-verifies it
+# before reporting success, but a daemon cannot prove its own output: read the
+# log back off the real encrypted volume instead.
+INSTALLED_AUDIT="${MOUNT_DIR}/@var/log/punar/audit.jsonl"
+sudo test -f "${INSTALLED_AUDIT}" \
+    || die 'the installed system carries no audit handoff at /var/log/punar/audit.jsonl'
+audit_dir_mode=$(sudo stat -c '%a' "${MOUNT_DIR}/@var/log/punar")
+[ "${audit_dir_mode}" = 750 ] \
+    || die "the installed audit directory is mode ${audit_dir_mode}, not 750"
+audit_file_mode=$(sudo stat -c '%a' "${INSTALLED_AUDIT}")
+[ "${audit_file_mode}" = 640 ] \
+    || die "the installed audit log is mode ${audit_file_mode}, not 640"
+sudo cp "${INSTALLED_AUDIT}" "${PROOF_DIR}/installed-audit.jsonl"
+sudo chown "$(id -u):$(id -g)" "${PROOF_DIR}/installed-audit.jsonl"
+
+# Each terminal installation event must be bound to the installer principal,
+# to no agent session, and to the system project. `awk NR==1` rather than
+# `head -1` because a closed pipe would trip pipefail before the assertion.
+while IFS='|' read -r audit_action audit_resource audit_result audit_slug; do
+    audit_event_file="${PROOF_DIR}/installed-audit-${audit_slug}.json"
+    jq -c --arg action "${audit_action}" \
+          --arg resource "${audit_resource}" \
+          --arg result "${audit_result}" \
+        'select(.action == $action
+                and .resource == $resource
+                and .result == $result
+                and .decision == "allow"
+                and .agent_session_id == "agt_none"
+                and .project_id == "system")' \
+        "${PROOF_DIR}/installed-audit.jsonl" \
+        | awk 'NR == 1' > "${audit_event_file}"
+    [ -s "${audit_event_file}" ] \
+        || die "the installed audit handoff has no ${audit_action} event with resource ${audit_resource}, result ${audit_result}, decision allow, agt_none and project system"
+done <<'AUDIT_EVENTS'
+install.plan|system_disk|success|plan
+install.apply|system_image|success|apply
+install.recovery_key|system_disk|enrolled|recovery-key
+AUDIT_EVENTS
+
+# I35's "and no key-shaped field" is only a real assertion if the whole event
+# shape is checked: schemas/audit/audit-event.json is additionalProperties
+# false, so schema conformance is what forbids an extra field. Validate through
+# the same containerized harness tools/validate-schemas.sh and the M9 gate use,
+# since this host is not assumed to have jsonschema.
+if command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "${REPO_ROOT}:/w" -v "${PROOF_DIR}:/proof:ro" \
+        -w /w python:3.12-slim sh -c \
+        "pip install -q jsonschema pyyaml referencing && \
+         for slug in plan apply recovery-key; do \
+           python tools/validate_schemas.py \
+             --document /proof/installed-audit-\${slug}.json \
+             --schema schemas/audit/audit-event.json || exit 1; \
+         done" \
+        || die 'an installed audit event does not validate against schemas/audit/audit-event.json'
+    echo '==> installed audit handoff validates against schemas/audit/audit-event.json'
+else
+    echo 'warning: docker is unavailable, so the installed audit events were not' >&2
+    echo 'warning: re-validated against schemas/audit/audit-event.json; the jq shape' >&2
+    echo 'warning: assertions above still ran' >&2
+fi
+
 sudo umount "${MOUNT_DIR}"
 DATA_MOUNTED=0
 sudo cryptsetup close "${MAPPER_NAME}"
@@ -681,7 +743,7 @@ MAPPER_OPEN=0
 sudo qemu-nbd --disconnect "${NBD_DEVICE}" >/dev/null
 NBD_ATTACHED=0
 
-printf 'I08-I13,I17,I36a-I36d,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
+printf 'I08-I13,I17,I35,I36a-I36d,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
     "${TARGET_BYTES}" "${luks_uuid}" "$((finished - started))" \
     > "${PROOF_DIR}/result.txt"
-echo "install-test: PASS (I08-I13 + I17 recovery floor + I36a-I36d refusals + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
+echo "install-test: PASS (I08-I13 + I17 recovery floor + I35 installed audit handoff + I36a-I36d refusals + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
