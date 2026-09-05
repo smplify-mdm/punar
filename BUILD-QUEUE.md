@@ -974,9 +974,16 @@ that compatibility gate.
 The current working tree now implements generic web-app creation, persistent
 launchers, isolated browser contexts, closed managed Chromium policy,
 workspace-aware selection, clean uninstall/purge, and the complete M11 image
-exercise. Host Rust, schema, shell, QML parser and static contract suites pass;
-the feature remains **LOCAL-ONLY** until a rebuilt image produces the M11
-runtime report and screenshot on both architectures. M12's implementation,
+exercise. Host Rust, schema, shell, QML parser and static contract suites pass.
+The x86 KVM desktop gate passed M11 in canonical run 33975607552. The first
+native ARM64 execution (local Apple-HVF, image `3acec65`, 2026-09-05) passed
+73 assertions and failed the two-way storage-separation check because the
+exercise stopped the browsers 1.5 s after the fixture launched, before its
+page script had persisted the probe (ARM64 under HVF also logs transient GPU
+command-buffer failures that delay first paint); the check now waits,
+bounded, for each context to persist its own probe first. ARM64 M11/M12
+runtime evidence on a rebuilt image is still owed, and hosted ARM CI cannot
+supply it without KVM. M12's implementation,
 daemon/CLI/image integration and event-driven
 reconciliation are complete: the same canonical run emitted `PUNAR_M12_OK`
 with 66 assertions on x86_64 and ARM64 and closed DoD items 19 and 20 for

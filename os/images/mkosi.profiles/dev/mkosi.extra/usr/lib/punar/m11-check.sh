@@ -428,6 +428,24 @@ grep_row "context status says existing windows are unchanged" \
 grep_row "context status says workspace changes do not launch apps" \
     "${RUN_DIR}/m11-context-status.txt" "WORKSPACE CHANGES DO NOT START APPS"
 
+# The probe values are written by the pages' own scripts, and Chromium
+# commits DOM storage on a timer. On a slower accelerator (native ARM64 under
+# HVF reported transient GPU command-buffer failures) the fixture window can
+# exist before its script has run, and stopping the browsers then proves
+# nothing. Wait, bounded, for each context to persist its OWN probe first;
+# the two-way check below still requires the other context's value to be
+# absent, so this cannot pass vacuously.
+waited=0
+while [ "${waited}" -lt 90 ]; do
+    if grep -raF 'punar-ctx-probe-personal' "${PERSONAL_PROFILE}" >/dev/null 2>&1 \
+            && grep -raF 'punar-ctx-probe-atlas' "${ATLAS_PROFILE}" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+note "info both contexts persisted their own storage probe after ${waited}s"
+
 # 5. The PUNAR+B command target opens a normal browser in the chosen context.
 stop_browsers
 [ -z "${NOTES_JOB}" ] || wait "${NOTES_JOB}" >/dev/null 2>&1 || true
