@@ -87,6 +87,7 @@ usr/lib/systemd/system/multi-user.target.wants/iwd.service -> ../iwd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-agentd.service -> ../punar-agentd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-identity-materialize.service -> ../punar-identity-materialize.service
 usr/lib/systemd/system/multi-user.target.wants/punar-netd.service -> ../punar-netd.service
+usr/lib/systemd/system/graphical.target.wants/punar-pi-update-health.service -> ../punar-pi-update-health.service
 usr/lib/systemd/system/multi-user.target.wants/punar-secrets.service -> ../punar-secrets.service
 usr/lib/systemd/system/multi-user.target.wants/punard-reconcile.timer -> ../punard-reconcile.timer
 usr/lib/systemd/system/multi-user.target.wants/punard.service -> ../punard.service

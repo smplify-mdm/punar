@@ -216,6 +216,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
+| `update.reconcile_candidate` | **root boot service only in normal operation; agent attribution is a hard denial before uid** | Pi selector/finalization only | required durable outcome audit before pending removal |
 | `update.rollback` | **root human only; agent attribution is a hard denial before uid** | yes, local selector only | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
@@ -871,7 +872,11 @@ The running kernel command line chooses the active fixed PARTUUID; the opposite
 fixed PARTUUID chooses the destination. Punar verifies compressed and UKI
 digests, verifies the UKI `.cmdline` binds exactly that destination, streams the
 root image, fsyncs it, physically re-reads and hashes it, retains the blessed
-old UKI, installs the new boot-counted UKI last, and durably selects it. On
+old UKI, installs the new boot-counted UKI last, and durably selects it. On a
+freshly installed device the first apply also retires the factory B-bound
+`punar-recovery_<version>.efi` before it opens root B, proving the retirement
+across an ESP read-only re-open; while slot A is still boot-counted that
+retirement, and therefore the apply, is refused as `conflict`. On
 Raspberry Pi, the equivalent signed A/B transaction stages the inactive root
 and firmware set for one-shot `tryboot`.
 
@@ -884,7 +889,46 @@ The daemon never reboots. `punarctl update apply … --reboot` performs the fixe
 caller-side restart only after this successful result (Pi uses `reboot 0
 tryboot`; UEFI uses `systemctl reboot`).
 
-### 5.17b `update.rollback`
+### 5.17b `update.reconcile_candidate`
+
+Params: none. This internal native-Pi boot-service method accepts no slot,
+path, digest, version or health value. It is root-only and an agent-attributed
+peer is denied even when uid 0. The daemon binds the durable pending record to
+firmware's read-only boot observation and the fixed selector layout, then
+returns one of three explicit outcomes:
+
+- `blessed_candidate`: a one-shot candidate passed every health signal; its
+  exact signed root and boot byte ranges were re-read with `O_DIRECT`, its
+  boot filesystem semantics and mounted read-only root `IMAGE_VERSION` matched,
+  and the selector was durably committed;
+- `firmware_fallback`: firmware returned to the recorded previous slot while
+  the selector remained uncommitted; no selector byte is changed and no
+  candidate health claim is made;
+- `postcommit_recovery`: the committed selector and exact previous-selector
+  backup survived an audit/power-loss window; the running candidate is fully
+  revalidated before finalization.
+
+The engine never removes pending state. The handler first appends and
+`fdatasync`s an outcome-specific audit event whose resource binds release id,
+version and signed-manifest digest, and only then removes the exact pending
+record it reconciled and syncs its parent directory. An audit failure retains
+pending state; retry is idempotent. `requires_normal_reboot` is true only for
+a still-running one-shot candidate, so firmware fallback and an ordinary
+post-commit recovery do not bounce the device unnecessarily. `firmware_fallback`
+is a boot observation: an ordinary boot of the previous slot with an
+uncommitted selector is finalized that way even when the staged candidate was
+never rebooted into (`update.apply` without `--reboot`, then a plain reboot),
+and the device then needs a fresh `update.apply`.
+
+```json
+{"release_id":"punar-desktop-stable-aarch64-raspberry_pi-2026.09.04.1",
+ "version":"2026.09.04.1","manifest_sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+ "pending_state_sha256":"1111111111111111111111111111111111111111111111111111111111111111",
+ "outcome":"firmware_fallback","candidate_slot":"b","previous_slot":"a",
+ "selector_committed":false,"requires_normal_reboot":false}
+```
+
+### 5.17c `update.rollback`
 
 Strict params:
 
@@ -953,11 +997,14 @@ Root-only, non-mutating, and audited as `action: "install.plan"`,
    key and requires its architecture/boot platform to match the live image;
 4. reads the first and last 34 logical sectors and binds their SHA-256, the
    serial, optional WWN, size and device node inside the plan;
-5. returns the four fixed partitions, byte offsets/sizes, filesystems,
-   encryption decision, data subvolumes, the signed compressed-artifact
-   digest/size, the signed uncompressed-slot digest/size, and the signed boot
-   artifact kind, filename, digest and size. The latter binds either the UKI
-   or Raspberry Pi boot filesystem into the same confirmation token.
+5. returns the platform's fixed partitions (four on UEFI, six on Raspberry
+   Pi), byte offsets/sizes, filesystems, encryption decision, data
+   subvolumes, the signed compressed-artifact digest/size, the signed
+   uncompressed-slot digest/size, and the signed boot artifact kind,
+   filename, digest and size. On UEFI it also returns the signed slot-B
+   `recovery_payload` and `recovery_boot_artifact` identities. Every one of
+   these fields is part of the canonical JSON behind `plan_token`, so a
+   B-only manifest substitution changes the token before destructive work.
 6. walks PCI, USB and ARM platform devices, resolves each modalias against the
    running kernel's bounded `modules.alias`, checks the bound driver and its
    fixed-argv `modinfo` firmware requirements, and returns a privacy-minimized
@@ -2945,6 +2992,7 @@ table and must not be read-modify-written by netd.
 | `network.policy` | `{"project":"atlas"}` | any | Effective strictest-wins active-project policy |
 | `network.explain` | `{"project":"atlas","zone":"corp_prod"}` | any | What/why/who/source/change/next-step explanation |
 | `network.apply` | absent or `{"project":"atlas"}` | **root** | Atomic reconcile of every live managed session |
+| `network.session_ready` | `{"session_id":"agt_…"}` | internal: the caller's own `SO_PEERCRED` pid must be inside the exact `punar-agent-<id>.scope` cgroup; no uid-0 bypass | Reconcile, then read this session's cgroupv2 selector and jump target back from the kernel table; returns `{session_id, project, state:"ready", enforcement:"nftables_cgroup_v2"}` or an error, never a pending state |
 | `relay.status` | absent | any | Selected route model and honesty fields |
 | `relay.set` | `{"mode":"direct"}` or `private_relay` | console owner or root | Persist the personal preference |
 

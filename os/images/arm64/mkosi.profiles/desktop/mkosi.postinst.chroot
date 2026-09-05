@@ -53,6 +53,15 @@ install -d -m 0755 /usr/lib/systemd/system/boot-complete.target.requires
 ln -sfn ../punar-update-health.service \
     /usr/lib/systemd/system/boot-complete.target.requires/punar-update-health.service
 
+# Native Pi firmware does not pull in systemd-boot's boot-complete target.
+# This conditional oneshot is part of the boot transaction only: staging a
+# pending file after multi-user.target is reached cannot trigger it mid-session.
+# Its device-tree and pending-state conditions keep generic UEFI ARM64 and
+# non-update boots outside this path entirely.
+install -d -m 0755 /usr/lib/systemd/system/graphical.target.wants
+ln -sfn ../punar-pi-update-health.service \
+    /usr/lib/systemd/system/graphical.target.wants/punar-pi-update-health.service
+
 # Debian packages nft under /usr/sbin; product services use the shared
 # cross-distribution /usr/bin contract.
 ln -sfn /usr/sbin/nft /usr/bin/nft

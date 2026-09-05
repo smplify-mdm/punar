@@ -21,7 +21,7 @@ fail() {
 
 [ -f "${ISO}" ] || fail "installer ISO is missing: ${ISO}"
 [ -x "${RELEASE_TOOL}" ] || fail "release verifier is missing: ${RELEASE_TOOL}"
-for command in xorriso sfdisk mcopy objcopy fsck.erofs zstd blkid e2fsck; do
+for command in xorriso sfdisk mcopy objcopy fsck.erofs zstd blkid e2fsck debugfs; do
     command -v "${command}" >/dev/null || fail "required command is missing: ${command}"
 done
 
@@ -58,8 +58,7 @@ for file in release.json release.json.sig tree-manifest.json live.erofs; do
 done
 [ -d "${WORK}/iso/punar/keys" ] || fail 'ISO is missing /punar/keys'
 
-read -r VERSION PAYLOAD PAYLOAD_SHA PAYLOAD_SIZE RAW_SHA RAW_SIZE \
-    SLOT_UKI SLOT_UKI_SHA SLOT_UKI_SIZE < <(
+mapfile -t ARTIFACT_FIELDS < <(
     python3 - "${WORK}/iso/punar/release.json" <<'PY'
 import json
 import re
@@ -81,30 +80,76 @@ for key, expected in required.items():
 if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", doc.get("version", "")):
     raise SystemExit("release metadata has an invalid version")
 
-payload = doc["payload"]
-boot = doc["boot_artifact"]
+slots = doc.get("uefi_slots")
+if not isinstance(slots, dict) or set(slots) != {"a", "b"}:
+    raise SystemExit("UEFI installer release does not carry exactly two slot pairs")
+slot_a = slots["a"]
+slot_b = slots["b"]
+if doc["payload"] != slot_a["payload"] or doc["boot_artifact"] != slot_a["boot_artifact"]:
+    raise SystemExit("top-level install artifacts are not the signed slot-A pair")
+payload = slot_a["payload"]
+boot = slot_a["boot_artifact"]
+payload_b = slot_b["payload"]
+boot_b = slot_b["boot_artifact"]
 values = [
     doc["version"], payload["filename"], payload["digest_sha256"],
     str(payload["size_bytes"]), payload["uncompressed_digest_sha256"],
     str(payload["uncompressed_size_bytes"]), boot["filename"],
-    boot["digest_sha256"], str(boot["size_bytes"]),
+    boot["digest_sha256"], str(boot["size_bytes"]), payload_b["filename"],
+    payload_b["digest_sha256"], str(payload_b["size_bytes"]),
+    payload_b["uncompressed_digest_sha256"],
+    str(payload_b["uncompressed_size_bytes"]), boot_b["filename"],
+    boot_b["digest_sha256"], str(boot_b["size_bytes"]),
 ]
 if any(any(char.isspace() for char in value) for value in values):
     raise SystemExit("release metadata artifact fields contain whitespace")
-print(" ".join(values))
+print("\n".join(values))
 PY
 )
+[ "${#ARTIFACT_FIELDS[@]}" -eq 17 ] \
+    || fail "release metadata returned ${#ARTIFACT_FIELDS[@]} artifact fields, expected 17"
+VERSION=${ARTIFACT_FIELDS[0]}
+PAYLOAD=${ARTIFACT_FIELDS[1]}
+PAYLOAD_SHA=${ARTIFACT_FIELDS[2]}
+PAYLOAD_SIZE=${ARTIFACT_FIELDS[3]}
+RAW_SHA=${ARTIFACT_FIELDS[4]}
+RAW_SIZE=${ARTIFACT_FIELDS[5]}
+SLOT_UKI=${ARTIFACT_FIELDS[6]}
+SLOT_UKI_SHA=${ARTIFACT_FIELDS[7]}
+SLOT_UKI_SIZE=${ARTIFACT_FIELDS[8]}
+PAYLOAD_B=${ARTIFACT_FIELDS[9]}
+PAYLOAD_B_SHA=${ARTIFACT_FIELDS[10]}
+PAYLOAD_B_SIZE=${ARTIFACT_FIELDS[11]}
+RAW_B_SHA=${ARTIFACT_FIELDS[12]}
+RAW_B_SIZE=${ARTIFACT_FIELDS[13]}
+SLOT_UKI_B=${ARTIFACT_FIELDS[14]}
+SLOT_UKI_B_SHA=${ARTIFACT_FIELDS[15]}
+SLOT_UKI_B_SIZE=${ARTIFACT_FIELDS[16]}
 
 PAYLOAD_PATH="${WORK}/iso/punar/${PAYLOAD}"
 SLOT_UKI_PATH="${WORK}/iso/punar/${SLOT_UKI}"
+PAYLOAD_B_PATH="${WORK}/iso/punar/${PAYLOAD_B}"
+SLOT_UKI_B_PATH="${WORK}/iso/punar/${SLOT_UKI_B}"
 [ -f "${PAYLOAD_PATH}" ] || fail "declared payload is absent: ${PAYLOAD}"
 [ -f "${SLOT_UKI_PATH}" ] || fail "declared slot UKI is absent: ${SLOT_UKI}"
+[ -f "${PAYLOAD_B_PATH}" ] || fail "declared recovery payload is absent: ${PAYLOAD_B}"
+[ -f "${SLOT_UKI_B_PATH}" ] || fail "declared recovery UKI is absent: ${SLOT_UKI_B}"
 
 "${RELEASE_TOOL}" verify-release "${WORK}/iso/punar/keys" \
     "${WORK}/iso/punar/release.json" "${WORK}/iso/punar/release.json.sig"
 "${RELEASE_TOOL}" verify-artifact "${PAYLOAD_PATH}" "${PAYLOAD_SHA}" "${PAYLOAD_SIZE}"
 "${RELEASE_TOOL}" verify-artifact "${SLOT_UKI_PATH}" "${SLOT_UKI_SHA}" "${SLOT_UKI_SIZE}"
+"${RELEASE_TOOL}" verify-artifact "${PAYLOAD_B_PATH}" "${PAYLOAD_B_SHA}" "${PAYLOAD_B_SIZE}"
+"${RELEASE_TOOL}" verify-artifact "${SLOT_UKI_B_PATH}" "${SLOT_UKI_B_SHA}" "${SLOT_UKI_B_SIZE}"
 
+[ "${RAW_SIZE}" = "${RAW_B_SIZE}" ] \
+    || fail 'slot A and recovery slot B do not have equal root sizes'
+[ "${RAW_SHA}" != "${RAW_B_SHA}" ] \
+    || fail 'recovery slot B is an unsafe byte clone of slot A'
+
+# Keep peak scratch use bounded to one decompressed root at a time. Finish all
+# source-A checks and release it before materializing B; release B before the
+# independent EROFS extraction below.
 zstd --decompress --force --no-progress "${PAYLOAD_PATH}" -o "${WORK}/slot.raw"
 [ "$(stat -c %s "${WORK}/slot.raw")" = "${RAW_SIZE}" ] \
     || fail 'uncompressed payload size does not match release metadata'
@@ -113,12 +158,79 @@ zstd --decompress --force --no-progress "${PAYLOAD_PATH}" -o "${WORK}/slot.raw"
 [ "$(blkid -p -s LABEL -o value "${WORK}/slot.raw")" = 'PUNAR-ROOT-A' ] \
     || fail 'uncompressed payload is not the PUNAR-ROOT-A filesystem'
 e2fsck -fn "${WORK}/slot.raw" >/dev/null
+rm -f "${WORK}/slot.raw"
+
+zstd --decompress --force --no-progress "${PAYLOAD_B_PATH}" -o "${WORK}/slot-b.raw"
+[ "$(stat -c %s "${WORK}/slot-b.raw")" = "${RAW_B_SIZE}" ] \
+    || fail 'uncompressed recovery payload size does not match release metadata'
+[ "$(sha256sum "${WORK}/slot-b.raw" | cut -d' ' -f1)" = "${RAW_B_SHA}" ] \
+    || fail 'uncompressed recovery payload digest does not match release metadata'
+[ "$(blkid -p -s LABEL -o value "${WORK}/slot-b.raw")" = 'PUNAR-ROOT-B' ] \
+    || fail 'uncompressed recovery payload is not the PUNAR-ROOT-B filesystem'
+[ "$(blkid -p -s UUID -o value "${WORK}/slot-b.raw")" = \
+    '724e1a3b-d966-54b7-9a97-8886985eee18' ] \
+    || fail 'uncompressed recovery payload has the wrong slot-B filesystem UUID'
+e2fsck -fn "${WORK}/slot-b.raw" >/dev/null
+debugfs -R 'cat /etc/fstab' "${WORK}/slot-b.raw" \
+    > "${WORK}/slot-b.fstab" 2>/dev/null \
+    || fail 'could not read recovery fstab from the signed source image'
+python3 - "${WORK}/slot-b.fstab" <<'PY'
+import sys
+
+roots = []
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "/":
+            roots.append((fields[0], fields[2]))
+expected = [("UUID=724e1a3b-d966-54b7-9a97-8886985eee18", "ext4")]
+if roots != expected:
+    raise SystemExit(f"recovery fstab has unsafe root binding: {roots!r}")
+PY
+rm -f "${WORK}/slot-b.raw" "${WORK}/slot-b.fstab"
+
+ESP_BYTES=$((1024 * 1024 * 1024))
+BOOTLOADER_RESERVE=$((2 * 16 * 1024 * 1024))
+FAT_RESERVE=$((64 * 1024 * 1024))
+UPDATE_HEADROOM=$((192 * 1024 * 1024))
+[ "${SLOT_UKI_SIZE}" -le "${UPDATE_HEADROOM}" ] \
+    && [ "${SLOT_UKI_B_SIZE}" -le "${UPDATE_HEADROOM}" ] \
+    || fail 'a signed UKI exceeds the fixed future-update headroom'
+[ $((SLOT_UKI_SIZE + SLOT_UKI_B_SIZE + BOOTLOADER_RESERVE + FAT_RESERVE + UPDATE_HEADROOM)) -le "${ESP_BYTES}" ] \
+    || fail 'initial UKIs do not leave the explicit ESP update reserve'
+
+objcopy --dump-section ".cmdline=${WORK}/slot-a.cmdline" "${SLOT_UKI_PATH}"
+objcopy --dump-section ".cmdline=${WORK}/slot-b.cmdline" "${SLOT_UKI_B_PATH}"
+objcopy --dump-section ".osrel=${WORK}/slot-a.osrel" "${SLOT_UKI_PATH}"
+objcopy --dump-section ".osrel=${WORK}/slot-b.osrel" "${SLOT_UKI_B_PATH}"
+tr -d '\000' < "${WORK}/slot-a.cmdline" > "${WORK}/slot-a.cmdline.txt"
+tr -d '\000' < "${WORK}/slot-b.cmdline" > "${WORK}/slot-b.cmdline.txt"
+[ "$(tr ' ' '\n' < "${WORK}/slot-a.cmdline.txt" | grep -c '^root=PARTUUID=')" -eq 1 ] \
+    || fail 'slot-A UKI does not carry exactly one root selector'
+[ "$(tr ' ' '\n' < "${WORK}/slot-b.cmdline.txt" | grep -c '^root=PARTUUID=')" -eq 1 ] \
+    || fail 'recovery UKI does not carry exactly one root selector'
+tr ' ' '\n' < "${WORK}/slot-a.cmdline.txt" \
+    | grep -Fqx 'root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea' \
+    || fail 'slot-A UKI does not bind the fixed slot-A PARTUUID'
+tr ' ' '\n' < "${WORK}/slot-b.cmdline.txt" \
+    | grep -Fqx 'root=PARTUUID=2b1b91a9-cf2c-4e9c-a723-5ec997971662' \
+    || fail 'recovery UKI does not bind the fixed slot-B PARTUUID'
+cmp -s "${WORK}/slot-a.osrel" "${WORK}/slot-b.osrel" \
+    && fail 'recovery UKI has no distinct boot-menu identity'
+tr -d '\000' < "${WORK}/slot-b.osrel" \
+    | grep -Fxq "PRETTY_NAME=\"Punar recovery ${VERSION}\"" \
+    || fail 'recovery UKI does not carry its distinct recovery title'
 
 fsck.erofs --extract="${WORK}/erofs-root" "${WORK}/iso/punar/live.erofs" >/dev/null
 python3 "${REPO_ROOT}/tools/tree_manifest.py" \
     "${WORK}/erofs-root" "${WORK}/erofs-tree-manifest.json"
 cmp "${WORK}/iso/punar/tree-manifest.json" "${WORK}/erofs-tree-manifest.json" \
     || fail 'live.erofs tree differs from the signed release-tree manifest'
+rm -rf "${WORK}/erofs-root"
+rm -f "${WORK}/erofs-tree-manifest.json"
 
 # Locate the appended ESP from the final artifact, then inspect it in place.
 sfdisk --json "${ISO}" > "${WORK}/partitions.json"

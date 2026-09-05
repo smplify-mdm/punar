@@ -32,50 +32,60 @@
     "partitions": [
       {
         "number": 1,
-        "name": "PUNAR-BOOT-A",
+        "name": "PUNAR-SELECT",
         "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
-        "partuuid": "79115027-a3f0-43dc-a251-4a0c637b135f",
+        "partuuid": "6ab88335-d069-4898-b639-734f3f2b971a",
         "offset_bytes": 1048576,
-        "size_bytes": 1073741824,
+        "size_bytes": 33554432,
         "filesystem": "vfat",
         "encrypted": false
       },
       {
         "number": 2,
-        "name": "PUNAR-ROOT-A",
-        "type_guid": "b921b045-1df0-41c3-af44-4c6f280d3fae",
-        "partuuid": "1beabfe0-9cb8-4b49-91ef-d372b845e7ea",
-        "offset_bytes": 1074790400,
-        "size_bytes": 8589934592,
-        "filesystem": "ext4",
-        "encrypted": false
-      },
-      {
-        "number": 3,
-        "name": "PUNAR-BOOT-B",
+        "name": "PUNAR-BOOT-A",
         "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
-        "partuuid": "706d6f54-d8b9-4276-9f4f-f1ac379a482e",
-        "offset_bytes": 9664724992,
+        "partuuid": "79115027-a3f0-43dc-a251-4a0c637b135f",
+        "offset_bytes": 34603008,
         "size_bytes": 1073741824,
         "filesystem": "vfat",
         "encrypted": false
       },
       {
-        "number": 4,
-        "name": "PUNAR-ROOT-B",
+        "number": 3,
+        "name": "PUNAR-ROOT-A",
         "type_guid": "b921b045-1df0-41c3-af44-4c6f280d3fae",
-        "partuuid": "2b1b91a9-cf2c-4e9c-a723-5ec997971662",
-        "offset_bytes": 10738466816,
+        "partuuid": "1beabfe0-9cb8-4b49-91ef-d372b845e7ea",
+        "offset_bytes": 1108344832,
         "size_bytes": 8589934592,
+        "filesystem": "ext4",
+        "encrypted": false
+      },
+      {
+        "number": 4,
+        "name": "PUNAR-BOOT-B",
+        "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        "partuuid": "706d6f54-d8b9-4276-9f4f-f1ac379a482e",
+        "offset_bytes": 9698279424,
+        "size_bytes": 1073741824,
+        "filesystem": "vfat",
         "encrypted": false
       },
       {
         "number": 5,
+        "name": "PUNAR-ROOT-B",
+        "type_guid": "b921b045-1df0-41c3-af44-4c6f280d3fae",
+        "partuuid": "2b1b91a9-cf2c-4e9c-a723-5ec997971662",
+        "offset_bytes": 10772021248,
+        "size_bytes": 8589934592,
+        "encrypted": false
+      },
+      {
+        "number": 6,
         "name": "PUNAR-DATA",
         "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4",
         "partuuid": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9",
-        "offset_bytes": 19328401408,
-        "size_bytes": 108671270912,
+        "offset_bytes": 19361955840,
+        "size_bytes": 108637716480,
         "filesystem": "btrfs",
         "encrypted": true
       }
@@ -83,7 +93,7 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "40e90bfb8799d80de1bf7f0c3a732bb4bac081458f83433148a836b5bccbf276",
+  "plan_token": "747592fcdf429b3a4352d8e7a22e1a60208547704da1fc686e969393012db063",
   "hardware_report": {
     "v": 1,
     "generated_at": "2026-08-30T18:45:00Z",

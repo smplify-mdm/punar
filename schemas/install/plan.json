@@ -61,10 +61,12 @@
         },
         "payload": { "$ref": "#/$defs/payload" },
         "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
+        "recovery_payload": { "$ref": "#/$defs/payload" },
+        "recovery_boot_artifact": { "$ref": "#/$defs/boot_artifact" },
         "partitions": {
           "type": "array",
           "minItems": 4,
-          "maxItems": 5,
+          "maxItems": 6,
           "items": { "$ref": "#/$defs/partition" }
         },
         "data_subvolumes": {
@@ -81,20 +83,130 @@
         {
           "if": { "properties": { "boot_platform": { "const": "uefi" } } },
           "then": {
+            "required": ["recovery_payload", "recovery_boot_artifact"],
             "properties": {
               "boot_artifact": {
                 "properties": { "kind": { "const": "uki" } }
               },
+              "recovery_boot_artifact": {
+                "properties": { "kind": { "const": "uki" } }
+              },
               "partitions": {
+                "minItems": 4,
                 "maxItems": 4,
                 "prefixItems": [
-                  { "properties": { "number": { "const": 1 }, "name": { "const": "PUNAR-ESP" } } },
-                  { "properties": { "number": { "const": 2 }, "name": { "const": "PUNAR-ROOT-A" } } },
-                  { "properties": { "number": { "const": 3 }, "name": { "const": "PUNAR-ROOT-B" } } },
-                  { "properties": { "number": { "const": 4 }, "name": { "const": "PUNAR-DATA" } } }
+                  {
+                    "properties": {
+                      "number": { "const": 1 },
+                      "name": { "const": "PUNAR-ESP" },
+                      "type_guid": { "const": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+                      "partuuid": { "const": "8bb56554-b5f1-4058-90ac-8dc91a8e2bd4" },
+                      "offset_bytes": { "const": 1048576 },
+                      "size_bytes": { "const": 1073741824 },
+                      "filesystem": { "const": "vfat" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 2 },
+                      "name": { "const": "PUNAR-ROOT-A" },
+                      "type_guid": {
+                        "enum": [
+                          "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
+                          "b921b045-1df0-41c3-af44-4c6f280d3fae"
+                        ]
+                      },
+                      "partuuid": { "const": "1beabfe0-9cb8-4b49-91ef-d372b845e7ea" },
+                      "offset_bytes": { "const": 1074790400 },
+                      "size_bytes": { "const": 8589934592 },
+                      "filesystem": { "const": "ext4" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 3 },
+                      "name": { "const": "PUNAR-ROOT-B" },
+                      "type_guid": {
+                        "enum": [
+                          "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
+                          "b921b045-1df0-41c3-af44-4c6f280d3fae"
+                        ]
+                      },
+                      "partuuid": { "const": "2b1b91a9-cf2c-4e9c-a723-5ec997971662" },
+                      "offset_bytes": { "const": 9664724992 },
+                      "size_bytes": { "const": 8589934592 },
+                      "filesystem": false,
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 4 },
+                      "name": { "const": "PUNAR-DATA" },
+                      "type_guid": { "const": "0fc63daf-8483-4772-8e79-3d69d8477de4" },
+                      "partuuid": { "const": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9" },
+                      "offset_bytes": { "const": 18254659584 },
+                      "size_bytes": { "minimum": 17179869184 },
+                      "filesystem": { "const": "btrfs" }
+                    }
+                  }
                 ]
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "architecture": { "const": "x86_64" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [
+                        {},
+                        { "properties": { "type_guid": { "const": "4f68bce3-e8cd-4db1-96e7-fbcaf984b709" } } },
+                        { "properties": { "type_guid": { "const": "4f68bce3-e8cd-4db1-96e7-fbcaf984b709" } } },
+                        {}
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "architecture": { "const": "aarch64" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [
+                        {},
+                        { "properties": { "type_guid": { "const": "b921b045-1df0-41c3-af44-4c6f280d3fae" } } },
+                        { "properties": { "type_guid": { "const": "b921b045-1df0-41c3-af44-4c6f280d3fae" } } },
+                        {}
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "encryption": { "const": "luks2" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [{}, {}, {}, { "properties": { "encrypted": { "const": true } } }]
+                    }
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "encryption": { "const": "none" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [{}, {}, {}, { "properties": { "encrypted": { "const": false } } }]
+                    }
+                  }
+                }
+              }
+            ]
           }
         },
         {
@@ -107,17 +219,108 @@
               "boot_artifact": {
                 "properties": { "kind": { "const": "raspberry_pi_bootfs" } }
               },
+              "recovery_payload": false,
+              "recovery_boot_artifact": false,
               "partitions": {
-                "minItems": 5,
+                "minItems": 6,
+                "maxItems": 6,
                 "prefixItems": [
-                  { "properties": { "number": { "const": 1 }, "name": { "const": "PUNAR-BOOT-A" } } },
-                  { "properties": { "number": { "const": 2 }, "name": { "const": "PUNAR-ROOT-A" } } },
-                  { "properties": { "number": { "const": 3 }, "name": { "const": "PUNAR-BOOT-B" } } },
-                  { "properties": { "number": { "const": 4 }, "name": { "const": "PUNAR-ROOT-B" } } },
-                  { "properties": { "number": { "const": 5 }, "name": { "const": "PUNAR-DATA" } } }
+                  {
+                    "properties": {
+                      "number": { "const": 1 },
+                      "name": { "const": "PUNAR-SELECT" },
+                      "type_guid": { "const": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+                      "partuuid": { "const": "6ab88335-d069-4898-b639-734f3f2b971a" },
+                      "offset_bytes": { "const": 1048576 },
+                      "size_bytes": { "const": 33554432 },
+                      "filesystem": { "const": "vfat" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 2 },
+                      "name": { "const": "PUNAR-BOOT-A" },
+                      "type_guid": { "const": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+                      "partuuid": { "const": "79115027-a3f0-43dc-a251-4a0c637b135f" },
+                      "offset_bytes": { "const": 34603008 },
+                      "size_bytes": { "const": 1073741824 },
+                      "filesystem": { "const": "vfat" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 3 },
+                      "name": { "const": "PUNAR-ROOT-A" },
+                      "type_guid": { "const": "b921b045-1df0-41c3-af44-4c6f280d3fae" },
+                      "partuuid": { "const": "1beabfe0-9cb8-4b49-91ef-d372b845e7ea" },
+                      "offset_bytes": { "const": 1108344832 },
+                      "size_bytes": { "const": 8589934592 },
+                      "filesystem": { "const": "ext4" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 4 },
+                      "name": { "const": "PUNAR-BOOT-B" },
+                      "type_guid": { "const": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+                      "partuuid": { "const": "706d6f54-d8b9-4276-9f4f-f1ac379a482e" },
+                      "offset_bytes": { "const": 9698279424 },
+                      "size_bytes": { "const": 1073741824 },
+                      "filesystem": { "const": "vfat" },
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 5 },
+                      "name": { "const": "PUNAR-ROOT-B" },
+                      "type_guid": { "const": "b921b045-1df0-41c3-af44-4c6f280d3fae" },
+                      "partuuid": { "const": "2b1b91a9-cf2c-4e9c-a723-5ec997971662" },
+                      "offset_bytes": { "const": 10772021248 },
+                      "size_bytes": { "const": 8589934592 },
+                      "filesystem": false,
+                      "encrypted": { "const": false }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "number": { "const": 6 },
+                      "name": { "const": "PUNAR-DATA" },
+                      "type_guid": { "const": "0fc63daf-8483-4772-8e79-3d69d8477de4" },
+                      "partuuid": { "const": "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9" },
+                      "offset_bytes": { "const": 19361955840 },
+                      "size_bytes": { "minimum": 17179869184 },
+                      "filesystem": { "const": "btrfs" }
+                    }
+                  }
                 ]
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "encryption": { "const": "luks2" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [{}, {}, {}, {}, {}, { "properties": { "encrypted": { "const": true } } }]
+                    }
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "encryption": { "const": "none" } } },
+                "then": {
+                  "properties": {
+                    "partitions": {
+                      "prefixItems": [{}, {}, {}, {}, {}, { "properties": { "encrypted": { "const": false } } }]
+                    }
+                  }
+                }
+              }
+            ]
           }
         }
       ]
@@ -138,7 +341,7 @@
         "wwn": { "type": "string", "minLength": 1, "maxLength": 256 },
         "size_bytes": { "type": "integer", "minimum": 35434546176 },
         "logical_sector_bytes": {
-          "enum": [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+          "enum": [512, 4096]
         },
         "existing_gpt_sha256": { "$ref": "#/$defs/digest" }
       },
@@ -216,10 +419,11 @@
         "encrypted"
       ],
       "properties": {
-        "number": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "number": { "type": "integer", "minimum": 1, "maximum": 6 },
         "name": {
           "enum": [
             "PUNAR-ESP",
+            "PUNAR-SELECT",
             "PUNAR-BOOT-A",
             "PUNAR-ROOT-A",
             "PUNAR-BOOT-B",
@@ -230,7 +434,7 @@
         "type_guid": { "$ref": "#/$defs/uuid" },
         "partuuid": { "$ref": "#/$defs/uuid" },
         "offset_bytes": { "type": "integer", "minimum": 1048576 },
-        "size_bytes": { "type": "integer", "minimum": 1073741824 },
+        "size_bytes": { "type": "integer", "minimum": 33554432 },
         "filesystem": { "enum": ["vfat", "ext4", "btrfs"] },
         "encrypted": { "type": "boolean" }
       },

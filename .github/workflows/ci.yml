@@ -421,6 +421,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The dual-slot installer roughly doubles the compressed payload set and
+      # xorriso holds ISO sources plus output at once. Hosted runners document
+      # only 14 GB of free disk; drop the preinstalled SDKs this job never uses
+      # and record the real headroom so the assembler's preflight and the
+      # stage reports it prints have a measured basis.
+      - name: Reclaim runner disk for dual-slot ISO assembly
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghc /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell /usr/lib/jvm
+          df -h /
+
       - name: Cache installer mkosi and Cargo inputs
         uses: actions/cache@v4
         with:
@@ -481,7 +494,11 @@ jobs:
             os/images/out/build-info.txt
             os/images/out/installer-boot-proof/**
             os/images/out/installer-install-proof/**
-          if-no-files-found: warn
+          # The ISO already contains compressed EROFS/zstd payloads. Level 1
+          # avoids spending runner time recompressing opaque bytes while
+          # retaining a normal compressed ZIP stream for artifact clients.
+          compression-level: 1
+          if-no-files-found: error
           retention-days: 7
 
   boot-test:
@@ -611,6 +628,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The dual-slot installer roughly doubles the compressed payload set and
+      # xorriso holds ISO sources plus output at once. Hosted runners document
+      # only 14 GB of free disk; drop the preinstalled SDKs this job never uses
+      # and record the real headroom so the assembler's preflight and the
+      # stage reports it prints have a measured basis.
+      - name: Reclaim runner disk for dual-slot ISO assembly
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghc /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell /usr/lib/jvm
+          df -h /
+
       # This exact key is populated by the prerequisite desktop job. Keeping
       # installer proof behind desktop parity avoids building a second full
       # product tree when the substrate cannot yet launch the shell.
@@ -684,7 +714,8 @@ jobs:
             os/images/out/debian-amd64-build-info.txt
             os/images/out/installer-boot-proof/**
             os/images/out/installer-install-proof/**
-          if-no-files-found: warn
+          compression-level: 1
+          if-no-files-found: error
           retention-days: 7
 
   arm64-image:

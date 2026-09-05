@@ -248,6 +248,15 @@ pub struct InstallPlan {
     pub recovery_mode: InstallRecoveryMode,
     pub payload: InstallPayloadPlan,
     pub boot_artifact: InstallBootArtifactPlan,
+    /// The signed slot-B payload identity confirmed for a UEFI install.
+    /// Absent on Raspberry Pi, whose bootfs transaction is platform-specific.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_payload: Option<InstallPayloadPlan>,
+    /// The B-bound UKI identity paired with [`Self::recovery_payload`].
+    /// Its presence in canonical JSON makes a B-only manifest substitution
+    /// change the plan token before destructive work is admitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_boot_artifact: Option<InstallBootArtifactPlan>,
     pub partitions: Vec<InstallPartitionPlan>,
     pub data_subvolumes: Vec<String>,
     pub warnings: Vec<String>,

@@ -56,7 +56,7 @@ it solid.
 | 12 | **`onboarding.md` §1.8 Layer 2 recovery** (a fourth UKI, `punar-recover`) | *dashed* | **Does not exist.** ESP room is reserved and the artefact is not built. Recorded here because onboarding §4.4 requirement 5 asked this document to decide, and this is the decision. |
 | 13 | **Bare-metal boot, USB boot, real firmware** | *dashed* | **NOT PROVEN AND NOT PROVABLE HERE.** QEMU + OVMF + virtio proves the software stack and nothing about hardware. |
 | 14 | **The ISO build steps against the pinned toolchain** (comma-composed profiles, `Format=uki`, the `xorriso` hybrid idiom, `libisoburn` in the snapshot) | **solid** | **VERIFIED 2026-08-31:** F1–F4 and the finished artifact are exercised by canonical run 33442898971. |
-| 15 | **A recovery path when the freshly installed system does not come up** | *dashed*, **and absent** | §12.1. I17 requires slot B zero-filled, `punar-recover` is not built, and `onboarding.md` §1.6.2 shows that a locked root makes `punard` the only privilege path. This is the sharpest gap the three designs have between them, and §12.1 recommends the cheap half of the fix. |
+| 15 | **A recovery path when the freshly installed system does not come up** | **mechanism implemented; install-VM evidence pending** | The §12.1 MVP decision is now taken: install media carries independently bound A/B payload-and-UKI pairs, the installer writes and directly re-reads both, and it cannot publish success until both UKIs are re-read from the ESP. This is a same-release firmware recovery floor, not the still-absent `punar-recover` repair environment; I17 is the executable boundary. |
 
 ---
 
@@ -108,8 +108,8 @@ under two designs that are already accepted.
 | # | Decision |
 |---|---|
 | 1 | **The artefact is a UEFI-bootable hybrid ISO built by the same pinned mkosi pipeline**, from a third profile, assembled by one pinned `xorriso` invocation. It is dd-able to USB and mountable as BMC virtual media. §3. |
-| 2 | **The install is an update apply.** The ISO carries a complete release triple (`release.json`, `.sig`, payload, UKI) exactly as `update-and-rollback.md` §4.1 defines it, and the install streams that payload into slot A through the same verify → write → re-read → bless order. There is no `pacstrap`, no package transaction, no network. §3.2. |
-| 3 | **The live environment and the thing it installs are the same tree in two containers** — an erofs for booting read-only, an ext4 slot payload for writing. CI asserts the two trees are identical file-for-file. What you tried is what you get. §3.1. |
+| 2 | **The install is an update apply.** The ISO carries a signed release manifest plus independently bound A/B root-and-UKI pairs, and the install streams both payloads through the same verify → write → re-read discipline before installing and re-reading both boot artifacts. There is no `pacstrap`, no package transaction, no network. §3.2. |
+| 3 | **The live environment and the thing it installs are the same release tree in two containers** — an erofs for booting read-only and ext4 slot payloads for writing. Slot B differs only where its filesystem and boot binding must differ (filesystem UUID, label, `/etc/fstab` selector and UKI root selector). What you tried is what you get, with a separately bootable recovery copy. §3.1. |
 | 4 | **The device layout is ADR-003's, literally**: ESP 1 GiB (three UKIs), root A 8 GiB, root B 8 GiB, shared remainder. Created by `systemd-repart` from a definition set that is the single source of truth for both the build and the install. §4. |
 | 5 | **`/var`, `/home` and `/var/tmp` are three btrfs subvolumes of the shared partition, mounted separately.** This satisfies execution-trust's separate-mount requirement *and* resolves its `/var/tmp` dilemma at zero cost, without imposing a fixed size split that a 128 GB disk cannot afford to get wrong. §4.3. |
 | 6 | **Every partition UUID is a fixed literal**, shared by every Punar device. That makes `/etc/fstab` and `/etc/crypttab` vendor files identical on every install — which is what ADR-003's "Punar-owned `/etc` is a rollback hazard" rule requires. §4.2. Its one real cost (two Punar disks in one machine) is named. |
@@ -144,18 +144,22 @@ DVD/virtual-media path *and* from a USB stick written with `dd`.
 |---|---|---|
 | *appended partition 2* (type GUID `C12A7328-…`) | The ESP: `EFI/BOOT/BOOTX64.EFI` (systemd-boot) + `EFI/Linux/punar-installer.efi` (the live UKI) | ~120 MB |
 | `punar/live.erofs` | The live environment — the desktop tree as a read-only erofs, loop-mounted with a tmpfs overlay | ≈ 1.2–2 GB |
-| `punar/punar-desktop-<version>.slot.raw.zst` | **The release payload**, byte-identical to what the update channel publishes | ≈ 1.2–2 GB |
+| `punar/punar-desktop-<version>.slot.raw.zst` | **The slot-A release payload**, the same release tree the update channel publishes as slot A (the ISO keeps the legacy name; no test compares the two builds' digests) | ≈ 1.2–2 GB |
+| `punar/punar-desktop-<version>.slot-b.raw.zst` | **The slot-B recovery payload**, the same verified release tree with its own filesystem UUID, label and `/etc/fstab` root binding | ≈ 1.2–2 GB |
 | `punar/punar-desktop-<version>.uki.efi` | The slot-A UKI (cmdline: `root=PARTUUID=<slot A>`) | ~60 MB |
+| `punar/punar-desktop-<version>.slot-b.uki.efi` | The separately built slot-B UKI (cmdline: `root=PARTUUID=<slot B>`) | ~60 MB |
 | `punar/release.json`, `release.json.sig` | The signed manifest, `schemas/update/release-manifest.json` | ~2 KB |
 | `punar/tree-manifest.json` | Per-file sha256 of the tree, emitted once and true of both containers (used by I04) | ~2 MB |
 
 **The live root and the installed root are the same tree in two
 containers.** The erofs is what you boot to run the installer; the
-`slot.raw.zst` is what gets written to slot A. They are produced from one
-mkosi build. CI asserts (I04) that their file lists, modes and per-file
-digests are equal. That gives the claim every installer wants and almost
-none can make: *the system you just used to install is the system you
-installed.*
+`slot.raw.zst` is what gets written to slot A. Slot B is derived from that
+same build before signing, then given the distinct ext4 and root selectors
+needed to boot safely from its own partition. CI asserts (I04) that the live
+tree and slot A have equal file lists, modes and per-file digests; I03 and
+I17 separately prove both slot-bound artifacts. That gives the claim every
+installer wants and almost none can make: *the system you just used to
+install is the release you installed.*
 
 **Why two containers and not one file used twice.** A slot payload must be
 a writable ext4 that `systemd-repart --copy-blocks` can lay down and that
@@ -169,11 +173,12 @@ in I04 ever proves awkward to keep true.
 
 ### 3.2 The install *is* an update apply, and that is the whole design
 
-`update-and-rollback.md` §4.1 already defines a release as three files plus
-a UKI, and §3 already defines applying one as: verify manifest signature →
-check admissibility → stream the payload into the inactive slot with a
-bounded buffer → re-read and digest what was written → install the UKI →
-make it default.
+`update-and-rollback.md` §4.1 defines the signed release contract, including
+the two independently bound UEFI root-and-UKI pairs. §3 already defines
+applying one as: verify manifest signature → check admissibility → stream a
+slot-bound payload with a bounded buffer → re-read and digest what was
+written → install its UKI → make it default. A fresh install applies both
+pairs and makes A the default only after the B recovery floor is durable.
 
 An install is that sequence with two additions on the front (create the
 partition table; create the LUKS container and filesystems) and one on the
@@ -196,9 +201,11 @@ Consequences worth naming:
   choose a different kernel, add a driver, or omit an application at
   install time. §9.2 takes that consequence seriously; §6.6 takes the
   application half of it.
-- **The first update on a new device is not a special case.** Slot B is
-  empty and blessed-nothing; the first `update.apply` is the second write
-  the machine has ever seen, and it is shaped exactly like the first.
+- **The first update on a new device is not a special case.** Slot B begins
+  as a separately bound, verified copy of the installed release. The first
+  `update.apply` replaces that inactive known-good floor with the new
+  B-bound release through the ordinary update transaction; A remains the
+  fallback until the candidate is blessed.
 
 ### 3.3 What changes in `os/images/`
 
@@ -1058,8 +1065,12 @@ rule that keeps it honest:
 > **A progress bar exists only where a denominator exists.** Everything
 > else is a checklist.
 
-Exactly one phase has a real denominator — `write-slot-a`, whose total is
-`release.json`'s `payload.uncompressed_size_bytes`. It gets a bar and a byte count.
+Exactly one phase has a real denominator — the historical wire phase
+`write-slot-a`, whose UEFI total is the sum of
+`uefi_slots.a.payload.uncompressed_size_bytes` and
+`uefi_slots.b.payload.uncompressed_size_bytes`. It gets a bar and a byte count;
+the UI calls it **write recovery pair** so the user is not told only half of
+what the daemon is doing.
 The other eight get a state and, where they have one, a real number.
 
 ```text
@@ -1072,10 +1083,10 @@ PUNAR · INSTALL                                          Stage 07 of 08
                   TPM-ASSISTED UNLOCK · SIMULATED · NOT ENROLLED
   ✓ write it down the recovery key was shown and acknowledged (§6.5.2)
   ✓ format        btrfs · @var @home @var-tmp · vfat /efi
-  ▸ write slot A  ███████████████░░░░░░░░  1.9 / 3.1 GB
-                  reading from the medium, writing to root A, hashing as it goes
-    re-read       waiting — Punar reads slot A back and compares the digest
-                  before it will boot from it
+  ▸ write recovery pair ███████████████░░░  4.9 / 6.2 GB
+                  writing independently bound roots A and B, hashing both
+    re-read       waiting — Punar reads both roots back and compares each
+                  signed digest before either can become a recovery floor
     boot          waiting
     seed          waiting
     verify        waiting
@@ -1096,7 +1107,7 @@ Three rules behind that screen:
    reading back what it wrote.
 3. **Failure names the phase and the disk state.** Before `partition` the
    disk is untouched and the message says so. From `partition` onward it is
-   not, and the message says *that*: *"The install stopped at write slot A.
+   not, and the message says *that*: *"The install stopped while writing the recovery pair.
    The disk has been partitioned and is not bootable. Nothing was written to
    your old data — it was erased when partitioning began. Next step: restart
    the installer."* §73's five questions, answered, including the one nobody
@@ -1116,8 +1127,8 @@ defensible because of where the disk can be when it happens:
 | `verify` | **Untouched.** Not one byte written. | yes | The old system still boots |
 | `partition` | A new GPT, possibly half-written; the old table is gone | **yes** — there is no user data on this layout yet | Firmware finds nothing bootable; boot the medium again |
 | `encrypt`, `format` | Punar layout present, LUKS header possibly incomplete | **yes**, same reason | as above |
-| `write-slot-a`, `re-read` | Slot A partial; digest will not match | **yes** | as above |
-| `boot`, `seed` | Slot A complete; ESP or `/var` seeding incomplete | **yes** | Possibly boots to a system with no `seed.json`, which first boot treats as the advisory-missing case (§6.4) |
+| `write-slot-a`, `re-read` | One or both roots partial, or a re-read digest does not match; no successful install is published | **yes** | as above |
+| `boot`, `seed` | Both roots complete and re-read; ESP or `/var` seeding incomplete | **yes** | Possibly boots to a system with no `seed.json`, which first boot treats as the advisory-missing case (§6.4) |
 
 **The one row that is not in that table, and is the dangerous one:** a
 **reinstall over a disk that already carries `PUNAR-DATA`**. From `partition`
@@ -1338,8 +1349,9 @@ and shared strict types are now authoritative for the attended lane.
   check to protect an input is relying on an accident.
 - **`install.plan`** takes the answers and returns the *entire* resulting
   layout — partition numbers, type GUIDs, literal UUIDs, byte offsets,
-  sizes, filesystems, subvolumes, both the compressed-artifact and
-  uncompressed-slot payload digests — **plus the target's
+  sizes, filesystems, subvolumes, the A and recovery-B compressed-artifact
+  and uncompressed-slot payload identities, and both boot-artifact kinds,
+  names, sizes and digests — **plus the target's
   physical identity: `disk.serial`, `disk.wwn` when present, `disk.size_bytes`,
   and `disk.existing_gpt_sha256`, the digest of the first and last 34 LBAs as
   they were read** — and then
@@ -1402,13 +1414,13 @@ specification.
 
 | Phase | Operation | Mechanism |
 |---|---|---|
-| verify | manifest signature, compressed payload digest/size and uncompressed slot digest/size | in-process ed25519 + sha256; trusted keys from `/usr/share/punar/keys/release/*.pub` |
+| verify | manifest signature plus compressed/uncompressed digest and size for both UEFI payloads and digest/size for both UKIs | in-process ed25519 + sha256; trusted keys from `/usr/share/punar/keys/release/*.pub`; all four files are opened and verified before target bytes change |
 | partition | create the GPT | `systemd-repart` with `--definitions=` pointing at the shipped directories only |
 | encrypt | LUKS2 format + enroll | `systemd-repart` `Encrypt=key-file`, key on an FD; `systemd-cryptenroll --recovery-key` |
 | format | vfat + btrfs + subvolumes | `systemd-repart` `Format=` / `Subvolumes=` |
-| write-slot-a | stream payload → slot A | `repart` `CopyBlocks=`, or a bounded 4 MiB read/write loop in `punard` — the same loop `update.apply` uses |
-| re-read | digest slot A | `fsync`, **close, and re-open the block device `O_DIRECT`**, then read `payload.uncompressed_size_bytes` bytes, sha256, and compare `payload.uncompressed_digest_sha256`. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter, which is the failure the step exists to catch. `update-and-rollback.md` §4.2 specifies `fsync` then re-read but does not say how the cache is defeated; this design pins it, and pins it in the shared code path so the update flow inherits it. **TO VERIFY** at the pin: `O_DIRECT` on the target block device with the 4 MiB aligned buffer the write loop already uses (the fallback, if alignment proves awkward under a device-mapper stack, is `BLKFLSBUF` on the fd before the re-read — weaker, still not a buffer hash, and named rather than assumed) |
-| boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the first known-good slot-A UKI as the permanently uncounted `punar_<version>.efi`; write assessment-aware `preferred punar_<version>*.efi`, `timeout 0`, `editor no` to `loader.conf`. Later updates alone use `+3-0`, because only then does a known-good fallback exist. **`--no-variables` is a decision, not a default** (§7.3.1) |
+| write-slot-a | stream independently bound payloads → slots A and B (the wire phase name is retained for compatibility) | bounded 4 MiB read/write loops in `punard`; progress is aggregated across both signed uncompressed sizes, and any B interruption prevents transition to `re-read` |
+| re-read | digest slots A and B | `fsync`, **close, and re-open each block device `O_DIRECT`**, then read that slot's signed `uncompressed_size_bytes`, sha256, and compare its `uncompressed_digest_sha256`. **This detail is the whole value of the phase:** a re-read served out of the page cache re-hashes the buffer that was just written and proves nothing about what reached the platter. Neither slot may be skipped and a B mismatch cannot reach `boot`. |
+| boot | ESP contents | `bootctl install --esp-path=… --no-variables`; copy the A-bound UKI as `punar_<version>.efi` and the B-bound UKI as `punar-recovery_<version>.efi`; write `preferred punar_<version>*.efi`, `timeout 0`, `editor no` to `loader.conf` so A remains the default. `syncfs`, unmount, remount read-only, then re-read and hash systemd-boot, both UKIs and `loader.conf` before entering `seed`. **`--no-variables` is a decision, not a default** (§7.3.1) |
 | seed | shared partition | create `/var/lib/punar` (`0700 root:root`), `machine-id`, the device id, the hardware report, `install/seed.json`, the `oobe-answers.json` passthrough; copy the audit log to `/var/log/punar/audit.jsonl` (`0640 root:root` during install, reassigned to the runtime `punar` group at boot). **No account.** |
 | verify | post-install check | re-open read-only, compare against the plan |
 
@@ -1432,13 +1444,16 @@ recovery key. The passphrase enters only on anonymous stdin and the key leaves
 only on bounded anonymous stdout into a zeroizing owner; bounded LUKS metadata
 identifies the `systemd-recovery` keyslot. The personal lane is wired to the
 no-timeout two-group acknowledgement gate and cannot enter `format` until it
-succeeds. The signed plan now binds the boot-artifact kind, name, digest and
-size as well as both root-payload identities. At `boot`, the executor rechecks
-that artifact before touching the target, mounts the derived ESP with
+succeeds. The signed plan now binds both boot-artifact kinds, names, digests
+and sizes as well as both root-payload identities. The historical
+`write-slot-a` phase writes A and B independently, and `re-read` opens and
+hashes both target partitions before boot setup is admitted. At `boot`, the
+executor rechecks both artifacts before touching the target, mounts the derived ESP with
 `nodev,nosuid,noexec,nosymfollow`, invokes the fixed `bootctl --no-variables`
-path, copies and re-hashes the uncounted slot-A UKI, durably writes the
-assessment-aware loader configuration, calls `syncfs`, and must unmount before
-entering `seed`. The seed executor derives and unlocks the plan-bound data
+path, copies the uncounted A UKI and the same-release B recovery UKI, durably
+writes the assessment-aware loader configuration, calls `syncfs`, unmounts,
+then remounts read-only and re-hashes both UKIs and the boot configuration
+before entering `seed`. The seed executor derives and unlocks the plan-bound data
 partition (4 on UEFI, 6 on Raspberry Pi) with one
 fixed `cryptsetup` argv and anonymous passphrase pipe, mounts only `@var`, and
 creates a random machine id, copies the validated live device identity so the
@@ -1837,7 +1852,7 @@ Gating unless marked. **40 assertions.**
 |---|---|
 | I01 | The ISO is produced from the pinned snapshot by `tools/build-image.sh`; `xorriso -indev … -toc` lists exactly the expected top-level entries and no others. |
 | I02 | The compact optical ESP contains GRUB `EFI/BOOT/BOOTX64.EFI` with a non-zero El Torito load count. The appended raw-drive ESP contains systemd-boot and **exactly one** UKI; the ISO9660 and raw-drive copies of that UKI are byte-identical, and its `.cmdline` contains `punar.live=1` and **no** `root=PARTUUID=`. |
-| I03 | `release.json` validates against `schemas/update/release-manifest.json`; its `payload.digest_sha256` equals the sha256 of the compressed payload file on the ISO; decompression yields exactly `uncompressed_size_bytes` with sha256 `uncompressed_digest_sha256`; `release.json.sig` verifies against the per-run ephemeral key. *(Key custody: SIMULATED, user-blocked 7.)* |
+| I03 | `release.json` validates against `schemas/update/release-manifest.json` and requires `uefi_slots.a` plus `uefi_slots.b`; all four referenced files (two compressed roots and two UKIs) match their signed sizes and digests; decompression of each root yields its exact signed uncompressed size and digest; A/B raw digests and UKI digests differ; each UKI's `.cmdline` names only its own fixed PARTUUID; `release.json.sig` verifies against the per-run ephemeral key. *(Key custody: SIMULATED, user-blocked 7.)* |
 | I04 | The live erofs tree and the slot payload tree are **identical**: same file list, same modes, same per-file sha256, compared against `tree-manifest.json`. |
 
 **Live boot:**
@@ -1866,8 +1881,8 @@ Gating unless marked. **40 assertions.**
 | I14 | The installed disk boots and `findmnt -no SOURCE /` resolves to the **slot A** PARTUUID. |
 | I15 | **`findmnt --json` shows `/`, `/efi`, `/var`, `/home`, `/var/tmp` as five distinct mounts, and `/home`'s mount id is not `/`'s.** *(This is the assertion that makes `execution-trust.md` V3 true and the mount-mark design buildable.)* |
 | I16 | `/var/lib/punar` is on the `/var` mount, not on the root slot. |
-| I17 | The ESP holds systemd-boot and **exactly one** UKI (slot A's); slot B exists, is zero-filled, and has no UKI. |
-| I18 | sha256 of the first `payload.uncompressed_size_bytes` bytes of slot A equals `release.json`'s `payload.uncompressed_digest_sha256`. |
+| I17 | Before install success, the first signed uncompressed extent of root A and root B has been independently re-read from the installed block devices and equals its slot's signed digest; the ESP has been unmounted, remounted read-only, and shown to hold systemd-boot plus **exactly two** UKIs whose re-read bytes equal the signed A/B artifacts. A's cmdline names only A's PARTUUID, B's names only B's, `loader.conf` prefers only `punar_<version>*.efi`, and the B artifact is the non-preferred `punar-recovery_<version>.efi`. Any absent, short, swapped, cloned, corrupt or interrupted B payload/UKI prevents success. |
+| I18 | sha256 of the first signed `uncompressed_size_bytes` on each root partition equals that slot's `uefi_slots.{a,b}.payload.uncompressed_digest_sha256`; the top-level payload remains exactly slot A. |
 | I19 | Booting with a **wrong** passphrase does not reach `PUNAR_BOOT_OK`; with the right one it does. |
 | I20 | `/etc/fstab` and `/etc/crypttab` on the installed system are **byte-identical** to the vendor copies inside the payload (nothing per-device was written into `/etc` — ADR-003's rollback-hazard rule). |
 | I21 | `/dev/shm` is mounted `noexec`. |
@@ -2092,17 +2107,24 @@ designs immediately.
 16. **No firmware boot entry is written** (§7.3.1), so on a machine with
     another operating system the user picks Punar from the firmware boot menu
     on first boot. A deliberate trade, and a real one.
-17. **A freshly installed device has no rollback target.** I17 requires slot B
-    zero-filled, so the A/B mechanism that answers *"the update broke it"* has
-    nothing to answer *"the **first** boot is broken"* with — and §9 Layer 2
-    of `onboarding.md` does not exist either. See §12.1.
+17. **A freshly installed device has only a same-release recovery floor, not a
+    repair environment or prior release — and it is manual.** I17 now requires
+    a separately bound, verified B payload and UKI before success, so a person
+    can boot the other slot if A is damaged. That entry is a systemd-boot menu
+    item titled `Punar recovery <version>`, reached by holding a key while the
+    machine boots (`loader.conf` keeps `timeout 0`); it is **not** a firmware
+    boot-menu entry (§7.3.1 writes no NVRAM variables) and it is **not**
+    automatic: the first A UKI is uncounted, so nothing falls back on its own
+    until the first update installs a counted candidate. A defect common to the
+    release affects both slots, and §9 Layer 2 of `onboarding.md` still does
+    not exist. See §12.1.
 18. **The toolchain claims in §3 are unverified at the pin** (F1–F4, §3.6).
 19. **The `re-read` phase's page-cache defeat is unverified** — `O_DIRECT` on
     the target block device is the design and the fallback is weaker (§7.3).
 
 ### 12.1 The one limit that is a recommendation, not just a disclosure
 
-Limit 17 is the only entry in this list that this document can cheaply fix,
+Limit 17 is the only entry in this list that this document can cheaply reduce,
 and `onboarding.md` §1.6.2 makes the case from the other side: on a Punar
 device root is locked, nobody is in `wheel`, and `punard` is the only path to
 privilege — so a `punard` that will not start on a fresh device is
@@ -2114,19 +2136,29 @@ Two answers exist and they are not exclusive:
 1. **Build `punar-recover` and its fourth UKI** (§6.4 requirement 5, currently
    answered *"room reserved, artefact not built"*). This is the right answer
    and it is a milestone's worth of work.
-2. **Bless slot B with the same image written to slot A**, at the `boot`
-   phase. The 8 GiB is already allocated and already zero-filled; writing it
-   costs one more pass of the same bounded copy loop and one more UKI on an
-   ESP sized for three. It makes the firmware's own boot menu a working
-   recovery path from the **first** boot rather than the second, and it
-   deletes limit 17 outright.
+2. **Install the same verified release into slot B with a distinct binding**
+   before the `boot` phase. The 8 GiB is already allocated; writing it costs
+   one more pass of the same bounded copy loop and one more UKI on an ESP
+   sized for three. B is not a byte clone: its ext4 UUID, label, `/etc/fstab`
+   selector and UKI root selector bind it to B. It gives systemd-boot's own
+   menu a manually selectable same-release recovery entry from the **first**
+   boot rather than the second — `Punar recovery <version>`, shown when a key
+   is held at boot. It is not automatic fallback and not a firmware menu
+   entry (limit 17).
 
-Option 2 changes assertion **I17**, which currently requires slot B to be
-zero-filled with no UKI — so it is a decision with a test attached and cannot
-be taken quietly. This document **recommends option 2 for the MVP and option 1
-for the first release that ships to anyone outside this repository**, and
-records that the recommendation is not yet a decision: I17 stands as written
-until it is taken.
+**Decision taken for the MVP (2026-09-04): option 2.** The release contract now
+requires both independently bound UEFI pairs. The installer verifies all four
+source files before destructive work, writes and directly re-reads both roots,
+installs both UKIs, then remounts the ESP read-only and re-verifies its bytes;
+it cannot enter `seed`, final verification or success on any missing, corrupt
+or interrupted B path. I03 and I17 carry the artifact and installed-device
+tests. Option 1 remains the requirement for the first release that ships to
+anyone outside this repository: the recovery floor is not a repair tool and
+cannot repair a release defect shared by A and B. The first ordinary
+`update.apply` retires `punar-recovery_<version>.efi` before it overwrites a
+single byte of root B, and only while the running A entry is the uncounted,
+preferred `punar_<version>.efi`; a still-counted A refuses with `conflict`, so
+a retained recovery UKI can never point at a partially rewritten B.
 
 ---
 

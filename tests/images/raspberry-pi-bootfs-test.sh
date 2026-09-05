@@ -5,11 +5,60 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HEALTH_SCRIPT="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/update-health.sh"
+HEALTH_SERVICE="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system/punar-pi-update-health.service"
+OBSOLETE_HEALTH_PATH="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system/punar-pi-update-health.path"
+ARM_POSTINST="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot"
+ARM_UNITS="${REPO_ROOT}/os/images/expected-enabled-units.arm64.txt"
 WORK="$(mktemp -d /tmp/punar-rpi-bootfs-test.XXXXXX)"
 cleanup() {
     rm -rf "${WORK}"
 }
 trap cleanup EXIT
+
+# Native firmware never reaches systemd-boot's bless generator. Prove the ARM
+# image enables a conditional *boot-transaction* oneshot, never a path watcher
+# that could fire as soon as staging creates pending state mid-session.
+test ! -e "${OBSOLETE_HEALTH_PATH}"
+grep -Fxq 'ConditionPathExists=/proc/device-tree/chosen/bootloader/partition' \
+    "${HEALTH_SERVICE}"
+grep -Fxq 'ConditionPathExists=/var/lib/punar/update/pending-pi.json' \
+    "${HEALTH_SERVICE}"
+grep -Fxq 'After=multi-user.target punard.service punar-agentd.service' \
+    "${HEALTH_SERVICE}"
+grep -Fxq 'DefaultDependencies=no' "${HEALTH_SERVICE}"
+grep -Fxq 'Conflicts=shutdown.target' "${HEALTH_SERVICE}"
+grep -Fxq 'Before=boot-complete.target shutdown.target' "${HEALTH_SERVICE}"
+grep -Fxq 'WantedBy=graphical.target' "${HEALTH_SERVICE}"
+grep -Fxq 'TimeoutStartSec=900' "${HEALTH_SERVICE}"
+if grep -Fq 'WantedBy=multi-user.target' "${HEALTH_SERVICE}"; then
+    echo "error: the Pi reconcile oneshot must not be wanted by multi-user.target (it orders after it)" >&2
+    exit 1
+fi
+grep -Fq '/usr/lib/systemd/system/graphical.target.wants/punar-pi-update-health.service' \
+    "${ARM_POSTINST}"
+if grep -Fq 'multi-user.target.wants/punar-pi-update-health' "${ARM_POSTINST}"; then
+    echo "error: the ARM64 postinst must not link the Pi reconcile oneshot into multi-user.target" >&2
+    exit 1
+fi
+grep -Fxq 'usr/lib/systemd/system/graphical.target.wants/punar-pi-update-health.service -> ../punar-pi-update-health.service' \
+    "${ARM_UNITS}"
+if grep -Fq 'punar-pi-update-health.path' "${ARM_UNITS}"; then
+    echo "error: the obsolete Pi path watcher must not be an enabled ARM64 unit" >&2
+    exit 1
+fi
+
+# Candidate blessing occurs only after the complete report. Reboot is driven
+# by the daemon's closed boolean result; fallback and an ordinary post-commit
+# recovery explicitly return false and therefore never reboot.
+report_line="$(grep -n '^[[:space:]]*write_report$' "${HEALTH_SCRIPT}" | head -n 1 | cut -d: -f1)"
+reconcile_after_health_line="$(grep -n '^[[:space:]]*if ! run_pi_reconcile; then' "${HEALTH_SCRIPT}" | tail -n 1 | cut -d: -f1)"
+[ -n "${report_line}" ] && [ -n "${reconcile_after_health_line}" ]
+[ "${report_line}" -lt "${reconcile_after_health_line}" ]
+grep -Fq '/usr/bin/punarctl --json update reconcile-candidate' "${HEALTH_SCRIPT}"
+grep -Fq '.requires_normal_reboot == true' "${HEALTH_SCRIPT}"
+grep -Fq '.requires_normal_reboot == false' "${HEALTH_SCRIPT}"
+grep -Fq '/usr/bin/systemctl --no-block reboot' "${HEALTH_SCRIPT}"
 
 mkdir -p "${WORK}/firmware/boot/overlays" \
     "${WORK}/firmware/modules/fixture-v8+" \

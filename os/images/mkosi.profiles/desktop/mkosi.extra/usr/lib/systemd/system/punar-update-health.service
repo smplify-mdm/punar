@@ -1,6 +1,7 @@
 [Unit]
 Description=Punar health gate for automatic update rollback
 Documentation=https://systemd.io/AUTOMATIC_BOOT_ASSESSMENT/
+ConditionPathExists=!/proc/device-tree/chosen/bootloader/partition
 Requires=punard.service punar-agentd.service
 After=multi-user.target graphical.target punard.service punar-agentd.service
 Before=boot-complete.target

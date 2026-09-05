@@ -288,10 +288,10 @@ pub struct ReleaseManifest {
     pub overlay_pin: Option<OverlayPin>,
     pub payload: PayloadArtifact,
     pub boot_artifact: BootArtifact,
-    /// Required by governed UEFI update staging, optional for a slot-A-only
-    /// UEFI installer manifest, and always `null` for Raspberry Pi. The
-    /// top-level pair is the install-media artifact so the attended installer
-    /// does not need to carry an unused second root image.
+    /// Required for UEFI releases and always `null` for Raspberry Pi. UEFI
+    /// install media needs both independently bound pairs so a fresh install
+    /// starts with a verified recovery floor; the top-level pair aliases slot
+    /// A for backwards-compatible install/update consumers.
     pub uefi_slots: Option<UefiSlotArtifacts>,
     pub min_from: Option<ReleaseVersion>,
     pub security: ReleaseSecurity,
@@ -620,14 +620,25 @@ impl ReleaseManifest {
                 if unique.len() != filenames.len() {
                     return invalid("UEFI slot artifact filenames must be distinct");
                 }
+                if slots.a.payload.uncompressed_size_bytes
+                    != slots.b.payload.uncompressed_size_bytes
+                    || slots.a.payload.uncompressed_digest_sha256
+                        == slots.b.payload.uncompressed_digest_sha256
+                {
+                    return invalid(
+                        "UEFI root artifacts must be equal-sized and independently slot-bound",
+                    );
+                }
+                if slots.a.boot_artifact.digest_sha256 == slots.b.boot_artifact.digest_sha256 {
+                    return invalid("UEFI boot artifacts must be independently slot-bound");
+                }
                 if self.payload != slots.a.payload || self.boot_artifact != slots.a.boot_artifact {
                     return invalid("top-level install artifacts must equal UEFI slot A");
                 }
             }
-            // A signed install manifest intentionally carries only the
-            // top-level slot-A pair. The update engine separately requires
-            // artifacts_for_slot(inactive) before it downloads or writes.
-            (BootPlatform::Uefi, None) => {}
+            (BootPlatform::Uefi, None) => {
+                return invalid("UEFI release requires independently bound slot A and B artifacts");
+            }
             (BootPlatform::RaspberryPi, None) => {}
             (BootPlatform::RaspberryPi, Some(_)) => {
                 return invalid("Raspberry Pi release may not carry UEFI slot artifacts");
@@ -1179,10 +1190,10 @@ mod tests {
     }
 
     #[test]
-    fn uefi_update_pairs_are_distinct_and_a_slot_a_only_installer_remains_valid() {
+    fn uefi_releases_require_distinct_slot_pairs() {
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
         manifest.uefi_slots = None;
-        assert!(manifest.validate().is_ok());
+        assert!(manifest.validate().is_err());
         assert!(manifest.artifacts_for_slot(UpdateSlot::B).is_none());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
@@ -1195,6 +1206,28 @@ mod tests {
             .filename
             .clone();
         manifest.uefi_slots.as_mut().unwrap().b.payload.filename = slot_a_name;
+        assert!(manifest.validate().is_err());
+
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        let slot_a_digest = manifest.payload.uncompressed_digest_sha256.clone();
+        manifest
+            .uefi_slots
+            .as_mut()
+            .unwrap()
+            .b
+            .payload
+            .uncompressed_digest_sha256 = slot_a_digest;
+        assert!(manifest.validate().is_err());
+
+        let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();
+        let slot_a_digest = manifest.boot_artifact.digest_sha256.clone();
+        manifest
+            .uefi_slots
+            .as_mut()
+            .unwrap()
+            .b
+            .boot_artifact
+            .digest_sha256 = slot_a_digest;
         assert!(manifest.validate().is_err());
 
         let mut manifest: ReleaseManifest = serde_json::from_slice(&manifest_bytes()).unwrap();

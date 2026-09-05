@@ -489,9 +489,33 @@ ARM64 CI in [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/
    read-only paired root and all four health signals before retaining a
    verified selector backup and swapping ordinary/try partitions. Tests prove
    the known-good pair remains byte-identical. This is verified software-path
-   evidence, not a production signature or booted-Pi claim. The typed public
-   `update.*` daemon/CLI surface, reboot handoff and image health-unit wiring
-   remain before this becomes user-operable.
+   evidence, not a production signature or booted-Pi claim. The boot-side
+   half now exists in the working tree (**LOCAL-ONLY**; canonical CI will
+   prove only the static unit contract and the image enablement golden — the
+   unit's load/condition/ordering behaviour on a running ARM64 image and any
+   booted-Pi behaviour stay unproven until an in-VM assertion or the physical
+   matrix exists): the parameterless, root-only, agent-denied
+   `update.reconcile_candidate` method returns one of three explicit
+   outcomes — `blessed_candidate`, `firmware_fallback`, `postcommit_recovery`
+   — after re-reading the exact signed root and boot byte ranges with
+   `O_DIRECT`, checking boot-file semantics and the mounted root
+   `IMAGE_VERSION`, and it never removes pending state before an
+   `fdatasync`ed outcome audit (retry is idempotent). The ARM64 image wires
+   `punar-pi-update-health.service` as a conditional boot-transaction oneshot
+   wanted by `graphical.target` and ordered after `multi-user.target` (an
+   earlier draft wanted it from `multi-user.target` while ordering after it —
+   a startup deadlock the bootfs contract now refuses); a normal boot of the
+   previous slot is finalized without another reboot. The hidden
+   `punarctl update reconcile-candidate` is the health script's only handoff
+   and waits with the update-mutation budget, because the daemon re-hashes
+   whole slots before it answers. The oneshot opts out of default
+   dependencies so `graphical.target` never waits on the health window.
+   Unit, daemon and static contract suites pass locally; the software-path
+   tests cover partial health, digest/size/version mismatch, firmware
+   fallback, audit-failure retry and post-commit recovery. Two labelled
+   limits are recorded in ADR-006: a never-tried candidate is finalized as
+   `firmware_fallback`, and a committed selector whose pending record
+   survived has no API exit if health later fails.
 4. Run ADR-006's reset/watchdog/power-loss matrix on a real supported Pi before
    advertising Raspberry Pi support.
 
@@ -801,6 +825,34 @@ re-proved I36c plus the full unattended path on 2026-09-04. Still open are the
 power-loss matrix, x86 substrate parity, logout/login human acceptance and
 physical hardware.
 
+**Same-release recovery floor (installer.md §12.1 option 2, decided
+2026-09-04; LOCAL-ONLY until the dual-slot ISO passes canonical CI):** every
+UEFI release manifest now requires independently bound A and B root/UKI
+pairs (`uefi_slots`), the install plan binds `recovery_payload` and
+`recovery_boot_artifact` into its token, and the installer verifies all four
+files before destructive work, re-reads the created GPT from the disk before
+any root write, writes and `O_DIRECT`-re-reads both roots, parses both UKIs
+for exactly one `root=PARTUUID=` selector, verifies B's ext4 UUID/label and
+`/etc/fstab` binding, installs `punar_<v>.efi` (preferred, uncounted) plus
+`punar-recovery_<v>.efi`, and re-hashes the ESP read-only before `seed`. The
+assembler derives B at image time (distinct ext4 identity, fstab and a
+`Punar recovery <v>` boot title) and refuses an Authenticode-signed A input.
+The first `update.apply` retires the recovery UKI before opening root B and
+only while A is the uncounted preferred entry; an apply that rewrites only
+root A (the device booted the recovery slot by hand) keeps the entry, and the
+read-only ESP admission checks now run before retirement so a refused apply
+cannot cost the floor. The first A entry stays **uncounted** by decision: a
+counted first A was tried and rejected because its blessing depends on a
+desktop session within the health window, which a fresh device idling at
+onboarding does not guarantee, and an exhausted A would strand the device on
+B with no blessed A. The entry is a manually selectable systemd-boot item
+(`Punar recovery <v>`, hold a key at boot), not firmware-menu or automatic
+fallback. The
+ISO grows by roughly one compressed root payload; both installer jobs now
+reclaim runner disk and the assembler refuses to start below 12 GiB free and
+logs headroom per stage so the floor can be calibrated from the first
+canonical run.
+
 **Closed design defect:** `install.targets` now excludes both the mounted live
 medium (including block-device `slaves/` ancestry) and every device carrying
 `PUNAR_ANSWR`. The fake-sysfs test exercises both directions; keep it when
@@ -934,6 +986,36 @@ The private relay is `user-blocked.md` item 6 and is the largest item on that
 list.
 
 ---
+
+### 6.6 Managed host-agent isolation (ADR-004)
+`docs/architecture/adr/ADR-004-managed-agent-isolation.md`. Implemented in
+the working tree, **LOCAL-ONLY until the M7/M8/M12 image gates pass on both
+architectures**: every managed host agent now launches behind a fixed
+`punar-env __agent-gate` inside its transient scope, which proves its own
+cgroup, registers with agentd, and blocks on the internal
+`network.session_ready` method until punar-netd has read this session's exact
+cgroup selector and jump target back from the kernel table — then `exec`s
+canonical `/usr/bin/bwrap` with read-only `/usr` and `/etc`, private
+`/proc`, `/dev`, `/tmp`, a fresh per-session home/runtime, and only the
+declared project at `/workspace`. No PATH lookup, no unsandboxed fallback, no
+pre-boundary version probe. The agentd, netd, punard and secrets sockets, the
+user D-Bus socket and the real home are absent inside the namespace. The
+first adversarial review's release blocker was fixed here: the kernel's `nft
+-j list` rows omit `level` on a cgroupv2 socket match (captured clean-VM
+evidence on both architectures), so the readback now tolerates an absent
+level and still rejects a wrong one; a regression test carries the exact
+captured rows. A second review found the same class twice more and both are
+fixed: the Debian images link `/usr/bin/nft` to `/usr/sbin/nft`, so the
+readiness preflight now validates both the alias chain and the canonical
+chain instead of rejecting every symlink; and the Arch image has no
+`hostname` binary, so the namespace probe uses `uname -n`. The readback now
+lists only the `egress` and `s_<tag>` chains under an explicit 1 MiB bound,
+gate handoff files are published atomically, and a project must live at
+`~/<project.name>` because that is where punar-netd locates its policy. Because the sandboxed mock can no longer reach punard, the M8
+gate now makes its two agent-originated calls from a process moved into the
+same scope cgroup (M9's `in-agent-scope.sh`) and asserts the mock's explicit
+"mediation unavailable" report instead. Known limits are in the ADR: whole
+`/etc` read-only, same-UID host peers, no real Claude package/OAuth closure.
 
 ## 7. How to add a new in-VM check
 

@@ -30,6 +30,20 @@
       "digest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "size_bytes": 168370688
     },
+    "recovery_payload": {
+      "release_id": "punar-desktop-stable-x86_64-uefi-2026.08.28.1",
+      "filename": "slot-b.raw.zst",
+      "digest_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "compressed_size_bytes": 912680551,
+      "uncompressed_digest_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "uncompressed_size_bytes": 8589934592
+    },
+    "recovery_boot_artifact": {
+      "kind": "uki",
+      "filename": "punar-desktop-x86_64-uefi-2026.08.28.1.slot-b.uki.efi",
+      "digest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "size_bytes": 168370688
+    },
     "partitions": [
       {
         "number": 1,
@@ -74,7 +88,7 @@
     "data_subvolumes": ["@var", "@home", "@var-tmp"],
     "warnings": []
   },
-  "plan_token": "70d834d0a5d234adba171c4a6746561c5ad2ce7c9684a650cab322d89ceee554",
+  "plan_token": "1f228f79dbb9e335dd20dcd9f84cb26da649c62ae8875a0e84afad073bf13b59",
   "hardware_report": {
     "v": 1,
     "generated_at": "2026-08-30T18:45:00Z",

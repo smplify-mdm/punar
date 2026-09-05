@@ -492,7 +492,7 @@ Two mitigations exist on paper and exactly one of them works today:
 
 | Mitigation | Does it cover the case? |
 |---|---|
-| **A/B rollback (ADR-003)** — boot the other slot | **Yes, after the first update. No, on a fresh install**, where `installer.md` §10.2 assertion I17 requires slot B to be *zero-filled with no UKI*. A device whose very first boot cannot start `punard` has no slot to roll back to |
+| **A/B rollback (ADR-003)** — boot the other slot | **Yes, after the first update. Only partly on a fresh install:** `installer.md` I17 now requires a separately bound, verified copy of the same release in slot B plus `punar-recovery_<v>.efi`, so a person can hold a key at boot and start the other slot. It is a same-release floor, not a repair environment: a `punard` defect common to the release breaks both slots |
 | **§1.8 Layer 2** — the `punar-recover` boot entry | **It is the right answer and it does not exist.** `installer.md` §6.4 requirement 5 reserves the ESP room and declines to build the artefact, so §1.8 Layer 2 is *dashed* |
 | Layer 1 (the account recovery code) | **No.** It is redeemed *through punard*, at the greeter |
 | Layer 3 (reinstall) | Yes, at the cost of everything on the disk |
@@ -512,12 +512,14 @@ exists, §8 carries limit 10 and every surface that says "Punar has no
 permanent administrator" must be able to answer *"then how do I get in when
 the daemon is broken?"* with something other than silence.
 
-The cheap interim, if the recovery UKI slips: the installer blesses slot B
-with the **same** image it wrote to slot A. It costs 8 GiB that are already
-allocated and nothing else, it makes the firmware's own boot menu a working
-recovery path from the first boot rather than the second, and it removes the
-"no rollback target on a fresh install" row above entirely. Recorded as a
-recommendation to `installer.md` §4.1, not a decision taken here.
+The cheap interim, if the recovery UKI slips: the installer writes slot B
+with the **same** release it wrote to slot A, separately bound to B. It costs
+8 GiB that are already allocated and nothing else, and it gives systemd-boot's
+menu a manually selectable `Punar recovery <version>` entry from the first
+boot rather than the second. It is not a firmware boot-menu entry and not an
+automatic fallback, so the "no rollback target on a fresh install" row above
+shrinks rather than disappears. `installer.md` §12.1 took this option on
+2026-09-04; `punar-recover` remains the requirement for a shipped release.
 
 ### 1.7 The bootstrap rule
 
@@ -1517,7 +1519,7 @@ Stated before anyone reads a green run as more than it is:
 | 07 | That the greeter is a security boundary against physical access | It is an authentication surface on top of disk encryption. The encryption is the boundary |
 | 08 | That accounts survive an update **today** | They will, by §1.9 and §1.10, on the A/B layout ADR-003 accepted and the installer has not yet built. Until then, assertion E-7 is a proxy |
 | 09 | That `sudo` has been removed | It ships with the substrate. Punar authors no rule for it and grants `wheel` to nobody, which is a different and provable statement |
-| 10 | That a device with a broken `punard` is recoverable without reinstalling | §1.6.2. Root is locked, nobody is in `wheel`, and every privilege path runs through `punard`. On a **freshly installed** device slot B is zero-filled (`installer.md` I17), so there is no rollback target either, and §1.8 Layer 2 does not exist. Until `punar-recover` ships, this is Layer 3 or nothing — and it is a **worse** recovery story than the dev image this document deletes |
+| 10 | That a device with a broken `punard` is recoverable without reinstalling | §1.6.2. Root is locked, nobody is in `wheel`, and every privilege path runs through `punard`. On a **freshly installed** device slot B holds a separately bound copy of the *same* release (`installer.md` I17), reachable by hand from systemd-boot's menu; that helps against a damaged A, not against a `punard` defect the release itself carries, and §1.8 Layer 2 does not exist. Until `punar-recover` ships, that case is Layer 3 or nothing — and it is a **worse** recovery story than the dev image this document deletes |
 | 11 | That the self-service set (§1.6.1) is a security boundary | It is a **ceremony** decision, not an authority decision. It says which low-risk, self-reversible capabilities a human at their own unmanaged machine may set without an approval card. Someone who is already that uid could have obtained a grant anyway by self-resolving; what changes is how many keystrokes it took, and what the audit event is called |
 | 12 | That Punar has a network-configuration story | It does not. No `network.*` capability exists, no polkit policy is authored, and no Wi-Fi manager is in the image. §1.6.1 states the constraint the future design must respect and does not pretend to have designed it |
 

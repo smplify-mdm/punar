@@ -19,6 +19,11 @@ GIT_SHA=$5
 BUILT_AT=$6
 CI_RUN_ID=$7
 OPTICAL_ESP_LABEL=PUNAR_BOOT
+ROOT_A_PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea
+ROOT_B_PARTUUID=2b1b91a9-cf2c-4e9c-a723-5ec997971662
+# UUIDv5(NAMESPACE_URL, "https://punar.org/filesystem/root-b"). This is the
+# same independently bound slot-B filesystem identity used by update bundles.
+ROOT_B_FS_UUID=724e1a3b-d966-54b7-9a97-8886985eee18
 
 # FAT volume labels are limited to 11 characters. Keep this explicit so a
 # branding change cannot make the native release job fail late in assembly.
@@ -67,6 +72,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The dual-slot media carries two compressed 8 GiB root payloads, and xorriso
+# holds the ISO sources and the finished ISO at once. Refuse to start on a
+# filesystem that cannot hold that peak instead of failing after the slot
+# copies; the stage lines record the real headroom so this floor can be
+# calibrated from a canonical run rather than guessed.
+ISO_ASSEMBLY_MIN_FREE_BYTES=$((12 * 1024 * 1024 * 1024))
+free_bytes() {
+    df --output=avail -B1 "$1" | tail -n 1 | tr -d '[:space:]'
+}
+report_free_space() {
+    echo "installer-iso disk: stage=$1 work_available_bytes=$(free_bytes "${WORK}") output_available_bytes=$(free_bytes "$(dirname "${OUTPUT_ISO}")")"
+}
+report_free_space start
+if [ "$(free_bytes "${WORK}")" -lt "${ISO_ASSEMBLY_MIN_FREE_BYTES}" ]; then
+    echo "error: ${WORK} has fewer than ${ISO_ASSEMBLY_MIN_FREE_BYTES} bytes free; dual-slot ISO assembly needs that peak" >&2
+    exit 1
+fi
+
 for loop_minor in {0..63}; do
     [ -b "/dev/loop${loop_minor}" ] || mknod --mode=0660 "/dev/loop${loop_minor}" b 7 "${loop_minor}"
 done
@@ -105,6 +128,46 @@ extract_uki() {
     ESP_LOOP=''
 }
 
+# objcopy rewrites PE sections without preserving an Authenticode signature.
+# The current lane intentionally has simulated Secure Boot, so refuse a signed
+# input instead of quietly producing a recovery UKI whose firmware signature
+# has been invalidated. Production must derive both sections before signing.
+refuse_authenticode_signed_uki() {
+    python3 - "$1" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as stream:
+    dos = stream.read(64)
+    if len(dos) != 64 or dos[:2] != b"MZ":
+        raise SystemExit("release UKI has no bounded DOS header")
+    pe = struct.unpack_from("<I", dos, 60)[0]
+    stream.seek(pe)
+    header = stream.read(24)
+    if len(header) != 24 or header[:4] != b"PE\0\0":
+        raise SystemExit("release UKI has no bounded PE header")
+    optional_size = struct.unpack_from("<H", header, 20)[0]
+    optional = stream.read(optional_size)
+if len(optional) != optional_size:
+    raise SystemExit("release UKI has a truncated PE optional header")
+magic = struct.unpack_from("<H", optional, 0)[0]
+if magic == 0x10B:
+    security = 128
+elif magic == 0x20B:
+    security = 144
+else:
+    raise SystemExit("release UKI has an unsupported PE optional-header magic")
+if security + 8 > len(optional):
+    raise SystemExit("release UKI has no bounded Authenticode directory")
+certificate_offset, certificate_size = struct.unpack_from("<II", optional, security)
+if certificate_offset or certificate_size:
+    raise SystemExit(
+        "release UKI is Authenticode-signed; objcopy section mutation would invalidate it"
+    )
+PY
+}
+
 mkdir -p "${WORK}/root" "${WORK}/iso-root/punar/keys" "${WORK}/erofs-extract"
 
 read -r root_start root_sectors < <(partition_bounds "${RELEASE_RAW}" 2)
@@ -112,6 +175,7 @@ read -r root_start root_sectors < <(partition_bounds "${RELEASE_RAW}" 2)
     || { echo "error: no root-A partition in ${RELEASE_RAW}" >&2; exit 1; }
 ROOT_BYTES=$((root_sectors * 512))
 SLOT_RAW="${WORK}/slot.raw"
+SLOT_B_RAW="${WORK}/slot-b.raw"
 dd if="${RELEASE_RAW}" of="${SLOT_RAW}" iflag=skip_bytes,count_bytes \
     skip="$((root_start * 512))" count="${ROOT_BYTES}" conv=sparse status=none
 [ "$(blkid -p -s LABEL -o value "${SLOT_RAW}")" = PUNAR-ROOT-A ] \
@@ -131,17 +195,200 @@ umount "${WORK}/root"
 losetup --detach "${ROOT_LOOP}"
 ROOT_LOOP=''
 
+# A fresh install must have a bootable recovery floor before its first update.
+# Derive B at image-assembly time (never on the target device): preserve the
+# release tree, replace the root filesystem identity/fstab binding, and verify
+# the resulting ext4 image before it enters signed release metadata.
+cp --sparse=always "${SLOT_RAW}" "${SLOT_B_RAW}"
+ROOT_A_FS_UUID="$(blkid -p -s UUID -o value "${SLOT_RAW}")"
+[ -n "${ROOT_A_FS_UUID}" ] \
+    || { echo "error: slot A has no ext4 filesystem UUID" >&2; exit 1; }
+ROOT_LOOP="$(losetup --find --show "${SLOT_B_RAW}")"
+mount "${ROOT_LOOP}" "${WORK}/root"
+grep -Fqi "UUID=${ROOT_A_FS_UUID} / ext4" "${WORK}/root/etc/fstab" \
+    || { echo "error: slot A fstab does not bind its ext4 filesystem UUID" >&2; exit 1; }
+sed -i "s/${ROOT_A_FS_UUID}/${ROOT_B_FS_UUID}/g" "${WORK}/root/etc/fstab"
+grep -Fqi "UUID=${ROOT_B_FS_UUID} / ext4" "${WORK}/root/etc/fstab" \
+    || { echo "error: could not bind recovery slot B in fstab" >&2; exit 1; }
+sync -f "${WORK}/root/etc/fstab"
+umount "${WORK}/root"
+losetup --detach "${ROOT_LOOP}"
+ROOT_LOOP=''
+tune2fs -U "${ROOT_B_FS_UUID}" -L PUNAR-ROOT-B "${SLOT_B_RAW}" >/dev/null
+[ "$(blkid -p -s UUID -o value "${SLOT_B_RAW}")" = "${ROOT_B_FS_UUID}" ] \
+    || { echo "error: recovery slot B has the wrong filesystem UUID" >&2; exit 1; }
+[ "$(blkid -p -s LABEL -o value "${SLOT_B_RAW}")" = PUNAR-ROOT-B ] \
+    || { echo "error: recovery slot B has the wrong filesystem label" >&2; exit 1; }
+e2fsck -fn "${SLOT_B_RAW}"
+ROOT_LOOP="$(losetup --find --show --read-only "${SLOT_B_RAW}")"
+mount -o ro,noload "${ROOT_LOOP}" "${WORK}/root"
+python3 - "${WORK}/root/etc/fstab" "${ROOT_B_FS_UUID}" <<'PY'
+import sys
+
+path, uuid = sys.argv[1:]
+roots = []
+with open(path, "r", encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "/":
+            roots.append((fields[0], fields[2]))
+if roots != [(f"UUID={uuid}", "ext4")]:
+    raise SystemExit(f"recovery fstab has unsafe root binding: {roots!r}")
+PY
+umount "${WORK}/root"
+losetup --detach "${ROOT_LOOP}"
+ROOT_LOOP=''
+
+PAYLOAD_NAME="punar-desktop-x86_64-uefi-${VERSION}.slot.raw.zst"
+SLOT_UKI_NAME="punar-desktop-x86_64-uefi-${VERSION}.uki.efi"
+PAYLOAD_B_NAME="punar-desktop-x86_64-uefi-${VERSION}.slot-b.raw.zst"
+SLOT_UKI_B_NAME="punar-desktop-x86_64-uefi-${VERSION}.slot-b.uki.efi"
+INSTALLER_UKI_NAME="punar-installer-${VERSION}-x86_64.efi"
+PAYLOAD="${WORK}/iso-root/punar/${PAYLOAD_NAME}"
+PAYLOAD_B="${WORK}/iso-root/punar/${PAYLOAD_B_NAME}"
+
+# Hash each raw filesystem before compression, verify the durable compressed
+# stream expands to those exact bytes, then release the 8 GiB temporary as
+# soon as correctness permits. Never carry both raws into EROFS extraction.
+UNCOMPRESSED_DIGEST="$(sha256sum "${SLOT_RAW}" | cut -d' ' -f1)"
+UNCOMPRESSED_B_DIGEST="$(sha256sum "${SLOT_B_RAW}" | cut -d' ' -f1)"
+[ "${UNCOMPRESSED_DIGEST}" != "${UNCOMPRESSED_B_DIGEST}" ] \
+    || { echo "error: slot B is an unsafe byte clone of slot A" >&2; exit 1; }
+zstd -T0 -10 --force --no-progress "${SLOT_RAW}" \
+    -o "${PAYLOAD}"
+sync -f "${PAYLOAD}"
+zstd --test --no-progress "${PAYLOAD}"
+[ "$(zstd --decompress --stdout --no-progress "${PAYLOAD}" | sha256sum | cut -d' ' -f1)" = \
+    "${UNCOMPRESSED_DIGEST}" ] \
+    || { echo "error: durable slot-A payload does not expand to its source digest" >&2; exit 1; }
+PAYLOAD_DIGEST="$(sha256sum "${PAYLOAD}" | cut -d' ' -f1)"
+PAYLOAD_SIZE="$(stat -c %s "${PAYLOAD}")"
+rm -f "${SLOT_RAW}"
+
+zstd -T0 -10 --force --no-progress "${SLOT_B_RAW}" \
+    -o "${PAYLOAD_B}"
+sync -f "${PAYLOAD_B}"
+zstd --test --no-progress "${PAYLOAD_B}"
+[ "$(zstd --decompress --stdout --no-progress "${PAYLOAD_B}" | sha256sum | cut -d' ' -f1)" = \
+    "${UNCOMPRESSED_B_DIGEST}" ] \
+    || { echo "error: durable slot-B payload does not expand to its source digest" >&2; exit 1; }
+PAYLOAD_B_DIGEST="$(sha256sum "${PAYLOAD_B}" | cut -d' ' -f1)"
+PAYLOAD_B_SIZE="$(stat -c %s "${PAYLOAD_B}")"
+rm -f "${SLOT_B_RAW}"
+report_free_space payloads-compressed
+
 fsck.erofs --extract="${WORK}/erofs-extract" "${WORK}/iso-root/punar/live.erofs"
 python3 "${REPO_ROOT}/tools/tree_manifest.py" \
     "${WORK}/erofs-extract" "${WORK}/tree-manifest-erofs.json"
 cmp "${WORK}/iso-root/punar/tree-manifest.json" "${WORK}/tree-manifest-erofs.json"
+rm -rf "${WORK}/erofs-extract"
+rm -f "${WORK}/tree-manifest-erofs.json"
 
-PAYLOAD_NAME="punar-desktop-x86_64-uefi-${VERSION}.slot.raw.zst"
-SLOT_UKI_NAME="punar-desktop-x86_64-uefi-${VERSION}.uki.efi"
-INSTALLER_UKI_NAME="punar-installer-${VERSION}-x86_64.efi"
-zstd -T0 -10 --force --no-progress "${SLOT_RAW}" \
-    -o "${WORK}/iso-root/punar/${PAYLOAD_NAME}"
 extract_uki "${RELEASE_RAW}" "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
+refuse_authenticode_signed_uki "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
+cp "${WORK}/iso-root/punar/${SLOT_UKI_NAME}" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
+# Secure Boot is explicitly SIMULATED for this build. Both UKIs are bound by
+# the signed release manifest; when production UKI signing lands, this build-
+# time derivation must be followed by that signer rather than moved on-device.
+objcopy --dump-section ".cmdline=${WORK}/slot-a.cmdline" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
+tr -d '\000' < "${WORK}/slot-a.cmdline" > "${WORK}/slot-a.cmdline.txt"
+[ "$(tr ' ' '\n' < "${WORK}/slot-a.cmdline.txt" | grep -c '^root=PARTUUID=')" -eq 1 ] \
+    || { echo "error: slot-A UKI must contain exactly one root PARTUUID" >&2; exit 1; }
+tr ' ' '\n' < "${WORK}/slot-a.cmdline.txt" \
+    | grep -Fqx "root=PARTUUID=${ROOT_A_PARTUUID}" \
+    || { echo "error: slot-A UKI does not bind the fixed slot-A PARTUUID" >&2; exit 1; }
+sed "s/${ROOT_A_PARTUUID}/${ROOT_B_PARTUUID}/g" \
+    "${WORK}/slot-a.cmdline.txt" > "${WORK}/slot-b.cmdline"
+printf '\0' >> "${WORK}/slot-b.cmdline"
+objcopy --update-section ".cmdline=${WORK}/slot-b.cmdline" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
+# Give the permanent fallback a visibly distinct boot-menu identity. This is
+# part of the B artifact before its manifest digest is computed. Production
+# Secure Boot must likewise derive both mutable UKI sections before signing.
+objcopy --dump-section ".osrel=${WORK}/slot-a.osrel" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
+python3 - "${WORK}/slot-a.osrel" "${WORK}/slot-b.osrel" "${VERSION}" <<'PY'
+import sys
+
+source, destination, version = sys.argv[1:]
+raw = open(source, "rb").read()
+text = raw.rstrip(b"\0").decode("utf-8")
+lines = text.splitlines()
+matches = [index for index, line in enumerate(lines) if line.startswith("PRETTY_NAME=")]
+if len(matches) != 1:
+    raise SystemExit("slot-A UKI os-release does not contain exactly one PRETTY_NAME")
+lines[matches[0]] = f'PRETTY_NAME="Punar recovery {version}"'
+with open(destination, "wb") as stream:
+    stream.write(("\n".join(lines) + "\n").encode("utf-8"))
+    stream.write(b"\0")
+PY
+objcopy --update-section ".osrel=${WORK}/slot-b.osrel" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
+# objcopy --update-section grows .osrel/.cmdline in place. The EFI loader
+# maps sections by VirtualAddress, so a grown section that crossed into its
+# successor's address range would be silently overlaid at boot. Require the
+# derived artifact's section table to stay strictly non-overlapping and to
+# keep A's section names, since nothing boots the recovery UKI before I17.
+check_uki_section_layout() {
+    python3 - "$1" "$2" <<'PY'
+import struct
+import sys
+
+
+def sections(path):
+    with open(path, "rb") as stream:
+        dos = stream.read(64)
+        pe = struct.unpack_from("<I", dos, 60)[0]
+        stream.seek(pe)
+        header = stream.read(24)
+        if header[:4] != b"PE\0\0":
+            raise SystemExit(f"{path}: no PE signature")
+        count = struct.unpack_from("<H", header, 6)[0]
+        optional_size = struct.unpack_from("<H", header, 20)[0]
+        optional = stream.read(optional_size)
+        alignment = struct.unpack_from("<I", optional, 32)[0]
+        table = []
+        for _ in range(count):
+            entry = stream.read(40)
+            name = entry[:8].split(b"\0", 1)[0].decode("ascii", "replace")
+            virtual_size, virtual_address, raw_size = struct.unpack_from("<III", entry, 8)
+            table.append((name, virtual_address, virtual_size, raw_size))
+    return alignment, table
+
+
+derived_path, source_path = sys.argv[1:]
+alignment, derived = sections(derived_path)
+_, source = sections(source_path)
+if [name for name, *_ in derived] != [name for name, *_ in source]:
+    raise SystemExit("recovery UKI section names differ from the slot-A UKI")
+ordered = sorted(derived, key=lambda section: section[1])
+for (name, address, virtual_size, raw_size), successor in zip(ordered, ordered[1:]):
+    end = address + max(virtual_size, raw_size)
+    if alignment:
+        end = (end + alignment - 1) // alignment * alignment
+    if end > successor[1]:
+        raise SystemExit(
+            f"recovery UKI section {name} ends at {end:#x}, overlapping {successor[0]} at {successor[1]:#x}"
+        )
+PY
+}
+check_uki_section_layout "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
+objcopy --dump-section ".cmdline=${WORK}/slot-b-verified.cmdline" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
+tr -d '\000' < "${WORK}/slot-b-verified.cmdline" \
+    | tr ' ' '\n' | grep -Fqx "root=PARTUUID=${ROOT_B_PARTUUID}" \
+    || { echo "error: recovery UKI does not bind the fixed slot-B PARTUUID" >&2; exit 1; }
+objcopy --dump-section ".osrel=${WORK}/slot-b-verified.osrel" \
+    "${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
+tr -d '\000' < "${WORK}/slot-b-verified.osrel" \
+    | grep -Fxq "PRETTY_NAME=\"Punar recovery ${VERSION}\"" \
+    || { echo "error: recovery UKI does not carry its distinct boot title" >&2; exit 1; }
 extract_uki "${INSTALLER_RAW}" "${WORK}/${INSTALLER_UKI_NAME}"
 
 # The live-root archive must already be inside the UKI built by mkosi/ukify.
@@ -175,13 +422,14 @@ if grep -Eq '(^|[[:space:]])console=(ttyS|ttyAMA)' "${WORK}/installer.cmdline.tx
     exit 1
 fi
 
-PAYLOAD="${WORK}/iso-root/punar/${PAYLOAD_NAME}"
 SLOT_UKI="${WORK}/iso-root/punar/${SLOT_UKI_NAME}"
-PAYLOAD_DIGEST="$(sha256sum "${PAYLOAD}" | cut -d' ' -f1)"
-UNCOMPRESSED_DIGEST="$(sha256sum "${SLOT_RAW}" | cut -d' ' -f1)"
+SLOT_UKI_B="${WORK}/iso-root/punar/${SLOT_UKI_B_NAME}"
 SLOT_UKI_DIGEST="$(sha256sum "${SLOT_UKI}" | cut -d' ' -f1)"
-PAYLOAD_SIZE="$(stat -c %s "${PAYLOAD}")"
+SLOT_UKI_B_DIGEST="$(sha256sum "${SLOT_UKI_B}" | cut -d' ' -f1)"
 SLOT_UKI_SIZE="$(stat -c %s "${SLOT_UKI}")"
+SLOT_UKI_B_SIZE="$(stat -c %s "${SLOT_UKI_B}")"
+[ "${SLOT_UKI_DIGEST}" != "${SLOT_UKI_B_DIGEST}" ] \
+    || { echo "error: recovery UKI is not independently bound to slot B" >&2; exit 1; }
 
 python3 - \
     "${WORK}/iso-root/punar/release.json" \
@@ -189,6 +437,9 @@ python3 - \
     "${PAYLOAD_NAME}" "${PAYLOAD_DIGEST}" "${PAYLOAD_SIZE}" \
     "${UNCOMPRESSED_DIGEST}" "${ROOT_BYTES}" \
     "${SLOT_UKI_NAME}" "${SLOT_UKI_DIGEST}" "${SLOT_UKI_SIZE}" \
+    "${PAYLOAD_B_NAME}" "${PAYLOAD_B_DIGEST}" "${PAYLOAD_B_SIZE}" \
+    "${UNCOMPRESSED_B_DIGEST}" \
+    "${SLOT_UKI_B_NAME}" "${SLOT_UKI_B_DIGEST}" "${SLOT_UKI_B_SIZE}" \
     "${RELEASE_SNAPSHOT_PIN}" "${GIT_SHA}" "${CI_RUN_ID}" \
     "${RELEASE_BUILDER_DIGEST}" "${RELEASE_SOURCE_DATE_EPOCH}" \
     "${BUILT_AT}" <<'PY'
@@ -206,6 +457,13 @@ import sys
     slot_uki_name,
     slot_uki_digest,
     slot_uki_size,
+    payload_b_name,
+    payload_b_digest,
+    payload_b_size,
+    uncompressed_b_digest,
+    slot_uki_b_name,
+    slot_uki_b_digest,
+    slot_uki_b_size,
     snapshot_pin,
     git_sha,
     ci_run_id,
@@ -238,6 +496,40 @@ document = {
         "digest_sha256": slot_uki_digest,
         "size_bytes": int(slot_uki_size),
     },
+    "uefi_slots": {
+        "a": {
+            "payload": {
+                "filename": payload_name,
+                "digest_sha256": payload_digest,
+                "size_bytes": int(payload_size),
+                "uncompressed_digest_sha256": uncompressed_digest,
+                "uncompressed_size_bytes": int(root_bytes),
+                "compression": "zstd",
+            },
+            "boot_artifact": {
+                "kind": "uki",
+                "filename": slot_uki_name,
+                "digest_sha256": slot_uki_digest,
+                "size_bytes": int(slot_uki_size),
+            },
+        },
+        "b": {
+            "payload": {
+                "filename": payload_b_name,
+                "digest_sha256": payload_b_digest,
+                "size_bytes": int(payload_b_size),
+                "uncompressed_digest_sha256": uncompressed_b_digest,
+                "uncompressed_size_bytes": int(root_bytes),
+                "compression": "zstd",
+            },
+            "boot_artifact": {
+                "kind": "uki",
+                "filename": slot_uki_b_name,
+                "digest_sha256": slot_uki_b_digest,
+                "size_bytes": int(slot_uki_b_size),
+            },
+        },
+    },
     "min_from": None,
     "security": {"severity": "none", "advisory_ids": []},
     "provenance": {
@@ -266,6 +558,8 @@ chmod 0600 "${WORK}/release.seed"
     "${WORK}/iso-root/punar/release.json.sig"
 "${RELEASE_TOOL}" verify-artifact "${PAYLOAD}" "${PAYLOAD_DIGEST}" "${PAYLOAD_SIZE}"
 "${RELEASE_TOOL}" verify-artifact "${SLOT_UKI}" "${SLOT_UKI_DIGEST}" "${SLOT_UKI_SIZE}"
+"${RELEASE_TOOL}" verify-artifact "${PAYLOAD_B}" "${PAYLOAD_B_DIGEST}" "${PAYLOAD_B_SIZE}"
+"${RELEASE_TOOL}" verify-artifact "${SLOT_UKI_B}" "${SLOT_UKI_B_DIGEST}" "${SLOT_UKI_B_SIZE}"
 
 # Put the exact installer UKI in the ISO filesystem. Optical firmware first
 # loads a compact GRUB standalone from a standards-sized El Torito FAT image;
@@ -331,6 +625,7 @@ mcopy -i "${WORK}/esp.img" "${WORK}/${INSTALLER_UKI_NAME}" "::/EFI/Linux/${INSTA
 
 TMP_ISO="${OUTPUT_ISO}.tmp"
 rm -f "${TMP_ISO}"
+report_free_space before-xorriso
 xorriso -as mkisofs \
     -iso-level 3 -full-iso9660-filenames -rational-rock \
     -volid PUNAR_INSTALL \
@@ -341,5 +636,6 @@ xorriso -as mkisofs \
     -no-emul-boot \
     -o "${TMP_ISO}" "${WORK}/iso-root"
 mv -f "${TMP_ISO}" "${OUTPUT_ISO}"
+report_free_space finished
 
 echo "PUNAR_INSTALLER_ISO_OK version=${VERSION} bytes=$(stat -c %s "${OUTPUT_ISO}") sha256=$(sha256sum "${OUTPUT_ISO}" | cut -d' ' -f1)"

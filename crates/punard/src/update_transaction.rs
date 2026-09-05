@@ -27,8 +27,8 @@ use crate::update_check::PreparedRelease;
 use crate::util::{sha256_hex, write_atomic_synced};
 
 const SMALL_FILE_MAX: u64 = 64 * 1024;
-const UKI_CMDLINE_MAX: u64 = 64 * 1024;
 const RELEASE_DOCUMENT_MAX: u64 = 1024 * 1024;
+const ESP_POST_STAGE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct UpdateTransactionSources {
@@ -99,6 +99,13 @@ pub enum UpdateTransactionError {
         required_bytes: u64,
         available_bytes: u64,
     },
+    #[error(
+        "ESP has {available_bytes} free bytes but staging plus reserve requires {required_bytes}"
+    )]
+    EspInsufficientSpace {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
 }
 
 impl UpdateTransactionError {
@@ -107,6 +114,7 @@ impl UpdateTransactionError {
             Self::Trust { stage, .. } => stage,
             Self::Verify(_) => "post_write_digest",
             Self::InsufficientSpace { .. } => "inactive_slot_space",
+            Self::EspInsufficientSpace { .. } => "esp_space",
             Self::Conflict(_) => "device_state",
             Self::NotFound(_) => "rollback_target",
             Self::Apply(_) => "apply",
@@ -194,6 +202,40 @@ impl UpdateTransactionEngine {
         )?;
         validate_uki_binding(&boot_path, candidate)?;
 
+        // Admission facts that need no write: the ESP must already hold a
+        // last-known-good UKI and room for the candidate. Checking them here,
+        // read-only, keeps the factory-recovery retirement below from ever
+        // running for an apply the later stage would refuse anyway, so a
+        // refused apply can never cost the device its recovery floor.
+        {
+            let esp = self.mount_esp(true)?;
+            let uki_dir = esp.path.join("EFI/Linux");
+            let known = match known_uki_versions(&uki_dir) {
+                Ok(known) => known,
+                Err(UpdateTransactionError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+            if known.is_empty() {
+                return Err(UpdateTransactionError::Conflict(
+                    "the ESP contains no last-known-good Punar UKI".into(),
+                ));
+            }
+            require_esp_stage_capacity(&esp.path, boot.size_bytes)?;
+            esp.finish()?;
+        }
+
+        // The factory recovery UKI points at slot B. It must be durably
+        // retired before the first update can overwrite any B byte, and only
+        // after an uncounted, preferred A entry proves first-boot blessing.
+        // A crash on either side of this boundary therefore leaves A as the
+        // bootable fallback; it can never leave a stale UKI aimed at a
+        // partially overwritten recovery root.
+        self.retire_initial_recovery_before_overwrite(current, candidate)?;
+
         let target = self.root_target(candidate);
         let mut destination = open_partition_for_write(
             target,
@@ -232,6 +274,7 @@ impl UpdateTransactionEngine {
         let loader_dir = mounted.path.join("loader");
         fs::create_dir_all(&uki_dir)?;
         fs::create_dir_all(&loader_dir)?;
+        require_esp_stage_capacity(&mounted.path, boot.size_bytes)?;
         let old_ukis = known_uki_versions(&uki_dir)?;
         if old_ukis.is_empty() {
             return Err(UpdateTransactionError::Conflict(
@@ -291,6 +334,77 @@ impl UpdateTransactionEngine {
                 })?,
             verified: true,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn retire_initial_recovery_before_overwrite(
+        &self,
+        current: UpdateSlot,
+        candidate: UpdateSlot,
+    ) -> Result<(), UpdateTransactionError> {
+        let mounted = self.mount_esp(false)?;
+        let uki_dir = mounted.path.join("EFI/Linux");
+        let recovery = recovery_uki_paths(&uki_dir)?;
+        if recovery.is_empty() {
+            return mounted.finish();
+        }
+        if candidate == UpdateSlot::A {
+            // The device is running from the recovery slot itself: A was
+            // damaged and B was selected by hand. This apply rewrites only
+            // root A, so the B-bound recovery entry stays exactly as valid as
+            // before; retiring it would leave no verified way back into B.
+            return mounted.finish();
+        }
+        if recovery.len() != 1 || current != UpdateSlot::A || candidate != UpdateSlot::B {
+            return Err(UpdateTransactionError::Conflict(
+                "factory recovery can be retired only while a blessed slot A is running and slot B is the inactive update target"
+                    .into(),
+            ));
+        }
+        let loader = mounted.path.join("loader/loader.conf");
+        let selector = read_preferred(&loader).ok_or_else(|| {
+            UpdateTransactionError::Conflict(
+                "factory recovery retirement requires one preferred selector".into(),
+            )
+        })?;
+        let blessed_version = selector_version(&selector).ok_or_else(|| {
+            UpdateTransactionError::Conflict(
+                "factory recovery retirement requires a versioned slot-A selector".into(),
+            )
+        })?;
+        let blessed_a = uki_dir.join(format!("punar_{blessed_version}.efi"));
+        if !blessed_a.is_file() {
+            return Err(UpdateTransactionError::Conflict(
+                "slot A has not completed health-gated first-boot blessing".into(),
+            ));
+        }
+        validate_uki_binding(&blessed_a, UpdateSlot::A)?;
+        validate_uki_binding(&recovery[0], UpdateSlot::B)?;
+
+        fs::remove_file(&recovery[0])?;
+        sync_filesystem(&mounted.path)?;
+        if recovery[0].exists() || !blessed_a.is_file() {
+            return Err(UpdateTransactionError::Verify(
+                "the ESP did not retain factory-recovery retirement with blessed A intact".into(),
+            ));
+        }
+        mounted.finish()?;
+
+        // Re-open read-only so a borrowed test mount and a real unmount/remount
+        // cross the same visibility check before any root-slot writer opens.
+        let reread = self.mount_esp(true)?;
+        let reread_recovery = recovery_uki_paths(&reread.path.join("EFI/Linux"))?;
+        let reread_a = reread
+            .path
+            .join("EFI/Linux")
+            .join(format!("punar_{blessed_version}.efi"));
+        if !reread_recovery.is_empty() || !reread_a.is_file() {
+            return Err(UpdateTransactionError::Verify(
+                "factory-recovery retirement did not survive an ESP read-only re-open".into(),
+            ));
+        }
+        validate_uki_binding(&reread_a, UpdateSlot::A)?;
+        reread.finish()
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -566,88 +680,18 @@ fn write_root_payload(
 }
 
 fn validate_uki_binding(path: &Path, slot: UpdateSlot) -> Result<(), UpdateTransactionError> {
-    let cmdline = pe_section(path, b".cmdline")?;
-    if cmdline.len() as u64 > UKI_CMDLINE_MAX {
-        return Err(UpdateTransactionError::Trust {
-            stage: "uki_cmdline",
-            reason: "UKI command line exceeds its safety bound".into(),
-        });
-    }
-    let text = std::str::from_utf8(cmdline.split(|byte| *byte == 0).next().unwrap_or(&cmdline))
-        .map_err(|_| UpdateTransactionError::Trust {
-            stage: "uki_cmdline",
-            reason: "UKI command line is not UTF-8".into(),
-        })?;
-    let roots = text
-        .split_ascii_whitespace()
-        .filter_map(|token| token.strip_prefix("root=PARTUUID="))
-        .collect::<Vec<_>>();
     let expected = match slot {
         UpdateSlot::A => ROOT_A_PARTUUID,
         UpdateSlot::B => ROOT_B_PARTUUID,
         UpdateSlot::Unknown => "",
     };
-    if roots.as_slice() != [expected] {
-        return Err(UpdateTransactionError::Trust {
-            stage: "uki_cmdline",
-            reason: "UKI is not bound to exactly the selected inactive root slot".into(),
-        });
-    }
-    Ok(())
-}
-
-fn pe_section(path: &Path, wanted: &[u8]) -> Result<Vec<u8>, UpdateTransactionError> {
     let mut file = open_regular_nofollow(path, "UKI")?;
-    let length = file.metadata()?.len();
-    let mut dos = [0_u8; 64];
-    file.read_exact(&mut dos)?;
-    if &dos[..2] != b"MZ" {
-        return trust("uki_cmdline", "boot artifact has no DOS/PE header");
-    }
-    let pe_offset = u32::from_le_bytes(dos[60..64].try_into().unwrap()) as u64;
-    if pe_offset > length.saturating_sub(24) {
-        return trust("uki_cmdline", "PE header offset is outside the artifact");
-    }
-    file.seek(SeekFrom::Start(pe_offset))?;
-    let mut header = [0_u8; 24];
-    file.read_exact(&mut header)?;
-    if &header[..4] != b"PE\0\0" {
-        return trust("uki_cmdline", "boot artifact has no PE signature");
-    }
-    let sections = u16::from_le_bytes(header[6..8].try_into().unwrap()) as u64;
-    let optional = u16::from_le_bytes(header[20..22].try_into().unwrap()) as u64;
-    if sections == 0 || sections > 96 {
-        return trust("uki_cmdline", "PE section count is invalid");
-    }
-    let table = pe_offset
-        .checked_add(24)
-        .and_then(|offset| offset.checked_add(optional))
-        .ok_or_else(|| UpdateTransactionError::Trust {
+    crate::uki::require_root_partuuid(&mut file, expected).map_err(|reason| {
+        UpdateTransactionError::Trust {
             stage: "uki_cmdline",
-            reason: "PE section table offset overflow".into(),
-        })?;
-    if table.saturating_add(sections * 40) > length {
-        return trust("uki_cmdline", "PE section table is truncated");
-    }
-    file.seek(SeekFrom::Start(table))?;
-    for _ in 0..sections {
-        let mut section = [0_u8; 40];
-        file.read_exact(&mut section)?;
-        let name_end = section[..8].iter().position(|byte| *byte == 0).unwrap_or(8);
-        if &section[..name_end] != wanted {
-            continue;
+            reason,
         }
-        let size = u32::from_le_bytes(section[16..20].try_into().unwrap()) as u64;
-        let offset = u32::from_le_bytes(section[20..24].try_into().unwrap()) as u64;
-        if size == 0 || size > UKI_CMDLINE_MAX || offset.saturating_add(size) > length {
-            return trust("uki_cmdline", "PE command-line section is invalid");
-        }
-        let mut bytes = vec![0_u8; size as usize];
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut bytes)?;
-        return Ok(bytes);
-    }
-    trust("uki_cmdline", "UKI has no .cmdline section")
+    })
 }
 
 fn trust<T>(stage: &'static str, reason: &str) -> Result<T, UpdateTransactionError> {
@@ -711,6 +755,54 @@ fn known_uki_versions(
         versions.push((version, entry.path()));
     }
     Ok(versions)
+}
+
+fn recovery_uki_paths(directory: &Path) -> Result<Vec<PathBuf>, UpdateTransactionError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.starts_with("punar-recovery_") {
+            continue;
+        }
+        if !entry.file_type()?.is_file()
+            || name
+                .strip_prefix("punar-recovery_")
+                .and_then(|value| value.strip_suffix(".efi"))
+                .filter(|value| !value.contains('+'))
+                .and_then(|value| value.parse::<ReleaseVersion>().ok())
+                .is_none()
+        {
+            return Err(UpdateTransactionError::Conflict(
+                "the ESP contains an invalid factory-recovery inventory entry".into(),
+            ));
+        }
+        paths.push(entry.path());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+#[cfg(target_os = "linux")]
+fn require_esp_stage_capacity(
+    path: &Path,
+    candidate_bytes: u64,
+) -> Result<(), UpdateTransactionError> {
+    let stat = rustix::fs::statvfs(path)
+        .map_err(|error| UpdateTransactionError::Io(std::io::Error::from(error)))?;
+    let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+    let required = candidate_bytes
+        .checked_add(ESP_POST_STAGE_RESERVE_BYTES)
+        .ok_or_else(|| UpdateTransactionError::Apply("ESP capacity calculation overflow".into()))?;
+    if available < required {
+        return Err(UpdateTransactionError::EspInsufficientSpace {
+            required_bytes: required,
+            available_bytes: available,
+        });
+    }
+    Ok(())
 }
 
 fn read_preferred(path: &Path) -> Option<String> {

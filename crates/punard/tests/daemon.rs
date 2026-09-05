@@ -418,6 +418,12 @@ fn configure_update_apply_fixture(cfg: &mut DaemonConfig, dir: &Path) {
     };
 }
 
+fn add_factory_recovery_uki(dir: &Path) -> PathBuf {
+    let path = dir.join("esp/EFI/Linux/punar-recovery_2026.08.20.1.efi");
+    fs::write(&path, test_uki(punard::install::ROOT_B_PARTUUID)).unwrap();
+    path
+}
+
 fn prepare_enrolled_application_policy(state_dir: &Path, applications: Value) {
     let policy_dir = state_dir.join("policy.d");
     fs::create_dir_all(&policy_dir).unwrap();
@@ -1074,6 +1080,103 @@ fn update_apply_and_rollback_are_verified_inactive_slot_transactions() {
         assert_eq!(event["decision"], "allow");
         assert_eq!(event["result"], "success");
     }
+}
+
+#[test]
+fn first_update_retires_factory_recovery_only_after_blessed_a() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        add_factory_recovery_uki(dir);
+    });
+    let recovery = td.dir.join("esp/EFI/Linux/punar-recovery_2026.08.20.1.efi");
+    let blessed_a = td.dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi");
+
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+
+    assert_eq!(applied["result"]["staged_slot"], "b", "{applied}");
+    assert!(!recovery.exists(), "stale recovery UKI must be retired");
+    assert!(
+        blessed_a.is_file(),
+        "the blessed slot-A fallback must survive recovery retirement"
+    );
+    assert_eq!(
+        &fs::read(td.dir.join("root-b")).unwrap()[..4096],
+        &vec![0xb2_u8; 4096],
+    );
+}
+
+#[test]
+fn first_update_preserves_recovery_and_root_b_until_a_is_blessed() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        let uncounted = dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi");
+        fs::rename(
+            &uncounted,
+            dir.join("esp/EFI/Linux/punar_2026.08.20.1+3-0.efi"),
+        )
+        .unwrap();
+        add_factory_recovery_uki(dir);
+    });
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let recovery = td.dir.join("esp/EFI/Linux/punar-recovery_2026.08.20.1.efi");
+
+    let refused = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+
+    assert_eq!(refused["error"]["code"], "conflict", "{refused}");
+    assert!(recovery.is_file(), "recovery must remain before blessing");
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+}
+
+#[test]
+fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            &cfg.update_transaction_sources.cmdline,
+            format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi"),
+            test_uki(punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+        add_factory_recovery_uki(dir);
+    });
+    let recovery = td.dir.join("esp/EFI/Linux/punar-recovery_2026.08.20.1.efi");
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false
+        })),
+    );
+
+    assert_eq!(applied["result"]["staged_slot"], "a", "{applied}");
+    assert!(
+        recovery.is_file(),
+        "a candidate that rewrites only root A must keep the B-bound recovery entry"
+    );
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert_eq!(
+        &fs::read(td.dir.join("root-a")).unwrap()[..4096],
+        &vec![0xa1_u8; 4096],
+    );
 }
 
 #[test]

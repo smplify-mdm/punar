@@ -876,6 +876,11 @@ pub enum Method {
     /// `update.apply` — stage the exact verified channel head into the fixed
     /// inactive slot. Root-only, agent-denied, serialized and audited.
     UpdateApply(UpdateApplyParams),
+    /// `update.reconcile_candidate` — internal Raspberry Pi boot-service
+    /// handoff. It accepts no caller input and reconciles only the durable
+    /// pending transaction against firmware, selector, root, boot and health
+    /// evidence. Root-only, agent-denied, serialized and audited.
+    UpdateReconcileCandidate,
     /// `update.rollback` — select an already-present last-known-good boot
     /// artifact. Root-only, agent-denied, serialized and audited.
     UpdateRollback(UpdateRollbackParams),
@@ -900,7 +905,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 39] = [
+    pub const NAMES: [&'static str; 40] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -934,6 +939,7 @@ impl Method {
         "update.status",
         "update.check",
         "update.apply",
+        "update.reconcile_candidate",
         "update.rollback",
         "install.targets",
         "install.plan",
@@ -979,6 +985,7 @@ impl Method {
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
             Method::UpdateApply(_) => "update.apply",
+            Method::UpdateReconcileCandidate => "update.reconcile_candidate",
             Method::UpdateRollback(_) => "update.rollback",
             Method::InstallTargets => "install.targets",
             Method::InstallPlan(_) => "install.plan",
@@ -1044,7 +1051,10 @@ impl Method {
             | Method::WebAppsContextCreate(_)
             | Method::WebAppsContextDelete(_) => false,
             Method::UpdateStatus => false,
-            Method::UpdateCheck(_) | Method::UpdateApply(_) | Method::UpdateRollback(_) => true,
+            Method::UpdateCheck(_)
+            | Method::UpdateApply(_)
+            | Method::UpdateReconcileCandidate
+            | Method::UpdateRollback(_) => true,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
@@ -1066,6 +1076,7 @@ impl Method {
             | Method::PrivilegeStatus
             | Method::AppsList
             | Method::UpdateStatus
+            | Method::UpdateReconcileCandidate
             | Method::InstallTargets
             | Method::InstallStatus => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
@@ -1182,6 +1193,9 @@ impl Method {
             }
             "update.check" => Self::parse_required_params(method, params).map(Method::UpdateCheck),
             "update.apply" => Self::parse_required_params(method, params).map(Method::UpdateApply),
+            "update.reconcile_candidate" => {
+                Self::expect_no_params(method, params).map(|()| Method::UpdateReconcileCandidate)
+            }
             "update.rollback" => {
                 Self::parse_required_params(method, params).map(Method::UpdateRollback)
             }
@@ -2240,6 +2254,7 @@ mod tests {
                 version: "2026.08.31.1".parse().unwrap(),
                 allow_downgrade: false,
             }),
+            Method::UpdateReconcileCandidate,
             Method::UpdateRollback(UpdateRollbackParams { to_version: None }),
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
@@ -2318,6 +2333,7 @@ mod tests {
                     | "approvals.consume"
                     | "update.check"
                     | "update.apply"
+                    | "update.reconcile_candidate"
                     | "update.rollback"
                     | "install.plan"
                     | "install.apply"
@@ -2575,6 +2591,16 @@ mod tests {
             rollback.method,
             Method::UpdateRollback(UpdateRollbackParams { to_version: None })
         ));
+
+        let commit =
+            Request::parse_json_line(r#"{"v":1,"id":"1","method":"update.reconcile_candidate"}"#)
+                .unwrap();
+        assert!(matches!(commit.method, Method::UpdateReconcileCandidate));
+        let commit_with_params = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"update.reconcile_candidate","params":{"slot":"b"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(commit_with_params.error.code, ErrorCode::InvalidParams);
 
         for forbidden in [
             "origin", "url", "path", "key", "slot", "command", "digest", "artifact",

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.punar.dev/v1alpha1/update/release-manifest.json",
   "title": "Punar release manifest",
-  "description": "Signed identity for one complete A/B root-slot payload and its platform boot artifact. The target fields prevent a valid artifact for another architecture or boot chain from being admitted.",
+  "description": "Signed identity for one complete release and its platform boot artifacts. UEFI releases carry independently bound A/B root-and-UKI pairs so fresh installs begin with a verified recovery floor; Raspberry Pi releases carry their platform payload and bootfs pair. The target fields prevent a valid artifact for another architecture or boot chain from being admitted.",
   "type": "object",
   "required": [
     "schema_version",
@@ -50,7 +50,7 @@
     "payload": { "$ref": "#/$defs/payload" },
     "boot_artifact": { "$ref": "#/$defs/boot_artifact" },
     "uefi_slots": {
-      "description": "Two independently bound root/UKI pairs for alternating UEFI A/B updates; null for a slot-A-only installer manifest and on Raspberry Pi. The update transaction requires the object before staging.",
+      "description": "Two independently bound root/UKI pairs required for every UEFI release and its install media; null on Raspberry Pi. The top-level payload and boot_artifact equal slot A.",
       "oneOf": [
         { "type": "null" },
         { "$ref": "#/$defs/uefi_slots" }
@@ -77,6 +77,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "boot_platform": { "const": "uefi" } } },
+      "then": { "properties": { "uefi_slots": { "$ref": "#/$defs/uefi_slots" } } }
+    },
     {
       "if": { "properties": { "boot_platform": { "const": "raspberry_pi" } } },
       "then": { "properties": { "uefi_slots": { "type": "null" } } }

@@ -1,0 +1,25 @@
+[Unit]
+Description=Punar boot-only Raspberry Pi update reconciliation
+Documentation=https://www.raspberrypi.com/documentation/computers/config_txt.html#example-update-flow-for-ab-booting
+ConditionPathExists=/proc/device-tree/chosen/bootloader/partition
+ConditionPathExists=/var/lib/punar/update/pending-pi.json
+# A target implicitly orders itself After= every unit it Wants= unless that
+# unit opts out. This gate may wait up to the health window plus a full slot
+# re-hash; graphical.target and everything ordered after it must not wait
+# for that (update-and-rollback.md section 6.5). Ordering is kept explicit.
+DefaultDependencies=no
+Conflicts=shutdown.target
+Requires=punard.service punar-agentd.service
+After=multi-user.target punard.service punar-agentd.service
+Before=boot-complete.target shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/punar/update-health.sh
+TimeoutStartSec=900
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=graphical.target

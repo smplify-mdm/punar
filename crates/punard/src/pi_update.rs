@@ -33,6 +33,9 @@ const PI_MOUNTINFO_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PI_CMDLINE_MAX_BYTES: u64 = 64 * 1024;
 const RELEASE_DOCUMENT_MAX_BYTES: u64 = 1024 * 1024;
 const RELEASE_SIGNATURE_BYTES: u64 = 64;
+const PI_ROOT_SLOT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const PI_BOOT_SLOT_BYTES: u64 = 1024 * 1024 * 1024;
+const DIRECT_IO_ALIGNMENT: u64 = 4096;
 
 #[derive(Debug, Error)]
 pub enum PiUpdateError {
@@ -206,7 +209,9 @@ pub struct PendingPiUpdate {
     pub candidate_root_partuuid: String,
     pub manifest_sha256: String,
     pub payload_sha256: String,
+    pub payload_size_bytes: u64,
     pub boot_sha256: String,
+    pub boot_size_bytes: u64,
     pub staged_at: String,
 }
 
@@ -221,10 +226,32 @@ pub struct PiStageResult {
     pub requires_tryboot_reboot: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PiReconcileOutcome {
+    BlessedCandidate,
+    FirmwareFallback,
+    PostcommitRecovery,
+}
+
+impl PiReconcileOutcome {
+    pub fn audit_action(self) -> &'static str {
+        match self {
+            Self::BlessedCandidate => "update.reconcile_candidate.blessed_candidate",
+            Self::FirmwareFallback => "update.reconcile_candidate.firmware_fallback",
+            Self::PostcommitRecovery => "update.reconcile_candidate.postcommit_recovery",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PiCommitResult {
+pub struct PiReconcileResult {
+    pub release_id: String,
     pub version: ReleaseVersion,
-    pub blessed_slot: PiSlot,
+    pub manifest_sha256: String,
+    pub pending_state_sha256: String,
+    pub outcome: PiReconcileOutcome,
+    pub candidate_slot: PiSlot,
     pub previous_slot: PiSlot,
     pub selector_committed: bool,
     pub requires_normal_reboot: bool,
@@ -356,7 +383,9 @@ impl PiUpdateEngine {
             candidate_root_partuuid: candidate.root_partuuid().to_string(),
             manifest_sha256: sha256_hex(&manifest_bytes),
             payload_sha256: manifest.payload.uncompressed_digest_sha256.clone(),
+            payload_size_bytes: manifest.payload.uncompressed_size_bytes,
             boot_sha256: manifest.boot_artifact.digest_sha256.clone(),
+            boot_size_bytes: manifest.boot_artifact.size_bytes,
             staged_at: punar_common::time::utc_now_rfc3339(),
         };
         let pending_bytes = serde_json::to_vec_pretty(&pending)
@@ -395,12 +424,16 @@ impl PiUpdateEngine {
         ))
     }
 
-    /// Bless a one-shot candidate only after firmware, root pairing and the
-    /// on-device health report all agree with the durable pending record.
-    /// A normal boot, a read-write root, or a partial health result can never
-    /// reach the selector write.
+    /// Reconcile a pending native-Pi tryboot transaction against firmware and
+    /// selector state. A candidate is re-hashed from the raw root and boot
+    /// devices and version-bound before it can be blessed or recovered. A
+    /// firmware fallback is recognized without touching the selector.
+    ///
+    /// Deliberately does **not** remove the pending record. The privileged IPC
+    /// handler must first durably append the outcome-specific success audit,
+    /// then call [`Self::finalize_pending`] with the exact state digest.
     #[cfg(target_os = "linux")]
-    pub fn commit_candidate(&self) -> Result<PiCommitResult, PiUpdateError> {
+    pub fn reconcile_candidate(&self) -> Result<PiReconcileResult, PiUpdateError> {
         let pending_bytes = read_bounded(
             &self.sources.pending_state,
             RELEASE_DOCUMENT_MAX_BYTES,
@@ -409,44 +442,59 @@ impl PiUpdateEngine {
         let pending: PendingPiUpdate = serde_json::from_slice(&pending_bytes)
             .map_err(|error| PiUpdateError::Trust(error.to_string()))?;
         validate_pending_state(&pending)?;
+        let pending_state_sha256 = sha256_hex(&pending_bytes);
 
         let observation = PiBootObservation::read(
             &self.sources.boot_partition_property,
             &self.sources.tryboot_property,
         )?;
-        if !observation.tryboot || observation.slot != pending.candidate_slot {
-            return Err(PiUpdateError::Conflict(
-                "the running firmware state is not the pending tryboot candidate".into(),
-            ));
-        }
-        validate_running_root(
-            &self.sources.cmdline_path,
-            &self.sources.mountinfo_path,
-            pending.candidate_slot,
-        )?;
-        validate_health_report(&self.sources.health_report)?;
-        self.verify_boot_filesystem(pending.candidate_slot)?;
 
         let mounted = self.mount_selector(false)?;
         let autoboot_path = mounted.path.join("autoboot.txt");
-        let previous = read_small_regular(
+        let selector = read_small_regular(
             &autoboot_path,
             PI_AUTOBOOT_MAX_BYTES,
             "Raspberry Pi selector",
         )?;
         let selector_is_uncommitted = validate_raspberry_pi_autoboot(
-            &previous,
+            &selector,
             u8::try_from(pending.previous_slot.boot_partition()).expect("Pi partition fits u8"),
             u8::try_from(pending.candidate_slot.boot_partition()).expect("Pi partition fits u8"),
         )
         .is_ok();
-        if !selector_is_uncommitted {
-            validate_raspberry_pi_autoboot(
-                &previous,
-                u8::try_from(pending.candidate_slot.boot_partition())
-                    .expect("Pi partition fits u8"),
-                u8::try_from(pending.previous_slot.boot_partition()).expect("Pi partition fits u8"),
-            )?;
+        let selector_is_committed = validate_raspberry_pi_autoboot(
+            &selector,
+            u8::try_from(pending.candidate_slot.boot_partition()).expect("Pi partition fits u8"),
+            u8::try_from(pending.previous_slot.boot_partition()).expect("Pi partition fits u8"),
+        )
+        .is_ok();
+
+        // Firmware cleared the one-shot flag and returned to the prior
+        // ordinary slot before userspace could commit. Nothing in the
+        // candidate is trusted or needed to finalize this explicit fallback.
+        if !observation.tryboot
+            && observation.slot == pending.previous_slot
+            && selector_is_uncommitted
+        {
+            mounted.finish()?;
+            return Ok(PiReconcileResult {
+                release_id: pending.release_id,
+                version: pending.version,
+                manifest_sha256: pending.manifest_sha256,
+                pending_state_sha256,
+                outcome: PiReconcileOutcome::FirmwareFallback,
+                candidate_slot: pending.candidate_slot,
+                previous_slot: pending.previous_slot,
+                selector_committed: false,
+                requires_normal_reboot: false,
+            });
+        }
+
+        // A crash or audit outage after selector replacement leaves the
+        // committed selector, its exact backup and the pending record. It is
+        // safe to retry in either the still-running tryboot or a later normal
+        // candidate boot, but only after revalidating all candidate evidence.
+        if observation.slot == pending.candidate_slot && selector_is_committed {
             let backup = read_small_regular(
                 &mounted.path.join("autoboot.previous"),
                 PI_AUTOBOOT_MAX_BYTES,
@@ -459,29 +507,46 @@ impl PiUpdateEngine {
                     .expect("Pi partition fits u8"),
             )?;
             mounted.finish()?;
-            self.remove_pending_state()?;
-            return Ok(PiCommitResult {
+            self.validate_running_candidate(&pending)?;
+            return Ok(PiReconcileResult {
+                release_id: pending.release_id,
                 version: pending.version,
-                blessed_slot: pending.candidate_slot,
+                manifest_sha256: pending.manifest_sha256,
+                pending_state_sha256,
+                outcome: PiReconcileOutcome::PostcommitRecovery,
+                candidate_slot: pending.candidate_slot,
                 previous_slot: pending.previous_slot,
                 selector_committed: true,
-                requires_normal_reboot: true,
+                requires_normal_reboot: observation.tryboot,
             });
         }
+
+        if !observation.tryboot
+            || observation.slot != pending.candidate_slot
+            || !selector_is_uncommitted
+        {
+            return Err(PiUpdateError::Conflict(
+                "firmware, pending state and selector do not describe a recoverable Pi update"
+                    .into(),
+            ));
+        }
+
+        // All health and exact-byte checks precede the first selector write.
+        self.validate_running_candidate(&pending)?;
 
         // Keep a separately verified prior selector before replacing the
         // active file. FAT rename durability still requires the physical
         // power-loss gate in ADR-006; this copy makes recovery possible
         // without pretending the filesystem is transactional.
         let previous_path = mounted.path.join("autoboot.previous");
-        write_atomic_synced(&previous_path, &previous, 0o600)?;
+        write_atomic_synced(&previous_path, &selector, 0o600)?;
         sync_filesystem(&mounted.path)?;
         let previous_reread = read_small_regular(
             &previous_path,
             PI_AUTOBOOT_MAX_BYTES,
             "previous Raspberry Pi selector",
         )?;
-        if previous_reread != previous {
+        if previous_reread != selector {
             return Err(PiUpdateError::Trust(
                 "the previous Raspberry Pi selector changed after its durable write".into(),
             ));
@@ -506,14 +571,50 @@ impl PiUpdateEngine {
         sync_filesystem(&mounted.path)?;
         mounted.finish()?;
 
-        self.remove_pending_state()?;
-        Ok(PiCommitResult {
+        Ok(PiReconcileResult {
+            release_id: pending.release_id,
             version: pending.version,
-            blessed_slot: pending.candidate_slot,
+            manifest_sha256: pending.manifest_sha256,
+            pending_state_sha256,
+            outcome: PiReconcileOutcome::BlessedCandidate,
+            candidate_slot: pending.candidate_slot,
             previous_slot: pending.previous_slot,
             selector_committed: true,
             requires_normal_reboot: true,
         })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn reconcile_candidate(&self) -> Result<PiReconcileResult, PiUpdateError> {
+        Err(PiUpdateError::Conflict(
+            "Raspberry Pi candidate reconciliation is available only on Linux".into(),
+        ))
+    }
+
+    /// Remove exactly the pending record that was reconciled. Callers must
+    /// invoke this only after the outcome-specific audit append has completed
+    /// and `fdatasync` has succeeded.
+    pub fn finalize_pending(&self, expected_sha256: &str) -> Result<(), PiUpdateError> {
+        if !is_sha256(expected_sha256) {
+            return Err(PiUpdateError::Invalid(
+                "pending-state finalization digest is invalid".into(),
+            ));
+        }
+        let bytes = read_bounded(
+            &self.sources.pending_state,
+            RELEASE_DOCUMENT_MAX_BYTES,
+            "pending Raspberry Pi update state",
+        )?;
+        if sha256_hex(&bytes) != expected_sha256 {
+            return Err(PiUpdateError::Conflict(
+                "pending Raspberry Pi update changed before finalization".into(),
+            ));
+        }
+        fs::remove_file(&self.sources.pending_state)?;
+        if let Some(parent) = self.sources.pending_state.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 
     /// Atomically exchange the ordinary and tryboot selectors after proving
@@ -619,14 +720,6 @@ impl PiUpdateEngine {
         ))
     }
 
-    fn remove_pending_state(&self) -> Result<(), PiUpdateError> {
-        fs::remove_file(&self.sources.pending_state)?;
-        if let Some(parent) = self.sources.pending_state.parent() {
-            File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    }
-
     #[cfg(target_os = "linux")]
     fn root_version(&self, slot: PiSlot) -> Result<ReleaseVersion, PiUpdateError> {
         let mounted = self.mount_root_slot(slot)?;
@@ -653,6 +746,77 @@ impl PiUpdateEngine {
             .parse()
             .map_err(|error: punar_common::update::UpdateTrustError| {
                 PiUpdateError::Refused(format!("the rollback root version is invalid: {error}"))
+            })?;
+        mounted.finish()?;
+        Ok(version)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_running_candidate(&self, pending: &PendingPiUpdate) -> Result<(), PiUpdateError> {
+        validate_running_root(
+            &self.sources.cmdline_path,
+            &self.sources.mountinfo_path,
+            pending.candidate_slot,
+        )?;
+        validate_health_report(&self.sources.health_report)?;
+
+        let root = resolved_partition_path(
+            self.root_target(pending.candidate_slot),
+            self.allow_regular_targets(),
+        )?;
+        digest_installed_partition(
+            &root,
+            pending.payload_size_bytes,
+            &pending.payload_sha256,
+            self.allow_regular_targets(),
+            "pending Raspberry Pi root slot",
+        )?;
+        let boot = resolved_partition_path(
+            self.boot_target(pending.candidate_slot),
+            self.allow_regular_targets(),
+        )?;
+        digest_installed_partition(
+            &boot,
+            pending.boot_size_bytes,
+            &pending.boot_sha256,
+            self.allow_regular_targets(),
+            "pending Raspberry Pi boot slot",
+        )?;
+        self.verify_boot_filesystem(pending.candidate_slot)?;
+
+        let installed = self.candidate_root_version(pending.candidate_slot)?;
+        if installed != pending.version {
+            return Err(PiUpdateError::Trust(format!(
+                "pending root contains release {installed}, expected {}",
+                pending.version
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn candidate_root_version(&self, slot: PiSlot) -> Result<ReleaseVersion, PiUpdateError> {
+        let mounted = self.mount_root_slot(slot)?;
+        let os_release = [
+            mounted.path.join("etc/os-release"),
+            mounted.path.join("usr/lib/os-release"),
+        ]
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            PiUpdateError::Trust("the pending root does not publish os-release".into())
+        })?;
+        let fields = crate::update_status::read_os_release(&os_release).ok_or_else(|| {
+            PiUpdateError::Trust("the pending root has invalid os-release".into())
+        })?;
+        let version = fields
+            .get("IMAGE_VERSION")
+            .ok_or_else(|| {
+                PiUpdateError::Trust("the pending root does not publish IMAGE_VERSION".into())
+            })?
+            .parse()
+            .map_err(|error: punar_common::update::UpdateTrustError| {
+                PiUpdateError::Trust(format!("the pending root version is invalid: {error}"))
             })?;
         mounted.finish()?;
         Ok(version)
@@ -924,6 +1088,11 @@ fn pi_slot_name(slot: PiSlot) -> String {
 
 fn validate_pending_state(pending: &PendingPiUpdate) -> Result<(), PiUpdateError> {
     if pending.schema_version != 1
+        || pending.release_id.is_empty()
+        || pending.release_id.len() > 192
+        || !pending.release_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
         || pending.previous_slot == pending.candidate_slot
         || pending.previous_slot.inactive() != pending.candidate_slot
         || pending.candidate_boot_partition != pending.candidate_slot.boot_partition()
@@ -931,7 +1100,13 @@ fn validate_pending_state(pending: &PendingPiUpdate) -> Result<(), PiUpdateError
         || pending.candidate_root_partuuid != pending.candidate_slot.root_partuuid()
         || !is_sha256(&pending.manifest_sha256)
         || !is_sha256(&pending.payload_sha256)
+        || pending.payload_size_bytes == 0
+        || pending.payload_size_bytes > PI_ROOT_SLOT_BYTES
+        || pending.payload_size_bytes % DIRECT_IO_ALIGNMENT != 0
         || !is_sha256(&pending.boot_sha256)
+        || pending.boot_size_bytes == 0
+        || pending.boot_size_bytes > PI_BOOT_SLOT_BYTES
+        || pending.boot_size_bytes % DIRECT_IO_ALIGNMENT != 0
         || punar_common::time::unix_seconds_from_rfc3339(&pending.staged_at).is_none()
     {
         return Err(PiUpdateError::Trust(
@@ -1376,7 +1551,7 @@ mod tests {
             boot_a_mount_override: Some(boot_a_mount),
             boot_b_mount_override: Some(boot_b_mount),
             root_a_mount_override: Some(root_a_mount),
-            root_b_mount_override: Some(root_b_mount),
+            root_b_mount_override: Some(root_b_mount.clone()),
         });
         let target = ReleaseTarget {
             image_id: "punar-desktop".into(),
@@ -1400,11 +1575,37 @@ mod tests {
         assert_eq!(stored.candidate_boot_partition, 4);
         assert_eq!(stored.candidate_root_partition, 5);
         assert_eq!(stored.manifest_sha256, sha256_hex(&manifest_bytes));
+        assert_eq!(stored.payload_size_bytes, root_payload.len() as u64);
+        assert_eq!(stored.boot_size_bytes, boot_payload.len() as u64);
 
         let conflict = engine
             .stage_bundle(&release, &keys, &target, "2026.08.30.5".parse().unwrap())
             .unwrap_err();
         assert!(conflict.to_string().contains("already pending"));
+
+        // A boot-time observation of the ordinary previous slot with the
+        // still-uncommitted selector is firmware fallback. Reconciliation
+        // records that explicit outcome, never changes the selector, and
+        // deliberately leaves pending state for the daemon's durable audit.
+        let fallback_selector = fs::read(selector.join("autoboot.txt")).unwrap();
+        let fallback = engine.reconcile_candidate().unwrap();
+        assert_eq!(fallback.outcome, PiReconcileOutcome::FirmwareFallback);
+        assert!(!fallback.selector_committed);
+        assert!(!fallback.requires_normal_reboot);
+        assert!(pending.exists());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            fallback_selector
+        );
+        engine
+            .finalize_pending(&fallback.pending_state_sha256)
+            .unwrap();
+        assert!(!pending.exists());
+
+        // Stage again to exercise a real candidate and post-commit recovery.
+        engine
+            .stage_bundle(&release, &keys, &target, "2026.08.30.5".parse().unwrap())
+            .unwrap();
 
         fs::write(&engine.sources.boot_partition_property, 4_u32.to_be_bytes()).unwrap();
         fs::write(&tryboot_property, 1_u32.to_be_bytes()).unwrap();
@@ -1418,17 +1619,97 @@ mod tests {
             "29 23 0:25 / / ro,relatime - ext4 /dev/mmcblk0p5 ro\n",
         )
         .unwrap();
+        let selector_before_health = fs::read(selector.join("autoboot.txt")).unwrap();
+        for report in [
+            br#"{"schema_version":1,"health":{"boot_completed":false,"control_plane_answers":true,"desktop_ready":true,"capabilities_verified":true},"waited_seconds":7}"#.as_slice(),
+            br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":false,"desktop_ready":true,"capabilities_verified":true},"waited_seconds":7}"#.as_slice(),
+            br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":true,"desktop_ready":false,"capabilities_verified":true},"waited_seconds":7}"#.as_slice(),
+            br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":true,"desktop_ready":true,"capabilities_verified":false},"waited_seconds":7}"#.as_slice(),
+        ] {
+            fs::write(&health, report).unwrap();
+            let error = engine.reconcile_candidate().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("has not passed every required health signal")
+            );
+            assert!(pending.exists(), "a failed health gate must remain retryable");
+            assert_eq!(
+                fs::read(selector.join("autoboot.txt")).unwrap(),
+                selector_before_health,
+                "no partial health result may change the selector"
+            );
+            assert!(
+                !selector.join("autoboot.previous").exists(),
+                "the commit path must not start before all health signals pass"
+            );
+        }
         fs::write(
             &health,
             br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":true,"desktop_ready":true,"capabilities_verified":true},"waited_seconds":7}"#,
         )
         .unwrap();
         let pending_before_commit = fs::read(&pending).unwrap();
-        let commit = engine.commit_candidate().unwrap();
-        assert_eq!(commit.blessed_slot, PiSlot::B);
+
+        // Raw candidate root and boot digests, exact bound sizes, and the
+        // mounted IMAGE_VERSION are all gates before selector mutation.
+        let mut corrupt_root = fs::read(&root_b).unwrap();
+        corrupt_root[0] ^= 0xff;
+        fs::write(&root_b, &corrupt_root).unwrap();
+        assert!(engine.reconcile_candidate().is_err());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before_health
+        );
+        fs::write(&root_b, &root_payload).unwrap();
+
+        let mut corrupt_boot = fs::read(&boot_b).unwrap();
+        corrupt_boot[0] ^= 0xff;
+        fs::write(&boot_b, &corrupt_boot).unwrap();
+        assert!(engine.reconcile_candidate().is_err());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before_health
+        );
+        fs::write(&boot_b, &boot_payload).unwrap();
+
+        let mut wrong_size: PendingPiUpdate =
+            serde_json::from_slice(&pending_before_commit).unwrap();
+        wrong_size.payload_size_bytes = 8192;
+        fs::write(&pending, serde_json::to_vec(&wrong_size).unwrap()).unwrap();
+        assert!(engine.reconcile_candidate().is_err());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before_health
+        );
+        fs::write(&pending, &pending_before_commit).unwrap();
+
+        fs::write(
+            root_b_mount.join("etc/os-release"),
+            "ID=punar\nIMAGE_VERSION=2026.08.30.7\n",
+        )
+        .unwrap();
+        assert!(engine.reconcile_candidate().is_err());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before_health
+        );
+        fs::write(
+            root_b_mount.join("etc/os-release"),
+            "ID=punar\nIMAGE_VERSION=2026.08.30.6\n",
+        )
+        .unwrap();
+
+        let commit = engine.reconcile_candidate().unwrap();
+        assert_eq!(commit.outcome, PiReconcileOutcome::BlessedCandidate);
+        assert_eq!(commit.candidate_slot, PiSlot::B);
         assert_eq!(commit.previous_slot, PiSlot::A);
         assert!(commit.selector_committed);
-        assert!(!pending.exists());
+        assert!(commit.requires_normal_reboot);
+        assert!(
+            pending.exists(),
+            "the engine may not outrun the success audit"
+        );
         assert_eq!(
             fs::read(selector.join("autoboot.previous")).unwrap(),
             canonical_autoboot(PiSlot::A, PiSlot::B)
@@ -1436,15 +1717,31 @@ mod tests {
         let committed_selector = fs::read(selector.join("autoboot.txt")).unwrap();
         validate_raspberry_pi_autoboot(&committed_selector, 4, 2).unwrap();
 
-        // Recreate the only durable state left by a crash after the selector
-        // commit but before pending-state removal. Retrying must recognize the
-        // already committed selector and finish without changing either copy.
-        fs::write(&pending, pending_before_commit).unwrap();
-        let recovered = engine.commit_candidate().unwrap();
-        assert_eq!(recovered.blessed_slot, PiSlot::B);
+        let mut changed_pending = pending_before_commit.clone();
+        changed_pending.push(b'\n');
+        fs::write(&pending, &changed_pending).unwrap();
+        assert!(
+            engine
+                .finalize_pending(&commit.pending_state_sha256)
+                .is_err()
+        );
+        assert!(
+            pending.exists(),
+            "a changed pending record must be retained"
+        );
+        fs::write(&pending, &pending_before_commit).unwrap();
+
+        // A later ordinary boot of the committed candidate with the valid
+        // backup is the power-loss/audit retry state. It is revalidated,
+        // finalized without another reboot, and leaves selectors untouched.
+        fs::write(&tryboot_property, 0_u32.to_be_bytes()).unwrap();
+        let recovered = engine.reconcile_candidate().unwrap();
+        assert_eq!(recovered.outcome, PiReconcileOutcome::PostcommitRecovery);
+        assert_eq!(recovered.candidate_slot, PiSlot::B);
         assert_eq!(recovered.previous_slot, PiSlot::A);
         assert!(recovered.selector_committed);
-        assert!(!pending.exists());
+        assert!(!recovered.requires_normal_reboot);
+        assert!(pending.exists());
         assert_eq!(
             fs::read(selector.join("autoboot.previous")).unwrap(),
             canonical_autoboot(PiSlot::A, PiSlot::B)
@@ -1453,6 +1750,10 @@ mod tests {
             fs::read(selector.join("autoboot.txt")).unwrap(),
             committed_selector
         );
+        engine
+            .finalize_pending(&recovered.pending_state_sha256)
+            .unwrap();
+        assert!(!pending.exists());
 
         let mismatch = engine
             .rollback(Some("2026.08.30.4".parse().unwrap()))

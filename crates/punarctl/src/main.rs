@@ -594,6 +594,10 @@ enum UpdateCommand {
         #[arg(long)]
         reboot: bool,
     },
+    /// Internal boot-service handoff for a native Raspberry Pi transaction.
+    /// The daemon accepts no slot, path, digest or health data from this command.
+    #[command(name = "reconcile-candidate", hide = true)]
+    ReconcileCandidate,
     /// Select a locally retained last-known-good release for the next boot.
     Rollback {
         /// Exact retained release; omitted selects the newest previous one.
@@ -4115,43 +4119,82 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Update { command } => match command {
-            UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
-                views::update_status(&style, v)
-            }),
-            UpdateCommand::Check { force } => rpc(
-                &client,
-                json,
-                "update.check",
-                Some(json!({ "force": force })),
-                |v| views::update_check(&style, v),
-            ),
-            UpdateCommand::Apply {
-                version,
-                allow_downgrade,
-                reboot,
-            } => update_mutation(
-                &client,
-                &style,
-                json,
-                "update.apply",
-                json!({
-                    "version": version,
-                    "allow_downgrade": allow_downgrade,
+        Command::Update { command } => {
+            match command {
+                UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
+                    views::update_status(&style, v)
                 }),
-                reboot,
-                UpdateRestart::Apply,
-            ),
-            UpdateCommand::Rollback { to_version, reboot } => update_mutation(
-                &client,
-                &style,
-                json,
-                "update.rollback",
-                json!({ "to_version": to_version }),
-                reboot,
-                UpdateRestart::Rollback,
-            ),
-        },
+                UpdateCommand::Check { force } => rpc(
+                    &client,
+                    json,
+                    "update.check",
+                    Some(json!({ "force": force })),
+                    |v| views::update_check(&style, v),
+                ),
+                UpdateCommand::Apply {
+                    version,
+                    allow_downgrade,
+                    reboot,
+                } => update_mutation(
+                    &client,
+                    &style,
+                    json,
+                    "update.apply",
+                    json!({
+                        "version": version,
+                        "allow_downgrade": allow_downgrade,
+                    }),
+                    reboot,
+                    UpdateRestart::Apply,
+                ),
+                UpdateCommand::ReconcileCandidate => {
+                    // The daemon re-reads the exact signed root and boot extents
+                    // with O_DIRECT before it answers, which on SD-class storage
+                    // far exceeds the ordinary response budget. The health script's
+                    // verdict must follow the daemon's durable outcome, so wait
+                    // with the mutation budget rather than time out mid-commit.
+                    let call = client.call_with_timeout(
+                        "update.reconcile_candidate",
+                        None,
+                        crate::ipc::UPDATE_MUTATION_TIMEOUT,
+                    );
+                    match call {
+                        Ok(result) => {
+                            render_or_json(json, &result, |value| {
+                                let version =
+                                    value.get("version").and_then(Value::as_str).ok_or_else(
+                                        || "candidate reconcile result has no version".to_string(),
+                                    )?;
+                                let slot = value
+                                    .get("candidate_slot")
+                                    .and_then(Value::as_str)
+                                    .ok_or_else(|| {
+                                        "candidate reconcile result has no candidate_slot"
+                                            .to_string()
+                                    })?;
+                                let outcome =
+                                    value.get("outcome").and_then(Value::as_str).ok_or_else(
+                                        || "candidate reconcile result has no outcome".to_string(),
+                                    )?;
+                                Ok(format!(
+                                    "Raspberry Pi update {version} ({slot}): {outcome}.\n"
+                                ))
+                            })
+                        }
+                        Err(error) => fail(&error),
+                    }
+                }
+                UpdateCommand::Rollback { to_version, reboot } => update_mutation(
+                    &client,
+                    &style,
+                    json,
+                    "update.rollback",
+                    json!({ "to_version": to_version }),
+                    reboot,
+                    UpdateRestart::Rollback,
+                ),
+            }
+        }
     }
 }
 

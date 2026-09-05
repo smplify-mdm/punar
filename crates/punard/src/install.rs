@@ -30,8 +30,8 @@ use punar_common::install_answers::{
     UnattendedInstallAnswers, admit_unattended_install_answers, verify_unattended_install_answers,
 };
 use punar_common::update::{
-    Architecture, BootArtifactKind, BootPlatform, ReleaseKeySet, ReleaseManifest, verify_reader,
-    verify_release_manifest,
+    Architecture, BootArtifact, BootArtifactKind, BootPlatform, PayloadArtifact, ReleaseKeySet,
+    ReleaseManifest, UefiSlotArtifact, verify_reader, verify_release_manifest,
 };
 use punar_common::{AuditEvent, Decision, PrincipalKind, Redacted};
 use punar_recovery::{
@@ -53,6 +53,7 @@ pub const ROOT_A_PARTUUID: &str = "1beabfe0-9cb8-4b49-91ef-d372b845e7ea";
 pub const ROOT_B_PARTUUID: &str = "2b1b91a9-cf2c-4e9c-a723-5ec997971662";
 pub const DATA_PARTUUID: &str = "21d4af4f-a19c-4c6a-b4e8-dd50e9f7ecb9";
 pub const INSTALLER_SERVICE_ACTOR_ID: &str = "punar-installer";
+const ROOT_B_FS_UUID: &str = "724e1a3b-d966-54b7-9a97-8886985eee18";
 
 const ESP_TYPE_GUID: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 const X86_ROOT_TYPE_GUID: &str = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709";
@@ -82,6 +83,12 @@ const LUKS_METADATA_MAX_BYTES: u64 = 1024 * 1024;
 const REPART_TARGET_READY_ATTEMPTS: usize = 50;
 const REPART_TARGET_READY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BOOTLOADER_MAX_BYTES: u64 = 16 * 1024 * 1024;
+// Two systemd-boot copies, FAT bookkeeping and one complete future UKI must
+// fit beside the initial A+B pair. This is an admission reserve, not an
+// estimate of whatever happens to be free on one build machine.
+const ESP_BOOTLOADER_COPIES: u64 = 2;
+const ESP_FAT_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
+const ESP_UPDATE_HEADROOM_BYTES: u64 = 192 * 1024 * 1024;
 const PI_BOOT_CONFIG_MAX_BYTES: usize = 64 * 1024;
 const PI_AUTOBOOT_MAX_BYTES: usize = 512;
 const PI_KERNEL_MAX_BYTES: u64 = 128 * 1024 * 1024;
@@ -118,6 +125,12 @@ pub struct InstallerSources {
     pub cryptenroll_path: PathBuf,
     pub cryptsetup_path: PathBuf,
     pub bootctl_path: PathBuf,
+    /// Architecture-specific systemd-boot image that `bootctl install`
+    /// copies to the removable-media fallback path. The installer hashes
+    /// this immutable live-image source before invoking bootctl and requires
+    /// the installed bytes to match both immediately and after a read-only
+    /// remount.
+    pub systemd_boot_path: PathBuf,
     pub repart_definitions_root: PathBuf,
     pub repart_runtime_root: PathBuf,
     pub hardware: HardwareSources,
@@ -155,6 +168,10 @@ pub struct InstallerSources {
     /// 2 read-only for the final installed-system check.
     #[cfg(test)]
     pub mounted_root_override: Option<PathBuf>,
+    /// Unit-test-only mounted recovery root slot B. Production always mounts
+    /// partition 3 read-only before accepting the installed recovery floor.
+    #[cfg(test)]
+    pub mounted_recovery_root_override: Option<PathBuf>,
     /// Unit-test-only evidence. Production always observes the running
     /// kernel, sysfs, module aliases and firmware tree.
     #[cfg(test)]
@@ -185,6 +202,11 @@ impl Default for InstallerSources {
             cryptenroll_path: PathBuf::from("/usr/bin/systemd-cryptenroll"),
             cryptsetup_path: PathBuf::from(cryptsetup_path),
             bootctl_path: PathBuf::from("/usr/bin/bootctl"),
+            systemd_boot_path: PathBuf::from(if std::env::consts::ARCH == "aarch64" {
+                "/usr/lib/systemd/boot/efi/systemd-bootaa64.efi"
+            } else {
+                "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+            }),
             repart_definitions_root: PathBuf::from("/usr/share/punar/repart.d"),
             repart_runtime_root: PathBuf::from("/run/punar/install"),
             hardware: HardwareSources::default(),
@@ -203,6 +225,8 @@ impl Default for InstallerSources {
             mounted_data_override: None,
             #[cfg(test)]
             mounted_root_override: None,
+            #[cfg(test)]
+            mounted_recovery_root_override: None,
             #[cfg(test)]
             hardware_report_override: None,
         }
@@ -462,17 +486,20 @@ impl Installer {
         Ok(())
     }
 
-    /// Begin the fixed nine-phase transaction. A second caller may not reset
+    /// Begin the fixed nine-phase transaction. `root_payload_bytes` covers
+    /// every root payload written during the historical `write_slot_a` wire
+    /// phase: one payload on Raspberry Pi and the independently bound A+B
+    /// recovery-floor pair on UEFI. A second caller may not reset
     /// or replace a running, awaiting, or succeeded install in this live boot.
     pub fn start_transaction_status(
         &self,
         plan_token: &str,
         disk: &str,
-        root_slot_bytes: u64,
+        root_payload_bytes: u64,
     ) -> Result<(), InstallError> {
         validate_plan_token(plan_token)?;
         device_path(&self.sources.dev_root, disk)?;
-        if root_slot_bytes == 0 {
+        if root_payload_bytes == 0 {
             return Err(InstallError::Invalid(
                 "the root-slot progress denominator must be non-zero".into(),
             ));
@@ -497,7 +524,7 @@ impl Installer {
                 InstallPhaseState::Running;
             let write = &mut next.phases[phase_index(InstallPhase::WriteSlotA)];
             write.completed_bytes = Some(0);
-            write.total_bytes = Some(root_slot_bytes);
+            write.total_bytes = Some(root_payload_bytes);
             Ok(next)
         })?;
         *self.seed_digest.lock().unwrap() = None;
@@ -528,7 +555,8 @@ impl Installer {
                 let progress = &current_status.phases[current_index];
                 if progress.completed_bytes != progress.total_bytes {
                     return Err(InstallError::Invalid(
-                        "root slot A must be completely written before re-read verification".into(),
+                        "all initial root slots must be completely written before re-read verification"
+                            .into(),
                     ));
                 }
             }
@@ -546,7 +574,7 @@ impl Installer {
                 || current.phase != Some(InstallPhase::WriteSlotA)
             {
                 return Err(InstallError::Invalid(
-                    "byte progress is available only while writing root slot A".into(),
+                    "byte progress is available only while writing the initial root slots".into(),
                 ));
             }
             let mut next = current.clone();
@@ -693,13 +721,49 @@ impl Installer {
         Ok(())
     }
 
-    /// Re-read the signed manifest and verify both the compressed root payload
-    /// and boot artifact through already-open descriptors. No target byte is
-    /// touched in this phase.
+    /// Re-read the signed manifest and verify every artifact the installation
+    /// will write through already-open descriptors. A UEFI install is refused
+    /// unless the manifest carries distinct, independently bound A+B root/UKI
+    /// pairs; accepting a slot-A-only manifest would recreate the first-boot
+    /// recovery hole. No target byte is touched in this phase.
     pub fn verify_release_payload(&self, plan: &InstallPlan) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::VerifyRelease)?;
-        self.open_verified_payload(plan).map(drop)?;
-        self.open_verified_boot_artifact(plan).map(drop)
+        let manifest = self.release_manifest_for_plan(plan)?;
+        match manifest.boot_platform {
+            BootPlatform::Uefi => {
+                let (slot_a, slot_b) = uefi_recovery_floor(plan, &manifest)?;
+                self.open_verified_payload_artifact(&slot_a.payload, "release root payload A")?;
+                self.open_verified_uefi_artifact(
+                    &slot_a.boot_artifact,
+                    ROOT_A_PARTUUID,
+                    "release slot-A UKI",
+                )?;
+                self.open_verified_payload_artifact(&slot_b.payload, "release recovery payload B")?;
+                self.open_verified_uefi_artifact(
+                    &slot_b.boot_artifact,
+                    ROOT_B_PARTUUID,
+                    "release recovery UKI B",
+                )?;
+                Ok(())
+            }
+            BootPlatform::RaspberryPi => {
+                self.open_verified_payload(plan).map(drop)?;
+                self.open_verified_boot_artifact(plan).map(drop)
+            }
+        }
+    }
+
+    fn open_verified_uefi_artifact(
+        &self,
+        artifact: &BootArtifact,
+        expected_root_partuuid: &str,
+        description: &str,
+    ) -> Result<File, InstallError> {
+        let mut file = self.open_verified_boot_artifact_entry(artifact, description)?;
+        crate::uki::require_root_partuuid(&mut file, expected_root_partuuid).map_err(|reason| {
+            InstallError::Trust(format!("{description} has unsafe boot semantics: {reason}"))
+        })?;
+        Ok(file)
     }
 
     /// Materialize Punar's fixed GPT, ESP and shared-data filesystem from the
@@ -795,6 +859,14 @@ impl Installer {
         let _ = fs::remove_dir_all(&rendered);
         prepared?;
 
+        // Re-read the primary GPT from the target itself before any root
+        // payload write or recovery-key enrollment. A successful repart exit
+        // is insufficient evidence: a stale, reordered, resized or
+        // substituted partition table must stop at the partition phase.
+        if plan_boot_platform(plan)? == BootPlatform::Uefi {
+            verify_post_repart_gpt(&target, plan, allow_regular_target)?;
+        }
+
         self.enter_phase(InstallPhase::Encrypt)?;
         if plan.encryption == InstallEncryption::None {
             // The wire keeps one phase vocabulary for encrypted and explicit
@@ -867,22 +939,79 @@ impl Installer {
         ))
     }
 
-    /// Decompress the already-verified artifact into root slot A through one
-    /// bounded 4 MiB buffer, hashing the exact raw bytes as they are written.
-    /// The destination is derived from the confirmed disk, never supplied by
-    /// the IPC caller.
+    /// Return the honest denominator for the root-write progress phase. UEFI
+    /// writes both independently bound recovery-floor payloads; Raspberry Pi
+    /// retains its platform-specific transaction until its paired installer
+    /// path is promoted separately.
+    pub fn root_write_bytes_total(&self, plan: &InstallPlan) -> Result<u64, InstallError> {
+        let manifest = self.release_manifest_for_plan(plan)?;
+        match manifest.boot_platform {
+            BootPlatform::Uefi => {
+                let (slot_a, slot_b) = uefi_recovery_floor(plan, &manifest)?;
+                slot_a
+                    .payload
+                    .uncompressed_size_bytes
+                    .checked_add(slot_b.payload.uncompressed_size_bytes)
+                    .ok_or_else(|| {
+                        InstallError::Invalid("initial root payload size overflow".into())
+                    })
+            }
+            BootPlatform::RaspberryPi => Ok(plan.payload.uncompressed_size_bytes),
+        }
+    }
+
+    /// Decompress the already-verified artifacts into their fixed root slots
+    /// through one bounded 4 MiB buffer, hashing the exact raw bytes as they
+    /// are written. A UEFI install writes A and the separately root-bound B
+    /// recovery floor before it may enter the re-read phase. Destinations are
+    /// derived from the confirmed disk, never supplied by the IPC caller.
     #[cfg(target_os = "linux")]
-    pub fn write_slot_a(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+    pub fn write_root_slots(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+        self.require_transaction_phase(plan, InstallPhase::WriteSlotA)?;
+        let manifest = self.release_manifest_for_plan(plan)?;
+        match manifest.boot_platform {
+            BootPlatform::Uefi => {
+                let (slot_a, slot_b) = uefi_recovery_floor(plan, &manifest)?;
+                self.write_root_slot_artifact(
+                    plan,
+                    root_a_partition_number(plan)?,
+                    &slot_a.payload,
+                    "root slot A",
+                    0,
+                )?;
+                self.write_root_slot_artifact(
+                    plan,
+                    root_b_partition_number(plan)?,
+                    &slot_b.payload,
+                    "recovery root slot B",
+                    slot_a.payload.uncompressed_size_bytes,
+                )
+            }
+            BootPlatform::RaspberryPi => self.write_root_slot_artifact(
+                plan,
+                root_a_partition_number(plan)?,
+                &manifest.payload,
+                "root slot A",
+                0,
+            ),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_root_slot_artifact(
+        &self,
+        plan: &InstallPlan,
+        partition_number: u32,
+        artifact: &PayloadArtifact,
+        description: &str,
+        progress_offset: u64,
+    ) -> Result<(), InstallError> {
         use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 
         self.require_transaction_phase(plan, InstallPhase::WriteSlotA)?;
-        validate_root_slot_payload(plan)?;
-        let payload = self.open_verified_payload(plan)?;
-        let slot_path = partition_device_path(
-            &self.sources.dev_root,
-            &plan.disk.device,
-            root_a_partition_number(plan)?,
-        )?;
+        let payload = self.open_verified_payload_artifact(artifact, description)?;
+        let slot_path =
+            partition_device_path(&self.sources.dev_root, &plan.disk.device, partition_number)?;
         let mut slot = fs::OpenOptions::new()
             .write(true)
             .custom_flags(
@@ -890,10 +1019,15 @@ impl Installer {
                     .expect("open flags fit libc::c_int"),
             )
             .open(&slot_path)?;
-        if !slot.metadata()?.file_type().is_block_device() {
-            return Err(InstallError::Refused(
-                "root slot A is not a block device".into(),
-            ));
+        let file_type = slot.metadata()?.file_type();
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        if !(file_type.is_block_device() || allow_regular_target && file_type.is_file()) {
+            return Err(InstallError::Refused(format!(
+                "{description} is not a block device"
+            )));
         }
 
         let mut child = Command::new(&self.sources.zstd_path)
@@ -911,13 +1045,16 @@ impl Installer {
         let copied = stream_exact_payload(
             &mut decompressed,
             &mut slot,
-            plan.payload.uncompressed_size_bytes,
-            &plan.payload.uncompressed_digest_sha256,
+            artifact.uncompressed_size_bytes,
+            &artifact.uncompressed_digest_sha256,
             |completed| {
-                if completed == plan.payload.uncompressed_size_bytes
+                if completed == artifact.uncompressed_size_bytes
                     || completed.saturating_sub(last_published) >= STATUS_PROGRESS_BYTES
                 {
-                    self.update_write_progress(completed)?;
+                    let aggregate = progress_offset.checked_add(completed).ok_or_else(|| {
+                        InstallError::Invalid("initial root write progress overflow".into())
+                    })?;
+                    self.update_write_progress(aggregate)?;
                     last_published = completed;
                 }
                 Ok(())
@@ -942,31 +1079,86 @@ impl Installer {
         Ok(())
     }
 
-    /// Close the writer, re-open slot A with `O_DIRECT`, and hash the bytes
-    /// returned by the block device. This cannot be satisfied by hashing the
-    /// write buffer or by a normal page-cache read.
+    /// Close every writer, re-open each written root slot with `O_DIRECT`, and
+    /// hash the bytes returned by the block device. UEFI success requires both
+    /// A and B to survive this independent read. This cannot be satisfied by
+    /// hashing the write buffer or by a normal page-cache read.
     #[cfg(target_os = "linux")]
-    pub fn verify_written_slot_a(&self, plan: &InstallPlan) -> Result<(), InstallError> {
+    pub fn verify_written_root_slots(&self, plan: &InstallPlan) -> Result<(), InstallError> {
         self.require_transaction_phase(plan, InstallPhase::ReRead)?;
-        validate_root_slot_payload(plan)?;
-        let slot_path = partition_device_path(
-            &self.sources.dev_root,
-            &plan.disk.device,
-            root_a_partition_number(plan)?,
-        )?;
-        digest_direct_block_device(
-            &slot_path,
-            plan.payload.uncompressed_size_bytes,
-            &plan.payload.uncompressed_digest_sha256,
-            "root slot A",
-        )
+        let manifest = self.release_manifest_for_plan(plan)?;
+        #[cfg(test)]
+        let allow_regular_target = self.sources.allow_regular_target_for_tests;
+        #[cfg(not(test))]
+        let allow_regular_target = false;
+        match manifest.boot_platform {
+            BootPlatform::Uefi => {
+                let (slot_a, slot_b) = uefi_recovery_floor(plan, &manifest)?;
+                let root_a = partition_device_path(
+                    &self.sources.dev_root,
+                    &plan.disk.device,
+                    root_a_partition_number(plan)?,
+                )?;
+                digest_installed_partition(
+                    &root_a,
+                    slot_a.payload.uncompressed_size_bytes,
+                    &slot_a.payload.uncompressed_digest_sha256,
+                    allow_regular_target,
+                    "root slot A",
+                )?;
+                let root_b = partition_device_path(
+                    &self.sources.dev_root,
+                    &plan.disk.device,
+                    root_b_partition_number(plan)?,
+                )?;
+                digest_installed_partition(
+                    &root_b,
+                    slot_b.payload.uncompressed_size_bytes,
+                    &slot_b.payload.uncompressed_digest_sha256,
+                    allow_regular_target,
+                    "recovery root slot B",
+                )?;
+                verify_ext4_identity(
+                    &root_b,
+                    allow_regular_target,
+                    ROOT_B_FS_UUID,
+                    "PUNAR-ROOT-B",
+                )?;
+                let token = sha256_hex(
+                    &canonical_json(plan)
+                        .map_err(|error| InstallError::Invalid(error.to_string()))?,
+                );
+                let recovery = self.mount_recovery_root(plan, &token)?;
+                verify_recovery_fstab(recovery.path())?;
+                recovery.finish()
+            }
+            BootPlatform::RaspberryPi => {
+                let root_a = partition_device_path(
+                    &self.sources.dev_root,
+                    &plan.disk.device,
+                    root_a_partition_number(plan)?,
+                )?;
+                digest_installed_partition(
+                    &root_a,
+                    plan.payload.uncompressed_size_bytes,
+                    &plan.payload.uncompressed_digest_sha256,
+                    allow_regular_target,
+                    "root slot A",
+                )
+            }
+        }
     }
 
-    /// Install the release's already-verified boot artifact onto the target
-    /// boot partition. Initial installation deliberately creates one
-    /// permanently uncounted slot-A UKI: there is no known-good slot B to
-    /// fall back to yet. Later updates use the separate `+3-0` counted-name
-    /// path once a last-known-good release exists.
+    /// Install the release's already-verified boot artifacts onto the target
+    /// boot partition. Initial UEFI installation writes the permanently
+    /// uncounted, preferred slot-A UKI plus a separately bound, uncounted,
+    /// non-preferred slot-B recovery UKI. Nothing falls back on its own: the
+    /// recovery entry is a manually selectable systemd-boot item until the
+    /// first update installs a counted candidate. A counted first A was
+    /// rejected because its blessing depends on a desktop session appearing
+    /// within the health window, which a fresh device idling at onboarding
+    /// does not guarantee, and an exhausted A would strand the device on B
+    /// with no blessed A for the retirement contract.
     ///
     /// The target ESP is derived from the confirmed disk, mounted with
     /// `nodev,nosuid,noexec,nosymfollow`, and always unmounted before the
@@ -1207,10 +1399,33 @@ impl Installer {
         plan: &InstallPlan,
         manifest: &ReleaseManifest,
     ) -> Result<(), InstallError> {
-        // Re-verify through one open descriptor before touching the ESP. The
-        // bounded copy below hashes the bytes again, closing an in-place
-        // source-mutation race between this check and the final rename.
-        let mut boot_artifact = self.open_verified_boot_artifact(plan)?;
+        let (slot_a, slot_b) = uefi_recovery_floor(plan, manifest)?;
+        // Open and verify both artifacts before touching the ESP. The bounded
+        // copies below hash the bytes again, closing an in-place source-
+        // mutation race between this check and each final rename.
+        let mut boot_artifact_a = self.open_verified_uefi_artifact(
+            &slot_a.boot_artifact,
+            ROOT_A_PARTUUID,
+            "release slot-A UKI",
+        )?;
+        let mut boot_artifact_b = self.open_verified_uefi_artifact(
+            &slot_b.boot_artifact,
+            ROOT_B_PARTUUID,
+            "release recovery UKI B",
+        )?;
+        let trusted_bootloader = read_bounded_regular(
+            &self.sources.systemd_boot_path,
+            usize::try_from(BOOTLOADER_MAX_BYTES).expect("bootloader bound fits usize"),
+            "immutable systemd-boot source",
+        )?;
+        if trusted_bootloader.is_empty() {
+            return Err(InstallError::Trust(
+                "the immutable systemd-boot source is empty".into(),
+            ));
+        }
+        let trusted_bootloader_size =
+            u64::try_from(trusted_bootloader.len()).expect("bounded systemd-boot length fits u64");
+        let trusted_bootloader_digest = sha256_hex(&trusted_bootloader);
         let token = sha256_hex(
             &canonical_json(plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
         );
@@ -1221,18 +1436,34 @@ impl Installer {
             .path()
             .join("EFI/BOOT")
             .join(uefi_fallback_filename(manifest.architecture));
-        require_bounded_regular_file(&fallback, BOOTLOADER_MAX_BYTES, "UEFI fallback bootloader")?;
+        verify_regular_file(
+            &fallback,
+            trusted_bootloader_size,
+            &trusted_bootloader_digest,
+            "installed UEFI fallback bootloader",
+        )?;
 
         let version = manifest.version.to_string();
         let uki_dir = esp.path().join("EFI/Linux");
         fs::create_dir_all(&uki_dir)?;
-        let uki_name = format!("punar_{version}.efi");
-        let installed_uki = uki_dir.join(&uki_name);
+        // The very first A entry is the permanently uncounted known-good UKI;
+        // later updates alone install counted `+3-0` candidates. The
+        // recovery-B entry is uncounted too and never preferred.
+        let uki_name_a = format!("punar_{version}.efi");
+        let uki_name_b = format!("punar-recovery_{version}.efi");
+        let installed_uki_a = uki_dir.join(&uki_name_a);
+        let installed_uki_b = uki_dir.join(&uki_name_b);
         copy_verified_file_atomic(
-            &mut boot_artifact,
-            &installed_uki,
-            plan.boot_artifact.size_bytes,
-            &plan.boot_artifact.digest_sha256,
+            &mut boot_artifact_a,
+            &installed_uki_a,
+            slot_a.boot_artifact.size_bytes,
+            &slot_a.boot_artifact.digest_sha256,
+        )?;
+        copy_verified_file_atomic(
+            &mut boot_artifact_b,
+            &installed_uki_b,
+            slot_b.boot_artifact.size_bytes,
+            &slot_b.boot_artifact.digest_sha256,
         )?;
 
         let loader_dir = esp.path().join("loader");
@@ -1241,22 +1472,26 @@ impl Installer {
         let loader = format!("preferred {selector}\ntimeout 0\neditor no\n");
         write_atomic_synced(&loader_dir.join("loader.conf"), loader.as_bytes(), 0o644)?;
 
-        let mut installed = open_regular_nofollow(&installed_uki, "installed slot-A UKI")?;
-        verify_reader(
-            &mut installed,
-            &plan.boot_artifact.digest_sha256,
-            plan.boot_artifact.size_bytes,
-        )
-        .map_err(|error| InstallError::Trust(error.to_string()))?;
-        drop(installed);
-
-        // `syncfs` covers bootctl's files, the UKI rename and loader.conf on
-        // the one target filesystem. A successful phase is therefore never
-        // published while those directory updates exist only in cache.
+        // `syncfs` covers bootctl's files, both UKI renames and loader.conf on
+        // the one target filesystem. Unmount before re-opening read-only so
+        // the recovery-floor check cannot accidentally validate an open
+        // writer or a not-yet-published directory transaction.
         let filesystem = File::open(esp.path())?;
         rustix::fs::syncfs(&filesystem).map_err(rustix_install_io)?;
         drop(filesystem);
-        esp.finish()
+        esp.finish()?;
+
+        let reread = self.mount_boot_partition_a(plan, &token, true)?;
+        verify_installed_uefi_recovery_floor(
+            reread.path(),
+            manifest,
+            &uki_name_a,
+            &uki_name_b,
+            &selector,
+            trusted_bootloader_size,
+            &trusted_bootloader_digest,
+        )?;
+        reread.finish()
     }
 
     #[cfg(target_os = "linux")]
@@ -1538,6 +1773,47 @@ impl Installer {
         Ok(MountedFilesystem::mounted(path))
     }
 
+    #[cfg(target_os = "linux")]
+    fn mount_recovery_root(
+        &self,
+        plan: &InstallPlan,
+        token: &str,
+    ) -> Result<MountedFilesystem, InstallError> {
+        #[cfg(test)]
+        if let Some(path) = &self.sources.mounted_recovery_root_override {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(InstallError::Refused(
+                    "the test recovery-root override is not a directory".into(),
+                ));
+            }
+            return Ok(MountedFilesystem::borrowed(path.clone()));
+        }
+
+        let source = partition_device_path(
+            &self.sources.dev_root,
+            &plan.disk.device,
+            root_b_partition_number(plan)?,
+        )?;
+        validate_repart_target(&source, false)?;
+        let path = self
+            .sources
+            .repart_runtime_root
+            .join(format!("recovery-root-{token}"));
+        create_private_directory(&path)?;
+        let flags = rustix::mount::MountFlags::RDONLY
+            | rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NOEXEC
+            | rustix::mount::MountFlags::NOSYMFOLLOW;
+        if let Err(error) =
+            rustix::mount::mount(&source, &path, "ext4", flags, None::<&std::ffi::CStr>)
+        {
+            let _ = fs::remove_dir(&path);
+            return Err(rustix_install_io(error));
+        }
+        Ok(MountedFilesystem::mounted(path))
+    }
+
     fn require_transaction_phase(
         &self,
         plan: &InstallPlan,
@@ -1561,6 +1837,14 @@ impl Installer {
 
     fn open_verified_payload(&self, plan: &InstallPlan) -> Result<File, InstallError> {
         let manifest = self.release_manifest_for_plan(plan)?;
+        self.open_verified_payload_artifact(&manifest.payload, "release payload")
+    }
+
+    fn open_verified_payload_artifact(
+        &self,
+        artifact: &PayloadArtifact,
+        description: &str,
+    ) -> Result<File, InstallError> {
         let parent = self
             .sources
             .release_manifest_path
@@ -1568,15 +1852,23 @@ impl Installer {
             .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
         open_verified_release_file(
             parent,
-            &manifest.payload.filename,
-            &plan.payload.digest_sha256,
-            plan.payload.compressed_size_bytes,
-            "release payload",
+            &artifact.filename,
+            &artifact.digest_sha256,
+            artifact.size_bytes,
+            description,
         )
     }
 
     fn open_verified_boot_artifact(&self, plan: &InstallPlan) -> Result<File, InstallError> {
         let manifest = self.release_manifest_for_plan(plan)?;
+        self.open_verified_boot_artifact_entry(&manifest.boot_artifact, "release boot artifact")
+    }
+
+    fn open_verified_boot_artifact_entry(
+        &self,
+        artifact: &BootArtifact,
+        description: &str,
+    ) -> Result<File, InstallError> {
         let parent = self
             .sources
             .release_manifest_path
@@ -1584,10 +1876,10 @@ impl Installer {
             .ok_or_else(|| InstallError::Trust("release directory is unavailable".into()))?;
         open_verified_release_file(
             parent,
-            &manifest.boot_artifact.filename,
-            &plan.boot_artifact.digest_sha256,
-            plan.boot_artifact.size_bytes,
-            "release boot artifact",
+            &artifact.filename,
+            &artifact.digest_sha256,
+            artifact.size_bytes,
+            description,
         )
     }
 
@@ -1596,6 +1888,21 @@ impl Installer {
         plan: &InstallPlan,
     ) -> Result<ReleaseManifest, InstallError> {
         let manifest = self.release_manifest()?;
+        let (expected_recovery_payload, expected_recovery_boot_artifact) =
+            match manifest.boot_platform {
+                BootPlatform::Uefi => {
+                    let slots = manifest.uefi_slots.as_ref().ok_or_else(|| {
+                        InstallError::Trust(
+                            "the signed UEFI release lost its slot-B recovery identity".into(),
+                        )
+                    })?;
+                    (
+                        Some(install_payload_plan(&manifest.release_id, &slots.b.payload)),
+                        Some(install_boot_artifact_plan(&slots.b.boot_artifact)),
+                    )
+                }
+                BootPlatform::RaspberryPi => (None, None),
+            };
         if manifest.release_id != plan.payload.release_id
             || manifest.payload.filename != plan.payload.filename
             || manifest.payload.digest_sha256 != plan.payload.digest_sha256
@@ -1607,6 +1914,8 @@ impl Installer {
             || manifest.boot_artifact.filename != plan.boot_artifact.filename
             || manifest.boot_artifact.digest_sha256 != plan.boot_artifact.digest_sha256
             || manifest.boot_artifact.size_bytes != plan.boot_artifact.size_bytes
+            || plan.recovery_payload != expected_recovery_payload
+            || plan.recovery_boot_artifact != expected_recovery_boot_artifact
         {
             return Err(InstallError::Trust(
                 "the signed release no longer matches the confirmed install plan".into(),
@@ -1788,6 +2097,21 @@ impl Installer {
         }
         debug_assert!(data_bytes >= DATA_MINIMUM);
 
+        let (recovery_payload, recovery_boot_artifact) = match boot_platform {
+            BootPlatform::Uefi => {
+                let slots = manifest.uefi_slots.as_ref().ok_or_else(|| {
+                    InstallError::Trust(
+                        "the signed UEFI release has no slot-B recovery identity".into(),
+                    )
+                })?;
+                (
+                    Some(install_payload_plan(&manifest.release_id, &slots.b.payload)),
+                    Some(install_boot_artifact_plan(&slots.b.boot_artifact)),
+                )
+            }
+            BootPlatform::RaspberryPi => (None, None),
+        };
+
         let plan = InstallPlan {
             schema_version: 1,
             architecture: architecture.to_string(),
@@ -1804,24 +2128,17 @@ impl Installer {
             keymap: params.keymap.clone(),
             encryption: params.encryption,
             recovery_mode: params.recovery_mode,
-            payload: InstallPayloadPlan {
-                release_id: manifest.release_id,
-                filename: manifest.payload.filename,
-                digest_sha256: manifest.payload.digest_sha256,
-                compressed_size_bytes: manifest.payload.size_bytes,
-                uncompressed_digest_sha256: manifest.payload.uncompressed_digest_sha256,
-                uncompressed_size_bytes: manifest.payload.uncompressed_size_bytes,
-            },
-            boot_artifact: InstallBootArtifactPlan {
-                kind: manifest.boot_artifact.kind,
-                filename: manifest.boot_artifact.filename,
-                digest_sha256: manifest.boot_artifact.digest_sha256,
-                size_bytes: manifest.boot_artifact.size_bytes,
-            },
+            payload: install_payload_plan(&manifest.release_id, &manifest.payload),
+            boot_artifact: install_boot_artifact_plan(&manifest.boot_artifact),
+            recovery_payload,
+            recovery_boot_artifact,
             partitions,
             data_subvolumes: vec!["@var".into(), "@home".into(), "@var-tmp".into()],
             warnings,
         };
+        if boot_platform == BootPlatform::Uefi {
+            uefi_recovery_floor(&plan, &manifest)?;
+        }
         let plan_token = sha256_hex(
             &canonical_json(&plan).map_err(|error| InstallError::Invalid(error.to_string()))?,
         );
@@ -2825,6 +3142,18 @@ fn require_bounded_regular_file(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn verify_regular_file(
+    path: &Path,
+    expected_size: u64,
+    expected_digest: &str,
+    description: &str,
+) -> Result<(), InstallError> {
+    let mut file = open_regular_nofollow(path, description)?;
+    verify_reader(&mut file, expected_digest, expected_size)
+        .map_err(|error| InstallError::Trust(format!("{description}: {error}")))
+}
+
 fn open_regular_nofollow(path: &Path, description: &str) -> Result<File, InstallError> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -2908,6 +3237,91 @@ fn copy_verified_file_atomic(
         let _ = fs::remove_file(&temporary);
     }
     copied
+}
+
+#[cfg(target_os = "linux")]
+fn verify_installed_uefi_recovery_floor(
+    esp: &Path,
+    manifest: &ReleaseManifest,
+    uki_name_a: &str,
+    uki_name_b: &str,
+    preferred_selector: &str,
+    trusted_bootloader_size: u64,
+    trusted_bootloader_digest: &str,
+) -> Result<(), InstallError> {
+    let slots = manifest.uefi_slots.as_ref().ok_or_else(|| {
+        InstallError::Trust("the installed UEFI recovery pair lost its signed identity".into())
+    })?;
+    let fallback = esp
+        .join("EFI/BOOT")
+        .join(uefi_fallback_filename(manifest.architecture));
+    verify_regular_file(
+        &fallback,
+        trusted_bootloader_size,
+        trusted_bootloader_digest,
+        "re-read UEFI fallback bootloader",
+    )?;
+
+    let uki_dir = esp.join("EFI/Linux");
+    let mut actual_names = BTreeSet::new();
+    for entry in fs::read_dir(&uki_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            return Err(InstallError::Trust(
+                "the installed UEFI recovery directory contains a non-file entry".into(),
+            ));
+        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            InstallError::Trust("the installed UEFI recovery entry name is invalid".into())
+        })?;
+        if !actual_names.insert(name) {
+            return Err(InstallError::Trust(
+                "the installed UEFI recovery directory contains duplicate entries".into(),
+            ));
+        }
+    }
+    let expected_names = BTreeSet::from([uki_name_a.to_string(), uki_name_b.to_string()]);
+    if actual_names != expected_names {
+        return Err(InstallError::Trust(
+            "the installed ESP does not contain exactly the slot-A and recovery-slot-B UKIs".into(),
+        ));
+    }
+
+    for (name, artifact, expected_root, description) in [
+        (
+            uki_name_a,
+            &slots.a.boot_artifact,
+            ROOT_A_PARTUUID,
+            "re-read slot-A UKI",
+        ),
+        (
+            uki_name_b,
+            &slots.b.boot_artifact,
+            ROOT_B_PARTUUID,
+            "re-read recovery-slot-B UKI",
+        ),
+    ] {
+        let mut installed = open_regular_nofollow(&uki_dir.join(name), description)?;
+        verify_reader(&mut installed, &artifact.digest_sha256, artifact.size_bytes)
+            .map_err(|error| InstallError::Trust(format!("{description}: {error}")))?;
+        crate::uki::require_root_partuuid(&mut installed, expected_root).map_err(|reason| {
+            InstallError::Trust(format!("{description} has unsafe boot semantics: {reason}"))
+        })?;
+    }
+
+    let expected_loader =
+        format!("preferred {preferred_selector}\ntimeout 0\neditor no\n").into_bytes();
+    let actual_loader = read_bounded_regular(
+        &esp.join("loader/loader.conf"),
+        4096,
+        "re-read systemd-boot loader configuration",
+    )?;
+    if actual_loader != expected_loader {
+        return Err(InstallError::Trust(
+            "the re-read systemd-boot preference no longer selects slot A".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn create_private_directory(path: &Path) -> Result<(), InstallError> {
@@ -3050,6 +3464,166 @@ fn validate_repart_target(path: &Path, allow_regular_for_tests: bool) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Parse and authenticate the primary GPT directly from the target device.
+/// The daemon does not accept `systemd-repart`'s exit status, udev labels or
+/// path publication as a substitute for the exact on-disk geometry that the
+/// user confirmed.
+fn verify_post_repart_gpt(
+    path: &Path,
+    plan: &InstallPlan,
+    allow_regular_for_tests: bool,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let mut disk = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
+        .open(path)?;
+    let kind = disk.metadata()?.file_type();
+    if !(kind.is_block_device() || allow_regular_for_tests && kind.is_file()) {
+        return Err(InstallError::Refused(
+            "post-repartition GPT source is not the confirmed block device".into(),
+        ));
+    }
+    let sector = plan.disk.logical_sector_bytes;
+    if !valid_sector_size(sector) {
+        return Err(InstallError::Invalid(
+            "the confirmed disk has an invalid logical sector size".into(),
+        ));
+    }
+    disk.seek(SeekFrom::Start(sector))?;
+    let mut header = vec![0_u8; sector as usize];
+    disk.read_exact(&mut header)?;
+    if &header[..8] != b"EFI PART" {
+        return Err(InstallError::Trust(
+            "post-repartition disk has no primary GPT header".into(),
+        ));
+    }
+    let header_size = usize::try_from(u32::from_le_bytes(header[12..16].try_into().unwrap()))
+        .map_err(|_| InstallError::Trust("GPT header size overflow".into()))?;
+    if !(92..=sector as usize).contains(&header_size) {
+        return Err(InstallError::Trust(
+            "post-repartition GPT header has an invalid size".into(),
+        ));
+    }
+    let expected_header_crc = u32::from_le_bytes(header[16..20].try_into().unwrap());
+    let mut authenticated_header = header[..header_size].to_vec();
+    authenticated_header[16..20].fill(0);
+    if gpt_crc32(&authenticated_header) != expected_header_crc {
+        return Err(InstallError::Trust(
+            "post-repartition GPT header checksum failed".into(),
+        ));
+    }
+    if u64::from_le_bytes(header[24..32].try_into().unwrap()) != 1 {
+        return Err(InstallError::Trust(
+            "post-repartition GPT primary header is not at LBA 1".into(),
+        ));
+    }
+    let entries_lba = u64::from_le_bytes(header[72..80].try_into().unwrap());
+    let entry_count = u64::from(u32::from_le_bytes(header[80..84].try_into().unwrap()));
+    let entry_size = u64::from(u32::from_le_bytes(header[84..88].try_into().unwrap()));
+    let expected_entries_crc = u32::from_le_bytes(header[88..92].try_into().unwrap());
+    if entry_count < plan.partitions.len() as u64
+        || entry_count > 4096
+        || !(128..=4096).contains(&entry_size)
+        || entry_size % 8 != 0
+    {
+        return Err(InstallError::Trust(
+            "post-repartition GPT entry table has unsafe bounds".into(),
+        ));
+    }
+    let entries_bytes = entry_count
+        .checked_mul(entry_size)
+        .filter(|bytes| *bytes <= 16 * 1024 * 1024)
+        .ok_or_else(|| InstallError::Trust("post-repartition GPT table size overflow".into()))?;
+    let entries_offset = entries_lba
+        .checked_mul(sector)
+        .ok_or_else(|| InstallError::Trust("post-repartition GPT table offset overflow".into()))?;
+    disk.seek(SeekFrom::Start(entries_offset))?;
+    let mut entries = vec![0_u8; entries_bytes as usize];
+    disk.read_exact(&mut entries)?;
+    if gpt_crc32(&entries) != expected_entries_crc {
+        return Err(InstallError::Trust(
+            "post-repartition GPT entry-table checksum failed".into(),
+        ));
+    }
+
+    let mut observed = 0_usize;
+    for index in 0..entry_count as usize {
+        let start = index * entry_size as usize;
+        let entry = &entries[start..start + entry_size as usize];
+        if entry[..16].iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        let expected = plan.partitions.get(observed).ok_or_else(|| {
+            InstallError::Trust("post-repartition GPT contains an extra partition".into())
+        })?;
+        if index + 1 != expected.number as usize {
+            return Err(InstallError::Trust(
+                "post-repartition GPT partition order differs from the confirmed plan".into(),
+            ));
+        }
+        let first_lba = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+        let last_lba = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+        let offset_bytes = first_lba
+            .checked_mul(sector)
+            .ok_or_else(|| InstallError::Trust("GPT partition offset overflow".into()))?;
+        let size_bytes = last_lba
+            .checked_sub(first_lba)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|sectors| sectors.checked_mul(sector))
+            .ok_or_else(|| InstallError::Trust("GPT partition size overflow".into()))?;
+        if gpt_guid(&entry[..16]) != expected.type_guid.to_ascii_lowercase()
+            || gpt_guid(&entry[16..32]) != expected.partuuid.to_ascii_lowercase()
+            || offset_bytes != expected.offset_bytes
+            || size_bytes != expected.size_bytes
+        {
+            return Err(InstallError::Trust(format!(
+                "post-repartition GPT partition {} differs from its confirmed type, PARTUUID, offset, or size",
+                expected.number
+            )));
+        }
+        observed += 1;
+    }
+    if observed != plan.partitions.len() {
+        return Err(InstallError::Trust(format!(
+            "post-repartition GPT contains {observed} partitions, expected {}",
+            plan.partitions.len()
+        )));
+    }
+    Ok(())
+}
+
+fn gpt_guid(bytes: &[u8]) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+        u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
+fn gpt_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 /// A successful repart exit is the destructive durability boundary, but the
@@ -4657,6 +5231,13 @@ fn root_a_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
     })
 }
 
+fn root_b_partition_number(plan: &InstallPlan) -> Result<u32, InstallError> {
+    Ok(match plan_boot_platform(plan)? {
+        BootPlatform::Uefi => 3,
+        BootPlatform::RaspberryPi => 5,
+    })
+}
+
 fn minimum_disk_bytes(sector_bytes: u64, boot_platform: BootPlatform) -> u64 {
     let start = align_up(GPT_LBAS * sector_bytes, ALIGNMENT).unwrap_or(ALIGNMENT);
     start
@@ -4904,6 +5485,132 @@ fn validate_root_slot_payload(plan: &InstallPlan) -> Result<(), InstallError> {
         ));
     }
     Ok(())
+}
+
+fn install_payload_plan(release_id: &str, artifact: &PayloadArtifact) -> InstallPayloadPlan {
+    InstallPayloadPlan {
+        release_id: release_id.to_string(),
+        filename: artifact.filename.clone(),
+        digest_sha256: artifact.digest_sha256.clone(),
+        compressed_size_bytes: artifact.size_bytes,
+        uncompressed_digest_sha256: artifact.uncompressed_digest_sha256.clone(),
+        uncompressed_size_bytes: artifact.uncompressed_size_bytes,
+    }
+}
+
+fn install_boot_artifact_plan(artifact: &BootArtifact) -> InstallBootArtifactPlan {
+    InstallBootArtifactPlan {
+        kind: artifact.kind,
+        filename: artifact.filename.clone(),
+        digest_sha256: artifact.digest_sha256.clone(),
+        size_bytes: artifact.size_bytes,
+    }
+}
+
+/// Resolve and validate the two signed artifacts required to make a fresh
+/// UEFI installation recoverable before its first update. The two roots are
+/// the same release, but they must have different exact-byte identities:
+/// slot B carries its own ext4 UUID/fstab binding and its UKI carries B's
+/// PARTUUID. Equal digests would be an unsafe clone, not a recovery floor.
+fn uefi_recovery_floor<'a>(
+    plan: &InstallPlan,
+    manifest: &'a ReleaseManifest,
+) -> Result<(&'a UefiSlotArtifact, &'a UefiSlotArtifact), InstallError> {
+    if plan_boot_platform(plan)? != BootPlatform::Uefi
+        || manifest.boot_platform != BootPlatform::Uefi
+    {
+        return Err(InstallError::Invalid(
+            "the UEFI recovery floor requires a UEFI install plan".into(),
+        ));
+    }
+    validate_root_slot_payload(plan)?;
+    let slots = manifest.uefi_slots.as_ref().ok_or_else(|| {
+        InstallError::Trust(
+            "the signed UEFI installer release has no independently bound slot-B recovery pair"
+                .into(),
+        )
+    })?;
+    let expected_payload = install_payload_plan(&manifest.release_id, &slots.b.payload);
+    let expected_boot_artifact = install_boot_artifact_plan(&slots.b.boot_artifact);
+    if plan.recovery_payload.as_ref() != Some(&expected_payload)
+        || plan.recovery_boot_artifact.as_ref() != Some(&expected_boot_artifact)
+    {
+        return Err(InstallError::Trust(
+            "the confirmed install plan does not bind the signed slot-B recovery pair".into(),
+        ));
+    }
+    let root_b_number = root_b_partition_number(plan)?;
+    let root_b = plan
+        .partitions
+        .iter()
+        .find(|partition| partition.number == root_b_number)
+        .ok_or_else(|| InstallError::Invalid("install plan has no root slot B".into()))?;
+    if root_b.name != "PUNAR-ROOT-B"
+        || root_b.partuuid != ROOT_B_PARTUUID
+        || root_b.size_bytes != ROOT_SIZE
+        || root_b.encrypted
+    {
+        return Err(InstallError::Invalid(
+            "install plan root slot B does not match the fixed product layout".into(),
+        ));
+    }
+    for (name, artifact, size) in [
+        ("A", &slots.a, ROOT_SIZE),
+        ("B", &slots.b, root_b.size_bytes),
+    ] {
+        if artifact.payload.uncompressed_size_bytes == 0
+            || artifact.payload.uncompressed_size_bytes > size
+            || artifact.payload.uncompressed_size_bytes % DIRECT_IO_BLOCK_BYTES as u64 != 0
+            || artifact.boot_artifact.kind != BootArtifactKind::Uki
+            || artifact.boot_artifact.size_bytes == 0
+        {
+            return Err(InstallError::Trust(format!(
+                "the signed UEFI slot-{name} pair does not fit the fixed install layout"
+            )));
+        }
+    }
+    if slots.a.payload.uncompressed_size_bytes != slots.b.payload.uncompressed_size_bytes {
+        return Err(InstallError::Trust(
+            "the signed UEFI recovery pair does not cover equal-sized root slots".into(),
+        ));
+    }
+    if slots.a.payload.uncompressed_digest_sha256 == slots.b.payload.uncompressed_digest_sha256 {
+        return Err(InstallError::Trust(
+            "slot B duplicates slot A instead of carrying an independent filesystem binding".into(),
+        ));
+    }
+    if slots.a.boot_artifact.digest_sha256 == slots.b.boot_artifact.digest_sha256 {
+        return Err(InstallError::Trust(
+            "slot B duplicates the slot-A UKI instead of carrying a B-bound boot artifact".into(),
+        ));
+    }
+    let boot_bytes = slots
+        .a
+        .boot_artifact
+        .size_bytes
+        .checked_add(slots.b.boot_artifact.size_bytes)
+        .ok_or_else(|| InstallError::Trust("UEFI recovery artifact size overflow".into()))?;
+    let largest_uki = slots
+        .a
+        .boot_artifact
+        .size_bytes
+        .max(slots.b.boot_artifact.size_bytes);
+    if largest_uki > ESP_UPDATE_HEADROOM_BYTES {
+        return Err(InstallError::Trust(
+            "a signed UEFI artifact exceeds the fixed future-update headroom".into(),
+        ));
+    }
+    let required_esp = boot_bytes
+        .checked_add(ESP_BOOTLOADER_COPIES * BOOTLOADER_MAX_BYTES)
+        .and_then(|bytes| bytes.checked_add(ESP_FAT_RESERVE_BYTES))
+        .and_then(|bytes| bytes.checked_add(ESP_UPDATE_HEADROOM_BYTES))
+        .ok_or_else(|| InstallError::Trust("UEFI ESP reserve calculation overflow".into()))?;
+    if required_esp > ESP_SIZE {
+        return Err(InstallError::Trust(format!(
+            "the signed UEFI recovery floor requires {required_esp} ESP bytes including two bootloader copies, FAT reserve, and future-update headroom; only {ESP_SIZE} are planned"
+        )));
+    }
+    Ok((&slots.a, &slots.b))
 }
 
 fn validate_raspberry_pi_boot_plan(plan: &InstallPlan) -> Result<(), InstallError> {
@@ -5309,6 +6016,94 @@ pub(crate) fn digest_installed_partition(
 }
 
 #[cfg(target_os = "linux")]
+fn verify_ext4_identity(
+    path: &Path,
+    allow_regular_for_tests: bool,
+    expected_uuid: &str,
+    expected_label: &str,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
+        .open(path)?;
+    let kind = file.metadata()?.file_type();
+    if !(kind.is_block_device() || allow_regular_for_tests && kind.is_file()) {
+        return Err(InstallError::Refused(
+            "recovery root identity source is not a block device".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(1024))?;
+    let mut superblock = [0_u8; 1024];
+    file.read_exact(&mut superblock)?;
+    if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
+        return Err(InstallError::Trust(
+            "installed recovery root is not an ext4 filesystem".into(),
+        ));
+    }
+    let uuid = format_uuid_bytes(&superblock[104..120]);
+    let label_end = superblock[120..136]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(16);
+    let label = std::str::from_utf8(&superblock[120..120 + label_end])
+        .map_err(|_| InstallError::Trust("installed recovery label is not UTF-8".into()))?;
+    if uuid != expected_uuid || label != expected_label {
+        return Err(InstallError::Trust(format!(
+            "installed recovery root has UUID {uuid} and label {label:?}, expected {expected_uuid} and {expected_label}"
+        )));
+    }
+    Ok(())
+}
+
+fn format_uuid_bytes(bytes: &[u8]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn verify_recovery_fstab(root: &Path) -> Result<(), InstallError> {
+    let bytes = read_bounded_regular(&root.join("etc/fstab"), 64 * 1024, "recovery root fstab")?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| InstallError::Trust("recovery root fstab is not UTF-8".into()))?;
+    let root_entries = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            (fields.len() >= 3 && fields[1] == "/").then_some((fields[0], fields[2]))
+        })
+        .collect::<Vec<_>>();
+    let expected_source = format!("UUID={ROOT_B_FS_UUID}");
+    if root_entries.as_slice() != [(expected_source.as_str(), "ext4")] {
+        return Err(InstallError::Trust(
+            "recovery root fstab does not contain exactly one slot-B UUID-bound ext4 root".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn digest_direct_block_device(
     path: &Path,
     expected_size: u64,
@@ -5422,6 +6217,56 @@ mod tests {
             .expect("UEFI fixture carries both slot pairs");
         slots.a.payload = manifest.payload.clone();
         slots.a.boot_artifact = manifest.boot_artifact.clone();
+    }
+
+    fn configure_uefi_boot_pair(manifest: &mut ReleaseManifest, slot_a: &[u8], slot_b: &[u8]) {
+        manifest.boot_artifact.filename = "punar-slot-a.efi".into();
+        manifest.boot_artifact.digest_sha256 = sha256_hex(slot_a);
+        manifest.boot_artifact.size_bytes = slot_a.len() as u64;
+        sync_uefi_install_pair(manifest);
+        let recovery = &mut manifest
+            .uefi_slots
+            .as_mut()
+            .expect("UEFI fixture carries both slot pairs")
+            .b
+            .boot_artifact;
+        recovery.filename = "punar-slot-b.efi".into();
+        recovery.digest_sha256 = sha256_hex(slot_b);
+        recovery.size_bytes = slot_b.len() as u64;
+    }
+
+    fn configure_uefi_payload_pair(manifest: &mut ReleaseManifest, slot_a: &[u8], slot_b: &[u8]) {
+        manifest.payload.filename = "slot-a.raw.zst".into();
+        manifest.payload.digest_sha256 = sha256_hex(slot_a);
+        manifest.payload.size_bytes = slot_a.len() as u64;
+        manifest.payload.uncompressed_digest_sha256 = sha256_hex(slot_a);
+        manifest.payload.uncompressed_size_bytes = slot_a.len() as u64;
+        sync_uefi_install_pair(manifest);
+        let recovery = &mut manifest
+            .uefi_slots
+            .as_mut()
+            .expect("UEFI fixture carries both slot pairs")
+            .b
+            .payload;
+        recovery.filename = "slot-b.raw.zst".into();
+        recovery.digest_sha256 = sha256_hex(slot_b);
+        recovery.size_bytes = slot_b.len() as u64;
+        recovery.uncompressed_digest_sha256 = sha256_hex(slot_b);
+        recovery.uncompressed_size_bytes = slot_b.len() as u64;
+    }
+
+    fn write_uefi_boot_pair(
+        release_dir: &Path,
+        manifest: &ReleaseManifest,
+        slot_a: &[u8],
+        slot_b: &[u8],
+    ) {
+        let slots = manifest
+            .uefi_slots
+            .as_ref()
+            .expect("UEFI fixture carries both slot pairs");
+        fs::write(release_dir.join(&slots.a.boot_artifact.filename), slot_a).unwrap();
+        fs::write(release_dir.join(&slots.b.boot_artifact.filename), slot_b).unwrap();
     }
 
     struct Fixture {
@@ -5603,6 +6448,84 @@ mod tests {
         fn installer(&self) -> Installer {
             Installer::new(self.sources.clone())
         }
+
+        fn write_confirmed_gpt(&self, plan: &InstallPlan) {
+            write_test_gpt(
+                &self.sources.dev_root.join(
+                    plan.disk
+                        .device
+                        .strip_prefix("/dev/")
+                        .expect("fixture disk path"),
+                ),
+                plan,
+            );
+        }
+    }
+
+    fn write_test_gpt(path: &Path, plan: &InstallPlan) {
+        let sector = plan.disk.logical_sector_bytes;
+        let entry_size = 128_usize;
+        let entry_count = 128_usize;
+        let mut entries = vec![0_u8; entry_size * entry_count];
+        for partition in &plan.partitions {
+            let offset = (partition.number as usize - 1) * entry_size;
+            let entry = &mut entries[offset..offset + entry_size];
+            entry[..16].copy_from_slice(&test_gpt_guid(&partition.type_guid));
+            entry[16..32].copy_from_slice(&test_gpt_guid(&partition.partuuid));
+            let first_lba = partition.offset_bytes / sector;
+            let last_lba = first_lba + partition.size_bytes / sector - 1;
+            entry[32..40].copy_from_slice(&first_lba.to_le_bytes());
+            entry[40..48].copy_from_slice(&last_lba.to_le_bytes());
+        }
+        let mut header = vec![0_u8; sector as usize];
+        header[..8].copy_from_slice(b"EFI PART");
+        header[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes());
+        header[12..16].copy_from_slice(&92_u32.to_le_bytes());
+        header[24..32].copy_from_slice(&1_u64.to_le_bytes());
+        header[32..40].copy_from_slice(&((plan.disk.size_bytes / sector) - 1).to_le_bytes());
+        header[40..48].copy_from_slice(&34_u64.to_le_bytes());
+        header[48..56].copy_from_slice(&((plan.disk.size_bytes / sector) - 34).to_le_bytes());
+        header[56..72].copy_from_slice(&test_gpt_guid("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+        header[72..80].copy_from_slice(&2_u64.to_le_bytes());
+        header[80..84].copy_from_slice(&(entry_count as u32).to_le_bytes());
+        header[84..88].copy_from_slice(&(entry_size as u32).to_le_bytes());
+        header[88..92].copy_from_slice(&gpt_crc32(&entries).to_le_bytes());
+        let header_crc = gpt_crc32(&header[..92]);
+        header[16..20].copy_from_slice(&header_crc.to_le_bytes());
+
+        let mut disk = fs::OpenOptions::new().write(true).open(path).unwrap();
+        disk.seek(SeekFrom::Start(sector)).unwrap();
+        disk.write_all(&header).unwrap();
+        disk.seek(SeekFrom::Start(2 * sector)).unwrap();
+        disk.write_all(&entries).unwrap();
+        disk.sync_all().unwrap();
+    }
+
+    fn test_gpt_guid(value: &str) -> [u8; 16] {
+        let compact = value.replace('-', "");
+        let decoded = (0..16)
+            .map(|index| u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let mut output = [0_u8; 16];
+        output[..4].copy_from_slice(&decoded[..4].iter().rev().copied().collect::<Vec<_>>());
+        output[4..6].copy_from_slice(&decoded[4..6].iter().rev().copied().collect::<Vec<_>>());
+        output[6..8].copy_from_slice(&decoded[6..8].iter().rev().copied().collect::<Vec<_>>());
+        output[8..].copy_from_slice(&decoded[8..]);
+        output
+    }
+
+    fn stamp_test_ext4_identity(bytes: &mut [u8], uuid: &str, label: &str) {
+        assert!(bytes.len() >= 2048);
+        bytes[1024 + 56..1024 + 58].copy_from_slice(&0xef53_u16.to_le_bytes());
+        let compact = uuid.replace('-', "");
+        for index in 0..16 {
+            bytes[1024 + 104 + index] =
+                u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).unwrap();
+        }
+        let label_bytes = label.as_bytes();
+        assert!(label_bytes.len() <= 16);
+        bytes[1024 + 120..1024 + 136].fill(0);
+        bytes[1024 + 120..1024 + 120 + label_bytes.len()].copy_from_slice(label_bytes);
     }
 
     impl Drop for Fixture {
@@ -6066,20 +6989,15 @@ mod tests {
     }
 
     fn advance_status_to_boot(installer: &Installer, result: &InstallPlanResult) {
+        let write_bytes = installer.root_write_bytes_total(&result.plan).unwrap();
         installer
-            .start_transaction_status(
-                &result.plan_token,
-                &result.plan.disk.device,
-                result.plan.payload.uncompressed_size_bytes,
-            )
+            .start_transaction_status(&result.plan_token, &result.plan.disk.device, write_bytes)
             .unwrap();
         installer.enter_phase(InstallPhase::Partition).unwrap();
         installer.enter_phase(InstallPhase::Encrypt).unwrap();
         installer.enter_phase(InstallPhase::Format).unwrap();
         installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
-        installer
-            .update_write_progress(result.plan.payload.uncompressed_size_bytes)
-            .unwrap();
+        installer.update_write_progress(write_bytes).unwrap();
         installer.enter_phase(InstallPhase::ReRead).unwrap();
         installer.enter_phase(InstallPhase::Boot).unwrap();
     }
@@ -6957,6 +7875,46 @@ mod tests {
     }
 
     #[test]
+    fn uefi_plan_refuses_a_missing_or_cloned_recovery_floor_without_writing() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let before = first_mib(&fixture.sources.dev_root.join("vda"));
+        fixture
+            .sources
+            .release_manifest_override
+            .as_mut()
+            .unwrap()
+            .uefi_slots = None;
+        let error = fixture
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires independently bound slot A and B")
+        );
+        assert_eq!(first_mib(&fixture.sources.dev_root.join("vda")), before);
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let before = first_mib(&fixture.sources.dev_root.join("vda"));
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        let slots = manifest.uefi_slots.as_mut().unwrap();
+        slots.b.payload.uncompressed_digest_sha256 =
+            slots.a.payload.uncompressed_digest_sha256.clone();
+        let error = fixture
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("independently slot-bound"),
+            "unexpected refusal: {error}"
+        );
+        assert_eq!(first_mib(&fixture.sources.dev_root.join("vda")), before);
+    }
+
+    #[test]
     fn plan_refuses_missing_graphics_without_writing_the_target() {
         let mut fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
@@ -6975,28 +7933,31 @@ mod tests {
     }
 
     #[test]
-    fn release_verification_binds_and_reads_the_exact_boot_artifact() {
+    fn release_verification_binds_and_reads_both_exact_uefi_slot_pairs() {
         let mut fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
         let release_dir = fixture.root.join("release");
         fs::create_dir_all(&release_dir).unwrap();
         fixture.sources.release_manifest_path = release_dir.join("release.json");
-        let payload = b"fixture compressed root payload";
-        let boot_artifact = b"MZ fixture unified kernel image";
+        let payload = b"fixture compressed root payload A";
+        let payload_b = b"fixture compressed recovery payload B";
+        let boot_artifact =
+            crate::uki::fixture_uki(&format!("quiet root=PARTUUID={ROOT_A_PARTUUID} ro"));
+        let boot_artifact_b =
+            crate::uki::fixture_uki(&format!("quiet root=PARTUUID={ROOT_B_PARTUUID} ro"));
         let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
         manifest.payload.filename = "slot.raw.zst".into();
         manifest.payload.digest_sha256 = sha256_hex(payload);
         manifest.payload.size_bytes = payload.len() as u64;
-        manifest.boot_artifact.filename = "punar.efi".into();
-        manifest.boot_artifact.digest_sha256 = sha256_hex(boot_artifact);
-        manifest.boot_artifact.size_bytes = boot_artifact.len() as u64;
+        configure_uefi_boot_pair(manifest, &boot_artifact, &boot_artifact_b);
         sync_uefi_install_pair(manifest);
+        let slot_b = &mut manifest.uefi_slots.as_mut().unwrap().b.payload;
+        slot_b.filename = "slot-b.raw.zst".into();
+        slot_b.digest_sha256 = sha256_hex(payload_b);
+        slot_b.size_bytes = payload_b.len() as u64;
         fs::write(release_dir.join(&manifest.payload.filename), payload).unwrap();
-        fs::write(
-            release_dir.join(&manifest.boot_artifact.filename),
-            boot_artifact,
-        )
-        .unwrap();
+        fs::write(release_dir.join(&slot_b.filename), payload_b).unwrap();
+        write_uefi_boot_pair(&release_dir, manifest, &boot_artifact, &boot_artifact_b);
 
         let installer = fixture.installer();
         let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
@@ -7017,6 +7978,225 @@ mod tests {
         let error = installer.verify_release_payload(&result.plan).unwrap_err();
         assert!(error.to_string().contains("digest"));
         assert_eq!(installer.status().phase, Some(InstallPhase::VerifyRelease));
+
+        fs::write(
+            release_dir.join(&result.plan.boot_artifact.filename),
+            &boot_artifact,
+        )
+        .unwrap();
+        let recovery_name = fixture
+            .sources
+            .release_manifest_override
+            .as_ref()
+            .unwrap()
+            .uefi_slots
+            .as_ref()
+            .unwrap()
+            .b
+            .payload
+            .filename
+            .clone();
+        fs::write(release_dir.join(recovery_name), b"corrupt recovery payload").unwrap();
+        let error = installer.verify_release_payload(&result.plan).unwrap_err();
+        assert!(error.to_string().contains("digest"));
+        assert_eq!(installer.status().phase, Some(InstallPhase::VerifyRelease));
+    }
+
+    #[test]
+    fn release_verification_rejects_a_signed_uki_bound_to_the_wrong_root() {
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let slot_a = crate::uki::fixture_uki(&format!("quiet root=PARTUUID={ROOT_A_PARTUUID} ro"));
+        let wrong_slot_b = crate::uki::fixture_uki(&format!(
+            "quiet root=PARTUUID={ROOT_A_PARTUUID} ro recovery"
+        ));
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        let payload_a = vec![b'A'; DIRECT_IO_BLOCK_BYTES];
+        let payload_b = vec![b'B'; DIRECT_IO_BLOCK_BYTES];
+        configure_uefi_payload_pair(manifest, &payload_a, &payload_b);
+        configure_uefi_boot_pair(manifest, &slot_a, &wrong_slot_b);
+        write_uefi_boot_pair(&release_dir, manifest, &slot_a, &wrong_slot_b);
+        fs::write(release_dir.join(&manifest.payload.filename), &payload_a).unwrap();
+        let payload_b_name = manifest
+            .uefi_slots
+            .as_ref()
+            .unwrap()
+            .b
+            .payload
+            .filename
+            .clone();
+        fs::write(release_dir.join(payload_b_name), &payload_b).unwrap();
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        installer
+            .start_transaction_status(
+                &result.plan_token,
+                &result.plan.disk.device,
+                installer.root_write_bytes_total(&result.plan).unwrap(),
+            )
+            .unwrap();
+        let error = installer.verify_release_payload(&result.plan).unwrap_err();
+        assert!(error.to_string().contains(ROOT_B_PARTUUID));
+        assert_eq!(installer.status().phase, Some(InstallPhase::VerifyRelease));
+        assert_eq!(
+            first_mib(&fixture.sources.dev_root.join("vda")),
+            vec![0; 1024 * 1024]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uefi_root_recovery_pair_is_written_and_both_slots_are_reread() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let slot_a = vec![b'A'; DIRECT_IO_BLOCK_BYTES * 2];
+        let mut slot_b = vec![b'B'; DIRECT_IO_BLOCK_BYTES * 2];
+        stamp_test_ext4_identity(&mut slot_b, ROOT_B_FS_UUID, "PUNAR-ROOT-B");
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        configure_uefi_payload_pair(manifest, &slot_a, &slot_b);
+        fs::write(release_dir.join(&manifest.payload.filename), &slot_a).unwrap();
+        let slot_b_name = manifest
+            .uefi_slots
+            .as_ref()
+            .unwrap()
+            .b
+            .payload
+            .filename
+            .clone();
+        fs::write(release_dir.join(slot_b_name), &slot_b).unwrap();
+
+        let zstd = fixture.root.join("zstd");
+        fs::write(&zstd, "#!/bin/sh\nexec /bin/cat\n").unwrap();
+        fs::set_permissions(&zstd, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.sources.zstd_path = zstd;
+        fixture.sources.allow_regular_target_for_tests = true;
+        let recovery_root = fixture.root.join("mounted-recovery-root");
+        fs::create_dir_all(recovery_root.join("etc")).unwrap();
+        fs::write(
+            recovery_root.join("etc/fstab"),
+            format!("UUID={ROOT_B_FS_UUID} / ext4 ro 0 1\n"),
+        )
+        .unwrap();
+        fixture.sources.mounted_recovery_root_override = Some(recovery_root);
+        for number in [2, 3] {
+            let target =
+                File::create(fixture.sources.dev_root.join(format!("vda{number}"))).unwrap();
+            target.set_len(slot_a.len() as u64).unwrap();
+        }
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        let total = installer.root_write_bytes_total(&result.plan).unwrap();
+        assert_eq!(total, (slot_a.len() + slot_b.len()) as u64);
+        installer
+            .start_transaction_status(&result.plan_token, &result.plan.disk.device, total)
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+        installer.write_root_slots(&result.plan).unwrap();
+        assert_eq!(
+            installer.status().phases[phase_index(InstallPhase::WriteSlotA)].completed_bytes,
+            Some(total)
+        );
+        assert_eq!(
+            fs::read(fixture.sources.dev_root.join("vda2")).unwrap(),
+            slot_a
+        );
+        assert_eq!(
+            fs::read(fixture.sources.dev_root.join("vda3")).unwrap(),
+            slot_b
+        );
+        installer.enter_phase(InstallPhase::ReRead).unwrap();
+        installer.verify_written_root_slots(&result.plan).unwrap();
+
+        let mut corrupted = fs::read(fixture.sources.dev_root.join("vda3")).unwrap();
+        *corrupted.last_mut().unwrap() ^= 1;
+        fs::write(fixture.sources.dev_root.join("vda3"), corrupted).unwrap();
+        let error = installer
+            .verify_written_root_slots(&result.plan)
+            .unwrap_err();
+        assert!(error.to_string().contains("recovery root slot B"));
+        assert_eq!(installer.status().phase, Some(InstallPhase::ReRead));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_slot_b_write_cannot_reach_reread_or_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let slot_a = vec![b'A'; DIRECT_IO_BLOCK_BYTES * 2];
+        let slot_b = vec![b'B'; DIRECT_IO_BLOCK_BYTES * 2];
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        configure_uefi_payload_pair(manifest, &slot_a, &slot_b);
+        fs::write(release_dir.join(&manifest.payload.filename), &slot_a).unwrap();
+        let slot_b_name = manifest
+            .uefi_slots
+            .as_ref()
+            .unwrap()
+            .b
+            .payload
+            .filename
+            .clone();
+        fs::write(release_dir.join(slot_b_name), &slot_b).unwrap();
+
+        let zstd = fixture.root.join("zstd-interrupt-b");
+        fs::write(
+            &zstd,
+            "#!/bin/sh\nset -eu\nfirst=$(dd bs=1 count=1 2>/dev/null)\nprintf %s \"${first}\"\nif [ \"${first}\" = B ]; then\n  dd bs=1 count=4095 status=none\n  exit 75\nfi\nexec /bin/cat\n",
+        )
+        .unwrap();
+        fs::set_permissions(&zstd, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.sources.zstd_path = zstd;
+        fixture.sources.allow_regular_target_for_tests = true;
+        let target_a = File::create(fixture.sources.dev_root.join("vda2")).unwrap();
+        target_a.set_len(slot_a.len() as u64).unwrap();
+        let target_b = File::create(fixture.sources.dev_root.join("vda3")).unwrap();
+        target_b.set_len(slot_b.len() as u64).unwrap();
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        let total = installer.root_write_bytes_total(&result.plan).unwrap();
+        installer
+            .start_transaction_status(&result.plan_token, &result.plan.disk.device, total)
+            .unwrap();
+        installer.enter_phase(InstallPhase::Partition).unwrap();
+        installer.enter_phase(InstallPhase::Encrypt).unwrap();
+        installer.enter_phase(InstallPhase::Format).unwrap();
+        installer.enter_phase(InstallPhase::WriteSlotA).unwrap();
+        let error = installer.write_root_slots(&result.plan).unwrap_err();
+        assert!(error.to_string().contains("ended before its signed size"));
+        assert_eq!(
+            fs::read(fixture.sources.dev_root.join("vda2")).unwrap(),
+            slot_a
+        );
+        let interrupted_b = fs::read(fixture.sources.dev_root.join("vda3")).unwrap();
+        assert_eq!(
+            &interrupted_b[..DIRECT_IO_BLOCK_BYTES],
+            &slot_b[..DIRECT_IO_BLOCK_BYTES]
+        );
+        assert_eq!(
+            &interrupted_b[DIRECT_IO_BLOCK_BYTES..],
+            &vec![0_u8; DIRECT_IO_BLOCK_BYTES]
+        );
+        assert_eq!(installer.status().phase, Some(InstallPhase::WriteSlotA));
+        assert!(installer.enter_phase(InstallPhase::ReRead).is_err());
+        assert_ne!(installer.status().state, InstallOverallState::Succeeded);
     }
 
     #[cfg(target_os = "linux")]
@@ -7030,17 +8210,20 @@ mod tests {
         let release_dir = fixture.root.join("release");
         fs::create_dir_all(&release_dir).unwrap();
         fixture.sources.release_manifest_path = release_dir.join("release.json");
-        let artifact = b"MZ signed fixture slot-A unified kernel image";
+        let artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_A_PARTUUID} ro quiet"));
+        let recovery_artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_B_PARTUUID} ro quiet"));
         let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
-        manifest.boot_artifact.filename = "punar-slot-a.efi".into();
-        manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
-        manifest.boot_artifact.size_bytes = artifact.len() as u64;
-        sync_uefi_install_pair(manifest);
-        fs::write(release_dir.join(&manifest.boot_artifact.filename), artifact).unwrap();
+        configure_uefi_boot_pair(manifest, &artifact, &recovery_artifact);
+        write_uefi_boot_pair(&release_dir, manifest, &artifact, &recovery_artifact);
 
         let esp = fixture.root.join("esp");
         fs::create_dir(&esp).unwrap();
         let capture = fixture.root.join("bootctl-capture");
+        let systemd_boot = fixture.root.join("systemd-bootx64.efi");
+        fs::write(&systemd_boot, b"fixture systemd-boot").unwrap();
+        fixture.sources.systemd_boot_path = systemd_boot;
         let fake_bootctl = fixture.root.join("bootctl");
         fs::write(
             &fake_bootctl,
@@ -7096,18 +8279,61 @@ mod tests {
             artifact
         );
         assert_eq!(
+            fs::read(esp.join(format!("EFI/Linux/punar-recovery_{version}.efi"))).unwrap(),
+            recovery_artifact
+        );
+        assert_eq!(
             fs::read_to_string(esp.join("loader/loader.conf")).unwrap(),
             format!("preferred punar_{version}*.efi\ntimeout 0\neditor no\n")
         );
         assert!(esp.join("EFI/BOOT/BOOTX64.EFI").is_file());
-        assert!(fs::read_dir(esp.join("EFI/Linux")).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("+3-0")
-        }));
+        assert_eq!(fs::read_dir(esp.join("EFI/Linux")).unwrap().count(), 2);
         assert_eq!(installer.status().phase, Some(InstallPhase::Seed));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uefi_boot_install_refuses_a_bootctl_source_substitution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        File::create(fixture.sources.dev_root.join("vda1")).unwrap();
+        let release_dir = fixture.root.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        fixture.sources.release_manifest_path = release_dir.join("release.json");
+        let artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_A_PARTUUID} ro quiet"));
+        let recovery_artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_B_PARTUUID} ro quiet"));
+        let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
+        configure_uefi_boot_pair(manifest, &artifact, &recovery_artifact);
+        write_uefi_boot_pair(&release_dir, manifest, &artifact, &recovery_artifact);
+
+        let trusted_bootloader = fixture.root.join("systemd-bootx64.efi");
+        fs::write(&trusted_bootloader, b"trusted fixture systemd-boot").unwrap();
+        fixture.sources.systemd_boot_path = trusted_bootloader;
+        let esp = fixture.root.join("esp");
+        fs::create_dir(&esp).unwrap();
+        let fake_bootctl = fixture.root.join("bootctl-substitutes-source");
+        fs::write(
+            &fake_bootctl,
+            "#!/bin/sh\nset -eu\nesp=''\nfor argument in \"$@\"; do\n  case \"${argument}\" in --esp-path=*) esp=\"${argument#--esp-path=}\" ;; esac\ndone\n[ -n \"${esp}\" ]\nmkdir -p \"${esp}/EFI/BOOT\"\nprintf 'different fixture systemd-boot' > \"${esp}/EFI/BOOT/BOOTX64.EFI\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_bootctl, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.sources.bootctl_path = fake_bootctl;
+        fixture.sources.allow_regular_target_for_tests = true;
+        fixture.sources.mounted_esp_override = Some(esp.clone());
+
+        let installer = fixture.installer();
+        let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        advance_status_to_boot(&installer, &result);
+        let error = installer.install_boot_artifact(&result.plan).unwrap_err();
+        assert!(error.to_string().contains("fallback bootloader"));
+        assert_eq!(installer.status().phase, Some(InstallPhase::Boot));
+        assert!(!esp.join("loader/loader.conf").exists());
+        assert!(!esp.join("EFI/Linux").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -7236,21 +8462,29 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn boot_artifact_tampering_is_refused_before_the_esp_is_touched() {
+    fn recovery_boot_artifact_tampering_is_refused_before_the_esp_is_touched() {
         let mut fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
         File::create(fixture.sources.dev_root.join("vda1")).unwrap();
         let release_dir = fixture.root.join("release");
         fs::create_dir_all(&release_dir).unwrap();
         fixture.sources.release_manifest_path = release_dir.join("release.json");
-        let artifact = b"MZ signed fixture slot-A unified kernel image";
+        let artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_A_PARTUUID} ro quiet"));
+        let recovery_artifact =
+            crate::uki::fixture_uki(&format!("root=PARTUUID={ROOT_B_PARTUUID} ro quiet"));
         let manifest = fixture.sources.release_manifest_override.as_mut().unwrap();
-        manifest.boot_artifact.filename = "punar-slot-a.efi".into();
-        manifest.boot_artifact.digest_sha256 = sha256_hex(artifact);
-        manifest.boot_artifact.size_bytes = artifact.len() as u64;
-        sync_uefi_install_pair(manifest);
-        let artifact_path = release_dir.join(&manifest.boot_artifact.filename);
-        fs::write(&artifact_path, artifact).unwrap();
+        configure_uefi_boot_pair(manifest, &artifact, &recovery_artifact);
+        write_uefi_boot_pair(&release_dir, manifest, &artifact, &recovery_artifact);
+        let artifact_path = release_dir.join(
+            &manifest
+                .uefi_slots
+                .as_ref()
+                .unwrap()
+                .b
+                .boot_artifact
+                .filename,
+        );
 
         let esp = fixture.root.join("esp");
         fs::create_dir(&esp).unwrap();
@@ -7261,7 +8495,7 @@ mod tests {
         let installer = fixture.installer();
         let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
         advance_status_to_boot(&installer, &result);
-        let mut tampered = artifact.to_vec();
+        let mut tampered = recovery_artifact.to_vec();
         *tampered.last_mut().unwrap() ^= 1;
         fs::write(&artifact_path, tampered).unwrap();
 
@@ -7545,6 +8779,34 @@ mod tests {
     }
 
     #[test]
+    fn apply_preflight_refuses_a_b_only_release_substitution_without_writing() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let disk_path = fixture.sources.dev_root.join("vda");
+        let mut installer = fixture.installer();
+        let plan = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        assert!(plan.plan.recovery_payload.is_some());
+        assert!(plan.plan.recovery_boot_artifact.is_some());
+
+        installer
+            .sources
+            .release_manifest_override
+            .as_mut()
+            .unwrap()
+            .uefi_slots
+            .as_mut()
+            .unwrap()
+            .b
+            .payload
+            .digest_sha256 = "8".repeat(64);
+        let before = first_mib(&disk_path);
+
+        let error = installer.preflight_apply(&apply_params(&plan)).unwrap_err();
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert_eq!(first_mib(&disk_path), before);
+    }
+
+    #[test]
     fn apply_preflight_rereads_identity_and_gpt_edges_before_any_write() {
         let fixture = Fixture::new();
         fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
@@ -7797,7 +9059,14 @@ mod tests {
         fixture.sources.repart_runtime_root = fixture.root.join("runtime");
         fixture.sources.allow_regular_target_for_tests = true;
         let installer = fixture.installer();
+        // The fake repart cannot author a GPT, so the confirmed table is
+        // written first and the plan is then re-bound to those exact edges:
+        // `prepare_disk_layout` re-plans at the destructive boundary and the
+        // post-repart GPT check reads this same table back.
+        let confirmed = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        fixture.write_confirmed_gpt(&confirmed.plan);
         let result = installer.plan(&encrypted_params("/dev/vda")).unwrap();
+        assert!(result.plan.partitions == confirmed.plan.partitions);
         installer
             .start_transaction_status(
                 &result.plan_token,
@@ -8079,6 +9348,38 @@ mod tests {
         assert!(error.to_string().contains("destructive boundary"));
         assert_eq!(first_mib(&disk), before);
         assert_eq!(installer.status().phase, Some(InstallPhase::Partition));
+    }
+
+    #[test]
+    fn post_repart_gpt_must_match_every_confirmed_partition_field() {
+        let fixture = Fixture::new();
+        fixture.add_disk("vda", 252, 128_000_000_000, "TARGET-128G");
+        let plan = fixture
+            .installer()
+            .plan(&encrypted_params("/dev/vda"))
+            .unwrap()
+            .plan;
+        fixture.write_confirmed_gpt(&plan);
+        let disk = fixture.sources.dev_root.join("vda");
+        verify_post_repart_gpt(&disk, &plan, true).unwrap();
+
+        let mut wrong = plan.clone();
+        wrong.partitions[2].partuuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into();
+        let error = verify_post_repart_gpt(&disk, &wrong, true).unwrap_err();
+        assert!(error.to_string().contains("partition 3 differs"));
+
+        let mut corrupt = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&disk)
+            .unwrap();
+        corrupt
+            .seek(SeekFrom::Start(plan.disk.logical_sector_bytes + 24))
+            .unwrap();
+        corrupt.write_all(&[2]).unwrap();
+        corrupt.sync_all().unwrap();
+        let error = verify_post_repart_gpt(&disk, &plan, true).unwrap_err();
+        assert!(error.to_string().contains("checksum"));
     }
 
     #[test]

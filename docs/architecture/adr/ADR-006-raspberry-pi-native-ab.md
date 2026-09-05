@@ -110,12 +110,27 @@ command line.
    `reboot "0 tryboot"`.
 4. The firmware clears the one-shot flag before starting the candidate. A
    reset before commit therefore returns to the ordinary blessed partition.
-5. Early candidate userspace proves all of: expected slot identity, root is
-   read-only, Punar daemons are healthy, boot reconcile completed, and the
-   version/state migration is admissible.
-6. Only then atomically rewrite `autoboot.txt`, swapping ordinary and tryboot
-   partition numbers. Record the blessing in the local audit trail and reboot
-   normally.
+5. A conditional oneshot is pulled into the **boot transaction** by
+   `graphical.target`; it is ordered after `multi-user.target` and is not a
+   path watcher. Creating `pending-pi.json` while a session is already running
+   cannot trigger candidate blessing before the requested tryboot.
+6. Candidate userspace proves all of: expected slot identity, root is mounted
+   read-only, Punar daemons and desktop are healthy, boot reconcile completed,
+   the exact signed root and boot byte ranges still match under `O_DIRECT`,
+   boot-file semantics are valid, and mounted root `IMAGE_VERSION` equals the
+   pending release.
+7. Only then durably rewrite and re-read `autoboot.txt`, swapping ordinary and
+   tryboot partition numbers. The engine leaves pending state in place. The
+   privileged handler must durably append and `fdatasync` the
+   `blessed_candidate` audit before removing that exact pending record and
+   syncing its directory; a still-running tryboot then reboots normally.
+8. The same boot-only reconcile distinguishes two recovery states. An
+   uncommitted selector plus an ordinary boot of the previous slot is
+   `firmware_fallback` and changes no selector bytes. A committed selector plus
+   its exact previous-selector backup and a candidate boot is
+   `postcommit_recovery`; it fully revalidates the candidate. Both clear
+   pending only after their own durable audit, and an ordinary boot does not
+   reboot again.
 
 A kernel/userspace hang still needs a reset to take the already-cleared
 tryboot path back to the blessed slot. Punar must therefore configure the
@@ -126,10 +141,11 @@ documents that it is cancelled when the Arm CPU starts.
 ## Security and failure properties
 
 - The candidate cannot bless itself before the health unit reaches the final
-  selector write. A separately verified previous selector is retained. FAT
-  does not make rename power-loss atomic, so recovery under selector-write
-  fault injection remains an explicit physical-board release gate rather than
-  an assumed property.
+  selector write. A separately verified previous selector is retained. An
+  audit outage leaves pending state and the committed-selector retry is
+  idempotent. FAT does not make rename power-loss atomic, so recovery under
+  selector-write fault injection remains an explicit physical-board release
+  gate rather than an assumed property.
 - Slot payload signatures remain user-blocked item 7, and Pi Secure Boot keys
   remain user-blocked item 1. CI uses ephemeral keys and labels that proof
   `SIMULATED`, exactly as x86 does.
@@ -141,6 +157,20 @@ documents that it is cancelled when the Arm CPU starts.
 - EEPROM A/B *firmware* update support on Pi 5 is a separate mechanism. Punar's
   OS rollback must not claim it protects an OS slot merely because the EEPROM
   itself updates safely.
+- **`firmware_fallback` is a boot observation, not a tryboot record.** Any
+  ordinary boot of the previous slot with an uncommitted selector is
+  finalized as `firmware_fallback`, including a staged candidate that was
+  never rebooted into (`update.apply` without `--reboot`, then a plain
+  reboot or power loss). The verified staged bytes are discarded from the
+  state machine and a fresh apply is required. Recording the tryboot request
+  itself is a follow-up.
+- **A committed selector whose pending record survived has no API exit if the
+  candidate later fails health.** `postcommit_recovery` revalidates the
+  running candidate, including its health report, and `update.rollback` and
+  `update.apply` refuse while the pending record exists. This window is
+  reachable only through an audit or power-loss failure between selector
+  commit and finalization; it is an open item for the physical-board matrix
+  below, not a claimed property.
 
 ## Verification required before shipping support
 
@@ -148,7 +178,9 @@ documents that it is cancelled when the Arm CPU starts.
    distinct fixed PARTUUIDs and shared data; every cmdline points only at its
    paired root and neither slot artifact contains `autoboot.txt`.
 2. QEMU/aarch64 checks the slot builder and state machine, explicitly labelled
-   as software-path evidence rather than Raspberry Pi hardware evidence.
+   as software-path evidence rather than Raspberry Pi hardware evidence. The
+   software tests cover partial health, exact digest/size/version mismatch,
+   firmware fallback, audit-failure retry and post-commit recovery.
 3. On a real Pi, deliberately fail before the health service, during daemon
    startup, and after userspace starts but before blessing; watchdog/reset must
    return to the old slot every time.

@@ -163,7 +163,7 @@ operating systems under the same release name.
 | 19 | **Boot counting is systemd-boot's own (`name+tries-left-tries-done.efi` + `systemd-bless-boot`), not a punar-owned counter.** A punar counter cannot be decremented by a kernel that panics before userspace; the bootloader's can. §6.3. |
 | 20 | **The exact automatic-rollback rule: blessing is gated on health.** `punar-update-health.service` is ordered before `systemd-bless-boot.service` in the `boot-complete.target` chain. Health fails ⇒ no blessing ⇒ tries-left stays decremented ⇒ after three unblessed boots systemd-boot selects the previous slot's permanently-blessed UKI. §6.4. |
 | 21 | **The last-known-good UKI is never removed by an update, and the ESP is sized for three.** The "both slots bad" case is therefore reachable only by ESP corruption or deletion. Bootable installer media now exists, but its authenticated ESP inspection/repair workflow does not and remains named as unowned work. §6.5. |
-| 22 | **Four typed methods, one new capability, no reboot method.** `update.status` (read, any peer), `update.check` / `update.apply` / `update.rollback` (root-only, audited). Rebooting is the *caller's* act (`punarctl update apply --reboot` runs `systemctl reboot` itself); punard does not grow a side-effect verb it does not need. §7.1. |
+| 22 | **Five typed methods, one new capability, no reboot method.** `update.status` (read, any peer), `update.check` / `update.apply` / `update.rollback` (root-only, audited), and the parameterless `update.reconcile_candidate` that only the native Raspberry Pi boot service calls (root-only, agent-denied, audited before pending state is removed). Rebooting is the *caller's* act (`punarctl update apply --reboot` runs `systemctl reboot` itself); punard does not grow a side-effect verb it does not need. §7.1. |
 | 23 | **`update.apply` is NOT approval-gated for a human at the keyboard, and IS denied for agent-attributed peers by M9's AI authority path.** Gating your own laptop behind an approval you also grant is theatre; an agent updating or rolling back the OS unattended is exactly what M9 exists to stop. The denial cites a *named* rule (`host.system_update: deny`), not the generic no-rule text. §7.3. |
 | 24 | **Rollback is never blocked on a managed device in this slice.** It is audited, and reported on the next sync. A device that cannot be recovered is worse than a device that reports a recovery. An org-side `rollbackPermitted` field is *proposed*, not implemented. §7.3. |
 | 25 | **The browser fast lane is a build input, not a second transport.** M11's `punar-security` overlay produces an ordinary signed release delivered by the ordinary mechanism — same manifest, same key, same slot, same health gate, same rollback. There is no second unsigned path because there is no second path. §9.1. |
@@ -427,7 +427,19 @@ release.json.sig                            detached signature over release.json
 ```
 
 Raspberry Pi uses one root payload and one signed boot-filesystem artifact;
-its manifest carries `uefi_slots: null`.
+its manifest carries `uefi_slots: null`. Installer media keeps the legacy
+slot-A names (`…slot.raw.zst`, `…uki.efi`) and uses the `.slot-b.` infix only
+for B; every consumer follows the manifest's `filename` fields, never a naming
+convention, and no test compares the ISO's A payload with a channel build.
+
+A fresh UEFI install writes both pairs and adds the B-bound UKI as the
+non-preferred `punar-recovery_<version>.efi`. That factory entry is retired
+by the first `update.apply` **before** any byte of root B is overwritten, and
+only while the running A entry is the uncounted, preferred
+`punar_<version>.efi`; an A that is still boot-counted refuses with
+`conflict`. The ESP is synced and re-opened read-only to prove the retirement
+before the root writer opens, so no retained UKI can ever point at a partially
+rewritten slot.
 
 `release.json` (`schemas/update/release-manifest.json`, §8.4):
 
@@ -967,6 +979,7 @@ real and named.
 | `update.check` | **root only** | yes (writes cached metadata) | always |
 | `update.apply` | **root only**, and agent-attributed peers take the M9 AI path first | yes | always |
 | `update.rollback` | **root only**, same M9 rule | yes | always |
+| `update.reconcile_candidate` | **root only**, same M9 rule; Raspberry Pi boot service in normal operation, no params | Pi selector finalization only | always, and the outcome audit is durable before pending state is removed |
 
 **There is no `update.reboot`, and that is deliberate.** `punarctl update
 apply --reboot` runs `systemctl reboot` *as the caller*, after punard
@@ -1079,6 +1092,8 @@ design (ipc.md §6).
 | `update.rollback` | `system_image` | human/root | `success`, `denied`, `failure` |
 | `update.health` | `system_image` | **service / punard** | `success`, `failure`, `partial` |
 | `update.auto_rollback` | `system_image` | **service / punard** | `success` |
+| `update.reconcile_candidate.blessed_candidate` / `.firmware_fallback` / `.postcommit_recovery` | `pi_release:<release_id>:<version>:<manifest sha256>` | **service / punard** via `punar-pi-update-health.service` | `success` (appended and `fdatasync`ed before the pending record is removed) |
+| `update.reconcile_candidate` | `pi_release:…` or `system_image` | **service / punard** | `denied`, `failure` |
 | `capabilities.set` | `system.update_channel` | existing path, unchanged | existing values |
 
 `update.auto_rollback` is emitted by the *recovered* system on its first
@@ -1105,10 +1120,11 @@ such.
 ### 8.1 Method table additions (implemented in `ipc.md` §5)
 
 ```text
-update.status    any connected peer   no   no
-update.check     root only            yes  always
-update.apply     root only (+M9)      yes  always
-update.rollback  root only (+M9)      yes  always
+update.status              any connected peer   no   no
+update.check               root only            yes  always
+update.apply               root only (+M9)      yes  always
+update.rollback            root only (+M9)      yes  always
+update.reconcile_candidate root only (+M9)      Pi   always  (params none; Pi boot service)
 ```
 
 **`update.status`** — params `{}`. Result:

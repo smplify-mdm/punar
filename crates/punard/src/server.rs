@@ -1178,6 +1178,18 @@ fn update_transaction_ipc_error(error: UpdateTransactionError) -> IpcError {
                 "available_bytes": available_bytes,
             }),
         ),
+        UpdateTransactionError::EspInsufficientSpace {
+            required_bytes,
+            available_bytes,
+        } => IpcError::with_details(
+            ErrorCode::InsufficientSpace,
+            "The EFI System Partition does not have enough room for the candidate UKI and the fixed update reserve. The boot selector was not changed.",
+            json!({
+                "stage": stage,
+                "required_bytes": required_bytes,
+                "available_bytes": available_bytes,
+            }),
+        ),
         UpdateTransactionError::Conflict(_) => IpcError::with_details(
             ErrorCode::Conflict,
             format!(
@@ -1324,6 +1336,30 @@ impl Inner {
         }
     }
 
+    /// Pi recovery is complete only after its exact outcome is durable. The
+    /// writer validates, appends, and `fdatasync`s each event; propagating an
+    /// error here deliberately leaves the pending record for an idempotent
+    /// boot-time retry.
+    fn log_pi_reconcile_required(&self, event: AuditEvent) -> Result<(), IpcError> {
+        match self.audit.lock().unwrap().append(&event) {
+            Ok(()) => {
+                self.audit_events.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("punard: FAILED to append required Pi reconcile audit event: {error}");
+                Err(IpcError::with_details(
+                    ErrorCode::Internal,
+                    "Punar reconciled the Raspberry Pi selector but could not durably record the outcome. The pending transaction was retained and the boot service will retry.",
+                    json!({
+                        "component": "pi_reconcile_audit",
+                        "pending_retained": true,
+                    }),
+                ))
+            }
+        }
+    }
+
     /// The audit attribution for one connected peer.
     ///
     /// M3: the resolved username, `source: human`. M8 adds the section-12.5
@@ -1458,6 +1494,7 @@ impl Inner {
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::UpdateApply(params) => self.handle_update_apply(peer, params),
+            Method::UpdateReconcileCandidate => self.handle_update_reconcile_candidate(peer),
             Method::UpdateRollback(params) => self.handle_update_rollback(peer, params),
             Method::InstallTargets => self
                 .installer
@@ -1758,6 +1795,67 @@ impl Inner {
         }
     }
 
+    /// Reconcile native Raspberry Pi boot state. There are no caller-supplied
+    /// slots, paths, digests or health values: firmware observation, the
+    /// exact pending record and local readback are the only inputs. Success
+    /// ordering is selector operation/observation, required durable audit,
+    /// then exact pending-record removal.
+    fn handle_update_reconcile_candidate(&self, peer: &Peer) -> Result<Value, IpcError> {
+        const ACTION: &str = "update.reconcile_candidate";
+        let actor = self.authorize_system_update(peer, ACTION)?;
+        let _guard = self.update_lock.lock().unwrap();
+        let result = if !self.cfg.pi_update_sources.boot_partition_property.exists() {
+            Err(PiUpdateError::Conflict(
+                "candidate blessing is available only on native Raspberry Pi firmware".into(),
+            ))
+        } else {
+            self.pi_update.reconcile_candidate()
+        };
+        match result {
+            Ok(reconciled) => {
+                let resource = format!(
+                    "pi_release:{}:{}:{}",
+                    reconciled.release_id, reconciled.version, reconciled.manifest_sha256
+                );
+                self.log_pi_reconcile_required(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    reconciled.outcome.audit_action(),
+                    &resource,
+                    Decision::Allow,
+                    AuditOutcome::Success,
+                ))?;
+                self.pi_update
+                    .finalize_pending(&reconciled.pending_state_sha256)
+                    .map_err(|error| {
+                        IpcError::with_details(
+                            ErrorCode::ApplyFailed,
+                            format!(
+                                "The Pi outcome was audited, but its exact pending record could not be finalized: {error}. The retained record will be retried safely."
+                            ),
+                            json!({
+                                "component": "pi_pending_finalize",
+                                "audit_recorded": true,
+                                "pending_retained": true,
+                            }),
+                        )
+                    })?;
+                Ok(to_value(reconciled))
+            }
+            Err(error) => {
+                self.log_audit(AuditEvent::action(
+                    &self.device_id,
+                    &actor,
+                    ACTION,
+                    "system_image",
+                    Decision::Allow,
+                    AuditOutcome::Failure,
+                ));
+                Err(pi_update_ipc_error(error))
+            }
+        }
+    }
+
     fn handle_update_rollback(
         &self,
         peer: &Peer,
@@ -1995,10 +2093,11 @@ impl Inner {
             ))?;
         }
 
+        let root_write_bytes = self.installer.root_write_bytes_total(&plan)?;
         self.installer.start_transaction_status(
             &params.plan_token,
             &params.disk,
-            plan.payload.uncompressed_size_bytes,
+            root_write_bytes,
         )?;
         self.installer.verify_release_payload(&plan)?;
         self.installer.enter_phase(InstallPhase::Partition)?;
@@ -2106,9 +2205,9 @@ impl Inner {
             }
         };
 
-        self.installer.write_slot_a(&plan)?;
+        self.installer.write_root_slots(&plan)?;
         self.installer.enter_phase(InstallPhase::ReRead)?;
-        self.installer.verify_written_slot_a(&plan)?;
+        self.installer.verify_written_root_slots(&plan)?;
         self.installer.enter_phase(InstallPhase::Boot)?;
         self.installer.install_boot_artifact(&plan)?;
         self.installer
@@ -4645,6 +4744,264 @@ mod tests {
             status.phase = Some(phase);
             assert!(install_status_disk_changed(&status), "{phase:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pi_reconcile_is_authorized_health_gated_and_audit_durable() {
+        use crate::install::ROOT_B_PARTUUID;
+        use crate::pi_update::{PendingPiUpdate, PiSlot};
+
+        let root = std::env::temp_dir().join(format!(
+            "punard-pi-reconcile-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        let state = root.join("state");
+        let selector = root.join("selector");
+        let boot_b = root.join("boot-b");
+        let root_b_mount = root.join("root-b-mount");
+        fs::create_dir_all(state.join("update")).unwrap();
+        fs::create_dir_all(&selector).unwrap();
+        fs::create_dir_all(&boot_b).unwrap();
+        fs::create_dir_all(root_b_mount.join("etc")).unwrap();
+        fs::write(
+            selector.join("autoboot.txt"),
+            b"[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=4\n",
+        )
+        .unwrap();
+        fs::write(
+            boot_b.join("cmdline-a.txt"),
+            format!(
+                "root=PARTUUID={} rootfstype=ext4 ro rootwait\n",
+                crate::install::ROOT_A_PARTUUID
+            ),
+        )
+        .unwrap();
+        fs::write(
+            boot_b.join("cmdline-b.txt"),
+            format!("root=PARTUUID={ROOT_B_PARTUUID} rootfstype=ext4 ro rootwait\n"),
+        )
+        .unwrap();
+        fs::write(
+            boot_b.join("config.txt"),
+            "[all]\narm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs8 followkernel\n[boot_partition=2]\ncmdline=cmdline-a.txt\n[boot_partition=4]\ncmdline=cmdline-b.txt\n",
+        )
+        .unwrap();
+        fs::write(boot_b.join("kernel8.img"), b"test kernel").unwrap();
+        fs::write(boot_b.join("initramfs8"), b"test initramfs").unwrap();
+        fs::write(
+            root_b_mount.join("etc/os-release"),
+            "ID=punar\nIMAGE_VERSION=2026.09.04.1\n",
+        )
+        .unwrap();
+
+        let root_bytes = vec![0x51_u8; 4096];
+        let boot_bytes = vec![0x52_u8; 4096];
+        let root_b_device = root.join("root-b-device");
+        let boot_b_device = root.join("boot-b-device");
+        fs::write(&root_b_device, &root_bytes).unwrap();
+        fs::write(&boot_b_device, &boot_bytes).unwrap();
+
+        let partition = root.join("partition");
+        let tryboot = root.join("tryboot");
+        let cmdline = root.join("cmdline");
+        let mountinfo = root.join("mountinfo");
+        let health = root.join("health.json");
+        let pending = state.join("update/pending-pi.json");
+        fs::write(&partition, 4_u32.to_be_bytes()).unwrap();
+        fs::write(&tryboot, 1_u32.to_be_bytes()).unwrap();
+        fs::write(
+            &cmdline,
+            format!("root=PARTUUID={ROOT_B_PARTUUID} rootfstype=ext4 ro rootwait\n"),
+        )
+        .unwrap();
+        fs::write(
+            &mountinfo,
+            "29 23 0:25 / / ro,relatime - ext4 /dev/mmcblk0p5 ro\n",
+        )
+        .unwrap();
+        fs::write(
+            &pending,
+            serde_json::to_vec(&PendingPiUpdate {
+                schema_version: 1,
+                release_id: "punar-test-pi-release".into(),
+                version: "2026.09.04.1".parse().unwrap(),
+                previous_slot: PiSlot::A,
+                candidate_slot: PiSlot::B,
+                candidate_boot_partition: 4,
+                candidate_root_partition: 5,
+                candidate_root_partuuid: ROOT_B_PARTUUID.into(),
+                manifest_sha256: "a".repeat(64),
+                payload_sha256: sha256_hex(&root_bytes),
+                payload_size_bytes: root_bytes.len() as u64,
+                boot_sha256: sha256_hex(&boot_bytes),
+                boot_size_bytes: boot_bytes.len() as u64,
+                staged_at: utc_now_rfc3339(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let pending_bytes = fs::read(&pending).unwrap();
+        fs::write(
+            &health,
+            br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":true,"desktop_ready":false,"capabilities_verified":true},"waited_seconds":7}"#,
+        )
+        .unwrap();
+
+        let audit_path = root.join("audit.jsonl");
+        let mut config = DaemonConfig::new(root.join("punard.sock"), state, audit_path.clone());
+        let proc_root = root.join("proc");
+        fs::create_dir_all(proc_root.join("4242")).unwrap();
+        fs::write(
+            proc_root.join("4242/cgroup"),
+            "0::/user.slice/punar-agent-agt_0011aabb2233.scope\n",
+        )
+        .unwrap();
+        config.proc_root = proc_root;
+        config.pi_update_sources = PiUpdateSources {
+            boot_partition_property: partition.clone(),
+            tryboot_property: tryboot.clone(),
+            cmdline_path: cmdline,
+            mountinfo_path: mountinfo,
+            health_report: health.clone(),
+            pending_state: pending.clone(),
+            root_b_partition: root_b_device,
+            boot_b_partition: boot_b_device,
+            allow_regular_targets: true,
+            selector_mount_override: Some(selector.clone()),
+            boot_b_mount_override: Some(boot_b),
+            root_b_mount_override: Some(root_b_mount),
+            ..PiUpdateSources::default()
+        };
+        let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();
+        let selector_before = fs::read(selector.join("autoboot.txt")).unwrap();
+
+        let nonroot = Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        };
+        let refused = daemon
+            .inner
+            .handle_update_reconcile_candidate(&nonroot)
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Denied);
+        let agent = Peer {
+            uid: 0,
+            gid: 0,
+            pid: Some(4242),
+        };
+        let refused = daemon
+            .inner
+            .handle_update_reconcile_candidate(&agent)
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Denied);
+
+        fs::write(&partition, 2_u32.to_be_bytes()).unwrap();
+        fs::write(&tryboot, 0_u32.to_be_bytes()).unwrap();
+        let fallback = daemon
+            .inner
+            .handle_update_reconcile_candidate(&Peer::root())
+            .unwrap();
+        assert_eq!(fallback["outcome"], "firmware_fallback");
+        assert_eq!(fallback["selector_committed"], false);
+        assert_eq!(fallback["requires_normal_reboot"], false);
+        assert!(!pending.exists());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before
+        );
+        assert!(
+            tail(&audit_path, 20)
+                .unwrap()
+                .events
+                .into_iter()
+                .any(|event| {
+                    event.action == "update.reconcile_candidate.firmware_fallback"
+                        && event.result == "success"
+                })
+        );
+
+        fs::write(&pending, &pending_bytes).unwrap();
+        fs::write(&partition, 4_u32.to_be_bytes()).unwrap();
+        fs::write(&tryboot, 1_u32.to_be_bytes()).unwrap();
+
+        let refused = daemon
+            .inner
+            .handle_update_reconcile_candidate(&Peer::root())
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Conflict);
+        assert!(pending.exists());
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            selector_before
+        );
+
+        fs::write(
+            &health,
+            br#"{"schema_version":1,"health":{"boot_completed":true,"control_plane_answers":true,"desktop_ready":true,"capabilities_verified":true},"waited_seconds":8}"#,
+        )
+        .unwrap();
+
+        // Force the required success append to fail only after the engine has
+        // replaced and re-read the selector. The pending state must survive.
+        OpenOptions::new()
+            .write(true)
+            .open(&audit_path)
+            .unwrap()
+            .set_len(AUDIT_ROTATE_BYTES)
+            .unwrap();
+        fs::remove_file(&audit_path).unwrap();
+        fs::create_dir(&audit_path).unwrap();
+        let audit_failure = daemon
+            .inner
+            .handle_update_reconcile_candidate(&Peer::root())
+            .unwrap_err();
+        assert_eq!(audit_failure.code, ErrorCode::Internal);
+        assert_eq!(
+            audit_failure.details,
+            Some(json!({
+                "component": "pi_reconcile_audit",
+                "pending_retained": true,
+            }))
+        );
+        assert!(pending.exists(), "audit failure must retain pending state");
+        assert_eq!(
+            fs::read(selector.join("autoboot.txt")).unwrap(),
+            b"[all]\ntryboot_a_b=1\nboot_partition=4\n[tryboot]\nboot_partition=2\n"
+        );
+
+        // Restore the live audit path. The retry recognizes the already
+        // committed selector, revalidates candidate bytes/version/health,
+        // durably records post-commit recovery, then removes exact pending.
+        fs::remove_dir(&audit_path).unwrap();
+        fs::write(&audit_path, b"").unwrap();
+        let recovered = daemon
+            .inner
+            .handle_update_reconcile_candidate(&Peer::root())
+            .unwrap();
+        assert_eq!(recovered["outcome"], "postcommit_recovery");
+        assert_eq!(recovered["candidate_slot"], "b");
+        assert_eq!(recovered["selector_committed"], true);
+        assert_eq!(recovered["requires_normal_reboot"], true);
+        assert!(!pending.exists());
+
+        let events = tail(&audit_path, 20)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| event.action == "update.reconcile_candidate.postcommit_recovery")
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].result, "success");
+        assert!(events[0].resource.as_deref().is_some_and(|resource| {
+            resource.contains("punar-test-pi-release:2026.09.04.1:")
+                && resource.ends_with(&"a".repeat(64))
+        }));
+
+        drop(daemon);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

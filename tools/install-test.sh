@@ -23,7 +23,7 @@ die() {
 [ -x "${RELEASE_TOOL}" ] \
     || die "release verifier is missing or not executable: ${RELEASE_TOOL}"
 for command in qemu-system-x86_64 qemu-img qemu-nbd sfdisk partx cryptsetup btrfs \
-    blkid jq python3 xorriso mkfs.vfat mcopy sha256sum; do
+    blkid jq python3 xorriso mkfs.vfat mcopy objcopy sha256sum; do
     command -v "${command}" >/dev/null || die "${command} is required"
 done
 
@@ -91,10 +91,14 @@ ADMISSION_SMALL_PREFIX_AFTER="${WORKDIR}/admission-small-prefix-after.bin"
 NBD_DEVICE=/dev/nbd0
 MAPPER_NAME="punar-ci-data-$$"
 MOUNT_DIR="${WORKDIR}/data-top"
+ESP_MOUNT_DIR="${WORKDIR}/esp"
+ROOT_B_MOUNT_DIR="${WORKDIR}/root-b"
 QEMU_PID=''
 NBD_ATTACHED=0
 MAPPER_OPEN=0
 DATA_MOUNTED=0
+ESP_MOUNTED=0
+ROOT_B_MOUNTED=0
 
 cleanup() {
     if [ -n "${QEMU_PID}" ] && kill -0 "${QEMU_PID}" 2>/dev/null; then
@@ -103,6 +107,12 @@ cleanup() {
     fi
     if [ "${DATA_MOUNTED}" -eq 1 ]; then
         sudo umount "${MOUNT_DIR}" 2>/dev/null || true
+    fi
+    if [ "${ESP_MOUNTED}" -eq 1 ]; then
+        sudo umount "${ESP_MOUNT_DIR}" 2>/dev/null || true
+    fi
+    if [ "${ROOT_B_MOUNTED}" -eq 1 ]; then
+        sudo umount "${ROOT_B_MOUNT_DIR}" 2>/dev/null || true
     fi
     if [ "${MAPPER_OPEN}" -eq 1 ]; then
         sudo cryptsetup close "${MAPPER_NAME}" 2>/dev/null || true
@@ -537,6 +547,89 @@ PY
 
 [ "$(sudo blkid -p -s TYPE -o value "${NBD_DEVICE}p1")" = vfat ] \
     || die 'partition 1 is not vfat'
+
+echo '==> prove the initial UEFI A+B recovery floor from the installed bytes'
+slot_a_bytes=$(jq -er '.uefi_slots.a.payload.uncompressed_size_bytes' "${RELEASE_DOCUMENT}")
+slot_b_bytes=$(jq -er '.uefi_slots.b.payload.uncompressed_size_bytes' "${RELEASE_DOCUMENT}")
+slot_a_sha=$(jq -er '.uefi_slots.a.payload.uncompressed_digest_sha256' "${RELEASE_DOCUMENT}")
+slot_b_sha=$(jq -er '.uefi_slots.b.payload.uncompressed_digest_sha256' "${RELEASE_DOCUMENT}")
+[ "${slot_a_bytes}" = "${slot_b_bytes}" ] \
+    || die 'signed UEFI recovery slots do not have equal byte coverage'
+[ "${slot_a_sha}" != "${slot_b_sha}" ] \
+    || die 'signed UEFI recovery slot B is an unsafe clone of slot A'
+installed_slot_a_sha=$(sudo dd if="${NBD_DEVICE}p2" bs=4M \
+    iflag=fullblock,direct,count_bytes count="${slot_a_bytes}" status=none \
+    | sha256sum | awk '{print $1}')
+[ "${installed_slot_a_sha}" = "${slot_a_sha}" ] \
+    || die 'installed slot A does not match its signed root digest'
+installed_slot_b_sha=$(sudo dd if="${NBD_DEVICE}p3" bs=4M \
+    iflag=fullblock,direct,count_bytes count="${slot_b_bytes}" status=none \
+    | sha256sum | awk '{print $1}')
+[ "${installed_slot_b_sha}" = "${slot_b_sha}" ] \
+    || die 'installed recovery slot B does not match its signed root digest'
+[ "$(sudo blkid -p -s LABEL -o value "${NBD_DEVICE}p2")" = PUNAR-ROOT-A ] \
+    || die 'installed slot A has the wrong filesystem label'
+[ "$(sudo blkid -p -s LABEL -o value "${NBD_DEVICE}p3")" = PUNAR-ROOT-B ] \
+    || die 'installed recovery slot B has the wrong filesystem label'
+[ "$(sudo blkid -p -s UUID -o value "${NBD_DEVICE}p3")" = \
+    724e1a3b-d966-54b7-9a97-8886985eee18 ] \
+    || die 'installed recovery slot B has the wrong filesystem UUID'
+
+version=$(jq -er '.version' "${RELEASE_DOCUMENT}")
+uki_a="punar_${version}.efi"
+uki_b="punar-recovery_${version}.efi"
+uki_a_sha=$(jq -er '.uefi_slots.a.boot_artifact.digest_sha256' "${RELEASE_DOCUMENT}")
+uki_b_sha=$(jq -er '.uefi_slots.b.boot_artifact.digest_sha256' "${RELEASE_DOCUMENT}")
+[ "${uki_a_sha}" != "${uki_b_sha}" ] \
+    || die 'signed recovery UKI is an unsafe clone of the slot-A UKI'
+mkdir -p "${ESP_MOUNT_DIR}"
+sudo mount -o ro,nodev,nosuid,noexec "${NBD_DEVICE}p1" "${ESP_MOUNT_DIR}"
+ESP_MOUNTED=1
+[ "$(find "${ESP_MOUNT_DIR}/EFI/Linux" -maxdepth 1 -type f -name '*.efi' | wc -l | tr -d ' ')" -eq 2 ] \
+    || die 'installed ESP does not contain exactly two initial UKIs'
+[ "$(sha256sum "${ESP_MOUNT_DIR}/EFI/Linux/${uki_a}" | awk '{print $1}')" = "${uki_a_sha}" ] \
+    || die 're-read slot-A UKI does not match signed release metadata'
+[ "$(sha256sum "${ESP_MOUNT_DIR}/EFI/Linux/${uki_b}" | awk '{print $1}')" = "${uki_b_sha}" ] \
+    || die 're-read recovery-slot-B UKI does not match signed release metadata'
+grep -Fxq "preferred punar_${version}*.efi" "${ESP_MOUNT_DIR}/loader/loader.conf" \
+    || die 'installed loader preference does not select slot A'
+objcopy --dump-section ".cmdline=${WORKDIR}/installed-slot-a.cmdline" \
+    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_a}"
+objcopy --dump-section ".cmdline=${WORKDIR}/installed-slot-b.cmdline" \
+    "${ESP_MOUNT_DIR}/EFI/Linux/${uki_b}"
+tr -d '\000' < "${WORKDIR}/installed-slot-a.cmdline" \
+    | tr ' ' '\n' | grep -Fqx 'root=PARTUUID=1beabfe0-9cb8-4b49-91ef-d372b845e7ea' \
+    || die 'installed slot-A UKI does not bind slot A'
+tr -d '\000' < "${WORKDIR}/installed-slot-b.cmdline" \
+    | tr ' ' '\n' | grep -Fqx 'root=PARTUUID=2b1b91a9-cf2c-4e9c-a723-5ec997971662' \
+    || die 'installed recovery UKI does not bind slot B'
+sudo umount "${ESP_MOUNT_DIR}"
+ESP_MOUNTED=0
+mkdir -p "${ROOT_B_MOUNT_DIR}"
+sudo mount -o ro,noload,nodev,nosuid,noexec "${NBD_DEVICE}p3" "${ROOT_B_MOUNT_DIR}"
+ROOT_B_MOUNTED=1
+python3 - "${ROOT_B_MOUNT_DIR}/etc/fstab" <<'PY'
+import sys
+
+roots = []
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    for raw in stream:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "/":
+            roots.append((fields[0], fields[2]))
+expected = [("UUID=724e1a3b-d966-54b7-9a97-8886985eee18", "ext4")]
+if roots != expected:
+    raise SystemExit(f"installed recovery fstab has unsafe root binding: {roots!r}")
+PY
+sudo umount "${ROOT_B_MOUNT_DIR}"
+ROOT_B_MOUNTED=0
+printf 'I17 PASS slot_a_sha256=%s slot_b_sha256=%s uki_a=%s uki_b=%s\n' \
+    "${installed_slot_a_sha}" "${installed_slot_b_sha}" "${uki_a_sha}" "${uki_b_sha}" \
+    > "${PROOF_DIR}/recovery-floor-result.txt"
+
 sudo cryptsetup isLuks "${NBD_DEVICE}p4" \
     || die 'partition 4 is not a LUKS container'
 sudo cryptsetup luksDump --dump-json-metadata "${NBD_DEVICE}p4" \
@@ -586,7 +679,7 @@ MAPPER_OPEN=0
 sudo qemu-nbd --disconnect "${NBD_DEVICE}" >/dev/null
 NBD_ATTACHED=0
 
-printf 'I08-I13,I36a-I36d,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
+printf 'I08-I13,I17,I36a-I36d,I36-unattended PASS target_bytes=%s luks_uuid=%s elapsed_seconds=%s\n' \
     "${TARGET_BYTES}" "${luks_uuid}" "$((finished - started))" \
     > "${PROOF_DIR}/result.txt"
-echo "install-test: PASS (I08-I13 + I36a-I36d refusals + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
+echo "install-test: PASS (I08-I13 + I17 recovery floor + I36a-I36d refusals + unattended I36 custody/secrecy; $((finished - started))s, ${ACCEL})"
