@@ -516,8 +516,10 @@ fn validate_executable(path: &Path, trusted_uid: u32) -> Result<(), ExecError> {
             canonical: None,
         });
     }
-    validate_selecting_directories(path, trusted_uid)?;
 
+    // The executable itself is judged before any directory: a wrong owner or
+    // a writable mode on the binary is the more specific finding, and callers
+    // (and the unit tests) rely on seeing it first.
     let canonical = fs::canonicalize(path).map_err(|_| ExecError::UnsafeBinary {
         path: path.to_path_buf(),
         canonical: None,
@@ -543,6 +545,7 @@ fn validate_executable(path: &Path, trusted_uid: u32) -> Result<(), ExecError> {
             mode,
         });
     }
+    validate_selecting_directories(path, trusted_uid)?;
     validate_selecting_directories(&canonical, trusted_uid)
 }
 
