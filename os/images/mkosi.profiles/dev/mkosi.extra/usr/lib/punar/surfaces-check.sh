@@ -1161,6 +1161,32 @@ else
     FAILED=1
 fi
 
+# --- group 8c: creating a workspace by pointer ------------------------------
+# Overview's "+ New project" control focuses the lowest unused workspace id,
+# because focusing a workspace that does not exist is what creates it. The
+# button's wiring is QML that qmllint checks structurally; what needs proving on
+# a running machine is that premise. A pointer click is not reachable over IPC,
+# so this exercises the dispatch the click performs, and says so.
+ws_free="$(hyprctl -j workspaces 2>/dev/null \
+    | jq -r '[.[].id] as $t | first(range(1; 64) | select(. as $i | ($t | index($i)) | not))')"
+if [ -n "${ws_free}" ] && [ "${ws_free}" -gt 0 ] 2>/dev/null; then
+    hyprctl dispatch "hl.dsp.focus({ workspace = '${ws_free}' })" >/dev/null 2>&1 || true
+    ws_created() {
+        hyprctl -j workspaces 2>/dev/null \
+            | jq -e --argjson id "${ws_free}" 'any(.[]; .id == $id)' >/dev/null
+    }
+    if wait_for 15 ws_created; then
+        note "ok   focusing free workspace ${ws_free} created it (the New project dispatch)"
+    else
+        note "FAIL focusing free workspace ${ws_free} did not create it; New project would do nothing"
+        FAILED=1
+    fi
+    hyprctl dispatch "hl.dsp.focus({ workspace = '1' })" >/dev/null 2>&1 || true
+else
+    note "FAIL could not find a free workspace id to exercise"
+    FAILED=1
+fi
+
 # --- group 9: an unattended session locks itself ----------------------------
 # The lock surface and its PAM stack existed long before anything invoked them
 # on their own: locking was always a deliberate act (PUNAR + Escape), so a
