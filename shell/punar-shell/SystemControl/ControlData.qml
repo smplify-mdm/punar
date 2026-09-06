@@ -93,6 +93,10 @@ Scope {
     property string webAppUrl: ""
     property string webAppContext: "personal"
     property string webAppRemoveArmed: ""
+    // Same two-step shape as webAppRemoveArmed. A pointer click is far easier
+    // to hit by accident than a chord, and these three end the session or the
+    // machine, so the first click arms and the second commits.
+    property string powerArmed: ""
 
     // The capability awaiting a typed reason ([E] · §48 requires one).
     // "" = nothing armed. Cleared by Esc, by moving the selection and by
@@ -330,6 +334,8 @@ Scope {
             if (data.pendingWebAppRemoval !== "") {
                 data.pendingWebAppRemoval = "";
                 data.webAppRemoveArmed = "";
+                data.powerArmed = "";
+            data.powerArmed = "";
             }
             // Never trust the write: re-read the control plane and let
             // the registry say what actually happened.
@@ -353,10 +359,11 @@ Scope {
         } catch (e) {
             data.lastActionPending = false;
             data.lastActionExit = 127;
-            data.lastActionError = "punarctl is not installed on this machine.";
+            data.lastActionError = "'" + argv[0] + "' could not be started on this machine.";
             data.pendingWebAppInstall = false;
             data.pendingWebAppRemoval = "";
             data.webAppRemoveArmed = "";
+            data.powerArmed = "";
         }
     }
 
@@ -783,6 +790,25 @@ Scope {
                 return;
             data.pendingWebAppRemoval = removeId;
             data.runMutation(["punarctl", "--json", "web-apps", "uninstall", removeId, "--yes"]);
+        } else if (kind === "sessionEnd" || kind === "systemRestart"
+                || kind === "systemPowerOff") {
+            // Power is logind's, not punard's: there is no typed capability to
+            // route through, and inventing a root RPC for it would be exactly
+            // the generic-execution primitive the spec forbids. polkit decides
+            // whether this session may act, and its refusal surfaces in the
+            // action-result row like any other failure. An enrolled device that
+            // must govern shutdown needs a real capability; that is not this.
+            if (data.powerArmed !== kind) {
+                data.powerArmed = kind;
+                return;
+            }
+            data.powerArmed = "";
+            if (kind === "sessionEnd")
+                data.runMutation(["hyprctl", "dispatch", "exit"]);
+            else if (kind === "systemRestart")
+                data.runMutation(["systemctl", "reboot"]);
+            else
+                data.runMutation(["systemctl", "poweroff"]);
         } else if (kind === "webContext") {
             var contextId = String(a.contextId);
             if (BrowserContext.bindToFocusedWorkspace(contextId)) {
@@ -1418,7 +1444,30 @@ Scope {
                     what: "No battery reported",
                     why: "This device exposes no BAT0 entry under /sys/class/power_supply — which is what a virtual machine reports, truthfully. No power capability is registered either, so there is nothing to govern.",
                     when_: "Unscheduled · no milestone claims power management"
-                }
+                },
+                actions: [
+                    {
+                        hotkey: "L",
+                        label: data.powerArmed === "sessionEnd"
+                            ? "Press again to end session" : "End session",
+                        tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
+                        kind: "sessionEnd"
+                    },
+                    {
+                        hotkey: "R",
+                        label: data.powerArmed === "systemRestart"
+                            ? "Press again to restart" : "Restart",
+                        tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
+                        kind: "systemRestart"
+                    },
+                    {
+                        hotkey: "P",
+                        label: data.powerArmed === "systemPowerOff"
+                            ? "Press again to shut down" : "Shut down",
+                        tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
+                        kind: "systemPowerOff"
+                    }
+                ]
             };
         }
         return {
@@ -1438,7 +1487,30 @@ Scope {
                     v: "/sys/class/power_supply/BAT0 — read once per open"
                 }
             ],
-            note: "Punar registers no power capability, so this view reports and does not set."
+            note: "Punar reports the supply class and does not set it: there is no typed power capability. Ending the session, restarting and shutting down go to logind, which asks polkit whether this session may act.",
+            actions: [
+                {
+                    hotkey: "L",
+                    label: data.powerArmed === "sessionEnd"
+                        ? "Press again to end session" : "End session",
+                    tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
+                    kind: "sessionEnd"
+                },
+                {
+                    hotkey: "R",
+                    label: data.powerArmed === "systemRestart"
+                        ? "Press again to restart" : "Restart",
+                    tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
+                    kind: "systemRestart"
+                },
+                {
+                    hotkey: "P",
+                    label: data.powerArmed === "systemPowerOff"
+                        ? "Press again to shut down" : "Shut down",
+                    tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
+                    kind: "systemPowerOff"
+                }
+            ]
         };
     }
 
