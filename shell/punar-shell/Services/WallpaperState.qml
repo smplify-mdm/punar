@@ -21,36 +21,6 @@ Singleton {
     // as too much line work behind a full screen of terminals.
     readonly property string defaultId: "yosemite"
     readonly property var catalog: [{
-        "id": "stillpoint",
-        "name": "Stillpoint",
-        "intent": "Warm signal · calm focus",
-        "file": "stillpoint.jpg",
-        "vector": false
-    }, {
-        "id": "daybreak",
-        "name": "Daybreak",
-        "intent": "Alpine twilight · open and quiet",
-        "file": "daybreak.jpg",
-        "vector": false
-    }, {
-        "id": "winterline",
-        "name": "Winterline",
-        "intent": "Winter lake · precise and bright",
-        "file": "winterline.jpg",
-        "vector": false
-    }, {
-        "id": "earthrise",
-        "name": "Earthrise",
-        "intent": "Lunar horizon · deep focus",
-        "file": "earthrise.jpg",
-        "vector": false
-    }, {
-        "id": "field",
-        "name": "Field",
-        "intent": "Theme-derived vector · ultra lean",
-        "file": "",
-        "vector": true
-    }, {
         "id": "yosemite",
         "name": "Yosemite",
         "intent": "Yosemite Valley, California · granite quiet",
@@ -85,6 +55,38 @@ Singleton {
         "file": "",
         "vector": true,
         "template": "plates/zion.svg.in"
+    
+    }, {
+
+        "id": "stillpoint",
+        "name": "Stillpoint",
+        "intent": "Warm signal · calm focus",
+        "file": "stillpoint.jpg",
+        "vector": false
+    }, {
+        "id": "daybreak",
+        "name": "Daybreak",
+        "intent": "Alpine twilight · open and quiet",
+        "file": "daybreak.jpg",
+        "vector": false
+    }, {
+        "id": "winterline",
+        "name": "Winterline",
+        "intent": "Winter lake · precise and bright",
+        "file": "winterline.jpg",
+        "vector": false
+    }, {
+        "id": "earthrise",
+        "name": "Earthrise",
+        "intent": "Lunar horizon · deep focus",
+        "file": "earthrise.jpg",
+        "vector": false
+    }, {
+        "id": "field",
+        "name": "Field",
+        "intent": "Theme-derived vector · ultra lean",
+        "file": "",
+        "vector": true
     }]
 
     readonly property string homeDir: {
