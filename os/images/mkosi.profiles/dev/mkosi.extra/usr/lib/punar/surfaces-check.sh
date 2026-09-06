@@ -657,16 +657,16 @@ fi
 # on the inviting default, can switch to the vector fallback, and restores the
 # default through the same atomic preference path the command center uses.
 ipc wallpaper state > /run/punar/surfaces-wallpaper-state.json 2>/dev/null
-if jq -e '.active == "stillpoint" and .writable == true' \
+if jq -e '.active == "yosemite" and .writable == true' \
         /run/punar/surfaces-wallpaper-state.json >/dev/null 2>&1; then
-    note "ok   wallpaper starts on writable Stillpoint default"
+    note "ok   wallpaper starts on the writable Yosemite plate default"
 else
-    note "FAIL wallpaper state is not the writable Stillpoint default"
+    note "FAIL wallpaper state is not the writable Yosemite plate default"
     FAILED=1
 fi
 
 ipc wallpaper list > /run/punar/surfaces-wallpapers.json 2>/dev/null
-if jq -e '.default == "stillpoint"
+if jq -e '.default == "yosemite"
         and (.wallpapers | length) == 10
         and ([.wallpapers[].id] | sort) == (["crater-lake", "daybreak", "earthrise", "field", "grand-canyon", "rainier", "stillpoint", "winterline", "yosemite", "zion"] | sort)' \
         /run/punar/surfaces-wallpapers.json >/dev/null 2>&1; then
@@ -750,17 +750,17 @@ else
 fi
 
 ipc wallpaper reset > /run/punar/surfaces-wallpaper-reset.json 2>/dev/null
-if jq -e '.applied == true and .active == "stillpoint" and .source == "shipped default"' \
+if jq -e '.applied == true and .active == "yosemite" and .source == "shipped default"' \
         /run/punar/surfaces-wallpaper-reset.json >/dev/null 2>&1; then
-    note "ok   wallpaper.reset restores the shipped Stillpoint default"
+    note "ok   wallpaper.reset restores the shipped Yosemite plate default"
 else
-    note "FAIL wallpaper.reset did not restore the shipped Stillpoint default"
+    note "FAIL wallpaper.reset did not restore the shipped Yosemite plate default"
     FAILED=1
 fi
 
 wallpaper_row="$(ipc commandcenter query wallpaper | tr -d '\r\n\"')"
 check_eq "command center exposes wallpaper as a typed action" \
-    "wallpaper · SetWallpaper(stillpoint) · current" "${wallpaper_row}"
+    "wallpaper · SetWallpaper(yosemite) · current" "${wallpaper_row}"
 ipc commandcenter close >/dev/null 2>&1
 
 bar_state="$(ipc bar state | tr -d '[:space:]"')"

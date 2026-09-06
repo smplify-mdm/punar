@@ -13,7 +13,13 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    readonly property string defaultId: "stillpoint"
+    // The shipped default is a topographic plate: survey contours of a real
+    // place, drawn from the theme's own three tones, so the desktop states the
+    // design language rather than decorating around it. Yosemite because its
+    // valley floor leaves a calm band across the middle of the frame, which is
+    // where windows sit. crater-lake is the quieter alternative if this reads
+    // as too much line work behind a full screen of terminals.
+    readonly property string defaultId: "yosemite"
     readonly property var catalog: [{
         "id": "stillpoint",
         "name": "Stillpoint",
