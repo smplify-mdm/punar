@@ -601,19 +601,6 @@ jobs:
           ./tests/performance/check-budgets.sh \
             os/images/out/debian-amd64-desktop-proof/ram-report.txt
 
-      # x86_64 half of milestone-13's release-image parity. The desktop gate
-      # above runs the dev-profile exercise image; this drives the real
-      # first-account journey on the fixture-free release image, the same way
-      # the ARM64 lane already does. The disk is attached with -snapshot, so
-      # the account and every write are disposable, and only the untouched
-      # first screen and the signed-in desktop are retained — never the
-      # one-time recovery receipt.
-      - name: Fixture-free Debian amd64 onboarding gate
-        run: |
-          ./tools/test-release-onboarding.sh \
-            os/images/out/punar-release-debian-x86_64.qcow2 \
-            os/images/out/debian-amd64-onboarding-proof
-
       - name: Verify candidate checksum
         run: |
           cd os/images/out
@@ -631,7 +618,6 @@ jobs:
             os/images/out/debian-amd64-build-info.txt
             os/images/out/debian-amd64-boot-proof/**
             os/images/out/debian-amd64-desktop-proof/**
-            os/images/out/debian-amd64-onboarding-proof/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -712,6 +698,20 @@ jobs:
             os/images/out/installer-install-proof \
             os/images/cache/cargo-target-amd64-debian/release/punar-release-tool
 
+      # x86_64 half of milestone-13's release-image parity. debian-amd64's
+      # desktop gate runs the dev-profile exercise image; this drives the real
+      # first-account journey on the fixture-free release image, as the ARM64
+      # lane already does. It lives here rather than in debian-amd64 because
+      # only the `iso` build produces punar-release-debian-x86_64.qcow2 —
+      # `all` does not. The disk is attached with -snapshot, so the account and
+      # every write are disposable, and only the untouched first screen and the
+      # signed-in desktop are retained — never the one-time recovery receipt.
+      - name: Fixture-free Debian amd64 onboarding gate
+        run: |
+          ./tools/test-release-onboarding.sh \
+            os/images/out/punar-release-debian-x86_64.qcow2 \
+            os/images/out/debian-amd64-onboarding-proof
+
       - name: Verify Debian installer checksum
         run: |
           cd os/images/out
@@ -729,6 +729,7 @@ jobs:
             os/images/out/debian-amd64-build-info.txt
             os/images/out/installer-boot-proof/**
             os/images/out/installer-install-proof/**
+            os/images/out/debian-amd64-onboarding-proof/**
           compression-level: 1
           if-no-files-found: error
           retention-days: 7
