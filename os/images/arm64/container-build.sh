@@ -372,6 +372,18 @@ install -d -m 0755 -o "${HOST_UID}" -g "${HOST_GID}" \
     "${IMAGES_DIR}/out/arm64-boot-proof" \
     "${IMAGES_DIR}/out/arm64-update-rollback-proof" \
     "${IMAGES_DIR}/out/arm64-desktop-proof"
+# Docker creates out/ as root on a clean checkout, and pre-creating the three
+# proof directories above only covers tools that write inside them. A host-side
+# tool that creates its own temporary file directly under out/ still fails with
+# EACCES, so return the directory itself — the amd64 lane already does this.
+chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out"
+chown "${HOST_UID}:${HOST_GID}" \
+    "${IMAGES_DIR}/out/SHA256SUMS.arm64" \
+    "${IMAGES_DIR}/out/arm64-build-info.txt"
+for image_id in "${BUILT[@]}"; do
+    [ ! -e "${IMAGES_DIR}/out/${image_id}.qcow2" ] \
+        || chown "${HOST_UID}:${HOST_GID}" "${IMAGES_DIR}/out/${image_id}.qcow2"
+done
 
 # mkosi/apt create private root-owned metadata directories. The cache archive
 # is written later by the unprivileged Actions runner, so return ownership of
