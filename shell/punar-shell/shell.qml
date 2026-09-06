@@ -161,6 +161,7 @@ ShellRoot {
         onCommandCenterRequested: commandCenterSurface.openSurface()
         onWindowActionsRequested: windowActionsSurface.openSurface()
         onBrowserContextRequested: systemControlSurface.openSection("applications")
+        onOverviewRequested: overviewSurface.openSurface()
     }
 
     // The normal close path is always available directly on PUNAR+Q. This

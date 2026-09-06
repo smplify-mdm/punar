@@ -75,6 +75,27 @@ DeferredSurfaceBase {
         return out;
     }
 
+    // The lowest id not already taken. Focusing a workspace that does not exist
+    // is what creates it, and a plain number is the ONE selector this surface
+    // already proves works (the cards below dispatch focusWorkspace(ws.id)).
+    // Hyprland also understands selectors like "empty", but an unverified
+    // selector spelling is exactly the kind of guess that has cost this
+    // codebase a gate cycle before.
+    function firstFreeWorkspaceId(): int {
+        var taken = {};
+        for (var i = 0; i < root.allCards.length; i++)
+            taken[root.allCards[i].id] = true;
+        var candidate = 1;
+        while (taken[candidate])
+            candidate += 1;
+        return candidate;
+    }
+
+    function createWorkspace(): void {
+        HyprlandActions.focusWorkspace(root.firstFreeWorkspaceId());
+        root.dismiss();
+    }
+
     function show() {
         if (!root.open)
             SurfaceTiming.begin("overview");
@@ -302,6 +323,44 @@ DeferredSurfaceBase {
                         anchors.rightMargin: 16
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 8
+
+                        // Creating a workspace had no pointer path at all: the
+                        // grid lists what exists, and the only way to make a new
+                        // one was to know a chord. Dashed, because the honesty
+                        // grammar reserves that for "not real yet".
+                        Rectangle {
+                            id: newProjectButton
+
+                            width: newProjectLabel.implicitWidth + 20
+                            height: 20
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: "transparent"
+                            border.width: 1
+                            border.color: newProjectMouse.containsMouse
+                                ? Theme.shellFg : Theme.shellInputBorder
+                            radius: Theme.radiusTag
+
+                            Meta {
+                                id: newProjectLabel
+
+                                anchors.centerIn: parent
+                                font.pixelSize: 9
+                                font.weight: 500
+                                font.letterSpacing: Theme.tracking(9, 0.13)
+                                color: newProjectMouse.containsMouse
+                                    ? Theme.shellFg : Theme.shellMuted
+                                text: "+ New project"
+                            }
+
+                            MouseArea {
+                                id: newProjectMouse
+
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.createWorkspace()
+                            }
+                        }
 
                         Item {
                             width: 200

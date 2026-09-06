@@ -77,6 +77,8 @@ Scope {
     // Bar still does not reach into a sibling surface directly.
     signal browserContextRequested()
 
+    signal overviewRequested()
+
     // Active Hyprland workspace in the masthead grammar (M2 named project
     // workspaces): a named workspace shows its NAME, an unnamed one falls
     // back to the number — Hyprland reports unnamed workspaces with the
@@ -325,9 +327,27 @@ Scope {
                         onClicked: root.commandCenterRequested()
                     }
                 }
-                MetaLabel {
+                Item {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: " · " + root.workspaceLabel
+                    implicitWidth: workspaceLabel.implicitWidth
+                    implicitHeight: workspaceLabel.implicitHeight
+
+                    MetaLabel {
+                        id: workspaceLabel
+
+                        text: " · " + root.workspaceLabel
+                    }
+
+                    // The workspace indicator is the one thing a pointer user
+                    // reaches for to change workspace, and it did nothing at
+                    // all. It opens the overview — the surface that already
+                    // owns switching and, now, creating.
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.overviewRequested()
+                    }
                 }
                 Item {
                     id: focusedAppButton
