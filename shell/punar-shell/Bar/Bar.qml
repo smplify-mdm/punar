@@ -572,12 +572,21 @@ Scope {
                         // inside singleton functions are not tracked reliably.
                         var instant = minuteClock.date && minuteClock.date.getTime
                                 ? minuteClock.date.getTime() : Date.now();
-                        if (immediateClockText !== ""
+                        if (timeZoneRevision < 0)
+                            return "";
+                        // Date and time are formatted SEPARATELY, and the time
+                        // keeps the exact "HH:mm" literal: LocalTime.format()
+                        // fast-paths that one pattern to the one-shot `date`
+                        // probe so a timezone change shows immediately instead
+                        // of at the next minute tick. A combined pattern such
+                        // as "ddd d MMM HH:mm" would miss that branch and
+                        // silently reintroduce the delay it exists to remove.
+                        var timeText = (immediateClockText !== ""
                                 && immediateClockMinute === Math.floor(instant / 60000))
-                            return immediateClockText;
-                        return timeZoneRevision >= 0
-                                ? LocalTime.format(minuteClock.date, "HH:mm")
-                                : "";
+                                ? immediateClockText
+                                : LocalTime.format(minuteClock.date, "HH:mm");
+                        var dateText = LocalTime.format(minuteClock.date, "ddd d MMM");
+                        return dateText === "" ? timeText : dateText + "  " + timeText;
                     }
                     color: Theme.shellInk2
                 }
