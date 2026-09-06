@@ -29,21 +29,6 @@ return function(ctx)
     bind(mod .. " + CTRL + K", hl.dsp.window.move({ into_group = "up" }), "Move window into group above")
     bind(mod .. " + CTRL + L", hl.dsp.window.move({ into_group = "right" }), "Move window into group right")
 
-    -- Pointer move and resize. Hyprland draws no server-side titlebars and
-    -- punar-look disables decoration, so before these a floating window
-    -- (PUNAR + V) could not be moved or resized with a mouse at all: the
-    -- keyboard grammar above was the only way to do either. bindm did not
-    -- appear anywhere in this tree.
-    --
-    -- The Lua spelling is verified AT RUNTIME by surfaces-check.sh reading
-    -- `hyprctl binds -j`, not here. A key or option the provider does not
-    -- understand is dropped silently rather than refused, so a static reading
-    -- of the config proves nothing about whether the bind exists.
-    bind(mod .. " + mouse:272", hl.dsp.window.drag(), "Move window with pointer",
-        { drag = true })
-    bind(mod .. " + mouse:273", hl.dsp.window.resize(), "Resize window with pointer",
-        { drag = true })
-
     bind(mod .. " + R", hl.dsp.submap("resize"), "Enter resize mode")
     hl.define_submap("resize", function()
         bind("H", hl.dsp.window.resize({ x = -40, y = 0, relative = true }), "Resize narrower", { repeating = true })
