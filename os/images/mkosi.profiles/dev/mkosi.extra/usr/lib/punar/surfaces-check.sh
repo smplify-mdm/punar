@@ -1158,6 +1158,31 @@ else
     FAILED=1
 fi
 
+# --- group 8b: a pointer can move and resize a window -----------------------
+# Hyprland registers no default mouse bindings once a config exists, and this
+# compositor draws no titlebars, so without an explicit drag bind a floating
+# window cannot be moved or resized by pointer at all. The config is not the
+# evidence: an unrecognised key or option is dropped silently, so the only
+# proof a bind exists is the compositor's own bind table.
+hyprctl -j binds > /run/punar/surfaces-binds.json 2>/dev/null || true
+if jq -e 'map(select(.mouse == true)) | length >= 2' \
+        /run/punar/surfaces-binds.json >/dev/null 2>&1; then
+    note "ok   the compositor registered pointer drag bindings"
+else
+    note "FAIL no pointer drag bindings registered; windows cannot be moved or resized by mouse"
+    FAILED=1
+fi
+for want in movewindow resizewindow; do
+    if jq -e --arg d "${want}" \
+            'map(select(.mouse == true and (.dispatcher | test($d)))) | length >= 1' \
+            /run/punar/surfaces-binds.json >/dev/null 2>&1; then
+        note "ok   a pointer bind dispatches ${want}"
+    else
+        note "FAIL no pointer bind dispatches ${want}"
+        FAILED=1
+    fi
+done
+
 # --- group 9: an unattended session locks itself ----------------------------
 # The lock surface and its PAM stack existed long before anything invoked them
 # on their own: locking was always a deliberate act (PUNAR + Escape), so a
