@@ -1272,6 +1272,93 @@ else
 fi
 rm -f "${idle_probe_conf}" "${idle_probe_flag}"
 
+# --- group 10: an application can actually notify ---------------------------
+#
+# THE GAP THIS CLOSES. Punar ships a real freedesktop notification daemon
+# (Services/Notifications.qml binds org.freedesktop.Notifications through
+# Quickshell's NotificationServer), a centre that keeps records, and toasts.
+# None of it had ever been proven end to end: before this group, no script in
+# os/images, tools/ or tests/ ever SENT a notification. The surfaces sweep above
+# opens the centre and screenshots it, which proves the window renders and
+# nothing at all about whether an application can reach it.
+#
+# That is the exact failure the daemon's own ownership probe exists to catch.
+# Quickshell yields the bus name SILENTLY when another daemon already holds it —
+# it logs a line no user reads and then simply receives nothing, which looks
+# identical to "nobody has notified you". Shipping that unproven is precisely
+# what spec 1.22 forbids.
+#
+# WHY busctl AND NOT notify-send. No libnotify ships in this image, and adding a
+# package so a test can pass would make the gate prove something about the test
+# harness rather than about the product. busctl is already present — the shell
+# itself uses it for the ownership probe — and calling Notify directly over
+# D-Bus is a truer test anyway: it is the raw freedesktop interface any
+# application would use, with no convenience layer standing in.
+notif_app="Punar Gate Probe"
+
+# (1) Punar must actually OWN the name in this image. "punar" is proven by PID
+#     comparison against Quickshell.processId; "foreign" means another daemon
+#     holds it and nothing reaches us; "unverified" means the probe could not
+#     run and is NOT treated as success — the absence of an answer is not an
+#     answer.
+notif_owner="$(ipc notifications owner | tr -d '[:space:]"')"
+check_eq "notifications.owner" "punar" "${notif_owner}"
+
+# (2) The negative leg FIRST, so the positive one cannot be vacuous: the probe's
+#     app name must not already be a group. Without this, a pre-existing row
+#     would make step (4) pass while proving nothing.
+notif_groups_before="$(ipc notifications groups | tr -d '"')"
+case "|${notif_groups_before}|" in
+    *"|${notif_app}|"*)
+        note "FAIL '${notif_app}' was already a notification group before the probe sent anything"
+        FAILED=1 ;;
+    *)  note "ok   '${notif_app}' is not a group before the probe sends" ;;
+esac
+notif_count_before="$(ipc notifications count | tr -d '[:space:]"')"
+
+# (3) Send one real notification over the session bus. Signature is the
+#     freedesktop Notify contract: app_name, replaces_id, icon, summary, body,
+#     actions[], hints{}, expire_timeout. -1 is the server's own default expiry.
+busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+    org.freedesktop.Notifications Notify "susssasa{sv}i" \
+    "${notif_app}" 0 "" "Gate probe" "sent by surfaces-check over D-Bus" 0 0 -1 \
+    >/dev/null 2>&1 || true
+
+# (4) MEASURE the effect; never trust the sender's exit status. busctl can
+#     return 0 having reached a bus that dropped the call on the floor.
+notif_seen=0
+notif_waited=0
+while [ "${notif_waited}" -lt 15 ]; do
+    notif_groups_after="$(ipc notifications groups | tr -d '"')"
+    case "|${notif_groups_after}|" in
+        *"|${notif_app}|"*) notif_seen=1; break ;;
+    esac
+    sleep 1
+    notif_waited=$((notif_waited + 1))
+done
+if [ "${notif_seen}" -eq 1 ]; then
+    note "ok   the notification reached the centre grouped under '${notif_app}' after ${notif_waited}s"
+else
+    note "FAIL no notification from '${notif_app}' reached the centre within 15s (groups: '${notif_groups_after:-}')"
+    FAILED=1
+fi
+
+# (5) The record COUNT moved too. Grouping alone could in principle be
+#     satisfied by a header with no row under it.
+notif_count_after="$(ipc notifications count | tr -d '[:space:]"')"
+if [ "${notif_count_after:-0}" -gt "${notif_count_before:-0}" ]; then
+    note "ok   centre record count rose ${notif_count_before} -> ${notif_count_after}"
+else
+    note "FAIL centre record count did not rise (${notif_count_before} -> ${notif_count_after})"
+    FAILED=1
+fi
+
+# (6) Leave the centre as we found it, and prove clearing is real rather than
+#     cosmetic — a centre that cannot forget is its own defect.
+ipc notifications clear >/dev/null 2>&1 || true
+notif_count_cleared="$(ipc notifications count | tr -d '[:space:]"')"
+check_eq "notifications.count after clear" "0" "${notif_count_cleared}"
+
 # --- artifacts --------------------------------------------------------------
 hyprctl -j clients > /run/punar/surfaces-clients.json 2>/dev/null || true
 

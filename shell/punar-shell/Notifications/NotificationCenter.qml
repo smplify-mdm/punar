@@ -526,6 +526,29 @@ DeferredSurfaceBase {
         return String(root.rowCount);
     }
 
+    // The group SOURCES, in the order the centre draws them, "|"-separated.
+    //
+    // Exists for one reason: nothing outside this process could previously
+    // observe that records are grouped BY APPLICATION. `ipcCount` proves a
+    // record arrived and `ipcFocused` names a selection, but neither can tell
+    // "grouped under the sending application" from "one flat list", so the
+    // in-VM gate had no way to assert the grouping contract except from a
+    // screenshot — which proves almost nothing and rots silently.
+    //
+    // It publishes only what the centre already draws on screen as a heading,
+    // so it widens no privacy boundary: the source is `appName` as the sending
+    // application supplied it (Services/Notifications.qml sourceOf), never a
+    // pid, a bus name or a cmdline.
+    function ipcGroups(): string {
+        var out = [];
+        var groups = Notifications.groups;
+        if (!Array.isArray(groups))
+            return "";
+        for (var i = 0; i < groups.length; i++)
+            out.push(String(groups[i].source));
+        return out.join("|");
+    }
+
     function ipcFocused(): string {
         return root.selectedKey;
     }

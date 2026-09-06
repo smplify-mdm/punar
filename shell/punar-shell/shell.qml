@@ -602,6 +602,14 @@ ShellRoot {
             notificationCenterSurface.releaseIfClosed();
             return result;
         }
+        function groups(): string {
+            var surface = notificationCenterSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcGroups();
+            notificationCenterSurface.releaseIfClosed();
+            return result;
+        }
         function owner(): string {
             var surface = notificationCenterSurface.ensureLoaded(false);
             if (surface === null)
