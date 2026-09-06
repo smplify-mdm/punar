@@ -675,6 +675,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils ovmf python3-jsonschema \
+            netcat-openbsd \
             btrfs-progs cryptsetup-bin dosfstools mtools xorriso
 
       - name: Enable KVM access for the runner user
@@ -765,7 +766,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-arm qemu-efi-aarch64 qemu-utils mtools zstd
+            qemu-system-arm qemu-efi-aarch64 qemu-utils mtools zstd \
+            netcat-openbsd
 
       - name: Verify native image checksum
         run: |
