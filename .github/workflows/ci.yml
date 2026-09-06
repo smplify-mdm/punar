@@ -794,6 +794,7 @@ jobs:
       # item 7).
       - name: Production Raspberry Pi install bundle (real pinned firmware)
         run: |
+          df -h /
           ./tools/build-raspberry-pi-install-bundle.sh \
             os/images/out/punar-release-arm64.qcow2 \
             "$(date -u +%Y.%m.%d).1" \
