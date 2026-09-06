@@ -1158,6 +1158,86 @@ else
     FAILED=1
 fi
 
+# --- group 9: an unattended session locks itself ----------------------------
+# The lock surface and its PAM stack existed long before anything invoked them
+# on their own: locking was always a deliberate act (PUNAR + Escape), so a
+# walked-away machine stayed open. hypridle now closes that.
+#
+# The shipped policy is a ten-minute timeout, which no gate can wait for, and
+# firing it for real would lock the session out from under every later
+# exercise. So the two halves are proven separately: the POLICY is asserted
+# from the shipped config, and the MECHANISM is proven live below with a
+# throwaway listener. What is deliberately NOT proven here is the composition —
+# that the shipped ten-minute listener reaches the lock. That needs a human or
+# a dedicated long-idle run.
+IDLE_CONF=/etc/xdg/hypr/punar-hypridle.conf
+if pgrep -u "$(id -un)" -f "hypridle -c ${IDLE_CONF}" >/dev/null 2>&1; then
+    note "ok   hypridle runs in the session against the shipped system config"
+else
+    note "FAIL no hypridle is running against ${IDLE_CONF}; an idle session never locks"
+    FAILED=1
+fi
+
+if [ -f "${IDLE_CONF}" ] && [ ! -w "${IDLE_CONF}" ]; then
+    note "ok   idle policy is present and not writable by the session user"
+else
+    note "FAIL ${IDLE_CONF} is missing or writable by $(id -un); auto-lock could be edited away"
+    FAILED=1
+fi
+
+idle_timeout="$(awk '/^[[:space:]]*timeout[[:space:]]*=/ {print $3; exit}' "${IDLE_CONF}" 2>/dev/null)"
+if [ -n "${idle_timeout}" ] && [ "${idle_timeout}" -gt 0 ] && [ "${idle_timeout}" -le 1800 ]; then
+    note "ok   idle timeout is ${idle_timeout}s, inside the half-hour ceiling"
+else
+    note "FAIL idle timeout '${idle_timeout}' is absent, zero or over 1800s"
+    FAILED=1
+fi
+
+if grep -qE '^[[:space:]]*lock_cmd[[:space:]]*=.*ipc call lock lock' "${IDLE_CONF}" 2>/dev/null; then
+    note "ok   idle policy locks through the shell's own lock surface"
+else
+    note "FAIL idle policy does not route locking to the Punar lock surface"
+    FAILED=1
+fi
+
+# The packaged unit carries no -c, so an enabled copy would both duplicate the
+# daemon and fail against a user config this image does not ship.
+if find /usr/lib/systemd/user /etc/systemd/user -name 'hypridle.service' -path '*.wants/*' 2>/dev/null | grep -q .; then
+    note "FAIL the packaged hypridle.service is enabled; it would duplicate the session daemon"
+    FAILED=1
+else
+    note "ok   the packaged hypridle.service stays disabled"
+fi
+
+# MECHANISM, live: a throwaway listener with a two-second timeout proves the
+# compositor actually delivers ext-idle-notify-v1 to a hypridle client in this
+# session. It touches a file instead of locking, so the gate stays usable.
+idle_probe_conf=/run/punar/surfaces-idle-probe.conf
+idle_probe_flag=/run/punar/surfaces-idle-probe.fired
+rm -f "${idle_probe_flag}"
+cat > "${idle_probe_conf}" <<PROBE
+listener {
+    timeout = 2
+    on-timeout = touch ${idle_probe_flag}
+}
+PROBE
+hypridle -c "${idle_probe_conf}" >/dev/null 2>&1 &
+idle_probe_pid=$!
+idle_waited=0
+while [ "${idle_waited}" -lt 20 ] && [ ! -e "${idle_probe_flag}" ]; do
+    sleep 1
+    idle_waited=$((idle_waited + 1))
+done
+kill "${idle_probe_pid}" 2>/dev/null || true
+wait "${idle_probe_pid}" 2>/dev/null || true
+if [ -e "${idle_probe_flag}" ]; then
+    note "ok   the compositor delivered an idle notification to hypridle after ${idle_waited}s"
+else
+    note "FAIL no idle notification reached hypridle within 20s; the idle path is dead"
+    FAILED=1
+fi
+rm -f "${idle_probe_conf}" "${idle_probe_flag}"
+
 # --- artifacts --------------------------------------------------------------
 hyprctl -j clients > /run/punar/surfaces-clients.json 2>/dev/null || true
 

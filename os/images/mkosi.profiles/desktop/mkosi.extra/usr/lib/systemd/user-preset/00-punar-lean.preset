@@ -2,9 +2,17 @@
 # its API and lifecycle jobs are opt-in. Hyprland owns exactly one deliberate
 # Foot server process, so the package's separate systemd server/socket must not
 # create a duplicate. PipeWire's unused generic filter chain also stays off.
+#
+# hypridle is the same case twice over. Hyprland starts it from the
+# hyprland.start block with an explicit system config, and the packaged unit's
+# ExecStart carries no -c — its default is ${XDG_CONFIG_HOME}/hypr/hypridle.conf,
+# which this image deliberately does not ship, so an enabled unit would both
+# duplicate the daemon and fail. Leaving it enabled would also add an unreviewed
+# .wants link and trip release-image policy A9.
 disable podman*.service
 disable podman*.socket
 disable podman*.timer
 disable foot-server.service
 disable foot-server.socket
+disable hypridle.service
 disable filter-chain.service

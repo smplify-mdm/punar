@@ -31,6 +31,12 @@ hl.on("hyprland.start", function()
     hl.exec_cmd(layoutScript .. " restore")
     hl.exec_cmd("systemctl --user start hyprpolkitagent.service")
     hl.exec_cmd("foot --server")
+    -- Idle auto-lock. Started here rather than through the packaged
+    -- hypridle.service (disabled in 00-punar-lean.preset) because that unit's
+    -- ExecStart carries no -c and would read a user config this image does not
+    -- ship. hypridle waits on ext-idle-notify-v1, so it adds no timer wakeups
+    -- at idle.
+    hl.exec_cmd("hypridle -c /etc/xdg/hypr/punar-hypridle.conf")
 end)
 
 hl.config({

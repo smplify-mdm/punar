@@ -131,6 +131,12 @@ stage_desktop_extra() {
     # Hyprland config. Lua is the supported provider from 0.55 onward; 0.56
     # warns on every legacy .conf session and 0.57 removes that parser.
     cp "${mod}"/hypr/*.lua "${extra}/etc/xdg/hypr/"
+    # The glob above is deliberately *.lua only — the .conf files beside it are
+    # the superseded legacy provider. The idle policy is not Hyprland config, it
+    # is hypridle's, so it is named explicitly rather than widening the glob and
+    # silently staging the legacy set.
+    install -m 0644 "${mod}/hypr/punar-hypridle.conf" \
+        "${extra}/etc/xdg/hypr/punar-hypridle.conf"
     # Product hook: deliberately empty. The dev profile overlays this exact
     # file with the desktop-ready CI marker; a release session starts no test
     # process merely because Hyprland launched.
