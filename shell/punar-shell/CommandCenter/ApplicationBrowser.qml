@@ -47,13 +47,50 @@ Item {
 
     implicitHeight: 480
 
+    // WEB APPS ARE A SOURCE, NOT A CATEGORY. A category says what an
+    // application is FOR — Slack is communication whether it arrives as a
+    // Flatpak or as a Chromium app-mode window — so folding "web app" into
+    // the category axis would make the taxonomy answer two questions at
+    // once and get both wrong. It is therefore a filter over `sources`,
+    // sharing the chip row because that is where a reader looks for
+    // narrowing, and keyed `source:` so it can never collide with a
+    // category id (the schema's category enum is plain words, no colons).
+    readonly property string webFilterId: "source:web"
+
+    function hasWebSource(app: var): bool {
+        if (app === null || app === undefined)
+            return false;
+        var srcs = app.sources;
+        if (!Array.isArray(srcs))
+            return false;
+        for (var i = 0; i < srcs.length; i++) {
+            if (srcs[i] !== null && typeof srcs[i] === "object"
+                && String(srcs[i].kind) === "web")
+                return true;
+        }
+        return false;
+    }
+
+    readonly property bool anyWebApp: {
+        var all = Catalog.entries;
+        if (!Array.isArray(all))
+            return false;
+        for (var i = 0; i < all.length; i++) {
+            if (root.hasWebSource(all[i]))
+                return true;
+        }
+        return false;
+    }
+
     function availableCatalog(query: string): var {
         var source = Catalog.search(query, 0);
         var out = [];
+        var webOnly = root.selectedCategory === root.webFilterId;
         for (var i = 0; i < source.length; i++) {
             var inCategory = String(query).trim() !== ""
                 || root.selectedCategory === "all"
-                || String(source[i].category) === root.selectedCategory;
+                || (webOnly ? root.hasWebSource(source[i])
+                            : String(source[i].category) === root.selectedCategory);
             if (inCategory && !Apps.catalogAppInstalled(source[i]))
                 out.push(source[i]);
         }
@@ -266,7 +303,8 @@ Item {
                         width: parent.width
                         text: root.query.trim() !== "" ? "Search results"
                             : (root.selectedCategory === "all" ? "Applications"
-                                : Catalog.categoryLabel(root.selectedCategory) + " applications")
+                                : (root.selectedCategory === root.webFilterId ? "Web applications"
+                                    : Catalog.categoryLabel(root.selectedCategory) + " applications"))
                         font.family: Theme.fontSans
                         font.pixelSize: 21
                         font.weight: 600
@@ -277,7 +315,9 @@ Item {
                         width: parent.width
                         text: root.selectedCategory === "all"
                             ? "Open what is installed or inspect permissions before adding reviewed software."
-                            : "Reviewed tools in this category. Type at any time to search the entire catalog."
+                            : (root.selectedCategory === root.webFilterId
+                                ? "Opened in a Chromium app-mode window. Nothing is installed natively."
+                                : "Reviewed tools in this category. Type at any time to search the entire catalog.")
                         font.family: Theme.fontSans
                         font.pixelSize: 12
                         color: Theme.shellInk2
@@ -415,6 +455,15 @@ Item {
                         categoryId: String(modelData.id)
                         categoryLabel: String(modelData.label)
                     }
+                }
+
+                // Last in the row, and absent entirely when the catalog
+                // ships no web app — a filter that can only ever return
+                // nothing is a dead control.
+                CategoryButton {
+                    categoryId: root.webFilterId
+                    categoryLabel: "Web apps"
+                    visible: root.anyWebApp
                 }
             }
 
