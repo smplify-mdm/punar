@@ -323,6 +323,7 @@ jobs:
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
+            tests/images/raspberry-pi-bundle-check.sh \
             tests/images/tree-manifest-test.sh \
             tests/images/developer-baseline-contract-test.sh \
             tests/images/debian-substrate-contract-test.sh \
@@ -749,7 +750,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-arm qemu-efi-aarch64 qemu-utils
+            qemu-system-arm qemu-efi-aarch64 qemu-utils mtools zstd
 
       - name: Verify native image checksum
         run: |
@@ -781,6 +782,27 @@ jobs:
 
       - name: Native ARM64 automatic rollback gate
         run: ./tools/update-rollback-test-arm64.sh
+
+      # tests/images/raspberry-pi-bootfs-test.sh proves the assembler against
+      # tiny synthetic inputs on every push. This builds the artifact a board
+      # would actually be written with: the official pinned raspberrypi/firmware
+      # tree, a generated initramfs and the staged modules from the real ARM64
+      # release image. Transient cost is roughly 20 GB (a 9 GB raw conversion
+      # plus the 8 GiB root payload) inside the container's /var/tmp and
+      # os/images/out. Signing still uses an ephemeral per-run key: this is
+      # software-path evidence, not a release (docs/development/user-blocked.md
+      # item 7).
+      - name: Production Raspberry Pi install bundle (real pinned firmware)
+        run: |
+          ./tools/build-raspberry-pi-install-bundle.sh \
+            os/images/out/punar-release-arm64.qcow2 \
+            "$(date -u +%Y.%m.%d).1" \
+            os/images/out/raspberry-pi-installer
+
+      - name: Verify the Pi bundle carries production firmware, not fixtures
+        run: |
+          ./tests/images/raspberry-pi-bundle-check.sh \
+            os/images/out/raspberry-pi-installer
 
       - name: Native ARM64 desktop gate
         if: steps.arm_accel.outputs.available == 'true'
@@ -830,6 +852,10 @@ jobs:
             os/images/out/arm64-release-onboarding-proof/**
             os/images/out/arm64-update-rollback-proof/**
             os/images/out/arm64-desktop-proof/**
+            os/images/out/raspberry-pi-installer/release/release.json
+            os/images/out/raspberry-pi-installer/release/release.json.sig
+            os/images/out/raspberry-pi-installer/release/root-a.sha256
+            os/images/out/raspberry-pi-installer/release/root-a.bytes
           if-no-files-found: warn
           retention-days: 7
 
