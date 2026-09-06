@@ -8,6 +8,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISO=${1:-}
 PROOF_DIR=${2:-"${REPO_ROOT}/os/images/out/installer-install-proof"}
+# Absolute, always: `docker -v` reads a relative source as a NAMED VOLUME and
+# refuses it, so a caller passing os/images/out/... silently loses the bind
+# mount instead of getting an error about the path.
+mkdir -p "${PROOF_DIR}"
+PROOF_DIR="$(cd "${PROOF_DIR}" && pwd)"
 RELEASE_TOOL=${3:-${PUNAR_RELEASE_TOOL:-"${REPO_ROOT}/os/images/cache/cargo-target/release/punar-release-tool"}}
 TARGET_BYTES=$((128 * 1024 * 1024 * 1024))
 SMALL_TARGET_BYTES=$((20 * 1024 * 1024 * 1024))
@@ -720,6 +725,7 @@ AUDIT_EVENTS
 # the same containerized harness tools/validate-schemas.sh and the M9 gate use,
 # since this host is not assumed to have jsonschema.
 if command -v docker >/dev/null 2>&1; then
+    set +e
     docker run --rm -v "${REPO_ROOT}:/w" -v "${PROOF_DIR}:/proof:ro" \
         -w /w python:3.12-slim sh -c \
         "pip install -q jsonschema pyyaml referencing && \
@@ -727,9 +733,23 @@ if command -v docker >/dev/null 2>&1; then
            python tools/validate_schemas.py \
              --document /proof/installed-audit-\${slug}.json \
              --schema schemas/audit/audit-event.json || exit 1; \
-         done" \
-        || die 'an installed audit event does not validate against schemas/audit/audit-event.json'
-    echo '==> installed audit handoff validates against schemas/audit/audit-event.json'
+         done"
+    validator_status=$?
+    set -e
+    case "${validator_status}" in
+        0)
+            echo '==> installed audit handoff validates against schemas/audit/audit-event.json'
+            ;;
+        1)
+            die 'an installed audit event does not validate against schemas/audit/audit-event.json'
+            ;;
+        # Anything else is the harness failing, not the artifact. Reporting a
+        # docker or image error as a schema rejection sends the next person to
+        # debug punard instead of the test.
+        *)
+            die "the installed-audit validator could not run (exit ${validator_status})"
+            ;;
+    esac
 else
     echo 'warning: docker is unavailable, so the installed audit events were not' >&2
     echo 'warning: re-validated against schemas/audit/audit-event.json; the jq shape' >&2
