@@ -148,14 +148,55 @@ FocusScope {
                 "tone": "none"
             });
         }
+        var drawn = ({});
         for (i = 0; i < Agents.detections.length; i++) {
             var d = Agents.detections[i];
             if (d === null || typeof d !== "object")
                 continue;
             total++;
+            var did = String(d.session_id || d.detection_id || "");
+            if (did !== "")
+                drawn[did] = true;
             out.push({
                 "text": String(d.agent || d.executable || "unrecognised process")
                     + " · unknown · suspected",
+                "tone": "bad"
+            });
+        }
+
+        // A RAISED ALERT WHOSE PROCESS HAS GONE still owns the bar. The
+        // count above is `max(agents.json, alerts.json)` because D-016
+        // Sect II·04 makes the residue last as long as the ALERT, not as
+        // long as the process (see `unknownCount`). Drawing rows from
+        // `Agents.detections` alone therefore left the one state the bar
+        // most needs to explain — badge says N, body says "nothing
+        // registered" — which reads as an alarm with no subject and
+        // teaches the reader to dismiss the badge unread.
+        //
+        // The alert record carries its own identity (ipc.md §20: agent,
+        // executable, owner, signature, last_seen), so the row is drawn
+        // from the file that is still asserting something, and it does
+        // not claim the process is running: `Alerts.isLive` decides
+        // between SUSPECTED and a last-seen stamp. An alert that a live
+        // detection already drew is skipped by `detection_id`, so the
+        // two files can never produce the same row twice.
+        for (i = 0; i < Alerts.active.length; i++) {
+            var a = Alerts.active[i];
+            var aid = Alerts.str(a, "detection_id");
+            if (aid !== "" && drawn[aid] === true)
+                continue;
+            total++;
+            var who = Alerts.str(a, "agent");
+            if (who === "")
+                who = Alerts.str(a, "executable");
+            if (who === "")
+                who = "unrecognised process";
+            var when = cluster.stamp(Alerts.str(a, "last_seen"));
+            out.push({
+                "text": who + (Alerts.isLive(a)
+                    ? " · unknown · suspected"
+                    : (when === "" ? " · unknown · no longer running"
+                                   : " · unknown · last seen " + when)),
                 "tone": "bad"
             });
         }
