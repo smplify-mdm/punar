@@ -382,7 +382,7 @@ same pinned snapshot. `punar-release-arm64.qcow2` is **0.985 GiB allocated /
 33 GiB virtual** with SHA-256
 `3c82250e43b3923c40eb2a5165bf54f79af12e886bc3fe534d6db58b2db35bf9`;
 its embedded provenance records source commit `e29edbd`.
-`tools/test-release-onboarding-arm64.sh` booted that exact hash with a
+`tools/test-release-onboarding.sh` booted that exact hash with a
 disposable snapshot disk and emitted `PUNAR_ONBOARDING_OK`: the real keyboard
 path created the first account, the one-time recovery receipt appeared, its
 focused default action entered through the one-use PAM token, and the actual

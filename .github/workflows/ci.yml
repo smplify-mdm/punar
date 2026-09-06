@@ -299,7 +299,7 @@ jobs:
             tools/fetch-raspberry-pi-firmware.sh \
             tools/stage-raspberry-pi-root.sh \
             tools/update-rollback-test-arm64.sh \
-            tools/test-release-onboarding-arm64.sh \
+            tools/test-release-onboarding.sh \
             tools/demo-arm64-vm.sh \
             tools/check-hyprland-dispatchers.sh \
             os/images/check-release-image.sh \
@@ -601,6 +601,19 @@ jobs:
           ./tests/performance/check-budgets.sh \
             os/images/out/debian-amd64-desktop-proof/ram-report.txt
 
+      # x86_64 half of milestone-13's release-image parity. The desktop gate
+      # above runs the dev-profile exercise image; this drives the real
+      # first-account journey on the fixture-free release image, the same way
+      # the ARM64 lane already does. The disk is attached with -snapshot, so
+      # the account and every write are disposable, and only the untouched
+      # first screen and the signed-in desktop are retained — never the
+      # one-time recovery receipt.
+      - name: Fixture-free Debian amd64 onboarding gate
+        run: |
+          ./tools/test-release-onboarding.sh \
+            os/images/out/punar-release-debian-x86_64.qcow2 \
+            os/images/out/debian-amd64-onboarding-proof
+
       - name: Verify candidate checksum
         run: |
           cd os/images/out
@@ -618,6 +631,7 @@ jobs:
             os/images/out/debian-amd64-build-info.txt
             os/images/out/debian-amd64-boot-proof/**
             os/images/out/debian-amd64-desktop-proof/**
+            os/images/out/debian-amd64-onboarding-proof/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -821,7 +835,7 @@ jobs:
       - name: Fixture-free native ARM64 onboarding gate
         if: steps.arm_accel.outputs.available == 'true'
         run: |
-          ./tools/test-release-onboarding-arm64.sh \
+          ./tools/test-release-onboarding.sh \
             os/images/out/punar-release-arm64.qcow2 \
             os/images/out/arm64-release-onboarding-proof
 

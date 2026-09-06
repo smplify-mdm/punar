@@ -16,7 +16,7 @@
 
 ## Current implementation evidence
 
-`tools/test-release-onboarding-arm64.sh` is the executable clean-release gate.
+`tools/test-release-onboarding.sh` is the executable clean-release gate.
 It boots the fixture-free image through QEMU in mandatory snapshot mode, waits
 for framebuffer states rather than sleeping blindly, drives the real keyboard
 fields, creates the first local account, observes the recovery receipt, enters
