@@ -275,6 +275,15 @@ run_release_tool verify-artifact "$(container_path "${PAYLOAD}")" \
 run_release_tool verify-artifact "$(container_path "${BOOTFS}")" \
     "${BOOTFS_DIGEST}" "${BOOTFS_SIZE}"
 
+# The release tool runs as container root, so on Linux the public key and the
+# signature land root-owned in the bind mount and the chmod below fails with
+# EPERM. Docker Desktop on macOS maps ownership back to the invoking user,
+# which is why this only ever breaks in CI. Hand the tree back the way the
+# image builder already does for its own outputs.
+docker run --rm --platform linux/arm64 \
+    --volume "${REPO_ROOT}:/work" --workdir /work rust:1.95.0-slim \
+    chown -R "${HOST_UID}:${HOST_GID}" "$(container_path "${OUT_ROOT}")"
+
 rm -f "${RELEASE_DIR}/root-a.sha256" "${RELEASE_DIR}/root-a.bytes"
 chmod 0644 "${KEY_DIR}/ephemeral-ci.pub" "${RELEASE_DIR}/release.json" \
     "${RELEASE_DIR}/release.json.sig" "${PAYLOAD}" "${BOOTFS}"
