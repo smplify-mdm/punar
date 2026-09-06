@@ -29,6 +29,8 @@ pragma ComponentBehavior: Bound
 // screen is the last surface that should acquire an animation budget.
 
 import QtQuick
+import QtQuick.Effects
+import Quickshell
 import Quickshell.Wayland
 import "../Theme"
 import "../Services"
@@ -51,7 +53,78 @@ WlSessionLockSurface {
 
     signal submitted(string passphrase)
 
+    // The flat theme field stays the FLOOR of this surface, never a
+    // decoration on top of one: if the image below fails to load, is absent,
+    // or the active wallpaper is a vector plate, what remains is exactly the
+    // lock screen that shipped before — calm paper, full contrast, nothing
+    // broken and nothing missing.
     color: Theme.shellSurface
+
+    // ---- the frosted field (owner request) ----------------------------
+    //
+    // The lock screen showed a flat colour while the desktop behind it showed
+    // the wallpaper, so unlocking read as arriving at a different machine.
+    // The wallpaper now shows through, heavily blurred and behind a scrim, so
+    // it reads as the same desk seen through glass rather than as a backdrop
+    // competing with the passphrase.
+    //
+    // ONLY RASTER ENTRIES ARE DRAWN. A vector plate's substituted drawing
+    // lives in a runtime file that Wallpaper.qml owns and regenerates on every
+    // theme change; reaching into another surface's private render target from
+    // the lock screen would couple the two and give the most
+    // security-sensitive surface a dependency it cannot verify. A plate is
+    // mostly its flat field colour anyway, so falling back to that colour is
+    // very close to the plate itself — and it is honest, which the coupling
+    // would not be.
+    //
+    // READING WallpaperState HERE IS SAFE, and is the opposite of the
+    // greeter's situation: the lock surface runs inside the user's own already
+    // authenticated session, so the preference it reads is the same user's.
+    // The greeter runs before any session exists and must never take its
+    // first frame from a user-writable file (see Greeter/shell.qml).
+    readonly property bool showsPhoto: !WallpaperState.activeIsVector
+        && WallpaperState.activeFile !== ""
+
+    Image {
+        id: lockField
+        anchors.fill: parent
+        visible: false // consumed by the effect below, never drawn directly
+        source: surface.showsPhoto
+            ? "file://" + Quickshell.shellDir + "/Wallpaper/assets/" + WallpaperState.activeFile
+            : ""
+        fillMode: Image.PreserveAspectCrop
+        // Decoded at a fraction of the output and then blurred: a lock screen
+        // holds this texture for as long as the machine is locked, and a blur
+        // this heavy cannot show detail the full-size decode would have paid
+        // for. Idle RAM is the budget this surface competes for.
+        sourceSize: Qt.size(Math.round(surface.width / 3), Math.round(surface.height / 3))
+        asynchronous: true
+        cache: false
+    }
+
+    MultiEffect {
+        anchors.fill: parent
+        source: lockField
+        visible: surface.showsPhoto && lockField.status === Image.Ready
+        autoPaddingEnabled: false
+        blurEnabled: true
+        blur: 1.0
+        blurMax: 48
+        // Pulled toward the surface's own value so the frost belongs to the
+        // theme rather than to the photograph.
+        saturation: -0.35
+        brightness: Theme.moodPanel ? -0.25 : 0.10
+    }
+
+    // The scrim is what makes the type legible, and it is deliberately heavy:
+    // the passphrase field is a single hairline with no box, so the ground
+    // beneath it has to be quiet enough that a hairline still reads.
+    Rectangle {
+        anchors.fill: parent
+        visible: surface.showsPhoto
+        color: Theme.shellSurface
+        opacity: Theme.moodPanel ? 0.82 : 0.86
+    }
 
     readonly property string initials: {
         var source = surface.displayName !== "" ? surface.displayName : surface.accountName;
@@ -275,13 +348,27 @@ WlSessionLockSurface {
         }
 
         // Passphrase row.
-        Row {
+        //
+        // THE FIELD IS CENTRED ON THE SURFACE, not the field-plus-button
+        // group. A centred Row put the input's optical centre ~88 px left of
+        // the clock, date and identity stacked directly above it — every
+        // other element sat on the surface's centre line and the one the eye
+        // actually tracks did not, which is what read as broken alignment.
+        //
+        // Unlock moves BENEATH the field rather than beside it, so the whole
+        // lower stack shares one centre line. It loses nothing: Return is the
+        // primary path, the footer says so, and Tab still reaches the button.
+        Item {
             anchors.horizontalCenter: parent.horizontalCenter
-            topPadding: Math.round(surface.height * 0.03)
-            spacing: 12
+            width: 220
+            height: fieldBox.height + unlockButton.height
+                + Math.round(surface.height * 0.03) + 14
 
             Item {
-                anchors.verticalCenter: parent.verticalCenter
+                id: fieldBox
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: Math.round(surface.height * 0.03)
                 width: 220
                 height: 34
 
@@ -357,7 +444,9 @@ WlSessionLockSurface {
             // Unlock: the one coloured element on the surface.
             Rectangle {
                 id: unlockButton
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: fieldBox.bottom
+                anchors.topMargin: 14
                 width: unlockRow.implicitWidth + 32
                 height: unlockRow.implicitHeight + 16
                 radius: Theme.radiusTag
