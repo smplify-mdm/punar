@@ -657,16 +657,16 @@ fi
 # on the inviting default, can switch to the vector fallback, and restores the
 # default through the same atomic preference path the command center uses.
 ipc wallpaper state > /run/punar/surfaces-wallpaper-state.json 2>/dev/null
-if jq -e '.active == "yosemite" and .writable == true' \
+if jq -e '.active == "daybreak" and .writable == true' \
         /run/punar/surfaces-wallpaper-state.json >/dev/null 2>&1; then
-    note "ok   wallpaper starts on the writable Yosemite plate default"
+    note "ok   wallpaper starts on the writable Daybreak default"
 else
-    note "FAIL wallpaper state is not the writable Yosemite plate default"
+    note "FAIL wallpaper state is not the writable Daybreak default"
     FAILED=1
 fi
 
 ipc wallpaper list > /run/punar/surfaces-wallpapers.json 2>/dev/null
-if jq -e '.default == "yosemite"
+if jq -e '.default == "daybreak"
         and (.wallpapers | length) == 10
         and ([.wallpapers[].id] | sort) == (["crater-lake", "daybreak", "earthrise", "field", "grand-canyon", "rainier", "stillpoint", "winterline", "yosemite", "zion"] | sort)' \
         /run/punar/surfaces-wallpapers.json >/dev/null 2>&1; then
@@ -750,17 +750,17 @@ else
 fi
 
 ipc wallpaper reset > /run/punar/surfaces-wallpaper-reset.json 2>/dev/null
-if jq -e '.applied == true and .active == "yosemite" and .source == "shipped default"' \
+if jq -e '.applied == true and .active == "daybreak" and .source == "shipped default"' \
         /run/punar/surfaces-wallpaper-reset.json >/dev/null 2>&1; then
-    note "ok   wallpaper.reset restores the shipped Yosemite plate default"
+    note "ok   wallpaper.reset restores the shipped Daybreak default"
 else
-    note "FAIL wallpaper.reset did not restore the shipped Yosemite plate default"
+    note "FAIL wallpaper.reset did not restore the shipped Daybreak default"
     FAILED=1
 fi
 
 wallpaper_row="$(ipc commandcenter query wallpaper | tr -d '\r\n\"')"
 check_eq "command center exposes wallpaper as a typed action" \
-    "wallpaper · SetWallpaper(yosemite) · current" "${wallpaper_row}"
+    "wallpaper · SetWallpaper(daybreak) · current" "${wallpaper_row}"
 ipc commandcenter close >/dev/null 2>&1
 
 bar_state="$(ipc bar state | tr -d '[:space:]"')"
@@ -1319,10 +1319,30 @@ notif_count_before="$(ipc notifications count | tr -d '[:space:]"')"
 # (3) Send one real notification over the session bus. Signature is the
 #     freedesktop Notify contract: app_name, replaces_id, icon, summary, body,
 #     actions[], hints{}, expire_timeout. -1 is the server's own default expiry.
+# The shell inherits a full session environment from its own startup; this
+# script does not necessarily, and `qs ipc` cannot reveal the difference —
+# Quickshell's IPC is a Unix socket in XDG_RUNTIME_DIR, not D-Bus, so every
+# `ipc` call above can succeed on a shell whose session bus this script cannot
+# address. Fall back to the standard per-user bus socket when the variable is
+# absent, which is exactly what libdbus does.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
+        && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+        && [ -S "${XDG_RUNTIME_DIR}/bus" ]; then
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+    export DBUS_SESSION_BUS_ADDRESS
+    note "info session bus address defaulted to ${XDG_RUNTIME_DIR}/bus"
+fi
+
 busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
     org.freedesktop.Notifications Notify "susssasa{sv}i" \
     "${notif_app}" 0 "" "Gate probe" "sent by surfaces-check over D-Bus" 0 0 -1 \
-    >/dev/null 2>&1 || true
+    > /run/punar/notify-send.txt 2>&1 && notif_send_rc=0 || notif_send_rc=$?
+# The measurement below is still what decides pass/fail - busctl can exit 0
+# having reached a bus that dropped the call. But a send that FAILED must say
+# why, or a red run leaves nobody able to tell a broken probe from a broken
+# daemon. This line is diagnosis, never the verdict.
+note "info busctl Notify exit=${notif_send_rc} output='$(tr -d "\r\n" < /run/punar/notify-send.txt 2>/dev/null | head -c 200)'"
+note "info session bus: DBUS_SESSION_BUS_ADDRESS='${DBUS_SESSION_BUS_ADDRESS:-unset}' XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-unset}' user=$(id -un 2>/dev/null)"
 
 # (4) MEASURE the effect; never trust the sender's exit status. busctl can
 #     return 0 having reached a bus that dropped the call on the floor.
