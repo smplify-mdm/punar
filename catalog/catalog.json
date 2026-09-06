@@ -11,54 +11,119 @@
   ],
   "apps": [
     {
-      "id": "telegram",
-      "name": "Telegram",
-      "icon": "telegram.svg",
-      "featured": true,
-      "category": "communication",
-      "keywords": ["messaging", "chat", "calls", "teams"],
-      "summary": "Fast messaging, voice calls, group conversations, and file sharing across your devices.",
+      "id": "android-studio",
+      "name": "Android Studio",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "android",
+        "mobile",
+        "java",
+        "kotlin",
+        "ide",
+        "google",
+        "emulator"
+      ],
+      "summary": "Google's Android IDE with an emulator, profilers and the Gradle Android toolchain.",
       "trustTier": "community",
-      "license": "free",
+      "license": "mixed",
       "publisher": "flathub",
       "bundledUpdater": "none",
       "disclosures": [
         {
           "id": "publisher:community",
-          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "source:downloads-at-runtime",
+          "text": "The IDE downloads the Android SDK, platform images and build tools from Google after install. Those components are not part of the pinned Flatpak."
+        },
+        {
+          "id": "privacy:vendor-telemetry",
+          "text": "Google collects usage and crash data subject to the settings presented on first run."
         }
       ],
       "sources": [
         {
           "kind": "flatpak",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "remote": "flathub",
-          "appId": "org.telegram.desktop",
-          "ref": "app/org.telegram.desktop/x86_64/stable",
-          "commit": "f1f68e081e2a36d995dd5a24bd1d56e4eb5cf2603081da5732511f8cfe29fc47",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "a0959069de476eae39b30db109ef721da0daf4586eba80a070eb92089ac0544f"
-        },
-        {
-          "kind": "flatpak",
-          "architectures": ["aarch64"],
-          "remote": "flathub",
-          "appId": "org.telegram.desktop",
-          "ref": "app/org.telegram.desktop/aarch64/stable",
-          "commit": "27f21f17888075ac458507c0e8865ca93928b8fcab3be7fdc17b5647d7d43857",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "dd2c18e8685eff74bff65386cb3d47656b80bb60846393cdf07a92ad977f6563"
+          "appId": "com.google.AndroidStudio",
+          "ref": "app/com.google.AndroidStudio/x86_64/stable",
+          "commit": "4e04bb2953af5fe4807721baf8e25b274b46645881cf5a1007c07d1dd4b4d9d6",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "c7bdf64249d2f79d1ba14a42b5bd1699413a879267e92c9880e149e532c13860"
         }
       ]
     },
     {
-      "id": "firefox",
-      "name": "Firefox",
-      "icon": "firefox.svg",
+      "id": "apostrophe",
+      "name": "Apostrophe",
+      "icon": "apostrophe.png",
       "featured": true,
-      "category": "browsers",
-      "keywords": ["web", "internet", "browser", "privacy"],
-      "summary": "An independent, open-source browser with strong privacy controls and broad web compatibility.",
+      "category": "writing",
+      "keywords": [
+        "Markdown",
+        "preview",
+        "writing",
+        "notes",
+        "editor",
+        "export"
+      ],
+      "summary": "A focused Markdown editor with live preview, document statistics, spell checking, and export tools.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.gitlab.somas.Apostrophe",
+          "ref": "app/org.gnome.gitlab.somas.Apostrophe/x86_64/stable",
+          "commit": "522ff389b5bf48c4fc4f825ba1c9a7cab797d23f851e2d777db0db9339b1817c",
+          "runtime": "org.gnome.Platform/x86_64/49",
+          "metadataSha256": "19a5f5fd0a83d16ae7552a20764042d93c420e92972c8e0ad9478e01bf6f79e7"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.gitlab.somas.Apostrophe",
+          "ref": "app/org.gnome.gitlab.somas.Apostrophe/aarch64/stable",
+          "commit": "8dc4c804e615251b4fc1eebc09a7423b64991ad0922d8ea2ea034c1bac712409",
+          "runtime": "org.gnome.Platform/aarch64/49",
+          "metadataSha256": "676c4c69b3c3a7a149f92945672cc4c8db48ff12d24548e64d4462f47acac31c"
+        }
+      ]
+    },
+    {
+      "id": "arduino-ide",
+      "name": "Arduino IDE",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "arduino",
+        "embedded",
+        "microcontroller",
+        "serial",
+        "hardware",
+        "sketch"
+      ],
+      "summary": "Writes, compiles and uploads sketches to Arduino and compatible microcontroller boards.",
       "trustTier": "community",
       "license": "free",
       "publisher": "flathub",
@@ -66,29 +131,133 @@
       "disclosures": [
         {
           "id": "publisher:community",
-          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "access:serial-devices",
+          "text": "Uploading to a board requires access to USB serial devices. Punar shows the requested device access before install."
         }
       ],
       "sources": [
         {
           "kind": "flatpak",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "remote": "flathub",
-          "appId": "org.mozilla.firefox",
-          "ref": "app/org.mozilla.firefox/x86_64/stable",
-          "commit": "0c9162f4cf3d26af289524068c7ebef2a1b10f7cf6f913749f2f9bc3f3ce0dde",
+          "appId": "cc.arduino.IDE2",
+          "ref": "app/cc.arduino.IDE2/x86_64/stable",
+          "commit": "f1b020babfd773a4279859a4e98d99ac24b387bb442eca912244bf768f4b57bf",
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "1c83208d196531604b340f21e5f16835468356850a0e5f99feb31cdea4082c06"
+          "metadataSha256": "ef8b05f1a047c59e634f9c81641f7ab24a2f9f5bee26224b32e236f33bb07c41"
+        }
+      ]
+    },
+    {
+      "id": "bitwarden",
+      "name": "Bitwarden",
+      "featured": false,
+      "category": "security",
+      "keywords": [
+        "password",
+        "vault",
+        "credentials",
+        "secrets",
+        "manager"
+      ],
+      "summary": "A password manager desktop client for a Bitwarden vault, self-hosted or on the vendor's service.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "data:credential-vault",
+          "text": "This application handles credential vaults. Review file and browser-integration access carefully before install."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Vault data syncs to the Bitwarden service or a self-hosted server you configure."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.bitwarden.desktop",
+          "ref": "app/com.bitwarden.desktop/x86_64/stable",
+          "commit": "66d1f3b52e9c42a150089a47d69914bf68b58c05f1bd8fc9f932ea7f186c64b8",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "f3449227ec262e77686d2e18a218ea91071080c56fbf7d85ff29732f51aaff59"
         },
         {
           "kind": "flatpak",
-          "architectures": ["aarch64"],
+          "architectures": [
+            "aarch64"
+          ],
           "remote": "flathub",
-          "appId": "org.mozilla.firefox",
-          "ref": "app/org.mozilla.firefox/aarch64/stable",
-          "commit": "c84b98e041e58749e824ae83bb2de6da268f0a0ca19f299329a6943de768cb67",
+          "appId": "com.bitwarden.desktop",
+          "ref": "app/com.bitwarden.desktop/aarch64/stable",
+          "commit": "ca168330927687b1ac960faa1d4cdd0a757613998e9111b31fe677cea36d1f3d",
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
-          "metadataSha256": "9789327903f64b67b40acc4d0d198e5a13b4b3d5a42bcca1acf20f0dcf158785"
+          "metadataSha256": "5d99cc06b9b3dd56ae938add93063facf50054279c2d6675e92447c9cb8769e7"
+        }
+      ]
+    },
+    {
+      "id": "celluloid",
+      "name": "Celluloid",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "video",
+        "player",
+        "mpv",
+        "gtk",
+        "playlist"
+      ],
+      "summary": "A simple GTK front end for mpv, with drag-and-drop playlists and a conventional player window.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.celluloid_player.Celluloid",
+          "ref": "app/io.github.celluloid_player.Celluloid/x86_64/stable",
+          "commit": "0696c5f2697218d566e51dbb81935e986621bf63c68d7a5a6bf0a574e6a6a22b",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "4f24ebe328124d0cddab4d9e749be66c56e6ca412ee28418ff2874cb5492ce68"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.celluloid_player.Celluloid",
+          "ref": "app/io.github.celluloid_player.Celluloid/aarch64/stable",
+          "commit": "1651707dad14953284adbac0e1a28f3fb6d96f8d4d8fb244c11e11f114b09675",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "cfc498e7e8b6d9c00f98b5724fd1c75c72380791e63ba971849cccfc7fe8d34b"
         }
       ]
     },
@@ -98,7 +267,14 @@
       "icon": "chatgpt.svg",
       "featured": true,
       "category": "ai",
-      "keywords": ["AI", "assistant", "coding", "writing", "research", "OpenAI"],
+      "keywords": [
+        "AI",
+        "assistant",
+        "coding",
+        "writing",
+        "research",
+        "OpenAI"
+      ],
       "summary": "OpenAI’s official web application for writing, research, coding, analysis, and general AI assistance.",
       "trustTier": "curated",
       "license": "proprietary",
@@ -117,39 +293,11 @@
       "sources": [
         {
           "kind": "web",
-          "architectures": ["x86_64", "aarch64"],
+          "architectures": [
+            "x86_64",
+            "aarch64"
+          ],
           "url": "https://chatgpt.com/",
-          "browser": "chromium"
-        }
-      ]
-    },
-    {
-      "id": "claude",
-      "name": "Claude",
-      "icon": "claude.svg",
-      "featured": true,
-      "category": "ai",
-      "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic"],
-      "summary": "Anthropic’s official web application for writing, research, coding, analysis, and general AI assistance.",
-      "trustTier": "curated",
-      "license": "proprietary",
-      "publisher": "upstream",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "source:official-web",
-          "text": "Punar opens Anthropic’s official Claude web application in Chromium app mode. No native Linux package is installed."
-        },
-        {
-          "id": "privacy:cloud-service",
-          "text": "Requests and files you submit leave this device for Anthropic’s service under your account and service settings."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "web",
-          "architectures": ["x86_64", "aarch64"],
-          "url": "https://claude.ai/",
           "browser": "chromium"
         }
       ]
@@ -160,8 +308,19 @@
       "icon": "chatgpt.svg",
       "featured": true,
       "category": "ai",
-      "keywords": ["AI", "assistant", "coding", "writing", "research", "OpenAI", "native", "desktop"],
-      "windowAppIds": ["chatgpt"],
+      "keywords": [
+        "AI",
+        "assistant",
+        "coding",
+        "writing",
+        "research",
+        "OpenAI",
+        "native",
+        "desktop"
+      ],
+      "windowAppIds": [
+        "chatgpt"
+      ],
       "summary": "OpenAI’s native Linux preview, downloaded on demand and installed without granting its package scripts control of Punar.",
       "trustTier": "curated",
       "license": "proprietary",
@@ -184,7 +343,9 @@
       "sources": [
         {
           "kind": "vendor_deb",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "url": "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_amd64.deb",
           "sha256": "3554b0022c6cfb513326f43fd11f718835a77086ac4d7ca2ff3ebbba2d4c7f45",
           "byteSize": 411651478,
@@ -198,7 +359,9 @@
         },
         {
           "kind": "vendor_deb",
-          "architectures": ["aarch64"],
+          "architectures": [
+            "aarch64"
+          ],
           "url": "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_arm64.deb",
           "sha256": "125e36522d43c75bd7958477846ba6b1cddf2eb19cefcb57dda80be1742f917f",
           "byteSize": 387370258,
@@ -213,14 +376,69 @@
       ]
     },
     {
+      "id": "claude",
+      "name": "Claude",
+      "icon": "claude.svg",
+      "featured": true,
+      "category": "ai",
+      "keywords": [
+        "AI",
+        "assistant",
+        "coding",
+        "writing",
+        "research",
+        "Anthropic"
+      ],
+      "summary": "Anthropic’s official web application for writing, research, coding, analysis, and general AI assistance.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "upstream",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:official-web",
+          "text": "Punar opens Anthropic’s official Claude web application in Chromium app mode. No native Linux package is installed."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Requests and files you submit leave this device for Anthropic’s service under your account and service settings."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "web",
+          "architectures": [
+            "x86_64",
+            "aarch64"
+          ],
+          "url": "https://claude.ai/",
+          "browser": "chromium"
+        }
+      ]
+    },
+    {
       "id": "claude-desktop",
       "name": "Claude Desktop (beta)",
       "icon": "claude.svg",
       "featured": true,
       "category": "ai",
-      "keywords": ["AI", "assistant", "coding", "writing", "research", "Anthropic", "native", "desktop", "Cowork"],
-      "windowAppIds": ["com.anthropic.Claude"],
-      "uriSchemes": ["claude"],
+      "keywords": [
+        "AI",
+        "assistant",
+        "coding",
+        "writing",
+        "research",
+        "Anthropic",
+        "native",
+        "desktop",
+        "Cowork"
+      ],
+      "windowAppIds": [
+        "com.anthropic.Claude"
+      ],
+      "uriSchemes": [
+        "claude"
+      ],
       "summary": "Anthropic’s native Linux beta, downloaded on demand and installed without granting its package scripts control of Punar.",
       "trustTier": "curated",
       "license": "proprietary",
@@ -243,7 +461,9 @@
       "sources": [
         {
           "kind": "vendor_deb",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "url": "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_1.40609.0_amd64.deb",
           "sha256": "a96e96ff8eb4d4d7ffa785aba7fc23f8684b12ac83ed2ef4060f0f09f4177a98",
           "byteSize": 166561632,
@@ -257,7 +477,9 @@
         },
         {
           "kind": "vendor_deb",
-          "architectures": ["aarch64"],
+          "architectures": [
+            "aarch64"
+          ],
           "url": "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_1.40609.0_arm64.deb",
           "sha256": "c97e1aa0cd49437054b161bced1fea2ebfae60453e616d5b73524a9146421773",
           "byteSize": 159481816,
@@ -272,13 +494,123 @@
       ]
     },
     {
-      "id": "spotify",
-      "name": "Spotify",
-      "icon": "spotify.svg",
+      "id": "dbeaver-community",
+      "name": "DBeaver Community",
+      "icon": "dbeaver.png",
       "featured": true,
-      "category": "media",
-      "keywords": ["music", "audio", "podcasts", "work"],
-      "summary": "Music and podcasts while you work. The native desktop client is offered where its publisher provides Linux binaries; the web player is the ARM64 fallback.",
+      "category": "developer",
+      "keywords": [
+        "database",
+        "SQL",
+        "PostgreSQL",
+        "MySQL",
+        "SQLite",
+        "developer"
+      ],
+      "summary": "A graphical database client for browsing, querying, and administering popular SQL databases.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by DBeaver Corporation. Punar verifies its exact signed metadata before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.dbeaver.DBeaverCommunity",
+          "ref": "app/io.dbeaver.DBeaverCommunity/x86_64/stable",
+          "commit": "4bf9ae215d7d2f9dc4d791fdb1a3bd9a89ea87105049ba30ed463fce90aff22b",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "56375aa2b8e1b4f267927d4223d75536f4dbc2a94f7a3bd6209fec7926e45815"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.dbeaver.DBeaverCommunity",
+          "ref": "app/io.dbeaver.DBeaverCommunity/aarch64/stable",
+          "commit": "6bda1c4dead888b4560640d6d635b5b32eab63d8a5fc5d4fbf925aa5057438b5",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "78ed28b6fc54473025baae608cd3520a6d0bbb827f92b3422bc9c770dbc8bc56"
+        }
+      ]
+    },
+    {
+      "id": "dev-toolbox",
+      "name": "Dev Toolbox",
+      "icon": "dev-toolbox.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": [
+        "JSON",
+        "YAML",
+        "regex",
+        "hash",
+        "formatter",
+        "converter",
+        "developer"
+      ],
+      "summary": "Focused utilities for formatting data, testing regular expressions, generating hashes, and common development conversions.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "me.iepure.devtoolbox",
+          "ref": "app/me.iepure.devtoolbox/x86_64/stable",
+          "commit": "75355bc0570868a3033741d2555b0f55159531043a0c308c64514c6a23322b36",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "929f743e71cf5e27a86b6d965eb02da0c9c6b5699b1bb6823b06613262b50d97"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "me.iepure.devtoolbox",
+          "ref": "app/me.iepure.devtoolbox/aarch64/stable",
+          "commit": "8f688d20ec83ee63020475325648f65ebd8d6105d4ab603af87a9c1cc9bb4c27",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "fdec8dee3dfa56b78f27ef2ce48740479ca6d73d3f76c798873629e6bde50661"
+        }
+      ]
+    },
+    {
+      "id": "discord",
+      "name": "Discord",
+      "icon": "discord.svg",
+      "featured": true,
+      "category": "communication",
+      "keywords": [
+        "messaging",
+        "chat",
+        "voice",
+        "community"
+      ],
+      "summary": "Community messaging, voice, and video. ARM64 devices use Discord in Chromium app mode.",
       "trustTier": "community",
       "license": "proprietary",
       "publisher": "flathub",
@@ -286,29 +618,83 @@
       "disclosures": [
         {
           "id": "publisher:community",
-          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Spotify."
+          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Discord."
         },
         {
           "id": "platform:x86-only",
-          "text": "Spotify currently publishes the Linux desktop binary only for x86_64. ARM64 devices use the official Spotify web player in Chromium."
+          "text": "Discord currently publishes its Linux desktop client only for x86_64. ARM64 devices use Discord in Chromium app mode."
         }
       ],
       "sources": [
         {
           "kind": "flatpak",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "remote": "flathub",
-          "appId": "com.spotify.Client",
-          "ref": "app/com.spotify.Client/x86_64/stable",
-          "commit": "c220ff3a3fea1408ad4d5133d692eacaa1ac2399ff0d3a20a56c5292cd991f8d",
+          "appId": "com.discordapp.Discord",
+          "ref": "app/com.discordapp.Discord/x86_64/stable",
+          "commit": "7dbf56111b9eb045f48078eea1681c755c4d49e00f7f20d07c5fb0715bcf508a",
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "23ebfd7a42327e7e3ac44e7fd548481fb4c66ce9e1535bae7f2192931f201c6f"
+          "metadataSha256": "72fb1247d667ede1fd9383e965a2719a688e30f252c0e1be2faef7311c59cb8d"
         },
         {
           "kind": "web",
-          "architectures": ["x86_64", "aarch64"],
-          "url": "https://open.spotify.com/",
+          "architectures": [
+            "aarch64"
+          ],
+          "url": "https://discord.com/app",
           "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "eclipse-java",
+      "name": "Eclipse IDE",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "java",
+        "ide",
+        "eclipse",
+        "jdt",
+        "plugins"
+      ],
+      "summary": "The Eclipse IDE for Java developers, with its workspace model and plug-in ecosystem.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.eclipse.Java",
+          "ref": "app/org.eclipse.Java/x86_64/stable",
+          "commit": "cac9a28b729f9b48ee252fa89680d8847e39b67664c86b2a08a1523050e8a742",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "f5de58aae6c231ff06a0d45603c64dc382ca1de09f29f6a6a36d5322861e86ff"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.eclipse.Java",
+          "ref": "app/org.eclipse.Java/aarch64/stable",
+          "commit": "93faa94782abf204dc20255667e00079c6e7e7c495afca1a8f199cbe44ba47c7",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "2a4e212b5a72ac0463d33c925dc5870618fc5f627bf77b9a7c1abf106fa80e87"
         }
       ]
     },
@@ -318,7 +704,12 @@
       "icon": "element.svg",
       "featured": true,
       "category": "communication",
-      "keywords": ["messaging", "chat", "matrix", "secure"],
+      "keywords": [
+        "messaging",
+        "chat",
+        "matrix",
+        "secure"
+      ],
       "summary": "Secure team messaging and video calls built on the open Matrix communication network.",
       "trustTier": "community",
       "license": "free",
@@ -333,7 +724,9 @@
       "sources": [
         {
           "kind": "flatpak",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "remote": "flathub",
           "appId": "im.riot.Riot",
           "ref": "app/im.riot.Riot/x86_64/stable",
@@ -343,7 +736,9 @@
         },
         {
           "kind": "flatpak",
-          "architectures": ["aarch64"],
+          "architectures": [
+            "aarch64"
+          ],
           "remote": "flathub",
           "appId": "im.riot.Riot",
           "ref": "app/im.riot.Riot/aarch64/stable",
@@ -354,12 +749,1346 @@
       ]
     },
     {
+      "id": "emacs",
+      "name": "GNU Emacs",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "editor",
+        "lisp",
+        "extensible",
+        "org-mode",
+        "ide"
+      ],
+      "summary": "An extensible editor and computing environment configured entirely in Emacs Lisp.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnu.emacs",
+          "ref": "app/org.gnu.emacs/x86_64/stable",
+          "commit": "6fb37299503abfe159853f452dffd957d61229162e0bdc08636e505419df3b78",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "14bff2766c2e0490d450e7c71f5debfe1b4d4e10715ebcf5b36d9a836da6cafc"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnu.emacs",
+          "ref": "app/org.gnu.emacs/aarch64/stable",
+          "commit": "37d184e46e7dab0b8436c247c97e69e2b13e2ce665d7a7132fb1ef9e42f1516d",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "ee054a3ebba630258ace1a52a56f41c22806cd8b863d90b7575a7ba7fa5c2390"
+        }
+      ]
+    },
+    {
+      "id": "firefox",
+      "name": "Firefox",
+      "icon": "firefox.svg",
+      "featured": true,
+      "category": "browsers",
+      "keywords": [
+        "web",
+        "internet",
+        "browser",
+        "privacy"
+      ],
+      "summary": "An independent, open-source browser with strong privacy controls and broad web compatibility.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.mozilla.firefox",
+          "ref": "app/org.mozilla.firefox/x86_64/stable",
+          "commit": "0c9162f4cf3d26af289524068c7ebef2a1b10f7cf6f913749f2f9bc3f3ce0dde",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "1c83208d196531604b340f21e5f16835468356850a0e5f99feb31cdea4082c06"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.mozilla.firefox",
+          "ref": "app/org.mozilla.firefox/aarch64/stable",
+          "commit": "c84b98e041e58749e824ae83bb2de6da268f0a0ca19f299329a6943de768cb67",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "9789327903f64b67b40acc4d0d198e5a13b4b3d5a42bcca1acf20f0dcf158785"
+        }
+      ]
+    },
+    {
+      "id": "flatseal",
+      "name": "Flatseal",
+      "featured": false,
+      "category": "security",
+      "keywords": [
+        "permissions",
+        "flatpak",
+        "sandbox",
+        "security",
+        "access"
+      ],
+      "summary": "Reviews and changes the permissions other Flatpak applications hold on this device.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "access:modifies-other-apps",
+          "text": "Flatseal changes the sandbox permissions of other installed applications. Access it grants is not re-reviewed by Punar."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.tchx84.Flatseal",
+          "ref": "app/com.github.tchx84.Flatseal/x86_64/stable",
+          "commit": "ef9fe38e9cb96c170ea579fe1bbf8c76011255d4962d7fc4b3aa4e0a6063f8ae",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "ccfc126b13e0f4fbe83a2f52691fed7059a4ad402f34d0d89a18634e4594d713"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.tchx84.Flatseal",
+          "ref": "app/com.github.tchx84.Flatseal/aarch64/stable",
+          "commit": "ef54cca6b14d499094f0c5e77c89abfa4c0c874368490833bf284e1ee14327e5",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "23646fc59161dde9c87b4fe31577b9c0afdf0b1c1f555bc369e1968937a50ff6"
+        }
+      ]
+    },
+    {
+      "id": "gimp",
+      "name": "GIMP",
+      "featured": false,
+      "category": "graphics",
+      "keywords": [
+        "image",
+        "photo",
+        "raster",
+        "editing",
+        "retouch",
+        "layers"
+      ],
+      "summary": "Raster image editing and retouching with layers, masks, filters and scripted batch work.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gimp.GIMP",
+          "ref": "app/org.gimp.GIMP/x86_64/stable",
+          "commit": "20ff537f2373968103fd1867403fc50974acea5cf81028e1788a64afe2b90848",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "2c327c4fbef2962f13369bdb98e758afa7d3a52c0a45f78b23294c7801953e93"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gimp.GIMP",
+          "ref": "app/org.gimp.GIMP/aarch64/stable",
+          "commit": "6e7370f21caf321518382fddaa505970e9de17d5022f0b0dca1df809133ade13",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "651c8f78ed74a9bc43c6774521638dec3d25427246a24e24e4ffa36a9302b70d"
+        }
+      ]
+    },
+    {
+      "id": "gnome-boxes",
+      "name": "Boxes",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "vm",
+        "virtual",
+        "machine",
+        "qemu",
+        "kvm",
+        "virtualization"
+      ],
+      "summary": "Creates and runs local virtual machines from installer images with minimal configuration.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "access:virtualization",
+          "text": "Virtual machines request hardware acceleration and disk image storage. Punar shows device and file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Boxes",
+          "ref": "app/org.gnome.Boxes/x86_64/stable",
+          "commit": "476600abc122ef11ed4ec4cf880465e3834449447188e29db1a3c91e66abf47f",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "7805198197562e01239deb80f0ba340609160f721e5fc85e21663dab372a1036"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Boxes",
+          "ref": "app/org.gnome.Boxes/aarch64/stable",
+          "commit": "51e67638d8efa28aae39ca724f88ab7900f06f82a32df1fa8c15d19f1acbc89e",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "9ccb59e79de04a31e43f22a5525c35383072f411c8b327431915dffe8e5f6ec4"
+        }
+      ]
+    },
+    {
+      "id": "gnome-builder",
+      "name": "Builder",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "ide",
+        "gnome",
+        "gtk",
+        "flatpak",
+        "build",
+        "meson"
+      ],
+      "summary": "A GNOME-native IDE that builds and runs projects inside their own Flatpak runtime.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Builder",
+          "ref": "app/org.gnome.Builder/x86_64/stable",
+          "commit": "34cce7530aa89739e69ab295f65138eaa9eecdc15a13d3c6d4e7b3011b050b80",
+          "runtime": "org.gnome.Sdk/x86_64/50",
+          "metadataSha256": "1b07c1235ba60a7d93a1408fbfe87f4957a253dbf08227e883148746f8e0d64b"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Builder",
+          "ref": "app/org.gnome.Builder/aarch64/stable",
+          "commit": "1b46067a25c3580e6db880a5babb81a9e3d0d6eb0fae1826438abce7cedd2c47",
+          "runtime": "org.gnome.Sdk/aarch64/50",
+          "metadataSha256": "b3daddd459edc0e7558ddd941cc51939c0c9dffb7a305b37f4a2aae111514fc7"
+        }
+      ]
+    },
+    {
+      "id": "gnome-connections",
+      "name": "Connections",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "vnc",
+        "rdp",
+        "remote",
+        "desktop",
+        "viewer"
+      ],
+      "summary": "A deliberately small remote desktop viewer for VNC and RDP machines.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "data:remote-credentials",
+          "text": "Connection profiles store remote hostnames and credentials on this device. Review file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Connections",
+          "ref": "app/org.gnome.Connections/x86_64/stable",
+          "commit": "c1ea02bbcaf95b533dcdc32761948ac95b13f0918c3512426305aace665e4046",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "ac13923ef07fcfe39f50abd87ccef931d7c0dc32dafb5ea254e356a933fb7748"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Connections",
+          "ref": "app/org.gnome.Connections/aarch64/stable",
+          "commit": "7585b15803ecc1edc7a51a8c800c9623028ed7c287979258a8296c353e123009",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "daad76a666bbd2068de456b2754b194f2b0f297a9e0db8cab6dfe18d2faee9c2"
+        }
+      ]
+    },
+    {
+      "id": "gnome-logs",
+      "name": "Logs",
+      "icon": "gnome-logs.png",
+      "featured": true,
+      "category": "diagnostics",
+      "keywords": [
+        "logs",
+        "journal",
+        "systemd",
+        "events",
+        "errors",
+        "debug",
+        "troubleshooting"
+      ],
+      "summary": "A searchable graphical viewer for systemd journal events, grouped into useful hardware, application, security, and system views.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:system-logs",
+          "text": "Reading host system logs can expose sensitive diagnostic data. Punar shows the requested host access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Logs",
+          "ref": "app/org.gnome.Logs/x86_64/stable",
+          "commit": "277b582eb8747d48a5192e4daabaab6e6f165422f8d6ec3f1055a816fc46fffc",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "153a5b7e2a02cffe938b11d5db39248dfc91d121e6887800fe023743db39fcaf"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Logs",
+          "ref": "app/org.gnome.Logs/aarch64/stable",
+          "commit": "fe8cc84bfbbad5158fd5b908b08b15c130efdcf363ed81cd53200030a0539d23",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "5beaf299c06b816ed733d7c52aabd880c0a3f6f9dd436841bd1d56f80089f791"
+        }
+      ]
+    },
+    {
+      "id": "godot",
+      "name": "Godot Engine",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "game",
+        "engine",
+        "2d",
+        "3d",
+        "gamedev",
+        "gdscript"
+      ],
+      "summary": "A 2D and 3D game engine with a scene editor, its own scripting language and multi-platform export.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.godotengine.Godot",
+          "ref": "app/org.godotengine.Godot/x86_64/stable",
+          "commit": "cf200349dd8922987a45428c4f27a2408cef5ef50c38b53df64e42190ffec7db",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "18e901ee1b114beff6407b791fe971a9598db5b82a61d0137a42049867ddfa8f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.godotengine.Godot",
+          "ref": "app/org.godotengine.Godot/aarch64/stable",
+          "commit": "39dbce31121a45fd6931ee0659765d29b172b6c645d3c099fd443a2adb2a71b7",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "62a1d24e5136bc7c79e27ede3b951c79c7e19f2295605342e574436363718505"
+        }
+      ]
+    },
+    {
+      "id": "httpie",
+      "name": "HTTPie",
+      "icon": "httpie.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": [
+        "REST",
+        "API",
+        "HTTP",
+        "GraphQL",
+        "testing",
+        "requests"
+      ],
+      "summary": "A graphical HTTP client for building, organizing, and testing REST, GraphQL, and other web API requests.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by HTTPie. Inspect its network and file permissions before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.httpie.Httpie",
+          "ref": "app/io.httpie.Httpie/x86_64/stable",
+          "commit": "3fe346d678fc275b4f9ab415951b79eaefd4e61daf34d6e781e8271e3dd6570f",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "1000ad4c19178ef7203edb6f350990e3c4277d0260f19cf07bf165e145de0f3a"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.httpie.Httpie",
+          "ref": "app/io.httpie.Httpie/aarch64/stable",
+          "commit": "96bf9cf0ba7caeed5eb5a80e023c002dc0f9236fc14d82ea90e0501787b5e3ef",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "4b8673c16e9cdb995c65a186cb72b90e196f3a76bc17c9a474dffc321c83105e"
+        }
+      ]
+    },
+    {
+      "id": "inkscape",
+      "name": "Inkscape",
+      "featured": false,
+      "category": "graphics",
+      "keywords": [
+        "vector",
+        "svg",
+        "illustration",
+        "drawing",
+        "design"
+      ],
+      "summary": "Vector illustration and SVG authoring with precise path editing and export control.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.inkscape.Inkscape",
+          "ref": "app/org.inkscape.Inkscape/x86_64/stable",
+          "commit": "c8f105875e5f89fc7b2a627a26ef23c9fc8a44e20ff6dbd26825a3b32e7143e8",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "cced8cbafea81472fa9499dec14e2713090e31fb770cf5db5cf431c47b1b8dd6"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.inkscape.Inkscape",
+          "ref": "app/org.inkscape.Inkscape/aarch64/stable",
+          "commit": "cef679559628d49886ecac76787ff1dcee265a8d6413547e30e801ec5ea67911",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "725c9da549e55a36f76d4003556b8caf339b128741fb6e8dddc347ed72216929"
+        }
+      ]
+    },
+    {
+      "id": "insomnia",
+      "name": "Insomnia",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "api",
+        "http",
+        "rest",
+        "graphql",
+        "grpc",
+        "client",
+        "testing"
+      ],
+      "summary": "Designs and tests HTTP, GraphQL and gRPC requests with environments and saved collections.",
+      "trustTier": "community",
+      "license": "mixed",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Account sync sends request collections to the vendor's service. Local-only use does not require an account."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "rest.insomnia.Insomnia",
+          "ref": "app/rest.insomnia.Insomnia/x86_64/stable",
+          "commit": "064d2edffdc01973d5cde24fbd36ae366237a676ad5ac69bc985e909ee19c9dc",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "56accfc39dd8fd88b439b064260fbbafb1ae484cf7f70e71c7e2bbe973036010"
+        }
+      ]
+    },
+    {
+      "id": "intellij-idea-community",
+      "name": "IntelliJ IDEA Community",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "java",
+        "kotlin",
+        "ide",
+        "jetbrains",
+        "refactor",
+        "debug",
+        "maven",
+        "gradle"
+      ],
+      "summary": "A full Java and Kotlin IDE with refactoring, debugging, build-tool integration and version control.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "privacy:vendor-telemetry",
+          "text": "JetBrains IDEs can send anonymous usage statistics. The setting is presented on first run and can be declined."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.IntelliJ-IDEA-Community",
+          "ref": "app/com.jetbrains.IntelliJ-IDEA-Community/x86_64/stable",
+          "commit": "4dac0e8eb22cbc9dcff3ac5c279e27af733fe660b94d5dbb43edfffe6f3384b0",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "c567e38b8198f56cfc3d14990a7485fc42f9ffdb05406cbf942c40381244bcae"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.IntelliJ-IDEA-Community",
+          "ref": "app/com.jetbrains.IntelliJ-IDEA-Community/aarch64/stable",
+          "commit": "0fc30e780577406f2a7b9fd67c6d4944df3ed0f18459a574c3db4e0c0233ae97",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "23bed1a86fa0ce7e6b5e1f7dfaadc85aa878d6804dd8c2eeaefd8b76b47ed77b"
+        }
+      ]
+    },
+    {
+      "id": "kate",
+      "name": "Kate",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "editor",
+        "text",
+        "kde",
+        "lsp",
+        "sessions"
+      ],
+      "summary": "A multi-document text editor with sessions, split views, LSP support and an embedded terminal.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.kde.kate",
+          "ref": "app/org.kde.kate/x86_64/stable",
+          "commit": "391d8f4fe21fa08c1df1fe0011cee7a3f48e2441275f68a342ec4ac2aeef2194",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "28221a583056a50aefd25ffcc5c39b47f90e125c7311a1ff807c5765d118d9ae"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.kde.kate",
+          "ref": "app/org.kde.kate/aarch64/stable",
+          "commit": "6c0b4cd0911473a4a8d5e9eaea55108b63c55d39d19970f4b3159f63c96c014a",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "82ffeca01500ad700ddb02ae00cb59bd6bbc960ed1e2f96918cf21b218353e95"
+        }
+      ]
+    },
+    {
+      "id": "keepassxc",
+      "name": "KeePassXC",
+      "icon": "keepassxc.png",
+      "featured": true,
+      "category": "security",
+      "keywords": [
+        "password",
+        "vault",
+        "credentials",
+        "security",
+        "offline",
+        "TOTP"
+      ],
+      "summary": "An offline-first password manager for encrypted KeePass vaults, passkeys, TOTP codes, and browser integration.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "data:credential-vault",
+          "text": "This application handles credential vaults. Review file and browser-integration access carefully before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.keepassxc.KeePassXC",
+          "ref": "app/org.keepassxc.KeePassXC/x86_64/stable",
+          "commit": "c6c60a9c0b105ac68672b3eefbca498f8fcd820887c2182009a2013f63713cf3",
+          "runtime": "org.kde.Platform/x86_64/5.15-25.08",
+          "metadataSha256": "04b60905f10d9e5c948e20ecff6ffd2ffa400157e601170c1cb72bfe5fcaa957"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.keepassxc.KeePassXC",
+          "ref": "app/org.keepassxc.KeePassXC/aarch64/stable",
+          "commit": "98c53b1a133023e76cf504c482f2af61208c789535514afca1ca785465604c8f",
+          "runtime": "org.kde.Platform/aarch64/5.15-25.08",
+          "metadataSha256": "22ea0a49feb85201599cb28d642bbfc87be78a5cf8f0ab6616ac5400ec3a7174"
+        }
+      ]
+    },
+    {
+      "id": "krita",
+      "name": "Krita",
+      "featured": false,
+      "category": "graphics",
+      "keywords": [
+        "painting",
+        "digital art",
+        "raster",
+        "illustration",
+        "brushes",
+        "animation"
+      ],
+      "summary": "A digital painting studio with a deep brush engine, animation timeline and colour management.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.kde.krita",
+          "ref": "app/org.kde.krita/x86_64/stable",
+          "commit": "25acd024c65073e26e84eae30c15137f7c8db03e999c0dc38036358221ac86e0",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "29efad957c9971f4b88e58777968903dc5d050a3ee81cc50e8d20b881e2eb3fe"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.kde.krita",
+          "ref": "app/org.kde.krita/aarch64/stable",
+          "commit": "e1a829914a6bcc591d6cb3fd9c4c5d5d58f965ef71583082a84c4bb686c25fae",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "74beea43d817f71bb4eaf37feb0108810eb901ae362d0398c48f9a18d972baf8"
+        }
+      ]
+    },
+    {
+      "id": "libreoffice",
+      "name": "LibreOffice",
+      "featured": false,
+      "category": "productivity",
+      "keywords": [
+        "office",
+        "documents",
+        "spreadsheet",
+        "presentation",
+        "writer",
+        "calc"
+      ],
+      "summary": "A full office suite for documents, spreadsheets and presentations, reading and writing common formats.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.libreoffice.LibreOffice",
+          "ref": "app/org.libreoffice.LibreOffice/x86_64/stable",
+          "commit": "09370484ead63533fa2b1d8be10612d1fab2b0c56cfe125e4a391e0e971d3891",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "f66deff962915741509b1779d5c0299f1865d79a10c588331ba567b1ee59e1e3"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.libreoffice.LibreOffice",
+          "ref": "app/org.libreoffice.LibreOffice/aarch64/stable",
+          "commit": "18407f661b0e88d171568c6e0cd3c62b86e29b0eb950333e42acaa4858e66f2c",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "893f00e06f457a00720ba3c6d7906e8a2204c476548e460987e505df08649662"
+        }
+      ]
+    },
+    {
+      "id": "meld",
+      "name": "Meld",
+      "icon": "meld.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": [
+        "diff",
+        "merge",
+        "git",
+        "compare",
+        "files",
+        "directories"
+      ],
+      "summary": "A visual diff and merge tool for comparing files, directories, and version-controlled working copies.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "source:flathub",
+          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.meld",
+          "ref": "app/org.gnome.meld/x86_64/stable",
+          "commit": "7449737ec00ed01bcd2c2db6940a5b2c5e6aca1dbe12aaf620b062d3d51a607b",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "63fe6a023258e8b07a412672ee057ca5ee4ff478722bdda5bfa7929a1421467f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.meld",
+          "ref": "app/org.gnome.meld/aarch64/stable",
+          "commit": "14f7de0eb98af8ec0d2504c3059e2c35be768f336d7d6f3704e86ba9eb84340c",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "55f223f70595794ebc730c535923759f5802fd32e67294c6f6a394e1c98c3db8"
+        }
+      ]
+    },
+    {
+      "id": "mission-center",
+      "name": "Mission Center",
+      "icon": "mission-center.png",
+      "featured": true,
+      "category": "diagnostics",
+      "keywords": [
+        "system monitor",
+        "CPU",
+        "memory",
+        "disk",
+        "network",
+        "GPU",
+        "processes"
+      ],
+      "summary": "A clear system monitor for CPU, memory, disks, networking, GPUs, applications, and individual processes.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:system-observation",
+          "text": "System monitoring requires broader process, device, and host access than an ordinary application; review the live permission list before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.missioncenter.MissionCenter",
+          "ref": "app/io.missioncenter.MissionCenter/x86_64/stable",
+          "commit": "98dd962a3249d6d51682698040ef88f60bf415f497acee625c836be35c5158eb",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "07b5c37689df6c9c97cee0ae8d255c8de2b92bb31ef3307e11ab54c29e282440"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.missioncenter.MissionCenter",
+          "ref": "app/io.missioncenter.MissionCenter/aarch64/stable",
+          "commit": "990f5e01720df5f30c9754d35dba95f5c23155de78acb4a337980aa33f2f1ead",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "ebc70172c97a50ed05b8211e9d7c35d00eb1de91eedb315527b34b0f395b2f65"
+        }
+      ]
+    },
+    {
+      "id": "mpv",
+      "name": "mpv",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "video",
+        "player",
+        "keyboard",
+        "minimal",
+        "scriptable"
+      ],
+      "summary": "A minimal, keyboard-driven video player with high-quality output and scriptable behaviour.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.mpv.Mpv",
+          "ref": "app/io.mpv.Mpv/x86_64/stable",
+          "commit": "563c0a286e884d148e17dcb1f72461a6b18047a6eb80252b67e8924f568a0d23",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "38fc0a2bd851a703700a07df885cb0da8609404abf19aa640ff85dde90525ce8"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.mpv.Mpv",
+          "ref": "app/io.mpv.Mpv/aarch64/stable",
+          "commit": "a119c3cfb6a126a8ef2f82a56a34e9ebcb8240625fbd7614702ce202af1cb42d",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "24200ff43cdf8deb4574f3f3de731955a7e6683d41b2f6d6ed7951358ef536cb"
+        }
+      ]
+    },
+    {
+      "id": "neovim",
+      "name": "Neovim",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "editor",
+        "vim",
+        "terminal",
+        "lua",
+        "lsp",
+        "modal"
+      ],
+      "summary": "A modal terminal editor with Lua configuration, built-in LSP and a large plugin ecosystem.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.neovim.nvim",
+          "ref": "app/io.neovim.nvim/x86_64/stable",
+          "commit": "dd9339a603031aacb1b6646819104820aabe905fe605c0327ccb0ec958d69186",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "87bb3613c1cb8d8ca79dab5e16fc737ede360aba4234995ef7aba6ae91a1a447"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.neovim.nvim",
+          "ref": "app/io.neovim.nvim/aarch64/stable",
+          "commit": "e5fbc8abc48e61b8d9281c45135c603727938a8038405e0d10f14b500688531b",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "7f83358f90230e9ac65682afdb0aadac6568bbb9e6a25df3ec6d2bc64217d670"
+        }
+      ]
+    },
+    {
+      "id": "obs-studio",
+      "name": "OBS Studio",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "screen",
+        "record",
+        "stream",
+        "capture",
+        "video",
+        "broadcast"
+      ],
+      "summary": "Screen recording and live streaming with scenes, sources and real-time compositing.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "access:screen-capture",
+          "text": "Recording captures your screen, windows and audio. Punar shows the requested capture and device access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.obsproject.Studio",
+          "ref": "app/com.obsproject.Studio/x86_64/stable",
+          "commit": "21b35765922fb5c8b92ccdccedc0d8ca709b12f86a961780350199082da822ef",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "3c1435af8f1b021a028609573957d303b142ce493f882f11ef52f2d860b2f0cf"
+        }
+      ]
+    },
+    {
+      "id": "podman-desktop",
+      "name": "Podman Desktop",
+      "icon": "podman-desktop.png",
+      "featured": true,
+      "category": "developer",
+      "keywords": [
+        "containers",
+        "Podman",
+        "Kubernetes",
+        "images",
+        "developer",
+        "Docker"
+      ],
+      "summary": "A graphical companion for building, running, and inspecting containers, images, pods, and local Kubernetes environments.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "access:container-engine",
+          "text": "Container management requires access to the user’s Podman socket and development files; inspect the live permission list before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.podman_desktop.PodmanDesktop",
+          "ref": "app/io.podman_desktop.PodmanDesktop/x86_64/stable",
+          "commit": "947d359aa5d117c100f19e659be197a48519f9d57dd89f8b6d7d742d06317517",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "f5ef05242820c9aec15b4434b294e88d8627c34aaeda605f3593147170bc8d6d"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.podman_desktop.PodmanDesktop",
+          "ref": "app/io.podman_desktop.PodmanDesktop/aarch64/stable",
+          "commit": "f6647a68867ad349af07aea0a1a5fc1cf53f4dca9d5cd6f633039083255d894a",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "76638c8e50fcd1f0108d08788cccc3e70f6c0138ab0256bb8cfa5c9d4e22c6c6"
+        }
+      ]
+    },
+    {
+      "id": "postman",
+      "name": "Postman",
+      "icon": "postman.png",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "REST",
+        "API",
+        "HTTP",
+        "GraphQL",
+        "testing",
+        "collections"
+      ],
+      "summary": "A widely used API platform for sending requests, organizing collections, documenting services, and running tests.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "disabled-by-packaging",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This community Flatpak is not published or supported by Postman. Punar verifies its exact signed metadata before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.getpostman.Postman",
+          "ref": "app/com.getpostman.Postman/x86_64/stable",
+          "commit": "503cba34a182fb372083a013bc4638c909b02a8aba187430b8fadb0f388ba1a6",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "bd8db9be546c6a84b1ba0f5a57c1967516a4540230d223408bfbb8a85c066753"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.getpostman.Postman",
+          "ref": "app/com.getpostman.Postman/aarch64/stable",
+          "commit": "abf7939a9749a648bbc5de8209ef4ac25df636de80b48fb42ff893f17f741eb4",
+          "runtime": "org.freedesktop.Platform/aarch64/24.08",
+          "metadataSha256": "aac1e648ced790bc4c94137ba4b16dac34fae2de192d64bbdbf50719d2138bb1"
+        }
+      ]
+    },
+    {
+      "id": "pycharm-community",
+      "name": "PyCharm Community",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "python",
+        "ide",
+        "jetbrains",
+        "debug",
+        "refactor",
+        "venv"
+      ],
+      "summary": "A Python IDE with completion, refactoring, an integrated debugger and virtualenv support.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "privacy:vendor-telemetry",
+          "text": "JetBrains IDEs can send anonymous usage statistics. The setting is presented on first run and can be declined."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.PyCharm-Community",
+          "ref": "app/com.jetbrains.PyCharm-Community/x86_64/stable",
+          "commit": "d4ce0e0ff457699ea4539d73c9131ecb6fb7064c8a79847f0ae2801d10e6bb88",
+          "runtime": "org.freedesktop.Sdk/x86_64/23.08",
+          "metadataSha256": "7e6132e1c91f8b81b082f240275fff9b4efc2e5cb7bb815fda226b723939c497"
+        }
+      ]
+    },
+    {
+      "id": "remmina",
+      "name": "Remmina",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "vnc",
+        "rdp",
+        "remote",
+        "desktop",
+        "ssh",
+        "spice"
+      ],
+      "summary": "A remote desktop client speaking VNC, RDP, SPICE and SSH from one connection list.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "data:remote-credentials",
+          "text": "Connection profiles store remote hostnames and credentials on this device. Review file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.remmina.Remmina",
+          "ref": "app/org.remmina.Remmina/x86_64/stable",
+          "commit": "d40938f656ca5f3699f63fb3a926d321d24e36c63edb97cca8a3d14108a5c65c",
+          "runtime": "org.gnome.Platform/x86_64/49",
+          "metadataSha256": "31a37b70e41788716332151b22eb5382e75aac956c3ebe1d6145614e43ce0c9c"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.remmina.Remmina",
+          "ref": "app/org.remmina.Remmina/aarch64/stable",
+          "commit": "593b96d308bf6d625e9de6281f1cda60c59cdadc80212ed9a55b13a45ee1e4e8",
+          "runtime": "org.gnome.Platform/aarch64/49",
+          "metadataSha256": "76ec36f5e0e4b56b09ceecef83f9f7cefff3070ea98b144682acfb392656268d"
+        }
+      ]
+    },
+    {
       "id": "slack",
       "name": "Slack",
       "icon": "slack.svg",
       "featured": true,
       "category": "communication",
-      "keywords": ["messaging", "chat", "teams", "work", "native", "huddles"],
+      "keywords": [
+        "messaging",
+        "chat",
+        "teams",
+        "work",
+        "native",
+        "huddles"
+      ],
       "summary": "Slack’s official Linux beta desktop client for messaging, channels, huddles, and team collaboration. ARM64 devices use a clearly labelled web fallback.",
       "trustTier": "curated",
       "license": "proprietary",
@@ -382,7 +2111,9 @@
       "sources": [
         {
           "kind": "vendor_deb",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "url": "https://downloads.slack-edge.com/desktop-releases/linux/x64/4.51.191/slack-desktop-4.51.191-amd64.deb",
           "sha256": "572474596216b635b69c4a72b42176a1d4d66f99e49e6267861aecdf3f79c1ed",
           "byteSize": 94954230,
@@ -396,20 +2127,27 @@
         },
         {
           "kind": "web",
-          "architectures": ["aarch64"],
+          "architectures": [
+            "aarch64"
+          ],
           "url": "https://app.slack.com/",
           "browser": "chromium"
         }
       ]
     },
     {
-      "id": "discord",
-      "name": "Discord",
-      "icon": "discord.svg",
+      "id": "spotify",
+      "name": "Spotify",
+      "icon": "spotify.svg",
       "featured": true,
-      "category": "communication",
-      "keywords": ["messaging", "chat", "voice", "community"],
-      "summary": "Community messaging, voice, and video. ARM64 devices use Discord in Chromium app mode.",
+      "category": "media",
+      "keywords": [
+        "music",
+        "audio",
+        "podcasts",
+        "work"
+      ],
+      "summary": "Music and podcasts while you work. The native desktop client is offered where its publisher provides Linux binaries; the web player is the ARM64 fallback.",
       "trustTier": "community",
       "license": "proprietary",
       "publisher": "flathub",
@@ -417,29 +2155,292 @@
       "disclosures": [
         {
           "id": "publisher:community",
-          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Discord."
+          "text": "The native package is maintained by the Flathub community and is not verified by, affiliated with, or supported by Spotify."
         },
         {
           "id": "platform:x86-only",
-          "text": "Discord currently publishes its Linux desktop client only for x86_64. ARM64 devices use Discord in Chromium app mode."
+          "text": "Spotify currently publishes the Linux desktop binary only for x86_64. ARM64 devices use the official Spotify web player in Chromium."
         }
       ],
       "sources": [
         {
           "kind": "flatpak",
-          "architectures": ["x86_64"],
+          "architectures": [
+            "x86_64"
+          ],
           "remote": "flathub",
-          "appId": "com.discordapp.Discord",
-          "ref": "app/com.discordapp.Discord/x86_64/stable",
-          "commit": "7dbf56111b9eb045f48078eea1681c755c4d49e00f7f20d07c5fb0715bcf508a",
+          "appId": "com.spotify.Client",
+          "ref": "app/com.spotify.Client/x86_64/stable",
+          "commit": "c220ff3a3fea1408ad4d5133d692eacaa1ac2399ff0d3a20a56c5292cd991f8d",
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "72fb1247d667ede1fd9383e965a2719a688e30f252c0e1be2faef7311c59cb8d"
+          "metadataSha256": "23ebfd7a42327e7e3ac44e7fd548481fb4c66ce9e1535bae7f2192931f201c6f"
         },
         {
           "kind": "web",
-          "architectures": ["aarch64"],
-          "url": "https://discord.com/app",
+          "architectures": [
+            "x86_64",
+            "aarch64"
+          ],
+          "url": "https://open.spotify.com/",
           "browser": "chromium"
+        }
+      ]
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "icon": "telegram.svg",
+      "featured": true,
+      "category": "communication",
+      "keywords": [
+        "messaging",
+        "chat",
+        "calls",
+        "teams"
+      ],
+      "summary": "Fast messaging, voice calls, group conversations, and file sharing across your devices.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This package is distributed through Flathub. Punar verifies its signed metadata and requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.telegram.desktop",
+          "ref": "app/org.telegram.desktop/x86_64/stable",
+          "commit": "f1f68e081e2a36d995dd5a24bd1d56e4eb5cf2603081da5732511f8cfe29fc47",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "a0959069de476eae39b30db109ef721da0daf4586eba80a070eb92089ac0544f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.telegram.desktop",
+          "ref": "app/org.telegram.desktop/aarch64/stable",
+          "commit": "27f21f17888075ac458507c0e8865ca93928b8fcab3be7fdc17b5647d7d43857",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "dd2c18e8685eff74bff65386cb3d47656b80bb60846393cdf07a92ad977f6563"
+        }
+      ]
+    },
+    {
+      "id": "thunderbird",
+      "name": "Thunderbird",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "email",
+        "mail",
+        "calendar",
+        "imap",
+        "caldav",
+        "contacts"
+      ],
+      "summary": "A desktop mail, calendar and contacts client supporting IMAP, POP and CalDAV accounts.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "data:mailbox",
+          "text": "Mail accounts, message archives and credentials are stored on this device. Review file access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.mozilla.Thunderbird",
+          "ref": "app/org.mozilla.Thunderbird/x86_64/stable",
+          "commit": "0b4287a64431c7b8b80d2f8842eeeea317fe98f615118be0ecc2185d4b1ad574",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "672171c7f69e8142f95aa0e5bf669f25a5ed09d3b71c86021db4aed7ab0e22c7"
+        }
+      ]
+    },
+    {
+      "id": "virt-manager",
+      "name": "Virtual Machine Manager",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "vm",
+        "libvirt",
+        "kvm",
+        "qemu",
+        "virtualization",
+        "manage"
+      ],
+      "summary": "Manages libvirt virtual machines locally and over SSH, with full device and storage control.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "access:virtualization",
+          "text": "Managing libvirt domains requires broad access to virtualization sockets, storage and devices. Review requested access carefully before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.virt_manager.virt-manager",
+          "ref": "app/org.virt_manager.virt-manager/x86_64/stable",
+          "commit": "594b46b52cc3c645020479f67ebe014df9ff3ee24624b6550855d4381e67f649",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "9223b9b85b84c3b0fac77d71cdc92689f62629c3b7888ee01f379aeac5d5b7fe"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.virt_manager.virt-manager",
+          "ref": "app/org.virt_manager.virt-manager/aarch64/stable",
+          "commit": "964990af401c71c6f030c926ae605255b1b021d2ad513ea3668d924e581343e3",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "839a9edfe0900f638c6ca5c57be63614e829e2b61b3b204fdf60dd789f391dae"
+        }
+      ]
+    },
+    {
+      "id": "vlc",
+      "name": "VLC",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "video",
+        "audio",
+        "player",
+        "media",
+        "codec",
+        "stream"
+      ],
+      "summary": "Plays nearly every audio and video format without extra codecs, including network streams and optical discs.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.videolan.VLC",
+          "ref": "app/org.videolan.VLC/x86_64/stable",
+          "commit": "5e38b439b73601ed51c3a911b04c6b233d9fa6fdfd8ad1381585c37af3f79f7d",
+          "runtime": "org.kde.Platform/x86_64/5.15-25.08",
+          "metadataSha256": "e624385b1716ab0dace971554b7965bfbd199a7c07386da20782063c4e4d05f9"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.videolan.VLC",
+          "ref": "app/org.videolan.VLC/aarch64/stable",
+          "commit": "67d59e8015a59c008aaf6673d387666a2e2b0f969d1438e86e4f62a9ce0c5aa8",
+          "runtime": "org.kde.Platform/aarch64/5.15-25.08",
+          "metadataSha256": "aa916253e0672cf483f2650cccf4470691234ad9991ed67241e533af04802927"
+        }
+      ]
+    },
+    {
+      "id": "vscode",
+      "name": "Visual Studio Code",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "editor",
+        "ide",
+        "microsoft",
+        "extensions",
+        "typescript",
+        "debug"
+      ],
+      "summary": "Microsoft's build of VS Code, with the official extension marketplace and remote development.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "license:proprietary-build",
+          "text": "This is Microsoft's licensed VS Code build, not the MIT-licensed source. VSCodium in this catalog is the telemetry-free build of the same source."
+        },
+        {
+          "id": "privacy:vendor-telemetry",
+          "text": "Microsoft's build collects telemetry by default and the extension marketplace is governed by Microsoft's terms."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.visualstudio.code",
+          "ref": "app/com.visualstudio.code/x86_64/stable",
+          "commit": "4c765cb0fe9f5b5ceced6e2fc55f70a169e69cd6c98879a02859852727881674",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "6e8cbe9d49f5a4b51a6a221887226d3c1173686cdbe8b0d503b328b9bc8dfcbd"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.visualstudio.code",
+          "ref": "app/com.visualstudio.code/aarch64/stable",
+          "commit": "b9d10e766598843512c60a4d1beeee5872f801f28c2ebba01bf24d899c977386",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "4d80f02c68558f58817335f393a1cec7828bbc91d7100255f70fbca3353544b7"
         }
       ]
     },
@@ -449,7 +2450,14 @@
       "icon": "vscodium.png",
       "featured": true,
       "category": "developer",
-      "keywords": ["code", "editor", "IDE", "VS Code", "programming", "git"],
+      "keywords": [
+        "code",
+        "editor",
+        "IDE",
+        "VS Code",
+        "programming",
+        "git"
+      ],
       "summary": "A telemetry-free build of the VS Code editor for programming, debugging, extensions, and source control.",
       "trustTier": "community",
       "license": "free",
@@ -463,368 +2471,28 @@
       ],
       "sources": [
         {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "com.vscodium.codium", "ref": "app/com.vscodium.codium/x86_64/stable",
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.vscodium.codium",
+          "ref": "app/com.vscodium.codium/x86_64/stable",
           "commit": "af803cf102996f7f250ee90983eac1c5f2c1260c7dae3acf33b7ac78b35b05f0",
           "runtime": "org.freedesktop.Sdk/x86_64/25.08",
           "metadataSha256": "7d1fcb6a17a1d9eb65aa46dcb0d2a38336cafedfd4b1570bf7cd6e3e86c2ff83"
         },
         {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "com.vscodium.codium", "ref": "app/com.vscodium.codium/aarch64/stable",
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.vscodium.codium",
+          "ref": "app/com.vscodium.codium/aarch64/stable",
           "commit": "25db4a819df41ed1586c07baaaf0b0fdcd1d8eda588c881befc318b723afd455",
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "7572d34fbec998c101d0e828049a6fe3f55b4a8e91b35a06cce3c76982c2acaa"
-        }
-      ]
-    },
-    {
-      "id": "dev-toolbox",
-      "name": "Dev Toolbox",
-      "icon": "dev-toolbox.png",
-      "featured": true,
-      "category": "developer",
-      "keywords": ["JSON", "YAML", "regex", "hash", "formatter", "converter", "developer"],
-      "summary": "Focused utilities for formatting data, testing regular expressions, generating hashes, and common development conversions.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "source:flathub",
-          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested access before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "me.iepure.devtoolbox", "ref": "app/me.iepure.devtoolbox/x86_64/stable",
-          "commit": "75355bc0570868a3033741d2555b0f55159531043a0c308c64514c6a23322b36",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "929f743e71cf5e27a86b6d965eb02da0c9c6b5699b1bb6823b06613262b50d97"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "me.iepure.devtoolbox", "ref": "app/me.iepure.devtoolbox/aarch64/stable",
-          "commit": "8f688d20ec83ee63020475325648f65ebd8d6105d4ab603af87a9c1cc9bb4c27",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "fdec8dee3dfa56b78f27ef2ce48740479ca6d73d3f76c798873629e6bde50661"
-        }
-      ]
-    },
-    {
-      "id": "dbeaver-community",
-      "name": "DBeaver Community",
-      "icon": "dbeaver.png",
-      "featured": true,
-      "category": "developer",
-      "keywords": ["database", "SQL", "PostgreSQL", "MySQL", "SQLite", "developer"],
-      "summary": "A graphical database client for browsing, querying, and administering popular SQL databases.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "disabled-by-packaging",
-      "disclosures": [
-        {
-          "id": "publisher:community",
-          "text": "This community Flatpak is not published or supported by DBeaver Corporation. Punar verifies its exact signed metadata before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "io.dbeaver.DBeaverCommunity", "ref": "app/io.dbeaver.DBeaverCommunity/x86_64/stable",
-          "commit": "4bf9ae215d7d2f9dc4d791fdb1a3bd9a89ea87105049ba30ed463fce90aff22b",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "56375aa2b8e1b4f267927d4223d75536f4dbc2a94f7a3bd6209fec7926e45815"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "io.dbeaver.DBeaverCommunity", "ref": "app/io.dbeaver.DBeaverCommunity/aarch64/stable",
-          "commit": "6bda1c4dead888b4560640d6d635b5b32eab63d8a5fc5d4fbf925aa5057438b5",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "78ed28b6fc54473025baae608cd3520a6d0bbb827f92b3422bc9c770dbc8bc56"
-        }
-      ]
-    },
-    {
-      "id": "httpie",
-      "name": "HTTPie",
-      "icon": "httpie.png",
-      "featured": true,
-      "category": "developer",
-      "keywords": ["REST", "API", "HTTP", "GraphQL", "testing", "requests"],
-      "summary": "A graphical HTTP client for building, organizing, and testing REST, GraphQL, and other web API requests.",
-      "trustTier": "community",
-      "license": "proprietary",
-      "publisher": "flathub",
-      "bundledUpdater": "disabled-by-packaging",
-      "disclosures": [
-        {
-          "id": "publisher:community",
-          "text": "This community Flatpak is not published or supported by HTTPie. Inspect its network and file permissions before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "io.httpie.Httpie", "ref": "app/io.httpie.Httpie/x86_64/stable",
-          "commit": "3fe346d678fc275b4f9ab415951b79eaefd4e61daf34d6e781e8271e3dd6570f",
-          "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "1000ad4c19178ef7203edb6f350990e3c4277d0260f19cf07bf165e145de0f3a"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "io.httpie.Httpie", "ref": "app/io.httpie.Httpie/aarch64/stable",
-          "commit": "96bf9cf0ba7caeed5eb5a80e023c002dc0f9236fc14d82ea90e0501787b5e3ef",
-          "runtime": "org.freedesktop.Platform/aarch64/25.08",
-          "metadataSha256": "4b8673c16e9cdb995c65a186cb72b90e196f3a76bc17c9a474dffc321c83105e"
-        }
-      ]
-    },
-    {
-      "id": "postman",
-      "name": "Postman",
-      "icon": "postman.png",
-      "featured": false,
-      "category": "developer",
-      "keywords": ["REST", "API", "HTTP", "GraphQL", "testing", "collections"],
-      "summary": "A widely used API platform for sending requests, organizing collections, documenting services, and running tests.",
-      "trustTier": "community",
-      "license": "proprietary",
-      "publisher": "flathub",
-      "bundledUpdater": "disabled-by-packaging",
-      "disclosures": [
-        {
-          "id": "publisher:community",
-          "text": "This community Flatpak is not published or supported by Postman. Punar verifies its exact signed metadata before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "com.getpostman.Postman", "ref": "app/com.getpostman.Postman/x86_64/stable",
-          "commit": "503cba34a182fb372083a013bc4638c909b02a8aba187430b8fadb0f388ba1a6",
-          "runtime": "org.freedesktop.Platform/x86_64/24.08",
-          "metadataSha256": "bd8db9be546c6a84b1ba0f5a57c1967516a4540230d223408bfbb8a85c066753"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "com.getpostman.Postman", "ref": "app/com.getpostman.Postman/aarch64/stable",
-          "commit": "abf7939a9749a648bbc5de8209ef4ac25df636de80b48fb42ff893f17f741eb4",
-          "runtime": "org.freedesktop.Platform/aarch64/24.08",
-          "metadataSha256": "aac1e648ced790bc4c94137ba4b16dac34fae2de192d64bbdbf50719d2138bb1"
-        }
-      ]
-    },
-    {
-      "id": "mission-center",
-      "name": "Mission Center",
-      "icon": "mission-center.png",
-      "featured": true,
-      "category": "diagnostics",
-      "keywords": ["system monitor", "CPU", "memory", "disk", "network", "GPU", "processes"],
-      "summary": "A clear system monitor for CPU, memory, disks, networking, GPUs, applications, and individual processes.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "access:system-observation",
-          "text": "System monitoring requires broader process, device, and host access than an ordinary application; review the live permission list before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "io.missioncenter.MissionCenter", "ref": "app/io.missioncenter.MissionCenter/x86_64/stable",
-          "commit": "98dd962a3249d6d51682698040ef88f60bf415f497acee625c836be35c5158eb",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "07b5c37689df6c9c97cee0ae8d255c8de2b92bb31ef3307e11ab54c29e282440"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "io.missioncenter.MissionCenter", "ref": "app/io.missioncenter.MissionCenter/aarch64/stable",
-          "commit": "990f5e01720df5f30c9754d35dba95f5c23155de78acb4a337980aa33f2f1ead",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "ebc70172c97a50ed05b8211e9d7c35d00eb1de91eedb315527b34b0f395b2f65"
-        }
-      ]
-    },
-    {
-      "id": "gnome-logs",
-      "name": "Logs",
-      "icon": "gnome-logs.png",
-      "featured": true,
-      "category": "diagnostics",
-      "keywords": ["logs", "journal", "systemd", "events", "errors", "debug", "troubleshooting"],
-      "summary": "A searchable graphical viewer for systemd journal events, grouped into useful hardware, application, security, and system views.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "access:system-logs",
-          "text": "Reading host system logs can expose sensitive diagnostic data. Punar shows the requested host access before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "org.gnome.Logs", "ref": "app/org.gnome.Logs/x86_64/stable",
-          "commit": "277b582eb8747d48a5192e4daabaab6e6f165422f8d6ec3f1055a816fc46fffc",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "153a5b7e2a02cffe938b11d5db39248dfc91d121e6887800fe023743db39fcaf"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "org.gnome.Logs", "ref": "app/org.gnome.Logs/aarch64/stable",
-          "commit": "fe8cc84bfbbad5158fd5b908b08b15c130efdcf363ed81cd53200030a0539d23",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "5beaf299c06b816ed733d7c52aabd880c0a3f6f9dd436841bd1d56f80089f791"
-        }
-      ]
-    },
-    {
-      "id": "apostrophe",
-      "name": "Apostrophe",
-      "icon": "apostrophe.png",
-      "featured": true,
-      "category": "writing",
-      "keywords": ["Markdown", "preview", "writing", "notes", "editor", "export"],
-      "summary": "A focused Markdown editor with live preview, document statistics, spell checking, and export tools.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "source:flathub",
-          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "org.gnome.gitlab.somas.Apostrophe", "ref": "app/org.gnome.gitlab.somas.Apostrophe/x86_64/stable",
-          "commit": "522ff389b5bf48c4fc4f825ba1c9a7cab797d23f851e2d777db0db9339b1817c",
-          "runtime": "org.gnome.Platform/x86_64/49",
-          "metadataSha256": "19a5f5fd0a83d16ae7552a20764042d93c420e92972c8e0ad9478e01bf6f79e7"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "org.gnome.gitlab.somas.Apostrophe", "ref": "app/org.gnome.gitlab.somas.Apostrophe/aarch64/stable",
-          "commit": "8dc4c804e615251b4fc1eebc09a7423b64991ad0922d8ea2ea034c1bac712409",
-          "runtime": "org.gnome.Platform/aarch64/49",
-          "metadataSha256": "676c4c69b3c3a7a149f92945672cc4c8db48ff12d24548e64d4462f47acac31c"
-        }
-      ]
-    },
-    {
-      "id": "meld",
-      "name": "Meld",
-      "icon": "meld.png",
-      "featured": true,
-      "category": "developer",
-      "keywords": ["diff", "merge", "git", "compare", "files", "directories"],
-      "summary": "A visual diff and merge tool for comparing files, directories, and version-controlled working copies.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "source:flathub",
-          "text": "Punar verifies this Flatpak’s pinned signed metadata and shows its requested file access before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "org.gnome.meld", "ref": "app/org.gnome.meld/x86_64/stable",
-          "commit": "7449737ec00ed01bcd2c2db6940a5b2c5e6aca1dbe12aaf620b062d3d51a607b",
-          "runtime": "org.gnome.Platform/x86_64/50",
-          "metadataSha256": "63fe6a023258e8b07a412672ee057ca5ee4ff478722bdda5bfa7929a1421467f"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "org.gnome.meld", "ref": "app/org.gnome.meld/aarch64/stable",
-          "commit": "14f7de0eb98af8ec0d2504c3059e2c35be768f336d7d6f3704e86ba9eb84340c",
-          "runtime": "org.gnome.Platform/aarch64/50",
-          "metadataSha256": "55f223f70595794ebc730c535923759f5802fd32e67294c6f6a394e1c98c3db8"
-        }
-      ]
-    },
-    {
-      "id": "keepassxc",
-      "name": "KeePassXC",
-      "icon": "keepassxc.png",
-      "featured": true,
-      "category": "security",
-      "keywords": ["password", "vault", "credentials", "security", "offline", "TOTP"],
-      "summary": "An offline-first password manager for encrypted KeePass vaults, passkeys, TOTP codes, and browser integration.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "data:credential-vault",
-          "text": "This application handles credential vaults. Review file and browser-integration access carefully before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "org.keepassxc.KeePassXC", "ref": "app/org.keepassxc.KeePassXC/x86_64/stable",
-          "commit": "c6c60a9c0b105ac68672b3eefbca498f8fcd820887c2182009a2013f63713cf3",
-          "runtime": "org.kde.Platform/x86_64/5.15-25.08",
-          "metadataSha256": "04b60905f10d9e5c948e20ecff6ffd2ffa400157e601170c1cb72bfe5fcaa957"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "org.keepassxc.KeePassXC", "ref": "app/org.keepassxc.KeePassXC/aarch64/stable",
-          "commit": "98c53b1a133023e76cf504c482f2af61208c789535514afca1ca785465604c8f",
-          "runtime": "org.kde.Platform/aarch64/5.15-25.08",
-          "metadataSha256": "22ea0a49feb85201599cb28d642bbfc87be78a5cf8f0ab6616ac5400ec3a7174"
-        }
-      ]
-    },
-    {
-      "id": "podman-desktop",
-      "name": "Podman Desktop",
-      "icon": "podman-desktop.png",
-      "featured": true,
-      "category": "developer",
-      "keywords": ["containers", "Podman", "Kubernetes", "images", "developer", "Docker"],
-      "summary": "A graphical companion for building, running, and inspecting containers, images, pods, and local Kubernetes environments.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "access:container-engine",
-          "text": "Container management requires access to the user’s Podman socket and development files; inspect the live permission list before install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "io.podman_desktop.PodmanDesktop", "ref": "app/io.podman_desktop.PodmanDesktop/x86_64/stable",
-          "commit": "947d359aa5d117c100f19e659be197a48519f9d57dd89f8b6d7d742d06317517",
-          "runtime": "org.freedesktop.Platform/x86_64/25.08",
-          "metadataSha256": "f5ef05242820c9aec15b4434b294e88d8627c34aaeda605f3593147170bc8d6d"
-        },
-        {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "io.podman_desktop.PodmanDesktop", "ref": "app/io.podman_desktop.PodmanDesktop/aarch64/stable",
-          "commit": "f6647a68867ad349af07aea0a1a5fc1cf53f4dca9d5cd6f633039083255d894a",
-          "runtime": "org.freedesktop.Platform/aarch64/25.08",
-          "metadataSha256": "76638c8e50fcd1f0108d08788cccc3e70f6c0138ab0256bb8cfa5c9d4e22c6c6"
         }
       ]
     },
@@ -834,7 +2502,15 @@
       "icon": "wireshark.png",
       "featured": false,
       "category": "diagnostics",
-      "keywords": ["network", "packets", "capture", "protocol", "debug", "security", "traffic"],
+      "keywords": [
+        "network",
+        "packets",
+        "capture",
+        "protocol",
+        "debug",
+        "security",
+        "traffic"
+      ],
       "summary": "A protocol analyzer for inspecting packet captures and troubleshooting complex network behavior.",
       "trustTier": "community",
       "license": "free",
@@ -848,18 +2524,83 @@
       ],
       "sources": [
         {
-          "kind": "flatpak", "architectures": ["x86_64"], "remote": "flathub",
-          "appId": "org.wireshark.Wireshark", "ref": "app/org.wireshark.Wireshark/x86_64/stable",
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.wireshark.Wireshark",
+          "ref": "app/org.wireshark.Wireshark/x86_64/stable",
           "commit": "e36b94cebe57ebe91b695d969e83ec1fc99e116e249c565459fd612f6103e3db",
           "runtime": "org.kde.Platform/x86_64/6.11",
           "metadataSha256": "2660eff177383a40b32c877edcff12e1b749b4dda7528df706d75fbbb1f4b0dd"
         },
         {
-          "kind": "flatpak", "architectures": ["aarch64"], "remote": "flathub",
-          "appId": "org.wireshark.Wireshark", "ref": "app/org.wireshark.Wireshark/aarch64/stable",
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.wireshark.Wireshark",
+          "ref": "app/org.wireshark.Wireshark/aarch64/stable",
           "commit": "f9464de23ce8fa27685b7832e977f3c0b52a3c8b9286df12a3786f8a1ff87830",
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "efc4322931a95ecda553225045f740135cec143ae23298e6d646c0da586293ab"
+        }
+      ]
+    },
+    {
+      "id": "zed",
+      "name": "Zed",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "editor",
+        "rust",
+        "fast",
+        "collaboration",
+        "lsp",
+        "ide"
+      ],
+      "summary": "A fast, collaborative code editor with built-in language servers and multiplayer editing.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:community",
+          "text": "This Flatpak is community-maintained. Punar verifies its pinned signed metadata and shows requested access before install."
+        },
+        {
+          "id": "privacy:cloud-service",
+          "text": "Collaboration and any assistant features require a Zed account and send the shared content to Zed's service. Local editing does not."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "dev.zed.Zed",
+          "ref": "app/dev.zed.Zed/x86_64/stable",
+          "commit": "e08b1794b95f3af98c964d944419114d543bd0f279f6eef16bf4395e6cb6cde9",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "1e381b8c3fcb7d003dff96dabe16dea265d0d4cd1eeb6503791952fe83a58f9a"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "dev.zed.Zed",
+          "ref": "app/dev.zed.Zed/aarch64/stable",
+          "commit": "c6a569a392a4f15b0595f7135584384556d7ec5ae5c8b55626a7421b96053ba8",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "ec9aa72149f9780cd8e0f5f4f5f611056c0f06f561243c134bc840112ed280cd"
         }
       ]
     }
