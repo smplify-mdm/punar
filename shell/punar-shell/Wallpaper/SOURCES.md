@@ -81,8 +81,8 @@ substituted at runtime, so each file serves both the paper and panel moods.
 
 | Plate | Place | Tile | Contours | Distributed SHA-256 |
 |---|---|---|---|---|
-| `yosemite` | Yosemite Valley, California, USA | `n38w120` | 30/60/150 m | `c8675b861ae71ebae17c75c3be19adb7b5ebb470f46bcd24ba357132f7c7de36` |
-| `grand-canyon` | Grand Canyon, Arizona, USA | `n37w113` | 40/80/200 m | `99aea12eca74632ead951d7ed76774e41b3a525667d6cc92ee36bfd8bfd943f8` |
-| `rainier` | Mount Rainier, Washington, USA | `n47w122` | 40/80/200 m | `3a87812a7277e95b8aca07b518cc0291f022903685ccb235cc14d0952b8b1eaa` |
-| `crater-lake` | Crater Lake, Oregon, USA | `n43w123` | 30/60/150 m | `4888250f5e8e74963acf5d7552d49a6b4ad5385cb56b45a73b8895ba10c076c1` |
-| `zion` | Zion Canyon, Utah, USA | `n38w114` | 40/80/200 m | `717411752a83eb04bdb391ec6c8b67c798caa69693fbf2e91d00a6a5dad52664` |
+| `yosemite` | Yosemite Valley, California, USA | `n38w120` | 30/60/150 m | `368d7ed76c911387ed032698c3906b17a63b71012db13eff71ba54c584bee198` |
+| `grand-canyon` | Grand Canyon, Arizona, USA | `n37w113` | 40/80/200 m | `50d2b675bd4bf68146388cd9cf22e610067233294ba4561fe70075c69d7d6aa5` |
+| `rainier` | Mount Rainier, Washington, USA | `n47w122` | 40/80/200 m | `de3d8b85b249b75ac93d011709d20cc4bdd74602d79b779833d08b64cebfd304` |
+| `crater-lake` | Crater Lake, Oregon, USA | `n43w123` | 30/60/150 m | `57235e8bb858d5ed2daf6b418a084d14fd30288ca382535c13dcd958887d56a7` |
+| `zion` | Zion Canyon, Utah, USA | `n38w114` | 40/80/200 m | `73e21fcac910732c2d311f31adb924270098b977bde2f3e3286ec25261064369` |

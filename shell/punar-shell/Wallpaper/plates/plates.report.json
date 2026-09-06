@@ -1,0 +1,112 @@
+[
+  {
+    "id": "yosemite",
+    "bytes": 998576,
+    "supplementary": 180,
+    "intermediate": 177,
+    "index": 102,
+    "water": 252,
+    "named_waters": [
+      "Bluejay Creek",
+      "Bridalveil Creek",
+      "Eagle Creek",
+      "Eagle Peak Creek",
+      "Illilouette Creek",
+      "Indian Canyon Creek",
+      "Lehamite Creek",
+      "Merced River"
+    ],
+    "min_m": 1200,
+    "max_m": 3000,
+    "scale_km": 2,
+    "sha256": "368d7ed76c911387ed032698c3906b17a63b71012db13eff71ba54c584bee198"
+  },
+  {
+    "id": "grand-canyon",
+    "bytes": 1262983,
+    "supplementary": 189,
+    "intermediate": 176,
+    "index": 95,
+    "water": 98,
+    "named_waters": [
+      "Boulder Creek",
+      "Bright Angel Creek",
+      "Bright Angel Wash",
+      "Clear Creek",
+      "Colorado River",
+      "Cremation Creek",
+      "Garden Creek",
+      "Grapevine Creek"
+    ],
+    "min_m": 720,
+    "max_m": 2240,
+    "scale_km": 2,
+    "sha256": "50d2b675bd4bf68146388cd9cf22e610067233294ba4561fe70075c69d7d6aa5"
+  },
+  {
+    "id": "rainier",
+    "bytes": 1530618,
+    "supplementary": 379,
+    "intermediate": 410,
+    "index": 180,
+    "water": 505,
+    "named_waters": [
+      "Basalt Creek",
+      "Boulder Creek",
+      "Edith Creek",
+      "Fryingpan Creek",
+      "Inter Fork",
+      "Kautz Creek",
+      "Muddy Fork Cowlitz River",
+      "Nisqually River"
+    ],
+    "min_m": 1000,
+    "max_m": 4360,
+    "scale_km": 2,
+    "sha256": "de3d8b85b249b75ac93d011709d20cc4bdd74602d79b779833d08b64cebfd304"
+  },
+  {
+    "id": "crater-lake",
+    "bytes": 465061,
+    "supplementary": 102,
+    "intermediate": 94,
+    "index": 51,
+    "water": 33,
+    "named_waters": [
+      "Bear Creek",
+      "Bybee Creek",
+      "Cavern Creek",
+      "Dutton Creek",
+      "Little Castle Creek",
+      "Middle Fork Copeland Creek",
+      "Munson Creek",
+      "North Fork Copeland Creek"
+    ],
+    "min_m": 1710,
+    "max_m": 2700,
+    "scale_km": 2,
+    "sha256": "57235e8bb858d5ed2daf6b418a084d14fd30288ca382535c13dcd958887d56a7"
+  },
+  {
+    "id": "zion",
+    "bytes": 1144561,
+    "supplementary": 349,
+    "intermediate": 364,
+    "index": 197,
+    "water": 127,
+    "named_waters": [
+      "Black Wash",
+      "Blue Creek",
+      "Goose Creek",
+      "Grapevine Wash",
+      "Jennings Wash",
+      "Left Fork North Creek",
+      "Little Creek",
+      "North Creek"
+    ],
+    "min_m": 1240,
+    "max_m": 2280,
+    "scale_km": 1,
+    "sha256": "73e21fcac910732c2d311f31adb924270098b977bde2f3e3286ec25261064369"
+  }
+]

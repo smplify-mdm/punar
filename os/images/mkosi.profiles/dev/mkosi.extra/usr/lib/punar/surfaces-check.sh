@@ -712,19 +712,22 @@ wallpaper_plate() {
             return
         fi
     done
-    if grep -qE '<text[ >]' "${wp_path}"; then
-        note "FAIL ${wp_name} plate carries <text>; it must render before fonts load"
+    # From <svg onward only. The plate's header comment explains that it carries
+    # no text element, and scanning the whole file matched that sentence — a
+    # check that fails because the file says it does not do the thing.
+    if sed -n '/<svg/,$p' "${wp_path}" | grep -qE '<text[ >/]'; then
+        note "FAIL ${wp_name} plate carries a text element; it must render before fonts load"
         FAILED=1
         return
     fi
     note "ok   ${wp_name} plate is the shipped three-substitution template"
 }
 
-wallpaper_plate yosemite c8675b861ae71ebae17c75c3be19adb7b5ebb470f46bcd24ba357132f7c7de36
-wallpaper_plate grand-canyon 99aea12eca74632ead951d7ed76774e41b3a525667d6cc92ee36bfd8bfd943f8
-wallpaper_plate rainier 3a87812a7277e95b8aca07b518cc0291f022903685ccb235cc14d0952b8b1eaa
-wallpaper_plate crater-lake 4888250f5e8e74963acf5d7552d49a6b4ad5385cb56b45a73b8895ba10c076c1
-wallpaper_plate zion 717411752a83eb04bdb391ec6c8b67c798caa69693fbf2e91d00a6a5dad52664
+wallpaper_plate yosemite 368d7ed76c911387ed032698c3906b17a63b71012db13eff71ba54c584bee198
+wallpaper_plate grand-canyon 50d2b675bd4bf68146388cd9cf22e610067233294ba4561fe70075c69d7d6aa5
+wallpaper_plate rainier de3d8b85b249b75ac93d011709d20cc4bdd74602d79b779833d08b64cebfd304
+wallpaper_plate crater-lake 57235e8bb858d5ed2daf6b418a084d14fd30288ca382535c13dcd958887d56a7
+wallpaper_plate zion 73e21fcac910732c2d311f31adb924270098b977bde2f3e3286ec25261064369
 
 wallpaper_asset daybreak 4aa5af32a22ead3930bab5b9b24e1a8c899ba13268e0e58acd94c96251905c18
 wallpaper_asset winterline 04aab01c53774d96d336ef0d15d235e10d9f1194ee7409615f7956615b5759f1

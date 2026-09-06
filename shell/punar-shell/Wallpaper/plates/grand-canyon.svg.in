@@ -13,9 +13,9 @@
      A TEMPLATE, NOT AN ASSET: the three colours are placeholders substituted at
      runtime by Wallpaper.qml (theme-system.md 7.3), which is what makes paper
      and panel one file. Budget as punar-wallpaper.svg.in — no raster, no
-     gradient, no filter, no <text>, no animation, no script. The corner type is
-     Geist Mono converted to outlines here, so the plate renders correctly
-     before any font is loaded. -->
+     gradient, no filter, no text element, no animation, no script. The corner
+     type is Geist Mono converted to outlines here, so the plate renders
+     correctly before any font is loaded. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"
      viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet" role="img">
   <title>Punar — Grand Canyon, Arizona, USA</title>
