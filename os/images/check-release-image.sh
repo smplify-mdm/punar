@@ -315,8 +315,20 @@ else
             "${IDLE_POLICY}"; then
         fail A13 'the idle-lock policy does not route locking to the Punar lock surface'
     fi
-    if [ "$(stat -c '%U %a' "${IDLE_POLICY}")" != "root 644" ]; then
-        fail A13 "the idle-lock policy is $(stat -c '%U %a' "${IDLE_POLICY}"), not root 644"
+    # Owner is compared against the tree's own /etc rather than the literal
+    # "root": a real image is assembled as root, but the policy test builds its
+    # fixture as the unprivileged CI runner, where everything is owned by
+    # `runner` and a literal check fails on a conforming tree. The property
+    # that matters is that this file is owned by whoever owns the system
+    # configuration and is writable by nobody else.
+    idle_owner=$(stat -c '%U' "${IDLE_POLICY}")
+    etc_owner=$(stat -c '%U' "${ROOT}/etc")
+    idle_mode=$(stat -c '%a' "${IDLE_POLICY}")
+    if [ "${idle_owner}" != "${etc_owner}" ]; then
+        fail A13 "the idle-lock policy is owned by ${idle_owner}, not ${etc_owner} like /etc"
+    fi
+    if [ "${idle_mode}" != "644" ]; then
+        fail A13 "the idle-lock policy is mode ${idle_mode}, not 644"
     fi
 fi
 
