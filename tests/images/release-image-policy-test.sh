@@ -84,6 +84,9 @@ printf '%s\n' \
     '    timeout = 600' \
     '    on-timeout = loginctl lock-session' \
     '}' > "${CLEAN}/etc/xdg/hypr/punar-hypridle.conf"
+mkdir -p "${CLEAN}/etc/security"
+printf '%s\n' '# stated lockout policy' 'deny = 5' 'unlock_time = 300' \
+    'fail_interval = 900' > "${CLEAN}/etc/security/faillock.conf"
 printf '%s\n' '[Unit]' 'Description=Punar product service' \
     > "${CLEAN}/usr/lib/systemd/system/punard.service"
 ln -s ../punard.service \
@@ -179,6 +182,20 @@ mutate_a13_route() {
     sed -i 's|lock_cmd = .*|lock_cmd = /usr/bin/true|' \
         "${CASE}/etc/xdg/hypr/punar-hypridle.conf"
 }
+# A14 has four ways to be wrong and each must bite: no stated policy at all
+# (the state that shipped, where Arch's defaults governed silently), a deny so
+# low the machine locks on a single typo, an unlock_time long enough to be
+# indistinguishable from a brick, and a policy the lock surface cannot read -
+# which would silently return it to the unlabelled "Try again".
+mutate_a14() { rm -f "${CASE}/etc/security/faillock.conf"; }
+mutate_a14_trigger() {
+    sed -i 's/deny = 5/deny = 1/' "${CASE}/etc/security/faillock.conf"
+}
+mutate_a14_forever() {
+    sed -i 's/unlock_time = 300/unlock_time = 86400/' \
+        "${CASE}/etc/security/faillock.conf"
+}
+mutate_a14_unreadable() { chmod 0600 "${CASE}/etc/security/faillock.conf"; }
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -237,6 +254,10 @@ expect_fail A7 mutate_a7
 expect_fail A13 mutate_a13
 expect_fail A13 mutate_a13_slow
 expect_fail A13 mutate_a13_route
+expect_fail A14 mutate_a14
+expect_fail A14 mutate_a14_trigger
+expect_fail A14 mutate_a14_forever
+expect_fail A14 mutate_a14_unreadable
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

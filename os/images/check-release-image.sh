@@ -332,6 +332,50 @@ else
     fi
 fi
 
+# A14: the account-lockout policy must be STATED by the image, not inherited.
+# etc/pam.d/punar-lock has always included pam_faillock, so after enough failed
+# passphrases the account locks and the CORRECT passphrase is refused too. With
+# no faillock.conf that threshold was whatever Arch's built-in defaults happened
+# to be, written down nowhere — and a lockout that nobody declared is one the
+# lock surface cannot describe, so it prints "Try again" and a locked-out owner
+# concludes their passphrase is broken. On a LUKS machine that conclusion ends
+# in a wipe. The bounds below are sanity, not taste: a deny of 1 is a machine
+# that locks on one typo, and an unlock_time long enough to outlast a working
+# day is indistinguishable from a brick.
+LOCKOUT_POLICY="${ROOT}/etc/security/faillock.conf"
+if [ ! -f "${LOCKOUT_POLICY}" ]; then
+    fail A14 'the account-lockout policy is missing: etc/security/faillock.conf'
+else
+    lock_deny=$(awk -F= '/^[[:space:]]*deny[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' \
+        "${LOCKOUT_POLICY}")
+    lock_unlock=$(awk -F= '/^[[:space:]]*unlock_time[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' \
+        "${LOCKOUT_POLICY}")
+    case "${lock_deny}" in
+        ''|*[!0-9]*) fail A14 "the lockout policy states no numeric deny (got '${lock_deny}')" ;;
+        *) if [ "${lock_deny}" -lt 3 ] || [ "${lock_deny}" -gt 10 ]; then
+               fail A14 "the lockout deny is ${lock_deny}, outside 3..10"
+           fi ;;
+    esac
+    case "${lock_unlock}" in
+        ''|*[!0-9]*) fail A14 "the lockout policy states no numeric unlock_time (got '${lock_unlock}')" ;;
+        *) if [ "${lock_unlock}" -lt 60 ] || [ "${lock_unlock}" -gt 3600 ]; then
+               fail A14 "the lockout unlock_time is ${lock_unlock}s, outside 60..3600"
+           fi ;;
+    esac
+    # The lock surface READS this file to phrase what it tells the reader, so a
+    # tree where it is unreadable would silently return the surface to the
+    # unlabelled "Try again" this assertion exists to prevent.
+    lock_mode=$(stat -c '%a' "${LOCKOUT_POLICY}")
+    lock_owner=$(stat -c '%U' "${LOCKOUT_POLICY}")
+    etc_owner_l=$(stat -c '%U' "${ROOT}/etc")
+    if [ "${lock_owner}" != "${etc_owner_l}" ]; then
+        fail A14 "the lockout policy is owned by ${lock_owner}, not ${etc_owner_l} like /etc"
+    fi
+    if [ "${lock_mode}" != "644" ]; then
+        fail A14 "the lockout policy is mode ${lock_mode}, not 644 (the lock surface must read it)"
+    fi
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

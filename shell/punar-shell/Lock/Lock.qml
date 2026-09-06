@@ -81,6 +81,72 @@ Scope {
     // Cleared on success, failure, error, and every lock.
     property string pending: ""
 
+    // ---- the lockout policy, read rather than assumed ---------------------
+    //
+    // `etc/pam.d/punar-lock` includes pam_faillock, so after enough failures
+    // the account is locked and the CORRECT passphrase is refused too. PAM
+    // reports that refusal as PAM_AUTH_ERR — the same code as a wrong
+    // passphrase — so this surface cannot tell the two apart from the result
+    // alone and used to print "Try again" for both. A person who has just been
+    // locked out for minutes is then told, in the same words as a typo, that
+    // their passphrase is wrong; on a LUKS machine that is how someone talks
+    // themselves into wiping a working disk.
+    //
+    // The numbers come from the shipped policy file rather than being repeated
+    // here, so /etc/security/faillock.conf and the sentence on the lock screen
+    // cannot drift apart. A file that is missing or unparsable yields 0, which
+    // this surface reads as "policy unknown" and then says nothing about
+    // lockouts at all — an invented threshold would be worse than silence.
+    property int denyAfter: 0
+    property int unlockSeconds: 0
+
+    readonly property string lockoutPath: "/etc/security/faillock.conf"
+
+    FileView {
+        id: faillockPolicy
+        path: root.lockoutPath
+        printErrors: false
+        onLoaded: {
+            var deny = 0;
+            var unlock = 0;
+            var lines = String(faillockPolicy.text()).split("\n");
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (line === "" || line.charAt(0) === "#")
+                    continue;
+                var eq = line.indexOf("=");
+                if (eq < 0)
+                    continue;
+                var key = line.substring(0, eq).trim();
+                var value = parseInt(line.substring(eq + 1).trim(), 10);
+                if (isNaN(value) || value <= 0)
+                    continue;
+                if (key === "deny")
+                    deny = value;
+                else if (key === "unlock_time")
+                    unlock = value;
+            }
+            root.denyAfter = deny;
+            root.unlockSeconds = unlock;
+        }
+        onLoadFailed: {
+            root.denyAfter = 0;
+            root.unlockSeconds = 0;
+        }
+    }
+
+    // "5 minutes" / "90 seconds" — whole units only; a lock screen does not
+    // need a countdown, it needs an order of magnitude the reader can wait out.
+    function lockoutWindow(): string {
+        if (root.unlockSeconds <= 0)
+            return "";
+        if (root.unlockSeconds % 60 === 0) {
+            var mins = root.unlockSeconds / 60;
+            return mins === 1 ? "1 minute" : mins + " minutes";
+        }
+        return root.unlockSeconds + " seconds";
+    }
+
     property date now: new Date()
 
     // ---- identity ---------------------------------------------------------
@@ -229,7 +295,27 @@ Scope {
                 return;
             }
             root.attempts = root.attempts + 1;
-            root.failure = result === PamResult.MaxTries ? "Too many attempts · wait and try again" : "Try again";
+            if (result === PamResult.MaxTries) {
+                root.failure = "Too many attempts · wait and try again";
+            } else if (root.denyAfter > 0 && root.attempts >= root.denyAfter) {
+                // This surface caused at least `deny` failures itself, so a
+                // lockout is now a fact rather than a guess, and it says the
+                // one thing the reader needs: the passphrase may well be
+                // right, and waiting is what fixes this.
+                var window = root.lockoutWindow();
+                root.failure = window === ""
+                    ? "Locked · too many attempts · wait before trying again"
+                    : "Locked · too many attempts · wait " + window + " and try again";
+            } else if (root.denyAfter > 0) {
+                // Stated as the POLICY, not as a remaining count: faillock's
+                // counter survives reboots and earlier lock sessions, while
+                // `attempts` resets on every lock, so a "2 tries left" here
+                // could be a lie. What is always true is the threshold.
+                root.failure = "Try again · " + root.denyAfter
+                    + " failures locks this account";
+            } else {
+                root.failure = "Try again";
+            }
         }
 
         onError: function (error) {
