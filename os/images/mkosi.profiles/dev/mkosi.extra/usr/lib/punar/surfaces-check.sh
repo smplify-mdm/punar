@@ -667,12 +667,12 @@ fi
 
 ipc wallpaper list > /run/punar/surfaces-wallpapers.json 2>/dev/null
 if jq -e '.default == "stillpoint"
-        and (.wallpapers | length) == 5
-        and ([.wallpapers[].id] | sort) == (["daybreak", "earthrise", "field", "stillpoint", "winterline"] | sort)' \
+        and (.wallpapers | length) == 10
+        and ([.wallpapers[].id] | sort) == (["crater-lake", "daybreak", "earthrise", "field", "grand-canyon", "rainier", "stillpoint", "winterline", "yosemite", "zion"] | sort)' \
         /run/punar/surfaces-wallpapers.json >/dev/null 2>&1; then
-    note "ok   wallpaper catalog exposes the five shipped choices"
+    note "ok   wallpaper catalog exposes the ten shipped choices"
 else
-    note "FAIL wallpaper catalog does not expose exactly daybreak/earthrise/field/stillpoint/winterline"
+    note "FAIL wallpaper catalog does not expose exactly the four rasters, Field and the five topographic plates"
     FAILED=1
 fi
 
@@ -690,6 +690,41 @@ wallpaper_asset() {
         FAILED=1
     fi
 }
+
+# A plate is a TEMPLATE, not a raster, so its invariants differ from a JPEG's:
+# it must carry all three substitutions (or a theme switch cannot colour it) and
+# no <text> (or it renders wrong before fonts load). The digest catches drift the
+# same way the raster check does.
+wallpaper_plate() {
+    wp_name="$1"
+    wp_expected="$2"
+    wp_path="/usr/share/punar/shell/Wallpaper/plates/${wp_name}.svg.in"
+    wp_actual="$(sha256sum "${wp_path}" 2>/dev/null | cut -d' ' -f1)"
+    if [ "${wp_actual}" != "${wp_expected}" ]; then
+        note "FAIL ${wp_name} plate is missing or altered (sha='${wp_actual}')"
+        FAILED=1
+        return
+    fi
+    for wp_token in __FIELD__ __HAIRLINE__ __EMPHASIS__; do
+        if ! grep -qF "${wp_token}" "${wp_path}"; then
+            note "FAIL ${wp_name} plate is missing the ${wp_token} substitution"
+            FAILED=1
+            return
+        fi
+    done
+    if grep -qE '<text[ >]' "${wp_path}"; then
+        note "FAIL ${wp_name} plate carries <text>; it must render before fonts load"
+        FAILED=1
+        return
+    fi
+    note "ok   ${wp_name} plate is the shipped three-substitution template"
+}
+
+wallpaper_plate yosemite c8675b861ae71ebae17c75c3be19adb7b5ebb470f46bcd24ba357132f7c7de36
+wallpaper_plate grand-canyon 99aea12eca74632ead951d7ed76774e41b3a525667d6cc92ee36bfd8bfd943f8
+wallpaper_plate rainier 3a87812a7277e95b8aca07b518cc0291f022903685ccb235cc14d0952b8b1eaa
+wallpaper_plate crater-lake 4888250f5e8e74963acf5d7552d49a6b4ad5385cb56b45a73b8895ba10c076c1
+wallpaper_plate zion 717411752a83eb04bdb391ec6c8b67c798caa69693fbf2e91d00a6a5dad52664
 
 wallpaper_asset daybreak 4aa5af32a22ead3930bab5b9b24e1a8c899ba13268e0e58acd94c96251905c18
 wallpaper_asset winterline 04aab01c53774d96d336ef0d15d235e10d9f1194ee7409615f7956615b5759f1
