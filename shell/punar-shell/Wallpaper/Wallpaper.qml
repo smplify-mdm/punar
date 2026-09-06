@@ -41,10 +41,12 @@ Scope {
     readonly property int sheetWidth: 1600
     readonly property int sheetHeight: 1000
 
-    // The template ships beside this file, so one path works in both the
-    // installed layout (/usr/share/punar/shell/Wallpaper/) and the repo
-    // (shell/punar-shell/Wallpaper/) — no candidate walking needed.
-    readonly property string templatePath: Quickshell.shellDir + "/Wallpaper/punar-wallpaper.svg.in"
+    // Templates ship beside this file, so one path works in both the installed
+    // layout (/usr/share/punar/shell/Wallpaper/) and the repo
+    // (shell/punar-shell/Wallpaper/) — no candidate walking needed. Which
+    // drawing is named by the selected entry, so the topographic plates and the
+    // original Field drawing take the same path through this surface.
+    readonly property string templatePath: Quickshell.shellDir + "/Wallpaper/" + WallpaperState.activeTemplate
 
     property string template: ""
 

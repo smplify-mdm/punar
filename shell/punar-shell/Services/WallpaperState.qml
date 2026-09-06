@@ -44,6 +44,41 @@ Singleton {
         "intent": "Theme-derived vector · ultra lean",
         "file": "",
         "vector": true
+    }, {
+        "id": "yosemite",
+        "name": "Yosemite",
+        "intent": "Yosemite Valley, California · granite quiet",
+        "file": "",
+        "vector": true,
+        "template": "plates/yosemite.svg.in"
+    }, {
+        "id": "grand-canyon",
+        "name": "Grand Canyon",
+        "intent": "South Rim, Arizona · stepped terraces",
+        "file": "",
+        "vector": true,
+        "template": "plates/grand-canyon.svg.in"
+    }, {
+        "id": "rainier",
+        "name": "Rainier",
+        "intent": "Mount Rainier, Washington · one cone",
+        "file": "",
+        "vector": true,
+        "template": "plates/rainier.svg.in"
+    }, {
+        "id": "crater-lake",
+        "name": "Crater Lake",
+        "intent": "Crater Lake, Oregon · still water",
+        "file": "",
+        "vector": true,
+        "template": "plates/crater-lake.svg.in"
+    }, {
+        "id": "zion",
+        "name": "Zion",
+        "intent": "Zion Canyon, Utah · narrow light",
+        "file": "",
+        "vector": true,
+        "template": "plates/zion.svg.in"
     }]
 
     readonly property string homeDir: {
@@ -62,6 +97,15 @@ Singleton {
     readonly property string activeIntent: root.active === null ? "Warm signal · calm focus" : String(root.active.intent)
     readonly property string activeFile: root.active === null ? "stillpoint.jpg" : String(root.active.file)
     readonly property bool activeIsVector: root.active !== null && root.active.vector === true
+
+    // Vector entries may name their own drawing. The original Field template is
+    // the default, so an entry that predates the topographic plates keeps
+    // working without carrying a redundant field.
+    readonly property string activeTemplate: {
+        if (root.active === null || !root.active.template)
+            return "punar-wallpaper.svg.in";
+        return String(root.active.template);
+    }
 
     function init(): void {
     }
