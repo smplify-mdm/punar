@@ -13,14 +13,25 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    // The shipped default is a topographic plate: survey contours of a real
-    // place, drawn from the theme's own three tones, so the desktop states the
-    // design language rather than decorating around it. Yosemite because its
-    // valley floor leaves a calm band across the middle of the frame, which is
-    // where windows sit. crater-lake is the quieter alternative if this reads
-    // as too much line work behind a full screen of terminals.
-    readonly property string defaultId: "yosemite"
+    // The shipped default is Daybreak — chosen by the owner after living with
+    // both options on a running machine, which is the only test that settles
+    // this. Its dark ridgeline fills the lower two thirds and its sky is a
+    // smooth gradient, so window chrome and the bar both sit on quiet ground,
+    // and the frame reads as depth rather than as line work competing with a
+    // screen of terminals.
+    //
+    // The topographic plates remain first-class and are listed immediately
+    // after: they are the leaner option (no raster to decode, theme-derived in
+    // three tones) and Yosemite was the previous default. This is a taste
+    // decision, not a technical one, and either is a supported choice.
+    readonly property string defaultId: "daybreak"
     readonly property var catalog: [{
+        "id": "daybreak",
+        "name": "Daybreak",
+        "intent": "Alpine twilight · open and quiet",
+        "file": "daybreak.jpg",
+        "vector": false
+    }, {
         "id": "yosemite",
         "name": "Yosemite",
         "intent": "Yosemite Valley, California · granite quiet",
@@ -62,12 +73,6 @@ Singleton {
         "name": "Stillpoint",
         "intent": "Warm signal · calm focus",
         "file": "stillpoint.jpg",
-        "vector": false
-    }, {
-        "id": "daybreak",
-        "name": "Daybreak",
-        "intent": "Alpine twilight · open and quiet",
-        "file": "daybreak.jpg",
         "vector": false
     }, {
         "id": "winterline",

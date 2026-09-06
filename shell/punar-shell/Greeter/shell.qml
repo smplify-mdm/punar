@@ -901,7 +901,19 @@ Scope {
                 // URL differs between `qs -p …/shell` and `qs -p …/Greeter`,
                 // and relative resolution silently rendered the fallback
                 // surface in the real release VM.
-                source: "file:///usr/share/punar/shell/Wallpaper/assets/stillpoint.jpg"
+                //
+                // MATCHES THE DESKTOP DEFAULT, and is hardcoded rather than
+                // read from WallpaperState on purpose. The greeter runs as the
+                // `greeter` user before any session exists, so the desktop's
+                // per-user selection is not readable from here and must not be:
+                // reading a user-writable file to decide the login screen's
+                // first frame would let a logged-out machine be redressed by
+                // whoever last wrote it. Kept in step with
+                // Services/WallpaperState.qml `defaultId` by hand — if that
+                // default changes and this does not, login shows one image and
+                // the desktop another, which is only cosmetic but reads as two
+                // different machines.
+                source: "file:///usr/share/punar/shell/Wallpaper/assets/daybreak.jpg"
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: false
                 cache: true
