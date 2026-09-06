@@ -1188,11 +1188,16 @@ else
     FAILED=1
 fi
 
+# Only that a listener exists. This image ships a CI override with a day-long
+# timeout, because the product's ten minutes locks the session out from under
+# the exercises. The product's bound is asserted by check-release-image.sh
+# against the release tree, where nothing overrides it — asserting it here
+# would only ever prove the override.
 idle_timeout="$(awk '/^[[:space:]]*timeout[[:space:]]*=/ {print $3; exit}' "${IDLE_CONF}" 2>/dev/null)"
-if [ -n "${idle_timeout}" ] && [ "${idle_timeout}" -gt 0 ] && [ "${idle_timeout}" -le 1800 ]; then
-    note "ok   idle timeout is ${idle_timeout}s, inside the half-hour ceiling"
+if [ -n "${idle_timeout}" ] && [ "${idle_timeout}" -gt 0 ]; then
+    note "ok   an idle listener is configured (${idle_timeout}s in this image)"
 else
-    note "FAIL idle timeout '${idle_timeout}' is absent, zero or over 1800s"
+    note "FAIL no idle listener is configured at all"
     FAILED=1
 fi
 

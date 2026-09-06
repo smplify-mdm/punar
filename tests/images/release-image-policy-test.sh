@@ -75,6 +75,15 @@ printf '%s\n' \
     '[default_session]' \
     'command = "agreety --cmd /usr/lib/punar/session.sh"' \
     'user = "greeter"' > "${CLEAN}/etc/greetd/config.toml"
+mkdir -p "${CLEAN}/etc/xdg/hypr"
+printf '%s\n' \
+    'general {' \
+    '    lock_cmd = qs -p /usr/share/punar/shell ipc call lock lock' \
+    '}' \
+    'listener {' \
+    '    timeout = 600' \
+    '    on-timeout = loginctl lock-session' \
+    '}' > "${CLEAN}/etc/xdg/hypr/punar-hypridle.conf"
 printf '%s\n' '[Unit]' 'Description=Punar product service' \
     > "${CLEAN}/usr/lib/systemd/system/punard.service"
 ln -s ../punard.service \
@@ -158,6 +167,18 @@ mutate_a11() {
         > "${CASE}/var/lib/punar/agents/registry.jsonl"
 }
 mutate_a12() { chmod 0644 "${CASE}/usr/bin/systemd-cryptenroll"; }
+# A13 has three ways to be wrong and each must bite: no lock at all, a timeout
+# so long it is a lock in name only, and a lock routed somewhere other than the
+# Punar lock surface.
+mutate_a13() { rm -f "${CASE}/etc/xdg/hypr/punar-hypridle.conf"; }
+mutate_a13_slow() {
+    sed -i 's/timeout = 600/timeout = 86400/' \
+        "${CASE}/etc/xdg/hypr/punar-hypridle.conf"
+}
+mutate_a13_route() {
+    sed -i 's|lock_cmd = .*|lock_cmd = /usr/bin/true|' \
+        "${CASE}/etc/xdg/hypr/punar-hypridle.conf"
+}
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -213,6 +234,9 @@ expect_fail A4 mutate_a4
 expect_fail A5 mutate_a5
 expect_fail A6 mutate_a6
 expect_fail A7 mutate_a7
+expect_fail A13 mutate_a13
+expect_fail A13 mutate_a13_slow
+expect_fail A13 mutate_a13_route
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

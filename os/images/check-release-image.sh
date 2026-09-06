@@ -290,6 +290,36 @@ if [ ! -x "${ROOT}/usr/bin/cryptsetup" ] \
     fail A12 'required installer executable is missing: usr/{bin,sbin}/cryptsetup'
 fi
 
+# A13: an unattended release session must lock itself. The lock surface and its
+# PAM stack are useless if nothing invokes them, and the CI image deliberately
+# overrides this policy with a day-long timeout so the desktop exercises are not
+# locked out mid-run — which means the product's bound can only be asserted
+# here, against a tree where nothing overrides it.
+IDLE_POLICY="${ROOT}/etc/xdg/hypr/punar-hypridle.conf"
+if [ ! -f "${IDLE_POLICY}" ]; then
+    fail A13 'the idle-lock policy is missing: etc/xdg/hypr/punar-hypridle.conf'
+else
+    idle_timeout=$(awk '/^[[:space:]]*timeout[[:space:]]*=/ {print $3; exit}' \
+        "${IDLE_POLICY}")
+    case "${idle_timeout}" in
+        ''|*[!0-9]*)
+            fail A13 "the idle-lock policy states no numeric timeout (got '${idle_timeout}')"
+            ;;
+        *)
+            if [ "${idle_timeout}" -lt 60 ] || [ "${idle_timeout}" -gt 1800 ]; then
+                fail A13 "the idle-lock timeout is ${idle_timeout}s, outside 60..1800"
+            fi
+            ;;
+    esac
+    if ! grep -qE '^[[:space:]]*lock_cmd[[:space:]]*=.*ipc call lock lock' \
+            "${IDLE_POLICY}"; then
+        fail A13 'the idle-lock policy does not route locking to the Punar lock surface'
+    fi
+    if [ "$(stat -c '%U %a' "${IDLE_POLICY}")" != "root 644" ]; then
+        fail A13 "the idle-lock policy is $(stat -c '%U %a' "${IDLE_POLICY}"), not root 644"
+    fi
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2
