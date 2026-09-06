@@ -200,6 +200,30 @@ fn public_error(error: &IdentityError) -> (&'static str, Option<&'static str>, &
             Some("username"),
             "The home folder could not be created. Nothing was changed; try again.",
         ),
+        IdentityError::NoRecoveryRecord => (
+            "recovery_unknown",
+            Some("username"),
+            "There is no recovery code on file for that account name.",
+        ),
+        IdentityError::RecoveryAlreadyUsed => (
+            "recovery_used",
+            Some("recoveryCode"),
+            "That recovery code has already been used. A code works once.",
+        ),
+        IdentityError::RecoveryExhausted => (
+            "recovery_exhausted",
+            Some("recoveryCode"),
+            "Too many incorrect recovery codes. This code can no longer be used.",
+        ),
+        // Deliberately the same shape of sentence as a wrong code, and it names
+        // the remaining budget rather than the reason: a message that
+        // distinguished "wrong code" from "no such account" would turn this
+        // surface into an account-name oracle for anyone holding the machine.
+        IdentityError::RecoveryMismatch => (
+            "recovery_mismatch",
+            Some("recoveryCode"),
+            "That recovery code is not correct. Codes are limited; check it and try again.",
+        ),
         IdentityError::Storage(_) | IdentityError::Materialize | IdentityError::Corrupt => (
             "transaction_failed",
             None,

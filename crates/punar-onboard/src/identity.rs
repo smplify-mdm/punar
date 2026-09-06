@@ -14,8 +14,8 @@ use serde_json::json;
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::protocol::{ValidatedAccount, ValidationError, validate_account};
-use crate::secret::{HashError, yescrypt};
+use crate::protocol::{ValidatedAccount, ValidationError, validate_account, validate_password};
+use crate::secret::{HashError, yescrypt, yescrypt_verify};
 
 const UID_MIN: u32 = 1000;
 const UID_MAX_EXCLUSIVE: u32 = 60_000;
@@ -87,6 +87,14 @@ pub enum IdentityError {
     Materialize,
     #[error("stored identity record is invalid")]
     Corrupt,
+    #[error("no account with a recovery record")]
+    NoRecoveryRecord,
+    #[error("the recovery code has already been used")]
+    RecoveryAlreadyUsed,
+    #[error("too many recovery attempts")]
+    RecoveryExhausted,
+    #[error("the recovery code does not match")]
+    RecoveryMismatch,
 }
 
 /// The small boundary between the identity transaction and substrate-owned
@@ -95,6 +103,7 @@ pub enum IdentityError {
 /// name. Production still has exactly one implementation below.
 trait IdentityPlatform {
     fn hash(&self, secret: &str) -> Result<Zeroizing<String>, IdentityError>;
+    fn verify(&self, secret: &str, stored: &str) -> Result<bool, IdentityError>;
     fn lookup(&self, database: &str, key: &str) -> Result<Option<String>, IdentityError>;
     fn current_hostname(&self) -> String;
     fn set_hostname(&self, hostname: &str) -> Result<(), IdentityError>;
@@ -113,6 +122,10 @@ struct SystemPlatform;
 impl IdentityPlatform for SystemPlatform {
     fn hash(&self, secret: &str) -> Result<Zeroizing<String>, IdentityError> {
         yescrypt(secret).map_err(IdentityError::from)
+    }
+
+    fn verify(&self, secret: &str, stored: &str) -> Result<bool, IdentityError> {
+        yescrypt_verify(secret, stored).map_err(IdentityError::from)
     }
 
     fn lookup(&self, database: &str, key: &str) -> Result<Option<String>, IdentityError> {
@@ -144,6 +157,13 @@ impl From<ValidationError> for IdentityError {
 }
 
 #[derive(Debug)]
+/// What a successful redemption reports back. Deliberately not the new hash,
+/// not the code, and not the account id — the caller needs to know it worked
+/// and for whom, and nothing else.
+pub struct RedeemedRecovery {
+    pub username: String,
+}
+
 pub struct CreatedAccount {
     pub username: String,
     pub hostname: String,
@@ -217,6 +237,32 @@ struct RecoveryRecord<'a> {
     used: bool,
 }
 
+/// The same document, read back. `RecoveryRecord` borrows for the write path;
+/// redemption needs an owned parse, and the two must not drift — the round-trip
+/// test at the bottom of this file is what holds them together.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRecovery {
+    v: u32,
+    account_id: String,
+    username: String,
+    algorithm: String,
+    hash: String,
+    #[serde(default)]
+    attempts: u32,
+    #[serde(default)]
+    used: bool,
+}
+
+/// How many wrong codes a recovery record tolerates before it is spent.
+///
+/// The code is 8 groups of modhex — far beyond guessing in five tries — so this
+/// bound is not what makes it strong. It exists so that a stolen machine cannot
+/// be ground against offline-quality odds by someone sitting at the greeter,
+/// and so that a spent record is a fact on disk rather than a rate limit some
+/// caller is trusted to honour.
+const RECOVERY_MAX_ATTEMPTS: u32 = 5;
+
 pub struct IdentityStore {
     paths: IdentityPaths,
     platform: Box<dyn IdentityPlatform>,
@@ -241,6 +287,123 @@ impl IdentityStore {
 
     /// Create the first account as one rollback-aware transaction. The only
     /// plaintext returned is the one-time recovery code.
+    /// Redeem the one-time recovery code and set a new account password.
+    ///
+    /// WHY THIS EXISTS. Onboarding has always generated a recovery code, hashed
+    /// it into `recovery.json`, and told the reader in as many words that the
+    /// code "can reset this local sign-in". Nothing in the tree ever read that
+    /// file. The product displayed a promise it could not keep, about the one
+    /// secret that decides whether a person keeps their data — and the account
+    /// is a systemd userdb record with no /etc/shadow entry and no unlocked
+    /// console identity, so a forgotten password had no path back at all.
+    ///
+    /// WHAT THIS DOES NOT TOUCH: the LUKS volume. The disk passphrase and its
+    /// systemd-cryptenroll recovery keyslot are separate secrets created by the
+    /// installer, deliberately not derived from the account password
+    /// (docs/design/onboarding.md section 4.5). Resetting a sign-in must never
+    /// imply the disk was re-keyed, and this function cannot re-key it.
+    ///
+    /// ORDER MATTERS. The attempt counter is persisted BEFORE the verdict is
+    /// returned, so a caller that dies mid-redemption — or is killed to dodge
+    /// the counter — still spends the attempt. The record is marked used before
+    /// the new hash is published for the same reason: a crash between the two
+    /// leaves a spent code and the OLD password, which locks nobody out any
+    /// further than they already were. The reverse order could leave a live
+    /// code beside a changed password, which is strictly worse.
+    pub fn redeem_recovery(
+        &self,
+        username: &str,
+        code: &str,
+        new_password: &str,
+    ) -> Result<RedeemedRecovery, IdentityError> {
+        // The new password is held to the same rules onboarding enforces. A
+        // recovery path that accepts a weaker secret than the front door is a
+        // downgrade attack with a friendly name.
+        validate_password(new_password, username, "").map_err(IdentityError::Validation)?;
+
+        let (account_dir, mut record) = self.find_recovery_record(username)?;
+        let recovery_path = account_dir.join("recovery.json");
+
+        if record.used {
+            return Err(IdentityError::RecoveryAlreadyUsed);
+        }
+        if record.attempts >= RECOVERY_MAX_ATTEMPTS {
+            return Err(IdentityError::RecoveryExhausted);
+        }
+        if record.algorithm != "yescrypt" {
+            return Err(IdentityError::Corrupt);
+        }
+
+        // Spend the attempt first, then judge. See ORDER MATTERS above.
+        record.attempts += 1;
+        self.write_recovery(&recovery_path, &record)?;
+
+        if !self.platform.verify(code, &record.hash)? {
+            return Err(IdentityError::RecoveryMismatch);
+        }
+
+        let new_hash = self.platform.hash(new_password)?;
+        record.used = true;
+        self.write_recovery(&recovery_path, &record)?;
+
+        let privileged = account_dir.join(format!("{username}.user-privileged"));
+        write_json_atomic(
+            &privileged,
+            &json!({"privileged": {"hashedPassword": [new_hash.as_str()]}}),
+            0o600,
+        )?;
+
+        // Publish so the change is live for the next authentication rather than
+        // the next boot: /run/userdb is what nss-systemd reads.
+        self.prepare_runtime_dirs()?;
+        copy_atomic(
+            &privileged,
+            &self
+                .paths
+                .runtime_userdb
+                .join(format!("{username}.user-privileged")),
+            0o600,
+        )?;
+
+        Ok(RedeemedRecovery {
+            username: username.to_string(),
+        })
+    }
+
+    /// The account directory and parsed recovery record for one username.
+    ///
+    /// Accounts are keyed by an opaque account id, so this walks the directory
+    /// rather than guessing a path from the name — a name is user-supplied and
+    /// must never become a path component here.
+    fn find_recovery_record(
+        &self,
+        username: &str,
+    ) -> Result<(PathBuf, StoredRecovery), IdentityError> {
+        let accounts = self.paths.accounts_dir();
+        let entries = match fs::read_dir(&accounts) {
+            Ok(entries) => entries,
+            Err(_) => return Err(IdentityError::NoRecoveryRecord),
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("recovery.json");
+            let Ok(bytes) = fs::read(&candidate) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<StoredRecovery>(&bytes) else {
+                // A single corrupt record must not hide every other account.
+                continue;
+            };
+            if record.v == 1 && record.username == username {
+                return Ok((entry.path(), record));
+            }
+        }
+        Err(IdentityError::NoRecoveryRecord)
+    }
+
+    fn write_recovery(&self, path: &Path, record: &StoredRecovery) -> Result<(), IdentityError> {
+        write_json_atomic(path, record, 0o600)
+    }
+
     pub fn create_first_account(
         &self,
         username: &str,
@@ -1034,8 +1197,15 @@ mod tests {
     }
 
     impl IdentityPlatform for FakePlatform {
-        fn hash(&self, _secret: &str) -> Result<Zeroizing<String>, IdentityError> {
-            Ok(Zeroizing::new("$y$j9T$testsalt$testhashvalue".to_string()))
+        // Secret-dependent on purpose: a constant fake hash would let the
+        // recovery tests below pass without ever comparing anything.
+        fn hash(&self, secret: &str) -> Result<Zeroizing<String>, IdentityError> {
+            let encoded: String = secret.bytes().map(|byte| format!("{byte:02x}")).collect();
+            Ok(Zeroizing::new(format!("$y$j9T$testsalt${encoded}")))
+        }
+
+        fn verify(&self, secret: &str, stored: &str) -> Result<bool, IdentityError> {
+            Ok(self.hash(secret)?.as_str() == stored)
         }
 
         fn lookup(&self, database: &str, key: &str) -> Result<Option<String>, IdentityError> {
@@ -1161,6 +1331,135 @@ mod tests {
         assert!(!paths.runtime_subgid.exists());
         let state: serde_json::Value = read_json(&paths.runtime_onboarding).unwrap();
         assert_eq!(state["complete"], false);
+    }
+
+    // ---- recovery redemption -------------------------------------------
+    //
+    // The code was generated, hashed and displayed from the first day this
+    // crate existed, and nothing ever read it back. These tests exist so the
+    // promise the greeter prints is one the daemon can keep.
+
+    fn recovery_store(temp: &TempDir) -> (IdentityStore, IdentityPaths, Zeroizing<String>) {
+        let paths = paths(temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(false)));
+        let created = store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .expect("account created");
+        (store, paths, created.recovery_code)
+    }
+
+    fn stored_hash(paths: &IdentityPaths, username: &str) -> String {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let raw = fs::read(dir.path().join(format!("{username}.user-privileged"))).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["privileged"]["hashedPassword"][0]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn stored_recovery(paths: &IdentityPaths) -> StoredRecovery {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let raw = fs::read(dir.path().join("recovery.json")).unwrap();
+        serde_json::from_slice(&raw).unwrap()
+    }
+
+    #[test]
+    fn the_recovery_code_actually_sets_a_new_password() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, code) = recovery_store(&temp);
+        let before = stored_hash(&paths, "alice");
+
+        store
+            .redeem_recovery("alice", &code, "seven copper lanterns")
+            .expect("redeemed");
+
+        let after = stored_hash(&paths, "alice");
+        assert_ne!(before, after, "the stored password hash did not change");
+        // Published, not merely written: nss-systemd reads /run/userdb, so a
+        // durable-only rewrite would take effect no earlier than the next boot.
+        let published = fs::read(paths.runtime_userdb.join("alice.user-privileged")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&published).unwrap();
+        assert_eq!(
+            value["privileged"]["hashedPassword"][0].as_str().unwrap(),
+            after
+        );
+    }
+
+    #[test]
+    fn a_wrong_code_is_rejected_and_spends_an_attempt() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let before = stored_hash(&paths, "alice");
+
+        let result = store.redeem_recovery("alice", "not-the-code", "seven copper lanterns");
+        assert!(matches!(result, Err(IdentityError::RecoveryMismatch)));
+        assert_eq!(
+            stored_recovery(&paths).attempts,
+            1,
+            "the attempt was not spent"
+        );
+        assert_eq!(
+            stored_hash(&paths, "alice"),
+            before,
+            "the password changed on a failure"
+        );
+    }
+
+    #[test]
+    fn a_code_works_exactly_once() {
+        let temp = TempDir::new().unwrap();
+        let (store, _paths, code) = recovery_store(&temp);
+        store
+            .redeem_recovery("alice", &code, "seven copper lanterns")
+            .unwrap();
+
+        let again = store.redeem_recovery("alice", &code, "nine folded maps");
+        assert!(matches!(again, Err(IdentityError::RecoveryAlreadyUsed)));
+    }
+
+    #[test]
+    fn attempts_are_bounded_and_the_correct_code_cannot_rescue_an_exhausted_record() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, code) = recovery_store(&temp);
+        for _ in 0..RECOVERY_MAX_ATTEMPTS {
+            let _ = store.redeem_recovery("alice", "not-the-code", "seven copper lanterns");
+        }
+        assert_eq!(stored_recovery(&paths).attempts, RECOVERY_MAX_ATTEMPTS);
+
+        // The real code must NOT work once the budget is gone, or the bound is
+        // decoration.
+        let result = store.redeem_recovery("alice", &code, "seven copper lanterns");
+        assert!(matches!(result, Err(IdentityError::RecoveryExhausted)));
+    }
+
+    #[test]
+    fn recovery_will_not_accept_a_weaker_password_than_the_front_door() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, code) = recovery_store(&temp);
+
+        let result = store.redeem_recovery("alice", &code, "short");
+        assert!(matches!(result, Err(IdentityError::Validation(_))));
+        // Rejected before the code is even examined, so a weak-password attempt
+        // does not burn the budget.
+        assert_eq!(stored_recovery(&paths).attempts, 0);
+    }
+
+    #[test]
+    fn an_unknown_account_has_no_recovery_record() {
+        let temp = TempDir::new().unwrap();
+        let (store, _paths, code) = recovery_store(&temp);
+        let result = store.redeem_recovery("mallory", &code, "seven copper lanterns");
+        assert!(matches!(result, Err(IdentityError::NoRecoveryRecord)));
     }
 
     #[test]
