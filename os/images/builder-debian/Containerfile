@@ -5,6 +5,17 @@
 # debian:sid-slim contains no CA bundle, while apt authenticates the snapshot's
 # signed Release metadata with the pinned Debian archive keyring. ca-certificates
 # is then installed for mkosi's HTTPS target-image fetches.
+#
+# RETRIES ARE NOT OPTIONAL HERE. snapshot.debian.org is one archive serving every
+# historical timestamp, and it rate-limits: a build failed on 2026-09-07 with
+# `TooManyRequests 503 No healthy backends` and `504 Gateway Timeout` across nine
+# gcc-16 packages, turning a docs-only commit red. apt does not retry by default,
+# so a single throttled object failed the whole image. Five retries with a 60 s
+# timeout cost nothing on a healthy fetch and remove the most common way this
+# lane goes red for a reason unrelated to the change under test.
+#
+# This does NOT weaken the pin. The timestamp, the base digest and the keyring
+# are untouched, so a retry can only ever re-fetch the same signed bytes.
 
 ARG BASE_IMAGE=docker.io/debian:sid-slim
 FROM ${BASE_IMAGE}
@@ -20,7 +31,10 @@ RUN printf '%s\n' \
         'Components: main' \
         'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
         > /etc/apt/sources.list.d/debian.sources \
-    && printf '%s\n' 'Acquire::Check-Valid-Until "false";' \
+    && printf '%s\n' \
+        'Acquire::Check-Valid-Until "false";' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "60";' \
         > /etc/apt/apt.conf.d/99-punar-snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends \

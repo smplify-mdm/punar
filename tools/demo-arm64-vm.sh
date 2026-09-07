@@ -52,6 +52,12 @@ QEMU="$(command -v qemu-system-aarch64 || true)"
 # "${arr[@]}" on an EMPTY array is an unbound-variable error under `set -u`.
 DISK_ARGS=(-snapshot)
 BOOT_DISK="${IMAGE}"
+# cache=unsafe discards the guest's flush requests. That is a fair trade for a
+# disposable disk — nothing survives the run anyway — and the wrong one the
+# moment writes are meant to last, because an unclean stop can then lose data
+# the guest was told was committed. Persistent runs get writeback, which
+# honours flushes.
+DISK_CACHE=unsafe
 PERSIST_NOTE="disk changes are disposable (-snapshot); onboarding runs again on every boot"
 if [ "${PUNAR_VM_PERSIST:-0}" = 1 ]; then
     command -v qemu-img >/dev/null 2>&1 || die "PUNAR_VM_PERSIST=1 needs qemu-img"
@@ -65,6 +71,7 @@ if [ "${PUNAR_VM_PERSIST:-0}" = 1 ]; then
         echo "    delete that file to return to a factory-fresh machine"
     fi
     DISK_ARGS=()
+    DISK_CACHE=writeback
     PERSIST_NOTE="disk changes PERSIST in $(basename "${BOOT_DISK}"); the build artifact is untouched"
 fi
 
@@ -196,7 +203,7 @@ exec "${QEMU}" \
     -smp "${PUNAR_VM_CPUS:-4}" \
     -m "${PUNAR_VM_MEMORY_MB:-3072}" \
     -bios "${FIRMWARE}" \
-    -drive "file=${BOOT_DISK},if=none,id=punardisk,format=qcow2,cache=unsafe,aio=threads" \
+    -drive "file=${BOOT_DISK},if=none,id=punardisk,format=qcow2,cache=${DISK_CACHE},aio=threads" \
     -device virtio-blk-pci,drive=punardisk,romfile= \
     ${DISK_ARGS[@]+"${DISK_ARGS[@]}"} \
     -device virtio-gpu-pci,id=punar-gpu,romfile= \
