@@ -1312,24 +1312,34 @@ else
         note "info could not capture a frame while the session was locked; the frosted-glass"
         note "info claim is UNPROVEN on this run. wlr-screencopy may refuse while an"
         note "info ext-session-lock surface holds the session — that is a fact worth having."
-    elif [ "${lock_sha_a}" = "${lock_sha_b}" ]; then
-        # ORDERED FIRST, and the first run taught this. Two different wallpapers
-        # producing a byte-identical locked screen is decisive on its own: it
-        # cannot happen if the blur samples the wallpaper, whether or not the
-        # frame is otherwise stable. Testing stability first reported
-        # INCONCLUSIVE on a run whose captures said A == B — the failure was in
-        # the artifacts and the verdict did not name it. An unstable frame makes
-        # this MORE damning, not less.
-        note "FAIL two different wallpapers produced an identical locked screen — the lock"
-        note "FAIL surface is drawing its scrim and nothing else (frames in lock-frost-*.png)"
+    elif [ "${lock_sha_b}" = "${lock_sha_a}" ] || [ "${lock_sha_b}" = "${lock_sha_a2}" ]; then
+        note "FAIL a second wallpaper produced a locked screen identical to the first — the"
+        note "FAIL lock surface is drawing its scrim and nothing else (lock-frost-*.png)"
         FAILED=1
-    elif [ "${lock_sha_a}" != "${lock_sha_a2}" ]; then
-        note "info two locks under the same wallpaper differed, so the frame is not stable"
-        note "info (the lock clock shows HH:MM and a minute rolled over). The wallpapers DID"
-        note "info produce different frames, so the blur is sampling something; the strict"
-        note "info comparison is INCONCLUSIVE this run rather than passed."
     else
-        note "ok   the locked screen differs between wallpapers '${lock_frost_a}' and '${lock_frost_b}', so the blur samples the wallpaper"
+        note "ok   the locked screen under '${lock_frost_b}' matches neither capture under '${lock_frost_a}', so the field samples the wallpaper"
+    fi
+
+    # WHY B IS COMPARED AGAINST BOTH A CAPTURES rather than against one, and why
+    # there is no INCONCLUSIVE branch any more.
+    #
+    # Something on this surface varies between captures independently of the
+    # wallpaper — the first run produced two different frames under the SAME
+    # wallpaper — and the password field carries a blinking caret, which is the
+    # obvious candidate but is not established. Whatever it is, an earlier
+    # version reported INCONCLUSIVE whenever it moved, which on a working frost
+    # would have meant a gate that can never reach a clean pass: the worst
+    # outcome, because it reads as coverage.
+    #
+    # Two captures under wallpaper A bound that variation instead of arguing
+    # about it. If the wallpaper reached the surface, B cannot match either of
+    # them; if it did not, B is one of them. The residual risk is a periodic
+    # element slower than the gap between captures, which would let A and A2
+    # land in the same phase — recorded here rather than papered over.
+    if [ "${lock_sha_a}" != "${lock_sha_a2}" ]; then
+        note "info the two captures under '${lock_frost_a}' differ, so something on this"
+        note "info surface varies independently of the wallpaper; the comparison above"
+        note "info accounts for it by testing B against both."
     fi
 
     # Whatever the verdict, copy the surface's own account of what it resolved

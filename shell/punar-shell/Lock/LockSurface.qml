@@ -29,7 +29,6 @@ pragma ComponentBehavior: Bound
 // screen is the last surface that should acquire an animation budget.
 
 import QtQuick
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Wayland
 import "../Theme"
@@ -88,57 +87,50 @@ WlSessionLockSurface {
     Image {
         id: lockField
         anchors.fill: parent
-        // STILL NOT WORKING, and instrumented rather than guessed at again.
-        // The surface renders as flat cream with no wallpaper in it; adding
-        // `layer.enabled` on the theory that an unrendered item provides no
-        // texture did not change that, which is evidence against the theory and
-        // not for it. The desktop draws the same file from the same path in the
-        // same process, so the asset, the path and WallpaperState are all fine
-        // and the fault is inside this surface.
+        visible: surface.showsPhoto
+
+        // THE BLUR IS THE DOWNSCALE. There is no shader here, deliberately.
         //
-        // The line below reports the three facts that separate what is left:
-        // whether the photo branch was taken at all, what URL was resolved, and
-        // whether the Image ever reached Ready. surfaces-check group 8d copies
-        // it into the run's report. It carries no secret — a wallpaper filename
-        // and a load status.
+        // This surface used MultiEffect and drew nothing: the lock screen was a
+        // flat cream rectangle with no wallpaper in it, on the owner's machine
+        // and in CI alike. The reason is that punar-graphics-env.sh exports
+        // QT_QUICK_BACKEND=software on any machine with no real DRM device —
+        // every VM, and the CI gate by design — and the Qt Quick software
+        // adaptation implements no shader effects and no layers. MultiEffect is
+        // built on both. It was never going to draw.
+        //
+        // The rest of this shell already knew. Nine surfaces omit the mockup's
+        // soft drop shadow citing the same llvmpipe constraint, and this file
+        // was the only one in the tree that reached for an effect at all — the
+        // one place that did is the one place that came out blank.
+        //
+        // So the frost is produced the way it can be produced on every machine
+        // Punar targets, including a Raspberry Pi: decode the photograph at a
+        // small fraction of the output and let the scaler stretch it back. A
+        // bilinear upscale of an 80-pixel-wide decode IS a blur, it is one
+        // ordinary textured quad, and it costs less memory than the third-scale
+        // decode the shader path was paying for — on a surface that holds its
+        // texture for as long as the machine stays locked.
+        source: surface.showsPhoto
+            ? "file://" + Quickshell.shellDir + "/Wallpaper/assets/" + WallpaperState.activeFile
+            : ""
+        fillMode: Image.PreserveAspectCrop
+        sourceSize: Qt.size(Math.max(1, Math.round(surface.width / 16)),
+                            Math.max(1, Math.round(surface.height / 16)))
+        smooth: true
+        asynchronous: true
+        cache: false
+
+        // Kept from the instrumented build. It costs one journal line per lock
+        // and it is the difference between "the frost is wrong" and knowing
+        // which of the branch, the URL and the decode failed. No secret is in
+        // it: a wallpaper filename and a load status.
         onStatusChanged: console.warn("punar-shell: lock field · status=" + lockField.status
             + " progress=" + lockField.progress
             + " showsPhoto=" + surface.showsPhoto
             + " vector=" + WallpaperState.activeIsVector
             + " file=" + WallpaperState.activeFile
             + " source=" + lockField.source)
-        Component.onCompleted: console.warn("punar-shell: lock field · constructed"
-            + " status=" + lockField.status
-            + " showsPhoto=" + surface.showsPhoto
-            + " file=" + WallpaperState.activeFile
-            + " source=" + lockField.source)
-        layer.enabled: true
-        visible: false // consumed by the effect below, never drawn directly
-        source: surface.showsPhoto
-            ? "file://" + Quickshell.shellDir + "/Wallpaper/assets/" + WallpaperState.activeFile
-            : ""
-        fillMode: Image.PreserveAspectCrop
-        // Decoded at a fraction of the output and then blurred: a lock screen
-        // holds this texture for as long as the machine is locked, and a blur
-        // this heavy cannot show detail the full-size decode would have paid
-        // for. Idle RAM is the budget this surface competes for.
-        sourceSize: Qt.size(Math.round(surface.width / 3), Math.round(surface.height / 3))
-        asynchronous: true
-        cache: false
-    }
-
-    MultiEffect {
-        anchors.fill: parent
-        source: lockField
-        visible: surface.showsPhoto && lockField.status === Image.Ready
-        autoPaddingEnabled: false
-        blurEnabled: true
-        blur: 1.0
-        blurMax: 48
-        // Pulled toward the surface's own value so the frost belongs to the
-        // theme rather than to the photograph.
-        saturation: -0.35
-        brightness: Theme.moodPanel ? -0.25 : 0.10
     }
 
     // The scrim is what makes the type legible, and it is deliberately heavy:
@@ -152,6 +144,12 @@ WlSessionLockSurface {
         // correctly-rendered frost would have been hard to see. The passphrase
         // field is a single hairline with no box, so the ground still has to be
         // quiet — but "faint" has to mean faint, not absent.
+        //
+        // This value has never actually been judged against a visible image:
+        // every build that carried it drew no wallpaper at all. It is the first
+        // thing to retune now that there is something behind it, and
+        // surfaces-check group 8d exports the locked frames so that can be done
+        // by looking rather than by guessing.
         opacity: Theme.moodPanel ? 0.72 : 0.76
     }
 
