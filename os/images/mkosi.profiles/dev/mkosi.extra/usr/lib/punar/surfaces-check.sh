@@ -1161,6 +1161,74 @@ else
     FAILED=1
 fi
 
+# --- group 8b: a correct passphrase actually unlocks the session ------------
+#
+# THE HOLE THIS CLOSES. Group 8 above asserts that the lock's PAM stack FILE
+# exists, and its own comment admitted the rest: "not a lock/unlock round trip:
+# submit() is unreachable over IPC". So nothing had ever proven the single
+# property the lock screen exists for — that the right passphrase gets you back
+# in. A session that could never be unlocked passed every gate in this file.
+# The owner found that by living with it, which is the worst way to find it.
+#
+# `lock submit` reaches the ordinary PAM conversation and exists only where
+# /usr/lib/punar/lock-exercise.allow does — this image. check-release-image.sh
+# A15 fails the build if that marker reaches a release tree.
+#
+# WHAT THIS GATE DOES NOT COVER, stated because the gap is the interesting part.
+# This image's `punar` account is created with useradd + chpasswd, so its
+# password lives in /etc/shadow. A real machine's account does NOT: onboarding
+# writes a systemd userdb record (punar-onboard identity.rs) and there is no
+# /etc/shadow entry at all. pam_unix resolves those through different paths —
+# unix_chkpwd against files here, nss-systemd against userdb there — so a green
+# result below proves the lock surface, its PAM stack and the round trip, and
+# says NOTHING about whether a userdb-backed account can be unlocked.
+#
+# That distinction is not academic: it is the remaining live hypothesis for the
+# owner's machine, where the greeter (root, pam_exec plus pam_unix) accepts the
+# password and this surface (unprivileged, pam_unix alone) rejects it. Closing
+# that needs a dev session user that is itself a userdb account, which is a
+# larger change to this image than this gate.
+#
+# The dev user's password is set by mkosi.profiles/dev/mkosi.postinst.chroot.
+lock_password="punar"
+lock_wrong="definitely-not-the-passphrase"
+
+ipc lock lock >/dev/null 2>&1
+lock_waited=0
+while [ "${lock_waited}" -lt 10 ] && [ "$(ipc lock state | tr -d '[:space:]"')" != "locked" ]; do
+    sleep 1
+    lock_waited=$((lock_waited + 1))
+done
+check_eq "lock.state after lock" "locked" "$(ipc lock state | tr -d '[:space:]"')"
+
+# NEGATIVE LEG FIRST, and it is the one that must never regress: if a wrong
+# passphrase unlocked the session, the positive leg below would pass on a
+# machine with no authentication at all.
+wrong_result="$(ipc lock submit "${lock_wrong}" | tr -d '[:space:]"')"
+check_eq "lock.submit is available in this image" "submitted" "${wrong_result}"
+sleep 3
+check_eq "lock.state after a WRONG passphrase" "locked" "$(ipc lock state | tr -d '[:space:]"')"
+
+# POSITIVE LEG: the correct passphrase must open the session.
+ipc lock submit "${lock_password}" >/dev/null 2>&1
+unlock_waited=0
+while [ "${unlock_waited}" -lt 15 ] && [ "$(ipc lock state | tr -d '[:space:]"')" != "unlocked" ]; do
+    sleep 1
+    unlock_waited=$((unlock_waited + 1))
+done
+unlock_state="$(ipc lock state | tr -d '[:space:]"')"
+if [ "${unlock_state}" = "unlocked" ]; then
+    note "ok   the CORRECT passphrase unlocked the session after ${unlock_waited}s"
+else
+    note "FAIL the correct passphrase did not unlock the session (state '${unlock_state}')"
+    FAILED=1
+fi
+
+# Everything after this group assumes an unlocked session, and a machine left
+# locked here would fail the rest of the file for a reason that has nothing to
+# do with what those groups test.
+check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
+
 # --- group 8c: creating a workspace by pointer ------------------------------
 # Overview's "+ New project" control focuses the lowest unused workspace id,
 # because focusing a workspace that does not exist is what creates it. The

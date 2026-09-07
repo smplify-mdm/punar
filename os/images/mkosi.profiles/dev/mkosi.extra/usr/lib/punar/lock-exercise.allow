@@ -1,0 +1,11 @@
+# Presence of this file lets `qs ipc call lock submit <passphrase>` reach the
+# lock surface's ordinary PAM conversation, so the in-VM gate can prove that a
+# CORRECT passphrase actually unlocks a session — the one property the lock
+# screen exists for, and the one nothing had ever tested.
+#
+# It is not an unlock bypass: a wrong secret fails exactly as it does at the
+# keyboard and faillock counts it the same way. It is a guessing surface, which
+# is why it ships here and only here.
+#
+# This file must never appear in a release tree. check-release-image.sh
+# assertion A15 fails the build if it does.

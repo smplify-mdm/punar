@@ -196,6 +196,13 @@ mutate_a14_forever() {
         "${CASE}/etc/security/faillock.conf"
 }
 mutate_a14_unreadable() { chmod 0600 "${CASE}/etc/security/faillock.conf"; }
+# A15 has exactly one way to be wrong, and it is the one that matters: the dev
+# image's lock-exercise seam surviving into a release tree.
+mutate_a15() {
+    mkdir -p "${CASE}/usr/lib/punar"
+    printf '%s\n' '# leaked from the dev profile' \
+        > "${CASE}/usr/lib/punar/lock-exercise.allow"
+}
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -258,6 +265,7 @@ expect_fail A14 mutate_a14
 expect_fail A14 mutate_a14_trigger
 expect_fail A14 mutate_a14_forever
 expect_fail A14 mutate_a14_unreadable
+expect_fail A15 mutate_a15
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

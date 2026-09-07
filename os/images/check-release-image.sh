@@ -376,6 +376,19 @@ else
     fi
 fi
 
+# A15: the lock exercise seam must not exist in a release image. Its presence
+# lets `qs ipc call lock submit <passphrase>` reach the lock surface's PAM
+# conversation, which is how the in-VM gate proves a correct passphrase actually
+# unlocks a session. That is not an unlock bypass — a wrong secret fails exactly
+# as it does at the keyboard, and faillock counts it the same — but it does let
+# anything that can reach the session's IPC socket guess at machine speed. A
+# locked screen is a promise about someone at the keyboard, and this file is the
+# mechanism that keeps the promise from being widened by a shipped convenience.
+LOCK_EXERCISE="${ROOT}/usr/lib/punar/lock-exercise.allow"
+if [ -e "${LOCK_EXERCISE}" ]; then
+    fail A15 'the lock exercise seam is present: usr/lib/punar/lock-exercise.allow'
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

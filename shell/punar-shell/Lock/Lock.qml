@@ -182,6 +182,40 @@ Scope {
 
     property string pamConfig: "login"
 
+    // ---- the exercise seam, and why it is not a bypass ---------------------
+    //
+    // The header above refuses an `unlock` verb, and still does: nothing here
+    // unlocks anything. `submit` hands a candidate passphrase to the SAME PAM
+    // conversation the keyboard uses, so a wrong secret fails exactly as it
+    // would at the field, faillock counts it exactly the same, and the session
+    // opens only if PAM says yes. It is the keyboard's path, driven by a test.
+    //
+    // WHY IT NEEDS A GATE ANYWAY. Even without a bypass, a submit verb lets any
+    // process that can reach this session's IPC socket guess at machine speed.
+    // That process already runs as the session user — it could read the same
+    // files — but a locked screen is a promise about someone at the keyboard,
+    // and quietly widening it in a shipped image is not this file's decision.
+    //
+    // So the verb exists ONLY where /usr/lib/punar/lock-exercise.allow does,
+    // which is the dev image and nowhere else. check-release-image.sh assertion
+    // A15 fails the build if that marker ever appears in a release tree, so the
+    // absence is a mechanism rather than a convention.
+    //
+    // WHY IT EXISTS AT ALL. surfaces-check could only assert that a PAM stack
+    // FILE existed — its own comment said "not a lock/unlock round trip:
+    // submit() is unreachable over IPC" — so nothing had ever proven that a
+    // correct passphrase unlocks a Punar session. The owner found that hole by
+    // being unable to unlock a machine whose password was right.
+    property bool exerciseAllowed: false
+
+    FileView {
+        id: exerciseProbe
+        path: "/usr/lib/punar/lock-exercise.allow"
+        printErrors: false
+        onLoaded: root.exerciseAllowed = true
+        onLoadFailed: root.exerciseAllowed = false
+    }
+
     FileView {
         id: pamProbe
         path: "/etc/pam.d/punar-lock"
@@ -253,6 +287,20 @@ Scope {
             if (!root.locked)
                 return "unlocked";
             return sessionLock.secure ? "locked" : "locking";
+        }
+
+        /// Submit a candidate passphrase through the ordinary PAM path.
+        /// Returns "refused" on any image without the exercise marker, which is
+        /// every release image. Never returns whether the secret was right —
+        /// the caller reads `state` afterwards, so this cannot become an oracle
+        /// that answers faster than PAM does.
+        function submit(passphrase: string): string {
+            if (!root.exerciseAllowed)
+                return "refused";
+            if (!root.locked)
+                return "unlocked";
+            root.submit(passphrase);
+            return "submitted";
         }
     }
 
