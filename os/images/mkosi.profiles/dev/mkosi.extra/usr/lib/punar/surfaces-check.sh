@@ -1346,11 +1346,21 @@ else
     # into the report. When this comparison fails the next question is always
     # "did the photo branch run, and did the Image load", and that answer should
     # not require anyone to go and find a journal.
-    journalctl --user -b --no-pager 2>/dev/null \
-        | grep "lock field" | tail -4 \
-        | while IFS= read -r line; do
-            note "info ${line#*punar-shell: }"
-        done
+    #
+    # READ OVER IPC, NOT OUT OF THE JOURNAL. The first version of this grepped
+    # `journalctl --user`, captured nothing, and said nothing about having
+    # captured nothing — the shell is `exec`d from greetd, so its stderr lands
+    # in the system journal, which the punar user running this script cannot
+    # read. Silent instrumentation is worse than none.
+    lock_field="$(ipc lock field | tr -d '"')"
+    case "${lock_field}" in
+        refused)    note "FAIL lock.field refused; the exercise marker is missing from a dev image"
+                    FAILED=1 ;;
+        unreported) note "info the lock field never reported; it was never constructed" ;;
+        "")         note "FAIL lock.field returned nothing at all"
+                    FAILED=1 ;;
+        *)          note "info lock field · ${lock_field}" ;;
+    esac
 
     if [ -n "${lock_frost_restore}" ] && [ "${lock_frost_restore}" != "null" ]; then
         ipc wallpaper set "${lock_frost_restore}" >/dev/null 2>&1 || true

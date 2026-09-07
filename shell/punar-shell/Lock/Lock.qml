@@ -208,6 +208,11 @@ Scope {
     // being unable to unlock a machine whose password was right.
     property bool exerciseAllowed: false
 
+    // The last thing the lock's frosted field reported about itself. Held
+    // across an unlock so a check script can read it after the round trip
+    // rather than having to interleave with a locked session.
+    property string fieldDiag: ""
+
     FileView {
         id: exerciseProbe
         path: "/usr/lib/punar/lock-exercise.allow"
@@ -301,6 +306,18 @@ Scope {
                 return "unlocked";
             root.submit(passphrase);
             return "submitted";
+        }
+
+        /// What the frosted field resolved the last time this surface was
+        /// built: whether the photo branch was taken, the URL, and whether the
+        /// Image reached Ready. Dev images only, behind the same marker
+        /// `submit` uses, so a release image answers "refused" and A15 keeps
+        /// the marker out of one. It reveals a wallpaper filename and a load
+        /// status and nothing else — never a secret, never an auth verdict.
+        function field(): string {
+            if (!root.exerciseAllowed)
+                return "refused";
+            return root.fieldDiag === "" ? "unreported" : root.fieldDiag;
         }
     }
 
@@ -406,6 +423,10 @@ Scope {
 
             onSubmitted: function (passphrase) {
                 root.submit(passphrase);
+            }
+
+            onFieldReport: function (report) {
+                root.fieldDiag = report;
             }
         }
     }

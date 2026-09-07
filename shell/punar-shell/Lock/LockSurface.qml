@@ -52,6 +52,11 @@ WlSessionLockSurface {
 
     signal submitted(string passphrase)
 
+    // What the frosted field resolved, reported to Lock.qml so the dev-gated
+    // `lock field` IPC verb can hand it to a check script. See the onStatusChanged
+    // handler below for why the journal alone was not enough.
+    signal fieldReport(string report)
+
     // The flat theme field stays the FLOOR of this surface, never a
     // decoration on top of one: if the image below fails to load, is absent,
     // or the active wallpaper is a vector plate, what remains is exactly the
@@ -121,16 +126,27 @@ WlSessionLockSurface {
         asynchronous: true
         cache: false
 
-        // Kept from the instrumented build. It costs one journal line per lock
-        // and it is the difference between "the frost is wrong" and knowing
-        // which of the branch, the URL and the decode failed. No secret is in
-        // it: a wallpaper filename and a load status.
-        onStatusChanged: console.warn("punar-shell: lock field · status=" + lockField.status
-            + " progress=" + lockField.progress
-            + " showsPhoto=" + surface.showsPhoto
-            + " vector=" + WallpaperState.activeIsVector
-            + " file=" + WallpaperState.activeFile
-            + " source=" + lockField.source)
+        // Kept from the instrumented build. It is the difference between "the
+        // frost is wrong" and knowing which of the branch, the URL and the
+        // decode failed. No secret is in it: a wallpaper filename and a load
+        // status.
+        //
+        // Reported BOTH ways on purpose. The journal line is for a person on a
+        // real machine. The signal is for the gate: this shell is `exec`d from
+        // greetd, so its stderr lands in the SYSTEM journal, which the punar
+        // user that runs surfaces-check cannot read — the first instrumented
+        // run captured nothing at all, silently, which is the failure mode the
+        // instrumentation existed to prevent.
+        onStatusChanged: {
+            var report = "status=" + lockField.status
+                + " progress=" + lockField.progress
+                + " showsPhoto=" + surface.showsPhoto
+                + " vector=" + WallpaperState.activeIsVector
+                + " file=" + WallpaperState.activeFile
+                + " source=" + lockField.source;
+            console.warn("punar-shell: lock field · " + report);
+            surface.fieldReport(report);
+        }
     }
 
     // The scrim is what makes the type legible, and it is deliberately heavy:

@@ -377,9 +377,11 @@ else
 fi
 
 # A15: the lock exercise seam must not exist in a release image. Its presence
-# lets `qs ipc call lock submit <passphrase>` reach the lock surface's PAM
-# conversation, which is how the in-VM gate proves a correct passphrase actually
-# unlocks a session. That is not an unlock bypass — a wrong secret fails exactly
+# gates two IPC verbs. `qs ipc call lock submit <passphrase>` reaches the lock
+# surface's PAM conversation, which is how the in-VM gate proves a correct
+# passphrase actually unlocks a session; `lock field` reports what the frosted
+# background resolved, which is how the gate tells a blank effect from an image
+# that never loaded. Without the marker both answer "refused". That is not an unlock bypass — a wrong secret fails exactly
 # as it does at the keyboard, and faillock counts it the same — but it does let
 # anything that can reach the session's IPC socket guess at machine speed. A
 # locked screen is a promise about someone at the keyboard, and this file is the
