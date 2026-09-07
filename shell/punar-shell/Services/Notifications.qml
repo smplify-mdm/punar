@@ -255,6 +255,52 @@ Singleton {
         return null;
     }
 
+    // ---- sender text is untrusted input ----
+    //
+    // Every string below arrives from an arbitrary application over D-Bus and
+    // is then drawn in Punar's own chrome, beside rows that mean something —
+    // in the centre, a notification sits in the same visual register as a
+    // punard approval. So the sender chooses the WORDS and Punar chooses the
+    // LAYOUT, and this is the one place that boundary is enforced. Every
+    // surface reads sender text through these accessors; none of them touch a
+    // raw field.
+    //
+    // WHAT IS REMOVED, AND WHY EACH:
+    //   - C0/C1 control characters become spaces rather than vanishing, so a
+    //     sender cannot fuse two words into one that reads as a third;
+    //   - bidi overrides and isolates (U+202A-U+202E, U+2066-U+2069) and the
+    //     directional marks are dropped outright. They exist to reorder text
+    //     visually without changing it, which is a spoofing primitive and
+    //     never something a notification legitimately needs;
+    //   - runs of whitespace collapse to one space. This is what bounds the
+    //     surfaces: a Text item honours an explicit newline even with wrapping
+    //     off and elide on, and the toast's meta row sizes itself to its own
+    //     implicitHeight inside a card whose height is unbounded, so an
+    //     application name full of newlines grew the card without limit. It is
+    //     also why Punar, not the sender, decides where a line breaks.
+    //
+    // The caps are deliberate fidelity loss and are set above what any surface
+    // can display — the toast gives a sentence two lines and the centre elides
+    // to one — so nothing that would have been read is lost. They exist so the
+    // text layout engine can never be handed a megabyte by a sender.
+    readonly property int maxSourceChars: 64
+    readonly property int maxSentenceChars: 240
+    readonly property int maxDetailChars: 480
+    readonly property int maxActionLabelChars: 32
+
+    function sanitize(value: var, cap: int): string {
+        if (typeof value !== "string" || value === "")
+            return "";
+        var out = value
+            .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+            .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        // The ellipsis says a sender said more, which is true and is not the
+        // same claim as a surface running out of room.
+        return out.length > cap ? out.slice(0, cap) + "\u2026" : out;
+    }
+
     // The speaker. A notification ALWAYS names its source — "anonymous
     // interruptions do not exist" (D-009 Sect II register 01) — so an
     // application that sent no name is labelled as exactly that, never
@@ -262,11 +308,11 @@ Singleton {
     function sourceOf(notification: var): string {
         if (notification === null || notification === undefined)
             return "";
-        var name = notification.appName;
-        if (typeof name === "string" && name !== "")
+        var name = root.sanitize(notification.appName, root.maxSourceChars);
+        if (name !== "")
             return name;
-        var entry = notification.desktopEntry;
-        if (typeof entry === "string" && entry !== "")
+        var entry = root.sanitize(notification.desktopEntry, root.maxSourceChars);
+        if (entry !== "")
             return entry;
         return "Unnamed application";
     }
@@ -277,11 +323,11 @@ Singleton {
     function sentenceOf(notification: var): string {
         if (notification === null || notification === undefined)
             return "";
-        var s = notification.summary;
-        if (typeof s === "string" && s !== "")
+        var s = root.sanitize(notification.summary, root.maxSentenceChars);
+        if (s !== "")
             return s;
-        var b = notification.body;
-        return (typeof b === "string" && b !== "") ? b : "(no message)";
+        var b = root.sanitize(notification.body, root.maxSentenceChars);
+        return b !== "" ? b : "(no message)";
     }
 
     // The detail line under the sentence. Empty when the sender supplied
@@ -290,10 +336,14 @@ Singleton {
     function detailOf(notification: var): string {
         if (notification === null || notification === undefined)
             return "";
-        var b = notification.body;
-        if (typeof b !== "string" || b === "")
+        var b = root.sanitize(notification.body, root.maxDetailChars);
+        if (b === "")
             return "";
-        return b === notification.summary ? "" : b;
+        // Compared after sanitising, so a body that differs from the summary
+        // only in whitespace or in a stripped control character is still
+        // recognised as the repeat it is and the card does not print the same
+        // sentence twice.
+        return b === root.sanitize(notification.summary, root.maxDetailChars) ? "" : b;
     }
 
     // "low" | "normal" | "critical". Returned as a STRING so no surface
@@ -311,11 +361,43 @@ Singleton {
         }
     }
 
+    // CAPPED AT NINE, and nine is not arbitrary: it is exactly how many
+    // actions a focused toast has keys for (1..9), which is the contract
+    // `actionsSupported` above is documented against. Drawing a tenth button
+    // printed the key cap "10" for a chord that does not exist, and an
+    // unbounded Flow of buttons grew the card the same way an unbounded meta
+    // row did. Capping here rather than in the view keeps invocation and
+    // display agreeing by construction: invokeNth bounds itself by this
+    // length, so no surface can offer an action the keyboard cannot reach.
+    readonly property int maxActions: 9
+
     function actionsOf(notification: var): var {
         if (notification === null || notification === undefined)
             return [];
         var a = notification.actions;
-        return (a === null || a === undefined) ? [] : a;
+        if (a === null || a === undefined)
+            return [];
+        if (a.length <= root.maxActions)
+            return a;
+        // Copied element by element rather than sliced: `actions` is a list
+        // exposed from C++, and this file does not assume it carries the whole
+        // JS Array prototype.
+        var capped = [];
+        for (var i = 0; i < root.maxActions; i++)
+            capped.push(a[i]);
+        return capped;
+    }
+
+    // An action's printed label. The sender picks the word, Punar bounds it:
+    // a button is one short line, and an action with no usable text falls back
+    // to its own identifier rather than drawing a blank control.
+    function actionLabelOf(action: var): string {
+        if (action === null || action === undefined)
+            return "";
+        var label = root.sanitize(action.text, root.maxActionLabelChars);
+        if (label !== "")
+            return label;
+        return root.sanitize(action.identifier, root.maxActionLabelChars);
     }
 
     // ---- toast dwell time ----

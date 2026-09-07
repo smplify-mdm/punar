@@ -394,16 +394,17 @@ DeferredSurfaceBase {
 
     function notifSub(rec: var): string {
         var parts = [];
+        // detailOf collapses whitespace itself now, at the boundary where
+        // sender text enters the shell, so this line no longer repairs it here.
         var detail = Notifications.detailOf(rec);
         if (detail !== "")
-            parts.push(detail.replace(/\s+/g, " "));
+            parts.push(detail);
         var at = Notifications.timeOf(rec);
         if (at !== "")
             parts.push(at);
         var acts = Notifications.actionsOf(rec);
         if (acts.length > 0) {
-            var label = acts[0].text;
-            parts.push("Enter · " + ((typeof label === "string" && label !== "") ? label : acts[0].identifier));
+            parts.push("Enter · " + Notifications.actionLabelOf(acts[0]));
         }
         return parts.join(" · ");
     }

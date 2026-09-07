@@ -570,6 +570,14 @@ Scope {
                                     anchors.verticalCenter: parent.verticalCenter
                                     color: Theme.shellFg
                                     elide: Text.ElideRight
+                                    // One line, belt and braces. sourceOf now
+                                    // collapses whitespace, so a sender cannot
+                                    // put a newline here — but this row sizes
+                                    // its container, which sizes a card whose
+                                    // height is unbounded, so the invariant is
+                                    // stated where the damage would happen and
+                                    // not only where it is prevented.
+                                    maximumLineCount: 1
                                     text: Notifications.sourceOf(card.modelData)
                                           + (card.urgency === "critical" ? " · Critical" : "")
                                 }
@@ -666,10 +674,7 @@ Scope {
                                         required property var modelData
                                         required property int index
 
-                                        label: {
-                                            var t = actionButton.modelData.text;
-                                            return (typeof t === "string" && t !== "") ? t : actionButton.modelData.identifier;
-                                        }
+                                        label: Notifications.actionLabelOf(actionButton.modelData)
                                         binding: String(actionButton.index + 1)
                                         showBinding: card.hasFocus
                                         // At most ONE filled button per

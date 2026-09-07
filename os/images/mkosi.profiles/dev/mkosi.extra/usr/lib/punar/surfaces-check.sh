@@ -1532,6 +1532,60 @@ ipc notifications clear >/dev/null 2>&1 || true
 notif_count_10b="$(ipc notifications count | tr -d '[:space:]"')"
 check_eq "notifications.count after the 10b clear" "0" "${notif_count_10b}"
 
+# --- 10c. Sender text is treated as untrusted input --------------------------
+# A notification's application name, summary and body come from any application
+# on the machine and are then drawn in Punar's own chrome — in the centre, in
+# the same visual register as a punard approval. Services/Notifications.qml
+# therefore sanitises them at the boundary: bidi overrides dropped, control
+# characters turned into spaces, whitespace runs collapsed, length bounded.
+#
+# That is a claim about a running shell, so it is asserted against one. The
+# `groups` accessor prints the stored source of each group, which is the exact
+# string a surface would draw, so a name that survived unsanitised shows up
+# here rather than in a screenshot nobody reads.
+#
+# The interesting one is the newline. A Text item honours an explicit newline
+# even with wrapping off and eliding on, and the toast's meta row sizes the
+# card, whose height is unbounded — so before this, an application name full of
+# newlines grew the card without limit. There is no pointer here to see that
+# with; what CAN be observed is that the newline never reaches the store.
+notif_hostile="$(printf 'Punar Gate\nHostile\007\342\200\256Probe')"
+notif_hostile_clean="Punar Gate Hostile Probe"
+
+notif_send "${notif_hostile}" "hostile name probe" || true
+notif_wait_count 1 || true
+
+notif_groups_h="$(ipc notifications groups | tr -d '"')"
+check_eq "control and bidi characters are stripped from an application name" \
+    "${notif_hostile_clean}" "${notif_groups_h}"
+
+# Independently of the exact expected string above: whatever came back, it is
+# one line. This is the assertion that speaks to the unbounded card directly.
+notif_group_lines="$(ipc notifications groups | tr -d '"' | wc -l | tr -d '[:space:]')"
+check_eq "a stored source spans no lines of its own" "0" "${notif_group_lines}"
+
+ipc notifications clear >/dev/null 2>&1 || true
+notif_wait_count 0 || true
+
+# Length is asserted as a RELATION, not against the shipped cap: a sender that
+# writes far more than any surface can draw gets bounded. Pinning 64 here would
+# go red the day the cap is retuned, which is a legitimate product change.
+notif_long="$(printf 'PunarGateLong%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)"
+notif_long_len="$(printf '%s' "${notif_long}" | wc -c | tr -d '[:space:]')"
+notif_send "${notif_long}" "length bound probe" || true
+notif_wait_count 1 || true
+notif_stored_len="$(ipc notifications groups | tr -d '"' | wc -c | tr -d '[:space:]')"
+if [ "${notif_stored_len}" -lt "${notif_long_len}" ]; then
+    note "ok   an over-long application name is bounded (${notif_long_len} bytes sent, ${notif_stored_len} stored)"
+else
+    note "FAIL an over-long application name was stored unbounded (${notif_long_len} sent, ${notif_stored_len} stored)"
+    FAILED=1
+fi
+
+ipc notifications clear >/dev/null 2>&1 || true
+notif_count_10c="$(ipc notifications count | tr -d '[:space:]"')"
+check_eq "notifications.count after the 10c clear" "0" "${notif_count_10c}"
+
 # --- artifacts --------------------------------------------------------------
 hyprctl -j clients > /run/punar/surfaces-clients.json 2>/dev/null || true
 
