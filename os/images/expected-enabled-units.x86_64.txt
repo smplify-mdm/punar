@@ -6,6 +6,12 @@
 # and systemd-networkd-wait-online. Socket-activated systemd storage/import,
 # TPM/PCR, credential, journal, package-key and session services are vendor
 # integration points and do not run until a local consumer invokes them.
+# 2026-09-07: punar-onboardd.socket added. The identity transaction service
+# is no longer a resident daemon bound to its own socket under a condition
+# that skipped it once onboarding completed — which left the greeter's
+# recovery door dead on exactly the machines that need it. systemd owns the
+# socket now and starts punar-onboardd@.service per connection, so this is a
+# vendor enablement rather than a running process.
 etc/systemd/system/factory-reset.target.wants/systemd-tpm2-clear.service -> /usr/lib/systemd/system/systemd-tpm2-clear.service
 etc/systemd/system/multi-user.target.wants/machines.target -> /usr/lib/systemd/system/machines.target
 etc/systemd/system/multi-user.target.wants/remote-cryptsetup.target -> /usr/lib/systemd/system/remote-cryptsetup.target
@@ -89,6 +95,7 @@ usr/lib/systemd/system/sockets.target.wants/gpg-agent-ssh@etc-pacman.d-gnupg.soc
 usr/lib/systemd/system/sockets.target.wants/gpg-agent@etc-pacman.d-gnupg.socket -> ../gpg-agent@.socket
 usr/lib/systemd/system/sockets.target.wants/keyboxd@etc-pacman.d-gnupg.socket -> ../keyboxd@.socket
 usr/lib/systemd/system/sockets.target.wants/polkit-agent-helper.socket -> ../polkit-agent-helper.socket
+usr/lib/systemd/system/sockets.target.wants/punar-onboardd.socket -> ../punar-onboardd.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-ask-password.socket -> ../systemd-ask-password.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-bootctl.socket -> ../systemd-bootctl.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-coredump.socket -> ../systemd-coredump.socket
