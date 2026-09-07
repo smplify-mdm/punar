@@ -568,6 +568,19 @@ Scope {
             property bool receipt: false
             property bool accountBusy: false
             property bool loginBusy: false
+
+            // ---- recovery ("forgot your password") ----------------------
+            //
+            // Onboarding shows a one-time code and says it "can reset this
+            // local sign-in". Until now nothing could redeem it: the daemon had
+            // no path and this screen had no way to ask. This is the asking.
+            //
+            // It lives on the LOGIN view only. A machine that has not finished
+            // onboarding has no recovery record to redeem, so offering the door
+            // there would be a second broken promise.
+            property bool recoveryOpen: false
+            property bool recoveryBusy: false
+            property string recoveryFailure: ""
             property bool accountHandled: false
             property bool loginHandled: false
             property string createdUsername: ""
@@ -753,6 +766,54 @@ Scope {
                 loginProcess.running = true;
             }
 
+            function redeemRecovery(): void {
+                if (panel.recoveryBusy)
+                    return;
+                if (recoveryCodeField.text === "") {
+                    panel.recoveryFailure = "Enter the recovery code you saved during setup.";
+                    recoveryCodeField.focusField();
+                    return;
+                }
+                // Checked here so a mistyped confirmation never spends one of
+                // the five attempts the daemon allows. The daemon still
+                // enforces the password rules; this only catches the mismatch
+                // the daemon cannot see, because it receives one password.
+                if (recoveryPassword.text !== recoveryConfirm.text) {
+                    panel.recoveryFailure = "Those passwords do not match.";
+                    recoveryConfirm.focusField();
+                    return;
+                }
+                panel.recoveryFailure = "";
+                panel.recoveryBusy = true;
+                recoveryProcess.stdinEnabled = true;
+                recoveryProcess.running = true;
+            }
+
+            function finishRecovery(body: string): void {
+                panel.recoveryBusy = false;
+                var response = null;
+                try {
+                    response = JSON.parse(body);
+                } catch (e) {
+                    response = null;
+                }
+                if (response !== null && response.ok === true) {
+                    // Straight back to the sign-in field with the new password
+                    // live. Not an automatic sign-in: the person just proved a
+                    // recovery code, not the secret they are about to use, and
+                    // typing it once confirms they know what they set.
+                    panel.recoveryOpen = false;
+                    panel.recoveryFailure = "";
+                    panel.loginFailure = "Password changed. Sign in with your new password.";
+                    loginPassword.focusField();
+                    return;
+                }
+                panel.recoveryFailure = response !== null && typeof response.message === "string"
+                    ? response.message
+                    : "The recovery service is unavailable. Restart and try again.";
+                recoveryCodeField.focusField();
+            }
+
             function finishLogin(body: string): void {
                 if (panel.loginHandled)
                     return;
@@ -827,6 +888,34 @@ Scope {
                     passwordField.clear();
                     confirmField.clear();
                     accountProcess.stdinEnabled = false;
+                }
+            }
+
+            Process {
+                id: recoveryProcess
+                command: ["/usr/bin/punar-onboard"]
+                stdinEnabled: true
+                stdout: StdioCollector {
+                    id: recoveryOutput
+                    waitForEnd: true
+                    onStreamFinished: panel.finishRecovery(recoveryOutput.text)
+                }
+                onStarted: {
+                    // Same relay and same framing as account creation; the
+                    // daemon routes on `op`. The code and the new password
+                    // leave this process on stdin and the fields are cleared
+                    // immediately, exactly as the creation path does.
+                    recoveryProcess.write(JSON.stringify({
+                        "v": 1,
+                        "op": "redeem_recovery",
+                        "username": root.accountName,
+                        "recoveryCode": recoveryCodeField.text,
+                        "password": recoveryPassword.text
+                    }) + "\n");
+                    recoveryCodeField.clear();
+                    recoveryPassword.clear();
+                    recoveryConfirm.clear();
+                    recoveryProcess.stdinEnabled = false;
                 }
             }
 
@@ -1537,6 +1626,7 @@ Scope {
                             Entry {
                                 id: loginPassword
                                 width: parent.width
+                                visible: !panel.recoveryOpen
                                 label: "Password"
                                 help: "Unlock " + root.accountName + " on this device."
                                 errorText: panel.loginFailure
@@ -1547,6 +1637,7 @@ Scope {
 
                             Item {
                                 width: parent.width
+                                visible: !panel.recoveryOpen
                                 height: 48
                                 Action {
                                     anchors.right: parent.right
@@ -1554,6 +1645,115 @@ Scope {
                                     busy: panel.loginBusy
                                     enabled: !panel.loginBusy
                                     onInvoked: panel.login()
+                                }
+                                // Quiet, and on the left, because it is the rare
+                                // path: a person signing in normally should not
+                                // have to read past it to reach the button they
+                                // want. It is not hidden behind a failure count
+                                // either — someone who already knows the password
+                                // is gone should not have to fail three times to
+                                // be told there is a way back.
+                                Action {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    label: "Forgot your password?"
+                                    hint: ""
+                                    quiet: true
+                                    enabled: !panel.loginBusy
+                                    onInvoked: {
+                                        panel.recoveryFailure = "";
+                                        panel.recoveryOpen = true;
+                                        recoveryCodeField.focusField();
+                                    }
+                                }
+                            }
+
+                            // ---- recovery ------------------------------------
+                            Text {
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                text: "Enter the recovery code shown when this device was set up, then choose a new password. The code works once."
+                                wrapMode: Text.Wrap
+                                font.family: Theme.fontSans
+                                font.pixelSize: 13
+                                color: Theme.shellInk2
+                            }
+
+                            Entry {
+                                id: recoveryCodeField
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                label: "Recovery code"
+                                placeholder: "The code you saved during setup"
+                                icon: "lock"
+                                help: "Shown once, when this device was set up."
+                                errorText: panel.recoveryFailure
+                                enabled: !panel.recoveryBusy
+                                onAccepted: recoveryPassword.focusField()
+                            }
+
+                            Entry {
+                                id: recoveryPassword
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                label: "New password"
+                                placeholder: "Enter new password"
+                                help: "Use 10 or more characters. No symbol rules or forced rotation."
+                                secret: true
+                                enabled: !panel.recoveryBusy
+                                onAccepted: recoveryConfirm.focusField()
+                            }
+
+                            Entry {
+                                id: recoveryConfirm
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                label: "Confirm new password"
+                                placeholder: "Type the same password again"
+                                secret: true
+                                enabled: !panel.recoveryBusy
+                                onAccepted: panel.redeemRecovery()
+                            }
+
+                            Text {
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                // Said plainly, because the two secrets are
+                                // separate by design and a person resetting one
+                                // must not believe they have reset the other.
+                                text: "This changes your sign-in password only. It does not change the disk encryption passphrase."
+                                wrapMode: Text.Wrap
+                                font.family: Theme.fontSans
+                                font.pixelSize: 12
+                                color: Theme.shellInk3
+                            }
+
+                            Item {
+                                width: parent.width
+                                visible: panel.recoveryOpen
+                                height: 48
+                                Action {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    label: "Back"
+                                    hint: ""
+                                    quiet: true
+                                    enabled: !panel.recoveryBusy
+                                    onInvoked: {
+                                        panel.recoveryOpen = false;
+                                        panel.recoveryFailure = "";
+                                        recoveryCodeField.clear();
+                                        recoveryPassword.clear();
+                                        recoveryConfirm.clear();
+                                        loginPassword.focusField();
+                                    }
+                                }
+                                Action {
+                                    anchors.right: parent.right
+                                    label: "Reset password"
+                                    busy: panel.recoveryBusy
+                                    enabled: !panel.recoveryBusy
+                                    onInvoked: panel.redeemRecovery()
                                 }
                             }
                         }
