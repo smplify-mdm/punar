@@ -17,19 +17,27 @@ pragma ComponentBehavior: Bound
 // lock took effect on every output; the surface prints its absence rather
 // than assuming success (spec §1.22).
 //
-// ── AUTHENTICATION IS PAM, NOT A COMPARISON ──────────────────────────────
-// Unlocking runs a real PAM conversation through `Quickshell.Services.Pam`
-// (`PamContext`, also verified present in the pinned snapshot). The shell
-// never reads a hash, never compares a string, and holds the typed
-// passphrase only for the moments between Enter and `respond()` — see
-// `pending` below, which is cleared on every terminal outcome.
+// ── AUTHENTICATION IS PAM, RUN BY A PRIVILEGED VERIFIER ──────────────────
+// Unlocking still runs a real PAM conversation against the `punar-lock`
+// stack — the shell never reads a hash and never compares a string — but it
+// no longer runs that conversation itself. It relays the typed passphrase
+// to `punar-authd` over a socket and reads back one of three words.
 //
-// PAM stack: `punar-lock` when the image installs `/etc/pam.d/punar-lock`,
-// otherwise `login`, which Arch's `pam` package always ships. The probe is
-// a FileView, so the day the image workstream drops that file in, this
-// picks it up with no code change. `pam_unix` authenticates an unprivileged
-// process through the setuid `unix_chkpwd` helper, so the shell needs no
-// privilege of its own.
+// IT CANNOT RUN PAM ITSELF, and this file used to claim the opposite. The
+// old text here said `pam_unix` authenticates an unprivileged process
+// through the setuid `unix_chkpwd` helper "so the shell needs no privilege
+// of its own". That is false for the accounts Punar actually creates:
+// systemd serves a userdb record's privileged section, where the hash
+// lives, only to a uid-0 caller. An in-process PamContext therefore
+// rejected every correct password on a real machine while greetd — which
+// is root — accepted the same one, and the lock screen could not be opened
+// by anyone. Both substrates refuse, for different reasons; the
+// measurements are in crates/punar-auth/src/lib.rs.
+//
+// The stack is no longer selected here either. punar-authd names
+// `punar-lock` and nothing else, so there is no probe and no fallback to
+// `login` — a fallback that silently changed which stack authenticated a
+// screen unlock was a way to be wrong quietly.
 //
 // ── THERE IS NO IPC UNLOCK, DELIBERATELY ─────────────────────────────────
 // The IpcHandler below exposes `lock` and `state` and nothing else. An
@@ -61,7 +69,6 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
-import Quickshell.Services.Pam
 
 Scope {
     id: root
@@ -180,7 +187,6 @@ Scope {
 
     // ---- PAM stack selection ---------------------------------------------
 
-    property string pamConfig: "login"
 
     // ---- the exercise seam, and why it is not a bypass ---------------------
     //
@@ -221,12 +227,6 @@ Scope {
         onLoadFailed: root.exerciseAllowed = false
     }
 
-    FileView {
-        id: pamProbe
-        path: "/etc/pam.d/punar-lock"
-        onLoaded: root.pamConfig = "punar-lock"
-        onLoadFailed: root.pamConfig = "login"
-    }
 
     // ---- clock ------------------------------------------------------------
 
@@ -329,76 +329,136 @@ Scope {
         root.pending = passphrase;
         root.failure = "";
         root.busy = true;
-        if (!pam.start()) {
-            root.busy = false;
-            root.pending = "";
-            root.failure = "Authentication is unavailable on this device";
-        }
+        // Re-armed on every attempt: onStarted disables stdin after writing, so
+        // without this a second try would run the verifier with nothing on its
+        // input and be told, correctly, that an empty secret is refused. A lock
+        // screen is retried by definition, which is exactly why this matters
+        // here and not in the greeter's one-shot account creation.
+        verifier.stdinEnabled = true;
+        verifier.running = true;
     }
 
-    PamContext {
-        id: pam
+    /// The verifier, and why the shell no longer runs PAM itself.
+    ///
+    /// It cannot. systemd serves a userdb record's privileged section — where
+    /// the password hash lives — only to a uid-0 caller, and this process is the
+    /// session user. An in-process PamContext therefore rejected every correct
+    /// password on an onboarding-created account while greetd, which is root,
+    /// accepted the same one. See crates/punar-auth/src/lib.rs for the
+    /// measurements on both substrates.
+    ///
+    /// The secret crosses one anonymous stdin pipe to a fixed argv, exactly as
+    /// account creation does in the greeter, and `pending` is cleared on the
+    /// next line. It is never an argument and never an environment variable.
+    Process {
+        id: verifier
 
-        config: root.pamConfig
-        user: root.accountName
-
-        // PAM asks; the shell answers with what the human typed, once.
-        onPamMessage: {
-            if (pam.responseRequired)
-                pam.respond(root.pending);
+        command: ["/usr/bin/punar-auth"]
+        stdinEnabled: true
+        stdout: StdioCollector {
+            id: verifierOutput
+            waitForEnd: true
+            // The LAST line, not the whole buffer: the verifier prints exactly
+            // one word, but a collector that accumulated across two attempts
+            // would yield "denieddenied", which is not a word this surface knows
+            // and would report a plain wrong password as a device fault.
+            onStreamFinished: root.finishAuth(root.lastLine(verifierOutput.text))
         }
 
-        onCompleted: function (result) {
-            root.busy = false;
+        onStarted: {
+            verifier.write(root.pending + "\n");
             root.pending = "";
-            if (result === PamResult.Success) {
-                root.attempts = 0;
-                root.failure = "";
-                // Setting this false is what releases the protocol lock;
-                // the compositor brings the session back exactly as it was.
-                root.locked = false;
-                return;
-            }
-            root.attempts = root.attempts + 1;
-            // An ordinary rejection used to leave no trace anywhere: only
-            // onError logged, so a session that could never be unlocked looked
-            // identical in the journal to one nobody had tried to unlock. This
-            // records the three facts that separate "wrong secret" from "this
-            // surface cannot authenticate at all" — which stack actually
-            // resolved, which account was authenticated, and what PAM returned.
-            // The passphrase itself is never logged, and neither is its length.
-            console.warn("punar-shell: lock auth rejected · config=" + root.pamConfig
-                + " user=" + root.accountName + " result=" + result
-                + " attempt=" + root.attempts);
-            if (result === PamResult.MaxTries) {
-                root.failure = "Too many attempts · wait and try again";
-            } else if (root.denyAfter > 0 && root.attempts >= root.denyAfter) {
-                // This surface caused at least `deny` failures itself, so a
-                // lockout is now a fact rather than a guess, and it says the
-                // one thing the reader needs: the passphrase may well be
-                // right, and waiting is what fixes this.
-                var window = root.lockoutWindow();
-                root.failure = window === ""
-                    ? "Locked · too many attempts · wait before trying again"
-                    : "Locked · too many attempts · wait " + window + " and try again";
-            } else if (root.denyAfter > 0) {
-                // Stated as the POLICY, not as a remaining count: faillock's
-                // counter survives reboots and earlier lock sessions, while
-                // `attempts` resets on every lock, so a "2 tries left" here
-                // could be a lie. What is always true is the threshold.
-                root.failure = "Try again · " + root.denyAfter
-                    + " failures locks this account";
-            } else {
-                root.failure = "Try again";
-            }
+            verifier.stdinEnabled = false;
         }
 
-        onError: function (error) {
-            root.busy = false;
-            root.pending = "";
-            root.attempts = root.attempts + 1;
-            console.warn("punar-shell: PAM error on config", root.pamConfig, error);
+        // A VERIFIER THAT NEVER STARTS MUST STILL SETTLE THE SURFACE. A missing
+        // binary or a failed exec would otherwise leave `busy` true forever and
+        // the lock screen accepting no further attempts — the same
+        // unrecoverable shape as the bug this whole change fixes. Whether
+        // Quickshell's StdioCollector emits onStreamFinished for a process that
+        // never ran is not documented, so this does not rely on it: exit is a
+        // terminal outcome too, and finishAuth is idempotent.
+        //
+        // Connected rather than declared as onExited because the signal's second
+        // parameter is a QProcess::ExitStatus, which qmllint cannot resolve in a
+        // declared handler — the Services/WallpaperState.qml idiom.
+        Component.onCompleted: verifier.exited.connect(function (exitCode) {
+            if (exitCode !== 0)
+                console.warn("punar-shell: punar-auth exited " + exitCode);
+            root.finishAuth("");
+        })
+    }
+
+    function lastLine(text: string): string {
+        var lines = String(text).split("\n");
+        for (var i = lines.length - 1; i >= 0; i--) {
+            var line = lines[i].trim();
+            if (line !== "")
+                return line;
+        }
+        return "";
+    }
+
+    /// One of three words, and anything else is treated as "could not ask".
+    ///
+    /// IDEMPOTENT ON PURPOSE. Both the collector finishing and the process
+    /// exiting are terminal, they arrive in no guaranteed order, and either may
+    /// be the only one that arrives. The first to land decides; the rest are
+    /// dropped, so a verdict can never be overwritten by the exit that followed
+    /// it.
+    function finishAuth(verdict: string): void {
+        if (!root.busy)
+            return;
+        root.busy = false;
+        root.pending = "";
+
+        if (verdict === "ok") {
+            root.attempts = 0;
+            root.failure = "";
+            // Setting this false is what releases the protocol lock; the
+            // compositor brings the session back exactly as it was.
+            root.locked = false;
+            return;
+        }
+
+        if (verdict !== "denied") {
+            // THE DEVICE COULD NOT ASK, which is not a statement about the
+            // secret, so it must not be rendered as one and must not spend an
+            // attempt. Telling someone their correct password is wrong on a
+            // machine they cannot get into is how a diagnosable fault becomes
+            // an unrecoverable one.
+            console.warn("punar-shell: lock auth unavailable · verdict='" + verdict
+                + "' user=" + root.accountName);
             root.failure = "Authentication is unavailable on this device";
+            return;
+        }
+
+        root.attempts = root.attempts + 1;
+        // An ordinary rejection used to leave no trace anywhere, so a session
+        // that could never be unlocked looked identical in the journal to one
+        // nobody had tried to unlock. This records what separates "wrong
+        // secret" from "this surface cannot authenticate at all". The
+        // passphrase is never logged, and neither is its length.
+        console.warn("punar-shell: lock auth rejected · user=" + root.accountName
+            + " attempt=" + root.attempts);
+
+        if (root.denyAfter > 0 && root.attempts >= root.denyAfter) {
+            // This surface caused at least `deny` failures itself, so a lockout
+            // is a fact rather than a guess, and it says the one thing the
+            // reader needs: the passphrase may well be right, and waiting is
+            // what fixes this.
+            var window = root.lockoutWindow();
+            root.failure = window === ""
+                ? "Locked · too many attempts · wait before trying again"
+                : "Locked · too many attempts · wait " + window + " and try again";
+        } else if (root.denyAfter > 0) {
+            // Stated as the POLICY, not as a remaining count: faillock's counter
+            // outlives this lock session while `attempts` resets on every lock,
+            // so "2 tries left" here could be a lie. The threshold is always true.
+            root.failure = "Try again · " + root.denyAfter
+                + " failures locks this account";
+        } else {
+            root.failure = "Try again";
         }
     }
 
