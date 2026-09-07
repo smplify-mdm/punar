@@ -88,11 +88,30 @@ WlSessionLockSurface {
     Image {
         id: lockField
         anchors.fill: parent
-        // `visible: false` alone was not enough: an item that is never rendered
-        // provides no texture, so MultiEffect sampled nothing and the surface
-        // drew as the scrim alone — a flat cream rectangle with no wallpaper in
-        // it at all. `layer.enabled` is what makes this a texture provider
-        // while still keeping it off the screen directly.
+        // STILL NOT WORKING, and instrumented rather than guessed at again.
+        // The surface renders as flat cream with no wallpaper in it; adding
+        // `layer.enabled` on the theory that an unrendered item provides no
+        // texture did not change that, which is evidence against the theory and
+        // not for it. The desktop draws the same file from the same path in the
+        // same process, so the asset, the path and WallpaperState are all fine
+        // and the fault is inside this surface.
+        //
+        // The line below reports the three facts that separate what is left:
+        // whether the photo branch was taken at all, what URL was resolved, and
+        // whether the Image ever reached Ready. surfaces-check group 8d copies
+        // it into the run's report. It carries no secret — a wallpaper filename
+        // and a load status.
+        onStatusChanged: console.warn("punar-shell: lock field · status=" + lockField.status
+            + " progress=" + lockField.progress
+            + " showsPhoto=" + surface.showsPhoto
+            + " vector=" + WallpaperState.activeIsVector
+            + " file=" + WallpaperState.activeFile
+            + " source=" + lockField.source)
+        Component.onCompleted: console.warn("punar-shell: lock field · constructed"
+            + " status=" + lockField.status
+            + " showsPhoto=" + surface.showsPhoto
+            + " file=" + WallpaperState.activeFile
+            + " source=" + lockField.source)
         layer.enabled: true
         visible: false // consumed by the effect below, never drawn directly
         source: surface.showsPhoto

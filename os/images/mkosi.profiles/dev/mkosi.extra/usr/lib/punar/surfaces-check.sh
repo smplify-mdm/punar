@@ -1250,9 +1250,12 @@ check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state 
 #   sha(A) == sha(A2) == sha(B) -> two different wallpapers produce an
 #                         identical locked screen. That is the bug. FAIL.
 #
-# Whether wlr-screencopy can capture at all while an ext-session-lock-v1
-# surface holds the session is not documented anywhere this script can consult,
-# so a refused capture is reported as a limitation and claims nothing.
+# ANSWERED ON THE FIRST RUN, and worth writing down because it decides whether
+# any visual assertion about the lock is possible at all: wlr-screencopy DOES
+# capture while an ext-session-lock-v1 surface holds the session under Hyprland
+# 0.56.2. All three frames came back at ~25 KB and legible. The refused-capture
+# branch below stays, because that is a compositor behaviour rather than a
+# guarantee, and a future one may differ.
 lock_frost_capture() {
     # $1 = wallpaper id, $2 = output path. Sets the wallpaper, locks, captures,
     # unlocks. Prints the frame's sha256, or nothing if anything refused.
@@ -1309,17 +1312,35 @@ else
         note "info could not capture a frame while the session was locked; the frosted-glass"
         note "info claim is UNPROVEN on this run. wlr-screencopy may refuse while an"
         note "info ext-session-lock surface holds the session — that is a fact worth having."
-    elif [ "${lock_sha_a}" != "${lock_sha_a2}" ]; then
-        note "info two locks under the same wallpaper differed, so the frame is not stable"
-        note "info (the lock clock shows HH:MM and a minute rolled over). The frosted-glass"
-        note "info comparison is INCONCLUSIVE this run rather than passed or failed."
-    elif [ "${lock_sha_a}" != "${lock_sha_b}" ]; then
-        note "ok   the locked screen differs between wallpapers '${lock_frost_a}' and '${lock_frost_b}', so the blur samples the wallpaper"
-    else
+    elif [ "${lock_sha_a}" = "${lock_sha_b}" ]; then
+        # ORDERED FIRST, and the first run taught this. Two different wallpapers
+        # producing a byte-identical locked screen is decisive on its own: it
+        # cannot happen if the blur samples the wallpaper, whether or not the
+        # frame is otherwise stable. Testing stability first reported
+        # INCONCLUSIVE on a run whose captures said A == B — the failure was in
+        # the artifacts and the verdict did not name it. An unstable frame makes
+        # this MORE damning, not less.
         note "FAIL two different wallpapers produced an identical locked screen — the lock"
         note "FAIL surface is drawing its scrim and nothing else (frames in lock-frost-*.png)"
         FAILED=1
+    elif [ "${lock_sha_a}" != "${lock_sha_a2}" ]; then
+        note "info two locks under the same wallpaper differed, so the frame is not stable"
+        note "info (the lock clock shows HH:MM and a minute rolled over). The wallpapers DID"
+        note "info produce different frames, so the blur is sampling something; the strict"
+        note "info comparison is INCONCLUSIVE this run rather than passed."
+    else
+        note "ok   the locked screen differs between wallpapers '${lock_frost_a}' and '${lock_frost_b}', so the blur samples the wallpaper"
     fi
+
+    # Whatever the verdict, copy the surface's own account of what it resolved
+    # into the report. When this comparison fails the next question is always
+    # "did the photo branch run, and did the Image load", and that answer should
+    # not require anyone to go and find a journal.
+    journalctl --user -b --no-pager 2>/dev/null \
+        | grep "lock field" | tail -4 \
+        | while IFS= read -r line; do
+            note "info ${line#*punar-shell: }"
+        done
 
     if [ -n "${lock_frost_restore}" ] && [ "${lock_frost_restore}" != "null" ]; then
         ipc wallpaper set "${lock_frost_restore}" >/dev/null 2>&1 || true
@@ -1662,7 +1683,14 @@ check_eq "control and bidi characters are stripped from an application name" \
 
 # Independently of the exact expected string above: whatever came back, it is
 # one line. This is the assertion that speaks to the unbounded card directly.
-notif_group_lines="$(ipc notifications groups | tr -d '"' | wc -l | tr -d '[:space:]')"
+#
+# COUNTED OFF THE CAPTURED VALUE, not off a pipeline. `wc -l` counts newline
+# characters, and every command's output ends with one, so piping `ipc` straight
+# into it reported 1 for a perfectly clean single-line name — a failing
+# assertion against working code, which is the worst kind. Command substitution
+# strips trailing newlines, so an embedded newline is the only thing left to
+# count.
+notif_group_lines="$(printf '%s' "${notif_groups_h}" | wc -l | tr -d '[:space:]')"
 check_eq "a stored source spans no lines of its own" "0" "${notif_group_lines}"
 
 ipc notifications clear >/dev/null 2>&1 || true
