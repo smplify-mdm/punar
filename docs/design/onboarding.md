@@ -1383,10 +1383,12 @@ The two meet at `identity`, `auth.kinds`, `groups.fromDirectory` and
 
 ### 7.1 The check and its constraints
 
-`os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/onboarding-check.sh`,
-committed **0755**, renamed to the adopting milestone's `mNN-check.sh`
+A check under `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/`,
+committed **0755**, named for the adopting milestone's `mNN-check.sh`
 convention at implementation time and wired the same way `m9-check` and
-`m13-check` are.
+`m13-check` are. No concrete filename is printed here on purpose: the script
+does not exist yet, and `tools/check-doc-freshness.sh` fails the build when a
+document cites a check-script path that is not in the tree.
 
 Constraints it must respect, all of them already binding on this repo:
 

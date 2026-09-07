@@ -458,9 +458,14 @@ qs -p /usr/share/punar/shell ipc call approval selected  # the apr_ on screen
 One layer-shell region at the D-009 toast position (top 13%, right 3.4%,
 `min(46%, 340px)` wide), rendering **only** `punar-agentd` detection
 alerts. It is the sliver `milestone-10.md` §5.6 names and nothing beside
-it: there is still no notification centre, no freedesktop notification
-daemon, no OSD, no `Punar+N` and no persistent do-not-disturb toggle —
-all four are M13.
+it. **All four of the things this paragraph used to list as missing now
+exist** — the freedesktop daemon (Services/Notifications.qml), the notification
+centre (Notifications/NotificationCenter.qml), the OSD (Notifications/Osd.qml)
+and a do-not-disturb toggle that persists to
+`~/.local/state/punar/notifications.json` — and an application reaching the
+centre is asserted on a running machine by surfaces-check.sh group 10. This
+region is still separate from all of them by design: it renders only
+`punar-agentd` detections, which are sticky and which quiet never reaches.
 
 The card is the D-009 anatomy: **meta row · hairline · one sentence ·
 detail · why · policy · actions · footer**.
@@ -530,8 +535,11 @@ about a process on this machine and the user does not.
 Under DND the card renders **without sound** (this shell plays none),
 **without focus steal** (a quiet raise never takes the keyboard) and
 **without auto-dismiss**. There is in fact no auto-dismiss timer at all,
-in either mode: M10 ships no notification centre, so a card that vanished
-on its own would leave the reader nowhere to find what they were told.
+in either mode. The original reason was that M10 shipped no notification
+centre, so a card that vanished on its own would leave the reader nowhere to
+find what they were told. The centre now exists — and alerts are deliberately
+NOT in the notification daemon's model, so the reason survives unchanged: a
+detection that auto-dismissed here would still leave nowhere to look.
 
 IPC (`alerts` target), driven from CI with
 `qs -p /usr/share/punar/shell ipc call alerts …`:

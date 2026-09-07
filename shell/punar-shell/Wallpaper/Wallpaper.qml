@@ -1,9 +1,11 @@
 // Wallpaper — the quiet desktop field.
 //
 // The owner brief now calls for an inviting high-resolution desktop field.
-// One original artwork and three curated 3840x2400 photographs ship beside
-// the theme-derived Field drawing, which remains the ultra-lean option.
-// Source, author, licence and modifications are recorded in SOURCES.md.
+// Ten choices ship: one original artwork, three curated 3840x2400
+// photographs, five topographic plates generated from public-domain USGS
+// elevation data, and the theme-derived Field drawing, which remains the
+// ultra-lean option. Source, author, licence and modifications are recorded
+// in SOURCES.md; the plates' provenance is in GENERATION.md.
 //
 // PERFORMANCE CONTRACT. This is still one background window inside the one
 // punar-shell process: no wallpaper daemon, service, process, timer, network
@@ -15,8 +17,9 @@
 //
 // The background never accepts input or focus.  A person selects it through
 // the keyboard-first command center or the typed `wallpaper` IPC target.  The
-// default, Stillpoint, uses generous negative space so application windows
-// stay visually primary. Field follows Theme.wallpaper* and preserves
+// default is Daybreak, whose dark ridgeline fills the lower two thirds and
+// whose sky is a smooth gradient, so window chrome and the bar both sit on
+// quiet ground and application windows stay visually primary. Field follows Theme.wallpaper* and preserves
 // D-015's original 1600x1000 geometry.
 
 // `Bound` because the per-output delegate below reads the shared template and

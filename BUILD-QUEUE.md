@@ -13,14 +13,18 @@ mistakes that each cost a full CI cycle.
 
 Spec §80 defines done as: a clean VM can do 26 things. **All 26 are now
 demonstrated** by the latest native ARM64 candidate's 780 milestone
-assertions, 122 desktop-surface assertions, 5 wireless-posture assertions and
+assertions, 122 desktop-surface assertions (**the count from run
+33273700091; the suite has grown since — groups 8b, 8c, 10, 10b and 10c all
+landed afterwards. Take the current number from a run's
+`/run/punar/surfaces-report.txt`, never from reading this file or the tree**),
+5 wireless-posture assertions and
 15 isolated surface-cost checks. Physical x86/ARM hardware acceptance remains
 a separate Phase-2 gate; clean-VM completion must not be restated as a
 bare-metal claim. The recently closed gates are recorded here:
 
 | # | DoD item | Status |
 |---|---|---|
-| 7 | launch browser / **web app** | **CORE DoD VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) passed both 122-assertion desktop-surface suites. Clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app installation, isolated browser contexts and managed Chromium policy are now runtime-proven on both architecture lanes: the x86_64 KVM desktop gate emitted `PUNAR_M11_OK` with 74 assertions on [run 33999044578](https://github.com/smplify-mdm/punar/actions/runs/33999044578), and a local Apple-HVF ARM64 run of image `12209b24…5b0444` emitted the same 74. The ARM lane is local evidence: hosted ARM runners expose no usable `/dev/kvm` and the workflow records that skip rather than claiming a proof. |
+| 7 | launch browser / **web app** | **CORE DoD VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) passed both 122-assertion desktop-surface suites. Clicking the top-left **PUNAR** launcher, `PUNAR+Space`, or `PUNAR+S` → Applications exposes actionable installed/catalog rows. Spotify → architecture-aware app card → official Spotify web player in Chromium app mode passed by pointer; an installed Chromium row opened directly. The clean ARM64 gate also searched for and opened Geany, Neovim in Foot, and the real Thunar Files window, and represented all 22 signed-catalog products in the live model **as the catalog stood at that run** — it now carries 50. The current catalog keeps Claude Web/ChatGPT Web distinct from Claude Desktop beta/ChatGPT Desktop preview. The on-demand vendor-package backend is locally contract-tested: exact origin/architecture/size/digest, no maintainer scripts, setuid/setgid removal, Punar-owned launcher, isolated app home, and reversible removal. Native third-party vendor UIs remain `COMPATIBILITY TESTING` until both architecture lanes install and launch them. Generic user-defined web-app installation, isolated browser contexts and managed Chromium policy are now runtime-proven on both architecture lanes: the x86_64 KVM desktop gate emitted `PUNAR_M11_OK` with 74 assertions on [run 33999044578](https://github.com/smplify-mdm/punar/actions/runs/33999044578), and a local Apple-HVF ARM64 run of image `12209b24…5b0444` emitted the same 74. The ARM lane is local evidence: hosted ARM runners expose no usable `/dev/kvm` and the workflow records that skip rather than claiming a proof. |
 | 19 | enforce project network rule | **VERIFIED IN CANONICAL DUAL-ARCH CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_M12_OK` with 66 assertions on both x86_64 KVM and ARM64 TCG. A same-user out-of-scope control reached its listener, the managed scope reached the allowed listener, and the managed production probe was denied by the cgroup-v2 nft rule. Policy compilation, attachment, named counters, malformed-policy fail-safe, detach and table self-heal all passed. This proves generic UEFI/QEMU behavior, not internet, VPN, Raspberry Pi or physical-NIC behavior. |
 | 20 | display local network activity | **VERIFIED IN CANONICAL DUAL-ARCH CI:** the same run joined a live allowed connection to the cross-user managed cgroup through kernel `NETLINK_SOCK_DIAG` metadata, rendered the bounded local-only Privacy panel, wrote only the reached destination to the purgeable agent ledger, and kept destinations/ports out of immutable audit. Both screenshots and reports exported successfully; the daemon held no `CAP_SYS_PTRACE`. |
 | 25 | demonstrate rollback/update mechanism | **VERIFIED IN CANONICAL ARM64 CI:** [run 33273700091](https://github.com/smplify-mdm/punar/actions/runs/33273700091) emitted `PUNAR_UPDATE_AUTO_ROLLBACK_OK attempts=3 fallback_slot=A`. Signed apply had already verified inactive-slot write/readback/hash and health-gated blessing. The four-boot proof exhausted an impossible pending UKI through `+2-1`, `+1-2`, `+0-3`; boot four skipped it and reached `PUNAR_BOOT_OK` from slot A. |
@@ -839,8 +843,8 @@ always open and nothing privileged is resident behind it. `Accept=yes` also
 keeps the crate free of `unsafe`: an accepted connection arrives on
 stdin/stdout, while inheriting a *listening* descriptor would need a raw-fd
 conversion `#![forbid(unsafe_code)]` refuses. New gate:
-`dev/.../usr/lib/punar/recovery-check.sh`, root, hard-gated in
-`tools/boot-test.sh`. **NOT PROVEN by that gate:** a successful redemption
+`os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh`,
+root, hard-gated in `tools/boot-test.sh`. **NOT PROVEN by that gate:** a successful redemption
 end to end, which needs a real recovery record and so belongs to
 `tools/test-release-onboarding.sh`.
 
@@ -936,7 +940,7 @@ locally like our smplify deployment and other VMs."*
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
 implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
-22 reviewed app identities, including clearly labelled official web entries and
+50 reviewed app identities, including clearly labelled official web entries and
 separate native preview/beta entries for Claude and ChatGPT. Flatpak sources
 are commit- and metadata-digest-pinned per architecture; unsupported ARM64
 publisher clients use labelled Chromium web fallbacks. Vendor Debian sources
@@ -1109,7 +1113,9 @@ amended rather than quietly broken.
 
 ### 6.8 Topographic wallpaper plates (2026-09-06)
 
-Five plates — Yosemite (shipped default), Grand Canyon, Rainier, Crater Lake,
+Five plates — Yosemite (**the default when this section was written; the
+shipped default is now the Daybreak photograph, see 6.9**), Grand Canyon,
+Rainier, Crater Lake,
 Zion — generated by `tools/build-wallpaper-plates.sh` from USGS 3DEP elevation
 and NHD hydrography, both public domain under 17 U.S.C. 105, so the coordinates
 in the corner are true rather than decorative. Each is a template carrying the
@@ -1132,6 +1138,28 @@ Known inconsistency: the greeter's first frame is a hardcoded `file://` path to
 the greeter runs as its own process. A plate needs the three substitutions
 applied before it can be drawn, so the login screen still shows the photograph
 while the desktop behind it shows the plate.
+
+### 6.9 Daybreak is the shipped default (2026-09-06)
+
+The owner drove both options on a running VM and chose the Daybreak photograph,
+which is the only test that settles a taste question. `WallpaperState.qml`
+carries ten choices — four photographs, five plates, Field — with
+`defaultId: "daybreak"`, asserted on the running machine by
+`surfaces-check.sh` (`.default == "daybreak"` and exactly ten entries).
+
+**This retires two claims in 6.8 above rather than amending them.** The
+16-second boot-to-desktop and the +11 MB idle attribution were both measured
+with a *plate* default; neither describes the shipping configuration any more,
+so neither should be cited as current. The plates remain first-class choices
+and remain the leaner option — the numbers are simply about a configuration
+this tree does not ship.
+
+The greeter/desktop inconsistency 6.8 records is also gone: the greeter's first
+frame is now `daybreak.jpg`, the same image the desktop draws. Only the
+"hardcoded absolute path" half survives, and it is deliberate — the greeter runs
+as its own user before any session exists and must not take its first frame
+from a user-writable preference file. `Greeter/shell.qml` documents the
+hand-sync rule beside the path.
 
 ## 7. How to add a new in-VM check
 

@@ -144,46 +144,64 @@ made and defended.
 ## 4. Repository map
 
 ```
-crates/                   Rust workspace — 68,614 lines, ZERO reference Arch
-  punard          13,472  the daemon: typed capability IPC, policy merge,
+crates/                   Rust workspace — 118,861 lines, ZERO reference Arch
+  punard          38,320  the daemon: typed capability IPC, policy merge,
                           reconcile loop, audit, M9 approval engine
-  punar-agentd    15,713  AI agent registry, access ledger, shadow-AI detection
-  punarctl        11,628  the CLI; views.rs is the D-014 render layer
-  punar-common    11,667  shared IPC types, descriptors, audit records
+  punarctl        17,544  the CLI; views.rs is the D-014 render layer
+  punar-common    16,319  shared IPC types, descriptors, audit records
+  punar-agentd    16,000  AI agent registry, access ledger, shadow-AI detection
+  punar-netd       7,788  M12 network enforcement: cgroup-v2 nftables policy,
+                          observation, relay — built and dual-arch CI-green
+  punar-env        7,100  rootless podman dev environments (M6), no daemon
   punar-secrets    5,511  short-lived mock credential broker (M9)
-  punar-env        4,727  rootless podman dev environments (M6), no daemon
-  punar-mock-smplify 4,407 dev/CI stand-in for the Smplify control plane
-  punar-policy       689  layered policy resolution
+  punar-mock-smplify 4,762 dev/CI stand-in for the Smplify control plane
+  punar-onboard    3,207  first-account creation, recovery redemption, the
+                          greetd client, the zero-resident materializer
+  punar-recovery     835  recovery-key custody
   punar-workspace    786  workspace state
-  punar-netd          14  M12 placeholder, unimplemented
+  punar-policy       689  layered policy resolution
 
-shell/punar-shell/        Quickshell/QML — 19,885 lines, ONE Arch mention (a comment)
-  SystemControl    3,139  settings-as-capabilities (largest surface)
-  Notifications    2,424  centre + toasts + OSD
-  AiPanel          2,157  what AI has done on this device
+shell/punar-shell/        Quickshell/QML — 27,985 lines, ONE Arch mention (a comment)
+  SystemControl    3,982  settings-as-capabilities (largest surface)
+  CommandCenter    3,347  PUNAR+Space, natural language → typed capabilities
+  Services         3,204  Status, Approvals, Alerts, Apps, Notifications,
+                          WallpaperState, WorkspaceState…
+  Notifications    2,458  centre + toasts + OSD (the freedesktop daemon lives
+                          in Services/Notifications.qml)
+  AiPanel          2,163  what AI has done on this device
   Theme            1,873  theme system + contrast validator
-  Services         1,810  Status, Approvals, Alerts, Apps, WorkspaceState…
-  CommandCenter    1,717  PUNAR+Space, natural language → typed capabilities
-  Bar              1,380  menubar: identity, status cluster, clock
-  Shortcuts        1,313  help overlay, generated from `hyprctl binds -j`
+  Greeter          1,783  first-run account card, login, forgot-password
+  Bar              1,611  menubar: identity, status cluster, clock
+  Shortcuts        1,324  help overlay, generated from `hyprctl binds -j`
   Approval         1,052  the M9 gate
+  Lock             1,015  session lock
   Alert            1,006  M10 shadow-AI cards
-  Overview           796  workspaces as projects
-  Lock               762  session lock
-  Wallpaper          262
+  Overview           850  workspaces as projects
+  PrivacyPanel       678  local network activity
+  WindowActions      589  the window action menu
+  Wallpaper          211
+
+  EVERY LINE COUNT ABOVE IS A SNAPSHOT taken 2026-09-07, not a live figure.
+  They are here for orientation — which crate is large, which surface owns
+  what — and they are wrong the moment anything lands. Recompute rather than
+  cite: `find crates -name '*.rs' -exec cat {} + | wc -l`. Nothing asserts
+  them, deliberately: a gate on a line count goes red on every commit and
+  would be weakened the first time it did.
 
 os/                       image build (THE ONLY substrate-coupled layer)
   images/mkosi.conf              base image, Architecture=x86-64
   images/snapshot.env            ALA date pin (2026/08/20) + builder digest
   images/builder/Containerfile   build container
   images/scripts/container-build.sh  stages os/modules + shell into mkosi.extra
-  images/mkosi.profiles/desktop/ the desktop profile + mkosi.extra tree
+  images/mkosi.profiles/         THREE profiles: desktop (the product),
+                                 dev (CI — every *-check.sh lives here),
+                                 installer
   modules/desktop/               hypr, foot, chromium, fonts, wallpapers
 
 tools/     build-image.sh boot-test.sh qmllint.sh validate-schemas.sh
-           demo-vm.sh punar-up.sh
-schemas/   15 JSON Schemas, 132 validated documents
-docs/      45 markdown files — see §12
+           check-doc-freshness.sh demo-vm.sh punar-up.sh
+schemas/   46 JSON Schema files
+docs/      53 markdown files — see §12
 ```
 
 ---
@@ -194,7 +212,7 @@ docs/      45 markdown files — see §12
 Unix socket with `SO_PEERCRED`. **There is never a generic root RPC and never a
 method that takes an arbitrary command, path or package name** (spec §60). Add
 a method by extending the `Method` enum and `fn dispatch` in
-`crates/punard/src/server.rs` (~line 860). The wire contract is
+`crates/punard/src/server.rs` (`fn dispatch`, ~line 1440 in a 5,000-line file — search for the name, not the number). The wire contract is
 `docs/api/ipc.md`; it is **additive** and still `v: 1`.
 
 **Capabilities are read-write.** Each backend in `crates/punard/src/backends/`
@@ -224,12 +242,20 @@ polling loops.
 qs -p /usr/share/punar/shell ipc show
 qs -p /usr/share/punar/shell ipc call <target> <verb>
 ```
-Fourteen targets: `bar commandcenter systemcontrol notifications toasts osd
-overview aipanel approval alerts shortcuts theme lock wallpaper`.
+Seventeen targets: `aipanel alerts approval bar commandcenter lock
+notifications osd overview policies privacypanel shortcuts systemcontrol theme
+toasts wallpaper windowactions`. (`surfaceprobe` is an eighteenth, in
+`surface-probe.qml`, and belongs to the isolated cost probe rather than to the
+running shell.) The authoritative list is
+`grep -rho 'target: "[a-z]*"' shell/punar-shell/ | sort -u`, and
+`tools/check-doc-freshness.sh` fails if this paragraph and that command
+disagree.
 
-`wallpaper` is a finite five-choice preference. Stillpoint is the shipped
-default; only the active 3840×2400 raster is decoded, and Field remains the
-theme-derived ultra-lean vector. Source/rights records and exact hashes ship
+`wallpaper` is a finite ten-choice preference: four photographs, five
+topographic plates and the theme-derived Field vector. **Daybreak is the
+shipped default** — chosen by the owner after living with both options on a
+running machine — and only the active raster is decoded; a plate needs no
+raster at all. Source/rights records and exact hashes ship
 beside the assets. No wallpaper daemon, scan, download, animation, or timer was
 introduced.
 
@@ -356,7 +382,11 @@ proves no class carries a weaker security/privacy result.
   **`punar-env` hardcodes `--network none`** and M6 justified it partly by "no
   rootless-net helper in the image" — **that is now false**, `passt` ships as a
   podman dependency. Wi-Fi landed but screen-share portals have not.
-- **M11 browser/web-apps · M12 network/relay** — designed, unbuilt.
+- **M11 browser/web-apps** — partially implemented; generic user-created web
+  apps, isolated browser contexts and managed Chromium policy are runtime-proven
+  on both architecture lanes. **M12 network/relay** — BUILT and canonical
+  dual-architecture CI-green (`PUNAR_M12_OK`, 66 assertions); `punar-netd` is
+  7,788 lines, not the placeholder an earlier revision of this file described.
 
 ### 7.5 ARM64 substrate accepted; minimal native lane is build/boot proven
 `docs/architecture/adr/ADR-005-arm64-support.md` — **Accepted for
@@ -474,10 +504,21 @@ Never violate these; several are asserted in CI:
 system, `punard`/`punarctl` and the typed capability API, desired state and
 reconciliation, the mock-enrolment journey, dev environments, agent registry,
 access ledger, approval gates, secret broker, shadow-AI detection, zram,
-native onboarding and recovery, the first signed app-catalog vertical slice,
+native onboarding, the first signed app-catalog vertical slice,
 and generic ARM64 image build/boot. The responsive six-app library itself is
 x86 runtime-proven in run 33146409332; its ARM Flatpak detail correction and
 the two unrelated runtime-gate corrections remain pending follow-up CI.
+
+**Password recovery, stated precisely** (2026-09-07), because "onboarding and
+recovery" used to sit in that list as one phrase and the two halves are not
+equally proven. The redemption LOGIC is covered by Rust unit tests: the code
+works exactly once, spends an attempt before judging, refuses a weaker password
+than the front door, and bounds attempts. The DOOR is now gated on a running
+machine — `recovery-check.sh` asserts the socket listens, answers, answers
+again, survives onboarding completing, and leaves nothing privileged resident.
+What is still NOT proven anywhere is a successful redemption end to end: that
+needs a real recovery record, which needs a real completed account, so it
+belongs to `tools/test-release-onboarding.sh` and is not there yet.
 
 **Real and canonical-CI exercised:** the signed hybrid x86_64 installer boots
 as optical media and as a raw drive, discovers and binds the disposable disk,
@@ -573,5 +614,5 @@ tested, using `mac80211_hwsim` to simulate hardware.
 | `docs/design/wallpapers.md` | owner-approved static desktop-field catalog + resource contract |
 | `docs/design/onboarding-flow.md` | binding one-card first-run interaction + acceptance contract |
 | `docs/api/ipc.md` | the wire contract (additive, `v: 1`) |
-| `docs/architecture/adr/` | ADR-001 substrate · ADR-002 binaries · ADR-003 A/B slots · ADR-005 required arm64 target / proposed substrate |
+| `docs/architecture/adr/` | ADR-001 substrate · ADR-002 binaries · ADR-003 A/B slots · ADR-004 managed-agent isolation · ADR-005 arm64 (**Accepted for implementation**, 2026-08-27) · ADR-006 Raspberry Pi native A/B · ADR-007 network enforcement boundary |
 | `docs/development/milestone-*.md` | per-milestone design + build record |

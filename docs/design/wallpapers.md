@@ -11,10 +11,15 @@ option instead of being discarded.
 
 ## Product decision
 
-Stillpoint is the default: an original Punar work whose quiet indigo field,
-three abstract matte planes, and controlled coral accent feel warm without
-competing with windows. It contains no literal landscape, road, horizon, or
-recognizable place. Daybreak keeps the photographic alpine-twilight option;
+**Daybreak is the default** (decided 2026-09-06 by the owner, after living
+with both options on a running machine — the only test that settles a taste
+question). Its dark ridgeline fills the lower two thirds and its sky is a
+smooth gradient, so window chrome and the bar both sit on quiet ground.
+Stillpoint, the previous default, remains a first-class choice: an original
+Punar work whose quiet indigo field, three abstract matte planes, and
+controlled coral accent feel warm without competing with windows, containing
+no literal landscape, road, horizon, or recognizable place. The five
+topographic plates are the leaner option — no raster to decode;
 Winterline is a lighter, precise aerial composition; Earthrise is the dark,
 forward-looking option; Field is the original theme-derived vector and the
 constrained-machine choice.

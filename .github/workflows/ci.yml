@@ -243,6 +243,13 @@ jobs:
       - name: Validate governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
 
+      # The durable documents are what the next session starts from, so a
+      # countable claim going quietly false in one of them is a defect, not
+      # bookkeeping. Only values with a single unambiguous source in the tree
+      # are checked; line counts and assertion totals deliberately are not.
+      - name: Validate document freshness
+        run: ./tools/check-doc-freshness.sh
+
   image:
     name: image (mkosi, containerized)
     runs-on: ubuntu-24.04
@@ -345,6 +352,7 @@ jobs:
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
+            tools/check-doc-freshness.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m2-check.sh \

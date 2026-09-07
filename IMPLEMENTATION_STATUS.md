@@ -1606,18 +1606,28 @@ tree: `cargo fmt --all -- --check` and `cargo clippy --workspace
 --all-targets -- -D warnings` both exit 0 in the pinned `rust:1`
 container; `cargo test --workspace` green — **840 passed, 0 failed**
 across 34 suites (719 at M9); `./tools/validate-schemas.sh` — 15 schemas
-metaschema-checked, **132 documents validated, ALL PASS**, and **no
+metaschema-checked, **132 documents validated, ALL PASS** (the tree now holds
+46 schema files; that figure is the 2026-08-25 count), and **no
 schema was edited by M10** (M8's Decision-0 law holds for a third
 milestone: everything the shipped schemas cannot hold travels as a
 sibling field of the IPC result or in a separate local record);
 `shellcheck v0.11.0` (pinned container) clean on `m10-check.sh`,
 `idle-ram.sh` and `boot-test.sh`. Recorded in milestone-10.md §21.3 and
 **not** re-run by this audit: `actionlint`, `qmllint` 6.11.2 over all
-fourteen `.qml` files, `PUNAR_BUILD_MODE=summary ./tools/build-image.sh`,
+fourteen `.qml` files (48 today), `PUNAR_BUILD_MODE=summary ./tools/build-image.sh`,
 and the replay of every `jq` filter in `m10-check.sh` against real
 documents (40 filters, none exiting 5 — the M9 failure mode).
 
-What remains: **nothing M10 claims is proven at runtime.** Ten of the
+What remains **as of that 2026-08-25 audit, and superseded since — do not
+read the paragraph below as current status.** M10 went green later that week
+(see this file's own M10 section: `PUNAR_M10_OK`, 135 assertions), the tree is
+committed and clean, and the `target-docker*/` cache it names no longer exists.
+It is kept verbatim because it is the build record the milestone table's
+credibility rests on, and erasing an inconvenient audit is how a status
+document stops being worth reading. Everything from here to the end of this
+paragraph is a snapshot of 2026-08-25:
+
+> **nothing M10 claims is proven at runtime.** Ten of the
 eleven §19 done-conditions are designed and gated, not observed; only
 "`ipc.md` §17–§20 landed additively" is verifiable by reading the tree.
 `m10-check` has never executed, **no `PUNAR_M10_OK` exists anywhere**,
@@ -1638,7 +1648,10 @@ sectioning and tracked in milestone-10.md §17–§18: **blocking, killing
 or quarantining** an unmanaged agent is M12 plus a policy verb (M10
 renders no dead buttons), network destinations and MCP activity as
 detection inputs or ledger rows are M12/M11+, the notification centre,
-the freedesktop daemon, the OSD and a persistent DND toggle are **M13**,
+the freedesktop daemon, the OSD and a persistent DND toggle were **M13** at the
+time of that audit and have since shipped — Services/Notifications.qml binds
+`org.freedesktop.Notifications`, and surfaces-check.sh group 10 asserts an
+application reaching the centre on a running machine —
 real cloud/transport/RBAC/IdP and any cross-device fleet **UI** are
 Phase 2, behavioural risk scoring is Phase 3, and every tracing
 mechanism spec 1.14 forbids — eBPF, fanotify, ptrace, `LD_PRELOAD`,
