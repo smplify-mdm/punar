@@ -128,9 +128,14 @@ DeferredSurfaceBase {
             ? Qt.formatDateTime(date, "d MMM · HH:mm") : view.scanned_at;
     }
 
+    // Sanitised, like every other surface that draws a name a process chose
+    // for itself (Services/SafeText.qml). This panel exists to show what is
+    // talking to the network; a process that could pick its own line breaks or
+    // reorder its own name here would be choosing how it appears on the
+    // surface built to expose it.
     function processName(process: var): string {
-        return process !== null && typeof process.name === "string"
-            ? process.name : "Unknown process";
+        var name = process !== null ? SafeText.plain(process.name, 0) : "";
+        return name !== "" ? name : "Unknown process";
     }
 
     function processMeta(process: var): string {
@@ -142,8 +147,12 @@ DeferredSurfaceBase {
         var session = process !== null && typeof process.session === "object"
             ? process.session : null;
         if (session !== null) {
-            if (typeof session.project === "string")
-                parts.push(session.project);
+            // The project name is text a person typed; the session id is an
+            // identifier printed verbatim so it can be matched against
+            // `punarctl` output by eye.
+            var project = SafeText.plain(session.project, 0);
+            if (project !== "")
+                parts.push(project);
             if (typeof session.id === "string")
                 parts.push(session.id);
         }

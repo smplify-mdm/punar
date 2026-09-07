@@ -550,7 +550,23 @@ DeferredSurfaceBase {
         return Qt.formatDateTime(d, "HH:mm");
     }
 
+    // SAFE BY DEFAULT, RAW BY EXCEPTION — the same inversion Services/Alerts.qml
+    // makes, for the same reason. This panel draws detections: `agent` and
+    // `executable` describe a process the user did not knowingly start, and a
+    // filename on Linux may legally contain newlines and bidi overrides. The
+    // accessor everything reaches for is therefore the one that sanitises, so
+    // a field added later is safe without anyone remembering to make it so.
     function str(obj: var, key: string): string {
+        return SafeText.plain(root.token(obj, key), 0);
+    }
+
+    // The unmodified field, for values that are COMPARED, mapped through a word
+    // table, parsed as a time, or used as an identity key — never drawn as the
+    // sender wrote them. Sanitising those would be a correctness bug rather
+    // than a safety measure: an id that lost a character no longer matches the
+    // record it came from, and `classification === "unknown"` must test what
+    // agentd wrote, not a normalised copy of it.
+    function token(obj: var, key: string): string {
         if (obj === null || obj === undefined || typeof obj !== "object")
             return "";
         var v = obj[key];
@@ -607,13 +623,13 @@ DeferredSurfaceBase {
             }
             if (typeof r !== "object")
                 continue;
-            var zone = root.str(r, "zone");
+            var zone = root.token(r, "zone");
             var group = root.zoneGroup(zone);
             out.push({
                 zone: zone,
                 label: root.zoneLabel(zone),
-                decision: root.str(r, "decision"),
-                enforcement: root.str(r, "enforcement"),
+                decision: root.token(r, "decision"),
+                enforcement: root.token(r, "enforcement"),
                 topRule: out.length === 0 || group !== prev
             });
             prev = group;
@@ -626,7 +642,7 @@ DeferredSurfaceBase {
     // the summary file are simply not printed.
     function sessionSub(sess: var): string {
         var parts = [];
-        var id = root.str(sess, "session_id");
+        var id = root.token(sess, "session_id");
         if (id !== "")
             parts.push(id);
         var user = root.str(sess, "user");
@@ -635,16 +651,16 @@ DeferredSurfaceBase {
         var env = root.str(sess, "environment");
         if (env !== "")
             parts.push(env);
-        var started = root.str(sess, "started_at");
+        var started = root.token(sess, "started_at");
         if (started !== "")
             parts.push("started " + root.shortTime(started));
         return parts.join(" · ");
     }
 
     function detectionSub(det: var): string {
-        var seen = root.str(det, "observed_at");
+        var seen = root.token(det, "observed_at");
         if (seen === "")
-            seen = root.str(det, "started_at");
+            seen = root.token(det, "started_at");
         var when = seen === "" ? "time unknown"
                                : "first observed " + root.shortTime(seen);
         return when + " · not launched through the managed runtime";
@@ -815,7 +831,7 @@ DeferredSurfaceBase {
                 out.push({
                     "label": cat.label,
                     "value": "Not yet observed",
-                    "note": root.milestoneWords(root.str(pending, "milestone")),
+                    "note": root.milestoneWords(root.token(pending, "milestone")),
                     "dashed": true
                 });
             } else {
@@ -843,14 +859,14 @@ DeferredSurfaceBase {
             if (e === null || e === undefined || typeof e !== "object")
                 continue;
             var parts = [];
-            var when = root.str(e, "timestamp");
+            var when = root.token(e, "timestamp");
             if (when !== "")
                 parts.push(root.shortTime(when));
-            var id = root.str(e, "event_id");
+            var id = root.token(e, "event_id");
             if (id !== "")
                 parts.push(id);
             out.push({
-                "category": root.eventWords(root.str(e, "event_type")),
+                "category": root.eventWords(root.token(e, "event_type")),
                 "detail": parts.join(" · ")
             });
         }
@@ -871,8 +887,8 @@ DeferredSurfaceBase {
             var r = rows[i];
             if (r === null || typeof r !== "object" || r.level !== 4)
                 continue;
-            var m = root.str(r, "milestone");
-            out.push(root.eventWords(root.str(r, "category")) + (m === "" ? "" : " · " + m));
+            var m = root.token(r, "milestone");
+            out.push(root.eventWords(root.token(r, "category")) + (m === "" ? "" : " · " + m));
         }
         return out.length === 0 ? "" : "Not yet observed · " + out.join(" · ");
     }
@@ -886,7 +902,7 @@ DeferredSurfaceBase {
         if (r === null || r === undefined || typeof r !== "object")
             return "";
         var days = typeof r.days === "number" ? r.days : -1;
-        var expires = root.str(r, "expires_at");
+        var expires = root.token(r, "expires_at");
         if (expires !== "") {
             var d = new Date(expires);
             var t = d.getTime();
@@ -907,10 +923,10 @@ DeferredSurfaceBase {
             var s = ss[i];
             if (s === null || s === undefined || typeof s !== "object")
                 continue;
-            var cls = root.str(s, "classification");
-            var ended = root.str(s, "status") === "ended";
+            var cls = root.token(s, "classification");
+            var ended = root.token(s, "status") === "ended";
             var project = root.str(s, "project");
-            var id = root.str(s, "session_id");
+            var id = root.token(s, "session_id");
             // D-005 register 01 — name, project, session id, classification.
             // Split across two meta lines: a real `agt_` id is twelve hex
             // digits and would elide away on one 216 px line, and a
@@ -939,7 +955,7 @@ DeferredSurfaceBase {
             out.push({
                 group: "Unknown",
                 kind: "detection",
-                id: root.str(d, "session_id"),
+                id: root.token(d, "session_id"),
                 name: root.str(d, "agent") === "" ? "unnamed process" : root.str(d, "agent"),
                 sub: "Unknown · Suspected",
                 sub2: "",
@@ -1118,7 +1134,7 @@ DeferredSurfaceBase {
         readonly property bool hasLedger: win.ledgerView !== null
         readonly property var ledgerRows: root.ledgerRows(win.ledgerView)
         readonly property var ledgerEvents: root.ledgerEvents(win.ledgerView)
-        readonly property string ledgerPurgedAt: root.str(win.ledgerView, "purged_at")
+        readonly property string ledgerPurgedAt: root.token(win.ledgerView, "purged_at")
 
         onVisibleChanged: {
             if (win.visible) {
@@ -1612,8 +1628,8 @@ DeferredSurfaceBase {
                                     return "";
                                 if (win.isDetection)
                                     return "Unmanaged · Suspected";
-                                var word = root.classWord(root.str(win.entry, "classification"));
-                                return root.str(win.entry, "status") === "ended"
+                                var word = root.classWord(root.token(win.entry, "classification"));
+                                return root.token(win.entry, "status") === "ended"
                                     ? word + " · Ended" : word;
                             }
                         }
@@ -2018,15 +2034,15 @@ DeferredSurfaceBase {
                     }
                     FactRow {
                         width: parent.width
-                        visible: win.isDetection && root.str(win.entry, "signature_id") !== ""
+                        visible: win.isDetection && root.token(win.entry, "signature_id") !== ""
                         label: "Matched signature"
-                        value: root.str(win.entry, "signature_id")
+                        value: root.token(win.entry, "signature_id")
                     }
                     FactRow {
                         width: parent.width
                         visible: win.isDetection
                         label: "Session id"
-                        value: root.str(win.entry, "session_id")
+                        value: root.token(win.entry, "session_id")
                     }
 
                     // The §23 honesty card (mockup .privacy): the panel
