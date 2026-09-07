@@ -647,11 +647,43 @@ QML errors and no binding loops**, that `aipanel state/open/close/toggle`
 answer correctly, that `↑`/`↓` move the rail selection and `Esc` closes,
 and that deleting `agents.json` fails closed to the empty panel.
 
+## THE RENDERING CONSTRAINT (read before reaching for an effect)
+
+**This shell must assume it has no shaders.** `punar-graphics-env.sh` exports
+`QT_QUICK_BACKEND=software` on any machine whose DRM devices are all virtual or
+absent — every VM, the CI desktop gate by design, and any bare-metal machine
+whose GPU does not bind. The Qt Quick **software adaptation implements no
+`ShaderEffect`, no `ShaderEffectSource`, and no item layers**
+(`layer.enabled`). Anything built on those draws **nothing at all** — not a
+degraded version, not a warning, not a QML error. Every other item type renders
+normally, so the surface looks built and the effect is simply absent.
+
+That is not hypothetical. `Lock/LockSurface.qml` used `MultiEffect` for the
+lock screen's frosted wallpaper and shipped a flat rectangle with no wallpaper
+in it, on the owner's machine and in CI, through two attempted fixes — the
+second of which added `layer.enabled`, which is the *other* half of what the
+backend does not have. The `Image` was loading correctly the whole time
+(`status=1 progress=1`, confirmed by the `lock field` diagnostic); only the
+effect was missing.
+
+**What to do instead.** Soft edges come from geometry, opacity and the theme's
+own colours. A blur can be had without a shader by decoding an image small and
+letting the scaler stretch it back — a bilinear upscale of an 80-pixel decode
+is a blur, it is one ordinary textured quad, and it costs *less* memory than a
+full-size decode. That is how the lock's frost is drawn now.
+
+If a surface ever does import `QtQuick.Effects`, both Debian profiles must name
+`qml6-module-qtquick-effects` again (Arch folds it into `qt6-declarative`), and
+whatever it draws must be asserted on a running machine — `surfaces-check.sh`
+group 8d is the worked example, and it exists because nothing in this suite
+noticed a blank effect for two releases.
+
 ## Known deviations from the mockups (deliberate)
 
 - The card's soft drop shadow is omitted: blur effects are costly on the
-  llvmpipe VM rendering path (PERFORMANCE_BUDGETS.md); the 22% ink-wash
-  scrim plus hairline border carries the separation.
+  llvmpipe VM rendering path (PERFORMANCE_BUDGETS.md) — and on the software
+  backend they do not draw at all, see the rendering constraint above; the 22%
+  ink-wash scrim plus hairline border carries the separation.
 - Mockup fractional font sizes round to whole pixels (8.5→9, 14.5→15,
   16.5→17) — `font.pixelSize` is integral.
 - No battery/net widgets in the bar (calm beats complete; the VM target has

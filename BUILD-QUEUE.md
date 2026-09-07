@@ -1141,6 +1141,24 @@ the greeter runs as its own process. A plate needs the three substitutions
 applied before it can be drawn, so the login screen still shows the photograph
 while the desktop behind it shows the plate.
 
+### 6.9a The shell has no shaders, and now says so once (2026-09-07)
+
+`punar-graphics-env.sh` exports `QT_QUICK_BACKEND=software` wherever no real
+DRM device binds — every VM and the CI desktop gate — and the Qt Quick software
+adaptation implements no `ShaderEffect`, no `ShaderEffectSource` and no item
+layers. Anything built on them draws **nothing**, with no error and no degraded
+form, while every other item renders normally.
+
+The shell knew this only as nine separate drop-shadow comments, one per surface,
+each phrased as a local cost trade. Nothing stated the general rule, so
+`Lock/LockSurface.qml` reached for `MultiEffect` and shipped a lock screen with
+no wallpaper in it through two attempted fixes. The rule is now stated once, at
+the top of `shell/punar-shell/README.md`, with the worked alternative: a blur
+can be had by decoding an image small and letting the scaler stretch it back.
+
+`surfaces-check.sh` group 8d is the assertion that would have caught it — it
+locks under two different wallpapers and fails if the frames match.
+
 ### 6.9 Daybreak is the shipped default (2026-09-06)
 
 The owner drove both options on a running VM and chose the Daybreak photograph,
