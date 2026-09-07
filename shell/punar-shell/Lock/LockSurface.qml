@@ -88,6 +88,12 @@ WlSessionLockSurface {
     Image {
         id: lockField
         anchors.fill: parent
+        // `visible: false` alone was not enough: an item that is never rendered
+        // provides no texture, so MultiEffect sampled nothing and the surface
+        // drew as the scrim alone — a flat cream rectangle with no wallpaper in
+        // it at all. `layer.enabled` is what makes this a texture provider
+        // while still keeping it off the screen directly.
+        layer.enabled: true
         visible: false // consumed by the effect below, never drawn directly
         source: surface.showsPhoto
             ? "file://" + Quickshell.shellDir + "/Wallpaper/assets/" + WallpaperState.activeFile
@@ -123,7 +129,11 @@ WlSessionLockSurface {
         anchors.fill: parent
         visible: surface.showsPhoto
         color: Theme.shellSurface
-        opacity: Theme.moodPanel ? 0.82 : 0.86
+        // Lightened from 0.82/0.86, which was heavy enough that even a
+        // correctly-rendered frost would have been hard to see. The passphrase
+        // field is a single hairline with no box, so the ground still has to be
+        // quiet — but "faint" has to mean faint, not absent.
+        opacity: Theme.moodPanel ? 0.72 : 0.76
     }
 
     readonly property string initials: {
