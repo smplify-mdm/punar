@@ -1070,6 +1070,7 @@ jobs:
             os/images/out/desktop-proof/wifi-report.txt
             os/images/out/desktop-proof/wifi-*.txt
             os/images/out/desktop-proof/recovery-report.txt
+            os/images/out/desktop-proof/lock-frost-*.png
             os/images/out/desktop-proof/surfaces-report.txt
             os/images/out/desktop-proof/surfaces-*.json
             os/images/out/desktop-proof/surfaces-*.txt

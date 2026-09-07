@@ -1229,6 +1229,107 @@ fi
 # do with what those groups test.
 check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
 
+# --- group 8d: the lock's frosted glass samples the wallpaper ---------------
+#
+# THE BUG THIS WOULD HAVE CAUGHT. The lock surface blurs the active wallpaper
+# behind its text. It shipped drawing a flat cream rectangle instead: the
+# source Image was `visible: false`, an item that is never rendered is not a
+# texture provider, so MultiEffect sampled nothing and only the scrim reached
+# the screen. Every assertion in this file passed. A human found it by looking
+# at a screenshot, which is the failure mode this suite exists to prevent.
+#
+# THE TEST. If the effect samples the wallpaper, the locked frame depends on
+# which wallpaper is active. If it samples nothing, the locked frame is the
+# same flat scrim whichever wallpaper is set. So: lock under wallpaper A,
+# again under A, and again under B.
+#
+#   sha(A) != sha(A2)  -> the frame is not stable (the lock clock shows HH:MM
+#                         and a minute rolled over). INCONCLUSIVE, not a
+#                         verdict — the control is what makes the rest safe.
+#   sha(A) == sha(A2) != sha(B) -> the wallpaper reaches the surface. PASS.
+#   sha(A) == sha(A2) == sha(B) -> two different wallpapers produce an
+#                         identical locked screen. That is the bug. FAIL.
+#
+# Whether wlr-screencopy can capture at all while an ext-session-lock-v1
+# surface holds the session is not documented anywhere this script can consult,
+# so a refused capture is reported as a limitation and claims nothing.
+lock_frost_capture() {
+    # $1 = wallpaper id, $2 = output path. Sets the wallpaper, locks, captures,
+    # unlocks. Prints the frame's sha256, or nothing if anything refused.
+    ipc wallpaper set "$1" >/dev/null 2>&1 || return 1
+    lf_waited=0
+    while [ "${lf_waited}" -lt 5 ] \
+            && [ "$(ipc wallpaper state | jq -r '.active' 2>/dev/null)" != "$1" ]; do
+        sleep 1
+        lf_waited=$((lf_waited + 1))
+    done
+    [ "$(ipc wallpaper state | jq -r '.active' 2>/dev/null)" = "$1" ] || return 1
+
+    ipc lock lock >/dev/null 2>&1
+    lf_waited=0
+    while [ "${lf_waited}" -lt 10 ] && [ "$(ipc lock state | tr -d '[:space:]"')" != "locked" ]; do
+        sleep 1
+        lf_waited=$((lf_waited + 1))
+    done
+    [ "$(ipc lock state | tr -d '[:space:]"')" = "locked" ] || return 1
+    # The surface animates in over the shared 300 ms curve; two seconds is the
+    # same headroom the painted-pixels probe above allows.
+    sleep 2
+    rm -f "$2"
+    grim "$2" 2>/dev/null || true
+
+    ipc lock submit "${lock_password}" >/dev/null 2>&1
+    lf_waited=0
+    while [ "${lf_waited}" -lt 15 ] && [ "$(ipc lock state | tr -d '[:space:]"')" != "unlocked" ]; do
+        sleep 1
+        lf_waited=$((lf_waited + 1))
+    done
+    [ "$(ipc lock state | tr -d '[:space:]"')" = "unlocked" ] || return 1
+    [ -s "$2" ] || return 1
+    sha256sum "$2" | cut -d" " -f1
+}
+
+# Vacuity guard: this needs two RASTER wallpapers. A vector plate takes a
+# different path through the surface entirely (`showsPhoto` is false), so
+# comparing a plate against a photograph would prove nothing about the blur.
+lock_frost_rasters="$(ipc wallpaper list \
+    | jq -r '[.wallpapers[] | select(.vector == false) | .id] | .[0:2] | join(" ")' 2>/dev/null)"
+lock_frost_a="$(printf "%s" "${lock_frost_rasters}" | cut -d" " -f1)"
+lock_frost_b="$(printf "%s" "${lock_frost_rasters}" | cut -d" " -f2)"
+lock_frost_restore="$(ipc wallpaper state | jq -r ".active" 2>/dev/null)"
+
+if [ -z "${lock_frost_a}" ] || [ -z "${lock_frost_b}" ] || [ "${lock_frost_a}" = "${lock_frost_b}" ]; then
+    note "info fewer than two raster wallpapers ship; the frosted-glass comparison did not run"
+else
+    lock_sha_a="$(lock_frost_capture "${lock_frost_a}" /run/punar/lock-frost-a.png)"
+    lock_sha_a2="$(lock_frost_capture "${lock_frost_a}" /run/punar/lock-frost-a2.png)"
+    lock_sha_b="$(lock_frost_capture "${lock_frost_b}" /run/punar/lock-frost-b.png)"
+
+    if [ -z "${lock_sha_a}" ] || [ -z "${lock_sha_a2}" ] || [ -z "${lock_sha_b}" ]; then
+        note "info could not capture a frame while the session was locked; the frosted-glass"
+        note "info claim is UNPROVEN on this run. wlr-screencopy may refuse while an"
+        note "info ext-session-lock surface holds the session — that is a fact worth having."
+    elif [ "${lock_sha_a}" != "${lock_sha_a2}" ]; then
+        note "info two locks under the same wallpaper differed, so the frame is not stable"
+        note "info (the lock clock shows HH:MM and a minute rolled over). The frosted-glass"
+        note "info comparison is INCONCLUSIVE this run rather than passed or failed."
+    elif [ "${lock_sha_a}" != "${lock_sha_b}" ]; then
+        note "ok   the locked screen differs between wallpapers '${lock_frost_a}' and '${lock_frost_b}', so the blur samples the wallpaper"
+    else
+        note "FAIL two different wallpapers produced an identical locked screen — the lock"
+        note "FAIL surface is drawing its scrim and nothing else (frames in lock-frost-*.png)"
+        FAILED=1
+    fi
+
+    if [ -n "${lock_frost_restore}" ] && [ "${lock_frost_restore}" != "null" ]; then
+        ipc wallpaper set "${lock_frost_restore}" >/dev/null 2>&1 || true
+    else
+        ipc wallpaper reset >/dev/null 2>&1 || true
+    fi
+    check_eq "the wallpaper is restored after the frost comparison" \
+        "${lock_frost_restore}" "$(ipc wallpaper state | jq -r ".active" 2>/dev/null)"
+fi
+
 # --- group 8c: creating a workspace by pointer ------------------------------
 # Overview's "+ New project" control focuses the lowest unused workspace id,
 # because focusing a workspace that does not exist is what creates it. The

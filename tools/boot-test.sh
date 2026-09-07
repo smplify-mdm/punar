@@ -643,6 +643,7 @@ run_desktop() {
           "${PROOF_DIR}/wifi-report.txt" \
           "${PROOF_DIR}"/wifi-*.txt \
           "${PROOF_DIR}/recovery-report.txt" \
+          "${PROOF_DIR}"/lock-frost-*.png \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
           "${PROOF_DIR}"/surfaces-*.txt \
@@ -803,6 +804,7 @@ run_desktop() {
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
                      recovery-report.txt \
+                     lock-frost-a.png lock-frost-a2.png lock-frost-b.png \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
