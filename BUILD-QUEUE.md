@@ -829,6 +829,34 @@ re-proved I36c plus the full unattended path on 2026-09-04. Still open are the
 power-loss matrix, x86 substrate parity, logout/login human acceptance and
 physical hardware.
 
+**The lock screen could not authenticate any account Punar creates
+(2026-09-07, fixed).** Onboarding writes systemd userdb records, not
+`/etc/shadow` entries, and systemd serves a record's privileged section — where
+the hash lives — only to a uid-0 caller. greetd is root so signing in worked;
+punar-shell is the session user, so a locked session could not be opened by
+anyone. Both substrates refuse for different reasons: Debian ships
+`unix_chkpwd` setgid `shadow` (2755) so the helper's *effective* uid is the
+caller's, Arch ships it setuid root (6755) so the effective uid is 0 but the
+*real* uid is not, which nss-systemd also refuses. Measured on a running
+machine: `userdbctl user <name> --json=short | grep -c hashedPassword` = 0 as
+uid 1000, with `pam_unix(punar-lock:auth): authentication failure; uid=1000
+euid=1000` in the journal.
+
+Fixed by `crates/punar-auth`: a socket-activated, per-connection root verifier
+that runs the real `punar-lock` stack and takes the account from `SO_PEERCRED`,
+never from the request. Running the stack as root is also what finally lets
+pam_faillock write its tally, so `deny=5` starts counting for the first time.
+
+**WHY NOTHING CAUGHT IT, which is the more important half.** surfaces-check
+group 8b locks and unlocks a session and stayed green throughout, because the
+account it exercises is the dev image's `punar` — created with `useradd`, so its
+password is in `/etc/shadow`, which is the one case that works. The gate's own
+comment said so and it was still read as coverage. `recovery-check.sh` group 5
+now builds a throwaway **userdb-backed** account, asserts it has no
+`/etc/shadow` entry, and authenticates it through `punar-auth` as that uid —
+with a wrong-secret negative leg and a shadow-backed control, so a harness
+failure and a product failure cannot be confused.
+
 **Password recovery is reachable again (2026-09-07).** The greeter's "Forgot
 your password?" door relays to `/run/punar-onboardd/onboard.sock`, and that
 socket was bound by `punar-onboardd.service` under

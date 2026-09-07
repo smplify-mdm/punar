@@ -173,6 +173,102 @@ MARKER_PLANTED=0
 after=$(probe_code)
 check_eq "the door still opens after the marker is withdrawn" "version_unsupported" "${after}"
 
+# --- 5. A userdb-backed account can actually authenticate -------------------
+#
+# THE ASSERTION THAT WAS MISSING FOR TWO RELEASES. surfaces-check group 8b locks
+# and unlocks a session and passed on every lane while the owner's machine could
+# not be unlocked by anyone — because the account it exercises is the dev image's
+# `punar`, created with useradd, whose password lives in /etc/shadow. Its own
+# comment says so. Every account Punar actually CREATES is a systemd userdb
+# record with no /etc/shadow entry at all, and systemd serves a userdb record's
+# privileged section only to a uid-0 caller. So the one gate that looked like it
+# covered unlocking tested the single case that already worked.
+#
+# This group builds a throwaway userdb account and authenticates it the way a
+# person does: through punar-auth, over punar-authd's socket, with the peer's
+# identity coming from the kernel. The fixture is the CREDENTIAL STORE, not the
+# auth path — the hash comes from the same mkpasswd invocation
+# crates/punar-onboard/src/secret.rs uses, and the record shape is the one
+# identity.rs writes and unit-tests. What is under test is whether a userdb
+# credential can be verified at all from an unprivileged session.
+AUTH_UID=4242
+AUTH_USER=punar-authprobe
+AUTH_PASS="probe-passphrase-9134"
+AUTH_DIR=/run/userdb
+
+auth_cleanup() {
+    rm -f "${AUTH_DIR}/${AUTH_USER}.user" "${AUTH_DIR}/${AUTH_USER}.user-privileged" \
+          "${AUTH_DIR}/${AUTH_UID}.user" "${AUTH_DIR}/${AUTH_UID}.user-privileged"
+}
+trap 'cleanup; auth_cleanup' EXIT INT TERM
+
+if [ ! -x /usr/bin/punar-auth ] || [ ! -x /usr/bin/mkpasswd ] || ! command -v setpriv >/dev/null 2>&1; then
+    note "FAIL the userdb authentication probe cannot run (punar-auth, mkpasswd or setpriv missing)"
+    FAILED=1
+    finish
+fi
+
+auth_hash="$(printf '%s\n' "${AUTH_PASS}" | mkpasswd --method=yescrypt --stdin 2>/dev/null)"
+case "${auth_hash}" in
+    \$y\$*) note "ok   the probe account's secret hashed with the shipped mkpasswd" ;;
+    *)  note "FAIL could not hash the probe secret (got '${auth_hash}')"
+        FAILED=1
+        finish ;;
+esac
+
+mkdir -p "${AUTH_DIR}"
+printf '%s\n' "{\"userName\":\"${AUTH_USER}\",\"uid\":${AUTH_UID},\"gid\":${AUTH_UID},\"realName\":\"Auth probe\",\"homeDirectory\":\"/nonexistent\",\"shell\":\"/usr/sbin/nologin\",\"disposition\":\"regular\"}" \
+    > "${AUTH_DIR}/${AUTH_USER}.user"
+printf '%s\n' "{\"privileged\":{\"hashedPassword\":[\"${auth_hash}\"]}}" \
+    > "${AUTH_DIR}/${AUTH_USER}.user-privileged"
+chmod 0600 "${AUTH_DIR}/${AUTH_USER}.user-privileged"
+ln -sf "${AUTH_USER}.user" "${AUTH_DIR}/${AUTH_UID}.user"
+ln -sf "${AUTH_USER}.user-privileged" "${AUTH_DIR}/${AUTH_UID}.user-privileged"
+
+# VACUITY GUARD, and it is the whole point of this group: if the probe account
+# had an /etc/shadow entry, this would be a third test of the case that already
+# worked and would pass whether or not the bug was fixed.
+if getent passwd "${AUTH_USER}" >/dev/null 2>&1; then
+    note "ok   the probe account resolves through NSS"
+else
+    note "FAIL the probe account does not resolve; nss-systemd is not reading ${AUTH_DIR}"
+    FAILED=1
+    finish
+fi
+auth_shadow="$(grep -c "^${AUTH_USER}:" /etc/shadow 2>/dev/null || true)"
+check_eq "the probe account has NO /etc/shadow entry" "0" "${auth_shadow}"
+
+# Ask as the probe account itself. punar-authd takes the identity from
+# SO_PEERCRED, so dropping to the uid is the only way to be that account — which
+# is also why a caller cannot ask about anyone else.
+auth_ask() {
+    # $1 = uid, $2 = secret
+    printf '%s\n' "$2" \
+        | setpriv --reuid="$1" --regid="$1" --clear-groups /usr/bin/punar-auth 2>/dev/null \
+        | tr -d '[:space:]'
+}
+
+auth_right="$(auth_ask "${AUTH_UID}" "${AUTH_PASS}")"
+check_eq "a userdb account authenticates with the correct secret" "ok" "${auth_right}"
+
+# NEGATIVE LEG. Without it, a verifier that answered "ok" to everything would
+# pass the line above.
+auth_wrong="$(auth_ask "${AUTH_UID}" "definitely-not-the-passphrase")"
+check_eq "a userdb account is refused with a wrong secret" "denied" "${auth_wrong}"
+
+# CONTROL. The dev image's punar account IS in /etc/shadow, so this leg passing
+# while the legs above fail says the harness works and the userdb path does not —
+# which is exactly the shape of the bug this group exists to catch.
+punar_uid="$(id -u punar 2>/dev/null || echo '')"
+if [ -n "${punar_uid}" ]; then
+    auth_control="$(auth_ask "${punar_uid}" "punar")"
+    check_eq "control: the shadow-backed account still authenticates" "ok" "${auth_control}"
+else
+    note "info no punar account on this image; the shadow-backed control did not run"
+fi
+
+auth_cleanup
+
 note "# NOT PROVEN HERE: a successful redemption. That needs a real recovery"
 note "# record, which needs a real completed account, which this image does not"
 note "# have — the dev profile autologins instead of onboarding. The end-to-end"
