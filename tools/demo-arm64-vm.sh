@@ -1,10 +1,18 @@
 #!/bin/bash
 # Native ARM64 Punar desktop launcher for Apple Silicon and ARM64 Linux.
 #
-# The disk is always attached in snapshot mode: interactive testing cannot
+# By default the disk is attached in snapshot mode: interactive testing cannot
 # mutate the reproducible build artifact. QMP and optional VNC remain
 # localhost-only, and the explicit input-device IDs make QMP press/release
 # automation deterministic. macOS defaults to a direct Cocoa window.
+#
+# SNAPSHOT MODE THROWS AWAY THE ACCOUNT YOU JUST CREATED. That is correct for a
+# demo and actively misleading for testing anything about identity: onboarding
+# runs again on the next boot, so a password set in one session is not the
+# password of the account in the next, and a lock screen will correctly reject
+# it. PUNAR_VM_PERSIST=1 keeps the writes instead, in a qcow2 overlay whose
+# backing file is the build artifact — the artifact still cannot be mutated,
+# and there is still nothing to clean up but one small file.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +43,30 @@ case "$(basename "${IMAGE}")" in
 esac
 QEMU="$(command -v qemu-system-aarch64 || true)"
 [ -n "${QEMU}" ] || die "qemu-system-aarch64 is required"
+
+# Persistence is an overlay, never a mutation. The overlay is named after the
+# digest of the image it backs, so rebuilding the image produces a NEW overlay
+# rather than silently reinterpreting old writes against different blocks —
+# which is corruption, and the quiet kind.
+# Expanded below as ${DISK_ARGS[@]+"..."}: macOS ships bash 3.2, where a plain
+# "${arr[@]}" on an EMPTY array is an unbound-variable error under `set -u`.
+DISK_ARGS=(-snapshot)
+BOOT_DISK="${IMAGE}"
+PERSIST_NOTE="disk changes are disposable (-snapshot); onboarding runs again on every boot"
+if [ "${PUNAR_VM_PERSIST:-0}" = 1 ]; then
+    command -v qemu-img >/dev/null 2>&1 || die "PUNAR_VM_PERSIST=1 needs qemu-img"
+    IMAGE_DIGEST="$(shasum -a 256 "${IMAGE}" 2>/dev/null | cut -c1-12)"
+    [ -n "${IMAGE_DIGEST}" ] || IMAGE_DIGEST="$(sha256sum "${IMAGE}" | cut -c1-12)"
+    BOOT_DISK="${IMAGE%.qcow2}.persist-${IMAGE_DIGEST}.qcow2"
+    if [ ! -f "${BOOT_DISK}" ]; then
+        qemu-img create -q -f qcow2 -F qcow2 -b "${IMAGE}" "${BOOT_DISK}" \
+            || die "could not create the persistent overlay ${BOOT_DISK}"
+        echo "==> created a persistent overlay: $(basename "${BOOT_DISK}")"
+        echo "    delete that file to return to a factory-fresh machine"
+    fi
+    DISK_ARGS=()
+    PERSIST_NOTE="disk changes PERSIST in $(basename "${BOOT_DISK}"); the build artifact is untouched"
+fi
 
 FIRMWARE=""
 for candidate in \
@@ -114,7 +146,7 @@ fi
 echo "==> booting native ARM64 $(basename "${IMAGE}") (${ACCEL})"
 echo "    display ${DISPLAY_LABEL}"
 echo "    QMP  127.0.0.1:${QMP_PORT}"
-echo "    disk changes are disposable (-snapshot)"
+echo "    ${PERSIST_NOTE}"
 echo "    graphics are software-rendered in this VM; judge bare-metal GPU smoothness separately"
 
 # QEMU starts with VNC authentication enabled but no usable password. Set it
@@ -164,9 +196,9 @@ exec "${QEMU}" \
     -smp "${PUNAR_VM_CPUS:-4}" \
     -m "${PUNAR_VM_MEMORY_MB:-3072}" \
     -bios "${FIRMWARE}" \
-    -drive "file=${IMAGE},if=none,id=punardisk,format=qcow2,cache=unsafe,aio=threads" \
+    -drive "file=${BOOT_DISK},if=none,id=punardisk,format=qcow2,cache=unsafe,aio=threads" \
     -device virtio-blk-pci,drive=punardisk,romfile= \
-    -snapshot \
+    ${DISK_ARGS[@]+"${DISK_ARGS[@]}"} \
     -device virtio-gpu-pci,id=punar-gpu,romfile= \
     -device qemu-xhci,id=punar-xhci \
     -device usb-kbd,id=punar-kbd \
