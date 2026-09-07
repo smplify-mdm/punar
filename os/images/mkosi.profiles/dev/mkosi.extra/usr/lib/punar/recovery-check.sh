@@ -119,11 +119,22 @@ check_eq "a second connection is answered too" "version_unsupported" "${second}"
 # process that can create accounts and change passwords alive through every
 # session. That trade is the reason the old condition existed, so it is asserted
 # rather than assumed.
-if pgrep -f 'punar-onboardd session' >/dev/null 2>&1; then
-    resident=1
-else
-    resident=0
-fi
+# Polled rather than sampled once. The client returns as soon as it has read
+# its reply, so the server process may still be on its way out for a moment
+# after a probe; a single pgrep here would fail intermittently and teach
+# whoever saw it that this check is flaky rather than that residency regressed.
+# Five seconds is far longer than an exit and far shorter than "resident".
+resident=1
+settle=0
+while [ "${settle}" -lt 5 ]; do
+    if pgrep -f 'punar-onboardd session' >/dev/null 2>&1; then
+        sleep 1
+        settle=$((settle + 1))
+    else
+        resident=0
+        break
+    fi
+done
 check_eq "no transaction process is resident between connections" "0" "${resident}"
 
 # --- 4. Completing onboarding does not take the door away ----------------
