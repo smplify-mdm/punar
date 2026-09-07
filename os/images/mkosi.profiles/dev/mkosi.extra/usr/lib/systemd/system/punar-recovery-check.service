@@ -1,0 +1,19 @@
+# Punar identity-door exercise (CI).
+#
+# ROOT, deliberately: /run/punar-onboardd is 0750 root:greeter, so User=punar
+# cannot traverse it, and the exercise restarts punar-onboardd.socket. Run as
+# punar this would have reported "unavailable" and exercised nothing.
+#
+# Not enabled, no .wants symlink — idle-ram.sh starts it synchronously.
+
+[Unit]
+Description=Punar identity-door exercise — the greeter's recovery socket answers (CI)
+
+[Service]
+Type=oneshot
+# Each probe carries the client's own 45 s read timeout and there are four of
+# them, plus two socket restarts. Two minutes is headroom, not an expectation.
+TimeoutStartSec=2min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/recovery-check.sh

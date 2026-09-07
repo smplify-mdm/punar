@@ -642,6 +642,7 @@ run_desktop() {
           "${PROOF_DIR}/meminfo" \
           "${PROOF_DIR}/wifi-report.txt" \
           "${PROOF_DIR}"/wifi-*.txt \
+          "${PROOF_DIR}/recovery-report.txt" \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
           "${PROOF_DIR}"/surfaces-*.txt \
@@ -801,6 +802,7 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
+                     recovery-report.txt \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
@@ -1409,6 +1411,35 @@ run_desktop() {
         exit 1
     else
         echo "==> Wireless: no report under TCG (informational only)"
+    fi
+
+    # Phase 11b: the greeter's recovery door. Gated exactly like the wireless
+    # verdict — a delivered FAIL or, under acceleration, a missing report both
+    # fail the build, because a missing verdict once passed as a warning and hid
+    # a check that never ran (BUILD-QUEUE.md section 7 step 4).
+    local recovery_report="${PROOF_DIR}/recovery-report.txt"
+    if [ -f "${recovery_report}" ]; then
+        if grep -q 'PUNAR_RECOVERY_FAIL' "${recovery_report}"; then
+            echo "error: identity-door exercise reported PUNAR_RECOVERY_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${recovery_report}" >&2 || true
+            exit 1
+        elif grep -q 'PUNAR_RECOVERY_OK' "${recovery_report}"; then
+            echo "==> Recovery door: PUNAR_RECOVERY_OK ($(grep -c '^ok' "${recovery_report}" || true) assertions passed)"
+            grep '^info' "${recovery_report}" >&2 || true
+        else
+            echo "error: recovery-report.txt carries no verdict (guest crashed mid-exercise?)" >&2
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_RECOVERY_FAIL' "${SERIAL_LOG}"; then
+        echo "error: identity-door exercise reported PUNAR_RECOVERY_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_RECOVERY_OK' "${SERIAL_LOG}"; then
+        echo "==> Recovery door: PUNAR_RECOVERY_OK (verdict from serial console)"
+    elif [ "${HARDWARE_ACCEL}" -eq 1 ]; then
+        echo "error: no recovery-report.txt and no verdict on serial — the identity-door exercise did not run" >&2
+        exit 1
+    else
+        echo "==> Recovery door: no report under TCG (informational only)"
     fi
 
     # Phase 12c.1: isolated surface construction/resident-cost verdict. The

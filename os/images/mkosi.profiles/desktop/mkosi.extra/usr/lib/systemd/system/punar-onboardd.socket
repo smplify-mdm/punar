@@ -1,0 +1,39 @@
+# The listening socket for first-account creation and recovery redemption.
+#
+# WHY A SOCKET UNIT AT ALL. The service used to bind its own socket under
+# ConditionPathExists=!/var/lib/punar/onboarding/completed.json, so on every
+# machine that had finished onboarding — the only machine where a person can
+# have forgotten their password — systemd skipped the unit, the socket never
+# existed, and the greeter's "Forgot your password?" door answered "The
+# recovery service is unavailable". The condition was correct about residency
+# and wrong about reachability. systemd owning the socket separates the two:
+# the door is always there, nothing privileged is running behind it.
+#
+# Accept=yes on purpose. Each connection gets its own short-lived root process
+# that serves one request and exits, so the authority to create an account or
+# change a password exists only for the length of a transaction. It also keeps
+# punar-onboardd free of unsafe code: an accepted connection arrives on
+# stdin/stdout, which safe std and safe rustix can both address, while
+# inheriting a *listening* descriptor would need a raw-fd conversion these
+# crates forbid.
+[Unit]
+Description=Punar identity transaction socket
+Documentation=file:/usr/share/doc/punar/onboarding-flow.md
+Before=greetd.service
+
+[Socket]
+ListenStream=/run/punar-onboardd/onboard.sock
+SocketUser=root
+SocketGroup=greeter
+SocketMode=0660
+Accept=yes
+# The directory is 0750 root:greeter, so only root and the greeter can reach
+# the socket at all. This cap bounds what a compromised greeter could spend,
+# since each connection costs a process. MaxConnectionsPerSource= is
+# deliberately absent: it keys on source IP and means nothing on AF_UNIX, so
+# setting it would be a control that does nothing.
+MaxConnections=4
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

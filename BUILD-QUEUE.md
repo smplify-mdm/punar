@@ -825,6 +825,25 @@ re-proved I36c plus the full unattended path on 2026-09-04. Still open are the
 power-loss matrix, x86 substrate parity, logout/login human acceptance and
 physical hardware.
 
+**Password recovery is reachable again (2026-09-07).** The greeter's "Forgot
+your password?" door relays to `/run/punar-onboardd/onboard.sock`, and that
+socket was bound by `punar-onboardd.service` under
+`ConditionPathExists=!/var/lib/punar/onboarding/completed.json`. Every machine
+that had finished onboarding — which is every machine where somebody can have
+forgotten a password — therefore skipped the unit, had no socket, and answered
+"The recovery service is unavailable". The condition was right about residency
+and wrong about reachability, and nothing looked at it. systemd now owns the
+socket (`punar-onboardd.socket`, `Accept=yes`) and starts a per-connection
+`punar-onboardd@.service` that serves one transaction and exits, so the door is
+always open and nothing privileged is resident behind it. `Accept=yes` also
+keeps the crate free of `unsafe`: an accepted connection arrives on
+stdin/stdout, while inheriting a *listening* descriptor would need a raw-fd
+conversion `#![forbid(unsafe_code)]` refuses. New gate:
+`dev/.../usr/lib/punar/recovery-check.sh`, root, hard-gated in
+`tools/boot-test.sh`. **NOT PROVEN by that gate:** a successful redemption
+end to end, which needs a real recovery record and so belongs to
+`tools/test-release-onboarding.sh`.
+
 **Same-release recovery floor (installer.md §12.1 option 2, decided
 2026-09-04; LOCAL-ONLY until the dual-slot ISO passes canonical CI):** every
 UEFI release manifest now requires independently bound A and B root/UKI

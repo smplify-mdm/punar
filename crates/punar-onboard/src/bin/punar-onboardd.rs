@@ -16,7 +16,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the admitted pre-login account-creation socket until success.
+    /// Serve one systemd-accepted connection on stdin/stdout, then exit.
+    ///
+    /// What the image runs. `punar-onboardd.socket` holds the listening socket
+    /// so account creation and recovery redemption stay reachable for the life
+    /// of the machine without a privileged process resident in between.
+    Session,
+    /// Bind the socket directly and serve until the first success.
+    ///
+    /// For tests and non-systemd callers only. Stopping on first success is
+    /// wrong for the shipped path, where the recovery door has to outlive the
+    /// first person who opens it.
     Serve {
         #[arg(long, default_value = "/run/punar-onboardd/onboard.sock")]
         socket: PathBuf,
@@ -30,6 +40,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
+        Command::Session => punar_onboard::server::session().map_err(|_| ()),
         Command::Serve { socket } => punar_onboard::server::serve(&socket).map_err(|_| ()),
         Command::Materialize => IdentityStore::production().materialize().map_err(|_| ()),
         Command::FirstLogin => {

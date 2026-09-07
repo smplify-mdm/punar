@@ -404,6 +404,13 @@ fi
 systemctl start punar-wifi-check.service \
     || echo "punar: idle-ram: punar-wifi-check.service failed to start" >&2
 
+# Identity-door exercise, beside the wireless one and for the same reason: it
+# runs as root and restarts punar-onboardd.socket, so it must not land inside a
+# check that counts windows or measures latency. It plants and withdraws a
+# completion marker under a trap; nothing it touches outlives it.
+systemctl start punar-recovery-check.service \
+    || echo "punar: idle-ram: punar-recovery-check.service failed to start" >&2
+
 # Per-surface construction/resident-cost instrument. It runs after the
 # canonical idle window so fifteen fresh probe processes cannot pollute the
 # whole-system budget, and before the normal surface gate so the latter proves
