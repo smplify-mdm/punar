@@ -1333,7 +1333,12 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
     note "info session bus address defaulted to ${XDG_RUNTIME_DIR}/bus"
 fi
 
-busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+# THE `--` IS LOAD-BEARING. The last argument is the freedesktop
+# expire_timeout, and -1 means "use the server's default". Without `--`,
+# getopt reads that -1 as a command-line option and busctl exits with
+# "unrecognized option '-1'" before sending anything — which is exactly what
+# the first run of this gate recorded. Do not remove it as tidying.
+busctl --user -- call org.freedesktop.Notifications /org/freedesktop/Notifications \
     org.freedesktop.Notifications Notify "susssasa{sv}i" \
     "${notif_app}" 0 "" "Gate probe" "sent by surfaces-check over D-Bus" 0 0 -1 \
     > /run/punar/notify-send.txt 2>&1 && notif_send_rc=0 || notif_send_rc=$?
