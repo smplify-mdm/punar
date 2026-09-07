@@ -175,6 +175,18 @@ jobs:
       # Org Actions policy (and Punar's own supply-chain posture, spec 59.6)
       # allows GitHub-owned actions only — no third-party toolchain/cache
       # actions. rustup ships preinstalled on hosted runners.
+      # punar-auth links libpam: it runs the punar-lock PAM stack as root so a
+      # systemd-userdb account can be authenticated at all. The runtime needs only
+      # the ordinary libpam every image already has; BUILDING needs the headers
+      # and the linker stub.
+      #
+      # This step is easy to omit and hard to read when omitted. `cargo clippy`
+      # exits 0 without it, because clippy checks and never links, so the failure
+      # surfaces only at `cargo test` as `cannot find -lpam` — which reads as
+      # "the tests broke" rather than "the runner is short a package".
+      - name: Install libpam headers (punar-auth links libpam)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libpam0g-dev
+
       - name: Install Rust toolchain (stable, rustfmt + clippy)
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy

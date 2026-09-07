@@ -56,6 +56,7 @@ RUN printf '%s\n' \
         git \
         cargo \
         rustc \
+        libpam0g-dev \
         ca-certificates \
         debian-archive-keyring \
     && if [ "$(dpkg --print-architecture)" = amd64 ]; then \

@@ -79,7 +79,7 @@ stage_punar_binaries() {
             CARGO_TARGET_DIR="${cargo_target}" \
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
-                -p punar-secrets -p punar-netd -p punar-onboard \
+                -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
                 -p punar-mock-smplify
     )
 
@@ -94,6 +94,8 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-onboard" \
         "${cargo_target}/release/punar-onboardd" \
         "${cargo_target}/release/punar-greet" \
+        "${cargo_target}/release/punar-auth" \
+        "${cargo_target}/release/punar-authd" \
         "${extra}/usr/bin/"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
@@ -101,7 +103,8 @@ stage_punar_binaries() {
 
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
-        punar-netd punar-onboard punar-onboardd punar-greet; do
+        punar-netd punar-onboard punar-onboardd punar-greet \
+        punar-auth punar-authd; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2

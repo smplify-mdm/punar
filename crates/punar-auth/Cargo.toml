@@ -1,0 +1,49 @@
+[package]
+name = "punar-auth"
+description = "Privileged verifier for a session user's own password, so the lock screen can authenticate a systemd-userdb account"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# THE ONE UNSAFE-BEARING DEPENDENCY HERE, and the reason it is worth it.
+#
+# This daemon runs the REAL punar-lock PAM stack rather than comparing a hash
+# itself, because that stack is where pam_faillock lives. A bespoke comparison
+# would silently drop rate limiting from the one surface an attacker has
+# physical, unlimited access to, and re-implementing the counter would mean a
+# tally store, a lockout window and crash-safe counting — strictly more code and
+# more risk than three locked crates. punar-onboard's secret::yescrypt_verify
+# exists and is deliberately NOT used here for that reason.
+#
+# libpam is a C API, so some crate holds the unsafe. Workspace crates are
+# #![forbid(unsafe_code)] and the root Cargo.toml's dependency policy already
+# says the unsafe belongs "in the audited dependency, not in Punar crates" — the
+# same reasoning that admitted rustix and signal-hook.
+#
+# WHY THIS CRATE AND NOT `pam`: measured, not assumed. `pam` resolves 22 new
+# packages including bindgen and clang-sys, which would put libclang into both
+# builder images; neither contains clang or llvm today. pam-client2 with default
+# features off resolves 3 (pam-client2, pam-sys2, rustversion). Its build script
+# only reaches for bindgen behind a non-default `generate-bindings` feature, so
+# the default path just links libpam.
+#
+# EXACT-PINNED, and default features OFF. A caret range on a five-version,
+# single-maintainer fork sitting in the password path is not a version spec, it
+# is a standing authorization. Default features would additionally pull
+# `rpassword` — a TTY password reader this daemon never uses, which carries
+# GHSA-2p6r-x3vv-xqm2 in versions below 7.5.0. The resolved 7.5.4 is unaffected,
+# but the right amount of an unused password-reading crate is none.
+#
+# LICENCE: MPL-2.0, the first copyleft-family licence in this workspace's
+# dependency set (every other locked package is MIT/Apache/BSD/Zlib/Unlicense).
+# It is file-level copyleft and imposes nothing on Punar's own Apache-2.0 code so
+# long as the crate is unmodified, which it is. Recorded here because it is a
+# real change in kind and the owner may wish to revisit it.
+pam-client2 = { version = "=0.5.5", default-features = false }
+
+rustix = { workspace = true, features = ["net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zeroize = { workspace = true }

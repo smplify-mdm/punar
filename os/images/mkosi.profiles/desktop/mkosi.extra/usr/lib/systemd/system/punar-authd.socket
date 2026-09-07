@@ -1,0 +1,36 @@
+# The lock screen's authentication socket.
+#
+# WHY IT EXISTS. systemd serves a userdb record's privileged section — where the
+# password hash lives — only to a uid-0 caller, so an unprivileged pam_unix
+# cannot authenticate an onboarding-created account at all. greetd runs as root
+# and could; punar-shell runs as the session user and could not, so the lock
+# screen could not be opened by anyone. See crates/punar-auth/src/lib.rs for the
+# measurements on both substrates.
+#
+# NO [Install] SECTION, for the reason punar-onboardd.socket records: a
+# WantedBy= makes Debian's preset create a second enablement under /etc beside
+# the vendor link under /usr, the reviewed enabled-unit manifests then differ per
+# lane, and release assertion A9 correctly fails the build. greetd's drop-in
+# Wants= this socket instead, which is the whole of its required lifetime —
+# there is no session to lock without a display manager.
+#
+# Accept=yes: each connection gets its own short-lived root process that serves
+# one verdict and exits, so the authority to authenticate exists only for the
+# length of an attempt. It also keeps punar-auth free of unsafe code, since an
+# accepted connection arrives on stdin/stdout while inheriting a listening
+# descriptor would need a raw-fd conversion the crate forbids.
+[Unit]
+Description=Punar lock-screen authentication socket
+Documentation=file:/usr/share/doc/punar/ipc.md
+
+[Socket]
+ListenStream=/run/punar-authd/auth.sock
+SocketUser=root
+SocketGroup=punar
+SocketMode=0660
+Accept=yes
+# The directory is 0750 root:punar and every human account is a member of punar,
+# so only a logged-in person can reach this at all. The cap bounds what a
+# compromised session could spend, since each connection costs a process.
+MaxConnections=8
+RemoveOnStop=yes

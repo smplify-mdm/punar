@@ -1,0 +1,35 @@
+# One authentication attempt, one process. Instantiated by punar-authd.socket
+# with the accepted connection already on stdin and stdout.
+[Unit]
+Description=Punar lock-screen authentication (connection %i)
+Documentation=file:/usr/share/doc/punar/ipc.md
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punar-authd
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+
+# BOUNDS THE WHOLE TRANSACTION, not just one read. The socket timeouts inside
+# the binary apply per read() syscall, so a peer dribbling a byte just inside
+# each interval would stay in the request loop indefinitely. This is the outer
+# limit; a real PAM stack answers in well under a second, and the modules that
+# deliberately delay a failure are bounded far below thirty.
+RuntimeMaxSec=30
+
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# /run/faillock is NOT optional here and is the reason the lockout policy starts
+# working at all. ProtectSystem=strict makes /run read-only, and pam_faillock
+# writes its per-user tally under that directory; an unprivileged pam_faillock
+# could never create one, which is why deny=5 has been counting nothing.
+ReadWritePaths=/run/faillock -/run/punar-authd
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

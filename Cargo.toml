@@ -7,6 +7,7 @@
 resolver = "3"
 members = [
     "crates/punar-agentd",
+    "crates/punar-auth",
     "crates/punar-common",
     "crates/punar-env",
     "crates/punar-mock-smplify",
