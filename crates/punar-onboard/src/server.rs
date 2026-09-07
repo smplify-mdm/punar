@@ -13,8 +13,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::identity::{IdentityError, IdentityStore};
 use crate::protocol::{
-    CreateAccountWire, ErrorResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
-    SuccessResponse, validate_timezone_name,
+    CreateAccountWire, ErrorResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OpProbe,
+    PROTOCOL_VERSION, RedeemRecoveryWire, RedeemedResponse, RequestOp, SuccessResponse,
+    validate_timezone_name,
 };
 
 pub fn serve(socket_path: &Path) -> Result<(), io::Error> {
@@ -56,6 +57,28 @@ fn handle(store: &IdentityStore, stream: &mut UnixStream) -> io::Result<bool> {
     }
     let mut payload = Zeroizing::new(vec![0_u8; len]);
     stream.read_exact(&mut payload)?;
+    // Choose the strict type before parsing into it. The probe tolerates
+    // unknown fields; nothing after this point does.
+    let op = match serde_json::from_slice::<OpProbe>(&payload) {
+        Ok(probe) => probe.op.unwrap_or(RequestOp::CreateAccount),
+        Err(_) => {
+            payload.zeroize();
+            write_error(
+                stream,
+                "request_invalid",
+                None,
+                "The account request was not valid.",
+            )?;
+            return Ok(false);
+        }
+    };
+
+    if matches!(op, RequestOp::RedeemRecovery) {
+        let result = handle_redeem(store, stream, &payload);
+        payload.zeroize();
+        return result;
+    }
+
     let request: CreateAccountWire = match serde_json::from_slice(&payload) {
         Ok(request) => request,
         Err(_) => {
@@ -158,6 +181,71 @@ fn apply_timezone(name: &str, localtime: &Path, zoneinfo: &Path) -> io::Result<(
         return Err(error);
     }
     Ok(())
+}
+
+/// Redeem the one-time recovery code and set a new password.
+///
+/// Separate from account creation on purpose: the two share a socket and a
+/// framing, and nothing else. This path creates no account, touches no
+/// hostname, no timezone and no home directory, and it is reachable only on a
+/// machine that already completed onboarding — there is no recovery record
+/// before that.
+fn handle_redeem(
+    store: &IdentityStore,
+    stream: &mut UnixStream,
+    payload: &[u8],
+) -> io::Result<bool> {
+    let request: RedeemRecoveryWire = match serde_json::from_slice(payload) {
+        Ok(request) => request,
+        Err(_) => {
+            write_error(
+                stream,
+                "request_invalid",
+                None,
+                "The recovery request was not valid.",
+            )?;
+            return Ok(false);
+        }
+    };
+    if request.v != PROTOCOL_VERSION {
+        write_error(
+            stream,
+            "version_unsupported",
+            None,
+            "This first-run client and service do not match.",
+        )?;
+        return Ok(false);
+    }
+
+    // Both secrets are owned for the length of the call and wiped after it,
+    // like the creation path's password.
+    let code = Zeroizing::new(request.recovery_code);
+    let password = Zeroizing::new(request.password);
+    let result = store.redeem_recovery(&request.username, &code, &password);
+    drop(code);
+    drop(password);
+
+    match result {
+        Ok(redeemed) => {
+            let response = RedeemedResponse {
+                v: PROTOCOL_VERSION,
+                ok: true,
+                username: &redeemed.username,
+                password_changed: true,
+            };
+            let body = Zeroizing::new(
+                serde_json::to_vec(&response)
+                    .map_err(|_| io::Error::other("response serialization failed"))?,
+            );
+            write_frame(stream, &body)?;
+            Ok(true)
+        }
+        Err(error) => {
+            let (code, field, message) = public_error(&error);
+            write_error(stream, code, field, message)?;
+            Ok(false)
+        }
+    }
 }
 
 fn public_error(error: &IdentityError) -> (&'static str, Option<&'static str>, &'static str) {

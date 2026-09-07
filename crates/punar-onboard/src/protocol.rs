@@ -11,10 +11,61 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 4096;
 pub const MAX_RESPONSE_BYTES: usize = 4096;
 
+/// Which transaction a request is asking for.
+///
+/// The field is OPTIONAL and absent means `create_account`, because the greeter
+/// that shipped before recovery existed sends no `op` at all and must keep
+/// working against a newer daemon. `CreateAccountWire` denies unknown fields —
+/// deliberately, so a typo in a secret-bearing request is an error rather than
+/// a silently ignored key — which is why `op` has to be a named member of it
+/// rather than something a probe reads past.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestOp {
+    CreateAccount,
+    RedeemRecovery,
+}
+
+/// Reads only the discriminator. Unknown fields are tolerated HERE and nowhere
+/// else: this parse exists to choose the strict type that will reject them.
+#[derive(Debug, Deserialize)]
+pub struct OpProbe {
+    #[serde(default)]
+    pub op: Option<RequestOp>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemRecoveryWire {
+    pub v: u32,
+    #[serde(default)]
+    pub op: Option<RequestOp>,
+    pub username: String,
+    /// The one-time code shown once at onboarding.
+    #[serde(rename = "recoveryCode")]
+    pub recovery_code: String,
+    /// The password to set. Held to onboarding's own rules by the daemon.
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemedResponse<'a> {
+    pub v: u32,
+    pub ok: bool,
+    pub username: &'a str,
+    /// Always true on success, and stated rather than implied: the reader is
+    /// about to sign in with a new secret and should be told the old one is
+    /// gone. The disk passphrase is untouched and this says nothing about it.
+    pub password_changed: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAccountWire {
     pub v: u32,
+    #[serde(default)]
+    pub op: Option<RequestOp>,
     pub username: String,
     pub password: String,
     #[serde(rename = "deviceName")]
@@ -255,6 +306,51 @@ pub fn derive_hostname(device_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_without_an_op_is_still_account_creation() {
+        // The greeter that shipped before recovery existed sends no `op`. A
+        // newer daemon that stopped understanding it would break first boot on
+        // every machine already in the field.
+        let legacy =
+            br#"{"v":1,"username":"alice","password":"three amber rivers","deviceName":"Studio"}"#;
+        let probe: OpProbe = serde_json::from_slice(legacy).expect("probe parses");
+        assert!(matches!(
+            probe.op.unwrap_or(RequestOp::CreateAccount),
+            RequestOp::CreateAccount
+        ));
+        let request: CreateAccountWire = serde_json::from_slice(legacy).expect("strict parse");
+        assert_eq!(request.username, "alice");
+    }
+
+    #[test]
+    fn a_redeem_request_routes_and_parses() {
+        let raw = br#"{"v":1,"op":"redeem_recovery","username":"alice","recoveryCode":"aaaa-bbbb","password":"seven copper lanterns"}"#;
+        let probe: OpProbe = serde_json::from_slice(raw).expect("probe parses");
+        assert!(matches!(probe.op, Some(RequestOp::RedeemRecovery)));
+        let request: RedeemRecoveryWire = serde_json::from_slice(raw).expect("strict parse");
+        assert_eq!(request.recovery_code, "aaaa-bbbb");
+    }
+
+    #[test]
+    fn strictness_survives_the_new_discriminator() {
+        // Adding `op` must not have turned either secret-bearing request into a
+        // shape that silently ignores a misspelled key.
+        let typo =
+            br#"{"v":1,"username":"alice","passwrd":"three amber rivers","deviceName":"Studio"}"#;
+        assert!(serde_json::from_slice::<CreateAccountWire>(typo).is_err());
+        let typo2 = br#"{"v":1,"op":"redeem_recovery","username":"alice","recovery_code":"x","password":"seven copper lanterns"}"#;
+        assert!(serde_json::from_slice::<RedeemRecoveryWire>(typo2).is_err());
+    }
+
+    #[test]
+    fn an_unknown_op_is_refused_rather_than_defaulted() {
+        // Defaulting an unrecognised op to account creation would let a client
+        // aiming at a future verb fall through into a transaction it did not ask
+        // for.
+        let raw = br#"{"v":1,"op":"delete_everything","username":"alice"}"#;
+        assert!(serde_json::from_slice::<OpProbe>(raw).is_err());
+    }
 
     #[test]
     fn usernames_follow_the_binding_contract() {
