@@ -1452,6 +1452,86 @@ ipc notifications clear >/dev/null 2>&1 || true
 notif_count_cleared="$(ipc notifications count | tr -d '[:space:]"')"
 check_eq "notifications.count after clear" "0" "${notif_count_cleared}"
 
+# --- 10b. Grouping and ordering, told apart from a flat list -----------------
+# Group 10 above sends ONE notification from ONE application. With a single
+# record, "grouped by application, newest first" and "one flat list" produce
+# identical output, so the accessor that exists to discriminate them was not
+# being used to discriminate anything. Its count leg is `>` only, so a second
+# record silently vanishing would also be invisible.
+#
+# Three records from two senders is the smallest arrangement that separates
+# them: two groups from three records is a claim a flat list cannot make, and
+# re-sending from the FIRST sender last makes the order a claim too.
+#
+# ASSERT THE RELATION, NOT THE STRING. The expected order is derived from the
+# send order this script controls — the group whose newest record is newest
+# sorts first — rather than pinned as a literal "Alpha|Beta", which would
+# become a scheduled failure the day grouping gains pinned or priority sources.
+#
+# It runs AFTER the clear above, from a centre proven empty, so the count is an
+# exact delta rather than a floor and no unrelated group can appear between the
+# two names being compared.
+notif_a="Punar Gate Alpha"
+notif_b="Punar Gate Beta"
+
+notif_send() {
+    busctl --user -- call org.freedesktop.Notifications /org/freedesktop/Notifications \
+        org.freedesktop.Notifications Notify "susssasa{sv}i" \
+        "$1" 0 "" "$2" "sent by surfaces-check over D-Bus" 0 0 -1 \
+        >> /run/punar/notify-send.txt 2>&1
+}
+# Waiting for each send to land before making the next one is what makes the
+# ordering assertion deterministic: every busctl call is its own bus
+# connection, and D-Bus orders messages per sender, not across senders.
+notif_wait_count() {
+    notif_w=0
+    while [ "${notif_w}" -lt 15 ]; do
+        [ "$(ipc notifications count | tr -d '[:space:]"')" = "$1" ] && return 0
+        sleep 1
+        notif_w=$((notif_w + 1))
+    done
+    return 1
+}
+
+# Vacuity guard for both names, on an empty centre: if either were already a
+# group, every assertion below would pass without the sends proving anything.
+notif_groups_pre="$(ipc notifications groups | tr -d '"')"
+case "|${notif_groups_pre}|" in
+    *"|${notif_a}|"*|*"|${notif_b}|"*)
+        note "FAIL a 10b probe name was already a group before anything was sent"
+        FAILED=1 ;;
+    *)  note "ok   neither 10b probe name is a group before sending" ;;
+esac
+
+notif_ordered=1
+notif_send "${notif_a}" "first from Alpha"  || notif_ordered=0
+notif_wait_count 1                          || notif_ordered=0
+notif_send "${notif_b}" "only from Beta"    || notif_ordered=0
+notif_wait_count 2                          || notif_ordered=0
+notif_send "${notif_a}" "second from Alpha" || notif_ordered=0
+notif_wait_count 3                          || notif_ordered=0
+check_eq "three records landed one at a time" "1" "${notif_ordered}"
+
+# Exactly three records, exactly two groups: a flat list would report three.
+notif_count_3="$(ipc notifications count | tr -d '[:space:]"')"
+check_eq "record count after three sends" "3" "${notif_count_3}"
+
+notif_groups_3="$(ipc notifications groups | tr -d '"')"
+notif_group_n="$(printf '%s' "${notif_groups_3}" | awk -F'|' '{print NF}')"
+check_eq "three records from two senders form two groups" "2" "${notif_group_n}"
+
+# The relation: Alpha sent last, so Alpha's group must sort ahead of Beta's.
+case "${notif_groups_3}" in
+    "${notif_a}|${notif_b}")
+        note "ok   the group whose newest record is newest sorts first" ;;
+    *)  note "FAIL groups are not in most-recent-first order (got '${notif_groups_3}', Alpha sent last)"
+        FAILED=1 ;;
+esac
+
+ipc notifications clear >/dev/null 2>&1 || true
+notif_count_10b="$(ipc notifications count | tr -d '[:space:]"')"
+check_eq "notifications.count after the 10b clear" "0" "${notif_count_10b}"
+
 # --- artifacts --------------------------------------------------------------
 hyprctl -j clients > /run/punar/surfaces-clients.json 2>/dev/null || true
 
