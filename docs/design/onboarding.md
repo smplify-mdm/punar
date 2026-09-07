@@ -1383,7 +1383,7 @@ The two meet at `identity`, `auth.kinds`, `groups.fromDirectory` and
 
 ### 7.1 The check and its constraints
 
-`os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/onboarding-check.sh`,
+`os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/onboarding-check.sh`,
 committed **0755**, renamed to the adopting milestone's `mNN-check.sh`
 convention at implementation time and wired the same way `m9-check` and
 `m13-check` are.

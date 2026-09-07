@@ -158,7 +158,7 @@ and the checker-only `hyprctl` calibration was 12 ms. Corrected eager
 command centre 87 · System Control 116 · shortcuts 186. Full-path totals were
 106–226 ms; the checker-only dispatch span was 39–41 ms.
 
-**File:** `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/surfaces-check.sh`
+**File:** `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh`
 
 ### 2.2 Measured lazy-loading — both passes runtime-proven
 [Run 33044217553](https://github.com/smplify-mdm/punar/actions/runs/33044217553)
@@ -1118,10 +1118,12 @@ while the desktop behind it shows the plate.
 
 Almost every task above needs one. The full recipe:
 
-1. **Script** at `os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/<name>-check.sh`,
+1. **Script** at `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/<name>-check.sh`,
    committed **mode 0755**. Always `exit 0`; the verdict is the last line of
    `/run/punar/<name>-report.txt` as `PUNAR_<NAME>_OK` / `_FAIL`.
-2. **Unit** at `.../usr/lib/systemd/system/punar-<name>-check.service`.
+2. **Unit** at
+   `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/systemd/system/punar-<name>-check.service`
+   — the same `dev` profile as step 1, not `desktop`.
    **Not enabled, no `.wants` symlink** — `idle-ram.sh` starts it synchronously.
    Choose `User=punar` for user-session things (shell IPC, the compositor) or
    root for system things (modprobe, D-Bus policy, `/var/lib`).

@@ -1,7 +1,7 @@
 # Check-script conventions: assert the invariant, never the placeholder
 
 Scope: every in-VM exercise under
-`os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/m*-check.sh`.
+`os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m*-check.sh`.
 
 Punar's honesty rule (spec 1.22) makes every milestone ship surfaces that
 **name what they cannot yet observe**: a `not_yet_observed[]` row with a
