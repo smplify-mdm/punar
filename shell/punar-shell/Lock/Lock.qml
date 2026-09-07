@@ -295,6 +295,16 @@ Scope {
                 return;
             }
             root.attempts = root.attempts + 1;
+            // An ordinary rejection used to leave no trace anywhere: only
+            // onError logged, so a session that could never be unlocked looked
+            // identical in the journal to one nobody had tried to unlock. This
+            // records the three facts that separate "wrong secret" from "this
+            // surface cannot authenticate at all" — which stack actually
+            // resolved, which account was authenticated, and what PAM returned.
+            // The passphrase itself is never logged, and neither is its length.
+            console.warn("punar-shell: lock auth rejected · config=" + root.pamConfig
+                + " user=" + root.accountName + " result=" + result
+                + " attempt=" + root.attempts);
             if (result === PamResult.MaxTries) {
                 root.failure = "Too many attempts · wait and try again";
             } else if (root.denyAfter > 0 && root.attempts >= root.denyAfter) {

@@ -413,7 +413,17 @@ WlSessionLockSurface {
                     font.pixelSize: 9
                     font.letterSpacing: Theme.tracking(9, 0.18)
                     color: Theme.shellInputBorder
-                    text: "Passphrase"
+                    // "Password", not "Passphrase". docs/design/onboarding.md
+                    // section 4.5 keeps these as two different secrets on
+                    // purpose — the LUKS PASSPHRASE unlocks the disk at boot,
+                    // the account PASSWORD authenticates the person — and
+                    // explicitly refuses to make them the same. This surface
+                    // runs pam_unix against the account, so asking for a
+                    // "passphrase" here instructs the reader to type the disk
+                    // secret, which can only ever be rejected. Every other
+                    // surface (greeter, onboarding, its errors and its
+                    // accessible names) already says password.
+                    text: "Password"
                 }
 
                 // The single hairline the plate draws instead of a box —
