@@ -837,9 +837,11 @@ that had finished onboarding — which is every machine where somebody can have
 forgotten a password — therefore skipped the unit, had no socket, and answered
 "The recovery service is unavailable". The condition was right about residency
 and wrong about reachability, and nothing looked at it. systemd now owns the
-socket (`punar-onboardd.socket`, `Accept=yes`) and starts a per-connection
+socket (`punar-onboardd.socket`, `Accept=yes`, pulled by greetd's own drop-in
+rather than enabled globally) and starts a per-connection
 `punar-onboardd@.service` that serves one transaction and exits, so the door is
-always open and nothing privileged is resident behind it. `Accept=yes` also
+open wherever there is a login screen to open it for, and nothing privileged is
+resident behind it. `Accept=yes` also
 keeps the crate free of `unsafe`: an accepted connection arrives on
 stdin/stdout, while inheriting a *listening* descriptor would need a raw-fd
 conversion `#![forbid(unsafe_code)]` refuses. New gate:

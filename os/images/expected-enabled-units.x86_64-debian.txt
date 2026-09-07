@@ -5,12 +5,6 @@
 # cryptsetup/integrity/verity target links are Debian's vendor wiring for the
 # mandatory encrypted installer. The native amd64 desktop build must still
 # compare the complete tree before parity is claimed.
-# 2026-09-07: punar-onboardd.socket added. The identity transaction service
-# is no longer a resident daemon bound to its own socket under a condition
-# that skipped it once onboarding completed — which left the greeter's
-# recovery door dead on exactly the machines that need it. systemd owns the
-# socket now and starts punar-onboardd@.service per connection, so this is a
-# vendor enablement rather than a running process.
 etc/systemd/system/multi-user.target.wants/e2scrub_reap.service -> /usr/lib/systemd/system/e2scrub_reap.service
 etc/systemd/system/multi-user.target.wants/iwd.service -> /usr/lib/systemd/system/iwd.service
 etc/systemd/system/multi-user.target.wants/punard-reconcile.timer -> /usr/lib/systemd/system/punard-reconcile.timer
@@ -95,7 +89,6 @@ usr/lib/systemd/system/multi-user.target.wants/systemd-networkd.service -> ../sy
 usr/lib/systemd/system/multi-user.target.wants/systemd-resolved.service -> ../systemd-resolved.service
 usr/lib/systemd/system/multi-user.target.wants/systemd-user-sessions.service -> ../systemd-user-sessions.service
 usr/lib/systemd/system/sockets.target.wants/dbus.socket -> ../dbus.socket
-usr/lib/systemd/system/sockets.target.wants/punar-onboardd.socket -> ../punar-onboardd.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-ask-password.socket -> ../systemd-ask-password.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-bootctl.socket -> ../systemd-bootctl.socket
 usr/lib/systemd/system/sockets.target.wants/systemd-creds.socket -> ../systemd-creds.socket

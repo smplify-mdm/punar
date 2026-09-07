@@ -35,5 +35,16 @@ Accept=yes
 MaxConnections=4
 RemoveOnStop=yes
 
-[Install]
-WantedBy=sockets.target
+# NO [Install] SECTION, DELIBERATELY. greetd's drop-in Wants= this socket and
+# is ordered after it, which is the whole of its required lifetime: the only
+# client is the greeter, and a machine with no login screen has nobody to open
+# the recovery door for.
+#
+# Enabling it independently bought nothing and cost a per-distribution
+# difference in the reviewed enabled-unit manifests. Measured, not assumed:
+# with a WantedBy=sockets.target the Debian ARM64 release build created BOTH
+# the vendor link under /usr and a preset-created one under /etc, and
+# release-image assertion A9 correctly failed the build over the second.
+# Whether the Arch lane's preset does the same was never established, because
+# removing the [Install] made the question moot — which is the better outcome
+# for a unit whose lifetime greetd already governs.
