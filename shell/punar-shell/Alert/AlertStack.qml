@@ -8,12 +8,16 @@ pragma ComponentBehavior: Bound
 //     meta row · hairline · one sentence · detail · why · policy ·
 //     actions · footer
 //
-// THE SLIVER, AND ONLY THE SLIVER (milestone-10.md §5.6). There is no
-// notification code in this shell: no toast stack for anything else, no
-// notification centre, no freedesktop notification daemon, no persistent
-// do-not-disturb toggle and no `Punar+N`. D-009 draws all three states;
-// M13 owns them. This file builds the one region M10's deliverable names
-// and nothing beside it.
+// THE SLIVER, AND ONLY THE SLIVER (milestone-10.md §5.6). This file builds
+// the one region M10's deliverable names and nothing beside it. When it was
+// written that was the whole of D-009 in the tree; the rest — the freedesktop
+// daemon, the toast stack, the notification centre, the OSD and a persistent
+// do-not-disturb toggle — has since shipped in Notifications/ and
+// Services/Notifications.qml. The SEPARATION is not historical, though, and
+// must not be tidied away: detection alerts are deliberately NOT in the
+// notification daemon's model. That is what makes "quiet never reaches a first
+// sighting" and "x never clears an alert" true by construction rather than by
+// a special case somebody could remove.
 //
 // SUSPECTED, NEVER CERTAIN, AND NEVER ARMED (milestone-10.md law 4, spec
 // 23, 1.22). The word "suspected" appears in the meta row AND in the
@@ -22,9 +26,13 @@ pragma ComponentBehavior: Bound
 // blocked" is printed because M10 detects, records and alerts and does
 // not block, kill or quarantine anything; a user who believes they are
 // protected when they are not is worse off than one who knows. There are
-// therefore no BLOCK NETWORK / REGISTER AS MANAGED buttons: those need
-// punar-netd (M12) and a policy verb, and this release ships no dead
-// buttons.
+// therefore no BLOCK NETWORK / REGISTER AS MANAGED buttons — and no longer
+// because a milestone is pending. M12 shipped punar-netd and its cgroup-v2
+// policy, and blocking a DETECTION still does not follow from it: enforcement
+// binds to a managed, active session, while an unmanaged process shares its
+// cgroup with whatever launched it, so a rule bound there would cut the
+// terminal and its siblings too. The absence is a standing consequence of what
+// an unmanaged process is, not a schedule.
 //
 // DELIBERATE DEVIATION FROM THE PLATE (milestone-10.md §5.1, written down
 // because it must be): D-009's subline reads
@@ -268,8 +276,8 @@ Scope {
     // Meta row, right half: the clock time of the most recent sighting —
     // D-009's `.tmeta .exp` slot. An unreadable stamp prints nothing.
     function metaTime(alert: var): string {
-        var t = Alerts.hhmm(Alerts.str(alert, "last_seen"));
-        return t !== "" ? t : Alerts.hhmm(Alerts.str(alert, "first_seen"));
+        var t = Alerts.hhmm(Alerts.token(alert, "last_seen"));
+        return t !== "" ? t : Alerts.hhmm(Alerts.token(alert, "first_seen"));
     }
 
     // THE one sentence. If it needs two, it is not a card (D-009 Sect I
@@ -305,7 +313,7 @@ Scope {
         var parts = [];
         if (exe !== "")
             parts.push(root.displayPath(exe, owner));
-        var when = Alerts.hhmm(Alerts.str(alert, live ? "first_seen" : "last_seen"));
+        var when = Alerts.hhmm(Alerts.token(alert, live ? "first_seen" : "last_seen"));
         var clause = live ? "running" : "no longer running";
         if (owner !== "")
             clause = live ? ("running as " + owner) : ("ran as " + owner);
@@ -319,6 +327,11 @@ Scope {
     // shipped signature actually tests. This is a RENDERING of the path
     // the record already carries, not a second datum: an unrecognised path
     // yields the generic phrasing rather than a confident-sounding guess.
+    // CLASSIFIED ON THE RAW PATH, deliberately. Callers pass Alerts.token, not
+    // Alerts.str: which directory a binary actually sits in is a fact about the
+    // filesystem, and stripping a bidi override could turn a path that is not
+    // in Downloads into one that looks like it is. The sanitised form is for
+    // the words the user reads; this is for deciding which words those are.
     function zonePhrase(executable: string): string {
         if (executable.indexOf("/Downloads/") >= 0)
             return "Downloads";
@@ -344,7 +357,7 @@ Scope {
             base = supplied;
         } else if (sig === "unmanaged-path-agentlike") {
             base = "an agent-named executable " + (live ? "is" : "was")
-                 + " running from " + root.zonePhrase(Alerts.str(alert, "executable"))
+                 + " running from " + root.zonePhrase(Alerts.token(alert, "executable"))
                  + ", outside any managed Punar session";
         } else {
             base = "this process " + (live ? "is" : "was")
@@ -465,7 +478,7 @@ Scope {
         if (a === null)
             return;
         root.releaseKeyboard();
-        root.inspectRequested(Alerts.str(a, "detection_id"));
+        root.inspectRequested(Alerts.token(a, "detection_id"));
     }
 
     // [D] Dismiss — DISMISS FILES, IT NEVER DESTROYS (§5.4, D-009 Sect I

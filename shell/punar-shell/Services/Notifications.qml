@@ -279,6 +279,9 @@ Singleton {
     //     application name full of newlines grew the card without limit. It is
     //     also why Punar, not the sender, decides where a line breaks.
     //
+    // The full argument for each of those, and the second caller that made it
+    // shared rather than local, are in Services/SafeText.qml.
+    //
     // The caps are deliberate fidelity loss and are set above what any surface
     // can display — the toast gives a sentence two lines and the centre elides
     // to one — so nothing that would have been read is lost. They exist so the
@@ -288,17 +291,13 @@ Singleton {
     readonly property int maxDetailChars: 480
     readonly property int maxActionLabelChars: 32
 
+    // The rule itself lives in Services/SafeText.qml, because Alerts needs the
+    // same one and a security surface must not import a notification daemon to
+    // borrow a regex. What stays here are the CAPS, which are a property of
+    // these surfaces rather than of the rule: a toast gives its sentence two
+    // lines and the centre elides to one.
     function sanitize(value: var, cap: int): string {
-        if (typeof value !== "string" || value === "")
-            return "";
-        var out = value
-            .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
-            .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
-        // The ellipsis says a sender said more, which is true and is not the
-        // same claim as a surface running out of room.
-        return out.length > cap ? out.slice(0, cap) + "\u2026" : out;
+        return SafeText.plain(value, cap);
     }
 
     // The speaker. A notification ALWAYS names its source — "anonymous

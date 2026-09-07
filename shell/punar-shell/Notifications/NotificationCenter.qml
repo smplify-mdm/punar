@@ -457,7 +457,7 @@ DeferredSurfaceBase {
         }
         if (row.kind === "alert") {
             root.hide();
-            root.inspectRequested(Alerts.str(row.rec, "detection_id"));
+            root.inspectRequested(Alerts.token(row.rec, "detection_id"));
             return;
         }
         var acts = Notifications.actionsOf(row.rec);

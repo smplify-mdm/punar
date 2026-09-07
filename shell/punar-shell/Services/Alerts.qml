@@ -59,7 +59,28 @@ Singleton {
 
     // ---- record accessors (tolerant, never throwing) ----
 
+    // SAFE BY DEFAULT, RAW BY EXCEPTION. `str` is what every surface reaches
+    // for, so `str` is the one that sanitises. The alternative — a raw default
+    // plus a `label()` a surface has to remember — makes the dangerous choice
+    // the convenient one, and the next surface that forgets is a spoofable
+    // alert card.
+    //
+    // WHY IT MATTERS ON THIS SURFACE PARTICULARLY. `executable` is a path read
+    // from `/proc/<pid>/exe`. A filename on Linux may contain any byte except
+    // `/` and NUL, so newlines and bidi overrides are legal in one — and the
+    // process whose name this is, is by construction one the user did not
+    // knowingly start. Left raw, a hostile binary chooses how it is rendered
+    // on the single surface whose whole purpose is to say that it is running.
+    // See Services/SafeText.qml for what is removed and why.
     function str(obj: var, key: string): string {
+        return SafeText.plain(root.token(obj, key), 0);
+    }
+
+    // The unmodified field. For identifiers and timestamps ONLY — values that
+    // are compared, joined on, or parsed, never drawn. Sanitising those would
+    // be a correctness bug: a detection_id with a stripped character no longer
+    // matches the record it came from, and dismissal joins on exactly that.
+    function token(obj: var, key: string): string {
         if (obj === null || obj === undefined || typeof obj !== "object")
             return "";
         var v = obj[key];
@@ -73,20 +94,20 @@ Singleton {
     }
 
     function id(alert: var): string {
-        return root.str(alert, "alert_id");
+        return root.token(alert, "alert_id");
     }
 
     // `live` | `cleared` | `dismissed`, or `unknown` for a record whose
     // state the shell cannot read. An unreadable state is never assumed to
     // be live: a card must not be manufactured out of a missing field.
     function alertState(alert: var): string {
-        var s = root.str(alert, "state");
+        var s = root.token(alert, "state");
         return s === "" ? "unknown" : s;
     }
 
     function isDismissed(alert: var): bool {
         return root.alertState(alert) === "dismissed"
-            || root.str(alert, "dismissed_at") !== "";
+            || root.token(alert, "dismissed_at") !== "";
     }
 
     // The process behind the signature was still running at the last pass.

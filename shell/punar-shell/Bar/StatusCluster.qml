@@ -182,7 +182,7 @@ FocusScope {
         // two files can never produce the same row twice.
         for (i = 0; i < Alerts.active.length; i++) {
             var a = Alerts.active[i];
-            var aid = Alerts.str(a, "detection_id");
+            var aid = Alerts.token(a, "detection_id");
             if (aid !== "" && drawn[aid] === true)
                 continue;
             total++;
@@ -191,7 +191,7 @@ FocusScope {
                 who = Alerts.str(a, "executable");
             if (who === "")
                 who = "unrecognised process";
-            var when = cluster.stamp(Alerts.str(a, "last_seen"));
+            var when = cluster.stamp(Alerts.token(a, "last_seen"));
             out.push({
                 "text": who + (Alerts.isLive(a)
                     ? " · unknown · suspected"
