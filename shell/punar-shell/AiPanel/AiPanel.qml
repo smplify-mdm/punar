@@ -28,10 +28,16 @@ pragma ComponentBehavior: Bound
 //   - process counts are distinct pids seen ALIVE AT A SAMPLING POINT,
 //     never a spawn total, and the section tagline says so;
 //   - detections are rendered as SUSPECTED, never certain, and the
-//     Block network / Register actions of the mockup are NOT drawn:
-//     those capabilities arrive with M12 (punar-netd plus a policy verb)
-//     and this release ships no dead buttons. `Inspect` is no longer in
-//     that list — since M10 it is the alert card's [I] key, which opens
+//     Block network / Register actions of the mockup are NOT drawn,
+//     and now NOT because a milestone is pending. M12 shipped punar-netd
+//     and its cgroup-v2 policy, and blocking a detection still does not
+//     follow from it: enforcement binds to a MANAGED, ACTIVE session
+//     (punar-agentd refuses anything else, pinned by a test), while an
+//     unmanaged process shares its cgroup with whatever launched it, so
+//     a rule bound there would cut the terminal and its siblings too.
+//     The footer therefore states the standing reason rather than naming
+//     a milestone that came and went. `Inspect` is no longer in that
+//     list either — since M10 it is the alert card's [I] key, which opens
 //     THIS panel on the detection it names (milestone-10.md §5.1); this
 //     surface is the inspect target, so it still draws no such button of
 //     its own.
@@ -2066,17 +2072,23 @@ DeferredSurfaceBase {
                                     font.pixelSize: 9
                                     font.weight: 500
                                     font.letterSpacing: Theme.tracking(9, 0.1)
-                                    // M10 FULFILLED THE `INSPECT` HALF OF
-                                    // THIS SENTENCE: the alert card's [I]
-                                    // opens THIS view on THIS detection
-                                    // (milestone-10.md §5.1), so naming
-                                    // inspect as pending would now be
-                                    // false. Blocking and registering a
-                                    // detection still do not exist — they
-                                    // need punar-netd and a policy verb —
-                                    // and the milestone they wait on is
-                                    // named rather than left vague.
-                                    text: "Visibility first · block network and register as managed arrive with enforcement (M12)"
+                                    // THIS LINE USED TO NAME A MILESTONE,
+                                    // and M12 then landed without giving
+                                    // a detection a block button — so the
+                                    // sentence quietly became a promise
+                                    // the product had already broken.
+                                    // Nothing in CI could catch that: it
+                                    // is a string, and it went false by
+                                    // the calendar rather than by an edit.
+                                    // What replaces it is the standing
+                                    // reason, which is only false on the
+                                    // day the code changes with it: an
+                                    // unmanaged process runs in no Punar
+                                    // scope, so there is no binding here
+                                    // to cut. (checks-conventions.md: the
+                                    // same disease, in an organ with no
+                                    // immune system.)
+                                    text: "Visibility only · unmanaged work runs in no Punar scope, so this device can see it but not cut it"
                                     wrapMode: Text.WordWrap
                                 }
                             }
