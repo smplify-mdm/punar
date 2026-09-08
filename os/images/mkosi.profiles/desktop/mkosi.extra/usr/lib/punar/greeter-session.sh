@@ -32,4 +32,24 @@ if [ "${PUNAR_GRAPHICS_MODE}" = software ]; then
     export PUNAR_REDUCED_MOTION
 fi
 
+
+# LEAVE THE TERMINAL BLACK BEHIND US. greetd hands VT1 from this compositor to
+# the desktop's, and in the moment between them the bare virtual terminal is
+# what is on screen — whatever text it last held, plus a cursor. Clearing it
+# once here means that gap shows black rather than the tail of the boot log.
+#
+# Scrollback is cleared too (\033[3J), because a terminal that is merely
+# scrolled to a blank page still has the boot log one keystroke away on a
+# machine whose lock screen is meant to be a boundary.
+#
+# Guarded on every failure: greetd owns this VT and grants it to the session
+# user, but a compositor that will not start because it could not write an
+# escape sequence would be a far worse bug than the flicker this removes.
+punar_clear_vt() {
+    punar_vt="/dev/tty${XDG_VTNR:-1}"
+    [ -w "${punar_vt}" ] || return 0
+    printf '\033[H\033[2J\033[3J\033[?25l' > "${punar_vt}" 2>/dev/null || true
+}
+punar_clear_vt
+
 exec Hyprland --config /etc/xdg/hypr/punar-greeter.lua
