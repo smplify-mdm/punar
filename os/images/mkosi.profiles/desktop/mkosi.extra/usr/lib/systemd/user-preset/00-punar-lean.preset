@@ -26,3 +26,14 @@ disable filter-chain.service
 # daemon the first time an application asks for a secret, and not before.
 disable gnome-keyring-daemon.service
 disable gnome-keyring-daemon.socket
+
+# gcr rides in as a gnome-keyring dependency and enables an SSH AGENT — a
+# resident service this image never asked for, and a SECOND one: the manifest
+# already carries gpg-agent-ssh.socket, so two agents would compete for
+# SSH_AUTH_SOCK and the winner would depend on unit ordering.
+#
+# Release-image policy A9 caught this rather than a person noticing, which is
+# the argument for a byte-exact enabled-unit manifest in one line: adding one
+# package quietly enabled a credential-adjacent daemon, and the build refused.
+disable gcr-ssh-agent.service
+disable gcr-ssh-agent.socket
