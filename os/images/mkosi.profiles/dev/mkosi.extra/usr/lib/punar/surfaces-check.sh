@@ -1665,22 +1665,47 @@ if [ -z "${hypr_pid}" ]; then
     note "FAIL no Hyprland process found; the compositor stdio assertion cannot run"
     FAILED=1
 else
+    # WHY THIS IS TWO MEASUREMENTS AND NOT ONE. Reading another process's fd
+    # links needs PTRACE_MODE_READ, which the checker — a system service, not a
+    # descendant of the compositor — does not always get even at the same uid.
+    # The first version asserted on the link alone and reported "the assertion
+    # did not run" as a FAILURE, which is a gate failing because it could not
+    # look. So: when the link is readable it is the direct evidence and is
+    # asserted; when it is not, the journal identifier carries the claim,
+    # because output that reached the journal under the session's own tag is
+    # output that did not reach the terminal.
+    hypr_fd_readable=0
     for hypr_fd in 1 2; do
         hypr_target="$(readlink "/proc/${hypr_pid}/fd/${hypr_fd}" 2>/dev/null)"
+        [ -n "${hypr_target}" ] && hypr_fd_readable=1
         case "${hypr_target}" in
             /dev/tty*|/dev/console|/dev/vc/*)
                 note "FAIL Hyprland fd ${hypr_fd} is ${hypr_target}; its log lands on the terminal and shows through at every session handover"
                 FAILED=1
                 ;;
             "")
-                note "FAIL Hyprland fd ${hypr_fd} could not be read; the assertion did not run"
-                FAILED=1
+                note "info Hyprland fd ${hypr_fd} is not readable from this service ($(readlink "/proc/${hypr_pid}/fd/${hypr_fd}" 2>&1 >/dev/null | head -c 80)); the journal leg below carries the claim"
                 ;;
             *)
                 note "ok   Hyprland fd ${hypr_fd} is ${hypr_target}, not a terminal"
                 ;;
         esac
     done
+
+    # The positive evidence, and the only leg that works without ptrace: the
+    # session script execs the compositor through `systemd-cat --identifier=
+    # punar-session`, so entries under that identifier exist if and only if the
+    # compositor's output is going to the journal. An empty journal here means
+    # the redirect is not in force, whatever the file on disk says.
+    hypr_journal="$(journalctl --identifier=punar-session --lines=1 --no-pager 2>/dev/null | grep -c . || true)"
+    if [ "${hypr_journal:-0}" -gt 0 ]; then
+        note "ok   the compositor's output is in the journal under punar-session"
+    elif [ "${hypr_fd_readable}" -eq 1 ]; then
+        note "info no punar-session journal entries yet; the fd assertion above already carries the claim"
+    else
+        note "FAIL neither Hyprland's fds nor the punar-session journal could be read; nothing here proved the compositor is off the terminal"
+        FAILED=1
+    fi
 fi
 
 # --- group 9c: a device policy change needs a password, and then works ------
