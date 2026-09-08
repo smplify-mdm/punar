@@ -163,7 +163,11 @@ Item {
             width: 52
             height: 52
             radius: Theme.radius
-            color: Theme.shellSurface
+            // A monogram needs a ground to read as an icon rather than as text
+            // in an empty box; a real logo does not, and gets the plain surface
+            // so nothing tints it.
+            color: appIcon.source.toString() === "" || appIcon.status === Image.Error
+                ? Theme.shellMuted : Theme.shellSurface
             border.width: Theme.hairline
             border.color: Theme.shellBorder
 
@@ -177,11 +181,31 @@ Item {
                 smooth: true
             }
 
-            Meta {
+            // THE MONOGRAM, when no icon file ships for this app.
+            //
+            // Twenty-one icon files cover sixty-two catalogue entries, and the
+            // rest fall here — so this is the common case, not the exception,
+            // and it was drawn like an exception: a 10px meta glyph in a
+            // secondary ink, which reads as an EMPTY PLATE beside a real logo.
+            // The owner reported it as "many apps are missing icons", which is
+            // exactly right about the effect and not quite right about the
+            // cause.
+            //
+            // Shipping forty more vendor logos is the other answer and a worse
+            // one: trademarks need clearing app by app, and the bytes ride in
+            // every image forever. A monogram that looks deliberate costs
+            // nothing, cannot be wrong about a brand, and stays correct when
+            // the catalogue grows.
+            Text {
                 anchors.centerIn: parent
                 visible: appIcon.source.toString() === "" || appIcon.status === Image.Error
-                color: Theme.shellInk2
                 text: Apps.glyphFor(tile.catalogApp ? String(tile.appData.name) : Apps.displayName(tile.appData))
+                font.family: Theme.fontSans
+                font.pixelSize: 20
+                font.weight: 600
+                font.letterSpacing: Theme.tracking(20, 0.02)
+                color: tile.selected || tile.hovered ? Theme.shellFg : Theme.shellInk2
+                textFormat: Text.PlainText
             }
         }
 
