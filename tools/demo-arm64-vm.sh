@@ -34,6 +34,12 @@ die() {
 }
 
 [ -f "${IMAGE}" ] || die "no such image: ${IMAGE}"
+# ABSOLUTE FROM HERE ON. `qemu-img create -b` resolves a backing path relative
+# to the OVERLAY's directory, not the working directory, so a relative image
+# argument produced `os/images/out/os/images/out/...` and PUNAR_VM_PERSIST=1
+# failed to create the overlay at all. Resolving once, here, also keeps the
+# QEMU -drive path independent of where this was invoked from.
+IMAGE="$(cd "$(dirname "${IMAGE}")" && pwd)/$(basename "${IMAGE}")"
 case "$(basename "${IMAGE}")" in
     punar-desktop-arm64.qcow2)
         [ "${PUNAR_VM_ALLOW_CI_FIXTURES:-0}" = 1 ] || die \

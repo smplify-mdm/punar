@@ -1488,56 +1488,117 @@ rm -f "${idle_probe_conf}" "${idle_probe_flag}"
 # nothing on the owner's machine. Every static gate passed — the QML parses, the
 # row activates, the argv is fixed and correct — because the failure was one
 # layer further down: `systemctl reboot` is a POLKIT-MEDIATED request, and a
-# session that is not active on a seat, or a machine with a second live session,
-# gets "Interactive authentication required" on a stderr nobody collected.
+# caller polkit does not consider an active local session gets "Interactive
+# authentication required" on a stderr nobody collected.
 #
-# Opening the surface (group 2) proves the button exists. This proves the button
-# would WORK, without rebooting the CI VM to find out: logind answers
-# CanReboot/CanPowerOff for the CALLER, over the same bus and the same polkit
-# rules `systemctl reboot` consults. "yes" means it would proceed unprompted;
-# "challenge" means a password dialog is required and the menu cannot deliver
-# one; "na"/"no" mean it would be refused outright.
-can_action() {
-    busctl --system call org.freedesktop.login1 /org/freedesktop/login1 \
-        org.freedesktop.login1.Manager "$1" 2>/dev/null \
-        | tr -d '"' | awk '{print $2}'
-}
+# ASK FROM INSIDE THE SESSION, and the reason is the first version of this group
+# getting it wrong. This script runs from punar-surfaces-check.service — a
+# SYSTEM service with User=punar and no PAMName, so the process has no logind
+# session of its own. polkit judges the CALLER, so asking from here measures a
+# subject that is not the one pressing the button, and the first run reported
+# "challenge" for a machine whose button may well work. Worse, the session-active
+# check that was supposed to catch that borrowed the graphical session's id
+# through a `${XDG_SESSION_ID:-$(...)}` fallback and passed — a control that
+# cannot fail is not a control.
+#
+# So the assertion is made from a child of the COMPOSITOR, re-entered through
+# `hyprctl dispatch` exactly as group 2 re-enters the surface bindings. The
+# service-context answer is kept as an info line: the contrast between the two
+# is the evidence for which subject polkit is judging.
+mkdir -p /run/punar
+rm -f /run/punar/canpower.txt
 
-login_session_id="${XDG_SESSION_ID:-$(loginctl --value show-user "$(id -u)" -p Display 2>/dev/null)}"
-session_active="$(loginctl show-session "${login_session_id}" -p Active --value 2>/dev/null)"
+# The facts a failure needs in order to name its own cause, rather than leaving
+# a reader to guess between "no rule", "no authority" and "wrong subject".
+POWER_RULE=/usr/share/polkit-1/rules.d/50-punar-power.rules
+if [ -f "${POWER_RULE}" ]; then
+    note "ok   the Punar power policy rule is installed ($(wc -c < "${POWER_RULE}" | tr -d ' ') bytes)"
+else
+    note "FAIL ${POWER_RULE} is not in this image; nothing grants the desktop user power actions"
+    FAILED=1
+fi
+polkit_unit=none
+for candidate in polkit.service polkitd.service; do
+    if systemctl is-active --quiet "${candidate}" 2>/dev/null; then
+        polkit_unit="${candidate}"
+        break
+    fi
+done
+note "# polkit authority unit: ${polkit_unit} (D-Bus activated; 'none' only means not running right now)"
+
+# The service context, recorded but NOT asserted on.
+service_session="${XDG_SESSION_ID:-none}"
+graphical_session="$(loginctl --value show-user "$(id -u)" -p Display 2>/dev/null)"
+session_active="$(loginctl show-session "${graphical_session}" -p Active --value 2>/dev/null)"
 session_count="$(loginctl list-sessions --no-legend 2>/dev/null | wc -l | tr -d ' ')"
-note "# logind session='${login_session_id}' active='${session_active}' sessions=${session_count}"
+note "# checker session='${service_session}' graphical session='${graphical_session}' active='${session_active}' sessions=${session_count}"
 
-# A session that logind does not consider active is the single most common
-# reason a desktop's power buttons stop working, and it is invisible from
-# inside the shell. Assert it directly rather than only through the verdicts
-# below, so a failure names the cause instead of the symptom.
-check_eq "logind considers this session active" "yes" "${session_active}"
+# A graphical session logind does not consider active is the single most common
+# reason a desktop's power buttons stop working, and it is invisible from inside
+# the shell. Assert it on the session the BUTTON runs in.
+check_eq "logind considers the graphical session active" "yes" "${session_active}"
 
-for power_verb in CanReboot CanPowerOff; do
-    power_verdict="$(can_action "${power_verb}")"
-    case "${power_verdict}" in
-        yes)
-            note "ok   logind ${power_verb} = yes (the menu row acts unprompted)"
-            ;;
-        challenge)
-            note "FAIL logind ${power_verb} = challenge; the row would need a polkit password dialog the session menu cannot show"
-            FAILED=1
-            ;;
-        "")
-            note "FAIL logind ${power_verb} returned nothing; logind is not answering this session"
-            FAILED=1
-            ;;
-        *)
-            note "FAIL logind ${power_verb} = ${power_verdict}; the row would be refused"
-            FAILED=1
-            ;;
-    esac
+cat > /run/punar/canpower.sh <<'POWERPROBE'
+#!/bin/sh
+# Runs as a child of Hyprland, so its polkit subject is the session the session
+# menu's rows actually run in. logind answers CanReboot/CanPowerOff for the
+# CALLER over the same rules `systemctl reboot` consults, which is how this asks
+# "would the row work" without rebooting the machine to find out.
+exec > /run/punar/canpower.txt 2>&1
+printf 'session=%s\n' "${XDG_SESSION_ID:-none}"
+for verb in CanReboot CanPowerOff; do
+    printf '%s=%s\n' "${verb}" "$(busctl --system call org.freedesktop.login1 \
+        /org/freedesktop/login1 org.freedesktop.login1.Manager "${verb}" 2>/dev/null \
+        | tr -d '"' | awk '{print $2}')"
+done
+POWERPROBE
+chmod +x /run/punar/canpower.sh
+hyprctl dispatch "hl.dsp.exec_cmd('/run/punar/canpower.sh')" >/dev/null 2>&1
+
+power_probe_waited=0
+while [ "${power_probe_waited}" -lt 20 ] && [ ! -s /run/punar/canpower.txt ]; do
+    sleep 1
+    power_probe_waited=$((power_probe_waited + 1))
 done
 
-# The polkit agent is the fallback that turns a "challenge" into a prompt
-# rather than a silent nothing. hyprland.lua starts it explicitly, so its
-# absence means the compositor's start hook did not take effect.
+if [ ! -s /run/punar/canpower.txt ]; then
+    note "FAIL the in-session power probe produced nothing after 20s; logind was not asked from the session"
+    FAILED=1
+else
+    note "# in-session probe: $(tr '\n' ' ' < /run/punar/canpower.txt)"
+    for power_verb in CanReboot CanPowerOff; do
+        power_verdict="$(sed -n "s/^${power_verb}=//p" /run/punar/canpower.txt)"
+        case "${power_verdict}" in
+            yes)
+                note "ok   logind ${power_verb} = yes from inside the session (the menu row acts unprompted)"
+                ;;
+            challenge)
+                note "FAIL logind ${power_verb} = challenge from inside the session; the row would need a polkit password dialog the session menu cannot show"
+                FAILED=1
+                ;;
+            "")
+                note "FAIL logind ${power_verb} returned nothing from inside the session; logind is not answering"
+                FAILED=1
+                ;;
+            *)
+                note "FAIL logind ${power_verb} = ${power_verdict} from inside the session; the row would be refused"
+                FAILED=1
+                ;;
+        esac
+    done
+fi
+
+# The same question from THIS process, which has no session. Recorded because
+# the two answers differing is the proof that polkit is judging the subject and
+# not the machine — and because a future reader will otherwise repeat the
+# mistake this group was born from.
+outside_verdict="$(busctl --system call org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager CanReboot 2>/dev/null | tr -d '"' | awk '{print $2}')"
+note "# CanReboot from the sessionless service context: ${outside_verdict:-no answer} (not asserted on)"
+
+# The polkit agent is the fallback that turns a "challenge" into a prompt rather
+# than a silent nothing. hyprland.lua starts it explicitly, so its absence means
+# the compositor's start hook did not take effect.
 if systemctl --user is-active --quiet hyprpolkitagent.service; then
     note "ok   hyprpolkitagent is running (a challenged action could still prompt)"
 else
