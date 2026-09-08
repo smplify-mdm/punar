@@ -584,6 +584,61 @@ Scope {
             property bool accountHandled: false
             property bool loginHandled: false
             property string createdUsername: ""
+
+            /// Whether the first-session handoff has reached a terminal
+            /// outcome. Guards the one bug this file had at its most visible
+            /// moment: see settleFirstSession().
+            property bool firstSessionSettled: false
+
+            /// See finishRecovery().
+            property bool recoveryHandled: false
+
+            /// Decide the post-onboarding handoff exactly once.
+            ///
+            /// THE BUG THIS FIXES, because it was visible on every first boot.
+            /// On success the old handler set `exitGreeter.running = true`,
+            /// which dispatches `hyprctl exit` and tears this greeter down —
+            /// and the collector then fired a SECOND time with empty text as
+            /// the process died. Empty text fails JSON.parse, fell into the
+            /// else branch, and painted "your account is ready, but the desktop
+            /// did not start" over a session that was starting perfectly well.
+            /// A person's first sight of their new machine was an error about a
+            /// failure that had not happened.
+            ///
+            /// So the first terminal outcome wins and later ones are dropped.
+            /// An empty read is NOT terminal by itself — the process may simply
+            /// not have answered yet — but the process exiting without ever
+            /// answering is, which is what `fromExit` distinguishes.
+            function settleFirstSession(text: string, fromExit: bool): void {
+                if (panel.firstSessionSettled)
+                    return;
+
+                var response = null;
+                try {
+                    response = JSON.parse(text);
+                } catch (e) {
+                    response = null;
+                }
+
+                if (response !== null && response.ok === true) {
+                    panel.firstSessionSettled = true;
+                    exitGreeter.running = true;
+                    return;
+                }
+
+                if (!fromExit && String(text).trim() === "")
+                    return;
+
+                // The one-use PAM token may already have been consumed before
+                // session startup failed. Never loop on a token that cannot
+                // succeed twice: the account is complete, so fall through to
+                // the real password greeter and say exactly what changed.
+                panel.firstSessionSettled = true;
+                root.accountName = panel.createdUsername;
+                root.firstRun = false;
+                panel.loginFailure = "Your account is ready, but the desktop did not start. Sign in with your password to try again.";
+                loginPassword.focusField();
+            }
             property string recoveryCode: ""
             property string formFailure: ""
             property string loginFailure: ""
@@ -784,12 +839,23 @@ Scope {
                     return;
                 }
                 panel.recoveryFailure = "";
+                panel.recoveryHandled = false;
                 panel.recoveryBusy = true;
                 recoveryProcess.stdinEnabled = true;
                 recoveryProcess.running = true;
             }
 
             function finishRecovery(body: string): void {
+                // Guarded like finishAccount and finishLogin, and for the
+                // reason the first-session handoff demonstrated: a
+                // StdioCollector fires again with empty text as its process
+                // dies, empty text fails JSON.parse, and the else branch paints
+                // a failure over something that worked. This path is the one a
+                // locked-out person uses, so a false "that code did not work"
+                // here is the most expensive version of that bug.
+                if (panel.recoveryHandled)
+                    return;
+                panel.recoveryHandled = true;
                 panel.recoveryBusy = false;
                 var response = null;
                 try {
@@ -943,28 +1009,17 @@ Scope {
                 stdout: StdioCollector {
                     id: firstOutput
                     waitForEnd: true
-                    onStreamFinished: {
-                        var response = null;
-                        try {
-                            response = JSON.parse(firstOutput.text);
-                        } catch (e) {
-                            response = null;
-                        }
-                        if (response !== null && response.ok === true)
-                            exitGreeter.running = true;
-                        else {
-                            // The one-use PAM token may already have been
-                            // consumed before session startup failed. Never
-                            // loop on a token that cannot succeed twice: the
-                            // account is complete, so fall through to the real
-                            // password greeter and say exactly what changed.
-                            root.accountName = panel.createdUsername;
-                            root.firstRun = false;
-                            panel.loginFailure = "Your account is ready, but the desktop did not start. Sign in with your password to try again.";
-                            loginPassword.focusField();
-                        }
-                    }
+                    onStreamFinished: panel.settleFirstSession(firstOutput.text, false)
                 }
+
+                // A process that dies without ever answering is a real failure,
+                // and the collector alone cannot tell that from one still
+                // thinking. Connected rather than declared because the signal's
+                // second parameter is a QProcess::ExitStatus, which qmllint
+                // cannot resolve in a declared handler.
+                Component.onCompleted: firstSession.exited.connect(function () {
+                    panel.settleFirstSession("", true);
+                })
             }
 
             Process {
