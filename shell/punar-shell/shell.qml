@@ -54,6 +54,7 @@ import "Services"
 import "Shortcuts"
 import "SystemControl"
 import "Wallpaper"
+import "SessionMenu"
 import "WindowActions"
 
 ShellRoot {
@@ -162,6 +163,7 @@ ShellRoot {
         onWindowActionsRequested: windowActionsSurface.openSurface()
         onBrowserContextRequested: systemControlSurface.openSection("applications")
         onOverviewRequested: overviewSurface.openSurface()
+        onSessionRequested: sessionMenuSurface.toggleSurface()
     }
 
     // The normal close path is always available directly on PUNAR+Q. This
@@ -171,6 +173,43 @@ ShellRoot {
         id: windowActionsSurface
         surfaceName: "windowactions"
         sourceComponent: WindowActions {}
+    }
+
+    // Lock, end session, restart and shut down, beside the clock. Deferred like
+    // every other action surface: nothing resident at idle, constructed on the
+    // click or the chord that opens it.
+    DeferredSurface {
+        id: sessionMenuSurface
+        surfaceName: "session"
+        sourceComponent: SessionMenu {
+            // The bar never reaches into the lock surface either; the shell root
+            // owns every cross-surface edge, the AlertStack.onInspectRequested
+            // precedent.
+            onLockRequested: lockSurface.lock()
+        }
+    }
+
+    IpcHandler {
+        target: "session"
+
+        function toggle(): void {
+            sessionMenuSurface.toggleSurface();
+        }
+        function open(): void {
+            sessionMenuSurface.openSurface();
+        }
+        function close(): void {
+            sessionMenuSurface.closeSurface();
+        }
+        function state(): string {
+            return sessionMenuSurface.surfaceState();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("session");
+        }
+        function residency(): string {
+            return sessionMenuSurface.residency();
+        }
     }
 
     IpcHandler {
@@ -657,6 +696,7 @@ ShellRoot {
     // `unlock` verb — that would make the session socket a complete bypass
     // of the passphrase.
     Lock {
+        id: lockSurface
     }
 
     // Ready marker (milestone-1.md §7 / survey decision 6): once the bar is

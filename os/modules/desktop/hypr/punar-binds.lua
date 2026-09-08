@@ -116,4 +116,8 @@ return function(ctx)
     bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd(ctx.shell .. " ipc call bar focus"), "Focus status cluster")
     bind(mod .. " + S", hl.dsp.exec_cmd(ctx.shell .. " ipc call systemcontrol toggle"), "System control")
     bind(mod .. " + escape", hl.dsp.exec_cmd(ctx.lock), "Lock session")
+    -- The session menu: lock, end session, restart, shut down in one place.
+    -- BackSpace because it is free and because it is the chord this class of
+    -- menu has on other Linux desktops; every letter key is already taken.
+    bind(mod .. " + backspace", hl.dsp.exec_cmd(ctx.session), "Session menu")
 end

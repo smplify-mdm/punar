@@ -8,6 +8,7 @@ local commandCenter = "qs -p /usr/share/punar/shell ipc call commandcenter toggl
 local overview = "qs -p /usr/share/punar/shell ipc call overview toggle"
 local aiPanel = "qs -p /usr/share/punar/shell ipc call aipanel toggle"
 local lock = "qs -p /usr/share/punar/shell ipc call lock lock"
+local session = "qs -p /usr/share/punar/shell ipc call session toggle"
 local layoutScript = "/usr/lib/punar/punar-layout.sh"
 local shell = "qs -p /usr/share/punar/shell"
 
@@ -72,6 +73,7 @@ require("/etc/xdg/hypr/punar-binds.lua")({
     overview = overview,
     ai_panel = aiPanel,
     lock = lock,
+    session = session,
     layout_script = layoutScript,
     shell = shell,
     -- --no-wait returns success as soon as the server accepts the window.

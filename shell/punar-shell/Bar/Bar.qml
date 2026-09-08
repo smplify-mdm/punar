@@ -64,6 +64,10 @@ import "../Services"
 Scope {
     id: root
 
+    /// Emitted when the bar's power glyph is clicked. Wired in shell.qml to the
+    /// session menu, so this file never reaches into another surface.
+    signal sessionRequested
+
     // Emitted once the bar object tree is complete — shell.qml uses this
     // to write the desktop ready marker (see shell.qml).
     signal barCreated()
@@ -571,6 +575,42 @@ Scope {
                         // the colour.
                         visible: cluster.detailLevel >= 2
                         text: Status.label + " · "
+                    }
+                }
+
+                // THE SESSION GLYPH. Lock, end session, restart and shut down
+                // in one place, beside the clock where GNOME and KDE put them
+                // and where the owner asked for them. It opens a MENU rather
+                // than a slot popover, because SlotPopover's own rule forbids a
+                // destructive action inside one and shutting down is plainly
+                // destructive; SessionMenu arms those rows instead.
+                Item {
+                    id: sessionGlyph
+
+                    anchors.verticalCenter: parent.verticalCenter
+                    implicitWidth: 18
+                    implicitHeight: 18
+
+                    Text {
+                        anchors.centerIn: parent
+                        // U+23FB POWER SYMBOL, drawn from the mono face the
+                        // rest of the bar uses so it sits on the same baseline
+                        // rhythm as the clock.
+                        text: "\u23fb"
+                        font.family: Theme.fontMono
+                        font.pixelSize: 12
+                        font.weight: 600
+                        color: sessionMouse.containsMouse ? Theme.shellFg : Theme.shellInk3
+                        textFormat: Text.PlainText
+                    }
+
+                    MouseArea {
+                        id: sessionMouse
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.sessionRequested()
                     }
                 }
 

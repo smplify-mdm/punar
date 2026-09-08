@@ -326,8 +326,20 @@ DeferredSurfaceBase {
 
                         // Creating a workspace had no pointer path at all: the
                         // grid lists what exists, and the only way to make a new
-                        // one was to know a chord. Dashed, because the honesty
-                        // grammar reserves that for "not real yet".
+                        // one was to know a chord.
+                        //
+                        // IT MUST BE READABLE WITHOUT HOVERING, which it was not.
+                        // The label used Theme.shellMuted, which is a SURFACE
+                        // token — it maps to panelSurface/muted and every one of
+                        // its other twenty uses in this shell is a background
+                        // fill, including the hover fills in WindowActions and
+                        // ApplicationBrowser. Painted as text on a card it is
+                        // very nearly the card, so the control appeared only when
+                        // the pointer was already on it: undiscoverable by
+                        // exactly the people a pointer affordance is for. The
+                        // resting state now uses the ink the rest of the shell
+                        // uses for secondary text, and a real border rather than
+                        // the input underline's.
                         Rectangle {
                             id: newProjectButton
 
@@ -337,7 +349,7 @@ DeferredSurfaceBase {
                             color: "transparent"
                             border.width: 1
                             border.color: newProjectMouse.containsMouse
-                                ? Theme.shellFg : Theme.shellInputBorder
+                                ? Theme.shellFg : Theme.shellBorder
                             radius: Theme.radiusTag
 
                             Meta {
@@ -348,7 +360,7 @@ DeferredSurfaceBase {
                                 font.weight: 500
                                 font.letterSpacing: Theme.tracking(9, 0.13)
                                 color: newProjectMouse.containsMouse
-                                    ? Theme.shellFg : Theme.shellMuted
+                                    ? Theme.shellFg : Theme.shellInk3
                                 text: "+ New project"
                             }
 
