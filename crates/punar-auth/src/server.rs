@@ -92,11 +92,15 @@ fn decide(uid: u32, reader: &mut dyn Read) -> (Verdict, Purpose) {
         }
     };
     payload.zeroize();
+    // The candidate moves into a Zeroizing wrapper BEFORE the version test, so
+    // every return from here on scrubs it. Returning on the version mismatch
+    // first left `request.password` to be dropped as an ordinary String — the
+    // one path out of this function that did not clear the secret.
+    let purpose = request.purpose;
+    let password = Zeroizing::new(request.password);
     if request.v != PROTOCOL_VERSION {
         return (Verdict::Denied, Purpose::Unlock);
     }
-    let purpose = request.purpose;
-    let password = Zeroizing::new(request.password);
     (verify_for_uid(uid, &password), purpose)
 }
 
@@ -145,9 +149,15 @@ fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
     Some(name)
 }
 
-/// Remove tickets older than the window before minting another, so a session
-/// that asks repeatedly cannot accumulate live bearer objects. punard also
-/// unlinks on use and re-checks the age, so this is hygiene, not the guarantee.
+/// Remove EXPIRED tickets before minting another, so a session that asks
+/// repeatedly does not leave a growing pile of dead files in /run.
+///
+/// It bounds the litter, not the number of LIVE tickets: two mints inside the
+/// window leave two spendable tickets, which is correct — a person who starts
+/// two changes and completes both should not have the first one silently
+/// invalidated by the second. Each is single-use and each expires on its own
+/// clock; punard unlinks on use and re-checks the age, and that is where the
+/// guarantee lives.
 fn sweep_expired(per_uid: &Path) {
     let Ok(entries) = fs::read_dir(per_uid) else {
         return;

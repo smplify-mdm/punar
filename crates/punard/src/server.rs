@@ -921,8 +921,16 @@ fn wire_classification(classification: Classification) -> WireClassification {
 /// This is what lets a surface OFFER editing only where editing would work,
 /// instead of discovering the answer from a refusal after the fact.
 fn admin_may_override(entry: &punar_policy::EffectiveEntry<Value>) -> bool {
+    // The second clause is RANK-SCOPED, and the difference matters because
+    // `device_specific_override` is not exclusively the local administrator's
+    // kind: its rank is stored data, so an organization may publish one, and at
+    // rank 1-3 that layer outranks this device exactly as an organization
+    // baseline does. Matching on the kind alone would have handed an org's own
+    // pinned value to the local administrator to edit, purely because of the
+    // word it was labelled with.
     entry.provenance.rank > DEVICE_ADMIN_RANK
-        || entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
+        || (entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
+            && entry.provenance.rank >= DEVICE_ADMIN_RANK)
 }
 
 fn source_ref(provenance: &Provenance) -> PolicySourceRef {
@@ -3848,7 +3856,7 @@ impl Inner {
     /// security boundary. docs/design/execution-trust.md says it plainly — "A
     /// local root user defeats local policy" — and nothing here changes that. A
     /// person who can become root on this machine can edit
-    /// `/var/lib/punar/policy/local.json` directly. What this method adds is
+    /// `/var/lib/punar/local-policy.json` directly. What this method adds is
     /// that the ORDINARY route is authenticated, bounded, explained and
     /// recorded, so a change has an author and a reason attached to it.
     ///
@@ -3962,6 +3970,16 @@ impl Inner {
         // 5. Whether this particular path is one the administrator's rung can
         //    move. A value an organization pins is not editable here, and the
         //    refusal names who pinned it rather than saying "no".
+        //
+        //    WITHDRAWING IS EXEMPT, and it has to be. This test looks at who
+        //    wins *now*, and an organization can come to outrank an entry the
+        //    administrator recorded earlier — at which point the same test that
+        //    stops them pinning also stops them removing what they already
+        //    pinned. The entry then sits in the store, inert while enrolled and
+        //    silently reactivating the day the device unenrolls: a rule nobody
+        //    can see, nobody can delete, and that comes back. A clear can only
+        //    ever remove a local opinion, so it can never contest the layer
+        //    that outranks it, and there is nothing for this check to protect.
         let current = self
             .effective
             .lock()
@@ -3969,7 +3987,8 @@ impl Inner {
             .get(id)
             .cloned()
             .ok_or_else(|| self.internal(&format!("{id} has no effective entry")))?;
-        if !admin_may_override(&current) {
+        let pinning = params.value.is_some();
+        if pinning && !admin_may_override(&current) {
             let mut event = AuditEvent::denial(&self.device_id, &actor, "policy.set", id);
             event.policy_ids = vec![current.provenance.policy_id.clone()];
             self.log_audit(event);
@@ -4606,6 +4625,14 @@ impl Inner {
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
         self.application_policy.lock().unwrap().clear();
+        // AND THE LOCAL-ADMIN VETO, which is the one that would otherwise
+        // outlive the organization that set it. An org document may turn local
+        // policy editing off; leaving that opinion in memory after its files
+        // are gone locks an unenrolled device's owner out of their own machine,
+        // citing a policy that no longer exists anywhere, until the daemon
+        // happens to restart. Every layer this enrollment installed is cleared
+        // in the same breath, and this one belongs in that list.
+        self.local_admin.lock().unwrap().clear();
         if let Err(e) = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]) {
             eprintln!("punard: enroll.stop could not remove rendered browser policy: {e}");
         }
@@ -4967,6 +4994,68 @@ fn to_value<T: serde::Serialize>(value: T) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// `device_specific_override` is not exclusively the local administrator's
+    /// kind — its rank is stored data, so an organization may publish one. At
+    /// rank 1-3 that layer outranks this device exactly as a baseline does, and
+    /// matching on the kind alone would hand an organization's own pinned value
+    /// to the local administrator to edit because of the word it was labelled
+    /// with.
+    #[test]
+    fn admin_may_override_is_decided_by_rank_and_not_by_a_label() {
+        use punar_policy::{Classification, EffectiveEntry, Provenance, SourceKind};
+        use serde_json::json;
+
+        let entry = |kind: SourceKind, rank: u32| EffectiveEntry {
+            value: json!("x"),
+            provenance: Provenance {
+                kind,
+                rank,
+                policy_id: "p".to_string(),
+                source_name: "s".to_string(),
+            },
+            classification: Classification::AutoRemediate,
+            user_override_permitted: rank >= 5,
+        };
+
+        // Below the administrator's rung: theirs to move.
+        assert!(super::admin_may_override(&entry(
+            SourceKind::LocalUserPreference,
+            5
+        )));
+        assert!(super::admin_may_override(&entry(
+            SourceKind::OsSecureDefault,
+            6
+        )));
+        // Their own entry, at their own rank.
+        assert!(super::admin_may_override(&entry(
+            SourceKind::DeviceSpecificOverride,
+            super::DEVICE_ADMIN_RANK
+        )));
+
+        // Above it: not theirs, whatever the kind is called.
+        for rank in 1..super::DEVICE_ADMIN_RANK {
+            assert!(
+                !super::admin_may_override(&entry(SourceKind::DeviceSpecificOverride, rank)),
+                "an organization-published device_specific_override at rank {rank} \
+                 must not be treated as the local administrator's own pin"
+            );
+        }
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::OrganizationBaseline,
+            2
+        )));
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::OrganizationRolePolicy,
+            3
+        )));
+        // A rank-4 approved exception wins the tie by push order, so it is not
+        // the administrator's to displace either.
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::TemporaryApprovedException,
+            4
+        )));
+    }
+
     use super::*;
     use std::fs::{self, OpenOptions};
 

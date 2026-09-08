@@ -1551,6 +1551,25 @@ for verb in CanReboot CanPowerOff; do
         /org/freedesktop/login1 org.freedesktop.login1.Manager "${verb}" 2>/dev/null \
         | tr -d '"' | awk '{print $2}')"
 done
+# THE ACTION THE PUNAR RULE ACTUALLY GRANTS, asked by name.
+#
+# CanReboot alone is a weak discriminator: with a single session logind consults
+# org.freedesktop.login1.reboot, whose SHIPPED default is already
+# allow_active=yes, so it answers "yes" on an image carrying no Punar rule at
+# all. Whether the stronger `-multiple-sessions` action is reached depends on
+# another user happening to hold a session — machine state, not a property of
+# the fix. Asking polkit about that action by name removes the dependence: it is
+# auth_admin_keep in the shipped policy and YES only because
+# 50-punar-power.rules says so.
+if command -v pkcheck >/dev/null 2>&1; then
+    pkcheck --action-id org.freedesktop.login1.reboot-multiple-sessions \
+        --process "$$" >/dev/null 2>&1
+    printf 'pkcheck_multiple_sessions=%s\n' "$?"
+else
+    printf 'pkcheck_multiple_sessions=absent\n'
+fi
+loginctl list-sessions --no-legend 2>/dev/null | tr -s ' ' | cut -d' ' -f1-4 \
+    | while IFS= read -r row; do printf 'session_row=%s\n' "${row}"; done
 POWERPROBE
 chmod +x /run/punar/canpower.sh
 hyprctl dispatch "hl.dsp.exec_cmd('/run/punar/canpower.sh')" >/dev/null 2>&1
@@ -1586,6 +1605,28 @@ else
                 ;;
         esac
     done
+
+    # The action that is authorized ONLY because of the Punar rule. Exit 0 is
+    # "authorized"; anything else is polkit declining to say yes without a
+    # password, which is the state the session menu cannot recover from.
+    pkcheck_result="$(sed -n 's/^pkcheck_multiple_sessions=//p' /run/punar/canpower.txt)"
+    case "${pkcheck_result}" in
+        0)
+            note "ok   polkit authorizes reboot-multiple-sessions for the session (50-punar-power.rules is in force)"
+            ;;
+        absent)
+            note "info pkcheck is not installed, so the -multiple-sessions action could not be asked by name; the CanReboot legs above are then only as strong as this machine's session count"
+            ;;
+        "")
+            note "FAIL the in-session probe reported no pkcheck result at all"
+            FAILED=1
+            ;;
+        *)
+            note "FAIL polkit does not authorize reboot-multiple-sessions (pkcheck exit ${pkcheck_result}); the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
+            FAILED=1
+            ;;
+    esac
+    sed -n 's/^session_row=/# logind session row: /p' /run/punar/canpower.txt >> "${REPORT}"
 fi
 
 # The same question from THIS process, which has no session. Recorded because
@@ -1688,14 +1729,40 @@ else
 
     # 5. THE PROPERTY THE WHOLE DESIGN RESTS ON: a ticket is trustworthy only
     #    because an unprivileged process cannot create one. Counting the files
-    #    would be a vacuous assertion here — this check runs as the session
-    #    user, so a directory it cannot read and an empty directory both count
-    #    zero. Assert the refusal instead, which is the fact that matters.
-    if ls /run/punar-authd/tickets >/dev/null 2>&1; then
+    #    would be vacuous here — this runs as the session user, so an
+    #    unreadable directory and an empty one both count zero.
+    #
+    #    EXISTENCE IS ASSERTED FIRST, and that is the half the earlier version
+    #    was missing: `ls` fails for "no such directory" exactly as it fails for
+    #    "not yours to read", so on a machine where punar-authd had never minted
+    #    anything the leg passed while proving nothing. The successful pin above
+    #    guarantees the directory is there by now, so its absence is a failure.
+    if [ ! -d /run/punar-authd/tickets ]; then
+        note "FAIL /run/punar-authd/tickets does not exist after a successful administrative change; the ticket path was not the one exercised"
+        FAILED=1
+    elif ls /run/punar-authd/tickets >/dev/null 2>&1; then
         note "FAIL the session user can read /run/punar-authd/tickets; a ticket would be forgeable"
         FAILED=1
     else
-        note "ok   the ticket directory is unreadable to the session user"
+        note "ok   the ticket directory exists and is unreadable to the session user"
+    fi
+
+    # LEAVE THE MACHINE AS IT WAS FOUND, whatever happened above. A withdraw leg
+    # that fails partway leaves a device_specific_override pinned on
+    # security.firewall, and every later group that reads policy — m4's merge
+    # assertions, m5's org-precedence ones — then fails for a reason that has
+    # nothing to do with what it is testing. One unconditional attempt, and a
+    # loud line if even that does not take.
+    if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
+        printf '%s\n' "${policy_password}" \
+            | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: cleanup" \
+              >/dev/null 2>&1
+        if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
+            note "FAIL ${policy_path} is still pinned by this gate; later policy groups will fail for the wrong reason"
+            FAILED=1
+        else
+            note "info the administrator pin was cleaned up after a failed leg"
+        fi
     fi
 fi
 

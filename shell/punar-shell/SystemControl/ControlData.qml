@@ -324,7 +324,15 @@ Scope {
         }
 
         onStarted: {
-            if (adminSecret.value === "")
+            // KEYED ON `stdinEnabled`, NOT ON THE SECRET BEING NON-EMPTY.
+            // Returning early for an empty secret left stdin OPEN, and the
+            // helper's `read` then blocked forever: `mutation.running` stayed
+            // true, and runMutation() — which returns early while it is —
+            // silently swallowed every later Restart, Shut down, log out,
+            // web-app change and policy edit for the life of the session, with
+            // no error anywhere. Whatever was typed, the pipe gets exactly one
+            // line and is then closed.
+            if (!mutation.stdinEnabled)
                 return;
             mutation.write(adminSecret.value + "\n");
             adminSecret.value = "";
@@ -334,6 +342,7 @@ Scope {
         // Connected, not declared — see the note on Probe above.
         Component.onCompleted: mutation.exited.connect(function (exitCode) {
             adminSecret.value = "";
+            mutation.stdinEnabled = false;
             data.lastActionPending = false;
             data.lastActionExit = exitCode;
             data.lastActionError = String(mutationErr.text).trim();
@@ -845,12 +854,16 @@ Scope {
                 return;
             }
             data.powerArmed = "";
+            // Absolute, for the reason SessionMenu.qml gives: this surface
+            // must not depend on whatever PATH the login manager handed the
+            // session. The two power routes were left spelled differently and
+            // that difference was not a decision.
             if (kind === "sessionEnd")
-                data.runMutation(["hyprctl", "dispatch", "exit"]);
+                data.runMutation(["/usr/bin/hyprctl", "dispatch", "exit"]);
             else if (kind === "systemRestart")
-                data.runMutation(["systemctl", "reboot"]);
+                data.runMutation(["/usr/bin/systemctl", "reboot"]);
             else
-                data.runMutation(["systemctl", "poweroff"]);
+                data.runMutation(["/usr/bin/systemctl", "poweroff"]);
         } else if (kind === "webContext") {
             var contextId = String(a.contextId);
             if (BrowserContext.bindToFocusedWorkspace(contextId)) {
@@ -923,6 +936,17 @@ Scope {
     function submitAdminPassword(password: string): void {
         if (data.adminStage !== "password" || mutation.running)
             return;
+        // An empty submit is a person pressing Enter twice, not a request. It
+        // is refused HERE rather than by the helper, because reaching the
+        // helper at all means spawning a process to be told what this line
+        // already knows — and punar-authd would count the attempt against the
+        // account's faillock tally for nothing.
+        if (password === "") {
+            data.lastActionArgv = "punarctl policy set " + data.adminPath;
+            data.lastActionExit = 2;
+            data.lastActionError = "Enter your password to confirm this change.";
+            return;
+        }
         var argv = [
             "/usr/lib/punar/punar-policy-set.sh",
             data.adminPath,
@@ -944,7 +968,11 @@ Scope {
             mutation.stdinEnabled = true;
             mutation.running = true;
         } catch (e) {
+            // stdinEnabled is reset too: a process that never started leaves it
+            // set, and the next ORDINARY mutation would then inherit a pipe
+            // nothing ever writes to or closes.
             adminSecret.value = "";
+            mutation.stdinEnabled = false;
             data.lastActionPending = false;
             data.lastActionExit = 127;
             data.lastActionError = "The policy helper is not installed on this machine.";

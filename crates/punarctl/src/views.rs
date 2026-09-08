@@ -1071,11 +1071,12 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
 
 /// `policy.set`: what was pinned, and — separately — what is actually in force.
 ///
-/// THE TWO LINES ARE NEVER COLLAPSED, even when they agree. An administrator
-/// who pins a value an organization outranks has done something real (the entry
-/// is recorded and becomes effective if the org layer goes away) and something
-/// that changed nothing today, and a single "done" line would let them believe
-/// the second thing did not happen.
+/// THE TWO LINES ARE NEVER COLLAPSED, because on a WITHDRAWAL they genuinely
+/// differ: the entry is gone and something underneath now decides, and a single
+/// "done" line would say nothing about what the machine will actually do. On a
+/// pin they always agree — the daemon refuses a pin that a higher layer already
+/// outranks (docs/api/ipc.md section 5.8a step 5), so there is no such thing as
+/// a recorded-but-overridden administrator entry to report.
 pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
     let set: model::PolicySet = parse(result)?;
     let pinned = match &set.pinned_value {
@@ -1103,11 +1104,11 @@ pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
             ),
         ],
     ));
-    if set.pinned_value.is_some() && effective != pinned {
+    if set.pinned_value.is_none() {
         out.push_str(&fmt::note(
             style,
-            "A higher-precedence source still decides this value. Your entry is \
-             recorded and takes effect if that source is withdrawn.",
+            "Your entry is gone. The source named above is what decides this \
+             value now.",
         ));
     }
     out.push_str(&fmt::note(style, POLICY_NOTE));

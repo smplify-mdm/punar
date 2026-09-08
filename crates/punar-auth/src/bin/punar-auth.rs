@@ -101,7 +101,17 @@ fn run(admin: bool) -> Option<String> {
             // will apply, so a far side that answered strangely cannot put an
             // arbitrary string on this process's stdout.
             let ticket = parsed.get("ticket").and_then(serde_json::Value::as_str)?;
-            if ticket.len() != 64 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
+            // LOWERCASE hex only, matching punard's `reauth::consume` exactly.
+            // `is_ascii_hexdigit` also accepts A-F, which punard refuses as
+            // malformed — so a relay that passed uppercase through would print
+            // a ticket that could only ever be rejected, and the person would
+            // be told their password confirmation was not in a form the device
+            // could check.
+            if ticket.len() != 64
+                || !ticket
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
                 return None;
             }
             Some(format!("ok {ticket}"))

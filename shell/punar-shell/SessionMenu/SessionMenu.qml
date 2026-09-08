@@ -57,6 +57,12 @@ DeferredSurfaceBase {
     /// nothing has failed.
     property string failure: ""
 
+    /// The exit status of the action in flight, or -1 while it is unknown.
+    /// Recorded separately from settling because the two arrive out of order:
+    /// `exited` fires when the process goes, `onStreamFinished` when its stderr
+    /// is complete, and only the second one can quote what it said.
+    property int lastExit: -1
+
     readonly property int rowCount: 4
 
     component Meta: Text {
@@ -174,6 +180,10 @@ DeferredSurfaceBase {
         root.open = false;
         root.armed = "";
         root.failure = "";
+        // `pending` too: this surface is unloaded on dismiss, and a reopen that
+        // came back with a stale `pending` would find every destructive row
+        // permanently inert — activate() returns early while it is set.
+        root.pending = "";
         root.windowVisible = false;
         root.unloadRequested();
     }
@@ -214,12 +224,21 @@ DeferredSurfaceBase {
         // from a string that reached this surface from anywhere else. Absolute
         // paths: this surface must not depend on whatever PATH the login
         // manager happened to hand the session.
-        if (kind === "sessionEnd")
-            power.exec(["/usr/bin/hyprctl", "dispatch", "exit"]);
-        else if (kind === "systemRestart")
-            power.exec(["/usr/bin/systemctl", "reboot"]);
-        else if (kind === "systemPowerOff")
-            power.exec(["/usr/bin/systemctl", "poweroff"]);
+        root.lastExit = -1;
+        // exec() can throw before anything is started at all. Unguarded, that
+        // left `pending` set with no process to ever clear it, and every row
+        // dead for the life of the surface — a silent failure of exactly the
+        // kind this surface was rewritten to stop having.
+        try {
+            if (kind === "sessionEnd")
+                power.exec(["/usr/bin/hyprctl", "dispatch", "exit"]);
+            else if (kind === "systemRestart")
+                power.exec(["/usr/bin/systemctl", "reboot"]);
+            else if (kind === "systemPowerOff")
+                power.exec(["/usr/bin/systemctl", "poweroff"]);
+        } catch (e) {
+            root.settle(127);
+        }
     }
 
     /// THE MENU DOES NOT CLOSE ON THE SECOND PRESS, and that is deliberate.
@@ -244,7 +263,9 @@ DeferredSurfaceBase {
         });
         root.failure = said.length > 0
             ? said[said.length - 1]
-            : "The command exited " + exitCode + " without saying why.";
+            : (exitCode < 0
+                ? "The command ended without saying why."
+                : "The command exited " + exitCode + " without saying why.");
     }
 
     Process {
@@ -252,19 +273,28 @@ DeferredSurfaceBase {
 
         stderr: StdioCollector {
             id: powerErr
+
             waitForEnd: true
+            // SETTLE HERE, not in `exited`. With waitForEnd the collector's
+            // text is complete only once the stream closes, and `exited` can
+            // arrive first — which is how the failure line this surface exists
+            // to show came out empty. By the time stderr has ended the process
+            // is gone and `lastExit` holds its status.
+            onStreamFinished: root.settle(root.lastExit)
         }
 
         Component.onCompleted: power.exited.connect(function (exitCode) {
-            root.settle(exitCode);
+            root.lastExit = exitCode;
         })
 
-        // A binary that cannot be started at all never emits `exited`, and that
-        // is exactly the case a silent surface hid. settle() clears `pending`
-        // first, so whichever of the two arrives first wins and the other is a
-        // no-op.
+        // A binary that cannot be started at all never emits `exited` and never
+        // produces a stream to finish. settle() clears `pending` first, so
+        // whichever path arrives first wins and the others are no-ops.
         onRunningChanged: if (!power.running && root.pending !== "")
-            root.settle(127)
+            Qt.callLater(function () {
+                if (root.pending !== "")
+                    root.settle(root.lastExit);
+            })
     }
 
     // ---- the surface -------------------------------------------------------
@@ -287,8 +317,33 @@ DeferredSurfaceBase {
         // reason this surface sat outside that loop and shipped unexercised.
         WlrLayershell.namespace: "punar-session"
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive
-                                               : WlrKeyboardFocus.None
+
+        // THE SURFACE STEPS ASIDE THE MOMENT AN ACTION IS IN FLIGHT, and the
+        // reason is the dialog it might have to make room for.
+        //
+        // `systemctl reboot` asks interactively. When polkit challenges the
+        // action — which the shipped policy still does for the
+        // `-ignore-inhibit` verbs this device deliberately does NOT grant —
+        // hyprpolkitagent raises a password prompt, and systemctl blocks on the
+        // answer. That prompt is an ordinary toplevel. An overlay layer surface
+        // holding EXCLUSIVE keyboard focus takes the keyboard away from every
+        // toplevel, and a full-output input region takes the pointer too: the
+        // person would see the prompt and be unable to type into it or click
+        // it, with the only way out being a click that cancels the reboot.
+        //
+        // So while `pending` is set the keyboard is released and the input
+        // region shrinks to the card. The menu stays VISIBLE — that is the
+        // whole point of not dismissing — but it stops being in the way.
+        WlrLayershell.keyboardFocus: root.open && root.pending === ""
+            ? WlrKeyboardFocus.Exclusive
+            : WlrKeyboardFocus.None
+
+        mask: root.pending === "" ? null : cardRegion
+
+        Region {
+            id: cardRegion
+            item: card
+        }
 
         onVisibleChanged: if (win.visible)
             keyFocus.forceActiveFocus()
@@ -336,6 +391,11 @@ DeferredSurfaceBase {
 
             MouseArea {
                 anchors.fill: parent
+                // Disabled while an action is in flight: dismissing unloads
+                // this surface, which destroys the Process and kills the
+                // systemctl that is waiting on an authentication answer. A
+                // stray click must not abort a reboot.
+                enabled: root.pending === ""
                 onClicked: root.dismiss()
             }
 

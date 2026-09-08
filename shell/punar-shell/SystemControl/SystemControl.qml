@@ -625,6 +625,13 @@ DeferredSurfaceBase {
         ctl.webAppComposerVisible = false;
         ctl.webAppRemoveArmed = "";
         ctl.query = "";
+        // An administrator edit is abandoned with the panel, and the typed
+        // password goes with it. Leaving the stage set would put a password
+        // field back on screen the next time this opened, mid-question and
+        // with the reason it belonged to already forgotten.
+        ctl.cancelAdminEdit();
+        adminReasonInput.text = "";
+        adminPasswordInput.text = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
 
