@@ -56,7 +56,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "251c8047d0bbfce04a2006cd78da11d6ddabb44cf9d6ba1ad5af20b3a15af04f"
         }
-      ]
+      ],
+      "icon": "alpaca.png"
     },
     {
       "id": "android-studio",
@@ -104,7 +105,8 @@
           "runtime": "org.freedesktop.Sdk/x86_64/25.08",
           "metadataSha256": "c7bdf64249d2f79d1ba14a42b5bd1699413a879267e92c9880e149e532c13860"
         }
-      ]
+      ],
+      "icon": "android-studio.png"
     },
     {
       "id": "apostrophe",
@@ -199,7 +201,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "ef8b05f1a047c59e634f9c81641f7ab24a2f9f5bee26224b32e236f33bb07c41"
         }
-      ]
+      ],
+      "icon": "arduino-ide.png"
     },
     {
       "id": "audacity",
@@ -249,7 +252,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "e5d81d134f440ee47e66fb6155b32d6a8ec9b65b946f4a0bfd64628e6351e116"
         }
-      ]
+      ],
+      "icon": "audacity.png"
     },
     {
       "id": "baobab",
@@ -297,7 +301,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "3fc0ff2b29fecd5608bb0ceeb0f2a53c366492794cb1f9f9087785badc7039e6"
         }
-      ]
+      ],
+      "icon": "baobab.png"
     },
     {
       "id": "bitwarden",
@@ -355,7 +360,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "5d99cc06b9b3dd56ae938add93063facf50054279c2d6675e92447c9cb8769e7"
         }
-      ]
+      ],
+      "icon": "bitwarden.png"
     },
     {
       "id": "blender",
@@ -398,7 +404,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "3b34492931123fb5d222bbca8b1a8d1211e22de7bd8b703be262580fea63ea88"
         }
-      ]
+      ],
+      "icon": "blender.png"
     },
     {
       "id": "browser",
@@ -445,7 +452,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "e02d32e2f92bd4fffb217aac71bed776365674c316b9067746c63619c74b1e34"
         }
-      ]
+      ],
+      "icon": "browser.png"
     },
     {
       "id": "bruno",
@@ -479,7 +487,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/24.08",
           "metadataSha256": "a06c8cd3f2988908915ee6f4ac9e3c21e2546f5882bb4bf73616916f96f4b6d1"
         }
-      ]
+      ],
+      "icon": "bruno.png"
     },
     {
       "id": "celluloid",
@@ -529,7 +538,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "cfc498e7e8b6d9c00f98b5724fd1c75c72380791e63ba971849cccfc7fe8d34b"
         }
-      ]
+      ],
+      "icon": "celluloid.png"
     },
     {
       "id": "chatgpt",
@@ -690,7 +700,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "853969d57ee367d641be6055fb642a8e52ca11b5f2a8b56436f2e7ca8e9c6270"
         }
-      ]
+      ],
+      "icon": "chrome.png"
     },
     {
       "id": "chromium",
@@ -737,7 +748,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "5bcef79596d2478e6200c9c809f06b8ffa4ce86250ca43abbddaf203f4660a55"
         }
-      ]
+      ],
+      "icon": "chromium.png"
     },
     {
       "id": "claude",
@@ -902,7 +914,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "5d23026ca50ce3f455069ffde0681d49561fd9750b9012f662bd7bede989e9a2"
         }
-      ]
+      ],
+      "icon": "clion.png"
     },
     {
       "id": "codeblocks",
@@ -949,7 +962,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "37986aca81a0211187dc318334526ef890364458557eac0d8b11c207963e7c0d"
         }
-      ]
+      ],
+      "icon": "codeblocks.png"
     },
     {
       "id": "cryptomator",
@@ -999,7 +1013,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "d21a35da41026d988ed784dd73417a9e3b0642deca8d7186f2ab68b2876074c9"
         }
-      ]
+      ],
+      "icon": "cryptomator.png"
     },
     {
       "id": "darktable",
@@ -1046,7 +1061,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "cf8b1738d80d2f01ebbd69251a381dbba61949d15b007ce592524a1b5b6d9206"
         }
-      ]
+      ],
+      "icon": "darktable.png"
     },
     {
       "id": "dbeaver-community",
@@ -1144,7 +1160,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "1d917d27c9094512193de7f6e28c2657b1c2bef464c01c8adca0220862b6abc4"
         }
-      ]
+      ],
+      "icon": "desktop.png"
     },
     {
       "id": "desktopeditors",
@@ -1193,7 +1210,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "b96ef9386a9e6885375bf8307629aed7017d47fbd1df63a7afb2d1156731357d"
         }
-      ]
+      ],
+      "icon": "desktopeditors.png"
     },
     {
       "id": "dev-toolbox",
@@ -1343,7 +1361,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "cf5e0ac5b817aeb3cdc1ac26d6660b322a99ed140410e89c1d1ac0f6c92b7e7e"
         }
-      ]
+      ],
+      "icon": "easyeffects.png"
     },
     {
       "id": "eclipse-java",
@@ -1393,7 +1412,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "2a4e212b5a72ac0463d33c925dc5870618fc5f627bf77b9a7c1abf106fa80e87"
         }
-      ]
+      ],
+      "icon": "eclipse-java.png"
     },
     {
       "id": "edge",
@@ -1428,7 +1448,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "79d5aadaba86dbc74fb3d96f59d1fad15c6759f28940e8533137f3d26a31da79"
         }
-      ]
+      ],
+      "icon": "edge.png"
     },
     {
       "id": "element",
@@ -1528,7 +1549,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "ee054a3ebba630258ace1a52a56f41c22806cd8b863d90b7575a7ba7fa5c2390"
         }
-      ]
+      ],
+      "icon": "emacs.png"
     },
     {
       "id": "eyedropper",
@@ -1577,7 +1599,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "c5b09fc5be5fdc998902d250faa19508b38c5db2794f0eb8f7dce2d1e264e997"
         }
-      ]
+      ],
+      "icon": "eyedropper.png"
     },
     {
       "id": "firefox",
@@ -1681,7 +1704,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "23646fc59161dde9c87b4fe31577b9c0afdf0b1c1f555bc369e1968937a50ff6"
         }
-      ]
+      ],
+      "icon": "flatseal.png"
     },
     {
       "id": "freecad",
@@ -1730,7 +1754,8 @@
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "80176af5ff04c5cde6108efdd1583316a6ddc977da2fbc2a9f88b7ca9accadf2"
         }
-      ]
+      ],
+      "icon": "freecad.png"
     },
     {
       "id": "gearlever",
@@ -1776,7 +1801,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "edecd6254ebf365169d76c49a6fdca125a174fbbba83b97624e52aba112b4223"
         }
-      ]
+      ],
+      "icon": "gearlever.png"
     },
     {
       "id": "ghb",
@@ -1811,7 +1837,8 @@
           "runtime": "org.gnome.Platform/x86_64/49",
           "metadataSha256": "80fda83ad9caa14c61fa8fc88e88fce3e7a1511d1df418b975a9fb61d05aa52f"
         }
-      ]
+      ],
+      "icon": "ghb.png"
     },
     {
       "id": "ghidra",
@@ -1857,7 +1884,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "d1e0fd813c689e2394d9dcdb15cf239adc984a645aea79f453c0c9eae94443be"
         }
-      ]
+      ],
+      "icon": "ghidra.png"
     },
     {
       "id": "gimp",
@@ -1908,7 +1936,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "651c8f78ed74a9bc43c6774521638dec3d25427246a24e24e4ffa36a9302b70d"
         }
-      ]
+      ],
+      "icon": "gimp.png"
     },
     {
       "id": "gitg",
@@ -1958,7 +1987,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "200dcb5365ff1041544040982f6eec8404a1c005137669ad5c7da080edc32b09"
         }
-      ]
+      ],
+      "icon": "gitg.png"
     },
     {
       "id": "gitkraken",
@@ -2005,7 +2035,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "6ce97e4b1049c76e6fe5aa107b1c6e983c738d7ec9483a1bfddb134b25d94c95"
         }
-      ]
+      ],
+      "icon": "gitkraken.png"
     },
     {
       "id": "gittyup",
@@ -2051,7 +2082,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "5b2d7ab81f4bc7e6f1d7bc4422447383cfa12fb09eac38095f342cd90ecbdb7e"
         }
-      ]
+      ],
+      "icon": "gittyup.png"
     },
     {
       "id": "gnome-boxes",
@@ -2106,7 +2138,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "9ccb59e79de04a31e43f22a5525c35383072f411c8b327431915dffe8e5f6ec4"
         }
-      ]
+      ],
+      "icon": "gnome-boxes.png"
     },
     {
       "id": "gnome-builder",
@@ -2157,7 +2190,8 @@
           "runtime": "org.gnome.Sdk/aarch64/50",
           "metadataSha256": "b3daddd459edc0e7558ddd941cc51939c0c9dffb7a305b37f4a2aae111514fc7"
         }
-      ]
+      ],
+      "icon": "gnome-builder.png"
     },
     {
       "id": "gnome-calculator",
@@ -2206,7 +2240,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "fc1b6a73b220b4a8815c062b5e6da63282a2ccc2b53d7dee3793f3b2a2adadea"
         }
-      ]
+      ],
+      "icon": "gnome-calculator.png"
     },
     {
       "id": "gnome-calendar",
@@ -2255,7 +2290,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "44e6a872996b434cf3ef9eaa3460624f7b115b30bb0dc4cadda02cf7084aa30f"
         }
-      ]
+      ],
+      "icon": "gnome-calendar.png"
     },
     {
       "id": "gnome-connections",
@@ -2309,7 +2345,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "daad76a666bbd2068de456b2754b194f2b0f297a9e0db8cab6dfe18d2faee9c2"
         }
-      ]
+      ],
+      "icon": "gnome-connections.png"
     },
     {
       "id": "gnome-logs",
@@ -2413,7 +2450,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "62a1d24e5136bc7c79e27ede3b951c79c7e19f2295605342e574436363718505"
         }
-      ]
+      ],
+      "icon": "godot.png"
     },
     {
       "id": "goland",
@@ -2460,7 +2498,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "cdb0e7266f239be4ddd9a8afd70b34f6f2f182e7733957acd1615e598891fe62"
         }
-      ]
+      ],
+      "icon": "goland.png"
     },
     {
       "id": "gpt4all",
@@ -2507,7 +2546,8 @@
           "runtime": "org.kde.Platform/aarch64/6.9",
           "metadataSha256": "e79f4450a9e7486c71b585c8f9edb2b4b0a3f2fd38cfa1eb74ba0a34b399b2c4"
         }
-      ]
+      ],
+      "icon": "gpt4all.png"
     },
     {
       "id": "httpie",
@@ -2605,7 +2645,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/24.08",
           "metadataSha256": "814cce2f3607dd0bf88dabb4cb00708a8e86ad50084f4f441e69840678128960"
         }
-      ]
+      ],
+      "icon": "ide.png"
     },
     {
       "id": "imhex",
@@ -2652,7 +2693,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "2a51b97ead5564fb3c6ae80917edcfe01616b1a69a8312c60f173b2b8c081dc5"
         }
-      ]
+      ],
+      "icon": "imhex.png"
     },
     {
       "id": "inkscape",
@@ -2702,7 +2744,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "725c9da549e55a36f76d4003556b8caf339b128741fb6e8dddc347ed72216929"
         }
-      ]
+      ],
+      "icon": "inkscape.png"
     },
     {
       "id": "insomnia",
@@ -2746,7 +2789,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "56accfc39dd8fd88b439b064260fbbafb1ae484cf7f70e71c7e2bbe973036010"
         }
-      ]
+      ],
+      "icon": "insomnia.png"
     },
     {
       "id": "intellij-idea-community",
@@ -2803,7 +2847,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "23bed1a86fa0ce7e6b5e1f7dfaadc85aa878d6804dd8c2eeaefd8b76b47ed77b"
         }
-      ]
+      ],
+      "icon": "intellij-idea-community.png"
     },
     {
       "id": "intellij-idea-ultimate",
@@ -2850,7 +2895,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/26.08",
           "metadataSha256": "253dc432f4f8f4fef972e0825e7562c94da99bc6e13a32148851949985a0aef5"
         }
-      ]
+      ],
+      "icon": "intellij-idea-ultimate.png"
     },
     {
       "id": "jan",
@@ -2887,7 +2933,8 @@
           "runtime": "org.gnome.Platform/x86_64/50",
           "metadataSha256": "60697e59a736b0a2daf38356128218d3e94346468f4629f2f8d5c4364a39cab0"
         }
-      ]
+      ],
+      "icon": "jan.png"
     },
     {
       "id": "jellyfindesktop",
@@ -2936,7 +2983,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "2bb09791100fd73a286e7b4dc6974b3c7f103b55613768444d8f89c9e38aab3d"
         }
-      ]
+      ],
+      "icon": "jellyfindesktop.png"
     },
     {
       "id": "joplin",
@@ -2990,7 +3038,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "d4c7614b4d8f16dcb8e03c9d6ea8de824e508d057f6dd15ebadca63eae684281"
         }
-      ]
+      ],
+      "icon": "joplin.png"
     },
     {
       "id": "kate",
@@ -3040,7 +3089,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "82ffeca01500ad700ddb02ae00cb59bd6bbc960ed1e2f96918cf21b218353e95"
         }
-      ]
+      ],
+      "icon": "kate.png"
     },
     {
       "id": "kdenlive",
@@ -3090,7 +3140,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "ba6cfe8bd5f171eadc5e136e4de2ac106b617210e57172976cc5377007141aa7"
         }
-      ]
+      ],
+      "icon": "kdenlive.png"
     },
     {
       "id": "kdiskmark",
@@ -3136,7 +3187,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "ee7c68a48e58feed79ef54d4ab6c635168a171fc334aea207c606aa71ea42ae8"
         }
-      ]
+      ],
+      "icon": "kdiskmark.png"
     },
     {
       "id": "keepassxc",
@@ -3239,7 +3291,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "74beea43d817f71bb4eaf37feb0108810eb901ae362d0398c48f9a18d972baf8"
         }
-      ]
+      ],
+      "icon": "krita.png"
     },
     {
       "id": "ktailctl",
@@ -3285,7 +3338,8 @@
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "bc71cb3e65ab4798e45dd760fc1468de74df575a00fe63a31d66b9eb890526a1"
         }
-      ]
+      ],
+      "icon": "ktailctl.png"
     },
     {
       "id": "libreoffice",
@@ -3336,7 +3390,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "893f00e06f457a00720ba3c6d7906e8a2204c476548e460987e505df08649662"
         }
-      ]
+      ],
+      "icon": "libreoffice.png"
     },
     {
       "id": "librewolf-community",
@@ -3383,7 +3438,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "f31c81226b9a760b0dd8a27042e66c470f852590cf2c39eb52de6da6aed5ded0"
         }
-      ]
+      ],
+      "icon": "librewolf-community.png"
     },
     {
       "id": "lm-studio",
@@ -3431,7 +3487,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "0f3b0e59f54b45fa0facecb5de204d1a63699e3971c50a94fbd2306674016e33"
         }
-      ]
+      ],
+      "icon": "lm-studio.png"
     },
     {
       "id": "localsend-app",
@@ -3477,7 +3534,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "6183140ea1812c59a641f2e23b5480fead2a4069b8f2f5b8a2afccaf5cde914e"
         }
-      ]
+      ],
+      "icon": "localsend-app.png"
     },
     {
       "id": "mediawriter",
@@ -3523,7 +3581,8 @@
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "d9d67aa38bc3c5c3cf8858f0bbd2cf7d8a4a08f27c1ec24a8d00802a14f7414e"
         }
-      ]
+      ],
+      "icon": "mediawriter.png"
     },
     {
       "id": "meld",
@@ -3622,7 +3681,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "e244889c85242fc11e195dd7121d8d06f319840522b88e43f3acd0b7f11cd75b"
         }
-      ]
+      ],
+      "icon": "micro.png"
     },
     {
       "id": "mission-center",
@@ -3725,7 +3785,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "24200ff43cdf8deb4574f3f3de731955a7e6683d41b2f6d6ed7951358ef536cb"
         }
-      ]
+      ],
+      "icon": "mpv.png"
     },
     {
       "id": "neovim",
@@ -3776,7 +3837,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "7f83358f90230e9ac65682afdb0aadac6568bbb9e6a25df3ec6d2bc64217d670"
         }
-      ]
+      ],
+      "icon": "neovim.png"
     },
     {
       "id": "netbeans",
@@ -3822,7 +3884,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "e65a9adf94d00778a6af51bf0ab21c2f29a58889b0d2da750a673c9142e75c04"
         }
-      ]
+      ],
+      "icon": "netbeans.png"
     },
     {
       "id": "notepadqq",
@@ -3870,7 +3933,8 @@
           "runtime": "org.kde.Platform/aarch64/5.15-23.08",
           "metadataSha256": "3b6f2ea7154a66971d311c215d8d48f6387f5e1867ea24bfeb56c94ba3905fe8"
         }
-      ]
+      ],
+      "icon": "notepadqq.png"
     },
     {
       "id": "obs-studio",
@@ -3913,7 +3977,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "3c1435af8f1b021a028609573957d303b142ce493f882f11ef52f2d860b2f0cf"
         }
-      ]
+      ],
+      "icon": "obs-studio.png"
     },
     {
       "id": "obsidian",
@@ -3959,7 +4024,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "590998f4ac9fc8efa898190a5ebefaae91f463101ed8d842d539b08b26f02c22"
         }
-      ]
+      ],
+      "icon": "obsidian.png"
     },
     {
       "id": "okular",
@@ -4009,7 +4075,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "db299c7287db473f32995d7896fab691c58366016b5873cf2604d2f52406b4b4"
         }
-      ]
+      ],
+      "icon": "okular.png"
     },
     {
       "id": "open-webui",
@@ -4055,7 +4122,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "da256e48c78b4e1ba26ac1c1832049e3ebd972bc3b33853af9cabb237946a4dc"
         }
-      ]
+      ],
+      "icon": "open-webui.png"
     },
     {
       "id": "opencode",
@@ -4101,7 +4169,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "6f046d3bf895f1e62fb1a71131b0202d41d60cd263581f4ceb8645dc14ad6fe9"
         }
-      ]
+      ],
+      "icon": "opencode.png"
     },
     {
       "id": "peazip",
@@ -4149,7 +4218,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "febae8c6bd7684845ecf5dd17f85ceb0280c5bb4099b7d6145fc37d20a3806d5"
         }
-      ]
+      ],
+      "icon": "peazip.png"
     },
     {
       "id": "pgadmin4",
@@ -4183,7 +4253,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "4fb2298550267fd104b5ba91dc2ca6813d50d164e0f0965f6ba099290c83e941"
         }
-      ]
+      ],
+      "icon": "pgadmin4.png"
     },
     {
       "id": "phpstorm",
@@ -4230,7 +4301,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "0fa99351035e97a04e1575dd53883579c5bd1afe7456d5cd23e31e14404b9df3"
         }
-      ]
+      ],
+      "icon": "phpstorm.png"
     },
     {
       "id": "podman-desktop",
@@ -4333,7 +4405,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "51e76f1572d838dea3dec1150779073c55e52aad05be34f2b493dfd9e66436fd"
         }
-      ]
+      ],
+      "icon": "pods.png"
     },
     {
       "id": "popsicle",
@@ -4379,7 +4452,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/24.08",
           "metadataSha256": "5023726f6410522d147cb4a3e48c758623e96f0ee9b38b38d9c454ecaac74c55"
         }
-      ]
+      ],
+      "icon": "popsicle.png"
     },
     {
       "id": "postman",
@@ -4474,7 +4548,8 @@
           "runtime": "org.freedesktop.Sdk/x86_64/23.08",
           "metadataSha256": "7e6132e1c91f8b81b082f240275fff9b4efc2e5cb7bb815fda226b723939c497"
         }
-      ]
+      ],
+      "icon": "pycharm-community.png"
     },
     {
       "id": "pycharm-professional",
@@ -4521,7 +4596,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "6ea68c756bbeb28f87859982b033c16c5a6620a19c379c6d1bbcdeac6d043e9a"
         }
-      ]
+      ],
+      "icon": "pycharm-professional.png"
     },
     {
       "id": "qdirstat",
@@ -4568,7 +4644,8 @@
           "runtime": "org.kde.Platform/aarch64/6.10",
           "metadataSha256": "2bb4c1ae409df805368af3ade4c4778b2b026752fce00724504af34f5a0bff9f"
         }
-      ]
+      ],
+      "icon": "qdirstat.png"
     },
     {
       "id": "qtcreator",
@@ -4615,7 +4692,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "f2a106f4202bc12dd13bd143626aa26e0dda453ca7ff2ec7eeb32c2ba54eda0f"
         }
-      ]
+      ],
+      "icon": "qtcreator.png"
     },
     {
       "id": "remmina",
@@ -4670,7 +4748,8 @@
           "runtime": "org.gnome.Platform/aarch64/49",
           "metadataSha256": "76ec36f5e0e4b56b09ceecef83f9f7cefff3070ea98b144682acfb392656268d"
         }
-      ]
+      ],
+      "icon": "remmina.png"
     },
     {
       "id": "resources",
@@ -4716,7 +4795,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "4ab0cbe257f9418c9aa3384631e3888d3c724354cc3ecdb6c613c1eba3b896be"
         }
-      ]
+      ],
+      "icon": "resources.png"
     },
     {
       "id": "rider",
@@ -4763,7 +4843,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "0eb0bfa7142d6a41ea7393153564801105677a009e6a991744b50e71ee98e463"
         }
-      ]
+      ],
+      "icon": "rider.png"
     },
     {
       "id": "rnote",
@@ -4813,7 +4894,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "fb3646a5e343324215e980755dd42637aee5b98740510c71d98fda6f8337b6a4"
         }
-      ]
+      ],
+      "icon": "rnote.png"
     },
     {
       "id": "rustdesk",
@@ -4859,7 +4941,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "7813a7f8f80641399005c2281de7cc87b63c698f22b34ec7376661d6975e4374"
         }
-      ]
+      ],
+      "icon": "rustdesk.png"
     },
     {
       "id": "rustrover",
@@ -4906,7 +4989,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/26.08",
           "metadataSha256": "06513619c031d4f0c9398bf63e948d8e892d18d507d92b732cd69eff270c5e3a"
         }
-      ]
+      ],
+      "icon": "rustrover.png"
     },
     {
       "id": "slack",
@@ -5065,7 +5149,8 @@
           "runtime": "org.kde.Sdk/aarch64/5.15-25.08",
           "metadataSha256": "ee3e9bb1b48d75bdcadb84056a06f8e2b7ef21b116f785321222771377939151"
         }
-      ]
+      ],
+      "icon": "spyder.png"
     },
     {
       "id": "sqlitebrowser",
@@ -5113,7 +5198,8 @@
           "runtime": "org.kde.Platform/aarch64/5.15-25.08",
           "metadataSha256": "9b65b66eb50414448fade655cb0209cc2a3ac8006e6412648a95db93c23cdf3b"
         }
-      ]
+      ],
+      "icon": "sqlitebrowser.png"
     },
     {
       "id": "studio",
@@ -5159,7 +5245,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "75b53d932d52c4da134e015b9f40a87eeb395bf0e6864e4f3fbd6d884e60a676"
         }
-      ]
+      ],
+      "icon": "studio.png"
     },
     {
       "id": "sublimetext",
@@ -5206,7 +5293,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "aa869afa7ae92026604924e710163a0377cf97256f3f9f4ff5563bf2f58974b1"
         }
-      ]
+      ],
+      "icon": "sublimetext.png"
     },
     {
       "id": "system-monitoring-center",
@@ -5253,7 +5341,8 @@
           "runtime": "org.gnome.Platform/aarch64/49",
           "metadataSha256": "7077f8f98fa148f74bdb9ea920e315929580def0da7824c1d4d9c4355f819790"
         }
-      ]
+      ],
+      "icon": "system-monitoring-center.png"
     },
     {
       "id": "telegram",
@@ -5346,7 +5435,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/24.08",
           "metadataSha256": "672171c7f69e8142f95aa0e5bf669f25a5ed09d3b71c86021db4aed7ab0e22c7"
         }
-      ]
+      ],
+      "icon": "thunderbird.png"
     },
     {
       "id": "torbrowser-launcher",
@@ -5381,7 +5471,8 @@
           "runtime": "org.kde.Platform/x86_64/6.11",
           "metadataSha256": "1cd73a082798c2d1e3f0bd03f133fad8a3d40c1938c374eaebf1901f98ac5240"
         }
-      ]
+      ],
+      "icon": "torbrowser-launcher.png"
     },
     {
       "id": "unityhub",
@@ -5415,7 +5506,8 @@
           "runtime": "org.freedesktop.Sdk/x86_64/25.08",
           "metadataSha256": "fbd2ce5ba56c99f0fe10363dd04b2d055ff172b8e019fc88c56095e0c3ce081d"
         }
-      ]
+      ],
+      "icon": "unityhub.png"
     },
     {
       "id": "vesktop",
@@ -5462,7 +5554,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "86113a814dc1de6de3b8b716fb6b4e6d69b7df3f77b381208aa6b852e6c4af6a"
         }
-      ]
+      ],
+      "icon": "vesktop.png"
     },
     {
       "id": "videodownloader",
@@ -5508,7 +5601,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "abfabf04170bace41f7aad610a170b1e1d52878a57588395623e2205a07d5f7e"
         }
-      ]
+      ],
+      "icon": "videodownloader.png"
     },
     {
       "id": "virt-manager",
@@ -5563,7 +5657,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "839a9edfe0900f638c6ca5c57be63614e829e2b61b3b204fdf60dd789f391dae"
         }
-      ]
+      ],
+      "icon": "virt-manager.png"
     },
     {
       "id": "vlc",
@@ -5614,7 +5709,8 @@
           "runtime": "org.kde.Platform/aarch64/5.15-25.08",
           "metadataSha256": "aa916253e0672cf483f2650cccf4470691234ad9991ed67241e533af04802927"
         }
-      ]
+      ],
+      "icon": "vlc.png"
     },
     {
       "id": "vscode",
@@ -5673,7 +5769,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "4d80f02c68558f58817335f393a1cec7828bbc91d7100255f70fbca3353544b7"
         }
-      ]
+      ],
+      "icon": "vscode.png"
     },
     {
       "id": "vscodium",
@@ -5775,7 +5872,8 @@
           "runtime": "org.gnome.Platform/aarch64/49",
           "metadataSha256": "d6a6fda3364762aee4cc036fe6f3831cccd3bc000dc4f80ad5d58a37e901efb5"
         }
-      ]
+      ],
+      "icon": "warehouse.png"
     },
     {
       "id": "webstorm",
@@ -5822,7 +5920,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/26.08",
           "metadataSha256": "03d9a1203d9ce8d1d3e48cf2f9e4c579140b1109916fb9bcbaf706f156563bb0"
         }
-      ]
+      ],
+      "icon": "webstorm.png"
     },
     {
       "id": "whaler",
@@ -5869,7 +5968,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "e5e270d7104a02fa03413df62d1853f571edbf8d5184e971caa2c6cff0222cc9"
         }
-      ]
+      ],
+      "icon": "whaler.png"
     },
     {
       "id": "whatsie",
@@ -5916,7 +6016,8 @@
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "f8b4a742ade2c11a1859850e4279c17cfb2a5482520ca8685383a64f46b99bf0"
         }
-      ]
+      ],
+      "icon": "whatsie.png"
     },
     {
       "id": "wireshark",
@@ -6015,7 +6116,8 @@
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "458d85092bcbe0c0d4f37e47c6255451e0d75e3fb699ec876b7543b65eaee034"
         }
-      ]
+      ],
+      "icon": "www.png"
     },
     {
       "id": "zapzap",
@@ -6063,7 +6165,8 @@
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "a84bfb14c79ef784d70a6d7412a16d89cd8d4577cdbbd413f3e496b2d0b6bc66"
         }
-      ]
+      ],
+      "icon": "zapzap.png"
     },
     {
       "id": "zed",
@@ -6118,7 +6221,8 @@
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "ec9aa72149f9780cd8e0f5f4f5f611056c0f06f561243c134bc840112ed280cd"
         }
-      ]
+      ],
+      "icon": "zed.png"
     },
     {
       "id": "zen",
@@ -6165,7 +6269,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "d93b17a634681e7129d3b99e7cee246cb875e498985b75a1ece2181e6641e8d7"
         }
-      ]
+      ],
+      "icon": "zen.png"
     },
     {
       "id": "zoom",
@@ -6202,7 +6307,8 @@
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "c038774ae879117bbd1996ada0093763a3930a57031b7495d558ba6ad7885d19"
         }
-      ]
+      ],
+      "icon": "zoom.png"
     },
     {
       "id": "zulip",
@@ -6252,7 +6358,8 @@
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "1e5a2b96196d72c615ab7b46f53703789440c40d59397574373b6005be66ab2b"
         }
-      ]
+      ],
+      "icon": "zulip.png"
     }
   ]
 }
