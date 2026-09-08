@@ -167,7 +167,7 @@ design language is in this category by construction.
 pending:** first-run onboarding; the signed local application catalog;
 `punarctl app` inspection and typed install actions; Command Center and System
 Control discovery; and Spotify's architecture-aware x86_64 Flatpak / ARM64 web
-fallback. The current image source now offers 50 reviewed identities in one
+fallback. The current image source now offers 62 reviewed identities in one
 searchable, categorized library, including developer, API-testing, diagnostics,
 Markdown, container, and credential tools. The source and QML gates are green;
 the additions made after the last release-VM proof are not a runtime claim

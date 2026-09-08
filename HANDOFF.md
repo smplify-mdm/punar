@@ -242,9 +242,9 @@ polling loops.
 qs -p /usr/share/punar/shell ipc show
 qs -p /usr/share/punar/shell ipc call <target> <verb>
 ```
-Seventeen targets: `aipanel alerts approval bar commandcenter lock
-notifications osd overview policies privacypanel shortcuts systemcontrol theme
-toasts wallpaper windowactions`. (`surfaceprobe` is an eighteenth, in
+Eighteen targets: `aipanel alerts approval bar commandcenter lock
+notifications osd overview policies privacypanel session shortcuts systemcontrol
+theme toasts wallpaper windowactions`. (`surfaceprobe` is an eighteenth, in
 `surface-probe.qml`, and belongs to the isolated cost probe rather than to the
 running shell.) The authoritative list is
 `grep -rho 'target: "[a-z]*"' shell/punar-shell/ | sort -u`, and
