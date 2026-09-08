@@ -1469,3 +1469,42 @@ the authority and it does not mention any of it.
 ---
 
 *Punar · Field Note design language · `docs/design/third-party-apps.md`*
+
+## Saved passwords, and why this is not a Keychain
+
+Punar ships `gnome-keyring`, which provides `org.freedesktop.secrets`. Without
+it no third-party application on the device can store a credential at all: the
+catalogue's own mail client declares `org.freedesktop.secrets=talk` in its
+Flatpak metadata and re-prompts for its password every launch on an image with
+no provider. That is what shipped, and it is why the package is here.
+
+**It is not an Apple Keychain, and the difference is structural rather than a
+matter of configuration.** Keychain binds an access-control list to each item
+and to a code-signed application identity, and the system asks when a different
+application wants that item. The freedesktop Secret Service protocol has no
+per-application access control of any kind: any process holding the bus name
+can read every item in an unlocked collection. Naming a collection per
+application organises secrets; it does not isolate them.
+
+**The enforcement point Punar actually has is the sandbox, and it acts before
+the secret exists.** A Flatpak reaches `org.freedesktop.secrets` only if its own
+metadata declares it, that declaration is pinned in the catalogue and re-fetched
+by `tools/verify-app-catalog.sh`, and `punard`'s `apps.inspect` renders it on
+the install card as **"Your saved passwords (read and write)"** before a person
+agrees to anything. That is the same shape as macOS's consent prompts — the
+decision is made once, in advance, by the person, with the access named — and
+it is the honest extent of the control. It governs what a catalogue application
+may ask for. It does not constrain a process the person runs from a shell.
+
+Two consequences worth stating plainly rather than discovering:
+
+- An application that has been granted this permission can read secrets saved
+  by a *different* application. Punar cannot prevent that, and no amount of
+  keyring configuration would.
+- The daemon is D-Bus activated and disabled in the user preset
+  (`00-punar-lean.preset`), so nothing runs at idle and it starts the first time
+  an application asks for a secret.
+
+Closing the gap properly means Punar brokering credential access itself, with
+per-application policy, rather than shipping a shared bus name — a component to
+build, not a package to install.

@@ -16,3 +16,13 @@ disable foot-server.service
 disable foot-server.socket
 disable hypridle.service
 disable filter-chain.service
+
+# gnome-keyring provides org.freedesktop.secrets and MUST be reachable, but it
+# must not be resident. Its packaged units carry [Install] sections
+# (WantedBy=graphical-session-pre.target and sockets.target), so leaving the
+# preset silent would enable both, add two unreviewed .wants links and trip
+# release-image policy A9 — the hypridle case above, exactly. D-Bus activation
+# through /usr/share/dbus-1/services/org.freedesktop.secrets.service starts the
+# daemon the first time an application asks for a secret, and not before.
+disable gnome-keyring-daemon.service
+disable gnome-keyring-daemon.socket

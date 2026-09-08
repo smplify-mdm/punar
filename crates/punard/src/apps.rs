@@ -1932,8 +1932,44 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>
         let access = if mode == "ro" { "read-only" } else { mode };
         permissions.push(format!("{path} files ({access})"));
     }
-    if !session_bus.is_empty() {
-        permissions.push("Desktop media controls".to_string());
+    // NAME THE BUS, DO NOT PARAPHRASE IT. Every entry in [Session Bus Policy]
+    // used to collapse into the single string "Desktop media controls", which
+    // was wrong for almost every application that has one and catastrophically
+    // wrong for the one that matters most: an app declaring
+    // `org.freedesktop.secrets=talk` can read and write EVERY saved password on
+    // this device, and the card said it wanted media controls.
+    //
+    // That line is the whole of Punar's answer to "who can read my
+    // credentials". The Secret Service protocol has no per-application access
+    // control — anything holding the bus name reads anything unlocked — so the
+    // sandbox declaration, shown before the person agrees, is the enforcement
+    // point. It has to be legible.
+    for name in &session_bus {
+        permissions.push(match name.as_str() {
+            "org.freedesktop.secrets" | "org.gnome.keyring.SystemPrompter" => {
+                "Your saved passwords (read and write)".to_string()
+            }
+            "org.freedesktop.Notifications" => "Send notifications".to_string(),
+            "org.freedesktop.portal.Desktop" => "Desktop portals".to_string(),
+            "org.gnome.OnlineAccounts" => "Your configured online accounts".to_string(),
+            "org.a11y.Bus" => "Accessibility services".to_string(),
+            "org.mpris.MediaPlayer2.*" | "org.mpris.MediaPlayer2" => {
+                "Desktop media controls".to_string()
+            }
+            other => format!("Desktop service {other}"),
+        });
+    }
+    // Sockets that are access, not display. None of these was rendered at all,
+    // so a smartcard reader and a printer queue were invisible on a card whose
+    // entire purpose is to show what an application asked for.
+    if has("sockets", "pcsc") {
+        permissions.push("Smartcards and security keys".to_string());
+    }
+    if has("sockets", "cups") {
+        permissions.push("Printers".to_string());
+    }
+    if has("shared", "ipc") {
+        permissions.push("Shared IPC with the desktop".to_string());
     }
     permissions.sort();
     permissions.dedup();
@@ -2193,6 +2229,41 @@ mod tests {
         assert!(
             !host_access.iter().any(|s| s.contains("home directory")),
             "Firefox's filesystems are narrow; claiming it reads your home would be false"
+        );
+    }
+
+    /// An application that can read every saved password must SAY so on the
+    /// card, in those words.
+    ///
+    /// This is Evolution's real metadata, and it is the case that made the bug
+    /// worth fixing: `org.freedesktop.secrets=talk` used to render as "Desktop
+    /// media controls". The Secret Service protocol has no per-application
+    /// access control, so this declaration — shown before a person agrees — is
+    /// the entire enforcement point Punar has over who reads credentials. A
+    /// wrong word here is not a cosmetic defect.
+    #[test]
+    fn an_app_that_can_read_every_saved_password_says_so() {
+        let evolution = "[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;fallback-x11;pcsc;\ndevices=dri;\nfilesystems=~/.gnupg;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\norg.gnome.keyring.SystemPrompter=talk\norg.gnome.OnlineAccounts=talk\norg.freedesktop.secrets=talk\n";
+        let (_containment, permissions, _host_access) = inspect_permissions(evolution);
+        assert!(
+            permissions.iter().any(|p| p.contains("saved passwords")),
+            "org.freedesktop.secrets must be named as saved-password access, got {permissions:?}"
+        );
+        assert!(
+            !permissions.iter().any(|p| p == "Desktop media controls"),
+            "this app asked for no media controls; claiming it did was the bug: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("Smartcards")),
+            "sockets=pcsc was rendered nowhere at all: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("online accounts")),
+            "org.gnome.OnlineAccounts must be named: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("Send notifications")),
+            "org.freedesktop.Notifications must be named: {permissions:?}"
         );
     }
 
