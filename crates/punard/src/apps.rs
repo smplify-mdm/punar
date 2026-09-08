@@ -249,6 +249,14 @@ impl AppManager {
         })
     }
 
+    /// The device's package architecture, as the catalogue's `architectures`
+    /// arrays spell it. Published in the shell summary so a surface can decline
+    /// to OFFER an application this machine could never install, rather than
+    /// letting the person discover it from a refusal.
+    pub fn architecture(&self) -> &str {
+        &self.arch
+    }
+
     #[cfg(test)]
     fn with_arch(mut self, arch: &str) -> Self {
         self.arch = arch.to_string();

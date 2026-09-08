@@ -1553,6 +1553,56 @@
       "icon": "emacs.png"
     },
     {
+      "id": "evolution",
+      "name": "Evolution",
+      "featured": false,
+      "category": "productivity",
+      "keywords": [
+        "calendar",
+        "contactmanagement",
+        "email",
+        "office"
+      ],
+      "summary": "Manage your email, contacts and schedule.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Evolution",
+          "ref": "app/org.gnome.Evolution/x86_64/stable",
+          "commit": "63ab47e6c42c491ea602e64049b3ad395f310edabad2119bf65d4d105a026c7a",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "e0b0f4e1426ec267b1b133931fb987018753377246f2018edbb132afb03e5835"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.Evolution",
+          "ref": "app/org.gnome.Evolution/aarch64/stable",
+          "commit": "4b6430b6e8b6d4a6cc0714379037059eb7b6c444fedc021fd60ea145a011eedc",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "a81ed0d6e187b9bf052798b4cfa43de044f465203095df856e35ef0383d0ec70"
+        }
+      ],
+      "icon": "evolution.png"
+    },
+    {
       "id": "eyedropper",
       "name": "Eyedropper",
       "featured": false,

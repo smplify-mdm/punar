@@ -1435,7 +1435,8 @@ render enrollment/compliance chrome without a socket connection or polling
   ```json
   {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
    "compliance_overall": "compliant", "device_class": "laptop",
-   "device_class_source": "observed", "ts": "2026-08-26T09:02:00Z"}
+   "device_class_source": "observed", "architecture": "aarch64",
+   "ts": "2026-08-26T09:02:00Z"}
   ```
 
   (`org_name` is `null` and `enrolled` is `false` on a personal device.)
@@ -1444,6 +1445,15 @@ render enrollment/compliance chrome without a socket connection or polling
   only what the shell renders or uses for its resident-cost decision. A
   missing/unknown class fails to `appliance`, the least-resident experience;
   it never changes a security or privacy guarantee.
+- `architecture` is the device's package architecture as the application
+  catalogue spells it (`x86_64`, `aarch64`). It is here because the catalogue
+  file the shell reads is **identical on every architecture** — each app lists
+  its own per-architecture sources — so without it the shell offered
+  applications that exist only for another CPU and the refusal arrived after
+  the person had chosen one. Consumers fail **open** on a missing value: not
+  yet known means show everything, and punard's own refusal is the backstop.
+  This is display data like the rest of the file and is never an authorization
+  input; `apps.install` re-derives the architecture itself.
 - **Non-authoritative by design**: `/run/punar` is `0755 root:root`; daemons
   write the `0644 root:root` summaries and sessions only read them. Root
   ownership prevents local replacement, but the content remains display data,

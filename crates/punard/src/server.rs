@@ -4944,6 +4944,7 @@ impl Inner {
                 punar_common::DeviceClassSource::Forced => "forced",
             }
             .to_string(),
+            architecture: self.apps.architecture().to_string(),
             ts: utc_now_rfc3339(),
         };
         let mut written = self.status_written.lock().unwrap();
@@ -4953,6 +4954,7 @@ impl Inner {
                 && w.compliance_overall == summary.compliance_overall
                 && w.device_class == summary.device_class
                 && w.device_class_source == summary.device_class_source
+                && w.architecture == summary.architecture
         });
         if unchanged {
             return;

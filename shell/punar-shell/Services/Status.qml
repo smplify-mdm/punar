@@ -47,6 +47,11 @@ Singleton {
     property string deviceClass: "appliance"
     property string deviceClassSource: "unknown"
 
+    /// The device's package architecture from status.json, or "" before the
+    /// file has been read. Consumers must fail OPEN on "": an empty string
+    /// means "not known yet", never "no architecture".
+    property string architecture: ""
+
     // "ok" | "warn" | "bad" — maps 1:1 to spec §52 decision states.
     readonly property string state: {
         switch (root.complianceState) {
@@ -144,6 +149,7 @@ Singleton {
         root.complianceState = "";
         root.deviceClass = "appliance";
         root.deviceClassSource = "unknown";
+        root.architecture = "";
     }
 
     function loadStatus(): void {
@@ -167,6 +173,7 @@ Singleton {
                && j.compliance_overall !== ""
                ? j.compliance_overall : "unknown")
             : "";
+        root.architecture = typeof j.architecture === "string" ? j.architecture : "";
         var deviceClass = typeof j.device_class === "string" ? j.device_class : "";
         root.deviceClass = ["workstation", "laptop", "appliance"].indexOf(deviceClass) >= 0
             ? deviceClass : "appliance";
