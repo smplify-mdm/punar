@@ -1895,6 +1895,19 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>
                 .to_string(),
         );
     }
+    // THE UNFILTERED SESSION BUS, which app-catalog.md section 8 lists as a
+    // bypass trigger and this function did not implement. It matters more than
+    // the others because it silently invalidates them: `sockets=session-bus`
+    // bind-mounts the REAL bus socket into the sandbox and attaches no
+    // xdg-dbus-proxy, so the app's own [Session Bus Policy] block — every line
+    // this card renders from it — is decorative. Without this trigger the card
+    // showed a tidy list of bus permissions for an app bound by none of them.
+    if has("sockets", "session-bus") {
+        host_access.push(
+            "This app reaches the desktop's message bus without a filter, so the desktop permissions listed for it are not enforced on it."
+                .to_string(),
+        );
+    }
     if has("devices", "all") {
         host_access.push(
             "This app can reach every device on this machine, including cameras, microphones and USB hardware."
@@ -1946,8 +1959,13 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>
     // point. It has to be legible.
     for name in &session_bus {
         permissions.push(match name.as_str() {
+            // THE CONSEQUENCE, NOT THE PERMISSION NAME. "Your saved passwords"
+            // reads as though this app is asking about its own, and it is not:
+            // the Secret Service protocol has no per-application separation, so
+            // one grant is a grant over every password every other application
+            // has saved. A person agreeing to this is agreeing to that.
             "org.freedesktop.secrets" | "org.gnome.keyring.SystemPrompter" => {
-                "Your saved passwords (read and write)".to_string()
+                "Every password saved by every app on this device (read and write) — the desktop's password service has no per-app separation".to_string()
             }
             "org.freedesktop.Notifications" => "Send notifications".to_string(),
             "org.freedesktop.portal.Desktop" => "Desktop portals".to_string(),
@@ -2246,8 +2264,10 @@ mod tests {
         let evolution = "[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;fallback-x11;pcsc;\ndevices=dri;\nfilesystems=~/.gnupg;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\norg.gnome.keyring.SystemPrompter=talk\norg.gnome.OnlineAccounts=talk\norg.freedesktop.secrets=talk\n";
         let (_containment, permissions, _host_access) = inspect_permissions(evolution);
         assert!(
-            permissions.iter().any(|p| p.contains("saved passwords")),
-            "org.freedesktop.secrets must be named as saved-password access, got {permissions:?}"
+            permissions
+                .iter()
+                .any(|p| p.contains("Every password saved by every app")),
+            "the card must name the shared pot, not merely the permission: {permissions:?}"
         );
         assert!(
             !permissions.iter().any(|p| p == "Desktop media controls"),
@@ -2265,6 +2285,37 @@ mod tests {
             permissions.iter().any(|p| p.contains("Send notifications")),
             "org.freedesktop.Notifications must be named: {permissions:?}"
         );
+    }
+
+    /// `sockets=session-bus` invalidates every bus permission the card renders,
+    /// so it has to be a bypass trigger rather than a quiet extra socket.
+    ///
+    /// flatpak bind-mounts the real session-bus socket for this and attaches no
+    /// filtering proxy, so the app's own [Session Bus Policy] block binds
+    /// nothing. Before this, such an app was drawn with a tidy list of bus
+    /// permissions it was not actually held to — which is worse than showing
+    /// nothing, because a list reads as a limit.
+    #[test]
+    fn an_unfiltered_session_bus_is_a_bypass_and_not_a_permission() {
+        let unfiltered = "[Context]\nshared=network;\nsockets=wayland;session-bus;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\n";
+        let (containment, _permissions, host_access) = inspect_permissions(unfiltered);
+        assert_eq!(
+            containment,
+            Containment::Bypass,
+            "an unfiltered session bus is not a sandboxed app"
+        );
+        assert!(
+            host_access.iter().any(|s| s.contains("without a filter")),
+            "the reason must be named: {host_access:?}"
+        );
+
+        // The ordinary case is unchanged: the same declaration WITHOUT the raw
+        // socket stays sandboxed, so this trigger cannot quietly reclassify
+        // every app that talks to the bus at all.
+        let filtered = "[Context]\nshared=network;\nsockets=wayland;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\n";
+        let (containment, _permissions, host_access) = inspect_permissions(filtered);
+        assert_eq!(containment, Containment::Sandboxed);
+        assert!(host_access.is_empty(), "{host_access:?}");
     }
 
     /// The other direction: an app that really can read everything says so, and

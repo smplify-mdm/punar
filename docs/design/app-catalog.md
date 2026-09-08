@@ -351,9 +351,22 @@ containment = sandbox-bypassed  if any of:
   feature:    devel
 ```
 
-This list is data, reviewed like M11's `policy-allowlist.json` and M10's
-signature file, at `catalog/containment-bypass.json`. Two consequences the
-surfaces must honour:
+This list was specified as data at `catalog/containment-bypass.json`, reviewed
+like M11's `policy-allowlist.json` and M10's signature file. **That file does
+not exist, and the list lives in code** — `inspect_permissions` in
+`crates/punard/src/apps.rs`, with a test per trigger. The divergence is recorded
+here rather than quietly corrected in one direction because it had a
+consequence: `session-bus (unfiltered)` was in this list and NOT in the code for
+as long as the two disagreed, so an application holding the raw session bus —
+for which flatpak attaches no filtering proxy at all, making its entire
+`[Session Bus Policy]` block decorative — was rendered as sandboxed, with a tidy
+list of desktop permissions it was not held to. A list of permissions reads as a
+limit, which made that card worse than an empty one.
+
+Moving the triggers to data is still the right end state (an organization should
+be able to read what Punar treats as an escape without reading Rust), but the
+authority today is the code, and this document says so rather than describing a
+file a reader would go looking for. Two consequences the surfaces must honour:
 
 1. A `sandbox-bypassed` app never renders the word "sandboxed" anywhere. The
    card says, in the second person: *"This app can read and write every file in
