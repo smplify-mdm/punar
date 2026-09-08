@@ -173,6 +173,12 @@ struct Inspection {
     metadata_sha256: String,
     containment: Containment,
     permissions: Vec<String>,
+    /// Second-person sentences, one per reason this app escapes its sandbox.
+    /// Empty for a sandboxed app. The surfaces render these verbatim rather
+    /// than composing their own, so a warning cannot drift from the rule that
+    /// produced it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_access: Vec<String>,
 }
 
 /// Immutable catalog view held by the daemon.
@@ -410,7 +416,13 @@ impl AppManager {
                         "commit": commit,
                     }));
                 }
-                let mut result = self.install(id, metadata_sha256)?;
+                // Reconcile is desired-state: an administrator or the device's
+                // own policy already decided this app belongs here, and there is
+                // no person at a card to acknowledge anything. The consent gate
+                // is a UI affordance for an interactive install, not a second
+                // authorisation, so it is satisfied here rather than turning
+                // every managed rollout into a refusal nobody can clear.
+                let mut result = self.install(id, metadata_sha256, true)?;
                 result["status"] = json!("updated");
                 result["previous_commit"] = json!(before);
                 Ok(result)
@@ -448,7 +460,18 @@ impl AppManager {
     }
 
     /// Install the exact package identity whose metadata the caller saw.
-    pub fn install(&self, id: &str, confirmed_digest: &str) -> Result<Value, AppError> {
+    /// Install one catalogue app.
+    ///
+    /// `acknowledge_host_access` is the caller stating that the person saw what
+    /// this app can reach outside its sandbox and chose to continue. It is
+    /// ignored for a sandboxed app, and required for one that is not; see the
+    /// gate below for why a refusal was the wrong shape.
+    pub fn install(
+        &self,
+        id: &str,
+        confirmed_digest: &str,
+        acknowledge_host_access: bool,
+    ) -> Result<Value, AppError> {
         let app = self.app(id)?;
         let source = self.select_source(app)?;
         if matches!(source, Source::VendorDeb { .. }) {
@@ -477,10 +500,28 @@ impl AppManager {
                 "the signed metadata no longer matches the catalog and the install card; refresh the catalog before retrying".to_string(),
             ));
         }
-        if inspection.containment == Containment::Bypass {
-            return Err(AppError::Policy(
-                "the verified package metadata requests broad host access and this build has no separate bypass-consent gate".to_string(),
-            ));
+        // THE CONSENT GATE, which this build previously did not have — and whose
+        // absence refused 46 of the 57 Flatpaks in the shipped catalogue.
+        // Firefox, VS Code, LibreOffice, GIMP, Wireshark, Neovim and most of the
+        // rest declare `devices=all`, `features=devel` or a broad filesystem, so
+        // the store listed apps it could not install and told the user they
+        // "need a security review" — naming a cause that did not exist.
+        //
+        // docs/design/app-catalog.md section 1.6 never called for a refusal. It
+        // called for a card that says, in the second person, what the app can
+        // reach, and an install that proceeds once the person has seen it. A
+        // refusal is not a stricter version of that; it is a different product,
+        // and it is the one where the app store does not work.
+        //
+        // The acknowledgement is per-install and carries the exact digest the
+        // sentences were derived from, so consent cannot be replayed against a
+        // different version of the app. Refusal is reserved for the case the
+        // design does name: the permissions changed under us.
+        if inspection.containment == Containment::Bypass && !acknowledge_host_access {
+            return Err(AppError::Policy(format!(
+                "this app is not confined by its sandbox and the request did not acknowledge it: {}",
+                inspection.host_access.join(" ")
+            )));
         }
 
         let before = self.installed_commit(app_id)?;
@@ -1132,7 +1173,7 @@ impl AppManager {
                 "metadata digest {observed_digest} does not match the pinned catalog digest {metadata_sha256}"
             )));
         }
-        let (containment, permissions) = inspect_permissions(&result.stdout);
+        let (containment, permissions, host_access) = inspect_permissions(&result.stdout);
         Ok(Inspection {
             verified: true,
             commit: commit.clone(),
@@ -1140,6 +1181,7 @@ impl AppManager {
             metadata_sha256: observed_digest,
             containment,
             permissions,
+            host_access,
         })
     }
 
@@ -1787,7 +1829,7 @@ fn is_sha256(value: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>) {
+fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>) {
     let mut section = "";
     let mut values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut session_bus = BTreeSet::new();
@@ -1825,11 +1867,44 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>) {
         .any(|name| name == "org.freedesktop.Flatpak" || name == "*" || name.starts_with("!"));
     let x11_without_wayland =
         (has("sockets", "x11") || has("sockets", "fallback-x11")) && !has("sockets", "wayland");
-    let bypass = broad_fs
-        || broad_bus
-        || has("devices", "all")
-        || has("features", "devel")
-        || x11_without_wayland;
+    // WHICH TRIGGER FIRED DECIDES WHAT THE SURFACE MAY SAY, and collapsing them
+    // into one boolean made the card wrong in both directions. Firefox's
+    // filesystems are all narrow — xdg-download, a speech socket, a read-only
+    // gtk config — and it trips this rule on `devices=all; features=devel;`. A
+    // card that told someone Firefox "can read every file in your home
+    // directory" would be false, and the design's own worked example lists
+    // Firefox as the app whose row must read honestly.
+    let mut host_access: Vec<String> = Vec::new();
+    if broad_fs {
+        host_access.push(
+            "This app can read and write every file in your home directory. Its sandbox does not constrain your files."
+                .to_string(),
+        );
+    }
+    if broad_bus {
+        host_access.push(
+            "This app can ask the desktop to run programs outside its sandbox, which is not a boundary it stays inside."
+                .to_string(),
+        );
+    }
+    if has("devices", "all") {
+        host_access.push(
+            "This app can reach every device on this machine, including cameras, microphones and USB hardware."
+                .to_string(),
+        );
+    }
+    if has("features", "devel") {
+        host_access.push(
+            "This app can use development interfaces that let it inspect and change other running processes."
+                .to_string(),
+        );
+    }
+    if x11_without_wayland {
+        host_access.push(
+            "This app draws through X11, where any window can read another window's keystrokes. Wayland's isolation does not apply."
+                .to_string(),
+        );
+    }
 
     let mut permissions = Vec::new();
     if has("shared", "network") {
@@ -1855,12 +1930,13 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>) {
     permissions.sort();
     permissions.dedup();
     (
-        if bypass {
-            Containment::Bypass
-        } else {
+        if host_access.is_empty() {
             Containment::Sandboxed
+        } else {
+            Containment::Bypass
         },
         permissions,
+        host_access,
     )
 }
 
@@ -2079,6 +2155,60 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// THE TEST WHOSE ABSENCE SHIPPED A STORE THAT COULD NOT INSTALL.
+    ///
+    /// Every metadata fixture in this file was narrow — Spotify-shaped, a couple
+    /// of read-only xdg directories — so nothing ever exercised the containment
+    /// rule against what real Flatpaks actually declare. Measured against the
+    /// live Flathub metadata for the shipped catalogue, 46 of 57 entries were
+    /// refused outright: Firefox, VS Code, LibreOffice, GIMP, Wireshark, Neovim,
+    /// IntelliJ and most of the rest declare `devices=all`, `features=devel` or
+    /// a broad filesystem. The store listed them and could install none of them.
+    #[test]
+    fn a_real_world_permission_set_is_installable_once_acknowledged() {
+        // Firefox's actual Context, abbreviated: note the filesystems are all
+        // NARROW. It is unconfined because of devices and devel, not because it
+        // can read your home — which is why the reasons are reported separately.
+        let firefox = "[Context]\nshared=network;ipc;\nsockets=wayland;fallback-x11;pulseaudio;\ndevices=all;\nfeatures=devel;\nfilesystems=xdg-download;xdg-config/gtk-3.0:ro;\n";
+        let (containment, _permissions, host_access) = inspect_permissions(firefox);
+        assert_eq!(containment, Containment::Bypass);
+        assert!(
+            host_access.iter().any(|s| s.contains("every device")),
+            "devices=all must be named"
+        );
+        assert!(
+            host_access
+                .iter()
+                .any(|s| s.contains("development interfaces")),
+            "features=devel must be named"
+        );
+        assert!(
+            !host_access.iter().any(|s| s.contains("home directory")),
+            "Firefox's filesystems are narrow; claiming it reads your home would be false"
+        );
+    }
+
+    /// The other direction: an app that really can read everything says so, and
+    /// says nothing about devices it cannot touch.
+    #[test]
+    fn broad_filesystem_access_is_named_for_what_it_is() {
+        let libreoffice =
+            "[Context]\nshared=network;\nsockets=wayland;\nfilesystems=host;xdg-documents;\n";
+        let (containment, _permissions, host_access) = inspect_permissions(libreoffice);
+        assert_eq!(containment, Containment::Bypass);
+        assert!(host_access.iter().any(|s| s.contains("home directory")));
+        assert!(!host_access.iter().any(|s| s.contains("every device")));
+    }
+
+    /// A confined app asks nothing, so the card must have nothing to show.
+    #[test]
+    fn a_sandboxed_app_raises_no_host_access_question() {
+        let narrow = "[Context]\nshared=network;\nsockets=wayland;pulseaudio;\ndevices=dri;\nfilesystems=xdg-music:ro;\n";
+        let (containment, _permissions, host_access) = inspect_permissions(narrow);
+        assert_eq!(containment, Containment::Sandboxed);
+        assert!(host_access.is_empty());
+    }
+
     #[test]
     fn install_requires_the_displayed_digest_and_verifies_the_pinned_commit() {
         let metadata = "[Context]\nshared=network;\nsockets=wayland;\n";
@@ -2109,13 +2239,14 @@ mod tests {
         assert!(matches!(
             manager.install(
                 "spotify",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                false,
             ),
             Err(AppError::Verification(_))
         ));
         assert!(!state_path.exists(), "a stale card installed nothing");
 
-        let installed = manager.install("spotify", &digest).unwrap();
+        let installed = manager.install("spotify", &digest, false).unwrap();
         assert_eq!(installed["changed"], true);
         assert_eq!(
             fs::read_to_string(&state_path).unwrap().trim(),
@@ -2284,13 +2415,14 @@ mod tests {
         assert!(matches!(
             manager.install(
                 "chatgpt-desktop",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                false,
             ),
             Err(AppError::Verification(_))
         ));
         assert!(!dir.join("curl-argv").exists());
 
-        let installed = manager.install("chatgpt-desktop", &digest).unwrap();
+        let installed = manager.install("chatgpt-desktop", &digest, false).unwrap();
         assert_eq!(installed["changed"], true);
         let root = vendor_root.join("chatgpt-desktop/current");
         assert!(root.join("usr/lib/chatgpt/ChatGPT").is_file());
@@ -2312,7 +2444,7 @@ mod tests {
         assert!(argv.contains("--proto =https"));
         assert!(!argv.contains("sh -c"));
 
-        let unchanged = manager.install("chatgpt-desktop", &digest).unwrap();
+        let unchanged = manager.install("chatgpt-desktop", &digest, false).unwrap();
         assert_eq!(unchanged["changed"], false);
         let removed = manager.remove("chatgpt-desktop").unwrap();
         assert_eq!(removed["changed"], true);
@@ -2345,7 +2477,7 @@ mod tests {
                 config_dir.clone(),
             );
 
-        manager.install("chatgpt-desktop", &digest).unwrap();
+        manager.install("chatgpt-desktop", &digest, false).unwrap();
         let desktop =
             fs::read_to_string(desktop_dir.join("punar-chatgpt-desktop.desktop")).unwrap();
         assert!(desktop.contains("Exec=punarctl app open chatgpt-desktop %U"));

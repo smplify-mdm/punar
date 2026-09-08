@@ -73,6 +73,12 @@ DeferredSurfaceBase {
     // live pinned-metadata inspection.
     property string appId: ""
     property string appPhase: ""
+
+    /// Set by the install card when a person has read what an unconfined app
+    /// can reach and chosen to continue. Reset on every new app card, so an
+    /// acknowledgement is never carried from one app to the next — the whole
+    /// value of the question is that it is asked about a specific app.
+    property bool hostAccessAcknowledged: false
     property var appRecord: null
     property string appFailure: ""
     property bool appRemoveArmed: false
@@ -145,6 +151,7 @@ DeferredSurfaceBase {
         root.appId = "";
         root.appPhase = "";
         root.appRecord = null;
+        root.hostAccessAcknowledged = false;
         root.appFailure = "";
         root.appRemoveArmed = false;
         root.appUpdatePhase = "idle";
@@ -574,6 +581,7 @@ DeferredSurfaceBase {
         var parsed = root.parseLastLine(appInspectOut.text);
         if (parsed !== null && typeof parsed === "object" && parsed.app) {
             root.appRecord = parsed.app;
+            root.hostAccessAcknowledged = false;
             var inspectedSource = String(parsed.app.source || "");
             if (inspectedSource === "flatpak" || inspectedSource === "vendor_deb")
                 Apps.recordCatalogInstallState(root.appId, parsed.app.installed === true);
@@ -611,14 +619,31 @@ DeferredSurfaceBase {
             return;
         }
         var inspection = root.appRecord.inspection;
-        var flatpakReady = source === "flatpak" && inspection && inspection.verified === true && inspection.containment === "sandboxed";
+        // A FLATPAK IS READY WHEN ITS METADATA VERIFIED, not when it happens to
+        // be confined. Requiring `containment === "sandboxed"` here refused 46
+        // of the 57 Flatpaks in the catalogue — Firefox, VS Code, LibreOffice,
+        // GIMP, Wireshark, Neovim and most of the rest declare `devices=all`,
+        // `features=devel` or a broad filesystem — and told the person a
+        // security review was pending, which was not true of any of them. What
+        // an unconfined app needs is for someone to see what it can reach and
+        // say yes; that is `hostAccessAcknowledged`, set by the install card.
+        var flatpakReady = source === "flatpak" && inspection && inspection.verified === true;
         var vendorReady = source === "vendor_deb" && inspection && inspection.pinned === true
             && inspection.verified_on_install === true && inspection.containment === "hardened_native";
         if (!flatpakReady && !vendorReady) {
-            root.appFailure = "This package needs a security review before Punar can install it.";
+            root.appFailure = inspection && inspection.verified === false
+                ? "Punar could not verify this package against the catalogue. Nothing was installed."
+                : "This package cannot be installed from this catalogue entry.";
             root.appPhase = "failed";
             return;
         }
+        var needsAcknowledgement = flatpakReady && inspection.containment !== "sandboxed";
+        // The card has already shown, above this button, exactly what the app
+        // can reach, and the button reads "Install anyway". Pressing it IS the
+        // answer, so it is recorded here rather than demanding a second press
+        // for a question that has been asked and answered on screen.
+        if (needsAcknowledgement)
+            root.hostAccessAcknowledged = true;
         var digest = String(flatpakReady ? (inspection.metadata_sha256 || "") : (inspection.package_sha256 || ""));
         if (digest.length !== 64) {
             root.appFailure = "The verified metadata digest is missing.";
@@ -627,10 +652,15 @@ DeferredSurfaceBase {
         }
         root.appPhase = "installing";
         try {
-            appInstallProc.command = [
+            var argv = [
                 "punarctl", "--json", "app", "install", root.appId, "--yes",
                 "--confirm-metadata-sha256", digest
             ];
+            // Sent only when the person actually acknowledged, so the flag
+            // cannot become a default that travels with every install.
+            if (needsAcknowledgement)
+                argv.push("--acknowledge-host-access");
+            appInstallProc.command = argv;
             appInstallProc.running = true;
         } catch (e) {
             root.appFailure = "The application installer is unavailable.";

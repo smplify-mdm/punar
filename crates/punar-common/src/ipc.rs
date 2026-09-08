@@ -543,6 +543,18 @@ pub struct AppsCatalogParams {
 pub struct AppsInstallParams {
     pub id: String,
     pub confirm_metadata_sha256: String,
+    /// The caller states that the person was shown what this app can reach
+    /// outside its sandbox, and chose to continue.
+    ///
+    /// Ignored for an app whose sandbox does confine it. Required for one whose
+    /// does not: most real Flatpaks declare `devices=all`, `features=devel` or a
+    /// broad filesystem, and refusing them outright — which is what this build
+    /// did before — is not a stricter product, it is one where the app store
+    /// does not install anything. The acknowledgement travels beside
+    /// `confirm_metadata_sha256`, so it is bound to the exact bytes whose
+    /// permissions were shown and cannot be replayed against a later version.
+    #[serde(default)]
+    pub acknowledge_host_access: bool,
 }
 
 /// Remove the native package associated with one catalog id.
@@ -2211,6 +2223,7 @@ mod tests {
                 id: "spotify".to_string(),
                 confirm_metadata_sha256:
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                acknowledge_host_access: false,
             }),
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),

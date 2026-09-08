@@ -11,6 +11,54 @@
   ],
   "apps": [
     {
+      "id": "alpaca",
+      "name": "Alpaca",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "chat",
+        "development",
+        "utility"
+      ],
+      "summary": "Chat with AI models.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jeffser.Alpaca",
+          "ref": "app/com.jeffser.Alpaca/x86_64/stable",
+          "commit": "ced59ceb84b2a8824c270305f413e76720ebf0b1d4fcfe224c19b4cd25ae42eb",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "0fb3227d03b466327dc646fcf439799708dae5e383dca97bc3364a47b6c6a870"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jeffser.Alpaca",
+          "ref": "app/com.jeffser.Alpaca/aarch64/stable",
+          "commit": "d66cdd66706a4dfe6a0986199ed82c7858dbfd7184538e4d63585bc3036fea92",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "251c8047d0bbfce04a2006cd78da11d6ddabb44cf9d6ba1ad5af20b3a15af04f"
+        }
+      ]
+    },
+    {
       "id": "android-studio",
       "name": "Android Studio",
       "featured": false,
@@ -204,6 +252,54 @@
       ]
     },
     {
+      "id": "baobab",
+      "name": "Disk Usage Analyzer",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "filesystem",
+        "system",
+        "utility"
+      ],
+      "summary": "Check folder sizes and available disk space.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.baobab",
+          "ref": "app/org.gnome.baobab/x86_64/stable",
+          "commit": "1c02a573e25a8fa812dab4282affe961615773e4ef98071439737c2b4047dda0",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "af3f4961eb77519251cd816d4e489e0a35e5d4fc6f70bc88d0f035688dc320ed"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.gnome.baobab",
+          "ref": "app/org.gnome.baobab/aarch64/stable",
+          "commit": "4ba07fea266aa2dc53bbf55e42e25270cd509f21e04455b1212d74c94e088b62",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "3fc0ff2b29fecd5608bb0ceeb0f2a53c366492794cb1f9f9087785badc7039e6"
+        }
+      ]
+    },
+    {
       "id": "bitwarden",
       "name": "Bitwarden",
       "featured": false,
@@ -301,6 +397,87 @@
           "commit": "f97247d9e87dca0bc28c6a01e51cd6425cf8b21c636d28514898b7315b21d521",
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "3b34492931123fb5d222bbca8b1a8d1211e22de7bd8b703be262580fea63ea88"
+        }
+      ]
+    },
+    {
+      "id": "browser",
+      "name": "Brave",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "Fast Internet, AI, Adblock.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.brave.Browser",
+          "ref": "app/com.brave.Browser/x86_64/stable",
+          "commit": "adab43247ffe189c6a63fa012cf44b82ec3fd01fb931b8eb75aefd0512fe03eb",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "619ce270fe82626695180bc815d9283af8c30467686ae475b2d7cf11aeada3a6"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.brave.Browser",
+          "ref": "app/com.brave.Browser/aarch64/stable",
+          "commit": "50a41caab43774ed3e06c96ab2eb254802200f2cbdb79ea19c959f2938549b1e",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "e02d32e2f92bd4fffb217aac71bed776365674c316b9067746c63619c74b1e34"
+        }
+      ]
+    },
+    {
+      "id": "bruno",
+      "name": "Bruno",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Fast and Git-Friendly API Client.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.usebruno.Bruno",
+          "ref": "app/com.usebruno.Bruno/x86_64/stable",
+          "commit": "e9d21582660e5740ec1833d8325c2e391d99569f042303ffbdb6a6e7282debca",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "a06c8cd3f2988908915ee6f4ac9e3c21e2546f5882bb4bf73616916f96f4b6d1"
         }
       ]
     },
@@ -469,6 +646,100 @@
       ]
     },
     {
+      "id": "chrome",
+      "name": "Google Chrome",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "The browser built to be yours.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.google.Chrome",
+          "ref": "app/com.google.Chrome/x86_64/stable",
+          "commit": "b86e55b133d5643e6de573870cd0a7d6797164981ff64e25ac157ff29221c68c",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "cab7cbb1e69b8fe0f333ab2989dea57a970f1da05368cb3e02698726864da14e"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.google.Chrome",
+          "ref": "app/com.google.Chrome/aarch64/stable",
+          "commit": "3671301d586f9794d7daedbb018d342168a0db1f43c6acce481930e5aa70ada7",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "853969d57ee367d641be6055fb642a8e52ca11b5f2a8b56436f2e7ca8e9c6270"
+        }
+      ]
+    },
+    {
+      "id": "chromium",
+      "name": "Chromium Web Browser",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "The web browser from Chromium project.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.chromium.Chromium",
+          "ref": "app/org.chromium.Chromium/x86_64/stable",
+          "commit": "650cf951c98ab3be7c88d95a6591a947123c88e3791cdfd90ec144082bc47b01",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "c4d896f97a2003570b22a45053255d5783a8afb237c2fae1c25a1e310c5206f5"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.chromium.Chromium",
+          "ref": "app/org.chromium.Chromium/aarch64/stable",
+          "commit": "2e9bf9fbdfa42ab0aab56931a80d34db1d05ca2fec1eef287e4f359bef691eef",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "5bcef79596d2478e6200c9c809f06b8ffa4ce86250ca43abbddaf203f4660a55"
+        }
+      ]
+    },
+    {
       "id": "claude",
       "name": "Claude",
       "icon": "claude.svg",
@@ -587,6 +858,100 @@
       ]
     },
     {
+      "id": "clion",
+      "name": "CLion",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "A cross-platform IDE for C and C++.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.CLion",
+          "ref": "app/com.jetbrains.CLion/x86_64/stable",
+          "commit": "93111c49bcbe3f6192e094265a83724da1578c5b36670f57fa62039f60137d75",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "22d6ec5698d367b0ba4c802ac0f5983a4e41b3dd2ed671bfb1648604a1337916"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.CLion",
+          "ref": "app/com.jetbrains.CLion/aarch64/stable",
+          "commit": "9abd5d8570d7e79585492578dfb914ba2d47b84c9704adc4515af3a8b7efedfd",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "5d23026ca50ce3f455069ffde0681d49561fd9750b9012f662bd7bede989e9a2"
+        }
+      ]
+    },
+    {
+      "id": "codeblocks",
+      "name": "Code::Blocks",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "IDE for C, C++ and Fortran.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.codeblocks.codeblocks",
+          "ref": "app/org.codeblocks.codeblocks/x86_64/stable",
+          "commit": "35fd570ca2732407d53af1b6216bbc8afa6609bd781fa1205c9ec5144ac6452e",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "6a3af7cd2858b08a1974475c705372e0a83c17f39014331579ef286465583d01"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.codeblocks.codeblocks",
+          "ref": "app/org.codeblocks.codeblocks/aarch64/stable",
+          "commit": "53cd20788d405ce19f21ce6480fecb7403d95541990ee2faf5e46ed41af405fe",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "37986aca81a0211187dc318334526ef890364458557eac0d8b11c207963e7c0d"
+        }
+      ]
+    },
+    {
       "id": "cryptomator",
       "name": "Cryptomator",
       "featured": false,
@@ -633,6 +998,53 @@
           "commit": "126716568b480bee00695d1b4d896ca42ffc6d9cbdcea06c2e65fb7879494b20",
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "d21a35da41026d988ed784dd73417a9e3b0642deca8d7186f2ab68b2876074c9"
+        }
+      ]
+    },
+    {
+      "id": "darktable",
+      "name": "darktable",
+      "featured": false,
+      "category": "graphics",
+      "keywords": [
+        "graphics",
+        "photography"
+      ],
+      "summary": "Organize and develop images from digital cameras.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.darktable.Darktable",
+          "ref": "app/org.darktable.Darktable/x86_64/stable",
+          "commit": "f611b84a8932382fa38a0b54c7359244e929248a10a64d298a9f5b1630da6945",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "d7402493583b8104995680a83b0910548351f71bc8eea13a58c04780d63d99bd"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.darktable.Darktable",
+          "ref": "app/org.darktable.Darktable/aarch64/stable",
+          "commit": "c3ed864d7555fdaecc058962e23eba343dcdfa350308ee4b3a3daf39413c8f9e",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "cf8b1738d80d2f01ebbd69251a381dbba61949d15b007ce592524a1b5b6d9206"
         }
       ]
     },
@@ -685,6 +1097,101 @@
           "commit": "6bda1c4dead888b4560640d6d635b5b32eab63d8a5fc5d4fbf925aa5057438b5",
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "78ed28b6fc54473025baae608cd3520a6d0bbb827f92b3422bc9c770dbc8bc56"
+        }
+      ]
+    },
+    {
+      "id": "desktop",
+      "name": "GitHub Desktop",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Simple collaboration from your desktop.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.shiftey.Desktop",
+          "ref": "app/io.github.shiftey.Desktop/x86_64/stable",
+          "commit": "d0d245eaec5260f69ef7a8a7c08bf7b497175a784224d4919e644e7182e8785b",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "147761f4fef16a37ddef1aff3b8c1a69c4591878b9fa8fe8c7fc42b915e9b3fc"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.shiftey.Desktop",
+          "ref": "app/io.github.shiftey.Desktop/aarch64/stable",
+          "commit": "deef3ffa210f1273c8d060ba47f77479b32551b1e9fac5fc385974b3b5218b93",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "1d917d27c9094512193de7f6e28c2657b1c2bef464c01c8adca0220862b6abc4"
+        }
+      ]
+    },
+    {
+      "id": "desktopeditors",
+      "name": "ONLYOFFICE Desktop Editors",
+      "featured": false,
+      "category": "productivity",
+      "keywords": [
+        "office",
+        "presentation",
+        "spreadsheet",
+        "wordprocessor"
+      ],
+      "summary": "Office productivity suite.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.onlyoffice.desktopeditors",
+          "ref": "app/org.onlyoffice.desktopeditors/x86_64/stable",
+          "commit": "5806f4728bd3e2bc5314c2c0dfbc59d10dcac33516b5536ac12ceae2e79f98c1",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "013750cd9c61a5fc5cae8e2fc43c950db3bb589a0dcf81f59d745fbbed0eb83e"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.onlyoffice.desktopeditors",
+          "ref": "app/org.onlyoffice.desktopeditors/aarch64/stable",
+          "commit": "724aa3efad2275a29a0ea31d867e92721a67fa1b325c710582dda31fa92012f7",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "b96ef9386a9e6885375bf8307629aed7017d47fbd1df63a7afb2d1156731357d"
         }
       ]
     },
@@ -792,6 +1299,53 @@
       ]
     },
     {
+      "id": "easyeffects",
+      "name": "Easy Effects",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "audio",
+        "audiovideo"
+      ],
+      "summary": "Simple audio effects.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.wwmm.easyeffects",
+          "ref": "app/com.github.wwmm.easyeffects/x86_64/stable",
+          "commit": "12b796b34167608548678ffe291b7aca9df0f937b79e84150a11d78c46a30c90",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "46128978c5537a0f407b900a58b099a8cf53d02e3bcc0097908fbd75c55a2fe2"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.wwmm.easyeffects",
+          "ref": "app/com.github.wwmm.easyeffects/aarch64/stable",
+          "commit": "f2e3de1732500b58d863d243a35c778a680584d8dee4ca5e42cc0fdd02e5623c",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "cf5e0ac5b817aeb3cdc1ac26d6660b322a99ed140410e89c1d1ac0f6c92b7e7e"
+        }
+      ]
+    },
+    {
       "id": "eclipse-java",
       "name": "Eclipse IDE",
       "featured": false,
@@ -838,6 +1392,41 @@
           "commit": "93faa94782abf204dc20255667e00079c6e7e7c495afca1a8f199cbe44ba47c7",
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "2a4e212b5a72ac0463d33c925dc5870618fc5f627bf77b9a7c1abf106fa80e87"
+        }
+      ]
+    },
+    {
+      "id": "edge",
+      "name": "Microsoft Edge",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "Introducing the new Microsoft Edge web browser. It\u2019s time to expect more. More privacy. More control. More productivity. More value.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.microsoft.Edge",
+          "ref": "app/com.microsoft.Edge/x86_64/stable",
+          "commit": "b8137c41d5da828886b46796b2ccb24e57056d501820666a84da05e3b7844176",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "79d5aadaba86dbc74fb3d96f59d1fad15c6759f28940e8533137f3d26a31da79"
         }
       ]
     },
@@ -938,6 +1527,55 @@
           "commit": "37d184e46e7dab0b8436c247c97e69e2b13e2ce665d7a7132fb1ef9e42f1516d",
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "ee054a3ebba630258ace1a52a56f41c22806cd8b863d90b7575a7ba7fa5c2390"
+        }
+      ]
+    },
+    {
+      "id": "eyedropper",
+      "name": "Eyedropper",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "graphics",
+        "utility",
+        "webdevelopment"
+      ],
+      "summary": "Pick and format colors.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.finefindus.eyedropper",
+          "ref": "app/com.github.finefindus.eyedropper/x86_64/stable",
+          "commit": "c607fc87e575c3a3eb796b6bce232b6ab25d76cf9f41a9a5cbf3f50960cb9feb",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "638944d098f75ecc592ec1fb2fd001139fe9a6da3163c04a8fa37887c8cf20f6"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.finefindus.eyedropper",
+          "ref": "app/com.github.finefindus.eyedropper/aarch64/stable",
+          "commit": "06597f1123980aab325f9f6b6a13e273c4c43456e8e10145d9a3a4de69054c55",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "c5b09fc5be5fdc998902d250faa19508b38c5db2794f0eb8f7dce2d1e264e997"
         }
       ]
     },
@@ -1046,6 +1684,230 @@
       ]
     },
     {
+      "id": "freecad",
+      "name": "FreeCAD",
+      "featured": false,
+      "category": "graphics",
+      "keywords": [
+        "education",
+        "engineering",
+        "graphics",
+        "science"
+      ],
+      "summary": "An open source parametric 3D CAD modeler.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.freecad.FreeCAD",
+          "ref": "app/org.freecad.FreeCAD/x86_64/stable",
+          "commit": "c8bae9a419fcddf1f40c046b064be3b8b98144734b1828428f6a2a944312dd29",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "db5ec08f69b6597581fb431ab46348b8ca1f7cdfb160f02c35bec7c63f1701b7"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.freecad.FreeCAD",
+          "ref": "app/org.freecad.FreeCAD/aarch64/stable",
+          "commit": "f45d1b1f3b8eff14e6f8f03606cd50539606d3aa86b1fd45576241ce472c8c50",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "80176af5ff04c5cde6108efdd1583316a6ddc977da2fbc2a9f88b7ca9accadf2"
+        }
+      ]
+    },
+    {
+      "id": "geany",
+      "name": "Geany",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide",
+        "texteditor"
+      ],
+      "summary": "Fast and lightweight IDE.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.geany.Geany",
+          "ref": "app/org.geany.Geany/x86_64/stable",
+          "commit": "d54993a583e5f24247648cc6da3af82f6ae437129b607657e86e20a924942d1e",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "32cd0d789fbd2dd675ed109358d6e118deec5a4b55342a8638f9b42b94d28df4"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.geany.Geany",
+          "ref": "app/org.geany.Geany/aarch64/stable",
+          "commit": "f3fbe0bbe5e657750730cfd95e00271c879de053d8d7eb8e74066af9659ade2f",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "6c65c6075ecc0db0e2236675e2d0c4f5e67039dd9ad91190ac1961f75bf7251f"
+        }
+      ]
+    },
+    {
+      "id": "gearlever",
+      "name": "Gear Lever",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "utility"
+      ],
+      "summary": "Manage AppImages.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "it.mijorus.gearlever",
+          "ref": "app/it.mijorus.gearlever/x86_64/stable",
+          "commit": "3cb51600bc734bd87fb498663b57bfb02530610aeeffe13804a8bbb6c805d3cc",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "337ba92c6f44000442bcd6aeac718c5babf574ce4fb0b1b7324ad092b6286964"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "it.mijorus.gearlever",
+          "ref": "app/it.mijorus.gearlever/aarch64/stable",
+          "commit": "63bcd570fa2810891c4fe2d0d663bcc07d78e47f4f9be25fd02d439b9ead9e68",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "edecd6254ebf365169d76c49a6fdca125a174fbbba83b97624e52aba112b4223"
+        }
+      ]
+    },
+    {
+      "id": "ghb",
+      "name": "HandBrake",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "audiovideo",
+        "video"
+      ],
+      "summary": "Video Transcoder.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "fr.handbrake.ghb",
+          "ref": "app/fr.handbrake.ghb/x86_64/stable",
+          "commit": "25655495223b3afd73afa4da4772ac1f3a2a7db5543a4cf907925f1ee36e8892",
+          "runtime": "org.gnome.Platform/x86_64/49",
+          "metadataSha256": "80fda83ad9caa14c61fa8fc88e88fce3e7a1511d1df418b975a9fb61d05aa52f"
+        }
+      ]
+    },
+    {
+      "id": "ghidra",
+      "name": "Ghidra",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Ghidra Reverse Engineering Suite.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.ghidra_sre.Ghidra",
+          "ref": "app/org.ghidra_sre.Ghidra/x86_64/stable",
+          "commit": "ed84a73ca88ee77a86cf61c5c877a88df389d1cc732d19626b6381e17f95031c",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "d613f18aa135256f23dc364204e4e77fc0cff2c9149e704d31f28489cb540a3a"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.ghidra_sre.Ghidra",
+          "ref": "app/org.ghidra_sre.Ghidra/aarch64/stable",
+          "commit": "ea6a4cb7fd7b02b821e44f1879cab6f9ef9398f2c2788410264ba9917081df07",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "d1e0fd813c689e2394d9dcdb15cf239adc984a645aea79f453c0c9eae94443be"
+        }
+      ]
+    },
+    {
       "id": "gimp",
       "name": "GIMP",
       "featured": false,
@@ -1143,6 +2005,99 @@
           "commit": "16fa7f061582f6bf1d0f5858473cc1c4c9bde5324373506bbd8e44414593cb2b",
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "200dcb5365ff1041544040982f6eec8404a1c005137669ad5c7da080edc32b09"
+        }
+      ]
+    },
+    {
+      "id": "gitkraken",
+      "name": "GitKraken",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "revisioncontrol"
+      ],
+      "summary": "For repo management, in-app code editing & issue tracking.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.axosoft.GitKraken",
+          "ref": "app/com.axosoft.GitKraken/x86_64/stable",
+          "commit": "24ea1243d34753d71b7aae6904e87c123d9c09df3944b4232c9d616e66367648",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "731b80fc351306fb1c46e5cd6f62dba0648771d9eb9ed0a33a212c83cd12da0c"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.axosoft.GitKraken",
+          "ref": "app/com.axosoft.GitKraken/aarch64/stable",
+          "commit": "f34e15925113ac0965003f4ddcc40848c6d90cb2beeb308f504c5e3a40903daf",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "6ce97e4b1049c76e6fe5aa107b1c6e983c738d7ec9483a1bfddb134b25d94c95"
+        }
+      ]
+    },
+    {
+      "id": "gittyup",
+      "name": "Gittyup",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Graphical Git client designed to help you understand and manage your source code history.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.Murmele.Gittyup",
+          "ref": "app/com.github.Murmele.Gittyup/x86_64/stable",
+          "commit": "738156b203fe61209de3c96acfa8da7399e2ef1c5204aab5f825ccbb02aea351",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "0edea5a74c1ef3fd5502c233076dd51349858c7c6a94231297302684d50c9c7f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.Murmele.Gittyup",
+          "ref": "app/com.github.Murmele.Gittyup/aarch64/stable",
+          "commit": "7e90dcd3609b5f1599573d5ae2f6156dc514e8e27de993cea2e554c666289fee",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "5b2d7ab81f4bc7e6f1d7bc4422447383cfa12fb09eac38095f342cd90ecbdb7e"
         }
       ]
     },
@@ -1509,6 +2464,100 @@
       ]
     },
     {
+      "id": "goland",
+      "name": "GoLand",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Capable and Ergonomic Go IDE.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.GoLand",
+          "ref": "app/com.jetbrains.GoLand/x86_64/stable",
+          "commit": "0e454971335a3c12f32e3c9fa99710be5aaec20715298a5f6cb31e25665e4242",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "8f4f8a78cfa25d1f1760d6d5bd24e8dfcc27cbcf574479e507dc530531f5f44e"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.GoLand",
+          "ref": "app/com.jetbrains.GoLand/aarch64/stable",
+          "commit": "0a529dedd8b11e18f345fe7295b0bb6f3ffc5826ace7ede63e6a8d84d8da7b41",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "cdb0e7266f239be4ddd9a8afd70b34f6f2f182e7733957acd1615e598891fe62"
+        }
+      ]
+    },
+    {
+      "id": "gpt4all",
+      "name": "GPT4ALL",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "office",
+        "utility"
+      ],
+      "summary": "Open-source assistant.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gpt4all.gpt4all",
+          "ref": "app/io.gpt4all.gpt4all/x86_64/stable",
+          "commit": "9f3d3869e2b65d08ebd2f2b13ce0ec05ca49e391121b66206e906bf19e06b24d",
+          "runtime": "org.kde.Platform/x86_64/6.9",
+          "metadataSha256": "92b5b7ce302c4baf4c8c6b0e64054578844566140ecf07f9712399280163f5d3"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gpt4all.gpt4all",
+          "ref": "app/io.gpt4all.gpt4all/aarch64/stable",
+          "commit": "c24254df49f5e05dea77af7eaea4537cd8a92e590b3527c2584f33e372fcec66",
+          "runtime": "org.kde.Platform/aarch64/6.9",
+          "metadataSha256": "e79f4450a9e7486c71b585c8f9edb2b4b0a3f2fd38cfa1eb74ba0a34b399b2c4"
+        }
+      ]
+    },
+    {
       "id": "httpie",
       "name": "HTTPie",
       "icon": "httpie.png",
@@ -1557,6 +2606,99 @@
           "commit": "96bf9cf0ba7caeed5eb5a80e023c002dc0f9236fc14d82ea90e0501787b5e3ef",
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "4b8673c16e9cdb995c65a186cb72b90e196f3a76bc17c9a474dffc321c83105e"
+        }
+      ]
+    },
+    {
+      "id": "ide",
+      "name": "GDevelop",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Fast and Easy Game-Making.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gdevelop.ide",
+          "ref": "app/io.gdevelop.ide/x86_64/stable",
+          "commit": "6af61a29feaeaa73bd4643e4d7299bcf98823d4a2d36c1e487d938e0d10e439c",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "8cc2204ca8b6339b10314667e2f85943a3402a76565d96233bf78fa1aa31a498"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gdevelop.ide",
+          "ref": "app/io.gdevelop.ide/aarch64/stable",
+          "commit": "5c38c5550a3969e04821783d6668c8f3f8a76f2f2463902b2d69b9b408cee07d",
+          "runtime": "org.freedesktop.Platform/aarch64/24.08",
+          "metadataSha256": "814cce2f3607dd0bf88dabb4cb00708a8e86ad50084f4f441e69840678128960"
+        }
+      ]
+    },
+    {
+      "id": "imhex",
+      "name": "ImHex",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Modern REing Hex Editor.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "net.werwolv.ImHex",
+          "ref": "app/net.werwolv.ImHex/x86_64/stable",
+          "commit": "3e4e0593d418b17abc962b7dd92c5b803e5c91d1c931f891a02abfa824c11f4d",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "a80bdb3492d8b912baa8188f6b477c13ef5dac8b1e1cc009308f68bdc764c3a3"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "net.werwolv.ImHex",
+          "ref": "app/net.werwolv.ImHex/aarch64/stable",
+          "commit": "36946d0b3c0db23fc431c9aac219426b7b1381d80c6d50eae2a9412028f37230",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "2a51b97ead5564fb3c6ae80917edcfe01616b1a69a8312c60f173b2b8c081dc5"
         }
       ]
     },
@@ -1708,6 +2850,139 @@
           "commit": "0fc30e780577406f2a7b9fd67c6d4944df3ed0f18459a574c3db4e0c0233ae97",
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "23bed1a86fa0ce7e6b5e1f7dfaadc85aa878d6804dd8c2eeaefd8b76b47ed77b"
+        }
+      ]
+    },
+    {
+      "id": "intellij-idea-ultimate",
+      "name": "IntelliJ IDEA",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Leading Java and Kotlin editor.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.IntelliJ-IDEA-Ultimate",
+          "ref": "app/com.jetbrains.IntelliJ-IDEA-Ultimate/x86_64/stable",
+          "commit": "af4fbed4ed7ef837ad9ec6528c0010ceed77b42412a3588da99d9b8e9df05966",
+          "runtime": "org.freedesktop.Sdk/x86_64/26.08",
+          "metadataSha256": "73c388f3190d569637965672acb0e50b109da56e27af181a9a1ccf7234fbcf86"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.IntelliJ-IDEA-Ultimate",
+          "ref": "app/com.jetbrains.IntelliJ-IDEA-Ultimate/aarch64/stable",
+          "commit": "24058ac1813f53224e681275a816e81e366c7951cc620292380cdef3464f97bd",
+          "runtime": "org.freedesktop.Sdk/aarch64/26.08",
+          "metadataSha256": "253dc432f4f8f4fef972e0825e7562c94da99bc6e13a32148851949985a0aef5"
+        }
+      ]
+    },
+    {
+      "id": "jan",
+      "name": "Jan",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "chat",
+        "dictionary",
+        "education",
+        "utility"
+      ],
+      "summary": "Private offline AI assistant.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "ai.jan.Jan",
+          "ref": "app/ai.jan.Jan/x86_64/stable",
+          "commit": "b2bde1feca09ea959a68ef2289400783342faa5cebc14ee7837e483c12f80512",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "60697e59a736b0a2daf38356128218d3e94346468f4629f2f8d5c4364a39cab0"
+        }
+      ]
+    },
+    {
+      "id": "jellyfindesktop",
+      "name": "Jellyfin Desktop",
+      "featured": false,
+      "category": "media",
+      "keywords": [
+        "audiovideo",
+        "player",
+        "tv",
+        "video"
+      ],
+      "summary": "Jellyfin desktop client.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.jellyfin.JellyfinDesktop",
+          "ref": "app/org.jellyfin.JellyfinDesktop/x86_64/stable",
+          "commit": "101468e6a77cf4cc4343f3069933025a86ebaf765eb662644dc6536003831c1d",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "5543c08a2898acddfd52589591cad27e1fed77143529996bdd93e35f86694300"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.jellyfin.JellyfinDesktop",
+          "ref": "app/org.jellyfin.JellyfinDesktop/aarch64/stable",
+          "commit": "dc713db9bbace6235ba79aecce440616f2da67013678bd45f0da0ca4c6e1ee9a",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "2bb09791100fd73a286e7b4dc6974b3c7f103b55613768444d8f89c9e38aab3d"
         }
       ]
     },
@@ -1866,6 +3141,52 @@
       ]
     },
     {
+      "id": "kdiskmark",
+      "name": "KDiskMark",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system"
+      ],
+      "summary": "Disk benchmark tool.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.jonmagon.kdiskmark",
+          "ref": "app/io.github.jonmagon.kdiskmark/x86_64/stable",
+          "commit": "a8e87435abc4eb4ab576b4d0fd8cad87ee20ef962089035e4615c19aca64ca6a",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "de365d8e6d876f803bc39733d91fb89712301fc469d843b16eb68304ae52019b"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.jonmagon.kdiskmark",
+          "ref": "app/io.github.jonmagon.kdiskmark/aarch64/stable",
+          "commit": "2aa47199490d6e25c1d0f4a6aaeba308df8000b46717b313b4d229c726781e5d",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "ee7c68a48e58feed79ef54d4ab6c635168a171fc334aea207c606aa71ea42ae8"
+        }
+      ]
+    },
+    {
       "id": "keepassxc",
       "name": "KeePassXC",
       "icon": "keepassxc.png",
@@ -1969,6 +3290,52 @@
       ]
     },
     {
+      "id": "ktailctl",
+      "name": "KTailctl",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system"
+      ],
+      "summary": "Manage and monitor Tailscale.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.fkoehler.KTailctl",
+          "ref": "app/org.fkoehler.KTailctl/x86_64/stable",
+          "commit": "d8f72d31f910856921764657ce98ea08dfbbd9a35b16fbeeb7ad53a2170dd6fd",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "f1aef8d0614143f3ab2d499a9832c9d3fb2a8382828547e57e66c7eaaccbe4aa"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.fkoehler.KTailctl",
+          "ref": "app/org.fkoehler.KTailctl/aarch64/stable",
+          "commit": "50aaa0833f5dfefd11b60a656a468fcb27bf6ac81629fa3a48825c8640fe787a",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "bc71cb3e65ab4798e45dd760fc1468de74df575a00fe63a31d66b9eb890526a1"
+        }
+      ]
+    },
+    {
       "id": "libreoffice",
       "name": "LibreOffice",
       "featured": false,
@@ -2016,6 +3383,193 @@
           "commit": "18407f661b0e88d171568c6e0cd3c62b86e29b0eb950333e42acaa4858e66f2c",
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "893f00e06f457a00720ba3c6d7906e8a2204c476548e460987e505df08649662"
+        }
+      ]
+    },
+    {
+      "id": "librewolf-community",
+      "name": "LibreWolf",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "LibreWolf Web Browser.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gitlab.librewolf-community",
+          "ref": "app/io.gitlab.librewolf-community/x86_64/stable",
+          "commit": "3aa3a73905466f7ec127a9888ce2c75e854cd4e3d2a502bc12f7e689a430f152",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "4434a0d877bdac89f172c3903e54bd3e8a09b5e1c470ade08f3cbfec487c6501"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.gitlab.librewolf-community",
+          "ref": "app/io.gitlab.librewolf-community/aarch64/stable",
+          "commit": "20641ef876429ad11756642a3a5fd384cf368c8153ff2b9f1d7b55c9893f621d",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "f31c81226b9a760b0dd8a27042e66c470f852590cf2c39eb52de6da6aed5ded0"
+        }
+      ]
+    },
+    {
+      "id": "lm-studio",
+      "name": "LM Studio",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "chat",
+        "development",
+        "utility"
+      ],
+      "summary": "Run AI models, locally and privately.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "ai.lmstudio.lm-studio",
+          "ref": "app/ai.lmstudio.lm-studio/x86_64/stable",
+          "commit": "ba556cc2d657b5fe056ae2bf4d3ce53f6e4701294d7e61d636241d1cf142c77d",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "52665fe44f7207222455717deb6471e95e28301f9ad81cc18c743703e8d9b2a3"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "ai.lmstudio.lm-studio",
+          "ref": "app/ai.lmstudio.lm-studio/aarch64/stable",
+          "commit": "2fa91f6f37f111030fc669179373e4fbc092959a755d4db78494900ea9cadf14",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "0f3b0e59f54b45fa0facecb5de204d1a63699e3971c50a94fbd2306674016e33"
+        }
+      ]
+    },
+    {
+      "id": "localsend-app",
+      "name": "LocalSend",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "utility"
+      ],
+      "summary": "Share files to nearby devices.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.localsend.localsend_app",
+          "ref": "app/org.localsend.localsend_app/x86_64/stable",
+          "commit": "31f3f559da9fc85ec88a82923e3d7287a873240573cbb9d6bd54bf4a26ad1ccd",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "012bc4f3bc98d7e1f458bb9e52a473e8cf822f26637967a303c41417e88dbee4"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.localsend.localsend_app",
+          "ref": "app/org.localsend.localsend_app/aarch64/stable",
+          "commit": "6c0e229a789a0c23bcd977488df9224a4ffee3c4b925163da6b5ad516f5a6dc4",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "6183140ea1812c59a641f2e23b5480fead2a4069b8f2f5b8a2afccaf5cde914e"
+        }
+      ]
+    },
+    {
+      "id": "mediawriter",
+      "name": "Fedora Media Writer",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system"
+      ],
+      "summary": "Create a Fedora live USB drive.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.fedoraproject.MediaWriter",
+          "ref": "app/org.fedoraproject.MediaWriter/x86_64/stable",
+          "commit": "0655f5154786cf6092440654a327ad911e2dd478b721b6ad65e7b82b1bbab440",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "e43d9b5e942a6f20b3de99c0ad6c02daefcbce97ba7fb74edb80f10a141009c2"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.fedoraproject.MediaWriter",
+          "ref": "app/org.fedoraproject.MediaWriter/aarch64/stable",
+          "commit": "414a87985ce6814714488356d8746e1136e5937d3694012fcae9e3ba19fc2521",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "d9d67aa38bc3c5c3cf8858f0bbd2cf7d8a4a08f27c1ec24a8d00802a14f7414e"
         }
       ]
     },
@@ -2068,6 +3622,53 @@
           "commit": "14f7de0eb98af8ec0d2504c3059e2c35be768f336d7d6f3704e86ba9eb84340c",
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "55f223f70595794ebc730c535923759f5802fd32e67294c6f6a394e1c98c3db8"
+        }
+      ]
+    },
+    {
+      "id": "micro",
+      "name": "Micro Text Editor",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "texteditor"
+      ],
+      "summary": "A modern and intuitive terminal-based text editor.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.zyedidia.micro",
+          "ref": "app/io.github.zyedidia.micro/x86_64/stable",
+          "commit": "91c5a2bf9f0c906cc41234267aa764ea921eb90a82a535e8e475425fea10ef54",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "cda3e2ed1e32b4ebb114edf07752cf46917e192af8df452af23427f19fab0755"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.zyedidia.micro",
+          "ref": "app/io.github.zyedidia.micro/aarch64/stable",
+          "commit": "80928f3da362d0b6f9a0dae3ce11a29dc2fc7ca2381653268329a425be6ee679",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "e244889c85242fc11e195dd7121d8d06f319840522b88e43f3acd0b7f11cd75b"
         }
       ]
     },
@@ -2226,6 +3827,100 @@
       ]
     },
     {
+      "id": "netbeans",
+      "name": "NetBeans",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "NetBeans - Apache Java IDE. Fits the Pieces Together.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.apache.netbeans",
+          "ref": "app/org.apache.netbeans/x86_64/stable",
+          "commit": "e27232367c77248e00cfeaa33b9e839340207a75ab222b0161c3cde99114f737",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "e9fb0dd864da7783687a1a0d0fad90ed64a40ae0e514df12e095f258734b99f3"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.apache.netbeans",
+          "ref": "app/org.apache.netbeans/aarch64/stable",
+          "commit": "c6ed51000e7d0d8400711472e0485b4e67f685882bb90335f3c3b95f4cb79b09",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "e65a9adf94d00778a6af51bf0ab21c2f29a58889b0d2da750a673c9142e75c04"
+        }
+      ]
+    },
+    {
+      "id": "notepadqq",
+      "name": "Notepadqq",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "texteditor",
+        "utility"
+      ],
+      "summary": "An advanced text editor.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.notepadqq.Notepadqq",
+          "ref": "app/com.notepadqq.Notepadqq/x86_64/stable",
+          "commit": "eddc9f20dfcb756eeca9a26fca56deee75f4a6ff8a7219d5c2c5593a7c0cd0d1",
+          "runtime": "org.kde.Platform/x86_64/5.15-23.08",
+          "metadataSha256": "b713ac6961180ce0e406abc1aae01e2154e86ad642e0b84b2a09f12e0b8417f2"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.notepadqq.Notepadqq",
+          "ref": "app/com.notepadqq.Notepadqq/aarch64/stable",
+          "commit": "a8fd3788e20a06c159a1c514ba4e6c1d6cbf4be3a9428b85f5d9c7dc481d772b",
+          "runtime": "org.kde.Platform/aarch64/5.15-23.08",
+          "metadataSha256": "3b6f2ea7154a66971d311c215d8d48f6387f5e1867ea24bfeb56c94ba3905fe8"
+        }
+      ]
+    },
+    {
       "id": "obs-studio",
       "name": "OBS Studio",
       "featured": false,
@@ -2265,6 +3960,52 @@
           "commit": "21b35765922fb5c8b92ccdccedc0d8ca709b12f86a961780350199082da822ef",
           "runtime": "org.freedesktop.Platform/x86_64/25.08",
           "metadataSha256": "3c1435af8f1b021a028609573957d303b142ce493f882f11ef52f2d860b2f0cf"
+        }
+      ]
+    },
+    {
+      "id": "obsidian",
+      "name": "Obsidian",
+      "featured": false,
+      "category": "productivity",
+      "keywords": [
+        "office"
+      ],
+      "summary": "Markdown-based knowledge base.",
+      "trustTier": "curated",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "md.obsidian.Obsidian",
+          "ref": "app/md.obsidian.Obsidian/x86_64/stable",
+          "commit": "092bb11df3c993bd41aebf29b91228e3dc47ebb918c0224cea792006f123e084",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "9bf3d34d265a868169bd859d7ed03702a642d5d480f9a14ca5214ac80457b471"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "md.obsidian.Obsidian",
+          "ref": "app/md.obsidian.Obsidian/aarch64/stable",
+          "commit": "48aad7bde4c522983472548286651291d94489a938458860eecc20c45b440b67",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "590998f4ac9fc8efa898190a5ebefaae91f463101ed8d842d539b08b26f02c22"
         }
       ]
     },
@@ -2319,6 +4060,227 @@
       ]
     },
     {
+      "id": "open-webui",
+      "name": "Open WebUI",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "utility"
+      ],
+      "summary": "The freedom AI stack.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.openwebui.open-webui",
+          "ref": "app/com.openwebui.open-webui/x86_64/stable",
+          "commit": "a7819b8bc3d77d0eaf52fdb2ba7b0cd47fff285abfaba7d15229bf3f0080127a",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "480eaa7c8a2c17456e67fd2279cec0ceb4a8840bd8e4124800d1f740746cb4c1"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.openwebui.open-webui",
+          "ref": "app/com.openwebui.open-webui/aarch64/stable",
+          "commit": "9a363a57f4baf4406a9d4a4f56180feac658391520b6005ce85950b1a297bf51",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "da256e48c78b4e1ba26ac1c1832049e3ebd972bc3b33853af9cabb237946a4dc"
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "featured": false,
+      "category": "ai",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Open source AI coding agent.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "ai.opencode.opencode",
+          "ref": "app/ai.opencode.opencode/x86_64/stable",
+          "commit": "5929a98bccf2f9cdc34f7c39fe76f0eb2471b4e9e67d1f68c9f0187f1da7e971",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "c75ad645480bcb487209ebc46137d4ae428ace00b399aaa535b449b6aee2112f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "ai.opencode.opencode",
+          "ref": "app/ai.opencode.opencode/aarch64/stable",
+          "commit": "88500c02fc2547740621c04213831e9a6dca2cde90c9d319c5294c00cdb38ff0",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "6f046d3bf895f1e62fb1a71131b0202d41d60cd263581f4ceb8645dc14ad6fe9"
+        }
+      ]
+    },
+    {
+      "id": "peazip",
+      "name": "PeaZip",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "archiving",
+        "compression",
+        "utility"
+      ],
+      "summary": "Free file archiver utility.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.peazip.PeaZip",
+          "ref": "app/io.github.peazip.PeaZip/x86_64/stable",
+          "commit": "c69721afadd3f354c8516767474b89e2bb86f734f53f1186bdd25f2848cbeb51",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "5235ad5f739d3a704ccfc9e7f33f7fb9a042a56b25c02f0d9a586758294500fa"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.peazip.PeaZip",
+          "ref": "app/io.github.peazip.PeaZip/aarch64/stable",
+          "commit": "5913e024995810b3bc910ebbe4c59e3446158924601cb8b60309b9dddccd6640",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "febae8c6bd7684845ecf5dd17f85ceb0280c5bb4099b7d6145fc37d20a3806d5"
+        }
+      ]
+    },
+    {
+      "id": "pgadmin4",
+      "name": "pgAdmin 4",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Admin and development platform for PostgreSQL.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.pgadmin.pgadmin4",
+          "ref": "app/org.pgadmin.pgadmin4/x86_64/stable",
+          "commit": "9a93fefcedfd8c4aca194d6982601fc3184b81645ea586b274ba2a821ebf30d6",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "4fb2298550267fd104b5ba91dc2ca6813d50d164e0f0965f6ba099290c83e941"
+        }
+      ]
+    },
+    {
+      "id": "phpstorm",
+      "name": "PhpStorm",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "PHP IDE for Professional Development.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.PhpStorm",
+          "ref": "app/com.jetbrains.PhpStorm/x86_64/stable",
+          "commit": "2ff9de090e0a01934585aa338e0598e71c3b17c74096a44e2d53637897954fc4",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "1d299946cfb643e60948269775a62c39b94eb21011681278b6ac3aeae149e472"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.PhpStorm",
+          "ref": "app/com.jetbrains.PhpStorm/aarch64/stable",
+          "commit": "2637360db18db482a58e27297ef720cf2f88550de3755d21d4f7cfa6d5bee637",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "0fa99351035e97a04e1575dd53883579c5bd1afe7456d5cd23e31e14404b9df3"
+        }
+      ]
+    },
+    {
       "id": "podman-desktop",
       "name": "Podman Desktop",
       "icon": "podman-desktop.png",
@@ -2367,6 +4329,103 @@
           "commit": "f6647a68867ad349af07aea0a1a5fc1cf53f4dca9d5cd6f633039083255d894a",
           "runtime": "org.freedesktop.Platform/aarch64/25.08",
           "metadataSha256": "76638c8e50fcd1f0108d08788cccc3e70f6c0138ab0256bb8cfa5c9d4e22c6c6"
+        }
+      ]
+    },
+    {
+      "id": "pods",
+      "name": "Pods",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "monitor",
+        "network",
+        "office",
+        "remoteaccess",
+        "system"
+      ],
+      "summary": "Manage your containers.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.marhkb.Pods",
+          "ref": "app/com.github.marhkb.Pods/x86_64/stable",
+          "commit": "880dbeb0ad96abdc70c9889a10ec3a699a4cc47d6795813b7a9146817031c19a",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "5b3203db18047f56ff4bdafede5b77ff895149b304722c0b1383b12806f79474"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.marhkb.Pods",
+          "ref": "app/com.github.marhkb.Pods/aarch64/stable",
+          "commit": "039dc36bb0ed4d9f719608f51ac46ec67422a8caefe7303da84fae614691c8af",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "51e76f1572d838dea3dec1150779073c55e52aad05be34f2b493dfd9e66436fd"
+        }
+      ]
+    },
+    {
+      "id": "popsicle",
+      "name": "Popsicle",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system"
+      ],
+      "summary": "Flash multiple USB devices in parallel.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.system76.Popsicle",
+          "ref": "app/com.system76.Popsicle/x86_64/stable",
+          "commit": "64025071862da2aec1ea0bb84ceb654f7b556c542f5819dc0d6e19e13f544f68",
+          "runtime": "org.freedesktop.Platform/x86_64/24.08",
+          "metadataSha256": "f1389f95290fb64d1c8b9bdc4e411cbecf56bfa91569e60b15354c52ff46a76c"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.system76.Popsicle",
+          "ref": "app/com.system76.Popsicle/aarch64/stable",
+          "commit": "973ae2cc3c79bacc2597aee6466bb96f80c8360be7bc46d94eb74d30e3cddada",
+          "runtime": "org.freedesktop.Platform/aarch64/24.08",
+          "metadataSha256": "5023726f6410522d147cb4a3e48c758623e96f0ee9b38b38d9c454ecaac74c55"
         }
       ]
     },
@@ -2466,6 +4525,147 @@
       ]
     },
     {
+      "id": "pycharm-professional",
+      "name": "PyCharm-Professional",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "The most intelligent Python IDE.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.PyCharm-Professional",
+          "ref": "app/com.jetbrains.PyCharm-Professional/x86_64/stable",
+          "commit": "f56af5ecd50ed690c6fd5be06776095c29c639800006f077ae7e39da1cc00cab",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "a96c4b7af42160b01e713cfbb44c09c342eae67a08e52011d0f286b0dc0125b7"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.PyCharm-Professional",
+          "ref": "app/com.jetbrains.PyCharm-Professional/aarch64/stable",
+          "commit": "2ab3fadff77d45b80ab4834a79de98081124a76a04124b820d49499755a9e0af",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "6ea68c756bbeb28f87859982b033c16c5a6620a19c379c6d1bbcdeac6d043e9a"
+        }
+      ]
+    },
+    {
+      "id": "qdirstat",
+      "name": "QDirStat",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "filesystem",
+        "system"
+      ],
+      "summary": "File System Directory Statistics.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.shundhammer.qdirstat",
+          "ref": "app/io.github.shundhammer.qdirstat/x86_64/stable",
+          "commit": "a2b364654668f614e1a398dec7dfd485499850a3903cfb81f30a8dc877a2e790",
+          "runtime": "org.kde.Platform/x86_64/6.10",
+          "metadataSha256": "c8478000a0c9697a583aefac6efdc93803682154a831c46bb270591aa362ff38"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.shundhammer.qdirstat",
+          "ref": "app/io.github.shundhammer.qdirstat/aarch64/stable",
+          "commit": "8cf1dc794f4992325401b95193b2dc8d845607fad6e0114047dfc4dd86478f06",
+          "runtime": "org.kde.Platform/aarch64/6.10",
+          "metadataSha256": "2bb4c1ae409df805368af3ade4c4778b2b026752fce00724504af34f5a0bff9f"
+        }
+      ]
+    },
+    {
+      "id": "qtcreator",
+      "name": "Qt Creator",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Cross-platform integrated development environment (IDE).",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.qt.QtCreator",
+          "ref": "app/io.qt.QtCreator/x86_64/stable",
+          "commit": "84f3b473f9fb16aea8252f7b69256aeefbcb1219e0ec5e5911e78cec931ccf32",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "cf95f3a1eb90d6e3a1f8ef39d929eb0b8c9d296d51f0c681b4f68598d34ee735"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.qt.QtCreator",
+          "ref": "app/io.qt.QtCreator/aarch64/stable",
+          "commit": "e8eb9f9d0295f12f970e99a77375569ff0b406875bc46f8439401052831b760e",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "f2a106f4202bc12dd13bd143626aa26e0dda453ca7ff2ec7eeb32c2ba54eda0f"
+        }
+      ]
+    },
+    {
       "id": "remmina",
       "name": "Remmina",
       "featured": false,
@@ -2521,6 +4721,99 @@
       ]
     },
     {
+      "id": "resources",
+      "name": "Resources",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system"
+      ],
+      "summary": "Keep an eye on system resources.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "net.nokyan.Resources",
+          "ref": "app/net.nokyan.Resources/x86_64/stable",
+          "commit": "8eae4d7bf309a8ab689d68d5d54db6aa6f34f38eebb30b5a49f739e1af7ea0f7",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "844c910b26887e4020089f51601beae2e067df7d6ddd2d7afad38ae4a3e487b8"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "net.nokyan.Resources",
+          "ref": "app/net.nokyan.Resources/aarch64/stable",
+          "commit": "915c44dfc0ec65a1b543c2f959ed80e080607a8945776add0ffbc5565df343de",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "4ab0cbe257f9418c9aa3384631e3888d3c724354cc3ecdb6c613c1eba3b896be"
+        }
+      ]
+    },
+    {
+      "id": "rider",
+      "name": "Rider",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Fast & powerful, cross platform .NET IDE.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.Rider",
+          "ref": "app/com.jetbrains.Rider/x86_64/stable",
+          "commit": "7b707c2ff35a7cf75a6a3851568ac35e038e036c65d77947fc75c6be8eff0fe4",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "ae86796a3d3fd95170167ff7c4b16487edacfa35444fe9b3f9d6111c66264325"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.Rider",
+          "ref": "app/com.jetbrains.Rider/aarch64/stable",
+          "commit": "ee2d4a2369dfb975cf9c77357b400094578f24b7ab2a3461044f5fa8ff03bb1f",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "0eb0bfa7142d6a41ea7393153564801105677a009e6a991744b50e71ee98e463"
+        }
+      ]
+    },
+    {
       "id": "rnote",
       "name": "Rnote",
       "featured": false,
@@ -2567,6 +4860,99 @@
           "commit": "6eeea193c0014c32591f09ce9b792f9d8a8b7592b99dd838389dab9250c6364e",
           "runtime": "org.gnome.Platform/aarch64/50",
           "metadataSha256": "fb3646a5e343324215e980755dd42637aee5b98740510c71d98fda6f8337b6a4"
+        }
+      ]
+    },
+    {
+      "id": "rustdesk",
+      "name": "RustDesk",
+      "featured": false,
+      "category": "utilities",
+      "keywords": [
+        "utility"
+      ],
+      "summary": "Secure remote desktop access.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.rustdesk.RustDesk",
+          "ref": "app/com.rustdesk.RustDesk/x86_64/stable",
+          "commit": "7b9c83af00afb2e10a1c9a0476b45cff492ee783506fe63290d12af703f46fcd",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "9ab21edae42b516b193f41473b14dda9a4c18092f444712601f1f07912b4498a"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.rustdesk.RustDesk",
+          "ref": "app/com.rustdesk.RustDesk/aarch64/stable",
+          "commit": "66754f9fc5c582d48c754e0f1ddbb94e55212dbdf03f0fb48f2fd76c2bcb6ad6",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "7813a7f8f80641399005c2281de7cc87b63c698f22b34ec7376661d6975e4374"
+        }
+      ]
+    },
+    {
+      "id": "rustrover",
+      "name": "RustRover",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "Powerful IDE for Rust.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.RustRover",
+          "ref": "app/com.jetbrains.RustRover/x86_64/stable",
+          "commit": "5cf984c250166658aafca3e60f2b701f1086a3a319ef85e8ea776cda5b4870a5",
+          "runtime": "org.freedesktop.Sdk/x86_64/26.08",
+          "metadataSha256": "147b0cd415aca4dfa518745058da0a79b882a08bbf69328ed75028a0caad5a46"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.RustRover",
+          "ref": "app/com.jetbrains.RustRover/aarch64/stable",
+          "commit": "8549731aaafcc389c4b27ff87eeb3899a653e3a0d7f637711c3bff7086c561ba",
+          "runtime": "org.freedesktop.Sdk/aarch64/26.08",
+          "metadataSha256": "06513619c031d4f0c9398bf63e948d8e892d18d507d92b732cd69eff270c5e3a"
         }
       ]
     },
@@ -2682,6 +5068,242 @@
       ]
     },
     {
+      "id": "spyder",
+      "name": "Spyder",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide",
+        "science"
+      ],
+      "summary": "The Scientific Python Development Environment.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.spyder_ide.spyder",
+          "ref": "app/org.spyder_ide.spyder/x86_64/stable",
+          "commit": "7a792587cb490e6d6d5d4770e89acd63434e53c610baa117ab41286370e5808c",
+          "runtime": "org.kde.Sdk/x86_64/5.15-25.08",
+          "metadataSha256": "0041155da042b6012402f02eac18570d6090ed2f1e0b80ec3b85534c86671bc2"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.spyder_ide.spyder",
+          "ref": "app/org.spyder_ide.spyder/aarch64/stable",
+          "commit": "5085a35adb95f9e8e13af60a00f5f389201c747aeef12bd09845461bb3d7aaad",
+          "runtime": "org.kde.Sdk/aarch64/5.15-25.08",
+          "metadataSha256": "ee3e9bb1b48d75bdcadb84056a06f8e2b7ef21b116f785321222771377939151"
+        }
+      ]
+    },
+    {
+      "id": "sqlitebrowser",
+      "name": "DB Browser for SQLite",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "database",
+        "development",
+        "utility"
+      ],
+      "summary": "light GUI editor for SQLite databases.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.sqlitebrowser.sqlitebrowser",
+          "ref": "app/org.sqlitebrowser.sqlitebrowser/x86_64/stable",
+          "commit": "0ab811662bd9a64e32f82648425a1d2e797e747fcb83be28c29addf62b5de4ae",
+          "runtime": "org.kde.Platform/x86_64/5.15-25.08",
+          "metadataSha256": "cb9e19149d7d5e9a7112d2696c94e2a08d4dcd9bf5fed85fa1ebfba94f993547"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "org.sqlitebrowser.sqlitebrowser",
+          "ref": "app/org.sqlitebrowser.sqlitebrowser/aarch64/stable",
+          "commit": "b0bb21198086be0cde60cbf3d61bffb65757cd67eba378c4a3e931fcf2a65b34",
+          "runtime": "org.kde.Platform/aarch64/5.15-25.08",
+          "metadataSha256": "9b65b66eb50414448fade655cb0209cc2a3ac8006e6412648a95db93c23cdf3b"
+        }
+      ]
+    },
+    {
+      "id": "studio",
+      "name": "Beekeeper Studio",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "The SQL Editor and Database Manager Of Your Dreams.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.beekeeperstudio.Studio",
+          "ref": "app/io.beekeeperstudio.Studio/x86_64/stable",
+          "commit": "768000a2f97ce50d3f59da165595ce718c49de562a7866a271a5bc4b34fd7ad1",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "7efafd7879e5bec1ea50f9f1e867bcb619809953e5b5062b37ecb2746ead8a0f"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.beekeeperstudio.Studio",
+          "ref": "app/io.beekeeperstudio.Studio/aarch64/stable",
+          "commit": "8f23ecda574f9173b9db267dac0e7c951aaf128da18da6fd0be643af88a4372a",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "75b53d932d52c4da134e015b9f40a87eeb395bf0e6864e4f3fbd6d884e60a676"
+        }
+      ]
+    },
+    {
+      "id": "sublimetext",
+      "name": "Sublime Text",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "utility"
+      ],
+      "summary": "Text Editing, Done Right.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.sublimehq.SublimeText",
+          "ref": "app/com.sublimehq.SublimeText/x86_64/stable",
+          "commit": "d6bb1c975fcd68135d85e89de4ac2582d06d01f41b12c054539ed29acfb68777",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "af745e5a66f234f136ea57edf8552f0aa9351f96c7c5ab0ae1524d3d96f7feb4"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.sublimehq.SublimeText",
+          "ref": "app/com.sublimehq.SublimeText/aarch64/stable",
+          "commit": "cc10be96efa10aabdb13400a84af1375f0d5d5f08e1a61aa715b639bece494f4",
+          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
+          "metadataSha256": "aa869afa7ae92026604924e710163a0377cf97256f3f9f4ff5563bf2f58974b1"
+        }
+      ]
+    },
+    {
+      "id": "system-monitoring-center",
+      "name": "System Monitoring Center",
+      "featured": false,
+      "category": "diagnostics",
+      "keywords": [
+        "system",
+        "utility"
+      ],
+      "summary": "Multi-featured system monitor.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.hakandundar34coding.system-monitoring-center",
+          "ref": "app/io.github.hakandundar34coding.system-monitoring-center/x86_64/stable",
+          "commit": "ef2b6b8453f78ec8651fe1b2e4869298348784d838cf597b86b3c2cf27b279b7",
+          "runtime": "org.gnome.Platform/x86_64/49",
+          "metadataSha256": "b6d89aa91e7fd4e41c97954dcb0b93281a4541f6ee8b5590e25cd847835a7049"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "io.github.hakandundar34coding.system-monitoring-center",
+          "ref": "app/io.github.hakandundar34coding.system-monitoring-center/aarch64/stable",
+          "commit": "76fb11db8a0cdf8c467829ea253326607e323d4a666f2196405bd381121df778",
+          "runtime": "org.gnome.Platform/aarch64/49",
+          "metadataSha256": "7077f8f98fa148f74bdb9ea920e315929580def0da7824c1d4d9c4355f819790"
+        }
+      ]
+    },
+    {
       "id": "telegram",
       "name": "Telegram",
       "icon": "telegram.svg",
@@ -2771,6 +5393,168 @@
           "commit": "0b4287a64431c7b8b80d2f8842eeeea317fe98f615118be0ecc2185d4b1ad574",
           "runtime": "org.freedesktop.Platform/x86_64/24.08",
           "metadataSha256": "672171c7f69e8142f95aa0e5bf669f25a5ed09d3b71c86021db4aed7ab0e22c7"
+        }
+      ]
+    },
+    {
+      "id": "torbrowser-launcher",
+      "name": "Tor Browser Launcher",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "A program to help you download, keep updated, and run Tor Browser.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "org.torproject.torbrowser-launcher",
+          "ref": "app/org.torproject.torbrowser-launcher/x86_64/stable",
+          "commit": "42fe8fa5a0c22b8dd223aff49ca4d0c8b613b743a90cef4bacb77a4ab2b5a73e",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "1cd73a082798c2d1e3f0bd03f133fad8a3d40c1938c374eaebf1901f98ac5240"
+        }
+      ]
+    },
+    {
+      "id": "unityhub",
+      "name": "Unity Hub",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development"
+      ],
+      "summary": "Manage game engine installations.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.unity.UnityHub",
+          "ref": "app/com.unity.UnityHub/x86_64/stable",
+          "commit": "0047d1cbf6c476824f31618abcaaa3c7bbaae770c792f72361e772f9bfe0196c",
+          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
+          "metadataSha256": "fbd2ce5ba56c99f0fe10363dd04b2d055ff172b8e019fc88c56095e0c3ce081d"
+        }
+      ]
+    },
+    {
+      "id": "vesktop",
+      "name": "Vesktop",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "instantmessaging",
+        "network"
+      ],
+      "summary": "Customizable Discord client.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "dev.vencord.Vesktop",
+          "ref": "app/dev.vencord.Vesktop/x86_64/stable",
+          "commit": "2682d9322e43704b8c289629b46746b4832dd09540971bd9d585ed1c7fab427e",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "6a5aa5510a7ee31e9a3810a948e34c8ceb8891ab2ca06a71781cd6d8d9d19ae5"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "dev.vencord.Vesktop",
+          "ref": "app/dev.vencord.Vesktop/aarch64/stable",
+          "commit": "4c0ab355065e428f295e038afde8423d75415b6f918410237b16f4b5e3f0e601",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "86113a814dc1de6de3b8b716fb6b4e6d69b7df3f77b381208aa6b852e6c4af6a"
+        }
+      ]
+    },
+    {
+      "id": "videodownloader",
+      "name": "Video Downloader",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network"
+      ],
+      "summary": "Download web videos.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.unrud.VideoDownloader",
+          "ref": "app/com.github.unrud.VideoDownloader/x86_64/stable",
+          "commit": "deb5c93259f131f4d13c4a9edc375d8c97600510bbbe0d3220ba79834cb0a3da",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "091512835f18981e90d25f99c7478a6d9208a9b660e119e47909d74bc12c2849"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.unrud.VideoDownloader",
+          "ref": "app/com.github.unrud.VideoDownloader/aarch64/stable",
+          "commit": "66c7eacd463badb193ae75fc9a050e2180500f67000d2aad0a3ebf177a04ef59",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "abfabf04170bace41f7aad610a170b1e1d52878a57588395623e2205a07d5f7e"
         }
       ]
     },
@@ -3042,6 +5826,147 @@
       ]
     },
     {
+      "id": "webstorm",
+      "name": "WebStorm",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "ide"
+      ],
+      "summary": "JavaScript and TypeScript IDE.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.WebStorm",
+          "ref": "app/com.jetbrains.WebStorm/x86_64/stable",
+          "commit": "01adb33d838467b05583e0f458877e87249662d154e1494026221e7f8d581b1c",
+          "runtime": "org.freedesktop.Sdk/x86_64/26.08",
+          "metadataSha256": "2b16bbac99fadb6af8be85051381c7c0cbe6799a363460287ae4712378e67a5a"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.jetbrains.WebStorm",
+          "ref": "app/com.jetbrains.WebStorm/aarch64/stable",
+          "commit": "5b62cd6b4a7d0f648585676785807ec694c24fcb074f8005be9e77ac3ad07e78",
+          "runtime": "org.freedesktop.Sdk/aarch64/26.08",
+          "metadataSha256": "03d9a1203d9ce8d1d3e48cf2f9e4c579140b1109916fb9bcbaf706f156563bb0"
+        }
+      ]
+    },
+    {
+      "id": "whaler",
+      "name": "Whaler",
+      "featured": false,
+      "category": "developer",
+      "keywords": [
+        "development",
+        "utility"
+      ],
+      "summary": "Docker Container Management.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.sdv43.whaler",
+          "ref": "app/com.github.sdv43.whaler/x86_64/stable",
+          "commit": "80e5c20772ebcfb6fbc5ba27f435e36fd51133b784bb77b4968a97cdc9cdf665",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "1055fe8653efc438b3b729d0423a79a7e0771be6b5fa23827b213b6c40d75664"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.github.sdv43.whaler",
+          "ref": "app/com.github.sdv43.whaler/aarch64/stable",
+          "commit": "5d17d6ff539808d4225b1065b0f02f92698b710e2113087b2aad179b1b7e29b3",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "e5e270d7104a02fa03413df62d1853f571edbf8d5184e971caa2c6cff0222cc9"
+        }
+      ]
+    },
+    {
+      "id": "whatsie",
+      "name": "Whatsie",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "instantmessaging",
+        "network"
+      ],
+      "summary": "Feature-rich WhatsApp Web client for the Linux desktop.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.ktechpit.whatsie",
+          "ref": "app/com.ktechpit.whatsie/x86_64/stable",
+          "commit": "1ed360309765daba7a19f2d1e7f97b1d28b9e5e5fbb91594716fbc3c9d5ba8fe",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "e189ae6b6182a1928ef331a337828cffe49829143166383d45becec65060d302"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.ktechpit.whatsie",
+          "ref": "app/com.ktechpit.whatsie/aarch64/stable",
+          "commit": "cf4f6f8d5b9d0ca72e6db17d700eff680b080daae01ebd62584a32e8da43dfad",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "f8b4a742ade2c11a1859850e4279c17cfb2a5482520ca8685383a64f46b99bf0"
+        }
+      ]
+    },
+    {
       "id": "wireshark",
       "name": "Wireshark",
       "icon": "wireshark.png",
@@ -3091,6 +6016,100 @@
           "commit": "f9464de23ce8fa27685b7832e977f3c0b52a3c8b9286df12a3786f8a1ff87830",
           "runtime": "org.kde.Platform/aarch64/6.11",
           "metadataSha256": "efc4322931a95ecda553225045f740135cec143ae23298e6d646c0da586293ab"
+        }
+      ]
+    },
+    {
+      "id": "www",
+      "name": "Proton VPN",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network"
+      ],
+      "summary": "Secures your internet and protects your online privacy.",
+      "trustTier": "community",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.protonvpn.www",
+          "ref": "app/com.protonvpn.www/x86_64/stable",
+          "commit": "ad1074b53b3052c8b7c8656454b893e413ac3811cfe252dba84fb7cd6c7a90da",
+          "runtime": "org.gnome.Platform/x86_64/50",
+          "metadataSha256": "59e824b7106b7e82d8914f03a15ca1cdd7178cba517a340d778597f2f1263c5d"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.protonvpn.www",
+          "ref": "app/com.protonvpn.www/aarch64/stable",
+          "commit": "74d05ca115b7c52378c743b23e671eb7c9ea6630530be5fb5a22e42348dae39c",
+          "runtime": "org.gnome.Platform/aarch64/50",
+          "metadataSha256": "458d85092bcbe0c0d4f37e47c6255451e0d75e3fb699ec876b7543b65eaee034"
+        }
+      ]
+    },
+    {
+      "id": "zapzap",
+      "name": "ZapZap",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "chat",
+        "instantmessaging",
+        "network"
+      ],
+      "summary": "Desktop client for web messaging.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "com.rtosta.zapzap",
+          "ref": "app/com.rtosta.zapzap/x86_64/stable",
+          "commit": "c6938883d577e58a8d875aa1fd2f984640dff36ef7d05535b35174344de6f3d7",
+          "runtime": "org.kde.Platform/x86_64/6.11",
+          "metadataSha256": "5294c8ad9bb3e5e355b64872e5b6fac9c2766d3831232717c9cd1dc4bfecabaf"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "com.rtosta.zapzap",
+          "ref": "app/com.rtosta.zapzap/aarch64/stable",
+          "commit": "5c62bbf7da2a50dac5af7656725119a63e38b624eaa202af156c39b8455210c9",
+          "runtime": "org.kde.Platform/aarch64/6.11",
+          "metadataSha256": "a84bfb14c79ef784d70a6d7412a16d89cd8d4577cdbbd413f3e496b2d0b6bc66"
         }
       ]
     },
@@ -3146,6 +6165,90 @@
           "commit": "c6a569a392a4f15b0595f7135584384556d7ec5ae5c8b55626a7421b96053ba8",
           "runtime": "org.freedesktop.Sdk/aarch64/25.08",
           "metadataSha256": "ec9aa72149f9780cd8e0f5f4f5f611056c0f06f561243c134bc840112ed280cd"
+        }
+      ]
+    },
+    {
+      "id": "zen",
+      "name": "Zen",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "network",
+        "webbrowser"
+      ],
+      "summary": "Stay focused, browse faster.",
+      "trustTier": "curated",
+      "license": "free",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:verified",
+          "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "app.zen_browser.zen",
+          "ref": "app/app.zen_browser.zen/x86_64/stable",
+          "commit": "ad9848d2eeb7860c3b9908f87fcafa3070265955b427d7404e80fe67ebcbafbb",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "6fd31ae3de0799871ca552107ac56766e15c9fd2288614584e6c10334761e634"
+        },
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "aarch64"
+          ],
+          "remote": "flathub",
+          "appId": "app.zen_browser.zen",
+          "ref": "app/app.zen_browser.zen/aarch64/stable",
+          "commit": "f2ff05f1d4e3ec4bfabb6834c0120e2b86ca83c1e43e50bb1e9d69325742b57d",
+          "runtime": "org.freedesktop.Platform/aarch64/25.08",
+          "metadataSha256": "d93b17a634681e7129d3b99e7cee246cb875e498985b75a1ece2181e6641e8d7"
+        }
+      ]
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "featured": false,
+      "category": "communication",
+      "keywords": [
+        "instantmessaging",
+        "network",
+        "telephony",
+        "videoconference"
+      ],
+      "summary": "Video Conferencing, Web Conferencing, Webinars, Screen Sharing.",
+      "trustTier": "community",
+      "license": "proprietary",
+      "publisher": "flathub",
+      "bundledUpdater": "none",
+      "disclosures": [
+        {
+          "id": "publisher:unverified",
+          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
+        }
+      ],
+      "sources": [
+        {
+          "kind": "flatpak",
+          "architectures": [
+            "x86_64"
+          ],
+          "remote": "flathub",
+          "appId": "us.zoom.Zoom",
+          "ref": "app/us.zoom.Zoom/x86_64/stable",
+          "commit": "2b7d9983eceb9968328213812a350f1de660864e12fd766cf806ffb331344037",
+          "runtime": "org.freedesktop.Platform/x86_64/25.08",
+          "metadataSha256": "c038774ae879117bbd1996ada0093763a3930a57031b7495d558ba6ad7885d19"
         }
       ]
     },

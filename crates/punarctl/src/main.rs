@@ -273,6 +273,15 @@ enum AppCommand {
         /// use obtains it from the card it prints immediately beforehand.
         #[arg(long, hide = true, value_name = "SHA256")]
         confirm_metadata_sha256: Option<String>,
+        /// Acknowledge that this app is not confined by its sandbox.
+        ///
+        /// Most real Flatpaks are not: `devices=all`, `features=devel` or a
+        /// broad filesystem is the norm rather than the exception. Punar shows
+        /// exactly what such an app can reach and then needs a yes; without
+        /// this flag an unconfined app is refused, and the refusal names what
+        /// it would have been able to do.
+        #[arg(long)]
+        acknowledge_host_access: bool,
     },
     /// Open an installed native app, or its curated web-app fallback.
     Open {
@@ -818,6 +827,7 @@ fn app_install(
     id: &str,
     yes: bool,
     confirmed: Option<String>,
+    acknowledge_host_access: bool,
 ) -> ExitCode {
     let detail = match inspect_app(client, id) {
         Ok(value) => value,
@@ -885,6 +895,7 @@ fn app_install(
         Some(json!({
             "id": id,
             "confirm_metadata_sha256": digest,
+            "acknowledge_host_access": acknowledge_host_access,
         })),
         crate::ipc::APP_MUTATION_TIMEOUT,
     ) {
@@ -3519,7 +3530,16 @@ fn main() -> ExitCode {
                 id,
                 yes,
                 confirm_metadata_sha256,
-            } => app_install(&client, &style, json, &id, yes, confirm_metadata_sha256),
+                acknowledge_host_access,
+            } => app_install(
+                &client,
+                &style,
+                json,
+                &id,
+                yes,
+                confirm_metadata_sha256,
+                acknowledge_host_access,
+            ),
             AppCommand::Open { id, uris } => app_open(&client, &id, &uris),
             AppCommand::RunVendor { id } => app_run_vendor(&client, &id),
             AppCommand::VendorSession {

@@ -28,6 +28,13 @@ Item {
     readonly property bool verified: root.inspection !== null && (root.inspection.verified === true || (root.inspection.pinned === true && root.inspection.verified_on_install === true))
     readonly property string containment: root.verified ? String(root.inspection.containment || "unknown") : ""
     readonly property var permissions: root.verified && Array.isArray(root.inspection.permissions) ? root.inspection.permissions : []
+
+    /// The sentences punard derived from THIS ref's metadata, one per reason
+    /// the sandbox does not confine it. Rendered verbatim: the daemon computed
+    /// them from the bytes it verified, so a card that composed its own wording
+    /// could describe an app the daemon never inspected.
+    readonly property var hostAccess: root.verified && Array.isArray(root.inspection.host_access) ? root.inspection.host_access : []
+    readonly property bool needsAcknowledgement: root.hostAccess.length > 0 && !root.installed
     readonly property var disclosures: root.record !== null && Array.isArray(root.record.disclosures) ? root.record.disclosures : []
     readonly property bool transactionBusy: root.phase === "installing" || root.phase === "removing"
 
@@ -180,6 +187,52 @@ Item {
                 }
             }
 
+            // NOT SANDBOXED, SAID PLAINLY AND FIRST. docs/design/app-catalog.md
+            // section 1.6: "A sandbox-bypassed app never renders the word
+            // 'sandboxed' anywhere", and the card says in the second person what
+            // the app can reach. This block is above the permission list because
+            // it is the thing that changes a decision, and it is warn-toned
+            // because it is a warn state — not red, which this shell reserves
+            // for a suspected AI process.
+            Meta {
+                width: parent.width
+                visible: root.needsAcknowledgement
+                color: Theme.shellStatusWarn
+                text: "Not confined by its sandbox"
+                topPadding: 2
+            }
+
+            Repeater {
+                model: root.needsAcknowledgement ? root.hostAccess : []
+                delegate: Text {
+                    required property var modelData
+                    width: content.width
+                    font.family: Theme.fontSans
+                    font.pixelSize: 12
+                    font.weight: 400
+                    color: Theme.shellStatusWarn
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    text: String(modelData)
+                }
+            }
+
+            Text {
+                width: content.width
+                visible: root.needsAcknowledgement
+                font.family: Theme.fontSans
+                font.pixelSize: 12
+                font.weight: 400
+                color: Theme.shellInk3
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                // The honest framing, and the reason this is a question rather
+                // than a refusal: most real applications are packaged this way,
+                // so refusing them would not make anyone safer, it would only
+                // move the install to a terminal where nothing is shown at all.
+                text: "Most desktop applications are packaged this way. Punar shows it rather than deciding for you; installing is your choice."
+            }
+
             Meta {
                 width: parent.width
                 visible: root.nativeSource && root.verified
@@ -313,6 +366,13 @@ Item {
                         return "Open ↵";
                     if (root.vendorSource)
                         return "Download & install ↵";
+                    // NAMED FOR WHAT IT DOES. The warning is already on screen
+                    // above; a button still reading "Install" would make the
+                    // person's answer to it invisible, and a button that read
+                    // "Install" and then did nothing until pressed twice would
+                    // be worse than the refusal this replaced.
+                    if (root.needsAcknowledgement)
+                        return "Install anyway ↵";
                     return "Install ↵";
                 }
             }

@@ -2442,10 +2442,11 @@ impl Inner {
             ));
         }
         let _guard = self.app_mutation.lock().unwrap();
-        match self
-            .apps
-            .install(&params.id, &params.confirm_metadata_sha256)
-        {
+        match self.apps.install(
+            &params.id,
+            &params.confirm_metadata_sha256,
+            params.acknowledge_host_access,
+        ) {
             Ok(result) => {
                 let outcome = if result["changed"] == true {
                     AuditOutcome::Success
