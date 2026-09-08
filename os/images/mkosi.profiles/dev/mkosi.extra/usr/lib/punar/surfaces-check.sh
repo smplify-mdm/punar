@@ -1647,6 +1647,42 @@ else
     FAILED=1
 fi
 
+# --- group 9d: nothing the compositor prints reaches the terminal -----------
+#
+# THE BUG THIS CLOSES was visible to the owner and invisible to every gate: a
+# "terminal like screen" between the greeter and the desktop. greetd connects a
+# session's stdio straight to the VT — that is how the packaged text greeter
+# works at all — so Hyprland's startup log was printed onto tty1. It sat there
+# unseen while the compositor held DRM and was revealed the instant the greeter
+# exited, which is exactly the handover the session scripts clear the terminal
+# to keep black. The clear ran BEFORE the printing, so it tidied away the
+# previous occupant's text and put our own there instead.
+#
+# Asserted on the live process rather than by grepping the script, because what
+# matters is where the descriptors actually point on a running machine.
+hypr_pid="$(pgrep -x Hyprland 2>/dev/null | head -1)"
+if [ -z "${hypr_pid}" ]; then
+    note "FAIL no Hyprland process found; the compositor stdio assertion cannot run"
+    FAILED=1
+else
+    for hypr_fd in 1 2; do
+        hypr_target="$(readlink "/proc/${hypr_pid}/fd/${hypr_fd}" 2>/dev/null)"
+        case "${hypr_target}" in
+            /dev/tty*|/dev/console|/dev/vc/*)
+                note "FAIL Hyprland fd ${hypr_fd} is ${hypr_target}; its log lands on the terminal and shows through at every session handover"
+                FAILED=1
+                ;;
+            "")
+                note "FAIL Hyprland fd ${hypr_fd} could not be read; the assertion did not run"
+                FAILED=1
+                ;;
+            *)
+                note "ok   Hyprland fd ${hypr_fd} is ${hypr_target}, not a terminal"
+                ;;
+        esac
+    done
+fi
+
 # --- group 9c: a device policy change needs a password, and then works ------
 #
 # THE PATH THIS COVERS, end to end and as the session user: System Control's
