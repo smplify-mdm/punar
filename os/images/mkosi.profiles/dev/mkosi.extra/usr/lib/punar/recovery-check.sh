@@ -208,6 +208,12 @@ if [ ! -x /usr/bin/punar-auth ] || [ ! -x /usr/bin/mkpasswd ] || ! command -v se
     finish
 fi
 
+# ASSERT THE DOOR BEFORE KNOCKING ON IT. The first run of this group reported
+# three identical "unavailable" results and said nothing about why. A listening
+# socket is a precondition, not a finding, and conflating the two cost a cycle.
+auth_socket_state="$(systemctl is-active punar-authd.socket 2>/dev/null || true)"
+check_eq "punar-authd.socket is listening" "active" "${auth_socket_state}"
+
 auth_hash="$(printf '%s\n' "${AUTH_PASS}" | mkpasswd --method=yescrypt --stdin 2>/dev/null)"
 case "${auth_hash}" in
     \$y\$*) note "ok   the probe account's secret hashed with the shipped mkpasswd" ;;
@@ -241,10 +247,25 @@ check_eq "the probe account has NO /etc/shadow entry" "0" "${auth_shadow}"
 # Ask as the probe account itself. punar-authd takes the identity from
 # SO_PEERCRED, so dropping to the uid is the only way to be that account — which
 # is also why a caller cannot ask about anyone else.
+# THE PROBE MUST BE IN THE ADMISSION GROUP, and the first run of this group is
+# why that is written down here. The socket is 0660 root:punar inside a 0750
+# root:punar directory, so a caller outside the group cannot even traverse to
+# it: every leg returned "unavailable" — the CONTROL included, which is what
+# said the fault was the harness rather than the userdb path. The product was
+# behaving correctly; the probe simply was not a member the way every real
+# account is (punar-onboard makes punar membership mandatory at creation).
+auth_gid="$(getent group punar | cut -d: -f3)"
+if [ -z "${auth_gid}" ]; then
+    note "FAIL the punar admission group does not exist; the socket is reachable by nobody"
+    FAILED=1
+    finish
+fi
+
 auth_ask() {
-    # $1 = uid, $2 = secret
+    # $1 = uid, $2 = secret. --regid is the ADMISSION group, not the caller's
+    # own, because group membership is what the socket's mode expresses.
     printf '%s\n' "$2" \
-        | setpriv --reuid="$1" --regid="$1" --clear-groups /usr/bin/punar-auth 2>/dev/null \
+        | setpriv --reuid="$1" --regid="${auth_gid}" --clear-groups /usr/bin/punar-auth 2>/dev/null \
         | tr -d '[:space:]'
 }
 
