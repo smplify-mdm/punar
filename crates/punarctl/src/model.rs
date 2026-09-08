@@ -288,7 +288,21 @@ pub struct PolicyExplain {
     pub effective_value: Value,
     pub source: PolicySource,
     pub user_override_permitted: bool,
+    /// Defaulted: an older daemon does not send it, and "no" is the safe
+    /// reading of a daemon that cannot say.
+    #[serde(default)]
+    pub admin_override_permitted: bool,
     pub compliance_state: String,
+}
+
+/// `policy.set` result (the device administrator's layer).
+#[derive(Deserialize)]
+pub struct PolicySet {
+    pub capability: String,
+    pub pinned_value: Option<Value>,
+    pub effective_value: Value,
+    pub source: PolicySource,
+    pub changed: bool,
 }
 
 /// The winning source: `kind`/`rank` are the `policy_source_kind` enum

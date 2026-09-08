@@ -125,6 +125,137 @@ fn persist_preferences(path: &Path, map: &BTreeMap<String, PreferenceEntry>) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Device administrator policy (device_specific_override, rank 4)
+// ---------------------------------------------------------------------------
+
+/// The device administrator's layer file, relative to the state directory.
+pub const ADMIN_POLICY_FILE: &str = "local-policy.json";
+
+/// One value the device's administrator has pinned for everyone on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminPolicyEntry {
+    pub value: Value,
+    /// RFC 3339, when it was pinned.
+    pub set_at: String,
+    /// The audit `user_id` that pinned it. A device policy without a name
+    /// attached is an anonymous rule nobody can be asked about.
+    pub set_by: String,
+    /// Why, in the administrator's words. Required, and required to be
+    /// non-empty by `policy.set`: the person who meets this rule six months
+    /// from now is usually not the person who wrote it.
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdminPolicyFile {
+    version: u32,
+    policies: BTreeMap<String, AdminPolicyEntry>,
+}
+
+/// `/var/lib/punar/local-policy.json` — the device administrator's layer.
+///
+/// Named `local-policy.json` and NOT `policy/local.json`: `policy.d/` next to
+/// it holds the ORGANIZATION's documents, and two sibling paths differing by
+/// one character while meaning opposite halves of the ladder is a trap for
+/// whoever reads this directory at three in the morning.
+///
+/// WHERE IT SITS, and why that needed no new machinery. SPEC section 39's
+/// ladder has six rungs and `device_specific_override` is the seventh source,
+/// deliberately rung-less: schemas/policy/policy-source.json says "deployments
+/// assign its rank explicitly ... because the spec calls the ladder
+/// 'suggested'". Punar assigns it **rank 4**, which produces exactly the
+/// behaviour a device owner expects and an enrolled fleet requires:
+///
+///   organization_baseline (2) and organization_role_policy (3) BEAT it, so an
+///   enrolled device cannot have its org policy edited away locally;
+///   it BEATS local_user_preference (5), so an administrator's decision binds
+///   every user of the device rather than being one opinion among them.
+///
+/// An organization that wants to forbid local administration entirely does not
+/// need a code path either: it mandates the capability that governs this layer,
+/// and rank 2 wins.
+///
+/// NOT A SECURITY BOUNDARY. docs/design/execution-trust.md is explicit that a
+/// local root user defeats local policy — root can stop punard. This is an
+/// administrative control over the people using the device, not a defence
+/// against someone who already owns it.
+pub struct AdminPolicyStore {
+    path: PathBuf,
+    map: Mutex<BTreeMap<String, AdminPolicyEntry>>,
+}
+
+impl AdminPolicyStore {
+    /// Load, or start empty when the file does not exist. A corrupt file is an
+    /// error rather than an empty map: silently dropping an administrator's
+    /// rules would relax the device without telling anyone, which is the worst
+    /// direction for this particular failure to fall.
+    pub fn load(path: &Path) -> io::Result<Self> {
+        let map = match fs::read_to_string(path) {
+            Ok(content) => {
+                let file: AdminPolicyFile = serde_json::from_str(&content).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{} is corrupt: {e}", path.display()),
+                    )
+                })?;
+                if file.version != STORE_VERSION {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} has unsupported version {} (this daemon writes {STORE_VERSION})",
+                            path.display(),
+                            file.version
+                        ),
+                    ));
+                }
+                file.policies
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(AdminPolicyStore {
+            path: path.to_path_buf(),
+            map: Mutex::new(map),
+        })
+    }
+
+    pub fn entries(&self) -> BTreeMap<String, AdminPolicyEntry> {
+        self.map.lock().unwrap().clone()
+    }
+
+    pub fn get(&self, capability: &str) -> Option<AdminPolicyEntry> {
+        self.map.lock().unwrap().get(capability).cloned()
+    }
+
+    /// Pin a value for the device, or clear it when `entry` is `None`.
+    ///
+    /// Clearing is a first-class operation rather than "set it back to the
+    /// default": the default may change with an image, and an administrator who
+    /// withdraws a rule means "stop pinning this", not "pin today's default".
+    pub fn set(&self, capability: &str, entry: Option<AdminPolicyEntry>) -> io::Result<()> {
+        let mut map = self.map.lock().unwrap();
+        match entry {
+            Some(entry) => {
+                map.insert(capability.to_string(), entry);
+            }
+            None => {
+                map.remove(capability);
+            }
+        }
+        persist_admin_policy(&self.path, &map)
+    }
+}
+
+fn persist_admin_policy(path: &Path, map: &BTreeMap<String, AdminPolicyEntry>) -> io::Result<()> {
+    let file = AdminPolicyFile {
+        version: STORE_VERSION,
+        policies: map.clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&file).expect("admin policy maps serialize");
+    write_atomic(path, &bytes, 0o600)
+}
+
+// ---------------------------------------------------------------------------
 // Persisted OS-default seeds (rank 6 layer, observation-seeded part)
 // ---------------------------------------------------------------------------
 

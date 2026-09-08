@@ -43,7 +43,7 @@ publish.workspace = true
 # real change in kind and the owner may wish to revisit it.
 pam-client2 = { version = "=0.5.5", default-features = false }
 
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["net", "rand"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }

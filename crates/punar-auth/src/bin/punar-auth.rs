@@ -11,6 +11,11 @@
 //! result. `unavailable` is printed for every local failure too — a missing
 //! socket, a refused connection, a truncated reply — because a device that could
 //! not ask must never tell someone their correct password is wrong.
+//!
+//! With `--admin` it asks for a re-authentication ticket as well, and a success
+//! prints `ok <ticket>`. The two modes share every other line: the unlock path's
+//! output is unchanged to the byte, which is the property that let this grow a
+//! second caller without touching the lock screen.
 
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -24,7 +29,10 @@ use zeroize::{Zeroize, Zeroizing};
 const SOCKET: &str = "/run/punar-authd/auth.sock";
 
 fn main() -> ExitCode {
-    let verdict = run().unwrap_or("unavailable");
+    // A closed argv: one optional flag, compared literally. Nothing here is a
+    // path, a name, or anything else a caller could aim somewhere.
+    let admin = std::env::args().skip(1).any(|arg| arg == "--admin");
+    let verdict = run(admin).unwrap_or_else(|| "unavailable".to_string());
     let _ = writeln!(io::stdout(), "{verdict}");
     // The exit status deliberately does NOT encode the verdict: a caller reads
     // the word. Exiting non-zero on a denial would make an ordinary wrong
@@ -32,7 +40,7 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run() -> Option<&'static str> {
+fn run(admin: bool) -> Option<String> {
     let mut input = Zeroizing::new(Vec::with_capacity(256));
     io::stdin()
         .lock()
@@ -51,6 +59,7 @@ fn run() -> Option<&'static str> {
         serde_json::to_vec(&serde_json::json!({
             "v": PROTOCOL_VERSION,
             "password": String::from_utf8_lossy(&input).into_owned(),
+            "purpose": if admin { "admin" } else { "unlock" },
         }))
         .ok()?,
     );
@@ -84,8 +93,20 @@ fn run() -> Option<&'static str> {
     // Mapped through a closed set rather than echoed: whatever the far side
     // says, this process prints one of three known words or nothing at all.
     match parsed.get("verdict").and_then(serde_json::Value::as_str) {
-        Some("ok") => Some("ok"),
-        Some("denied") => Some("denied"),
+        Some("ok") => {
+            if !admin {
+                return Some("ok".to_string());
+            }
+            // A ticket is echoed only after passing the same shape test punard
+            // will apply, so a far side that answered strangely cannot put an
+            // arbitrary string on this process's stdout.
+            let ticket = parsed.get("ticket").and_then(serde_json::Value::as_str)?;
+            if ticket.len() != 64 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(format!("ok {ticket}"))
+        }
+        Some("denied") => Some("denied".to_string()),
         _ => None,
     }
 }

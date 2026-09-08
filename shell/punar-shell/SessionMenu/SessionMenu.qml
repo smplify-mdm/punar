@@ -49,6 +49,14 @@ DeferredSurfaceBase {
     /// carries anything a person typed, because nothing here is typed.
     property string lastAction: ""
 
+    /// "" | "sessionEnd" | "systemRestart" | "systemPowerOff" — the action that
+    /// has been launched and has not yet answered.
+    property string pending: ""
+
+    /// Why the last attempt failed, in the words the tool used. Empty when
+    /// nothing has failed.
+    property string failure: ""
+
     readonly property int rowCount: 4
 
     component Meta: Text {
@@ -165,6 +173,7 @@ DeferredSurfaceBase {
     function dismiss(): void {
         root.open = false;
         root.armed = "";
+        root.failure = "";
         root.windowVisible = false;
         root.unloadRequested();
     }
@@ -191,25 +200,71 @@ DeferredSurfaceBase {
             root.lockNow();
             return;
         }
+        if (root.pending !== "")
+            return;
         if (root.armed !== kind) {
             root.armed = kind;
             return;
         }
         root.armed = "";
         root.lastAction = kind;
+        root.failure = "";
+        root.pending = kind;
         // Fixed argv, chosen by a switch over a closed set — never assembled
-        // from a string that reached this surface from anywhere else.
+        // from a string that reached this surface from anywhere else. Absolute
+        // paths: this surface must not depend on whatever PATH the login
+        // manager happened to hand the session.
         if (kind === "sessionEnd")
-            power.exec(["hyprctl", "dispatch", "exit"]);
+            power.exec(["/usr/bin/hyprctl", "dispatch", "exit"]);
         else if (kind === "systemRestart")
-            power.exec(["systemctl", "reboot"]);
+            power.exec(["/usr/bin/systemctl", "reboot"]);
         else if (kind === "systemPowerOff")
-            power.exec(["systemctl", "poweroff"]);
-        root.dismiss();
+            power.exec(["/usr/bin/systemctl", "poweroff"]);
+    }
+
+    /// THE MENU DOES NOT CLOSE ON THE SECOND PRESS, and that is deliberate.
+    ///
+    /// It closed immediately before, which meant a refused reboot looked
+    /// exactly like an accepted one: the surface went away and the machine
+    /// stayed up, with the reason — logind's, polkit's, or a missing binary's —
+    /// written to a stderr nobody was collecting. A power action either takes
+    /// the machine down, in which case nothing is left to look at, or it fails,
+    /// in which case the failure is the only thing worth showing.
+    function settle(exitCode: int): void {
+        var kind = root.pending;
+        root.pending = "";
+        if (kind === "")
+            return;
+        if (exitCode === 0) {
+            root.dismiss();
+            return;
+        }
+        var said = String(powerErr.text).trim().split("\n").filter(function (line) {
+            return line.trim() !== "";
+        });
+        root.failure = said.length > 0
+            ? said[said.length - 1]
+            : "The command exited " + exitCode + " without saying why.";
     }
 
     Process {
         id: power
+
+        stderr: StdioCollector {
+            id: powerErr
+            waitForEnd: true
+        }
+
+        Component.onCompleted: power.exited.connect(function (exitCode) {
+            root.settle(exitCode);
+        })
+
+        // A binary that cannot be started at all never emits `exited`, and that
+        // is exactly the case a silent surface hid. settle() clears `pending`
+        // first, so whichever of the two arrives first wins and the other is a
+        // no-op.
+        onRunningChanged: if (!power.running && root.pending !== "")
+            root.settle(127)
     }
 
     // ---- the surface -------------------------------------------------------
@@ -226,7 +281,11 @@ DeferredSurfaceBase {
         }
         exclusionMode: ExclusionMode.Ignore
         color: "transparent"
-        WlrLayershell.namespace: "punar-session-menu"
+        // `punar-session`, matching the surface's IPC target name, because the
+        // desktop gate asserts a mapped layer called `punar-<target>` for every
+        // surface it opens. The old `punar-session-menu` spelling was the
+        // reason this surface sat outside that loop and shipped unexercised.
+        WlrLayershell.namespace: "punar-session"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive
                                                : WlrKeyboardFocus.None
@@ -246,7 +305,11 @@ DeferredSurfaceBase {
                     // Disarm before dismissing: backing out of a half-pressed
                     // shutdown must not also close the menu, or the second
                     // Escape someone reflexively presses lands somewhere else.
-                    if (root.armed !== "")
+                    // A reported failure is dismissed the same way, and first,
+                    // so Escape never throws away an explanation unread.
+                    if (root.failure !== "")
+                        root.failure = "";
+                    else if (root.armed !== "")
                         root.armed = "";
                     else
                         root.dismiss();
@@ -330,8 +393,10 @@ DeferredSurfaceBase {
 
                     ActionRow {
                         width: parent.width
-                        label: root.armed === "sessionEnd"
-                            ? "Press again to end session" : "End session"
+                        label: root.pending === "sessionEnd"
+                            ? "Ending session…"
+                            : root.armed === "sessionEnd"
+                                ? "Press again to end session" : "End session"
                         detail: root.armed === "sessionEnd"
                             ? "Open applications will close"
                             : "Sign out and return to the login screen"
@@ -342,8 +407,10 @@ DeferredSurfaceBase {
 
                     ActionRow {
                         width: parent.width
-                        label: root.armed === "systemRestart"
-                            ? "Press again to restart" : "Restart"
+                        label: root.pending === "systemRestart"
+                            ? "Restarting…"
+                            : root.armed === "systemRestart"
+                                ? "Press again to restart" : "Restart"
                         detail: root.armed === "systemRestart"
                             ? "The machine will reboot now" : ""
                         binding: "R"
@@ -353,13 +420,31 @@ DeferredSurfaceBase {
 
                     ActionRow {
                         width: parent.width
-                        label: root.armed === "systemPowerOff"
-                            ? "Press again to shut down" : "Shut down"
+                        label: root.pending === "systemPowerOff"
+                            ? "Shutting down…"
+                            : root.armed === "systemPowerOff"
+                                ? "Press again to shut down" : "Shut down"
                         detail: root.armed === "systemPowerOff"
                             ? "The machine will power off now" : ""
                         binding: "S"
                         tone: root.armed === "systemPowerOff" ? Theme.shellStatusWarn : Theme.shellFg
                         onActivated: root.activate("systemPowerOff")
+                    }
+
+                    // Shown only when an action was refused. The tool's own last
+                    // line is quoted rather than paraphrased: "Interactive
+                    // authentication required" is a fixable sentence, and any
+                    // wording of ours would be a guess about which of several
+                    // refusals happened.
+                    Text {
+                        width: parent.width
+                        visible: root.failure !== ""
+                        text: root.failure
+                        wrapMode: Text.WordWrap
+                        font.family: Theme.fontMono
+                        font.pixelSize: 10
+                        color: Theme.shellStatusWarn
+                        textFormat: Text.PlainText
                     }
 
                     Text {

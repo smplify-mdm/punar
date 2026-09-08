@@ -19,7 +19,44 @@ pub const MAX_RESPONSE_BYTES: usize = 4096;
 pub struct VerifyRequest {
     pub v: u32,
     pub password: String,
+    /// What the caller intends to do with a successful answer. Defaults to
+    /// [`Purpose::Unlock`], so every existing lock-screen client is unchanged
+    /// and a client that does not know about tickets cannot accidentally mint
+    /// one.
+    #[serde(default)]
+    pub purpose: Purpose,
 }
+
+/// What a successful verification is FOR.
+///
+/// The distinction exists because the two answers have different lifetimes. An
+/// unlock is spent the instant it is given — the screen opens, and nothing is
+/// carried forward. An administrative change has to be proved to a *different*
+/// process (punard), which cannot itself run PAM for an unprivileged caller, so
+/// something durable enough to hand over has to exist. That something is a
+/// ticket, and it is minted only when the caller said in advance that it wanted
+/// one: a lock screen never leaves a credential-shaped object lying in /run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Purpose {
+    /// Open a locked session. No ticket.
+    #[default]
+    Unlock,
+    /// Re-authenticate before a device-administration change. On `ok`, a
+    /// single-use ticket is minted for this caller's uid.
+    Admin,
+}
+
+/// Where minted tickets live. Root-owned and root-only: a ticket is a bearer
+/// object, and the whole reason punard can trust one is that no unprivileged
+/// process could have created the file.
+pub const TICKET_DIR: &str = "/run/punar-authd/tickets";
+
+/// How long a ticket may be presented for. Short on purpose — this is the
+/// window between typing a password and pressing the button next to it, not a
+/// session. Long enough that a slow confirmation dialog does not strand
+/// somebody who typed correctly.
+pub const TICKET_MAX_AGE_SECS: u64 = 120;
 
 /// The three outcomes, and deliberately only three.
 ///
@@ -45,6 +82,11 @@ pub enum Verdict {
 pub struct VerifyResponse {
     pub v: u32,
     pub verdict: Verdict,
+    /// Present only for a [`Purpose::Admin`] request that succeeded. Omitted
+    /// entirely otherwise, so an unlock response stays byte-identical to the
+    /// one every shipped lock screen already parses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 impl VerifyResponse {
@@ -52,6 +94,15 @@ impl VerifyResponse {
         Self {
             v: PROTOCOL_VERSION,
             verdict,
+            ticket: None,
+        }
+    }
+
+    pub fn with_ticket(verdict: Verdict, ticket: Option<String>) -> Self {
+        Self {
+            v: PROTOCOL_VERSION,
+            verdict,
+            ticket,
         }
     }
 }
@@ -71,6 +122,36 @@ mod tests {
         assert!(serde_json::from_slice::<VerifyRequest>(with_uid).is_err());
         let correct = br#"{"v":1,"password":"x"}"#;
         assert!(serde_json::from_slice::<VerifyRequest>(correct).is_ok());
+    }
+
+    #[test]
+    fn a_request_without_a_purpose_is_an_unlock() {
+        // Every shipped lock screen sends exactly these two fields. If the
+        // default ever became Admin, every unlock would leave a bearer ticket
+        // in /run — so the default is asserted, not assumed.
+        let plain: VerifyRequest = serde_json::from_slice(br#"{"v":1,"password":"x"}"#).unwrap();
+        assert_eq!(plain.purpose, Purpose::Unlock);
+        let admin: VerifyRequest =
+            serde_json::from_slice(br#"{"v":1,"password":"x","purpose":"admin"}"#).unwrap();
+        assert_eq!(admin.purpose, Purpose::Admin);
+        assert!(
+            serde_json::from_slice::<VerifyRequest>(br#"{"v":1,"password":"x","purpose":"root"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unlock_response_carries_no_ticket_field_at_all() {
+        // Not "carries null" — carries nothing. The lock surface parses this
+        // string today and must keep seeing exactly what it saw before.
+        let body = serde_json::to_string(&VerifyResponse::new(Verdict::Ok)).unwrap();
+        assert_eq!(body, r#"{"v":1,"verdict":"ok"}"#);
+        let with = serde_json::to_string(&VerifyResponse::with_ticket(
+            Verdict::Ok,
+            Some("abc".to_string()),
+        ))
+        .unwrap();
+        assert_eq!(with, r#"{"v":1,"verdict":"ok","ticket":"abc"}"#);
     }
 
     #[test]

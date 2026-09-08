@@ -803,8 +803,13 @@ fn policy_explain_human_output_matches_the_spec_40_snapshot() {
 
     // The SPEC section 40 information set in the D-014 field-note grammar
     // (milestone-4.md section 7): EFFECTIVE VALUE / SOURCE / POLICY /
-    // USER OVERRIDE / COMPLIANCE rows; source and policy names verbatim
-    // in the mixed-case description column.
+    // USER OVERRIDE / ADMINISTRATOR / COMPLIANCE rows; source and policy names
+    // verbatim in the mixed-case description column.
+    //
+    // ADMINISTRATOR answers the question USER OVERRIDE provokes — "then who
+    // can?" — and here the honest answer is that nobody needs to: the value is
+    // already the person's own to change. The mock daemon predates the field,
+    // so this snapshot also proves the tolerant default renders sensibly.
     let expected = format!(
         "{}\n{RULE}\n{}",
         masthead_line(
@@ -815,6 +820,7 @@ fn policy_explain_human_output_matches_the_spec_40_snapshot() {
          SOURCE                       Personal preference\n\
          POLICY                       personal-defaults\n\
          USER OVERRIDE                Permitted · it is your device\n\
+         ADMINISTRATOR                Not needed · you can change this yourself\n\
          COMPLIANCE       COMPLIANT\n\
          MERGED FROM OS DEFAULTS + YOUR PREFERENCES\n"
     );

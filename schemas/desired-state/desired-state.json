@@ -110,6 +110,20 @@
               },
               "required": ["enabled"],
               "additionalProperties": false
+            },
+            "localAdmin": {
+              "title": "Local administration",
+              "description": "Whether the device's own administrator may edit local policy (spec section 44.5 lists local admin among the service controls enterprise policy governs). Absent means the organization has no opinion and the device's owner administers it, which is the state of every unenrolled device. punard reads this as a provenance-tagged layer: the best-ranked opinion governs, and a value outside the enum refuses daemon start rather than falling back to the permissive default.",
+              "type": "object",
+              "properties": {
+                "policyEditing": {
+                  "title": "Local policy editing",
+                  "description": "'allowed' lets a re-authenticated administrator record device_specific_override entries through policy.set (docs/api/ipc.md section 5.8a); 'denied' turns that route off, and the refusal names this policy. Neither value affects what the organization's own layers pin: those outrank the local administrator either way.",
+                  "enum": ["allowed", "denied"]
+                }
+              },
+              "required": ["policyEditing"],
+              "additionalProperties": false
             }
           },
           "required": ["firewall"],

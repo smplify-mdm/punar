@@ -30,7 +30,14 @@ hl.on("hyprland.start", function()
     hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE XDG_CONFIG_DIRS XDG_DATA_DIRS")
     hl.exec_cmd(shell)
     hl.exec_cmd(layoutScript .. " restore")
-    hl.exec_cmd("systemctl --user start hyprpolkitagent.service")
+    -- The import above and this start are two INDEPENDENT spawns, so their
+    -- order is not guaranteed — and hyprpolkitagent.service carries
+    -- ConditionEnvironment=WAYLAND_DISPLAY. Losing that race does not fail the
+    -- unit, it SKIPS it silently, and the desktop then has no authentication
+    -- agent: every polkit action that needs one fails with no dialog and no
+    -- message. Repeat the import inside the same shell so the ordering is a
+    -- property of this line rather than of the scheduler.
+    hl.exec_cmd("sh -c 'dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE; exec systemctl --user start hyprpolkitagent.service'")
     hl.exec_cmd("foot --server")
     -- Idle auto-lock. Started here rather than through the packaged
     -- hypridle.service (disabled in 00-punar-lean.preset) because that unit's

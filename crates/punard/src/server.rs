@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,13 +39,13 @@ use punar_common::ipc::{
     AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
     EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
-    FirstSync, IpcError, LastQuery, LastSync, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
-    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
-    PolicyExplainResult, PolicySourceRef, PrivilegeRequestParams, PrivilegeRevokeParams,
-    PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry, ReconcileResult,
-    RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT, StatusResult,
-    WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams, WebAppsInstallParams,
-    WebAppsListParams, WebAppsUninstallParams,
+    FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method,
+    Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
+    PolicyExplainParams, PolicyExplainResult, PolicySetParams, PolicySetResult, PolicySourceRef,
+    PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
+    ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
+    SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
+    WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -78,13 +78,13 @@ use crate::install::{
 };
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
-    ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason, EffectiveDocument,
-    Layer, compute_effective, evaluate_application_policy, evaluate_webapp_policy, load_policy_dir,
-    write_effective_debug_copy,
+    ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason, DEVICE_ADMIN_RANK,
+    EffectiveDocument, Layer, LocalAdminLayer, compute_effective, evaluate_application_policy,
+    evaluate_webapp_policy, load_policy_dir, resolve_local_admin, write_effective_debug_copy,
 };
 use crate::state::{
-    MigrationOutcome, OsDefaultsStore, PreferenceEntry, PreferencesStore, load_or_create_device_id,
-    migrate_m3_store,
+    ADMIN_POLICY_FILE, AdminPolicyEntry, AdminPolicyStore, MigrationOutcome, OsDefaultsStore,
+    PreferenceEntry, PreferencesStore, load_or_create_device_id, migrate_m3_store,
 };
 use crate::update_check::{UpdateCheckEngine, UpdateCheckError, UpdateCheckSources};
 use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
@@ -204,6 +204,11 @@ pub struct DaemonConfig {
     pub approvals_file: PathBuf,
     /// M9: the shipped AI authority document (SPEC section 20).
     pub ai_defaults_file: PathBuf,
+    /// Where `punar-authd` mints re-authentication tickets
+    /// ([`crate::reauth::TICKET_DIR`] in production). Injectable so a test can
+    /// prove the ACCEPT half of `policy.set` — the half that matters and the
+    /// one a hardcoded `/run` path leaves to the VM gate alone.
+    pub reauth_ticket_dir: PathBuf,
     /// M9: the uid an agent-raised approval is routed to — the console
     /// user. 1000 in the image (`punar`); injectable for tests. Not a
     /// presence check: see `Inner::console_user`.
@@ -282,6 +287,7 @@ impl DaemonConfig {
             os_release_path: PathBuf::from("/etc/os-release"),
             kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
             approvals_file,
+            reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
             agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
@@ -362,6 +368,13 @@ struct Inner {
     os_defaults: OsDefaultsStore,
     /// Rank-5 layer: recorded user preferences.
     preferences: PreferencesStore,
+    /// The device administrator's layer (device_specific_override, rank 4):
+    /// beaten by both organization rungs, beats every user's preference.
+    admin_policy: AdminPolicyStore,
+    /// Organization opinions about whether this device's administrator may
+    /// edit local policy at all (SPEC section 44.5). Reloaded with the org
+    /// layers on every enrollment transition.
+    local_admin: Mutex<Vec<LocalAdminLayer>>,
     /// Ranks 1–4 (and stored-rank overrides): policy.d drops. Loaded at
     /// startup; since M5 the **enrollment chain** reloads them live
     /// (`enroll.start` writes + reloads, `enroll.stop` empties). A manual
@@ -497,6 +510,7 @@ impl Daemon {
         // M3 values become the seeds (not a fresh observation).
         let os_defaults = OsDefaultsStore::load(&cfg.state_dir.join("os-defaults.json"))?;
         let preferences = PreferencesStore::load(&cfg.state_dir.join("preferences.json"))?;
+        let admin_policy = AdminPolicyStore::load(&cfg.state_dir.join(ADMIN_POLICY_FILE))?;
         if let Some(outcome) = migrate_m3_store(
             &cfg.state_dir,
             &registry,
@@ -545,6 +559,7 @@ impl Daemon {
             &registry,
             &os_defaults,
             &preferences,
+            &admin_policy,
             &loaded.layers,
             utc_now_rfc3339(),
         );
@@ -583,7 +598,9 @@ impl Daemon {
                 audit_events: AtomicU64::new(audit_events),
                 os_defaults,
                 preferences,
+                admin_policy,
                 org_layers: Mutex::new(loaded.layers),
+                local_admin: Mutex::new(loaded.local_admin),
                 application_policy: Mutex::new(loaded.applications),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
@@ -893,6 +910,21 @@ fn wire_classification(classification: Classification) -> WireClassification {
     }
 }
 
+/// Whether the device administrator's layer could win this path.
+///
+/// The rule is one comparison and it is the same one the merge uses: a layer at
+/// rank 4 beats anything numerically greater. So the administrator can move a
+/// value that an OS default (6) or a user preference (5) currently wins, and
+/// cannot move one an organization pins at 1, 2 or 3 — nor one already held by
+/// a rank-4 approved exception, which wins that rung by push order.
+///
+/// This is what lets a surface OFFER editing only where editing would work,
+/// instead of discovering the answer from a refusal after the fact.
+fn admin_may_override(entry: &punar_policy::EffectiveEntry<Value>) -> bool {
+    entry.provenance.rank > DEVICE_ADMIN_RANK
+        || entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
+}
+
 fn source_ref(provenance: &Provenance) -> PolicySourceRef {
     PolicySourceRef {
         kind: provenance.kind.as_str().to_string(),
@@ -931,6 +963,10 @@ fn domain_syntax_ok(domain: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Method handlers
 // ---------------------------------------------------------------------------
+
+/// The longest reason a `policy.set` may carry. Generous for a sentence,
+/// bounded because it is persisted and re-rendered in a refusal message.
+const MAX_POLICY_REASON_CHARS: usize = 500;
 
 fn invalid_state(reason: &str) -> IpcError {
     IpcError::with_details(
@@ -1415,6 +1451,7 @@ impl Inner {
                 &self.registry,
                 &self.os_defaults,
                 &self.preferences,
+                &self.admin_policy,
                 &org_layers,
                 utc_now_rfc3339(),
             )
@@ -1464,6 +1501,7 @@ impl Inner {
             Method::Reconcile => self.handle_reconcile(peer),
             Method::PolicyEffective => Ok(to_value(self.handle_policy_effective())),
             Method::PolicyExplain(params) => self.handle_policy_explain(params),
+            Method::PolicySet(params) => self.handle_policy_set(peer, params),
             Method::EnrollStart(params) => self.handle_enroll_start(peer, params),
             Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
             Method::EnrollStop => self.handle_enroll_stop(peer),
@@ -3273,6 +3311,38 @@ impl Inner {
             };
             return (Err(err), execution);
         }
+        self.settle_layer_change(
+            actor,
+            cap,
+            id,
+            Some(&params.desired_state),
+            "capabilities.set",
+            extra_policy_ids,
+        )
+    }
+
+    /// Apply the effective value for `id` after a layer store has changed:
+    /// recompute the merge, apply, verify, audit under `audit_action`.
+    ///
+    /// SHARED BY `capabilities.set` AND `policy.set` on purpose. The two differ
+    /// only in which layer they wrote and what the audit trail calls the
+    /// action; everything after that — apply the value the MERGE chose rather
+    /// than the one the caller named, re-observe, and record the outcome — is
+    /// the same sequence, and having one copy of it is what stops the
+    /// administrator's path from quietly drifting into a weaker one.
+    ///
+    /// `requested` is what the caller asked for, or `None` when they cleared an
+    /// entry. It is used for one thing: deciding whether the result should say
+    /// the value was overridden by a higher layer.
+    fn settle_layer_change(
+        &self,
+        actor: &AuditActor,
+        cap: &dyn Capability,
+        id: &str,
+        requested: Option<&Value>,
+        audit_action: &str,
+        extra_policy_ids: &[String],
+    ) -> (Result<Value, IpcError>, Execution) {
         self.recompute_effective();
 
         let (effective_value, winning_policy_id) = {
@@ -3282,14 +3352,18 @@ impl Inner {
                 .expect("registered capability has an effective entry");
             (entry.value.clone(), entry.provenance.policy_id.clone())
         };
-        let overridden = effective_value != params.desired_state;
+        let overridden = requested.is_some_and(|want| effective_value != *want);
         let mut policy_ids = vec![winning_policy_id];
         policy_ids.extend(extra_policy_ids.iter().cloned());
         let audited = |outcome: AuditOutcome| {
-            let mut event = AuditEvent::capabilities_set(
+            // `AuditEvent::action` is what `AuditEvent::capabilities_set` is
+            // built from, so a `capabilities.set` event through this path is
+            // byte-identical to the one M3 shipped.
+            let mut event = AuditEvent::action(
                 &self.device_id,
                 actor,
-                &params.capability,
+                audit_action,
+                id,
                 Decision::Allow,
                 outcome,
             );
@@ -3703,6 +3777,8 @@ impl Inner {
     /// per-path provenance and compliance. Read, not audited.
     fn handle_policy_effective(&self) -> PolicyEffectiveResult {
         let doc = self.effective.lock().unwrap().clone();
+        let local_admin = self.local_admin_status();
+        let admin_editable = local_admin.allowed;
         let tracker = self.tracker.lock().unwrap();
         let entries = doc
             .entries
@@ -3712,12 +3788,27 @@ impl Inner {
                 effective_value: entry.value.clone(),
                 source: source_ref(&entry.provenance),
                 user_override_permitted: entry.user_override_permitted,
+                admin_override_permitted: admin_editable && admin_may_override(entry),
                 compliance_state: tracker.state_of(path),
             })
             .collect();
         PolicyEffectiveResult {
             computed_at: doc.computed_at,
             entries,
+            local_admin,
+        }
+    }
+
+    /// The device-wide half of the answer: whether an administrator may edit
+    /// anything, and which organization document said otherwise.
+    fn local_admin_status(&self) -> LocalAdminStatus {
+        let layers = self.local_admin.lock().unwrap();
+        match resolve_local_admin(&layers) {
+            Some(layer) => LocalAdminStatus {
+                allowed: layer.allowed,
+                source: Some(source_ref(&layer.provenance)),
+            },
+            None => LocalAdminStatus::default(),
         }
     }
 
@@ -3743,9 +3834,241 @@ impl Inner {
             effective_value: entry.value.clone(),
             source: source_ref(&entry.provenance),
             user_override_permitted: entry.user_override_permitted,
+            admin_override_permitted: self.local_admin_status().allowed
+                && admin_may_override(&entry),
             compliance_state: self.tracker.lock().unwrap().state_of(path),
         };
         Ok(to_value(result))
+    }
+
+    /// `policy.set`: the device administrator pins (or clears) one capability
+    /// for everyone on this machine.
+    ///
+    /// WHAT THIS IS, AND WHAT IT IS NOT. It is an ADMINISTRATIVE control, not a
+    /// security boundary. docs/design/execution-trust.md says it plainly — "A
+    /// local root user defeats local policy" — and nothing here changes that. A
+    /// person who can become root on this machine can edit
+    /// `/var/lib/punar/policy/local.json` directly. What this method adds is
+    /// that the ORDINARY route is authenticated, bounded, explained and
+    /// recorded, so a change has an author and a reason attached to it.
+    ///
+    /// THE LADDER IT ENFORCES, in the order the checks run, because each one
+    /// answers a different person's question:
+    ///
+    /// ```text
+    /// 1. an agent scope?          -> denied outright. No re-auth path exists
+    ///                                for an agent, and SPEC 60 forbids
+    ///                                root-ness inside a scope buying a bypass.
+    /// 2. a stated reason?         -> required. A pinned value with no reason
+    ///                                is the thing the next person will ask
+    ///                                about, and the answer belongs in the file.
+    /// 3. does the value validate? -> the capability decides, as it does for
+    ///                                capabilities.set. Closed vocabulary.
+    /// 4. may a local admin edit?  -> the organization decides (SPEC 44.5).
+    /// 5. may THIS path move?      -> the ladder decides: rank 4 cannot displace
+    ///                                ranks 1-3, nor a rank-4 approved exception.
+    /// 6. who is asking?           -> uid 0, or a re-authenticated caller
+    ///                                holding a ticket punar-authd minted for
+    ///                                their own uid in the last two minutes.
+    /// ```
+    ///
+    /// Order matters for what a refusal SAYS. Asking for a password and then
+    /// refusing the change on policy grounds would be a small cruelty; every
+    /// reason that does not depend on who is asking is settled first.
+    fn handle_policy_set(&self, peer: &Peer, params: &PolicySetParams) -> Result<Value, IpcError> {
+        let cap = self.lookup(&params.capability)?;
+        let id = params.capability.as_str();
+        let actor = self.actor_of(peer);
+        let deny = |details: Value, message: String| -> IpcError {
+            IpcError::with_details(ErrorCode::Denied, message, details)
+        };
+
+        // 1. No agent, at any uid.
+        if let Some(session) = actor.agent_session_id.clone() {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "policy.set",
+                id,
+            ));
+            return Err(deny(
+                json!({
+                    "decision": "deny",
+                    "capability": id,
+                    "agent_session_id": session,
+                    "reason": "agent_scope",
+                }),
+                format!(
+                    "An AI agent may not set device policy.\n\
+                     Requested by: {session}\n\
+                     Policy: personal defaults — device administration requires a \
+                     person who has just proved their password, and an agent has no \
+                     password to prove.\n\
+                     Next step: make the change yourself in System Control · Policy."
+                ),
+            ));
+        }
+
+        // 2. A reason, in the administrator's own words.
+        let reason = params.reason.trim();
+        if reason.is_empty() || reason.chars().count() > MAX_POLICY_REASON_CHARS {
+            return Err(IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "A device policy change needs a reason of 1 to {MAX_POLICY_REASON_CHARS} \
+                     characters.\n\
+                     Policy: personal defaults — a pinned value outlives the moment it \
+                     was pinned, and the next person to meet it deserves to know why.\n\
+                     Next step: repeat the change with --reason \"...\"."
+                ),
+                json!({ "param": "reason", "capability": id }),
+            ));
+        }
+
+        // 3. The value is the capability's to accept, exactly as for
+        //    capabilities.set. Clearing skips this: there is nothing to check.
+        if let Some(value) = &params.value {
+            cap.validate(value).map_err(|why| invalid_state(&why))?;
+        }
+
+        // 4. The organization's opinion about local administration.
+        let local_admin = self.local_admin_status();
+        if !local_admin.allowed {
+            let (name, policy_id) = local_admin
+                .source
+                .as_ref()
+                .map(|src| (src.name.clone(), src.policy_id.clone()))
+                .unwrap_or_else(|| ("your organization".into(), "unknown".into()));
+            let mut event = AuditEvent::denial(&self.device_id, &actor, "policy.set", id);
+            event.policy_ids = vec![policy_id.clone()];
+            self.log_audit(event);
+            return Err(deny(
+                json!({
+                    "decision": "deny",
+                    "capability": id,
+                    "policy_ids": [policy_id],
+                    "reason": "local_admin_disabled",
+                }),
+                format!(
+                    "Local policy editing is turned off on this device by {name} \
+                     ({policy_id}).\n\
+                     User override: not permitted.\n\
+                     Next step: ask {name} to change the policy centrally — this device \
+                     will pick it up on its next sync."
+                ),
+            ));
+        }
+
+        // 5. Whether this particular path is one the administrator's rung can
+        //    move. A value an organization pins is not editable here, and the
+        //    refusal names who pinned it rather than saying "no".
+        let current = self
+            .effective
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| self.internal(&format!("{id} has no effective entry")))?;
+        if !admin_may_override(&current) {
+            let mut event = AuditEvent::denial(&self.device_id, &actor, "policy.set", id);
+            event.policy_ids = vec![current.provenance.policy_id.clone()];
+            self.log_audit(event);
+            return Err(IpcError::denied_org_pinned(
+                id,
+                &current.provenance.source_name,
+                &current.provenance.policy_id,
+            ));
+        }
+
+        // 6. Who is asking. Root needs no ticket — it has no lock screen to
+        //    re-authenticate against, and it could edit the store directly in
+        //    any case, so demanding one would be theatre.
+        if peer.uid != 0 {
+            let Some(ticket) = params.ticket.as_deref() else {
+                self.log_audit(AuditEvent::denial(
+                    &self.device_id,
+                    &actor,
+                    "policy.set",
+                    id,
+                ));
+                return Err(deny(
+                    json!({
+                        "decision": "deny",
+                        "capability": id,
+                        "reason": "reauthentication_required",
+                    }),
+                    "Changing device policy needs your password again, and this \
+                     request did not carry a confirmation.\n\
+                     Policy: personal defaults — an administrative change is \
+                     confirmed at the moment it is made, not by having been \
+                     signed in for a while.\n\
+                     Next step: make the change from System Control · Policy, \
+                     which asks for your password first."
+                        .to_string(),
+                ));
+            };
+            if let Err(why) = crate::reauth::consume(
+                &self.cfg.reauth_ticket_dir,
+                peer.uid,
+                ticket,
+                SystemTime::now(),
+            ) {
+                self.log_audit(AuditEvent::denial(
+                    &self.device_id,
+                    &actor,
+                    "policy.set",
+                    id,
+                ));
+                return Err(deny(
+                    json!({
+                        "decision": "deny",
+                        "capability": id,
+                        "reason": format!("reauthentication_{}", why.as_str()),
+                    }),
+                    format!(
+                        "Your password confirmation was not accepted: {}.\n\
+                         Policy: personal defaults — a confirmation is good once, for \
+                         two minutes, for the account that made it.\n\
+                         Next step: try the change again and enter your password when \
+                         asked.",
+                        why.as_message()
+                    ),
+                ));
+            }
+        }
+
+        // Authorized. Record the entry, then let the shared settle path apply
+        // whatever the MERGE now says — which may not be what was just pinned,
+        // if a higher layer wins, and the result says so rather than implying
+        // the change took effect.
+        let entry = params.value.as_ref().map(|value| AdminPolicyEntry {
+            value: value.clone(),
+            set_at: utc_now_rfc3339(),
+            set_by: actor.user_id.clone(),
+            reason: reason.to_string(),
+        });
+        self.admin_policy
+            .set(id, entry)
+            .map_err(|e| self.internal(&format!("persisting the policy entry failed: {e}")))?;
+
+        let (result, execution) =
+            self.settle_layer_change(&actor, cap, id, params.value.as_ref(), "policy.set", &[]);
+        result?;
+
+        let settled = self
+            .effective
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| self.internal(&format!("{id} has no effective entry")))?;
+        Ok(to_value(PolicySetResult {
+            capability: id.to_string(),
+            pinned_value: params.value.clone(),
+            effective_value: settled.value,
+            source: source_ref(&settled.provenance),
+            changed: execution.changed.unwrap_or(false),
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -4122,6 +4445,7 @@ impl Inner {
         *self.device_token.lock().unwrap() = Some(token);
         *self.enrollment.lock().unwrap() = Some(enrollment);
         *self.org_layers.lock().unwrap() = loaded.layers;
+        *self.local_admin.lock().unwrap() = loaded.local_admin;
         *self.application_policy.lock().unwrap() = loaded.applications;
         self.reload_ai_authority();
         self.recompute_effective();

@@ -1582,14 +1582,256 @@ fn policy_explain_unknown_path_is_not_found_in_section_73_voice() {
 }
 
 #[test]
-fn no_write_side_policy_method_exists() {
-    // Contract section 8: the only policy mutations are capabilities.set
-    // and (M5) the enrollment-managed policy.d drop.
+fn no_generic_write_side_policy_method_exists() {
+    // Contract section 8, as amended by the device-administrator layer. There
+    // is now exactly one write-side policy method, `policy.set`, and it takes a
+    // REGISTERED CAPABILITY and a value that capability validates. What must
+    // never exist is a generic document write — the root RPC primitive SPEC
+    // sections 10 and 60 forbid — so the probes below are the shapes such a
+    // primitive would wear.
     let td = TestDaemon::start_as_root();
-    for probe in ["policy.set", "policy.write", "policy.apply"] {
+    for probe in ["policy.write", "policy.apply", "policy.patch", "policy.put"] {
         let resp = td.call(probe, Some(json!({ "path": "mock.widget" })));
         assert_eq!(resp["error"]["code"], "unknown_method", "probe {probe}");
     }
+
+    // And `policy.set` itself refuses to be used as one: a path expression is
+    // not a capability, and an unknown field is a hard parse error rather than
+    // something quietly ignored.
+    let by_path = td.call(
+        "policy.set",
+        Some(json!({ "path": "mock.widget", "value": "on", "reason": "because" })),
+    );
+    assert_eq!(by_path["error"]["code"], "invalid_params");
+    let smuggled = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "on",
+            "reason": "because",
+            "document": {"anything": true}
+        })),
+    );
+    assert_eq!(smuggled["error"]["code"], "invalid_params");
+    let unregistered = td.call(
+        "policy.set",
+        Some(json!({ "capability": "not.a_capability", "value": "on", "reason": "because" })),
+    );
+    assert_eq!(unregistered["error"]["code"], "not_found");
+}
+
+/// Root pins a value; the merge makes it effective; the entry is on disk with
+/// its author and reason; clearing it hands the path back to the layer below.
+#[test]
+fn root_pins_a_capability_for_the_device_and_can_hand_it_back() {
+    let td = TestDaemon::start_as_root();
+
+    // A user preference first, so the administrator has something to outrank.
+    let pref = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "mock.widget", "desired_state": "off" })),
+    );
+    assert!(pref.get("error").is_none(), "{pref}");
+
+    let set = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "on",
+            "reason": "the lab machines all run with the widget on"
+        })),
+    );
+    assert!(set.get("error").is_none(), "{set}");
+    let result = &set["result"];
+    assert_eq!(result["capability"], "mock.widget");
+    assert_eq!(result["pinned_value"], "on");
+    assert_eq!(result["effective_value"], "on");
+    assert_eq!(result["source"]["kind"], "device_specific_override");
+    assert_eq!(result["source"]["rank"], 4);
+    assert_eq!(result["changed"], true);
+
+    let explained = td.call("policy.explain", Some(json!({ "path": "mock.widget" })));
+    assert_eq!(explained["result"]["effective_value"], "on");
+    assert_eq!(explained["result"]["user_override_permitted"], false);
+    assert_eq!(
+        explained["result"]["admin_override_permitted"], true,
+        "an administrator can still move a value they pinned themselves"
+    );
+
+    // The reason is persisted with the entry, not only logged.
+    let stored: Value = serde_json::from_str(
+        &std::fs::read_to_string(td.dir.join("state/local-policy.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = &stored["policies"]["mock.widget"];
+    assert_eq!(entry["value"], "on");
+    assert_eq!(
+        entry["reason"],
+        "the lab machines all run with the widget on"
+    );
+    assert!(entry["set_by"].as_str().is_some_and(|who| !who.is_empty()));
+
+    // Clearing gives the path back to the preference underneath.
+    let cleared = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": null,
+            "reason": "the lab booking ended"
+        })),
+    );
+    assert!(cleared.get("error").is_none(), "{cleared}");
+    assert_eq!(cleared["result"]["pinned_value"], Value::Null);
+    assert_eq!(cleared["result"]["effective_value"], "off");
+    assert_eq!(cleared["result"]["source"]["kind"], "local_user_preference");
+
+    let audit = td.call("audit.tail", Some(json!({ "n": 20 })));
+    let actions: Vec<&str> = audit["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+    assert!(
+        actions.iter().filter(|a| **a == "policy.set").count() >= 2,
+        "both the pin and the clear are in the trail: {actions:?}"
+    );
+}
+
+/// A change with no reason is refused before anything is written. The reason is
+/// not decoration: it is the only part of a pinned value that explains itself
+/// to whoever meets it next.
+#[test]
+fn a_policy_change_without_a_reason_is_refused() {
+    let td = TestDaemon::start_as_root();
+    for reason in ["", "   "] {
+        let resp = td.call(
+            "policy.set",
+            Some(json!({ "capability": "mock.widget", "value": "on", "reason": reason })),
+        );
+        assert_eq!(resp["error"]["code"], "invalid_params", "{resp}");
+        assert_eq!(resp["error"]["details"]["param"], "reason");
+    }
+    assert!(
+        !td.dir.join("state/local-policy.json").exists()
+            || std::fs::read_to_string(td.dir.join("state/local-policy.json"))
+                .unwrap()
+                .contains("\"policies\": {}"),
+        "nothing was written"
+    );
+}
+
+/// The ACCEPT half: a ticket punar-authd minted for this caller's own uid
+/// authorizes the change, and is spent doing it.
+///
+/// The ticket directory is injected rather than reached at `/run` so this can
+/// run on a build machine — but the ticket itself is created exactly as
+/// punar-authd creates one (a 0700 per-uid directory, an empty 0600 file named
+/// by the token), because a test that mints them a different way would prove
+/// something about the test.
+#[test]
+fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        }),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            cfg.reauth_ticket_dir = dir.join("tickets");
+        },
+    );
+    let per_uid = td.dir.join("tickets/1000");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&per_uid)
+        .unwrap();
+    fs::File::create(per_uid.join(TOKEN)).unwrap();
+
+    let set = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "on",
+            "reason": "the shared machine keeps this on",
+            "ticket": TOKEN
+        })),
+    );
+    assert!(set.get("error").is_none(), "{set}");
+    assert_eq!(set["result"]["effective_value"], "on");
+    assert_eq!(set["result"]["source"]["kind"], "device_specific_override");
+    assert!(
+        !per_uid.join(TOKEN).exists(),
+        "the ticket was spent, not merely checked"
+    );
+
+    // And the same ticket a second time authorizes nothing.
+    let replay = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "off",
+            "reason": "trying the same confirmation twice",
+            "ticket": TOKEN
+        })),
+    );
+    assert_eq!(replay["error"]["code"], "denied");
+    assert_eq!(
+        replay["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
+    let explained = td.call("policy.explain", Some(json!({ "path": "mock.widget" })));
+    assert_eq!(
+        explained["result"]["effective_value"], "on",
+        "the replay changed nothing"
+    );
+}
+
+/// An ordinary desktop user cannot pin device policy just by being connected.
+/// The socket admits them; the ticket is what authorizes them, and without one
+/// the refusal says so in words that name the fix.
+#[test]
+fn a_user_without_a_reauthentication_ticket_is_refused() {
+    let td = TestDaemon::start_as_uid(1000);
+    let resp = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "on",
+            "reason": "I would like this on"
+        })),
+    );
+    assert_eq!(resp["error"]["code"], "denied");
+    assert_eq!(
+        resp["error"]["details"]["reason"],
+        "reauthentication_required"
+    );
+    let message = resp["error"]["message"].as_str().unwrap();
+    assert!(message.contains("password"), "{message}");
+    assert!(message.contains("Next step"), "{message}");
+
+    // A ticket that was never minted is refused too, and by its own name: the
+    // daemon must not treat "no such ticket" as "close enough".
+    let forged = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "value": "on",
+            "reason": "I would like this on",
+            "ticket": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        })),
+    );
+    assert_eq!(forged["error"]["code"], "denied");
+    assert_eq!(
+        forged["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
 }
 
 /// The Acme org fixtures through the whole daemon: an organization_baseline

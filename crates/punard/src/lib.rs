@@ -61,6 +61,7 @@ pub mod hardware;
 pub mod install;
 pub mod pi_update;
 pub mod policy;
+pub mod reauth;
 pub mod server;
 pub mod state;
 mod uki;

@@ -7,17 +7,22 @@
 //! need a raw-fd conversion `#![forbid(unsafe_code)]` refuses — and it means no
 //! root process with authentication authority is resident between attempts.
 
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use pam_client2::conv_mock::Conversation;
 use pam_client2::{Context, Flag};
 use rustix::net::sockopt::{Timeout, set_socket_timeout};
+use rustix::rand::{GetRandomFlags, getrandom};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::protocol::{
-    MAX_REQUEST_BYTES, PROTOCOL_VERSION, Verdict, VerifyRequest, VerifyResponse,
+    MAX_REQUEST_BYTES, PROTOCOL_VERSION, Purpose, TICKET_DIR, Verdict, VerifyRequest,
+    VerifyResponse,
 };
 
 /// The stack this daemon runs. Deliberately the same file the lock surface
@@ -50,37 +55,120 @@ pub fn session() -> io::Result<()> {
     let mut reader = stdin.lock();
     let stdout = io::stdout();
     let mut writer = stdout.lock();
-    let verdict = decide(uid, &mut reader);
-    write_response(&mut writer, verdict)
+    let (verdict, purpose) = decide(uid, &mut reader);
+    // The ticket is minted AFTER the verdict and only for the one purpose that
+    // asked for it, so no path that merely opens a screen can leave a bearer
+    // object behind. A minting failure is not turned into a denial: the secret
+    // was correct, and saying otherwise would be the exact lie this daemon's
+    // three-verdict rule exists to prevent. The caller sees `ok` with no
+    // ticket, and punard refuses the change for a stated, fixable reason.
+    let ticket = match (verdict, purpose) {
+        (Verdict::Ok, Purpose::Admin) => mint_ticket(Path::new(TICKET_DIR), uid),
+        _ => None,
+    };
+    write_response(&mut writer, verdict, ticket)
 }
 
-/// Read one framed request and turn it into a verdict.
-fn decide(uid: u32, reader: &mut dyn Read) -> Verdict {
+/// Read one framed request and turn it into a verdict, plus what the caller
+/// said the answer was for.
+fn decide(uid: u32, reader: &mut dyn Read) -> (Verdict, Purpose) {
     let mut header = [0_u8; 4];
     if reader.read_exact(&mut header).is_err() {
-        return Verdict::Unavailable;
+        return (Verdict::Unavailable, Purpose::Unlock);
     }
     let len = u32::from_le_bytes(header) as usize;
     if len == 0 || len > MAX_REQUEST_BYTES {
-        return Verdict::Denied;
+        return (Verdict::Denied, Purpose::Unlock);
     }
     let mut payload = Zeroizing::new(vec![0_u8; len]);
     if reader.read_exact(&mut payload).is_err() {
-        return Verdict::Unavailable;
+        return (Verdict::Unavailable, Purpose::Unlock);
     }
     let request: VerifyRequest = match serde_json::from_slice(&payload) {
         Ok(request) => request,
         Err(_) => {
             payload.zeroize();
-            return Verdict::Denied;
+            return (Verdict::Denied, Purpose::Unlock);
         }
     };
     payload.zeroize();
     if request.v != PROTOCOL_VERSION {
-        return Verdict::Denied;
+        return (Verdict::Denied, Purpose::Unlock);
     }
+    let purpose = request.purpose;
     let password = Zeroizing::new(request.password);
-    verify_for_uid(uid, &password)
+    (verify_for_uid(uid, &password), purpose)
+}
+
+/// Create one single-use ticket for `uid` under `dir`, returning its name.
+///
+/// THE FILE'S EXISTENCE IS THE WHOLE PROOF, which is why it has no contents and
+/// no signature. `dir` is root-owned and mode 0700, so an unprivileged process
+/// cannot create an entry in it; punard, which is root, therefore knows that
+/// any name it finds there was written by this daemon after a real PAM success.
+/// The uid is the SUBDIRECTORY rather than a field, so there is no parse step
+/// that could be got wrong and no format for a later edit to extend.
+fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
+    let per_uid = dir.join(uid.to_string());
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&per_uid)
+        .ok()?;
+    // recursive(true) does not apply the mode to a directory that already
+    // exists, and a wrong mode here is the one thing that would matter.
+    fs::set_permissions(&per_uid, fs::Permissions::from_mode(0o700)).ok()?;
+    sweep_expired(&per_uid);
+
+    let mut raw = [0_u8; 32];
+    let mut filled = 0;
+    while filled < raw.len() {
+        let count = getrandom(&mut raw[filled..], GetRandomFlags::empty()).ok()?;
+        if count == 0 {
+            return None;
+        }
+        filled += count;
+    }
+    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+
+    let path: PathBuf = per_uid.join(&name);
+    OpenOptions::new()
+        .write(true)
+        // create_new: a name this daemon just drew at random must not be able
+        // to land on an existing file, and 256 bits says it will not — so if it
+        // somehow does, that is a fact worth failing on rather than papering
+        // over by truncating whatever was there.
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok()?;
+    Some(name)
+}
+
+/// Remove tickets older than the window before minting another, so a session
+/// that asks repeatedly cannot accumulate live bearer objects. punard also
+/// unlinks on use and re-checks the age, so this is hygiene, not the guarantee.
+fn sweep_expired(per_uid: &Path) {
+    let Ok(entries) = fs::read_dir(per_uid) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let expired = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|when| {
+                when.elapsed()
+                    .map(|age| age.as_secs() > crate::protocol::TICKET_MAX_AGE_SECS)
+                    // A modification time in the future is a clock that moved.
+                    // Treat it as expired: a ticket that cannot be aged is not
+                    // one to keep.
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        if expired {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Resolve the peer's uid to a name and run the stack for it.
@@ -146,8 +234,12 @@ fn authenticate(username: &str, password: &str) -> Verdict {
     Verdict::Ok
 }
 
-fn write_response(writer: &mut dyn Write, verdict: Verdict) -> io::Result<()> {
-    let body = serde_json::to_vec(&VerifyResponse::new(verdict))
+fn write_response(
+    writer: &mut dyn Write,
+    verdict: Verdict,
+    ticket: Option<String>,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(&VerifyResponse::with_ticket(verdict, ticket))
         .map_err(|_| io::Error::other("response serialization failed"))?;
     let len = u32::try_from(body.len()).map_err(|_| io::Error::other("response too large"))?;
     writer.write_all(&len.to_le_bytes())?;
@@ -196,24 +288,93 @@ mod tests {
         // A peer that vanishes mid-request has said nothing about a password,
         // so the surface must not be able to render it as a wrong one.
         let mut short = io::Cursor::new(vec![4_u8, 0, 0]);
-        assert_eq!(decide(1000, &mut short), Verdict::Unavailable);
+        assert_eq!(decide(1000, &mut short).0, Verdict::Unavailable);
     }
 
     #[test]
     fn a_malformed_or_oversized_request_is_denied_without_allocating() {
         let mut huge = io::Cursor::new((MAX_REQUEST_BYTES as u32 + 1).to_le_bytes().to_vec());
-        assert_eq!(decide(1000, &mut huge), Verdict::Denied);
+        assert_eq!(decide(1000, &mut huge).0, Verdict::Denied);
 
         let mut junk = io::Cursor::new(framed(b"not json"));
-        assert_eq!(decide(1000, &mut junk), Verdict::Denied);
+        assert_eq!(decide(1000, &mut junk).0, Verdict::Denied);
 
         let mut wrong_version = io::Cursor::new(framed(br#"{"v":99,"password":"x"}"#));
-        assert_eq!(decide(1000, &mut wrong_version), Verdict::Denied);
+        assert_eq!(decide(1000, &mut wrong_version).0, Verdict::Denied);
     }
 
     #[test]
     fn a_username_on_the_wire_is_refused_rather_than_honoured() {
         let mut named = io::Cursor::new(framed(br#"{"v":1,"username":"root","password":"x"}"#));
-        assert_eq!(decide(1000, &mut named), Verdict::Denied);
+        assert_eq!(decide(1000, &mut named).0, Verdict::Denied);
+    }
+
+    /// A request that never gets far enough to be understood must not be
+    /// treated as an administrative one. Every early return says Unlock, and
+    /// this asserts it for the shapes that take those returns.
+    #[test]
+    fn a_request_that_was_never_understood_is_never_an_admin_request() {
+        for body in [
+            framed(b"not json").as_slice(),
+            framed(br#"{"v":99,"password":"x","purpose":"admin"}"#).as_slice(),
+        ] {
+            let mut cursor = io::Cursor::new(body.to_vec());
+            assert_eq!(decide(1000, &mut cursor).1, Purpose::Unlock);
+        }
+    }
+
+    #[test]
+    fn a_minted_ticket_is_a_root_only_file_named_by_its_own_secret() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-tickets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let name = mint_ticket(&dir, 1000).expect("mint");
+        assert_eq!(name.len(), 64, "256 bits, hex");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let per_uid = dir.join("1000");
+        assert_eq!(
+            fs::metadata(&per_uid).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the directory an unprivileged process must not be able to write"
+        );
+        let ticket = per_uid.join(&name);
+        assert_eq!(
+            fs::metadata(&ticket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&ticket).unwrap(), Vec::<u8>::new(), "no contents");
+
+        // A second mint is a different secret, in the same place.
+        let second = mint_ticket(&dir, 1000).expect("mint again");
+        assert_ne!(second, name);
+        assert!(per_uid.join(&second).exists());
+        assert!(ticket.exists(), "and it did not disturb the first");
+
+        // A different uid cannot reach it: the uid is the directory.
+        let other = mint_ticket(&dir, 1001).expect("mint for another uid");
+        assert!(dir.join("1001").join(&other).exists());
+        assert!(!dir.join("1001").join(&name).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minting_sweeps_a_ticket_that_has_outlived_its_window() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let stale = mint_ticket(&dir, 1000).expect("mint");
+        let per_uid = dir.join("1000");
+        let path = per_uid.join(&stale);
+        // Age it past the window by moving its mtime, which is the only input
+        // the sweep reads.
+        let old = std::time::SystemTime::now()
+            - Duration::from_secs(crate::protocol::TICKET_MAX_AGE_SECS + 60);
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(old).unwrap();
+        drop(file);
+
+        let fresh = mint_ticket(&dir, 1000).expect("mint again");
+        assert!(!path.exists(), "the stale ticket did not survive the sweep");
+        assert!(per_uid.join(&fresh).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

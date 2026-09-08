@@ -1033,6 +1033,16 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
         // the User Preference rung (rank < 5) pins a value.
         "Not permitted · a higher-precedence source pins this value"
     };
+    // The second half of "can this change", and the one a person asks next when
+    // the first line says no. They are different questions: a user preference
+    // cannot move an administrator's pin, but the administrator can.
+    let admin_desc = if explain.admin_override_permitted {
+        "Can change this · punarctl policy set"
+    } else if explain.user_override_permitted {
+        "Not needed · you can change this yourself"
+    } else {
+        "Cannot change this · the source above outranks the device"
+    };
     let mut out = fmt::masthead(style, "Policy Explain", path);
     out.push_str(&fmt::rows(
         style,
@@ -1046,6 +1056,7 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
             Row::new("Source", "", Slot::Neutral, &explain.source.name),
             Row::new("Policy", "", Slot::Neutral, &explain.source.policy_id),
             Row::new("User override", "", Slot::Neutral, override_desc),
+            Row::new("Administrator", "", Slot::Neutral, admin_desc),
             Row::new(
                 "Compliance",
                 &explain.compliance_state,
@@ -1054,6 +1065,51 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
             ),
         ],
     ));
+    out.push_str(&fmt::note(style, POLICY_NOTE));
+    Ok(out)
+}
+
+/// `policy.set`: what was pinned, and — separately — what is actually in force.
+///
+/// THE TWO LINES ARE NEVER COLLAPSED, even when they agree. An administrator
+/// who pins a value an organization outranks has done something real (the entry
+/// is recorded and becomes effective if the org layer goes away) and something
+/// that changed nothing today, and a single "done" line would let them believe
+/// the second thing did not happen.
+pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
+    let set: model::PolicySet = parse(result)?;
+    let pinned = match &set.pinned_value {
+        Some(value) => state_str(value),
+        None => "withdrawn".to_string(),
+    };
+    let effective = state_str(&set.effective_value);
+    let mut out = fmt::masthead(style, "Policy Set", &set.capability);
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new("Administrator", &pinned, Slot::Neutral, ""),
+            Row::new("Effective value", &effective, Slot::Neutral, ""),
+            Row::new("Source", "", Slot::Neutral, &set.source.name),
+            Row::new("Policy", "", Slot::Neutral, &set.source.policy_id),
+            Row::new(
+                "Applied",
+                if set.changed { "yes" } else { "no change" },
+                Slot::Neutral,
+                if set.changed {
+                    ""
+                } else {
+                    "the device was already in this state"
+                },
+            ),
+        ],
+    ));
+    if set.pinned_value.is_some() && effective != pinned {
+        out.push_str(&fmt::note(
+            style,
+            "A higher-precedence source still decides this value. Your entry is \
+             recorded and takes effect if that source is withdrawn.",
+        ));
+    }
     out.push_str(&fmt::note(style, POLICY_NOTE));
     Ok(out)
 }

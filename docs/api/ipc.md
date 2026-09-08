@@ -195,6 +195,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always |
 | `policy.effective` (M4) | any connected peer | no      | no      |
 | `policy.explain` (M4)   | any connected peer | no      | no      |
+| `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) |
 | `enroll.start` (M5)     | **root only (uid 0)** | yes  | always  |
 | `enroll.status` (M5)    | any connected peer | no      | no      |
 | `enroll.stop` (M5)      | **root only (uid 0)** | yes  | always  |
@@ -504,6 +505,27 @@ safety constraint … 6 = OS default; lower rank wins).
 may override the OS default or their own preference; anything above the
 User Preference rung pins the value (personal mode: always `true`).
 
+Two additive fields carry the device-administrator layer (section 5.8a).
+Both are optional under the v1 additive-field rule, and a client that does
+not see them is talking to a daemon that predates it:
+
+- each entry's `admin_override_permitted` is `true` iff this device's
+  administrator could move the value — the winning rank is greater than 4,
+  or the winner already *is* the administrator's own entry. It answers the
+  question `user_override_permitted: false` provokes, which is "then who
+  can?", and it is what lets a surface offer editing only where editing
+  would work rather than discovering the answer from a refusal.
+- a top-level `local_admin` object says whether local policy editing is
+  permitted at all, and by whom it was withheld:
+  `{"allowed": true}` on a personal device (the default when no
+  organization has an opinion), or
+  `{"allowed": false, "source": {"kind": "organization_baseline", "rank": 2,
+  "policy_id": "eng-baseline-v12", "name": "Acme Engineering Baseline"}}`
+  when one has (spec section 44.5 names local admin among the service
+  controls enterprise policy governs; the organization expresses it as
+  `spec.security.localAdmin.policyEditing: "allowed" | "denied"` in its
+  desired-state document).
+
 ### 5.8 `policy.explain` (M4)
 
 Params: `{"path": "security.firewall"}` — a capability path from the
@@ -518,9 +540,12 @@ information set:
              "policy_id": "personal-defaults",
              "name": "Personal preference"},
   "user_override_permitted": true,
+  "admin_override_permitted": true,
   "compliance_state": "compliant"
 }}
 ```
+
+`admin_override_permitted` is the additive field described in section 5.7.
 
 Unknown path → `not_found` (`details.param: "path"` sibling shape to the
 capability case; the section 73 message names the path and points at
@@ -533,6 +558,87 @@ merge (e.g. `{"kind": "organization_baseline", "rank": 2, "policy_id":
 `user_override_permitted: false`) — no M5 shape change; the M4 renderer
 already prints these fields, which is how the spec section 40 managed
 output becomes real without touching this method.
+
+### 5.8a `policy.set`
+
+Params:
+
+```json
+{"capability": "security.firewall", "value": "disabled",
+ "reason": "the lab machines run without it", "ticket": "<64 hex>"}
+```
+
+Mutating, always audited (`action: "policy.set"`, `resource:` the
+capability). Records (or, with `"value": null`, withdraws) the **device
+administrator's** entry — `device_specific_override` at precedence rank 4 —
+and then applies whatever the merge says, exactly as `capabilities.set`
+does.
+
+**It is not a document write, and the shape is the argument.** The caller
+names one *registered capability* and one value that capability validates.
+There is no path expression, no merge patch, and no way to reach a path the
+registry does not already govern: a generic "write this policy document as
+root" primitive is the root RPC spec sections 10 and 60 forbid, and it
+would let a caller author policy for paths nothing can apply, verify or
+explain. `deny_unknown_fields` makes a smuggled extra field a hard parse
+error rather than something silently ignored.
+
+**Where rank 4 comes from.** `schemas/policy/policy-source.json` says
+`device_specific_override` "appears in the section 39 source list but has
+no rung in the suggested ladder, so deployments assign its rank
+explicitly". Punar assigns 4, which produces exactly the two properties
+that matter: `organization_baseline` (2) and `organization_role_policy` (3)
+beat it, so an enrolled device's org policy cannot be edited away locally;
+and it beats `local_user_preference` (5), so an administrator's decision
+binds everyone using the device. Rank 4 is shared with
+`temporary_approved_exception`, and an organization's approved exception
+wins that tie — it is a decision somebody already made about that exact
+path.
+
+Authorization, in the order the checks run — every reason that does not
+depend on *who is asking* is settled before a password is requested:
+
+1. an **agent-attributed peer is refused whatever its uid** (spec section
+   60: root-ness inside an agent scope buys no bypass, and an agent has no
+   password to re-prove);
+2. a non-empty `reason` of at most 500 characters is required, and is
+   persisted with the entry;
+3. the value must validate against the capability (`invalid_params`);
+4. `local_admin.allowed` must be true (`denied`, citing the organization);
+5. the path's current winner must be one rank 4 outranks (`denied`, citing
+   the pinning source — the same message `capabilities.set` gives);
+6. uid 0 is authorized as-is. Any other caller must present `ticket`: a
+   single-use re-authentication ticket minted by `punar-authd` for **that
+   caller's own uid** within the last 120 seconds. It is spent whether or
+   not it turns out to be fresh.
+
+`policy.set` is deliberately **not** root-only. There is no sudo on a Punar
+desktop, so "root only" would mean "nobody can do this at the keyboard".
+
+Result:
+
+```json
+{"v":1,"id":"1","result":{
+  "capability": "security.firewall",
+  "pinned_value": "disabled",
+  "effective_value": "enabled",
+  "source": {"kind": "organization_baseline", "rank": 2,
+             "policy_id": "eng-baseline-v12",
+             "name": "Acme Engineering Baseline"},
+  "changed": false
+}}
+```
+
+`pinned_value` and `effective_value` are reported separately and are never
+collapsed, even when they agree: an administrator who pins a value an
+organization outranks has recorded something real (it becomes effective if
+the org layer is withdrawn) *and* changed nothing today, and one "done"
+line would let them believe otherwise.
+
+**This is an administrative control, not a security boundary.**
+`docs/design/execution-trust.md` says it plainly — a local root user
+defeats local policy. What this method adds is that the ordinary route is
+authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
@@ -1253,11 +1359,17 @@ or path other than the confirmed target device. An installed system returns
 ## 8. Explicit non-goals of this contract (M3, amended M4/M5)
 
 - No generic execution method of any kind (spec sections 10, 60) — permanent.
-  There is also **no write-side `policy.*` method**: the only policy
-  mutations are `capabilities.set` (user preference) and, since M5, the
-  enrollment-managed `policy.d` drop (`enroll.start`/`enroll.stop` — which
-  write only whole fetched envelopes, never accept policy content as
-  params).
+  There is also **no generic write-side `policy.*` method**, and that
+  wording is the whole of the promise: the policy mutations are
+  `capabilities.set` (user preference), the enrollment-managed `policy.d`
+  drop since M5 (`enroll.start`/`enroll.stop` — which write only whole
+  fetched envelopes, never accept policy content as params), and
+  `policy.set` (section 5.8a), which takes **one registered capability and
+  one value that capability validates** and can express nothing else. A
+  method that accepted a path expression, a document or a merge patch would
+  be the root RPC this line forbids; a typed setter over a closed registry
+  is not, and the daemon test `no_generic_write_side_policy_method_exists`
+  probes both halves.
 - No TCP, no abstract-namespace sockets (path perms are the admission
   mechanism), no SCM_RIGHTS fd passing. This holds for the M5 control-plane
   *client* side too: `punard` speaks to the (mock) control plane over a

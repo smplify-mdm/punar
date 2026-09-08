@@ -1767,6 +1767,119 @@ DeferredSurfaceBase {
                         }
                     }
 
+                    // The device-administrator flow: a reason, then a
+                    // password. Two fields rather than one form, because they
+                    // are two different questions and the second one should
+                    // not be on screen while the first is being thought about.
+                    //
+                    // THE PASSWORD FIELD IS NOT A TextInput WITH A MASK BY
+                    // ACCIDENT: echoMode is set to Password so the shell never
+                    // paints the secret, and the text is handed straight to
+                    // ControlData and cleared here, so it lives in exactly one
+                    // place for exactly as long as it takes to write it to a
+                    // pipe.
+                    Item {
+                        id: adminBox
+
+                        width: parent.width
+                        visible: ctl.adminStage !== ""
+                        height: visible ? 68 : 0
+
+                        onVisibleChanged: if (adminBox.visible)
+                            adminReasonInput.forceActiveFocus()
+
+                        Meta {
+                            id: adminLabel
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            font.pixelSize: 9
+                            font.letterSpacing: Theme.tracking(9, 0.12)
+                            color: Theme.shellStatusWarn
+                            text: ctl.adminStage === "reason"
+                                ? (ctl.adminValue === ""
+                                    ? "Why are you withdrawing " + ctl.adminPath + "? · ↵ continues · Esc cancels"
+                                    : "Why are you pinning " + ctl.adminPath + " for everyone? · ↵ continues · Esc cancels")
+                                : "Your password, to confirm this change · ↵ applies · Esc cancels"
+                        }
+                        TextInput {
+                            id: adminReasonInput
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: adminLabel.bottom
+                            anchors.topMargin: 12
+                            visible: ctl.adminStage === "reason"
+                            font.family: Theme.fontSans
+                            font.pixelSize: 15
+                            color: Theme.shellFg
+                            clip: true
+
+                            onVisibleChanged: if (adminReasonInput.visible)
+                                adminReasonInput.forceActiveFocus()
+
+                            Keys.onPressed: function (event) {
+                                switch (event.key) {
+                                case Qt.Key_Escape:
+                                    adminReasonInput.text = "";
+                                    ctl.cancelAdminEdit();
+                                    win.focusRail();
+                                    event.accepted = true;
+                                    break;
+                                case Qt.Key_Return:
+                                case Qt.Key_Enter:
+                                    ctl.submitAdminReason(adminReasonInput.text);
+                                    adminReasonInput.text = "";
+                                    if (ctl.adminStage === "password")
+                                        adminPasswordInput.forceActiveFocus();
+                                    event.accepted = true;
+                                    break;
+                                }
+                            }
+                        }
+                        TextInput {
+                            id: adminPasswordInput
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: adminLabel.bottom
+                            anchors.topMargin: 12
+                            visible: ctl.adminStage === "password"
+                            echoMode: TextInput.Password
+                            font.family: Theme.fontSans
+                            font.pixelSize: 15
+                            color: Theme.shellFg
+                            clip: true
+
+                            onVisibleChanged: if (adminPasswordInput.visible)
+                                adminPasswordInput.forceActiveFocus()
+
+                            Keys.onPressed: function (event) {
+                                switch (event.key) {
+                                case Qt.Key_Escape:
+                                    adminPasswordInput.text = "";
+                                    ctl.cancelAdminEdit();
+                                    win.focusRail();
+                                    event.accepted = true;
+                                    break;
+                                case Qt.Key_Return:
+                                case Qt.Key_Enter:
+                                    ctl.submitAdminPassword(adminPasswordInput.text);
+                                    adminPasswordInput.text = "";
+                                    win.focusRail();
+                                    event.accepted = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: ctl.adminStage === "password"
+                                ? adminPasswordInput.bottom : adminReasonInput.bottom
+                            anchors.topMargin: 6
+                            height: 2
+                            color: Theme.shellFg
+                        }
+                    }
+
                     // What punarctl was asked, and what it answered —
                     // verbatim. spec §10: one capability layer, one voice.
                     Item {

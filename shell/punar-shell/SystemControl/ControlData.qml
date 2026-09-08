@@ -103,6 +103,19 @@ Scope {
     // closing the panel — a request never stays armed behind the reader.
     property string reasonForCapability: ""
 
+    // ---- device-administrator policy edit -----------------------------
+    // A change to device policy is two questions and a password, in that
+    // order: what, why, and prove it is you. The stage is held here rather
+    // than in the surface so a lazily-unloaded pane cannot lose it halfway.
+    //
+    // "" | "reason" | "password"
+    property string adminStage: ""
+    property string adminPath: ""
+    /// The value to pin, already a JSON scalar as a string. Empty means the
+    /// entry is being withdrawn.
+    property string adminValue: ""
+    property string adminReason: ""
+
     // Millisecond clock for the §48 grant countdown, advanced only by the
     // surface's Timer, which runs only while that surface is open.
     property double nowMs: Date.now()
@@ -310,8 +323,17 @@ Scope {
             waitForEnd: true
         }
 
+        onStarted: {
+            if (adminSecret.value === "")
+                return;
+            mutation.write(adminSecret.value + "\n");
+            adminSecret.value = "";
+            mutation.stdinEnabled = false;
+        }
+
         // Connected, not declared — see the note on Probe above.
         Component.onCompleted: mutation.exited.connect(function (exitCode) {
+            adminSecret.value = "";
             data.lastActionPending = false;
             data.lastActionExit = exitCode;
             data.lastActionError = String(mutationErr.text).trim();
@@ -334,9 +356,12 @@ Scope {
             if (data.pendingWebAppRemoval !== "") {
                 data.pendingWebAppRemoval = "";
                 data.webAppRemoveArmed = "";
-                data.powerArmed = "";
-            data.powerArmed = "";
             }
+            // Disarm unconditionally. This used to sit inside the web-app
+            // removal branch, so a power action that FAILED left its row
+            // armed — one stray press away from trying again with no
+            // confirmation, which is the exact thing arming exists to stop.
+            data.powerArmed = "";
             // Never trust the write: re-read the control plane and let
             // the registry say what actually happened.
             data.refreshProbes();
@@ -399,6 +424,23 @@ Scope {
         if (p === null || !Array.isArray(p.entries))
             return [];
         return p.entries;
+    }
+
+    // Whether this device's administrator may edit policy at all, and who
+    // decided otherwise. A daemon that predates the field sends nothing, and
+    // the permissive reading is correct there: an unenrolled device's owner
+    // administers it.
+    readonly property var policyLocalAdmin: {
+        var p = data.obj(policyProbe.payload);
+        var la = p === null ? null : data.obj(p.local_admin);
+        if (la === null)
+            return {allowed: true, sourceName: "", policyId: ""};
+        var src = data.obj(la.source);
+        return {
+            allowed: la.allowed !== false,
+            sourceName: src === null ? "" : data.str(src, "name", ""),
+            policyId: src === null ? "" : data.str(src, "policy_id", "")
+        };
     }
 
     readonly property var grantList: {
@@ -838,7 +880,86 @@ Scope {
             );
         } else if (kind === "revoke") {
             data.runMutation(["punarctl", "privilege", "revoke", String(a.grantId)]);
+        } else if (kind === "policyPin" || kind === "policyClear") {
+            data.beginAdminEdit(String(a.path), kind === "policyPin" ? String(a.value) : "");
         }
+    }
+
+    /// Start the two-step administrator flow for one path.
+    function beginAdminEdit(path: string, value: string): void {
+        if (mutation.running)
+            return;
+        data.adminPath = path;
+        data.adminValue = value;
+        data.adminReason = "";
+        data.adminStage = "reason";
+        data.lastActionError = "";
+    }
+
+    function cancelAdminEdit(): void {
+        data.adminStage = "";
+        data.adminPath = "";
+        data.adminValue = "";
+        data.adminReason = "";
+    }
+
+    function submitAdminReason(reason: string): void {
+        if (data.adminStage !== "reason")
+            return;
+        if (reason.trim() === "") {
+            data.lastActionArgv = "punarctl policy set " + data.adminPath;
+            data.lastActionExit = 2;
+            data.lastActionError = "A device policy change needs a reason.";
+            return;
+        }
+        data.adminReason = reason.trim();
+        data.adminStage = "password";
+    }
+
+    /// The second step. The password is written on an anonymous pipe to a
+    /// fixed helper — never an argument, never an environment variable, and
+    /// never held in a property, which is why it is a parameter that falls
+    /// out of scope the moment this returns.
+    function submitAdminPassword(password: string): void {
+        if (data.adminStage !== "password" || mutation.running)
+            return;
+        var argv = [
+            "/usr/lib/punar/punar-policy-set.sh",
+            data.adminPath,
+            data.adminValue === "" ? "--clear" : data.adminValue,
+            data.adminReason
+        ];
+        data.adminStage = "";
+        data.lastActionArgv = "punarctl policy "
+            + (data.adminValue === "" ? "clear " : "set ")
+            + data.adminPath
+            + (data.adminValue === "" ? "" : " " + data.adminValue);
+        data.lastActionExit = -1;
+        data.lastActionError = "";
+        data.lastActionPending = true;
+        data.pendingTimeZone = "";
+        mutation.command = argv;
+        adminSecret.value = password;
+        try {
+            mutation.stdinEnabled = true;
+            mutation.running = true;
+        } catch (e) {
+            adminSecret.value = "";
+            data.lastActionPending = false;
+            data.lastActionExit = 127;
+            data.lastActionError = "The policy helper is not installed on this machine.";
+        }
+        data.adminPath = "";
+        data.adminValue = "";
+        data.adminReason = "";
+    }
+
+    /// Holds the typed secret for exactly as long as it takes the helper to
+    /// start and read one line. Cleared by onStarted, and again on exit, so
+    /// no code path leaves it set.
+    QtObject {
+        id: adminSecret
+        property string value: ""
     }
 
     function submitReason(reason: string): void {
@@ -2030,24 +2151,113 @@ Scope {
                 dashed: data.awaiting()
             };
         }
+        var admin = data.policyLocalAdmin;
         var rows = [];
         for (var i = 0; i < entries.length; i++) {
             var e = entries[i];
             if (e === null || typeof e !== "object")
                 continue;
             var src = data.obj(e.source);
+            var path = data.str(e, "path", "—");
+            var pinnedHere = data.str(src, "kind", "") === "device_specific_override";
+            var meta = data.stateWord(e.effective_value)
+                + " · " + data.str(src, "name", "?")
+                + " · " + data.str(src, "policy_id", "?")
+                + " · override " + (e.user_override_permitted === true ? "permitted" : "not permitted");
             rows.push({
-                name: data.capabilityLabel(data.str(e, "path", "—")),
-                meta: data.stateWord(e.effective_value) + " · " + data.str(src, "name", "?") + " · " + data.str(src, "policy_id", "?") + " · override " + (e.user_override_permitted === true ? "permitted" : "not permitted"),
-                tone: data.complianceTone(data.str(e, "compliance_state", ""))
+                name: data.capabilityLabel(path),
+                meta: meta + " · " + data.adminNote(e, admin, pinnedHere),
+                tone: data.complianceTone(data.str(e, "compliance_state", "")),
+                tag: pinnedHere ? "Pinned" : "",
+                // The affordance is the LABELLED control, not the whole row.
+                // A row that silently does something when clicked is not an
+                // offer, and pinning a value for everyone on the machine is
+                // not a thing to discover by accident.
+                secondaryLabel: data.adminActionLabel(e, admin, pinnedHere),
+                secondaryTone: pinnedHere ? "danger" : "",
+                secondaryAction: data.adminAction(e, admin, pinnedHere)
             });
         }
         return {
             title: personal ? "Policy" : "Policies",
             sub: (personal ? "Security · your effective merged document · " : "Organization · effective merged document · ") + rows.length + " governed paths",
             rows: rows,
-            note: "Each row is one winning source after the layered merge. Opening the capability's own section shows the same information as a §40 explain card — same data, same order, and the same order punarctl policy explain prints it in."
+            note: admin.allowed
+                ? "Each row is one winning source after the layered merge. A row you can act on is one this device's administrator outranks; a row you cannot names the source that outranks them. Changing a row asks for a reason and then for your password — administering this machine is something you prove at the moment you do it, not a role you hold."
+                : "Each row is one winning source after the layered merge. Local policy editing is turned off on this device by " + admin.sourceName + " (" + admin.policyId + "), so no row here can be changed from the machine itself. Ask them to change it centrally and this device will pick it up on its next sync."
         };
+    }
+
+    /// The sentence a row adds about who, if anyone, can move it.
+    function adminNote(entry: var, admin: var, pinnedHere: bool): string {
+        if (!admin.allowed)
+            return "local editing off · " + admin.policyId;
+        if (entry.admin_override_permitted !== true)
+            return "the source above outranks this device";
+        if (pinnedHere)
+            return "pinned by this device's administrator";
+        if (data.adminValueChoice(entry) === "")
+            return "administrator can pin · punarctl policy set";
+        return "administrator can pin this for everyone";
+    }
+
+    /// The label on a row's control, or "" for a row that offers nothing.
+    function adminActionLabel(entry: var, admin: var, pinnedHere: bool): string {
+        var action = data.adminAction(entry, admin, pinnedHere);
+        return action === undefined ? "" : String(action.label);
+    }
+
+    /// The one action a policy row may carry.
+    ///
+    /// ONE ACTION, NOT A VALUE PICKER, and the restriction is deliberate. A row
+    /// offers a pin only when the capability's declared state space has exactly
+    /// two values, because then "pin the other one" is unambiguous and needs no
+    /// chooser. Anything with an open or wider space (a hostname, a timezone)
+    /// says so and points at the command that can express it, rather than
+    /// growing a second editor inside a list.
+    function adminAction(entry: var, admin: var, pinnedHere: bool): var {
+        if (!admin.allowed || entry.admin_override_permitted !== true)
+            return undefined;
+        var path = data.str(entry, "path", "");
+        if (path === "")
+            return undefined;
+        if (pinnedHere)
+            return {
+                kind: "policyClear",
+                path: path,
+                label: "Withdraw this pin"
+            };
+        var other = data.adminValueChoice(entry);
+        if (other === "")
+            return undefined;
+        return {
+            kind: "policyPin",
+            path: path,
+            value: other,
+            label: "Pin " + data.stateWord(other) + " for everyone"
+        };
+    }
+
+    /// The other value, when a capability declares exactly two and the
+    /// effective value is one of them. "" whenever that is not true.
+    function adminValueChoice(entry: var): string {
+        var path = data.str(entry, "path", "");
+        var caps = data.capabilityList;
+        for (var i = 0; i < caps.length; i++) {
+            var c = caps[i];
+            if (c === null || typeof c !== "object" || data.str(c, "capability", "") !== path)
+                continue;
+            var allowed = c.allowed_desired_states;
+            if (!Array.isArray(allowed) || allowed.length !== 2)
+                return "";
+            var current = JSON.stringify(entry.effective_value);
+            for (var j = 0; j < allowed.length; j++) {
+                if (JSON.stringify(allowed[j]) !== current)
+                    return String(allowed[j]);
+            }
+            return "";
+        }
+        return "";
     }
 
     function viewPrivilege(): var {

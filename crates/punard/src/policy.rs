@@ -23,7 +23,7 @@ use crate::browser_policy::{
     BrowserPolicyLayer, CAPABILITY_ID as BROWSER_POLICY_CAPABILITY, extract_browser_policy,
 };
 use crate::capability::Registry;
-use crate::state::{OsDefaultsStore, PreferencesStore};
+use crate::state::{AdminPolicyStore, OsDefaultsStore, PreferencesStore};
 use crate::util::write_atomic;
 
 /// The built-in personal-mode policy id (`punar_common` audit constant,
@@ -39,6 +39,27 @@ pub fn personal_os_default() -> Provenance {
         source_name: "OS default".to_string(),
     }
 }
+
+/// Provenance for the device administrator's layer.
+///
+/// `device_specific_override` at RANK 4, which is a deployment decision the
+/// schema explicitly leaves open: policy-source.json says the kind "has no rung
+/// in the suggested ladder, so deployments assign its rank explicitly". Rank 4
+/// puts it below both organization rungs and above user preference, which is
+/// the entire behaviour an administrator needs and an enrolled fleet requires.
+pub fn device_admin_override(policy_id: &str) -> Provenance {
+    Provenance {
+        kind: SourceKind::DeviceSpecificOverride,
+        rank: DEVICE_ADMIN_RANK,
+        policy_id: policy_id.to_string(),
+        source_name: "Device administrator".to_string(),
+    }
+}
+
+/// The rank assigned to the device administrator's layer. Named rather than
+/// spelled `4` at the use site, because it is the one number in this file whose
+/// value is a policy decision rather than a fact from the spec ladder.
+pub const DEVICE_ADMIN_RANK: u32 = 4;
 
 /// Personal-mode provenance for the User Preference layer (rank 5).
 pub fn personal_user_preference() -> Provenance {
@@ -140,6 +161,63 @@ pub struct ApplicationPolicyDecision {
     pub provenance: Option<Provenance>,
 }
 
+/// One organization opinion about whether this device's own administrator may
+/// edit local policy (SPEC section 44.5 names "local admin" among the service
+/// controls enterprise policy governs; the desired-state schema's `security`
+/// block is explicitly extensible for exactly these).
+///
+/// Shape: `spec.security.localAdmin.policyEditing: "allowed" | "denied"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAdminLayer {
+    pub provenance: Provenance,
+    pub allowed: bool,
+}
+
+/// Pick the opinion that governs: the best-ranked layer, first-wins within a
+/// rank exactly as [`merge`](punar_policy::merge) resolves a tie. `None` means
+/// no organization has an opinion, and an unenrolled device's owner
+/// administers it.
+pub fn resolve_local_admin(layers: &[LocalAdminLayer]) -> Option<&LocalAdminLayer> {
+    layers.iter().min_by_key(|layer| layer.provenance.rank)
+}
+
+/// Extract `spec.security.localAdmin` from a desired-state payload.
+///
+/// A present-but-unreadable value is an ERROR, not an absence. "The
+/// organization tried to say something about local administration and this
+/// device could not tell what" must never resolve to the permissive default:
+/// refusing to start is the honest failure, and it is the posture every other
+/// malformed policy input in this loader already takes.
+fn extract_local_admin_policy(
+    payload: &Value,
+    provenance: &Provenance,
+    path: &Path,
+) -> io::Result<Option<LocalAdminLayer>> {
+    let Some(section) = payload.pointer("/spec/security/localAdmin") else {
+        return Ok(None);
+    };
+    let Some(setting) = section.get("policyEditing") else {
+        return Ok(None);
+    };
+    let allowed = match setting.as_str() {
+        Some("allowed") => true,
+        Some("denied") => false,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: spec.security.localAdmin.policyEditing must be \"allowed\" or \"denied\",                      found {setting} — refusing to start",
+                    path.display()
+                ),
+            ));
+        }
+    };
+    Ok(Some(LocalAdminLayer {
+        provenance: provenance.clone(),
+        allowed,
+    }))
+}
+
 /// Result of loading `policy.d/`.
 #[derive(Debug, Default)]
 pub struct LoadedPolicies {
@@ -151,6 +229,8 @@ pub struct LoadedPolicies {
     /// Raw, allowlisted Chromium policy opinions with provenance. The final
     /// managed document is rendered only after all layers are loaded.
     pub browsers: Vec<BrowserPolicyLayer>,
+    /// Organization opinions about local administration (SPEC section 44.5).
+    pub local_admin: Vec<LocalAdminLayer>,
     /// `spec.*` paths that have no registered capability yet — logged once
     /// at load and ignored (they land with their capabilities, M5+).
     pub unmapped: Vec<String>,
@@ -232,6 +312,10 @@ pub fn load_policy_dir(dir: &Path) -> io::Result<LoadedPolicies> {
             Some(payload) => {
                 let application = extract_application_policy(payload, &provenance)?;
                 let browser = extract_browser_policy(payload, &provenance)?;
+                if let Some(local_admin) = extract_local_admin_policy(payload, &provenance, &path)?
+                {
+                    loaded.local_admin.push(local_admin);
+                }
                 let browser_managed = application.as_ref().is_some_and(|layer| {
                     !layer.required_web_apps.is_empty()
                         || !layer.denied_origins.is_empty()
@@ -695,6 +779,10 @@ pub fn flatten_desired_state(document: &Value) -> FlattenedSpec {
                                 json!("disabled")
                             },
                         )),
+                        // Consumed by extract_local_admin_policy above; it is
+                        // governance of this daemon rather than a capability,
+                        // so it has no registry path to map onto.
+                        ("localAdmin", _) => {}
                         _ => flat.unmapped.push(format!("spec.security.{key}")),
                     }
                 }
@@ -753,6 +841,7 @@ pub fn compute_effective(
     registry: &Registry,
     os_defaults: &OsDefaultsStore,
     preferences: &PreferencesStore,
+    admin_policy: &AdminPolicyStore,
     org_layers: &[Layer],
     computed_at: String,
 ) -> EffectiveDocument {
@@ -782,7 +871,27 @@ pub fn compute_effective(
             },
         ));
     }
+    // ORG LAYERS ARE PUSHED BEFORE THE ADMINISTRATOR'S, and the order is load
+    // bearing at exactly one rank. `merge` breaks a tie by first-wins, and the
+    // administrator's rank 4 maps onto the same rung as an organization's
+    // Temporary Approved Exception. An organization that has published an
+    // approved exception has already decided this path deliberately; a local
+    // administrator must not silently displace it by being appended later.
+    // Every other rank is decided by the ladder and is unaffected by order.
     layers.extend(org_layers.iter().cloned());
+    for (id, entry) in admin_policy.entries() {
+        layers.push((
+            id,
+            LayerValue {
+                value: entry.value,
+                // The policy id carries the administrator's name so `punarctl
+                // policy explain` can answer "who decided this", which is the
+                // question a pinned value always provokes.
+                provenance: device_admin_override(&format!("device-admin/{}", entry.set_by)),
+                classification: Classification::AutoRemediate,
+            },
+        ));
+    }
 
     EffectiveDocument {
         computed_at,
@@ -812,7 +921,7 @@ mod tests {
 
     use super::*;
     use crate::capability::mock::MockCapability;
-    use crate::state::PreferenceEntry;
+    use crate::state::{AdminPolicyEntry, AdminPolicyStore, PreferenceEntry};
 
     const ACME_ENVELOPE: &str =
         include_str!("../../../fixtures/organizations/acme/policy-source-eng-baseline-v12.json");
@@ -1175,6 +1284,12 @@ mod tests {
         (dir, os_defaults, preferences)
     }
 
+    /// An empty administrator layer, for the tests that predate it and are
+    /// about something else.
+    fn no_admin(tag: &str) -> AdminPolicyStore {
+        AdminPolicyStore::load(&tmp(tag).join("local.json")).unwrap()
+    }
+
     #[test]
     fn personal_mode_effective_document_prefers_the_user_over_the_seed() {
         let (dir, os_defaults, preferences) = stores("eff-personal");
@@ -1198,7 +1313,14 @@ mod tests {
             )
             .unwrap();
 
-        let doc = compute_effective(&registry, &os_defaults, &preferences, &[], "now".into());
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &no_admin("eff-personal"),
+            &[],
+            "now".into(),
+        );
         let firewall = doc.get("security.firewall").unwrap();
         assert_eq!(firewall.value, json!("disabled"));
         assert_eq!(firewall.provenance.kind, SourceKind::LocalUserPreference);
@@ -1248,6 +1370,7 @@ mod tests {
             &registry,
             &os_defaults,
             &preferences,
+            &no_admin("eff-acme"),
             &loaded.layers,
             "now".into(),
         );
@@ -1262,6 +1385,236 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn admin_store(tag: &str, id: &str, value: Value) -> AdminPolicyStore {
+        let store = AdminPolicyStore::load(&tmp(tag).join("local.json")).unwrap();
+        store
+            .set(
+                id,
+                Some(AdminPolicyEntry {
+                    value,
+                    set_at: "2026-09-08T10:00:00Z".into(),
+                    set_by: "owner".into(),
+                    reason: "the device is shared with a class".into(),
+                }),
+            )
+            .unwrap();
+        store
+    }
+
+    /// The whole point of the layer: an administrator's decision binds every
+    /// account on the device, including one that already recorded the opposite
+    /// preference. The preference is not erased — it becomes effective again
+    /// the moment the administrator's entry is cleared, which the second half
+    /// asserts.
+    #[test]
+    fn the_device_administrator_outranks_a_user_preference_and_clearing_gives_it_back() {
+        let (dir, os_defaults, preferences) = stores("eff-admin-beats-user");
+        let registry = Registry::new(vec![Box::new(MockCapability::new(
+            "security.firewall",
+            json!("disabled"),
+        ))]);
+        os_defaults
+            .seed("security.firewall", json!("disabled"))
+            .unwrap();
+        preferences
+            .set(
+                "security.firewall",
+                PreferenceEntry {
+                    value: json!("disabled"),
+                    set_at: "2026-09-08T09:00:00Z".into(),
+                    set_by: "punar".into(),
+                },
+            )
+            .unwrap();
+        let admin = admin_store(
+            "eff-admin-beats-user-a",
+            "security.firewall",
+            json!("enabled"),
+        );
+
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &admin,
+            &[],
+            "now".into(),
+        );
+        let entry = doc.get("security.firewall").unwrap();
+        assert_eq!(entry.value, json!("enabled"));
+        assert_eq!(entry.provenance.kind, SourceKind::DeviceSpecificOverride);
+        assert_eq!(entry.provenance.rank, DEVICE_ADMIN_RANK);
+        assert_eq!(entry.provenance.policy_id, "device-admin/owner");
+        assert!(
+            !entry.user_override_permitted,
+            "a user may not override their administrator"
+        );
+
+        admin.set("security.firewall", None).unwrap();
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &admin,
+            &[],
+            "now".into(),
+        );
+        let entry = doc.get("security.firewall").unwrap();
+        assert_eq!(entry.value, json!("disabled"));
+        assert_eq!(entry.provenance.kind, SourceKind::LocalUserPreference);
+        assert!(entry.user_override_permitted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And the direction that matters more: an enrolled device's organization
+    /// outranks the machine's own administrator. If this ever inverted, a
+    /// fleet's baseline would be advisory.
+    #[test]
+    fn an_organization_baseline_outranks_the_device_administrator() {
+        let (dir, os_defaults, preferences) = stores("eff-org-beats-admin");
+        let policy_dir = dir.join("policy.d");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(
+            policy_dir.join("eng-baseline-v12.json"),
+            serde_json::to_string(&acme_combined()).unwrap(),
+        )
+        .unwrap();
+        let registry = Registry::new(vec![Box::new(MockCapability::new(
+            "security.firewall",
+            json!("enabled"),
+        ))]);
+        let admin = admin_store(
+            "eff-org-beats-admin-a",
+            "security.firewall",
+            json!("disabled"),
+        );
+        let loaded = load_policy_dir(&policy_dir).unwrap();
+
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &admin,
+            &loaded.layers,
+            "now".into(),
+        );
+        let entry = doc.get("security.firewall").unwrap();
+        assert_eq!(entry.value, json!("enabled"));
+        assert_eq!(entry.provenance.kind, SourceKind::OrganizationBaseline);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rank-4 tie. `device_specific_override` is assigned the same rung as
+    /// an organization's Temporary Approved Exception, so which of the two wins
+    /// is decided by push order rather than by the ladder — and it must be the
+    /// organization's, because an approved exception is a decision somebody
+    /// already made about this exact path.
+    #[test]
+    fn an_organization_temporary_exception_wins_the_rank_four_tie() {
+        let (dir, os_defaults, preferences) = stores("eff-rank4-tie");
+        let registry = Registry::new(vec![Box::new(MockCapability::new(
+            "security.firewall",
+            json!("disabled"),
+        ))]);
+        let admin = admin_store("eff-rank4-tie-a", "security.firewall", json!("disabled"));
+        let exception: Vec<Layer> = vec![(
+            "security.firewall".to_string(),
+            LayerValue {
+                value: json!("enabled"),
+                provenance: Provenance {
+                    kind: SourceKind::TemporaryApprovedException,
+                    rank: 4,
+                    policy_id: "apr_2026_09_08".to_string(),
+                    source_name: "Approved exception".to_string(),
+                },
+                classification: Classification::AutoRemediate,
+            },
+        )];
+
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &admin,
+            &exception,
+            "now".into(),
+        );
+        let entry = doc.get("security.firewall").unwrap();
+        assert_eq!(entry.value, json!("enabled"));
+        assert_eq!(entry.provenance.policy_id, "apr_2026_09_08");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_organization_can_take_local_policy_editing_away_and_a_broken_one_refuses_to_start() {
+        let dir = tmp("local-admin");
+        let policy_dir = dir.join("policy.d");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+
+        // No opinion at all: an unenrolled device's owner administers it.
+        assert!(load_policy_dir(&policy_dir).unwrap().local_admin.is_empty());
+        assert!(resolve_local_admin(&[]).is_none());
+
+        let envelope = |editing: Value| {
+            json!({
+                "policy_id": "eng-baseline-v12",
+                "source_kind": "organization_baseline",
+                "precedence_rank": 2,
+                "source_name": "Acme Engineering Baseline",
+                "policy": {
+                    "apiVersion": "smplify.io/v1alpha1",
+                    "kind": "DeviceDesiredState",
+                    "metadata": {"organization": "acme", "device": "dev_test"},
+                    "spec": {
+                        "security": {
+                            "firewall": {"enabled": true},
+                            "localAdmin": {"policyEditing": editing}
+                        }
+                    }
+                }
+            })
+        };
+
+        std::fs::write(
+            policy_dir.join("a.json"),
+            serde_json::to_string(&envelope(json!("denied"))).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_policy_dir(&policy_dir).unwrap();
+        let governing = resolve_local_admin(&loaded.local_admin).expect("an opinion");
+        assert!(!governing.allowed);
+        assert_eq!(governing.provenance.policy_id, "eng-baseline-v12");
+        assert!(
+            !loaded
+                .unmapped
+                .iter()
+                .any(|path| path.contains("localAdmin")),
+            "a consumed section must not also be reported as unmapped"
+        );
+
+        std::fs::write(
+            policy_dir.join("a.json"),
+            serde_json::to_string(&envelope(json!("allowed"))).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            resolve_local_admin(&load_policy_dir(&policy_dir).unwrap().local_admin)
+                .unwrap()
+                .allowed
+        );
+
+        // A value nobody can read must never resolve to the permissive default.
+        std::fs::write(
+            policy_dir.join("a.json"),
+            serde_json::to_string(&envelope(json!("mostly"))).unwrap(),
+        )
+        .unwrap();
+        let err = load_policy_dir(&policy_dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("policyEditing"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn effective_debug_copy_is_written_0600() {
         use std::os::unix::fs::PermissionsExt;
@@ -1272,7 +1625,14 @@ mod tests {
             json!("off"),
         ))]);
         os_defaults.seed("mock.widget", json!("off")).unwrap();
-        let doc = compute_effective(&registry, &os_defaults, &preferences, &[], "now".into());
+        let doc = compute_effective(
+            &registry,
+            &os_defaults,
+            &preferences,
+            &no_admin("eff-debug"),
+            &[],
+            "now".into(),
+        );
         let path = dir.join("effective.json");
         write_effective_debug_copy(&path, &doc).unwrap();
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

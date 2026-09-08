@@ -488,6 +488,38 @@ pub struct CapabilitiesSetParams {
     pub desired_state: Value,
 }
 
+/// Params for `policy.set` — the device administrator's layer
+/// (`device_specific_override`, rank 4).
+///
+/// THE SHAPE IS THE SECURITY ARGUMENT, so it is worth stating what this is
+/// *not*: it is not a document write. An administrator names one registered
+/// capability and one value that the capability itself validates, exactly as
+/// `capabilities.set` does. There is no path expression, no JSON merge patch
+/// and no way to reach a path the registry does not already govern — because a
+/// generic "write this document as root" primitive is the root RPC the spec
+/// forbids (SPEC sections 10, 60), and it would let a caller author policy for
+/// paths no capability can apply, verify or explain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySetParams {
+    /// The capability whose device-wide value is being pinned.
+    pub capability: CapabilityId,
+    /// The value to pin, validated against the capability exactly like
+    /// `capabilities.set`. `null` **clears** the administrator's entry and
+    /// lets the layers below become effective again.
+    pub value: Option<Value>,
+    /// Why, in the administrator's own words. Required and required to be
+    /// non-empty: a pinned value with no stated reason is the thing every
+    /// person who later meets it will ask about, and the answer belongs in the
+    /// record rather than in someone's memory.
+    pub reason: String,
+    /// A single-use re-authentication ticket minted by `punar-authd` for this
+    /// caller. Absent is legitimate only for uid 0, which has no lock screen to
+    /// re-authenticate against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
 /// Params for `audit.tail`. `n` defaults to [`AUDIT_TAIL_DEFAULT`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -814,6 +846,12 @@ pub enum Method {
     PolicyEffective,
     /// `policy.explain` (M4) — one effective entry for a path. Read.
     PolicyExplain(PolicyExplainParams),
+    /// `policy.set` — pin (or clear) one capability's value for everyone on
+    /// this device, as the device administrator. Not root-only: its authority
+    /// is a re-authenticated member of the device's admission group, which is
+    /// the only way a person at a Punar desktop can prove they are the owner.
+    /// Always audited; refused outright inside an agent scope.
+    PolicySet(PolicySetParams),
     /// `enroll.start` (M5, contract section 5.9) — enroll against the
     /// (mock) control plane. Root-only; always audited; all-or-nothing.
     EnrollStart(EnrollStartParams),
@@ -917,7 +955,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 40] = [
+    pub const NAMES: [&'static str; 41] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -926,6 +964,7 @@ impl Method {
         "reconcile",
         "policy.effective",
         "policy.explain",
+        "policy.set",
         "enroll.start",
         "enroll.status",
         "enroll.stop",
@@ -972,6 +1011,7 @@ impl Method {
             Method::Reconcile => "reconcile",
             Method::PolicyEffective => "policy.effective",
             Method::PolicyExplain(_) => "policy.explain",
+            Method::PolicySet(_) => "policy.set",
             Method::EnrollStart(_) => "enroll.start",
             Method::EnrollStatus => "enroll.status",
             Method::EnrollStop => "enroll.stop",
@@ -1021,6 +1061,13 @@ impl Method {
             | Method::PolicyExplain(_)
             | Method::EnrollStatus => false,
             Method::CapabilitiesSet(_) | Method::Reconcile => true,
+            // `policy.set` is NOT root-only, and the difference is the point.
+            // There is no sudo on a Punar desktop, so "root-only" would mean
+            // "nobody can ever do this at the keyboard". Its authority is
+            // instead a re-authenticated member of the admission group, proven
+            // by a ticket punar-authd minted for this very caller; the daemon
+            // enforces that, this flag only says it is not uid-0-only.
+            Method::PolicySet(_) => false,
             // M5 (contract section 5): enrollment mutations are root-only,
             // exactly like `capabilities.set`.
             Method::EnrollStart(_) | Method::EnrollStop => true,
@@ -1095,6 +1142,7 @@ impl Method {
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
             Method::PolicyExplain(p) => serde_json::to_value(p),
+            Method::PolicySet(p) => serde_json::to_value(p),
             Method::EnrollStart(p) => serde_json::to_value(p),
             Method::ApprovalsGet(p) | Method::ApprovalsConsume(p) => serde_json::to_value(p),
             Method::ApprovalsCreate(p) => serde_json::to_value(p),
@@ -1150,6 +1198,7 @@ impl Method {
             "policy.explain" => {
                 Self::parse_required_params(method, params).map(Method::PolicyExplain)
             }
+            "policy.set" => Self::parse_required_params(method, params).map(Method::PolicySet),
             "enroll.start" => Self::parse_required_params(method, params).map(Method::EnrollStart),
             "enroll.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::EnrollStatus)
@@ -1924,6 +1973,12 @@ pub struct PolicyEffectiveEntry {
     pub effective_value: Value,
     pub source: PolicySourceRef,
     pub user_override_permitted: bool,
+    /// `true` iff a device administrator could change this value — the
+    /// winning rank is at or below the administrator's own layer. Defaulted
+    /// so a pre-`policy.set` payload still parses; a reader that sees it
+    /// missing is talking to an older daemon, and false is the safe reading.
+    #[serde(default)]
+    pub admin_override_permitted: bool,
     pub compliance_state: ComplianceState,
 }
 
@@ -1933,6 +1988,36 @@ pub struct PolicyEffectiveResult {
     /// RFC 3339, when the effective document was last recomputed.
     pub computed_at: String,
     pub entries: Vec<PolicyEffectiveEntry>,
+    /// Whether this device's administrator may edit policy at all, and who
+    /// decided. A surface reads this once to know whether to offer editing,
+    /// instead of discovering the answer from a refusal.
+    #[serde(default)]
+    pub local_admin: LocalAdminStatus,
+}
+
+/// The device-wide answer to "may the local administrator edit policy?"
+/// (SPEC section 44.5 lists local admin among the service controls an
+/// organization governs; an enrolled fleet sets it, a personal device does
+/// not and keeps the permissive default).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalAdminStatus {
+    pub allowed: bool,
+    /// The organization layer that decided, when one did. `None` on a
+    /// personal device, where nothing has an opinion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PolicySourceRef>,
+}
+
+impl Default for LocalAdminStatus {
+    /// Permissive: an unenrolled device's owner administers it. This is not a
+    /// security decision — a local root user defeats local policy either way
+    /// (docs/design/execution-trust.md) — it is who the machine belongs to.
+    fn default() -> Self {
+        Self {
+            allowed: true,
+            source: None,
+        }
+    }
 }
 
 /// `policy.explain` result (contract section 5.8): one effective entry
@@ -1942,7 +2027,25 @@ pub struct PolicyExplainResult {
     pub effective_value: Value,
     pub source: PolicySourceRef,
     pub user_override_permitted: bool,
+    /// See [`PolicyEffectiveEntry::admin_override_permitted`].
+    #[serde(default)]
+    pub admin_override_permitted: bool,
     pub compliance_state: ComplianceState,
+}
+
+/// `policy.set` result: what was pinned, and what is actually in force
+/// afterwards — which differ whenever an organization layer outranks the
+/// administrator, and saying so is the difference between an honest result
+/// and one that lets someone believe a change took effect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicySetResult {
+    pub capability: String,
+    /// The administrator's pinned value, or `null` when the entry was cleared.
+    pub pinned_value: Option<Value>,
+    pub effective_value: Value,
+    pub source: PolicySourceRef,
+    /// `false` when the device was already in the effective state.
+    pub changed: bool,
 }
 
 /// The `audit` sub-object of [`StatusResult`].
@@ -2170,6 +2273,12 @@ mod tests {
             Method::PolicyEffective,
             Method::PolicyExplain(PolicyExplainParams {
                 path: CapabilityId::new("security.firewall").unwrap(),
+            }),
+            Method::PolicySet(PolicySetParams {
+                capability: CapabilityId::new("security.firewall").unwrap(),
+                value: Some(json!("disabled")),
+                reason: "the lab machines run without it".into(),
+                ticket: None,
             }),
             Method::EnrollStart(EnrollStartParams {
                 org_domain: "acme.com".to_string(),
@@ -3364,12 +3473,41 @@ mod tests {
             other => panic!("wrong method: {other:?}"),
         }
 
-        // There is no write-side policy method (contract section 8).
-        let reject = Request::parse_json_line(
-            r#"{"v":1,"id":"1","method":"policy.set","params":{"path":"security.firewall"}}"#,
+        // There is no GENERIC write-side policy method (contract section 8).
+        // `policy.set` exists and is typed; the shapes a document-write
+        // primitive would wear do not parse.
+        for probe in [
+            r#"{"v":1,"id":"1","method":"policy.write","params":{"path":"security.firewall"}}"#,
+            r#"{"v":1,"id":"1","method":"policy.apply","params":{"document":{}}}"#,
+        ] {
+            let reject = Request::parse_json_line(probe).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::UnknownMethod, "probe {probe}");
+        }
+        for probe in [
+            // A path expression is not a capability.
+            r#"{"v":1,"id":"1","method":"policy.set","params":{"path":"security.firewall","value":"disabled","reason":"x"}}"#,
+            // No reason.
+            r#"{"v":1,"id":"1","method":"policy.set","params":{"capability":"security.firewall","value":"disabled"}}"#,
+            // An extra field is a hard parse error, not something ignored.
+            r#"{"v":1,"id":"1","method":"policy.set","params":{"capability":"security.firewall","value":"disabled","reason":"x","document":{}}}"#,
+        ] {
+            let reject = Request::parse_json_line(probe).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "probe {probe}");
+        }
+
+        // The one shape that does parse, and the null that withdraws an entry.
+        let request = Request::parse_json_line(
+            r#"{"v":1,"id":"1","method":"policy.set","params":{"capability":"security.firewall","value":null,"reason":"the lab booking ended"}}"#,
         )
-        .unwrap_err();
-        assert_eq!(reject.error.code, ErrorCode::UnknownMethod);
+        .unwrap();
+        match request.method {
+            Method::PolicySet(params) => {
+                assert_eq!(params.capability.as_str(), "security.firewall");
+                assert_eq!(params.value, None);
+                assert_eq!(params.ticket, None);
+            }
+            other => panic!("wrong method: {other:?}"),
+        }
     }
 
     #[test]

@@ -341,6 +341,39 @@ enum PolicyCommand {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
     },
+    /// Pin a value for everyone on this device, as its administrator
+    /// (device_specific_override, rank 4).
+    ///
+    /// Needs your password again unless you are root. The confirmation is
+    /// read from standard input as a single line, so it is never an argument
+    /// and never reaches /proc — the same discipline the lock screen uses.
+    Set {
+        /// Dotted capability path, like `security.firewall`.
+        path: CapabilityId,
+        /// The value to pin. Validated by the capability itself.
+        value: String,
+        /// Why, in your own words. Recorded with the entry and shown to
+        /// anyone who asks why this value is pinned.
+        #[arg(long)]
+        reason: String,
+        /// Read a re-authentication ticket from the first line of standard
+        /// input (as printed by `punar-auth --admin`).
+        #[arg(long)]
+        ticket_stdin: bool,
+    },
+    /// Withdraw the administrator's entry for a path, handing it back to the
+    /// layers underneath.
+    Clear {
+        /// Dotted capability path, like `security.firewall`.
+        path: CapabilityId,
+        /// Why you are withdrawing it.
+        #[arg(long)]
+        reason: String,
+        /// Read a re-authentication ticket from the first line of standard
+        /// input.
+        #[arg(long)]
+        ticket_stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -690,6 +723,30 @@ fn local_hostname() -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "localhost".to_string())
+}
+
+/// Read a re-authentication ticket from the first line of standard input.
+///
+/// ON STDIN AND NOT ON ARGV, deliberately. A ticket is a bearer object with a
+/// two-minute life: anything on the command line is world-readable in
+/// `/proc/<pid>/cmdline` for as long as the process runs, which is exactly long
+/// enough for another local process to take it and spend it first. The lock
+/// screen passes a password the same way, for the same reason.
+fn read_ticket(enabled: bool) -> Result<Option<String>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
+        .map_err(|e| format!("The confirmation could not be read from standard input: {e}"))?;
+    let ticket = line.trim().to_string();
+    if ticket.is_empty() {
+        return Err("No confirmation arrived on standard input.\n\
+                    Next step: run `punar-auth --admin` first and pipe its ticket in, or make \
+                    the change from System Control · Policy, which does this for you."
+            .to_string());
+    }
+    Ok(Some(ticket))
 }
 
 fn fail(error: &CallError) -> ExitCode {
@@ -3585,6 +3642,58 @@ fn main() -> ExitCode {
                 Some(json!({"path": path.as_str()})),
                 |v| views::policy_explain(&style, v, path.as_str()),
             ),
+            PolicyCommand::Set {
+                path,
+                value,
+                reason,
+                ticket_stdin,
+            } => {
+                // The value is DATA. It is parsed as JSON when it parses and
+                // passed as a string when it does not, so `true`, `42` and
+                // `enabled` all reach the daemon as the capability expects —
+                // and the daemon, not this client, decides whether it is
+                // acceptable.
+                let parsed: Value =
+                    serde_json::from_str(&value).unwrap_or_else(|_| Value::String(value.clone()));
+                let mut params = json!({
+                    "capability": path.as_str(),
+                    "value": parsed,
+                    "reason": reason,
+                });
+                match read_ticket(ticket_stdin) {
+                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                    Ok(None) => {}
+                    Err(why) => {
+                        eprintln!("{why}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                rpc(&client, json, "policy.set", Some(params), |v| {
+                    views::policy_set(&style, v)
+                })
+            }
+            PolicyCommand::Clear {
+                path,
+                reason,
+                ticket_stdin,
+            } => {
+                let mut params = json!({
+                    "capability": path.as_str(),
+                    "value": Value::Null,
+                    "reason": reason,
+                });
+                match read_ticket(ticket_stdin) {
+                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                    Ok(None) => {}
+                    Err(why) => {
+                        eprintln!("{why}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                rpc(&client, json, "policy.set", Some(params), |v| {
+                    views::policy_set(&style, v)
+                })
+            }
         },
         #[cfg(target_os = "linux")]
         Command::Install { command } => match command {

@@ -254,7 +254,7 @@ fi
 # `approval` is deliberately NOT in this list and is asserted conditionally in
 # group 2b: it is a GATE, not a panel, and "unconditionally-openable" is simply
 # false for it.
-for t in commandcenter systemcontrol notifications shortcuts aipanel overview; do
+for t in commandcenter systemcontrol notifications shortcuts aipanel overview session; do
     before="$(sstate "${t}")"
     check_eq "${t}.state before open" "closed" "${before}"
     check_eq "${t}.residency before open" "unloaded" "$(sresidency "${t}")"
@@ -1481,6 +1481,162 @@ else
     FAILED=1
 fi
 rm -f "${idle_probe_conf}" "${idle_probe_flag}"
+
+# --- group 9b: the power buttons are actually AUTHORIZED to act -------------
+#
+# THE GAP THIS CLOSES, and it shipped: the session menu's Restart button did
+# nothing on the owner's machine. Every static gate passed — the QML parses, the
+# row activates, the argv is fixed and correct — because the failure was one
+# layer further down: `systemctl reboot` is a POLKIT-MEDIATED request, and a
+# session that is not active on a seat, or a machine with a second live session,
+# gets "Interactive authentication required" on a stderr nobody collected.
+#
+# Opening the surface (group 2) proves the button exists. This proves the button
+# would WORK, without rebooting the CI VM to find out: logind answers
+# CanReboot/CanPowerOff for the CALLER, over the same bus and the same polkit
+# rules `systemctl reboot` consults. "yes" means it would proceed unprompted;
+# "challenge" means a password dialog is required and the menu cannot deliver
+# one; "na"/"no" mean it would be refused outright.
+can_action() {
+    busctl --system call org.freedesktop.login1 /org/freedesktop/login1 \
+        org.freedesktop.login1.Manager "$1" 2>/dev/null \
+        | tr -d '"' | awk '{print $2}'
+}
+
+login_session_id="${XDG_SESSION_ID:-$(loginctl --value show-user "$(id -u)" -p Display 2>/dev/null)}"
+session_active="$(loginctl show-session "${login_session_id}" -p Active --value 2>/dev/null)"
+session_count="$(loginctl list-sessions --no-legend 2>/dev/null | wc -l | tr -d ' ')"
+note "# logind session='${login_session_id}' active='${session_active}' sessions=${session_count}"
+
+# A session that logind does not consider active is the single most common
+# reason a desktop's power buttons stop working, and it is invisible from
+# inside the shell. Assert it directly rather than only through the verdicts
+# below, so a failure names the cause instead of the symptom.
+check_eq "logind considers this session active" "yes" "${session_active}"
+
+for power_verb in CanReboot CanPowerOff; do
+    power_verdict="$(can_action "${power_verb}")"
+    case "${power_verdict}" in
+        yes)
+            note "ok   logind ${power_verb} = yes (the menu row acts unprompted)"
+            ;;
+        challenge)
+            note "FAIL logind ${power_verb} = challenge; the row would need a polkit password dialog the session menu cannot show"
+            FAILED=1
+            ;;
+        "")
+            note "FAIL logind ${power_verb} returned nothing; logind is not answering this session"
+            FAILED=1
+            ;;
+        *)
+            note "FAIL logind ${power_verb} = ${power_verdict}; the row would be refused"
+            FAILED=1
+            ;;
+    esac
+done
+
+# The polkit agent is the fallback that turns a "challenge" into a prompt
+# rather than a silent nothing. hyprland.lua starts it explicitly, so its
+# absence means the compositor's start hook did not take effect.
+if systemctl --user is-active --quiet hyprpolkitagent.service; then
+    note "ok   hyprpolkitagent is running (a challenged action could still prompt)"
+else
+    note "FAIL hyprpolkitagent is not running; any challenged polkit action fails silently"
+    FAILED=1
+fi
+
+# --- group 9c: a device policy change needs a password, and then works ------
+#
+# THE PATH THIS COVERS, end to end and as the session user: System Control's
+# Policy view offers an administrator a pin, asks for a reason and a password,
+# and runs /usr/lib/punar/punar-policy-set.sh, which re-authenticates through
+# punar-authd and spends the ticket on `punarctl policy set`. Every piece of
+# that has unit tests; none of them proves the CHAIN, and the chain is where a
+# missing binary, a socket group, a PAM stack or a ticket directory mode fails.
+#
+# NEGATIVE LEGS FIRST. If a change went through without a password, the positive
+# leg below would pass on a machine with no authentication at all.
+#
+# The dev user's password is set by mkosi.profiles/dev/mkosi.postinst.chroot,
+# the same one group 8b uses.
+policy_password="punar"
+policy_wrong="definitely-not-the-passphrase"
+policy_path="security.firewall"
+
+policy_source_kind() {
+    punarctl policy explain "$1" --json 2>/dev/null \
+        | sed -n 's/.*"source":{"kind":"\([a-z_]*\)".*/\1/p'
+}
+policy_effective_value() {
+    punarctl policy explain "$1" --json 2>/dev/null \
+        | sed -n 's/.*"effective_value":"\([a-z]*\)".*/\1/p'
+}
+
+policy_before_kind="$(policy_source_kind "${policy_path}")"
+policy_value="$(policy_effective_value "${policy_path}")"
+note "# policy ${policy_path} source=${policy_before_kind:-none} value=${policy_value:-none}"
+
+if [ -z "${policy_value}" ]; then
+    note "FAIL punarctl policy explain ${policy_path} returned no effective value; the rest of this group cannot run"
+    FAILED=1
+else
+    # 1. No confirmation at all.
+    policy_no_ticket="$(punarctl policy set "${policy_path}" "${policy_value}" \
+        --reason "gate: no ticket" 2>&1 >/dev/null)"
+    case "${policy_no_ticket}" in
+        *password*)
+            note "ok   a policy change with no confirmation is refused, in words that name the fix"
+            ;;
+        *)
+            note "FAIL a policy change with no confirmation was not refused as expected: '${policy_no_ticket}'"
+            FAILED=1
+            ;;
+    esac
+
+    # 2. A wrong password. The helper must stop before punarctl is reached.
+    printf '%s\n' "${policy_wrong}" \
+        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: wrong password" \
+          >/dev/null 2>&1
+    policy_wrong_rc="$?"
+    check_eq "the helper's exit status for a wrong password" "3" "${policy_wrong_rc}"
+    check_eq "the winning source after a wrong password" \
+        "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
+
+    # 3. THE POSITIVE LEG. Pinning the value the device already has changes
+    #    nothing about the machine and everything about the provenance, which
+    #    is what is being asserted — a gate must not leave a CI VM with its
+    #    firewall in a different state than it found it.
+    printf '%s\n' "${policy_password}" \
+        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: administrator pin" \
+          >/dev/null 2>&1
+    policy_set_rc="$?"
+    check_eq "the helper's exit status for a correct password" "0" "${policy_set_rc}"
+    check_eq "the winning source after an administrator pin" \
+        "device_specific_override" "$(policy_source_kind "${policy_path}")"
+    check_eq "the effective value is unchanged by a same-value pin" \
+        "${policy_value}" "$(policy_effective_value "${policy_path}")"
+
+    # 4. And withdrawing it hands the path back to the layer underneath.
+    printf '%s\n' "${policy_password}" \
+        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: withdraw" \
+          >/dev/null 2>&1
+    policy_clear_rc="$?"
+    check_eq "the helper's exit status for a withdrawal" "0" "${policy_clear_rc}"
+    check_eq "the winning source after withdrawing the pin" \
+        "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
+
+    # 5. THE PROPERTY THE WHOLE DESIGN RESTS ON: a ticket is trustworthy only
+    #    because an unprivileged process cannot create one. Counting the files
+    #    would be a vacuous assertion here — this check runs as the session
+    #    user, so a directory it cannot read and an empty directory both count
+    #    zero. Assert the refusal instead, which is the fact that matters.
+    if ls /run/punar-authd/tickets >/dev/null 2>&1; then
+        note "FAIL the session user can read /run/punar-authd/tickets; a ticket would be forgeable"
+        FAILED=1
+    else
+        note "ok   the ticket directory is unreadable to the session user"
+    fi
+fi
 
 # --- group 10: an application can actually notify ---------------------------
 #

@@ -1,0 +1,47 @@
+// Punar: the person at the keyboard may restart and shut down their own
+// machine, without being asked for a password first.
+//
+// WHY THIS FILE EXISTS. The session menu's Restart row did nothing on a real
+// device, and the reason was two layers below the button. `systemctl reboot`
+// is a polkit request, and systemd ships
+// org.freedesktop.login1.reboot-multiple-sessions as auth_admin_keep even for
+// an active local session. So the moment a machine has a second live session —
+// a lingering greeter, a second VT, a `systemd-run --machine` shell — logind
+// answers "challenge" instead of "yes", and the reboot silently does not
+// happen unless an authentication agent is running to raise a dialog.
+//
+// THE DECISION. On a Punar desktop the admitted `punar` member is the person
+// who owns the machine; the power button on the case restarts it with no
+// password at all, and requiring one here buys nothing against an attacker who
+// already has physical access. macOS's Apple menu behaves exactly this way,
+// and this menu is modelled on it.
+//
+// THE THREE NARROWINGS THAT KEEP THIS HONEST:
+//   * `subject.local && subject.active` — only the seat that is actually in
+//     front of the machine. A remote or background session gets the shipped
+//     behaviour, prompt and all.
+//   * `punar` group membership — the admission group every human account on
+//     this device joins, and nothing else does.
+//   * The `-ignore-inhibit` actions are DELIBERATELY ABSENT. An application
+//     holding a shutdown inhibitor ("still writing your file") must still be
+//     able to say so; overriding that is a different decision from "may this
+//     person reboot", and it is not one this file makes.
+//
+// Everything else falls through to the shipped policy: NOT_HANDLED means "no
+// opinion", not "yes".
+polkit.addRule(function (action, subject) {
+    if (!subject.local || !subject.active) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (!subject.isInGroup("punar")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    switch (action.id) {
+    case "org.freedesktop.login1.reboot":
+    case "org.freedesktop.login1.reboot-multiple-sessions":
+    case "org.freedesktop.login1.power-off":
+    case "org.freedesktop.login1.power-off-multiple-sessions":
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

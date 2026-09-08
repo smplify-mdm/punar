@@ -361,6 +361,7 @@ jobs:
             tests/desktop/layout-script-test.sh \
             tests/desktop/terminal-app-test.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-policy-set.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
