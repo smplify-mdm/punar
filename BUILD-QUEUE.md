@@ -970,7 +970,7 @@ locally like our smplify deployment and other VMs."*
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
 implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
-130 reviewed app identities, including clearly labelled official web entries and
+129 reviewed app identities, including clearly labelled official web entries and
 separate native preview/beta entries for Claude and ChatGPT. Flatpak sources
 are commit- and metadata-digest-pinned per architecture; unsupported ARM64
 publisher clients use labelled Chromium web fallbacks. Vendor Debian sources

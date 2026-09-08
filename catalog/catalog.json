@@ -1733,54 +1733,6 @@
       ]
     },
     {
-      "id": "geany",
-      "name": "Geany",
-      "featured": false,
-      "category": "developer",
-      "keywords": [
-        "development",
-        "ide",
-        "texteditor"
-      ],
-      "summary": "Fast and lightweight IDE.",
-      "trustTier": "community",
-      "license": "free",
-      "publisher": "flathub",
-      "bundledUpdater": "none",
-      "disclosures": [
-        {
-          "id": "publisher:unverified",
-          "text": "Flathub has not verified who publishes this app. Punar has not reviewed or scanned it either. It pins the exact bytes and shows the access the app asks for before you install."
-        }
-      ],
-      "sources": [
-        {
-          "kind": "flatpak",
-          "architectures": [
-            "x86_64"
-          ],
-          "remote": "flathub",
-          "appId": "org.geany.Geany",
-          "ref": "app/org.geany.Geany/x86_64/stable",
-          "commit": "d54993a583e5f24247648cc6da3af82f6ae437129b607657e86e20a924942d1e",
-          "runtime": "org.freedesktop.Sdk/x86_64/25.08",
-          "metadataSha256": "32cd0d789fbd2dd675ed109358d6e118deec5a4b55342a8638f9b42b94d28df4"
-        },
-        {
-          "kind": "flatpak",
-          "architectures": [
-            "aarch64"
-          ],
-          "remote": "flathub",
-          "appId": "org.geany.Geany",
-          "ref": "app/org.geany.Geany/aarch64/stable",
-          "commit": "f3fbe0bbe5e657750730cfd95e00271c879de053d8d7eb8e74066af9659ade2f",
-          "runtime": "org.freedesktop.Sdk/aarch64/25.08",
-          "metadataSha256": "6c65c6075ecc0db0e2236675e2d0c4f5e67039dd9ad91190ac1961f75bf7251f"
-        }
-      ]
-    },
-    {
       "id": "gearlever",
       "name": "Gear Lever",
       "featured": false,

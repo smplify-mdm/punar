@@ -52,6 +52,9 @@ EXCLUDED_APPS = {
     "org.mozilla.thunderbird": "duplicate app id; org.mozilla.Thunderbird is already curated",
     "org.winehq.Wine": "a Windows compatibility layer, adjacent to the gaming use this tier excludes",
     "io.github.ilya_zlobintsev.LACT": "GPU overclocking utility, not developer tooling",
+    "org.geany.Geany": "the image already ships geany; its Flatpak shares a desktop id "
+                       "with the native package, so the store would list an app it cannot "
+                       "add a second row for",
 }
 
 # Development tooling that a developer would expect and Flathub's install

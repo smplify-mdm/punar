@@ -11,7 +11,7 @@ runtime result, never publisher copy. It also contains no application payload:
 the base image ships only Flatpak itself, this catalog, and Flathub's signed
 remote descriptor. Apps and runtimes are fetched on demand into shared `/var`.
 
-The current browseable catalog contains 130 reviewed identities across AI,
+The current browseable catalog contains 129 reviewed identities across AI,
 Developer, Diagnostics, Writing, Security, Browsers, Communication, and Media.
 The developer set includes VSCodium, Dev Toolbox, DBeaver Community, HTTPie,
 Postman, Meld, and Podman Desktop. Logs, Mission Center, and Wireshark cover
