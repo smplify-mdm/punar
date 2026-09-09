@@ -569,7 +569,27 @@ impl AppManager {
         // fail for a missing remote should say THAT.
         self.ensure_remote(remote)?;
 
-        let commit_arg = format!("--commit={commit}");
+        // TWO COMMANDS, BECAUSE FLATPAK HAS NO INSTALL-TIME COMMIT FLAG.
+        //
+        // This used to pass `--commit=` to `flatpak install`, which does not
+        // accept it — only `flatpak update` does. flatpak rejected the whole
+        // command with "error: Unknown option --commit=…", so EVERY catalogue
+        // install failed, and the pin the card promised was never applied by
+        // that flag. Verified against flatpak 1.16.6: `install --help` lists
+        // --no-deploy, --noninteractive and --or-update and no --commit;
+        // `update --help` lists `--commit=COMMIT  Commit to deploy`.
+        //
+        // So: install the ref, then deploy the pinned commit onto it. When the
+        // remote's head already IS the pin — the normal case, since the
+        // catalogue is re-pinned against Flathub — the second command is a
+        // no-op. When it is not, the second command moves the deployment back
+        // to the bytes the person was shown.
+        //
+        // THE HONEST GAP, stated because it is real: between the two commands
+        // the remote's head is deployed, and it may not be the pinned commit.
+        // flatpak offers no way to close that window — there is no
+        // install-a-specific-commit verb — so the pin is enforced by the
+        // deploy below and the verification after it, not by the install.
         run_quiet_with_timeout(
             &self.flatpak_bin,
             &[
@@ -577,16 +597,35 @@ impl AppManager {
                 "--system",
                 "--noninteractive",
                 "--or-update",
-                &commit_arg,
                 remote,
                 r#ref,
             ],
             INSTALL_TIMEOUT,
         )?;
+        let commit_arg = format!("--commit={commit}");
+        run_quiet_with_timeout(
+            &self.flatpak_bin,
+            &["update", "--system", "--noninteractive", &commit_arg, r#ref],
+            INSTALL_TIMEOUT,
+        )?;
         let observed = self.installed_commit(app_id)?;
         if observed.as_deref() != Some(commit.as_str()) {
+            // FAIL CLOSED. The card said Punar pins the exact bytes; bytes are
+            // deployed that are not those bytes, and leaving them installed
+            // while returning an error would make the promise false in the one
+            // case it exists for. Removal is best-effort — if it also fails the
+            // verification error still stands, and it names both facts.
+            let removed = run_quiet_with_timeout(
+                &self.flatpak_bin,
+                &["uninstall", "--system", "--noninteractive", app_id],
+                REMOVE_TIMEOUT,
+            );
             return Err(AppError::Verification(format!(
-                "Flatpak reported success, but {app_id} is at {observed:?} instead of the pinned commit"
+                "Flatpak reported success, but {app_id} is at {observed:?} instead of the pinned commit{}",
+                match removed {
+                    Ok(()) => "; the unpinned copy was removed",
+                    Err(_) => "; the unpinned copy could NOT be removed and is still installed",
+                }
             )));
         }
         Ok(json!({
@@ -2513,12 +2552,14 @@ mod tests {
         let argv_path = dir.join("argv");
         let bin = dir.join("stateful-flatpak");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(),
             metadata_path.display(),
             state_path.display(),
             state_path.display(),
             state_path.display(),
+            state_path.display(),
+            // the `update --commit=` arm writes the commit it was given
             state_path.display(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             state_path.display(),
@@ -2572,7 +2613,40 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         let argv = fs::read_to_string(&argv_path).unwrap();
-        assert!(argv.contains("install --system --noninteractive --or-update --commit=aaaaaaaa"));
+        // THIS ASSERTION USED TO PIN AN INVALID COMMAND. It required
+        // `install … --or-update --commit=aaaaaaaa`, and `flatpak install` has
+        // no --commit option — only `flatpak update` does. flatpak rejected the
+        // whole command with "Unknown option --commit=…", so every catalogue
+        // install failed on a real machine while this test passed: the double's
+        // `install)` arm ignores arguments it does not recognise, exactly as a
+        // stub does and the real program does not.
+        //
+        // So the shape is asserted as two commands, in order, and the pin is
+        // asserted through the STATE the double writes from `--commit=` rather
+        // than through the argv alone.
+        assert!(
+            argv.contains("install --system --noninteractive --or-update flathub app/"),
+            "install must carry no --commit; flatpak rejects it:\n{argv}"
+        );
+        assert!(
+            !argv
+                .lines()
+                .any(|line| line.starts_with("install ") && line.contains("--commit")),
+            "no install line may carry --commit:\n{argv}"
+        );
+        assert!(
+            argv.contains("update --system --noninteractive --commit=aaaaaaaa"),
+            "the pinned commit is deployed by `update`, which is the verb that accepts it:\n{argv}"
+        );
+        let install_at = argv
+            .lines()
+            .position(|l| l.starts_with("install "))
+            .unwrap();
+        let update_at = argv.lines().position(|l| l.starts_with("update ")).unwrap();
+        assert!(
+            install_at < update_at,
+            "the ref must exist before a commit can be deployed onto it:\n{argv}"
+        );
         assert!(!argv.contains("sh -c"));
 
         fs::write(
