@@ -1067,7 +1067,13 @@ if command -v flatpak >/dev/null 2>&1; then
     # exits non-zero. `flatpak` prints option-parse failures to stderr.
     check_flatpak_argv() {
         cfa_label="$1"; shift
-        cfa_out="$(flatpak "$@" 2>&1 || true)"
+        # BOUNDED. Every probe below fails on a local lookup — an unconfigured
+        # remote, an absent ref, a missing file — so none of them reaches the
+        # system helper or polkit. `timeout` is here for the day that stops
+        # being true: a probe that blocks on an authorisation dialog would
+        # otherwise eat the whole service start timeout and take every later
+        # group down with it, reporting nothing about the cause.
+        cfa_out="$(timeout 20 flatpak "$@" 2>&1 || true)"
         case "${cfa_out}" in
             *"Unknown option"*|*"Unrecognized option"*)
                 note "FAIL flatpak rejects the argv punard sends for ${cfa_label}: ${cfa_out}"
@@ -1120,6 +1126,98 @@ if command -v flatpak >/dev/null 2>&1; then
 else
     note "FAIL flatpak is absent, so no catalogue app can be installed"
     FAILED=1
+fi
+
+# --- group 5d: an install that really happens, with no network --------------
+# Group 5c proves flatpak ACCEPTS punard's argv. It cannot prove what flatpak
+# then SAYS, and the whole of the Evolution failure lived in the answer rather
+# than the question: `flatpak list --columns=…,active` renders the deployment
+# checksum through ellipsize_string() and returns twelve characters, while the
+# catalogue pins sixty-four, so punard's `!=` was unequal for every possible
+# input and deleted apps that had installed perfectly.
+#
+# The relationship punard depends on is therefore asserted against the real
+# program: the listing value is a PREFIX of what `info --show-commit` reports,
+# and the latter is a whole checksum. Nothing here reaches Flathub. A minimal
+# runtime is exported into a temporary repo with flatpak's own build-export,
+# installed from it, measured, and removed — a few seconds, no network, and
+# nothing left behind. It uses --user, so no part of it asks polkit for
+# anything; the rendering code is the same for either installation.
+#
+# This is also the only place anything asserts that `update --commit=<full>`
+# EXITS ZERO when the ref is already at that commit. That is punard's ordinary
+# case — the catalogue is re-pinned against the remote head — and punard treats
+# a non-zero exit as a failed install, so if that verb ever started reporting
+# "nothing to do" as an error, every install in the catalogue would fail.
+if command -v flatpak >/dev/null 2>&1; then
+    fp_arch="$(flatpak --default-arch 2>/dev/null || uname -m)"
+    fp_name=org.punar.SurfacesGateRuntime
+    fp_gate_ref="runtime/${fp_name}/${fp_arch}/1"
+    fp_tmp="$(mktemp -d 2>/dev/null || echo /tmp/punar-fp-gate)"
+    mkdir -p "${fp_tmp}/tree/files"
+    printf 'punar surfaces gate\n' > "${fp_tmp}/tree/files/marker"
+    printf '[Runtime]\nname=%s\nruntime=%s/%s/1\n' \
+        "${fp_name}" "${fp_name}" "${fp_arch}" > "${fp_tmp}/tree/metadata"
+
+    fp_ready=0
+    if timeout 60 flatpak build-export --runtime "${fp_tmp}/repo" "${fp_tmp}/tree" 1 \
+            >/dev/null 2>"${fp_tmp}/export.err" \
+        && timeout 30 flatpak remote-add --user --no-gpg-verify \
+            punar-surfaces-gate "${fp_tmp}/repo" >/dev/null 2>"${fp_tmp}/add.err" \
+        && timeout 120 flatpak install --user --noninteractive \
+            punar-surfaces-gate "${fp_gate_ref}" \
+            >/dev/null 2>"${fp_tmp}/install.err"; then
+        fp_ready=1
+        note "ok   a flatpak installed from a local repo without touching the network"
+    else
+        note "FAIL could not stage a local flatpak install: $(cat "${fp_tmp}"/*.err 2>/dev/null | tr '\n' ' ')"
+        FAILED=1
+    fi
+
+    if [ "${fp_ready}" -eq 1 ]; then
+        fp_full="$(timeout 20 flatpak info --user --show-commit "${fp_gate_ref}" 2>/dev/null \
+            | tr -d '[:space:]')"
+        fp_full_len="$(printf '%s' "${fp_full}" | wc -c | tr -d '[:space:]')"
+        check_eq "info --show-commit reports a whole checksum" "64" "${fp_full_len}"
+
+        fp_short="$(timeout 20 flatpak list --user --runtime \
+            --columns=application,active 2>/dev/null \
+            | grep -F "${fp_name}" | head -n 1 | cut -f2 | tr -d '[:space:]')"
+        fp_short_len="$(printf '%s' "${fp_short}" | wc -c | tr -d '[:space:]')"
+
+        # THE ASSERTION THE PRODUCT BUG NEEDED. Not "these are equal" — they
+        # are not, and punard believing they were is what deleted a working
+        # Evolution — but "the short one is a prefix of the long one", which is
+        # what makes the app grid's cheap comparison sound and the install's
+        # full comparison necessary.
+        case "${fp_full}" in
+            "${fp_short}"*)
+                note "ok   the listing checksum (${fp_short_len} chars) is a prefix of the whole one" ;;
+            *)
+                note "FAIL the listing checksum ${fp_short} is not a prefix of ${fp_full}"
+                FAILED=1 ;;
+        esac
+        if [ "${fp_short_len}" -lt "${fp_full_len}" ]; then
+            note "ok   the listing abbreviates, so a pin must not be compared against it"
+        else
+            note "ok   the listing is not abbreviated on this flatpak (${fp_short_len} chars)"
+        fi
+
+        # punard runs exactly this after every install, and treats a non-zero
+        # exit as a failed install.
+        if timeout 120 flatpak update --user --noninteractive \
+                "--commit=${fp_full}" "${fp_gate_ref}" >/dev/null 2>&1; then
+            note "ok   deploying the commit already deployed exits zero"
+        else
+            note "FAIL update --commit=<already deployed> exits non-zero, which punard reads as a failed install"
+            FAILED=1
+        fi
+
+        timeout 60 flatpak uninstall --user --noninteractive "${fp_gate_ref}" >/dev/null 2>&1 || true
+    fi
+
+    timeout 30 flatpak remote-delete --user --force punar-surfaces-gate >/dev/null 2>&1 || true
+    rm -rf "${fp_tmp}"
 fi
 
 # --- group 6: the SYSTEM can open a link, not just a human ------------------
