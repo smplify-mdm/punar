@@ -1572,6 +1572,18 @@
         {
           "id": "publisher:verified",
           "text": "Flathub verified the publisher is the project itself \u2014 an identity check, not an inspection. Punar has not reviewed or scanned this app. It pins the exact bytes and shows the access the app asks for before you install."
+        },
+        {
+          "id": "access:renderer-sandbox-disabled",
+          "text": "Message bodies are drawn by a web engine whose own sandbox the publisher's build switches off. The app sandbox still applies, and Punar cannot switch the inner one back on."
+        },
+        {
+          "id": "data:shared-keyring",
+          "text": "Your mail account passwords are kept in this device's shared password service, which has no per-app separation: any app you allow to use it can read them."
+        },
+        {
+          "id": "data:mailbox",
+          "text": "Mail accounts, message archives and credentials are stored on this device. Review file access before install."
         }
       ],
       "sources": [

@@ -355,6 +355,7 @@ jobs:
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/app-launcher-contract-test.sh \
+            tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -397,6 +398,14 @@ jobs:
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      # Every GSettings key in the seed is pinned by exact spelling, because
+      # GSettings ignores a key it does not know: a typo ships, changes
+      # nothing, and reports success. The two deliberate omissions are pinned
+      # too — both are things a later edit would helpfully add and both would
+      # remove something the person asked for.
+      - name: Validate the Evolution first-run defaults and disclosures
+        run: ./tests/desktop/evolution-defaults-contract-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
