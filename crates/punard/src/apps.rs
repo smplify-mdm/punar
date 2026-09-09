@@ -33,6 +33,11 @@ const INSPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const VENDOR_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Configuring a remote writes a local config file and fetches the GPG key
+/// named by the repo file. It is not a download of app bytes and must not be
+/// given an install-sized budget: a minute is generous, and failing fast here
+/// leaves a person with a real error instead of a half-hour of nothing.
+const REMOTE_ADD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_VENDOR_PACKAGE_BYTES: u64 = 600 * 1024 * 1024;
 const VENDOR_HOME_PERMISSIONS: &[&str] = &[
     "Network access",
@@ -544,6 +549,26 @@ impl AppManager {
             }));
         }
 
+        // THE REMOTE HAS TO EXIST, AND ON A FRESH DEVICE IT DOES NOT.
+        //
+        // mkosi.postinst.chroot runs `flatpak remote-add --system` at BUILD
+        // time, which writes /var/lib/flatpak/repo/config into the root slot.
+        // At boot, PUNAR-DATA's @var subvolume is mounted over /var
+        // (repart.d/install/50-data.conf) and shadows it — deliberately, so an
+        // A/B OS swap neither duplicates nor loses installed app bytes. The
+        // consequence nobody drew: /var/lib/flatpak is EMPTY on a fresh
+        // machine, so no remote exists and every install in the catalogue
+        // failed with "flatpak exited with exit status: 1" before touching the
+        // network. Verified on a real device: the connection table showed NTP
+        // and LLMNR and no TCP to Flathub at all.
+        //
+        // Adding it here rather than in a boot unit keeps the enabled-unit
+        // manifest unchanged and puts the repair where the need is known. It is
+        // idempotent, the repo file is the signed one named by the catalogue,
+        // and a failure is reported rather than swallowed: an install about to
+        // fail for a missing remote should say THAT.
+        self.ensure_remote(remote)?;
+
         let commit_arg = format!("--commit={commit}");
         run_quiet_with_timeout(
             &self.flatpak_bin,
@@ -617,6 +642,38 @@ impl AppManager {
             .iter()
             .find(|app| app.id == id)
             .ok_or_else(|| AppError::NotFound(id.to_string()))
+    }
+
+    /// Ensure the catalogue's named remote is configured in the system Flatpak
+    /// installation, using the repo file the signed catalogue points at.
+    ///
+    /// `--if-not-exists` makes this a no-op on every boot after the first, and
+    /// the argv is fixed: the only caller-influenced value is a remote id that
+    /// was validated against the catalogue when it loaded.
+    fn ensure_remote(&self, remote_id: &str) -> Result<(), AppError> {
+        let Some(remote) = self
+            .catalog
+            .remotes
+            .iter()
+            .find(|candidate| candidate.id == remote_id)
+        else {
+            return Err(AppError::Backend(format!(
+                "the catalogue names no remote {remote_id:?}, so this application cannot be fetched"
+            )));
+        };
+        let repo_file = remote.repo_file.to_string_lossy().into_owned();
+        run_quiet_with_timeout(
+            &self.flatpak_bin,
+            &[
+                "remote-add",
+                "--system",
+                "--if-not-exists",
+                "--from",
+                &remote.id,
+                &repo_file,
+            ],
+            REMOTE_ADD_TIMEOUT,
+        )
     }
 
     fn select_source<'a>(&self, app: &'a App) -> Result<&'a Source, AppError> {
@@ -2456,7 +2513,7 @@ mod tests {
         let argv_path = dir.join("argv");
         let bin = dir.join("stateful-flatpak");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(),
             metadata_path.display(),
             state_path.display(),
@@ -2485,6 +2542,30 @@ mod tests {
         assert!(!state_path.exists(), "a stale card installed nothing");
 
         let installed = manager.install("spotify", &digest, false).unwrap();
+        // THE REMOTE IS CONFIGURED BEFORE THE INSTALL, and this asserts it
+        // through the recorded argv rather than trusting the call site. On a
+        // real device /var is a separate subvolume that shadows what the image
+        // build wrote, so without this every catalogue install fails before it
+        // reaches the network.
+        let argv = fs::read_to_string(&argv_path).unwrap();
+        let remote_add_line = argv
+            .lines()
+            .position(|line| line.starts_with("remote-add "))
+            .expect("the install path configures the remote");
+        let install_line = argv
+            .lines()
+            .position(|line| line.starts_with("install "))
+            .expect("the install ran");
+        assert!(
+            remote_add_line < install_line,
+            "the remote must be configured BEFORE the install, got:\n{argv}"
+        );
+        assert!(
+            argv.lines().any(|line| line.starts_with("remote-add ")
+                && line.contains("--if-not-exists")
+                && line.contains("flathub.flatpakrepo")),
+            "remote-add must be idempotent and use the catalogue's signed repo file:\n{argv}"
+        );
         assert_eq!(installed["changed"], true);
         assert_eq!(
             fs::read_to_string(&state_path).unwrap().trim(),
