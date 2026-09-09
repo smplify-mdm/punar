@@ -310,7 +310,7 @@ else
     FAILED=1
 fi
 tail -n 1 "${RC_FILE}" > "${RUN_DIR}/m5-received-compliance-last.json" 2>/dev/null
-jq_check "last received compliance: device id matches, overall compliant, five named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
+jq_check "last received compliance: device id matches, overall compliant, six named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
     "${RUN_DIR}/m5-received-compliance-last.json" \
     "(keys | sort) == [\"device_id\", \"received_at\", \"report\"]
      and .device_id == \"${DEVICE_ID}\"
@@ -318,7 +318,7 @@ jq_check "last received compliance: device id matches, overall compliant, five n
      and .report.overall == \"compliant\"
      and (.report.categories | length) == 6
      and ([.report.categories[].category] | sort
-          == [\"browser.policy\", \"security.firewall\", \"system.hostname\", \"system.update_channel\", \"time.timezone\"])
+          == [\"browser.policy\", \"security.credential_isolation\", \"security.firewall\", \"system.hostname\", \"system.update_channel\", \"time.timezone\"])
      and (.report.categories | all((keys | sort) == [\"category\", \"state\"]))"
 
 # --- 10. inventory: sent once at enroll, then hash-gated ---------------------
