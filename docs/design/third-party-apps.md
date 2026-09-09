@@ -1508,10 +1508,28 @@ Two consequences worth stating plainly rather than discovering:
 **And the device says so, rather than this paragraph saying so.** The
 `security.credential_isolation` capability observes which provider owns
 `org.freedesktop.secrets` and reports one of `per_application`, `shared` or
-`none`. Its desired state is `per_application`; every image that ships today
-observes `shared`, so an enrolled device reports **non_compliant** in the
-compliance report an organization already reads — without anyone choosing to
-disclose it, and without a person having read this file.
+`none`, in the compliance and inventory reports an organization already reads —
+without anyone choosing to disclose it, and without a person having read this
+file.
+
+**Punar reports the fact; the organization decides whether the fact is a
+violation.** The capability has no compiled-in desired state: it takes the
+first-observation seed, so an unenrolled device is compliant with what it is. An
+organization that requires isolation publishes
+`security.credential_isolation: per_application` in its desired-state document,
+and that device then reports non_compliant against its own organization's
+requirement, through the same layer machinery every other capability uses.
+
+The first version of this made `per_application` the compiled-in desired state,
+which put every device into permanent unremediable drift — reconcile never
+converged and a personal machine whose owner had asked for nothing would have
+shown non-compliant forever. A signal that is always on is not a signal; it
+buries the drift that means something. The in-VM M3 exercise caught it, on the
+assertion that a second reconcile is clean.
+
+One property worth keeping: because the desired value is the seed rather than a
+constant, a device whose credential provider LATER disappears drifts against its
+own history and reports it.
 
 It is observed and never applied: the provider is a property of the image, so
 the capability is not mutable and the reconcile loop reports the drift as

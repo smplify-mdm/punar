@@ -46,10 +46,24 @@ use crate::capability::{BackendError, Capability, DescriptorMeta};
 
 pub const CAPABILITY_ID: &str = "security.credential_isolation";
 
-/// The state Punar intends, and therefore the desired value. It is not the
-/// observed value on any image that ships today, and that gap is the entire
-/// point: an enrolled device reports `non_compliant` until it closes.
-pub const DESIRED: &str = "per_application";
+/// The state Punar intends. It is NOT this capability's desired value, and the
+/// difference is the whole design.
+///
+/// Making it the desired value put every device into permanent, unremediable
+/// drift: reconcile never converged, `drift_count` never returned to zero, and
+/// the shell would have shown non-compliant forever on a personal machine whose
+/// owner had asked for nothing. A signal that is always on is not a signal, and
+/// it would have buried the drift that means something.
+///
+/// The desired value is the observed one (via the first-observation seed, like
+/// hostname and timezone), so an unenrolled device is compliant with itself.
+/// AN ORGANIZATION THAT REQUIRES ISOLATION PUBLISHES IT — `security.
+/// credential_isolation: per_application` in its desired-state document — and
+/// that device then reports non_compliant against its own organization's
+/// requirement, through the layer machinery every other capability already
+/// uses. That is the honest allocation: Punar reports the fact, the
+/// organization decides whether the fact is a violation.
+pub const INTENDED: &str = "per_application";
 
 /// Providers known to scope callers to their own collection. Empty today —
 /// `punar-keyringd` joins it when it exists, and the emptiness is why every
@@ -175,7 +189,10 @@ impl Capability for CredentialIsolationBackend {
     }
 
     fn default_desired(&self) -> Option<Value> {
-        Some(json!(DESIRED))
+        // None, so the OS-default layer takes the persisted first observation —
+        // the seed pattern hostname and timezone use. A device is compliant
+        // with what it is until an organization says otherwise.
+        None
     }
 }
 
@@ -266,11 +283,13 @@ mod tests {
         let err = backend.apply(&json!("per_application")).unwrap_err();
         assert!(err.to_string().contains("cannot be changed"), "{err}");
 
-        // And the desired state is the one Punar intends, so a device that has
-        // not got there reports drift rather than reporting itself compliant
-        // with whatever it happens to be.
-        assert_eq!(backend.default_desired(), Some(json!(DESIRED)));
-        assert_ne!(backend.observe().unwrap(), json!(DESIRED));
+        // NO COMPILED-IN DESIRED STATE, deliberately. Returning `INTENDED`
+        // here put every device into permanent unremediable drift and made
+        // reconcile never converge; the desired value comes from the
+        // first-observation seed, and an organization that requires isolation
+        // publishes it as policy.
+        assert_eq!(backend.default_desired(), None);
+        assert_ne!(backend.observe().unwrap(), json!(INTENDED));
         let _ = fs::remove_dir_all(&d);
     }
 }
