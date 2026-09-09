@@ -336,11 +336,22 @@ impl AppManager {
                 continue;
             };
             let (installed_now, commit, target, update_available) = match source {
-                Source::Flatpak { app_id, commit, .. } => installed
-                    .get(app_id)
-                    .map_or((false, Value::Null, json!(commit), false), |observed| {
-                        (true, json!(observed), json!(commit), observed != commit)
-                    }),
+                Source::Flatpak { app_id, commit, .. } => installed.get(app_id).map_or(
+                    (false, Value::Null, json!(commit), false),
+                    |observed| {
+                        // `observed` is abbreviated here — see
+                        // `installed_flatpaks`. The grid is a display, and one
+                        // subprocess per installed app to un-abbreviate it
+                        // would buy nothing: a prefix test answers "is an
+                        // update waiting" exactly as well.
+                        (
+                            true,
+                            json!(observed),
+                            json!(commit),
+                            !commit_is_pinned(observed, commit),
+                        )
+                    },
+                ),
                 Source::VendorDeb { sha256, .. } => {
                     let digest = self.installed_vendor_digest(&app.id)?;
                     let update_available = digest.as_deref().is_some_and(|value| value != sha256);
@@ -608,8 +619,20 @@ impl AppManager {
             &["update", "--system", "--noninteractive", &commit_arg, r#ref],
             INSTALL_TIMEOUT,
         )?;
-        let observed = self.installed_commit(app_id)?;
-        if observed.as_deref() != Some(commit.as_str()) {
+        // THE WHOLE CHECKSUM, not the listing's twelve-character abbreviation:
+        // this is the comparison the card's promise rests on, so it compares
+        // every byte of the pin. A checksum flatpak will not report is treated
+        // exactly like a wrong one — an unverifiable pin is not a pin.
+        let verdict = match self.deployed_commit(app_id) {
+            Ok(observed) if observed == *commit => Ok(()),
+            Ok(observed) => Err(format!(
+                "{app_id} is deployed at {observed} instead of the pinned {commit}"
+            )),
+            Err(error) => Err(format!(
+                "{app_id} was installed but flatpak would not say which commit is deployed, so the pin could not be confirmed: {error}"
+            )),
+        };
+        if let Err(reason) = verdict {
             // FAIL CLOSED. The card said Punar pins the exact bytes; bytes are
             // deployed that are not those bytes, and leaving them installed
             // while returning an error would make the promise false in the one
@@ -621,7 +644,7 @@ impl AppManager {
                 REMOVE_TIMEOUT,
             );
             return Err(AppError::Verification(format!(
-                "Flatpak reported success, but {app_id} is at {observed:?} instead of the pinned commit{}",
+                "Flatpak reported success, but {reason}{}",
                 match removed {
                     Ok(()) => "; the unpinned copy was removed",
                     Err(_) => "; the unpinned copy could NOT be removed and is still installed",
@@ -1290,6 +1313,13 @@ impl AppManager {
         })
     }
 
+    /// The installed system apps, mapped to the checksum of the active
+    /// deployment AS `flatpak list` RENDERS IT — which is abbreviated.
+    ///
+    /// This is the cheap enumeration: one subprocess for the whole set. It
+    /// answers "is it installed" exactly, and "which bytes" only to twelve
+    /// characters. Anything comparing against a catalogue pin wants
+    /// [`Self::deployed_commit`] instead.
     fn installed_flatpaks(&self) -> Result<BTreeMap<String, String>, AppError> {
         if self.catalog.apps.is_empty() {
             return Ok(BTreeMap::new());
@@ -1314,9 +1344,67 @@ impl AppManager {
             .collect())
     }
 
-    fn installed_commit(&self, app_id: &str) -> Result<Option<String>, AppError> {
-        Ok(self.installed_flatpaks()?.remove(app_id))
+    /// The FULL checksum of the deployment currently active for `app_id`.
+    ///
+    /// THE ABBREVIATION IS WHY THIS EXISTS. `flatpak list --columns=…,active`
+    /// prints the checksum ellipsized to twelve characters, and the catalogue
+    /// pins all sixty-four. Comparing the two with `!=` can never be equal, so
+    /// the post-install verification rejected installs that had in fact landed
+    /// on exactly the pinned commit and — failing closed, as it should when the
+    /// bytes really are wrong — uninstalled them. Evolution reported
+    /// `Some("4b6430b6e8b6")` "instead of the pinned commit" whose first twelve
+    /// characters are `4b6430b6e8b6`.
+    ///
+    /// `flatpak info --show-commit` is the only interface that reports the
+    /// whole checksum. A single `--show-` option prints the bare value; more
+    /// than one prints `Label: value` lines, so the last whitespace-separated
+    /// token is taken and then required to be a full checksum. An
+    /// unrecognisable answer is an error, never a shrug: a pin that cannot be
+    /// read is a pin that cannot be enforced.
+    fn deployed_commit(&self, app_id: &str) -> Result<String, AppError> {
+        let result = run_with_timeout(
+            &self.flatpak_bin,
+            &["info", "--system", "--show-commit", app_id],
+            INSPECT_TIMEOUT,
+        )
+        .map_err(|e| AppError::Backend(e.to_string()))?;
+        if !result.success {
+            return Err(AppError::Backend(clean_backend_error(&result.stderr)));
+        }
+        let commit = result
+            .stdout
+            .split_whitespace()
+            .next_back()
+            .unwrap_or_default();
+        // An ostree commit checksum has the shape of any other sha256.
+        if !is_sha256(commit) {
+            return Err(AppError::Backend(format!(
+                "flatpak reported the deployed commit of {app_id} as {commit:?}, which is not a checksum"
+            )));
+        }
+        Ok(commit.to_string())
     }
+
+    /// The full checksum of `app_id`, or `None` when it is not installed.
+    fn installed_commit(&self, app_id: &str) -> Result<Option<String>, AppError> {
+        if !self.installed_flatpaks()?.contains_key(app_id) {
+            return Ok(None);
+        }
+        self.deployed_commit(app_id).map(Some)
+    }
+}
+
+/// Whether the deployment `observed` is the catalogue's pinned `commit`.
+///
+/// `observed` is full whenever it came from [`AppManager::deployed_commit`],
+/// and the twelve-character abbreviation when it came from the cheap listing;
+/// a prefix test is equality for the first and the strongest available answer
+/// for the second. The abbreviated form is only ever used to render "an update
+/// is available" in the app grid — never to decide that installed bytes are
+/// the bytes a person was shown, which is [`AppManager::install`]'s job and
+/// compares full checksums.
+fn commit_is_pinned(observed: &str, pinned: &str) -> bool {
+    observed.len() >= 12 && pinned.starts_with(observed)
 }
 
 fn source_kind(source: &Source) -> &'static str {
@@ -2543,6 +2631,23 @@ mod tests {
         assert!(host_access.is_empty());
     }
 
+    /// The grid's "an update is waiting" hint reads an abbreviated checksum
+    /// and must not mistake it for drift.
+    #[test]
+    fn an_abbreviated_checksum_still_recognises_its_own_pin() {
+        let pin = "4b6430b6e8b6d4a6cc0714379037059eb7b6c444fedc021fd60ea145a011eedc";
+        assert!(
+            commit_is_pinned("4b6430b6e8b6", pin),
+            "flatpak's own listing"
+        );
+        assert!(commit_is_pinned(pin, pin), "and the whole checksum");
+        assert!(!commit_is_pinned("4b6430b6e8b7", pin), "one character out");
+        // A short prefix is not evidence. Twelve characters is what flatpak
+        // prints; anything shorter is refused rather than charitably matched.
+        assert!(!commit_is_pinned("4b6430b6e8b", pin));
+        assert!(!commit_is_pinned("", pin));
+    }
+
     #[test]
     fn install_requires_the_displayed_digest_and_verifies_the_pinned_commit() {
         let metadata = "[Context]\nshared=network;\nsockets=wayland;\n";
@@ -2552,7 +2657,7 @@ mod tests {
         let argv_path = dir.join("argv");
         let bin = dir.join("stateful-flatpak");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%.12s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ \"$3\" = '--show-commit' ] || {{ echo 'unexpected info options' >&2; exit 2; }}; [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(),
             metadata_path.display(),
             state_path.display(),
@@ -2648,6 +2753,31 @@ mod tests {
             "the ref must exist before a commit can be deployed onto it:\n{argv}"
         );
         assert!(!argv.contains("sh -c"));
+
+        // THE ABBREVIATION IS THE POINT OF THIS BLOCK. `flatpak list
+        // --columns=…,active` ellipsizes the checksum to twelve characters
+        // while the catalogue pins sixty-four, so a listing value compared to a
+        // pin with `!=` is unequal even when the right bytes are deployed —
+        // which is how a successful Evolution install got verified as wrong and
+        // then uninstalled. The double abbreviates exactly as flatpak does, so
+        // reintroducing that comparison fails the install assertions above
+        // rather than passing here and failing on the person's machine.
+        let listed = manager.installed_flatpaks().unwrap();
+        assert_eq!(
+            listed.get("com.spotify.Client").map(String::as_str),
+            Some("aaaaaaaaaaaa"),
+            "the listing abbreviates, as flatpak does"
+        );
+        assert_eq!(
+            manager.installed_commit("com.spotify.Client").unwrap(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            "the pin comparison reads the whole checksum"
+        );
+        assert!(
+            argv.lines()
+                .any(|line| line.starts_with("info ") && line.contains("--show-commit")),
+            "the full checksum comes from `flatpak info --show-commit`:\n{argv}"
+        );
 
         fs::write(
             &state_path,

@@ -1040,6 +1040,88 @@ else
     FAILED=1
 fi
 
+# --- group 5c: flatpak ACCEPTS the argv punard actually sends ----------------
+# THIS GROUP EXISTS BECAUSE THE UNIT TESTS CANNOT FAIL HERE. punard's flatpak
+# tests drive a shell-script double, and a double ignores options it does not
+# recognise exactly as a stub does and the real program does not. So
+# `install … --or-update --commit=<64 hex>` passed every test in the tree and
+# was rejected outright by flatpak on the person's machine — "error: Unknown
+# option --commit=…" — which meant EVERY catalogue install failed while CI was
+# green. A check that cannot fail is not a check.
+#
+# The real binary is here in the booted image, so ask it. Each argv below is
+# the argv punard builds, aimed at a remote and a ref that do not exist. It is
+# EXPECTED to fail; what is asserted is only that it did not fail in the option
+# parser. That distinction is the whole value: an absent remote, an absent ref
+# and a missing authorisation all produce their own messages, while a bad
+# option produces "Unknown option" and nothing else does. Nothing here touches
+# the network, so the group costs milliseconds and cannot go flaky offline.
+if command -v flatpak >/dev/null 2>&1; then
+    # A ref and remote chosen to be absent everywhere, so resolution fails
+    # before any fetch is attempted.
+    fp_ref="app/org.punar.SurfacesGateAbsent/$(uname -m)/stable"
+    fp_remote="punar-surfaces-gate-absent"
+    fp_commit="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    # Asserts on the OUTPUT, not the exit status, because a correct run here
+    # exits non-zero. `flatpak` prints option-parse failures to stderr.
+    check_flatpak_argv() {
+        cfa_label="$1"; shift
+        cfa_out="$(flatpak "$@" 2>&1 || true)"
+        case "${cfa_out}" in
+            *"Unknown option"*|*"Unrecognized option"*)
+                note "FAIL flatpak rejects the argv punard sends for ${cfa_label}: ${cfa_out}"
+                FAILED=1 ;;
+            *)
+                note "ok   flatpak accepts the argv punard sends for ${cfa_label}" ;;
+        esac
+    }
+
+    check_flatpak_argv "install" \
+        install --system --noninteractive --or-update "${fp_remote}" "${fp_ref}"
+    check_flatpak_argv "the pinned deploy" \
+        update --system --noninteractive "--commit=${fp_commit}" "${fp_ref}"
+    check_flatpak_argv "reading the deployed commit" \
+        info --system --show-commit org.punar.SurfacesGateAbsent
+    check_flatpak_argv "configuring the remote" \
+        remote-add --system --if-not-exists --from "${fp_remote}" /nonexistent.flatpakrepo
+    check_flatpak_argv "removal" \
+        uninstall --system --noninteractive org.punar.SurfacesGateAbsent
+
+    # The listing punard enumerates with must be accepted AND must succeed:
+    # unlike the others this one names nothing absent, so a non-zero exit is a
+    # real failure. `--columns=application,active` is the pair punard parses.
+    if flatpak list --system --app --columns=application,active >/dev/null 2>&1; then
+        note "ok   flatpak accepts the columns punard parses"
+    else
+        note "FAIL flatpak rejects --columns=application,active, which punard parses"
+        FAILED=1
+    fi
+
+    # THE ABBREVIATION, ASSERTED AGAINST THE REAL PROGRAM. `flatpak list`
+    # ellipsizes the deployment checksum to twelve characters while the
+    # catalogue pins all sixty-four, and comparing the two with `!=` is never
+    # equal — so a successful install verified as WRONG and was uninstalled
+    # again. If a future flatpak stops abbreviating, this line says so rather
+    # than letting the prefix comparison quietly become the only one.
+    fp_first="$(flatpak list --system --app --columns=application,active 2>/dev/null \
+        | head -n 1 | cut -f2)"
+    if [ -z "${fp_first}" ]; then
+        note "ok   nothing is installed, so the listing has no checksum to measure"
+    else
+        fp_len="$(printf '%s' "${fp_first}" | wc -c | tr -d '[:space:]')"
+        if [ "${fp_len}" -eq 12 ] || [ "${fp_len}" -eq 64 ]; then
+            note "ok   the listing checksum is ${fp_len} characters, a form punard reads"
+        else
+            note "FAIL the listing checksum is ${fp_len} characters, which punard does not read"
+            FAILED=1
+        fi
+    fi
+else
+    note "FAIL flatpak is absent, so no catalogue app can be installed"
+    FAILED=1
+fi
+
 # --- group 6: the SYSTEM can open a link, not just a human ------------------
 # xdg-open is what a notification action, a terminal URL activation or the
 # command center's "open" verb calls. Both halves are asserted because either
