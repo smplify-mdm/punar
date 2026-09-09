@@ -126,7 +126,7 @@ jq_check "effective document: six named entries, full shape, override permitted 
     "${RUN_DIR}/m4-effective.json" \
     '(.entries | length) == 6
      and ([.entries[].path] | sort
-          == ["browser.policy", "security.firewall", "system.hostname", "system.update_channel", "time.timezone"])
+          == ["browser.policy", "security.credential_isolation", "security.firewall", "system.hostname", "system.update_channel", "time.timezone"])
      and (.entries | all(
        has("path") and has("effective_value") and has("compliance_state")
        and (.source | has("kind") and has("rank") and has("policy_id") and has("name"))
