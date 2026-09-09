@@ -277,10 +277,16 @@ QtObject {
 
     // Switch to a workspace by id. Named for what it does, and separate
     // from openProject, which creates and renames.
+    //
+    // THROUGH HyprlandActions, and the gate that rejected the first version of
+    // this was right for a reason beyond tidiness: `Hyprland.dispatch("workspace
+    // N")` is the LEGACY dispatcher string, and this session is Lua-native. It
+    // would have parsed, returned, and moved nothing — a switch verb that
+    // silently does nothing, which is worse than the rename it replaced.
     function focusWorkspaceId(id: int): bool {
         if (id < 1)
             return false;
-        Hyprland.dispatch("workspace " + id);
+        HyprlandActions.focusWorkspace(id);
         return true;
     }
 

@@ -1263,8 +1263,14 @@ if command -v flatpak >/dev/null 2>&1; then
     fp_name=org.punar.SurfacesGateRuntime
     fp_gate_ref="runtime/${fp_name}/${fp_arch}/1"
     fp_tmp="$(mktemp -d 2>/dev/null || echo /tmp/punar-fp-gate)"
-    mkdir -p "${fp_tmp}/tree/files"
-    printf 'punar surfaces gate\n' > "${fp_tmp}/tree/files/marker"
+    # BOTH DIRECTORIES, and the asymmetry is flatpak's, not a belt-and-braces
+    # habit. `build-export` VALIDATES the tree by checking that `files` and
+    # `metadata` exist — "Build directory %s not initialized" otherwise — but
+    # for a runtime it COMMITS from `usr`. A tree with only `files` therefore
+    # passes validation and then dies on opendir(.../usr), which is exactly
+    # what this group reported on its first real run.
+    mkdir -p "${fp_tmp}/tree/files" "${fp_tmp}/tree/usr"
+    printf 'punar surfaces gate\n' > "${fp_tmp}/tree/usr/marker"
     printf '[Runtime]\nname=%s\nruntime=%s/%s/1\n' \
         "${fp_name}" "${fp_name}" "${fp_arch}" > "${fp_tmp}/tree/metadata"
 
