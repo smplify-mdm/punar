@@ -573,11 +573,14 @@ impl AppManager {
         // network. Verified on a real device: the connection table showed NTP
         // and LLMNR and no TCP to Flathub at all.
         //
-        // Adding it here rather than in a boot unit keeps the enabled-unit
+        // Adding it in a call rather than a boot unit keeps the enabled-unit
         // manifest unchanged and puts the repair where the need is known. It is
         // idempotent, the repo file is the signed one named by the catalogue,
         // and a failure is reported rather than swallowed: an install about to
-        // fail for a missing remote should say THAT.
+        // fail for a missing remote should say THAT. `inspect_flatpak` above
+        // has already made the guarantee for this install; it is restated here
+        // because the install is a separate promise and reconcile may reach it
+        // by a path that skipped the card.
         self.ensure_remote(remote)?;
 
         // TWO COMMANDS, BECAUSE FLATPAK HAS NO INSTALL-TIME COMMIT FLAG.
@@ -1276,6 +1279,18 @@ impl AppManager {
         else {
             unreachable!("inspect_flatpak called for a web source")
         };
+        // THE REMOTE HAS TO EXIST BEFORE THIS LINE, NOT BEFORE THE INSTALL.
+        //
+        // `remote-info` resolves the ref through a configured remote, so on a
+        // fresh device — where PUNAR-DATA's @var subvolume shadows the empty
+        // /var/lib/flatpak the image build populated — the very first card a
+        // person opens fails before it can draw a single permission sentence.
+        // The repair used to sit further down `install`, which meant it only
+        // ever ran after an inspection that had already failed; it appeared to
+        // work in testing solely because a failed install had added the remote
+        // on the way past, so the SECOND attempt found one. Putting it here
+        // covers the card, the install and reconcile with one idempotent call.
+        self.ensure_remote(remote)?;
         let commit_arg = format!("--commit={commit}");
         let arch_arg = format!("--arch={}", self.arch);
         let result = run_with_timeout(
@@ -2329,7 +2344,7 @@ mod tests {
         let metadata_path = dir.join("metadata");
         fs::write(&metadata_path, metadata).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\nremote-add) : ;;\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
             metadata_path.display()
         );
         fs::write(&bin, script).unwrap();
@@ -2705,6 +2720,20 @@ mod tests {
         assert!(
             remote_add_line < install_line,
             "the remote must be configured BEFORE the install, got:\n{argv}"
+        );
+        // AND BEFORE THE INSPECTION, which is the earlier need and the one
+        // that was missed. `remote-info` resolves the ref through a configured
+        // remote, so on a fresh device the permission card itself failed —
+        // never reaching the install whose repair would have fixed it. That
+        // read as working only because a failed first attempt left the remote
+        // behind for the second.
+        let remote_info_line = argv
+            .lines()
+            .position(|line| line.starts_with("remote-info "))
+            .expect("the card inspects the remote metadata");
+        assert!(
+            remote_add_line < remote_info_line,
+            "the remote must be configured BEFORE the metadata is read, got:\n{argv}"
         );
         assert!(
             argv.lines().any(|line| line.starts_with("remote-add ")
