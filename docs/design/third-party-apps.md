@@ -1505,6 +1505,25 @@ Two consequences worth stating plainly rather than discovering:
   (`00-punar-lean.preset`), so nothing runs at idle and it starts the first time
   an application asks for a secret.
 
+**And the device says so, rather than this paragraph saying so.** The
+`security.credential_isolation` capability observes which provider owns
+`org.freedesktop.secrets` and reports one of `per_application`, `shared` or
+`none`. Its desired state is `per_application`; every image that ships today
+observes `shared`, so an enrolled device reports **non_compliant** in the
+compliance report an organization already reads — without anyone choosing to
+disclose it, and without a person having read this file.
+
+It is observed and never applied: the provider is a property of the image, so
+the capability is not mutable and the reconcile loop reports the drift as
+alert-only instead of retrying an apply that could never succeed. An
+unrecognised provider is reported as `shared` rather than given the benefit of
+the doubt, because the two errors are not symmetric — understating isolation
+costs the device nothing, while overstating it tells an organization something
+false about where its credentials are.
+
 Closing the gap properly means Punar brokering credential access itself, with
 per-application policy, rather than shipping a shared bus name — a component to
-build, not a package to install.
+build, not a package to install. When it exists it joins the provider list in
+`crates/punard/src/backends/credential_isolation.rs`, the observed value becomes
+`per_application`, and the same report that says non_compliant today starts
+saying compliant without a word of documentation changing.

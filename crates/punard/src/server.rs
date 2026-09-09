@@ -1435,7 +1435,7 @@ impl Inner {
         let desired = self
             .effective_value_of(meta.capability.as_str())
             .unwrap_or_else(|| current.clone());
-        meta.describe(current, desired)
+        meta.describe(current, desired, cap.mutable())
     }
 
     /// The effective value for one capability path, if the document has an
@@ -3663,6 +3663,23 @@ impl Inner {
             // observed state matches the effective value).
             self.tracker.lock().unwrap().fail_counts.remove(id);
             return (RemediationOutcome::None, ComplianceState::Compliant);
+        }
+        if !cap.mutable() {
+            // DRIFT THAT NOTHING ON THIS DEVICE CAN FIX. Retrying an apply here
+            // would fail once per reconcile cycle forever, filling the audit
+            // trail with a failure that is not a fault — the value is a
+            // property of the image, and the honest report is the same one
+            // alert_only makes: this is not compliant, and remediation was not
+            // attempted. An organization reading the compliance report learns
+            // the true state; nobody is told a lie about it being fixable.
+            // No audit event, deliberately: the classification-driven
+            // alert_only branch below emits none either, and reconcile runs on
+            // a timer — an event per cycle for a state that cannot change would
+            // be the trail's loudest entry and its least informative. The
+            // reconcile result carries `remediation: alert_only` and the
+            // tracker records non_compliant, which is what the compliance
+            // report an organization reads is built from.
+            return (RemediationOutcome::AlertOnly, ComplianceState::NonCompliant);
         }
         match classification {
             // approval_required classifies as such but behaves as

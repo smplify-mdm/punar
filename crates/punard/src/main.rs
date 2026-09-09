@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use punar_common::DeviceClass;
 use punard::backends::browser_policy::BrowserPolicyBackend;
+use punard::backends::credential_isolation::CredentialIsolationBackend;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
 use punard::backends::timezone::TimezoneBackend;
@@ -137,6 +138,11 @@ struct RunArgs {
 
 fn build_registry(args: &RunArgs) -> Registry {
     Registry::new(vec![
+        // Observed, never applied: which provider owns org.freedesktop.secrets
+        // is a property of the image. It is registered so that an enrolled
+        // device REPORTS whether its credential store isolates applications,
+        // rather than that fact living only in a design document.
+        Box::new(CredentialIsolationBackend::default()),
         Box::new(FirewallBackend::new(
             args.nft_bin.clone(),
             args.ruleset.clone(),
