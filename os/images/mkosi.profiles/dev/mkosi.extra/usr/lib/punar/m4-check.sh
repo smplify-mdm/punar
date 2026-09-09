@@ -122,9 +122,9 @@ else
     note "FAIL punarctl --json policy effective exit $? (user punar): $(head -c 240 "${RUN_DIR}/m4-effective.json")"
     FAILED=1
 fi
-jq_check "effective document: five named entries, full shape, override permitted everywhere" \
+jq_check "effective document: six named entries, full shape, override permitted everywhere" \
     "${RUN_DIR}/m4-effective.json" \
-    '(.entries | length) == 5
+    '(.entries | length) == 6
      and ([.entries[].path] | sort
           == ["browser.policy", "security.firewall", "system.hostname", "system.update_channel", "time.timezone"])
      and (.entries | all(
@@ -206,10 +206,10 @@ jq_check "explain after re-enable: effective enabled, compliant" \
 
 # --- 8. status compliance block (section 52, personal scope) + baseline B ----
 "${CTL}" --json status > "${RUN_DIR}/m4-status-a.json" 2>&1
-jq_check "status compliance: overall compliant, 5 capability rows, counter is a number" \
+jq_check "status compliance: overall compliant, 6 capability rows, counter is a number" \
     "${RUN_DIR}/m4-status-a.json" \
     '.compliance.overall == "compliant"
-     and (.compliance.capabilities | length) == 5
+     and (.compliance.capabilities | length) == 6
      and (.compliance.capabilities | all(.state == "compliant"))
      and (.compliance.drift_remediated_total | type) == "number"'
 BASELINE="$(jq -r '.compliance.drift_remediated_total' "${RUN_DIR}/m4-status-a.json" 2>/dev/null)"
