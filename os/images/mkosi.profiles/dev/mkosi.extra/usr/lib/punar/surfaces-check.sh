@@ -1040,6 +1040,115 @@ else
     FAILED=1
 fi
 
+# --- group 5a: typing a workspace number goes there, and renames nothing ----
+# THE OLD BEHAVIOUR WAS DESTRUCTIVE, not merely unhelpful. milestone-2.md §153
+# names the command centre the discoverable surface for go-to-workspace, and
+# spec §13.3 gives 1..9 to workspaces — so "2" means workspace 2. What the
+# shipped surface did with "2": stripped no verb, normalised the digit as a
+# legal PROJECT NAME, failed to match (knownProjects skips unnamed numeric
+# workspaces, which is exactly what a plain workspace 2 is), and offered to
+# CREATE a project called "2" at whatever id happened to be free. Enter on
+# that row renamed an unrelated workspace to "2".
+#
+# Asserted through the live surface rather than the source, because the bug
+# was a fall-through between three functions that each looked right alone.
+ipc commandcenter open >/dev/null 2>&1 || true
+sleep 1
+cc_two="$(ipc commandcenter query 2 | tr -d '\r\n"')"
+case "${cc_two}" in
+    workspace*)
+        note "ok   typing a workspace number offers the workspace (${cc_two})" ;;
+    *)
+        note "FAIL typing 2 offers ${cc_two:-nothing} instead of workspace 2"
+        FAILED=1 ;;
+esac
+case "${cc_two}" in
+    *"New workspace"*|*OpenProject*)
+        note "FAIL typing 2 still offers to create or rename a project: ${cc_two}"
+        FAILED=1 ;;
+    *)
+        note "ok   typing a workspace number offers no rename" ;;
+esac
+cc_switch="$(ipc commandcenter query "switch to 3" | tr -d '\r\n"')"
+case "${cc_switch}" in
+    workspace*)
+        note "ok   a switch verb with a number resolves to that workspace (${cc_switch})" ;;
+    *)
+        note "FAIL 'switch to 3' offers ${cc_switch:-nothing} instead of workspace 3"
+        FAILED=1 ;;
+esac
+ipc commandcenter close >/dev/null 2>&1 || true
+
+# --- group 5b: the shortcut reference is SORTED, not just populated ---------
+# THE SHIPPED SURFACE FAILED THIS AND NOTHING SAID SO. Its own footer read
+# `75 BINDS · 75 ROWS · 0 UNDESCRIBED · 75 UNMAPPED` under one OTHER heading:
+# every bind unclassified, and the digit fold never fired. The cause is that
+# the Lua-native session reports EVERY bind with dispatcher `__lua`, so
+# BindTable's dispatcher-keyed tables — bySection, byIpcTarget and byCommand
+# alike — matched nothing at all.
+#
+# The gate could not have caught it: it asserted that particular rows EXIST
+# (Q/Close window, the guarded Window actions) and rows existed. Row presence
+# is not classification, and the unmapped count the footer prints was not
+# reachable over IPC for anything to read. Both are now.
+#
+# This matters more than a tidy reference. Spec §12.3 names three
+# discoverability mechanisms, D-017 Sect V·03 records that the hold overlay is
+# blocked on an unverified compositor capability and designates the help
+# surface the fallback — so PUNAR+/ is the ONE shipped path by which a person
+# who does not already know a chord can find one. A person who opens it to
+# learn how to reach another workspace must find a WORKSPACES AND PROJECTS
+# heading, not seventy-five rows in an undifferentiated block with that
+# heading absent entirely.
+ipc shortcuts open >/dev/null 2>&1 || true
+sleep 1
+sc_rows="$(ipc shortcuts rows | tr -d '[:space:]"')"
+sc_unmapped="$(ipc shortcuts unmapped | tr -d '[:space:]"')"
+sc_sections="$(ipc shortcuts sections | tr -d '[:space:]"')"
+
+case "${sc_sections}" in
+    *"WORKSPACESANDPROJECTS"*)
+        note "ok   the shortcut reference renders a WORKSPACES AND PROJECTS section" ;;
+    *)
+        note "FAIL the shortcut reference has no WORKSPACES AND PROJECTS section; sections are: ${sc_sections}"
+        FAILED=1 ;;
+esac
+
+# UNMAPPED IS A RATIO, NOT A HEADCOUNT. Pinning zero would go red the day
+# somebody adds a bind before its description is classified, which is a
+# legitimate in-progress state and exactly what OTHER is for. What is never
+# legitimate is the majority of the table falling through: that is the
+# classifier being broken rather than a row being new.
+if [ -n "${sc_rows}" ] && [ "${sc_rows}" -gt 0 ] 2>/dev/null; then
+    if [ "$((sc_unmapped * 2))" -lt "${sc_rows}" ]; then
+        note "ok   the shortcut reference classifies most of its rows (${sc_unmapped} of ${sc_rows} unmapped)"
+    else
+        note "FAIL the shortcut reference left ${sc_unmapped} of ${sc_rows} rows unmapped — the classifier is not matching"
+        FAILED=1
+    fi
+else
+    note "FAIL the shortcut reference reported no rows at all (rows=${sc_rows:-empty})"
+    FAILED=1
+fi
+
+# THE FOLD, asserted as a relation rather than a number. D-017 Sect I·01 says
+# nine workspace binds are one idea; the fold collapses a contiguous digit run
+# into one row, so a working table always has FEWER rows than binds. `75 BINDS
+# · 75 ROWS` is the shape of a fold that never fired.
+sc_binds="$(hyprctl binds -j 2>/dev/null | jq -r '[ .[] | select(.description != "") ] | length' 2>/dev/null || echo "")"
+if [ -n "${sc_binds}" ] && [ "${sc_binds}" -gt 0 ] 2>/dev/null && [ -n "${sc_rows}" ]; then
+    if [ "${sc_rows}" -lt "${sc_binds}" ]; then
+        note "ok   the digit fold fired (${sc_binds} described binds rendered as ${sc_rows} rows)"
+    else
+        note "FAIL the digit fold never fired: ${sc_binds} described binds rendered as ${sc_rows} rows"
+        FAILED=1
+    fi
+else
+    note "ok   no live bind table to compare the fold against; skipping the fold relation"
+fi
+
+ipc shortcuts close >/dev/null 2>&1 || true
+
 # --- group 5c: flatpak ACCEPTS the argv punard actually sends ----------------
 # THIS GROUP EXISTS BECAUSE THE UNIT TESTS CANNOT FAIL HERE. punard's flatpak
 # tests drive a shell-script double, and a double ignores options it does not

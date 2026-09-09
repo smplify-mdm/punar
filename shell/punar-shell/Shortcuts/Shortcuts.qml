@@ -152,6 +152,29 @@ DeferredSurfaceBase {
         return String(Local.BindTable.undescribed);
     }
 
+    // The footer has always printed the unmapped count and the surface has
+    // never let anything ASK for it, which is why the reference could ship
+    // with every one of its seventy-five rows unclassified and no gate
+    // disagree. The number is the alarm D-017 Sect I·03 designed; an alarm
+    // nothing can read is not one.
+    function ipcUnmapped(): string {
+        return String(Local.BindTable.unmapped);
+    }
+
+    // The section headers actually rendered, in render order. A reference
+    // whose rows all fall to OTHER still has rows and still has a row
+    // count; the sections are the only thing that says they were sorted
+    // into the shape a person reaches for.
+    function ipcSections(): string {
+        var seen = [];
+        var all = Local.BindTable.rows;
+        for (var i = 0; i < all.length; i++) {
+            if (seen.indexOf(all[i].section) < 0)
+                seen.push(all[i].section);
+        }
+        return seen.join(",");
+    }
+
     Timer {
         id: hideTimer
         interval: Theme.durStandard
