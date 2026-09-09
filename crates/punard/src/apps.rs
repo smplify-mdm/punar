@@ -15,6 +15,7 @@ use std::io::Read;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1340,7 +1341,7 @@ fn extract_member_to_file(
         .stderr(Stdio::null())
         .spawn_busy_retry()
         .map_err(backend_io)?;
-    wait_quiet_child(bin, &mut child, timeout)
+    wait_quiet_child(bin, &mut child, timeout, None)
 }
 
 fn extract_text_member(
@@ -1424,23 +1425,58 @@ fn extract_payload(
         .stderr(Stdio::null())
         .spawn_busy_retry()
         .map_err(backend_io)?;
-    wait_quiet_child(bin, &mut child, timeout)
+    wait_quiet_child(bin, &mut child, timeout, None)
 }
 
+/// Wait for a fixed-argv backend child, and — when `capture` names a file its
+/// stderr was redirected to — say what it said.
+///
+/// STDERR USED TO GO TO /dev/null on every caller, and the cost was paid by a
+/// person rather than a log: a failed install produced exactly
+/// "/usr/bin/flatpak exited with exit status: 1" on the install card, and
+/// punard's own next-step text had to GUESS at the cause ("check network
+/// connectivity and `flatpak remotes`") because the daemon had discarded the
+/// one sentence that knew.
 fn wait_quiet_child(
     bin: &Path,
     child: &mut std::process::Child,
     timeout: Duration,
+    capture: Option<&Path>,
 ) -> Result<(), AppError> {
+    // Read at most this much back: enough for any real diagnostic, bounded so a
+    // runaway backend cannot make the daemon allocate on its behalf.
+    const MAX_CAPTURE: u64 = 64 * 1024;
+    let detail = |capture: Option<&Path>| -> String {
+        let Some(path) = capture else {
+            return String::new();
+        };
+        let mut text = String::new();
+        if let Ok(file) = File::open(path) {
+            let _ = file.take(MAX_CAPTURE).read_to_string(&mut text);
+        }
+        let _ = fs::remove_file(path);
+        backend_failure_detail(&text)
+    };
+    let discard = |capture: Option<&Path>| {
+        if let Some(path) = capture {
+            let _ = fs::remove_file(path);
+        }
+    };
+
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) if status.success() => {
+                discard(capture);
+                return Ok(());
+            }
             Ok(Some(status)) => {
-                return Err(AppError::Backend(format!(
-                    "{} exited with {status}",
-                    bin.display()
-                )));
+                let said = detail(capture);
+                return Err(AppError::Backend(if said.is_empty() {
+                    format!("{} exited with {status}", bin.display())
+                } else {
+                    format!("{} exited with {status}: {said}", bin.display())
+                }));
             }
             Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -1448,12 +1484,20 @@ fn wait_quiet_child(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(AppError::Backend(format!(
-                    "{} timed out after {timeout:?}",
-                    bin.display()
-                )));
+                let said = detail(capture);
+                return Err(AppError::Backend(if said.is_empty() {
+                    format!("{} timed out after {timeout:?}", bin.display())
+                } else {
+                    format!(
+                        "{} timed out after {timeout:?}; last said: {said}",
+                        bin.display()
+                    )
+                }));
             }
-            Err(error) => return Err(backend_io(error)),
+            Err(error) => {
+                discard(capture);
+                return Err(backend_io(error));
+            }
         }
     }
 }
@@ -2015,38 +2059,74 @@ fn clean_backend_error(stderr: &str) -> String {
     }
 }
 
+/// Distinguishes concurrent captures. Two installs cannot share a file, and a
+/// pid alone would collide with itself across sequential calls in one process.
+static BACKEND_CAPTURE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// The most informative line of a backend's stderr.
+///
+/// [`clean_backend_error`] takes the FIRST line, which is right for the tools
+/// that lead with their complaint. flatpak does not: it narrates progress and
+/// puts the reason last, prefixed `error:`. Taking the first line there yields
+/// a download counter.
+fn backend_failure_detail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let chosen = lines
+        .iter()
+        .rev()
+        .find(|line| line.to_ascii_lowercase().starts_with("error:"))
+        .or_else(|| lines.last())
+        .copied()
+        .unwrap_or_default();
+    chosen.chars().take(240).collect()
+}
+
+/// Run a fixed-argv backend command, and — on failure — say what it said.
+///
+/// STDERR USED TO GO TO /dev/null, and the cost of that was paid by a person
+/// rather than a log. An install that failed produced exactly
+/// "/usr/bin/flatpak exited with exit status: 1" on the card, and punard's own
+/// next-step text had to GUESS at the cause ("check network connectivity and
+/// `flatpak remotes`") because the daemon had thrown away the one sentence that
+/// knew. The two operations behind this function, install and uninstall, are
+/// the ones most likely to fail for a reason worth reading.
+///
+/// A FILE AND NOT A PIPE, deliberately. This function polls `try_wait` in a
+/// loop and never reads the child's output; with a pipe, a backend chatty
+/// enough to fill the buffer would block on write while this loop waited for it
+/// to exit, and an install would hang until the timeout instead of failing. A
+/// file cannot deadlock. It is read only on failure, and bounded.
 fn run_quiet_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Result<(), AppError> {
+    // A FILE AND NOT A PIPE, deliberately. The wait loop polls `try_wait` and
+    // never reads the child's output; with a pipe, a backend chatty enough to
+    // fill the buffer would block on write while the loop waited for it to
+    // exit, so an install would hang until the timeout instead of failing. A
+    // file cannot deadlock, and it is read only on failure.
+    let capture_path = std::env::temp_dir().join(format!(
+        "punard-backend-{}-{}.err",
+        std::process::id(),
+        BACKEND_CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let stderr_target = match File::create(&capture_path) {
+        Ok(file) => Stdio::from(file),
+        // A capture we cannot open must never stop the operation it was only
+        // going to describe.
+        Err(_) => Stdio::null(),
+    };
+    let capture = capture_path.exists().then_some(capture_path.as_path());
+
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr_target)
         .spawn_busy_retry()
         .map_err(|e| AppError::Backend(e.to_string()))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(AppError::Backend(format!(
-                    "{} exited with {status}",
-                    bin.display()
-                )));
-            }
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(AppError::Backend(format!(
-                    "{} timed out after {timeout:?}",
-                    bin.display()
-                )));
-            }
-            Err(e) => return Err(AppError::Backend(e.to_string())),
-        }
-    }
+    wait_quiet_child(bin, &mut child, timeout, capture)
 }
 
 #[cfg(test)]
@@ -2316,6 +2396,34 @@ mod tests {
         let (containment, _permissions, host_access) = inspect_permissions(filtered);
         assert_eq!(containment, Containment::Sandboxed);
         assert!(host_access.is_empty(), "{host_access:?}");
+    }
+
+    /// flatpak narrates progress and puts its reason LAST, prefixed `error:`.
+    /// Taking the first line — which is right for tools that lead with their
+    /// complaint — yields a download counter, so the selection has to prefer
+    /// the `error:` line.
+    #[test]
+    fn a_backend_failure_quotes_the_line_that_explains_it() {
+        let flatpak = "Looking for matches…\n                       Required runtime for org.gnome.Calendar/aarch64/stable\n                       Downloading… 12%\n                       error: Unable to load summary from remote flathub: Failed to fetch\n";
+        assert_eq!(
+            backend_failure_detail(flatpak),
+            "error: Unable to load summary from remote flathub: Failed to fetch"
+        );
+
+        // No `error:` line: the last thing said is better than the first, which
+        // in a progress-narrating tool is always noise.
+        assert_eq!(
+            backend_failure_detail("Looking for matches…\nsomething went wrong\n"),
+            "something went wrong"
+        );
+
+        // Nothing at all is not a crash and not a fake explanation.
+        assert_eq!(backend_failure_detail(""), "");
+        assert_eq!(backend_failure_detail("\n  \n"), "");
+
+        // Bounded, so a runaway backend cannot dictate the size of an error.
+        let huge = format!("error: {}", "x".repeat(4096));
+        assert_eq!(backend_failure_detail(&huge).chars().count(), 240);
     }
 
     /// The other direction: an app that really can read everything says so, and
