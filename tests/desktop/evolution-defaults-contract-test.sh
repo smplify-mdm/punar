@@ -72,10 +72,22 @@ require_key headers-collapsed true "the header block starts collapsed"
 # BOTH FONT FAMILIES MUST ACTUALLY EXIST IN THE IMAGE. A Pango font description
 # naming a family that is not installed does not fail — it silently falls back,
 # which looks exactly like the bug being fixed here.
+#
+# ASSERTED ON THE SOURCE TREE, not on mkosi.extra. The staged copy under
+# mkosi.extra/usr/share/fonts is produced by container-build.sh at build time
+# and is gitignored, so a fresh checkout does not have it and this check failed
+# on CI while passing on a working tree that had already built once. The
+# vendored families in os/modules/desktop/fonts are what is actually committed,
+# and container-build.sh copies exactly these two into the image.
 for family in instrument-sans geist-mono; do
-    [ -d "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/share/fonts/punar/${family}" ] \
-        || fail "keyfile names a font family the image does not ship: ${family}"
+    [ -d "${REPO_ROOT}/os/modules/desktop/fonts/${family}" ] \
+        || fail "keyfile names a font family the repository does not vendor: ${family}"
 done
+
+# And the build must still be staging them, or the family exists in the tree
+# and not on the machine — the same silent Pango fallback by another route.
+grep -q 'fonts/instrument-sans' "${REPO_ROOT}/os/images/scripts/container-build.sh" \
+    || fail "container-build.sh no longer stages the fonts the keyfile names"
 
 # ---- the deliberate omissions ---------------------------------------------
 
