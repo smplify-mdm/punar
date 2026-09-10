@@ -1104,6 +1104,39 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
             | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].title')"
         check_eq "the mail window carries its product title" "Punar Mail" "${mail_title}"
 
+        # IT MUST HAVE PAINTED SOMETHING, not merely mapped. A QML file with a
+        # broken import maps a window and draws an empty rectangle, which every
+        # assertion above passes happily — and Theme resolving to nothing is
+        # EXACTLY that failure, which is why the import path moved into a
+        # pragma. A screenshot is the cheapest evidence that pixels exist, and
+        # it lands in the exported proof so the render can be reviewed without
+        # booting anything.
+        #
+        # Compared against the empty-desktop baseline this script already
+        # captured: identical bytes means the compositor showed the same screen
+        # with the window mapped, which is a window that painted nothing.
+        if grim /run/punar/surfaces-mail.png 2>/dev/null; then
+            mail_png_bytes="$(wc -c < /run/punar/surfaces-mail.png | tr -d ' ')"
+            if [ -z "${BASELINE_BYTES}" ]; then
+                # No baseline was captured, so "differs from the empty desktop"
+                # has nothing to compare against and would pass trivially. Say
+                # what is actually known instead of dressing it up.
+                if [ "${mail_png_bytes}" -gt 0 ] 2>/dev/null; then
+                    note "info mail screenshot captured (${mail_png_bytes} bytes); no baseline to compare, paint not asserted"
+                else
+                    note "FAIL the mail screenshot is empty"
+                    FAILED=1
+                fi
+            elif [ "${mail_png_bytes}" != "${BASELINE_BYTES}" ]; then
+                note "ok   the mail window painted (${mail_png_bytes} bytes, differs from the empty desktop)"
+            else
+                note "FAIL the mail window mapped but the screen is byte-identical to the empty desktop"
+                FAILED=1
+            fi
+        else
+            note "info mail screenshot unavailable (grim failed; paint not asserted)"
+        fi
+
         # CLOSED THROUGH THE COMPOSITOR, the same action PUNAR+Q is bound to,
         # so this proves the window participates in the ordinary window grammar
         # rather than merely existing.

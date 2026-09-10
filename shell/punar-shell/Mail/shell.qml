@@ -59,6 +59,8 @@
 // Launched by /usr/lib/punar/punar-mail.sh, which sets that import path and
 // execs `qs -p /usr/share/punar/shell/Mail`.
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Theme
@@ -88,45 +90,129 @@ ShellRoot {
         // carries the Punar key) is specified in the design and deliberately
         // not invented here: a spike that grows a keymap stops being a spike.
         Item {
+            id: frame
+
             anchors.fill: parent
             focus: true
-            Keys.onEscapePressed: win.visible = false
 
-            // ---- masthead ------------------------------------------------
-            // The §5 grammar the whole shell shares: identity left, state
-            // right, a 2px ink rule under it. Mono, tracked, uppercase.
+            // ---- model -------------------------------------------------
+            Fixtures {
+                id: fixtures
+            }
+
+            // The list is flat and carries its own group heads, because a
+            // section header that scrolls with its section is one item in one
+            // list — and a ListView with sticky headers would need a second
+            // model and a delegate that outlives its section.
+            readonly property var rows: {
+                var out = [];
+                var group = "";
+                var pending = -1;
+                for (var i = 0; i < fixtures.threads.length; i++) {
+                    var t = fixtures.threads[i];
+                    if (t.group !== group) {
+                        group = t.group;
+                        out.push({ "head": group, "count": 0, "thread": null });
+                        pending = out.length - 1;
+                    }
+                    out[pending].count += 1;
+                    out.push({ "head": "", "count": 0, "thread": t });
+                }
+                return out;
+            }
+
+            property int cursor: 1
+
+            function step(delta: int): void {
+                var next = frame.cursor;
+                for (var guard = 0; guard < frame.rows.length; guard++) {
+                    next += delta;
+                    if (next < 0 || next >= frame.rows.length)
+                        return;
+                    // Group heads are not stops. The cursor walks threads.
+                    if (frame.rows[next].thread !== null) {
+                        frame.cursor = next;
+                        list.positionViewAtIndex(next, ListView.Contain);
+                        return;
+                    }
+                }
+            }
+
+            Keys.onEscapePressed: win.visible = false
+            Keys.onPressed: function (event) {
+                if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    frame.step(1);
+                    event.accepted = true;
+                } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
+                    frame.step(-1);
+                    event.accepted = true;
+                }
+            }
+
+            // ---- masthead ----------------------------------------------
+            // Two lines each side over a 2px ink rule: identity left, state
+            // right. The shell's own grammar, and the reason every screen in
+            // the design is specified as "L1 / L2 | R1 / R2".
             Item {
                 id: masthead
 
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
-                height: 44
+                height: 52
 
-                Text {
+                Column {
                     anchors.left: parent.left
                     anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "PUNAR · MAIL"
-                    font.family: Theme.fontMono
-                    font.pixelSize: 10
-                    font.weight: 600
-                    font.letterSpacing: Theme.tracking(10, 0.15)
-                    color: Theme.shellFg
+                    spacing: 3
+
+                    Text {
+                        text: "PUNAR · MAIL · INBOX"
+                        font.family: Theme.fontMono
+                        font.pixelSize: 10
+                        font.weight: 600
+                        font.letterSpacing: Theme.tracking(10, 0.15)
+                        color: Theme.shellFg
+                    }
+                    Text {
+                        text: fixtures.account.toUpperCase() + " · " + fixtures.protocol
+                        font.family: Theme.fontMono
+                        font.pixelSize: 9
+                        font.weight: 500
+                        font.letterSpacing: Theme.tracking(9, 0.13)
+                        color: Theme.shellInk3
+                    }
                 }
 
-                // NO COUNT, NO CLOCK, NO SYNC TIME. Every one of those would be
-                // a claim, and this window has no account to make one about.
-                Text {
+                Column {
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "NO ACCOUNT"
-                    font.family: Theme.fontMono
-                    font.pixelSize: 9
-                    font.weight: 500
-                    font.letterSpacing: Theme.tracking(9, 0.13)
-                    color: Theme.shellInk3
+                    spacing: 3
+
+                    Text {
+                        anchors.right: parent.right
+                        text: "IN:INBOX"
+                        font.family: Theme.fontMono
+                        font.pixelSize: 10
+                        font.weight: 600
+                        font.letterSpacing: Theme.tracking(10, 0.15)
+                        color: Theme.shellFg
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        // FIXTURE, and the footer says so. A real client prints
+                        // the sync clock; this one prints a constant, because a
+                        // surface that invents a plausible timestamp is lying
+                        // in the one register this design cares most about.
+                        text: fixtures.unreadCount + " UNREAD · FIXTURE DATA"
+                        font.family: Theme.fontMono
+                        font.pixelSize: 9
+                        font.weight: 500
+                        font.letterSpacing: Theme.tracking(9, 0.13)
+                        color: Theme.shellInk3
+                    }
                 }
             }
 
@@ -140,91 +226,394 @@ ShellRoot {
                 color: Theme.shellFg
             }
 
-            // ---- body ----------------------------------------------------
-            // DASHED, BECAUSE NOTHING HERE IS REAL YET. The design language
-            // reserves a dashed outline for a capability that is drawn but not
-            // operating; a solid one asserts the thing works. Drawing a plain
-            // empty inbox here would be the exact dishonesty that grammar
-            // exists to prevent.
+            // ---- rail ---------------------------------------------------
+            // 208px, a 1px right rule, tracked-mono section heads, no icons,
+            // no search row, no settings foot. It is a DISPLAY: it never takes
+            // keyboard focus, and `v` will later open the same model as a
+            // bounded instrument over the list.
             Item {
+                id: rail
+
                 anchors.left: parent.left
-                anchors.right: parent.right
                 anchors.top: mastheadRule.bottom
                 anchors.bottom: footerRule.top
+                width: 208
 
                 Column {
-                    anchors.centerIn: parent
-                    width: Math.min(parent.width - 64, 560)
-                    spacing: 14
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: 14
+                    spacing: 0
 
-                    Canvas {
-                        id: dashed
+                    component RailHead: Text {
+                        font.family: Theme.fontMono
+                        font.pixelSize: 9
+                        font.weight: 600
+                        font.letterSpacing: Theme.tracking(9, 0.14)
+                        color: Theme.shellInk3
+                        leftPadding: 16
+                        topPadding: 14
+                        bottomPadding: 6
+                    }
 
-                        width: parent.width
-                        height: 128
-                        onPaint: {
-                            var ctx = dashed.getContext("2d");
-                            ctx.reset();
-                            ctx.strokeStyle = Theme.shellBorder;
-                            ctx.lineWidth = 1;
-                            ctx.setLineDash([5, 5]);
-                            ctx.strokeRect(0.5, 0.5, dashed.width - 1, dashed.height - 1);
+                    // A rail row prints a name and, when it has one, a count.
+                    // A count of zero is ABSENT rather than rendered as "0":
+                    // nothing is not a quantity.
+                    component RailRow: Item {
+                        id: railRow
+
+                        required property string label
+                        required property int tally
+                        required property bool current
+                        required property bool verbatim
+
+                        width: rail.width
+                        height: 24
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: Theme.shellMuted
+                            visible: railRow.current
+                        }
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: 2
+                            color: Theme.shellFg
+                            visible: railRow.current
                         }
 
-                        Column {
-                            anchors.centerIn: parent
-                            spacing: 8
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 16
+                            anchors.right: tally.left
+                            anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            // Server strings print verbatim; Punar's own view
+                            // names are product vocabulary and take the
+                            // masthead's sentence case.
+                            text: railRow.label
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
+                            font.family: Theme.fontSans
+                            font.pixelSize: 12
+                            font.weight: railRow.current ? 500 : 400
+                            color: railRow.current ? Theme.shellFg : Theme.shellInk2
+                        }
 
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: "NOT A MAIL CLIENT YET"
-                                font.family: Theme.fontMono
-                                font.pixelSize: 10
-                                font.weight: 600
-                                font.letterSpacing: Theme.tracking(10, 0.15)
-                                color: Theme.shellInk3
-                            }
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                width: dashed.width - 48
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.WordWrap
-                                text: "This window reads no mail, contacts no server "
-                                    + "and stores nothing. It exists to prove that a "
-                                    + "Punar application window works."
-                                font.family: Theme.fontSans
-                                font.pixelSize: 12
-                                color: Theme.shellInk2
-                            }
+                        Text {
+                            id: tally
+
+                            anchors.right: parent.right
+                            anchors.rightMargin: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: railRow.tally > 0
+                            text: railRow.tally
+                            font.family: Theme.fontMono
+                            font.pixelSize: 10
+                            font.weight: 500
+                            color: Theme.shellInk3
                         }
                     }
 
-                    // What the spike actually proves, stated as facts rather
-                    // than as a roadmap. Each line is true of the running
-                    // process or it does not belong here.
-                    Column {
-                        width: parent.width
-                        spacing: 4
+                    RailHead {
+                        text: "ACCOUNT"
+                        topPadding: 0
+                    }
+                    RailRow {
+                        label: fixtures.account
+                        tally: 0
+                        current: false
+                        verbatim: true
+                    }
 
-                        Repeater {
-                            model: [
-                                "xdg-toplevel · Quickshell FloatingWindow",
-                                "design system · Theme module over QML_IMPORT_PATH",
-                                "process · its own qs -p, like the greeter",
-                                "keyboard · Esc closes"
-                            ]
+                    RailHead {
+                        text: "VIEWS"
+                    }
+                    Repeater {
+                        model: fixtures.views
 
+                        RailRow {
+                            required property var modelData
+
+                            label: modelData.name
+                            tally: modelData.count
+                            current: modelData.current
+                            verbatim: false
+                        }
+                    }
+
+                    RailHead {
+                        text: "FOLDERS · IMAP"
+                    }
+                    Repeater {
+                        model: fixtures.folders
+
+                        RailRow {
+                            required property string modelData
+
+                            label: modelData
+                            tally: 0
+                            current: false
+                            verbatim: true
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                id: railRule
+
+                anchors.left: rail.right
+                anchors.top: mastheadRule.bottom
+                anchors.bottom: footerRule.top
+                width: Theme.hairline
+                color: Theme.shellBorder
+            }
+
+            // ---- thread list --------------------------------------------
+            ListView {
+                id: list
+
+                anchors.left: railRule.right
+                anchors.right: parent.right
+                anchors.top: mastheadRule.bottom
+                anchors.bottom: footerRule.top
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: frame.rows
+
+                delegate: Item {
+                    id: row
+
+                    required property int index
+                    required property var modelData
+
+                    width: list.width
+                    height: row.modelData.thread === null ? 34 : 40
+
+                    // GROUP HEAD. Its hairline is the only horizontal line in
+                    // the whole field — there are no rules between rows, and
+                    // separation is the gutter. Per-row rules turn a list into
+                    // a table, which is the spreadsheet feeling this refuses.
+                    Item {
+                        anchors.fill: parent
+                        visible: row.modelData.thread === null
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 16
+                            anchors.bottom: headRule.top
+                            anchors.bottomMargin: 5
+                            text: row.modelData.head.toUpperCase()
+                            font.family: Theme.fontMono
+                            font.pixelSize: 11
+                            font.weight: 500
+                            font.letterSpacing: Theme.tracking(11, 0.12)
+                            color: Theme.shellInk3
+                        }
+                        Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 16
+                            anchors.bottom: headRule.top
+                            anchors.bottomMargin: 5
+                            text: row.modelData.count
+                            font.family: Theme.fontMono
+                            font.pixelSize: 11
+                            font.weight: 500
+                            color: Theme.shellInk3
+                        }
+                        Rectangle {
+                            id: headRule
+
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: 6
+                            height: Theme.hairline
+                            color: Theme.shellBorder
+                        }
+                    }
+
+                    // THREAD ROW — six columns on a fixed grid so the eye
+                    // reads down a column rather than tracking a ragged edge.
+                    Item {
+                        id: threadRow
+
+                        anchors.fill: parent
+                        visible: row.modelData.thread !== null
+
+                        readonly property var t: row.modelData.thread
+                        readonly property bool focused: row.index === frame.cursor
+
+                        // FOCUS is a ground lift plus a 2px ink rule on the
+                        // left edge — the same selection statement the
+                        // groupbar's active tab and D-007's overview use.
+                        Rectangle {
+                            anchors.fill: parent
+                            color: Theme.shellMuted
+                            visible: threadRow.focused
+                        }
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: 2
+                            color: Theme.shellFg
+                            visible: threadRow.focused
+                        }
+
+                        // [00] mark gutter — the key that made the mark is the
+                        // mark. Nothing is marked in the fixture.
+                        Text {
+                            id: mark
+
+                            anchors.left: parent.left
+                            anchors.leftMargin: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 16
+                            visible: threadRow.t.marked === true
+                            text: "\u00d7"
+                            font.family: Theme.fontMono
+                            font.pixelSize: 12
+                            color: Theme.shellFg
+                        }
+
+                        // [01] correspondent — unread is WEIGHT, never a dot.
+                        Text {
+                            id: who
+
+                            anchors.left: parent.left
+                            anchors.leftMargin: 32
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 168
+                            text: threadRow.t.correspondent
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
+                            font.family: Theme.fontSans
+                            font.pixelSize: 12.5
+                            font.weight: threadRow.t.unread ? 500 : 400
+                            color: threadRow.t.unread ? Theme.shellFg : Theme.shellInk2
+                        }
+
+                        // [02] depth — absent when the thread is one message.
+                        Text {
+                            id: depth
+
+                            anchors.left: who.right
+                            anchors.leftMargin: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 24
+                            visible: threadRow.t.depth > 1
+                            text: threadRow.t.depth
+                            font.family: Theme.fontMono
+                            font.pixelSize: 10
+                            color: Theme.shellInk3
+                        }
+
+                        // [03] subject · preview — elides as ONE string with a
+                        // single ellipsis, so the line never breaks twice.
+                        Text {
+                            anchors.left: depth.right
+                            anchors.leftMargin: 8
+                            anchors.right: chips.left
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
+                            font.family: Theme.fontSans
+                            font.pixelSize: 12.5
+                            font.weight: threadRow.t.unread ? 500 : 400
+                            color: threadRow.t.unread ? Theme.shellFg : Theme.shellInk2
+                            text: threadRow.t.subject + "   " + threadRow.t.preview
+                        }
+
+                        // [04] chips, right-aligned, never wrapping. A third
+                        // label collapses to +n rather than pushing the time.
+                        Row {
+                            id: chips
+
+                            anchors.right: when.left
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 4
+
+                            component Chip: Rectangle {
+                                id: chipRoot
+
+                                required property string text
+                                required property bool derived
+
+                                height: 17
+                                width: chipText.implicitWidth + 12
+                                radius: Theme.radiusTag
+                                color: "transparent"
+                                border.width: Theme.hairline
+                                border.color: Theme.shellBorder
+
+                                Text {
+                                    id: chipText
+
+                                    anchors.centerIn: parent
+                                    text: chipRoot.text
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: 9.5
+                                    font.weight: 600
+                                    font.letterSpacing: Theme.tracking(9.5, 0.12)
+                                    // The attachment chip is the one DERIVED
+                                    // chip and is distinguished from a label by
+                                    // weight of ink, not by a second silhouette.
+                                    color: chipRoot.derived ? Theme.shellInk3 : Theme.shellFg
+                                }
+                            }
+
+                            Repeater {
+                                model: Math.min(2, threadRow.t.labels.length)
+
+                                Chip {
+                                    required property int index
+
+                                    text: threadRow.t.labels[index].toUpperCase()
+                                    derived: false
+                                }
+                            }
                             Text {
-                                required property string modelData
-
-                                text: "· " + modelData
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: threadRow.t.labels.length > 2
+                                text: "+" + (threadRow.t.labels.length - 2)
                                 font.family: Theme.fontMono
-                                font.pixelSize: 9
-                                font.weight: 500
-                                font.letterSpacing: Theme.tracking(9, 0.13)
+                                font.pixelSize: 9.5
                                 color: Theme.shellInk3
                             }
+                            Chip {
+                                visible: threadRow.t.attachment !== ""
+                                text: threadRow.t.attachment
+                                derived: true
+                            }
                         }
+
+                        // [05] time — fixed width so the column never jitters.
+                        Text {
+                            id: when
+
+                            anchors.right: parent.right
+                            anchors.rightMargin: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 56
+                            horizontalAlignment: Text.AlignRight
+                            text: threadRow.t.time
+                            font.family: Theme.fontMono
+                            font.pixelSize: 10
+                            color: Theme.shellInk3
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: row.modelData.thread !== null
+                        onClicked: frame.cursor = row.index
                     }
                 }
             }
@@ -252,7 +641,7 @@ ShellRoot {
                     anchors.left: parent.left
                     anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "ESC CLOSE"
+                    text: "J/K MOVE · ESC CLOSE"
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
@@ -263,7 +652,10 @@ ShellRoot {
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "Window spike · nothing is connected"
+                    // THE ONLY HONEST THING THIS SURFACE CAN SAY. Every string
+                    // above is written by hand; no account exists, no server
+                    // was contacted, and nothing was read from disk.
+                    text: "FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED"
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
