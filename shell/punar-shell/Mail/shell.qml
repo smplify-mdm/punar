@@ -288,7 +288,7 @@ ShellRoot {
                         Text {
                             anchors.left: parent.left
                             anchors.leftMargin: 16
-                            anchors.right: tally.left
+                            anchors.right: tallyText.left
                             anchors.rightMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
                             // Server strings print verbatim; Punar's own view
@@ -304,7 +304,7 @@ ShellRoot {
                         }
 
                         Text {
-                            id: tally
+                            id: tallyText
 
                             anchors.right: parent.right
                             anchors.rightMargin: 16

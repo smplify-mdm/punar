@@ -1073,7 +1073,13 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
             | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length == 0' >/dev/null 2>&1
     }
 
-    setsid /usr/lib/punar/punar-mail.sh >/dev/null 2>&1 &
+    # KEEP THE LAUNCHER'S OUTPUT. Discarding it to /dev/null cost a full CI
+    # cycle: an id colliding with a property name made QML refuse to load the
+    # component, the window never mapped, and the only evidence the gate could
+    # offer was "never appeared" — the diagnosis had to come from reading the
+    # source instead. A surface that fails to start says why on stderr, and
+    # this is the same lesson the power buttons taught earlier: capture it.
+    setsid /usr/lib/punar/punar-mail.sh >/run/punar/mail-launch.log 2>&1 &
     if wait_for 120 mail_client; then
         note "ok   the mail application window opened as an ordinary client"
 
@@ -1155,7 +1161,11 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
             FAILED=1
         fi
     else
-        note "FAIL the mail application window never appeared in hyprctl clients"
+        # The report is what boot-test.sh prints on failure, so the reason has
+        # to land IN it rather than in a file nobody exports.
+        mail_why="$(tr -d '\r' < /run/punar/mail-launch.log 2>/dev/null \
+            | grep -v '^$' | tail -n 3 | tr '\n' ' ' | cut -c1-300)"
+        note "FAIL the mail application window never appeared in hyprctl clients: ${mail_why:-no output on stderr}"
         FAILED=1
     fi
     pkill -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1 || true
