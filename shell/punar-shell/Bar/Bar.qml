@@ -331,22 +331,69 @@ Scope {
                         onClicked: root.commandCenterRequested()
                     }
                 }
+                // THE DOOR HAS TO LOOK LIKE A DOOR.
+                //
+                // This opened the overview already, and a person testing the
+                // build still reported that they could not see how to switch
+                // project workspaces with a mouse — which was exactly right.
+                // It was the ONLY interactive control in this row drawn with no
+                // affordance whatsoever: no hover fill, no hover rule, no
+                // padding, and a hit box that was the glyph box of an 11px
+                // label inside a 30px bar. At rest and on hover it was
+                // indistinguishable from the inert " · " separators beside it,
+                // same ink-3 and same weight, so the only signal it was a
+                // control at all was the cursor changing — which a person only
+                // sees if they already happened to put the pointer on it.
+                //
+                // `hoverEnabled: true` was already set on the MouseArea and
+                // nothing read it: the MouseArea had no id, so no binding could
+                // reach containsMouse. The visual was intended and never wired.
+                //
+                // D-016 Sect III·03 lists "Workspace → the overview
+                // (PUNAR+TAB)" among the bar's doors, so this is the design's
+                // own intent rather than a new affordance. What it does NOT
+                // license is a switcher in the bar: the same plate reserves the
+                // left zone for identity and drops the workspace subtitle first
+                // when space runs out. The bar names where you are and opens
+                // the surface that switches; it does not become that surface.
+                //
+                // Everything below is the brandButton pattern from twenty lines
+                // above, applied verbatim, because consistency IS the
+                // affordance here — a person learns "these highlight, so these
+                // are buttons" once.
                 Item {
-                    anchors.verticalCenter: parent.verticalCenter
-                    implicitWidth: workspaceLabel.implicitWidth
-                    implicitHeight: workspaceLabel.implicitHeight
+                    id: workspaceButton
+
+                    width: workspaceLabel.implicitWidth + 12
+                    height: bar.height
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Theme.shellMuted
+                        visible: workspaceMouse.containsMouse || workspaceMouse.pressed
+                    }
 
                     MetaLabel {
                         id: workspaceLabel
 
-                        text: " · " + root.workspaceLabel
+                        anchors.left: parent.left
+                        anchors.leftMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "· " + root.workspaceLabel
                     }
 
-                    // The workspace indicator is the one thing a pointer user
-                    // reaches for to change workspace, and it did nothing at
-                    // all. It opens the overview — the surface that already
-                    // owns switching and, now, creating.
+                    Rectangle {
+                        anchors.left: workspaceLabel.left
+                        anchors.right: workspaceLabel.right
+                        anchors.bottom: parent.bottom
+                        height: Theme.hairline
+                        color: Theme.shellFg
+                        visible: workspaceMouse.containsMouse
+                    }
+
                     MouseArea {
+                        id: workspaceMouse
+
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor

@@ -356,6 +356,7 @@ jobs:
             os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/evolution-defaults-contract-test.sh \
+            tests/desktop/bar-affordance-contract-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -406,6 +407,15 @@ jobs:
       # remove something the person asked for.
       - name: Validate the Evolution first-run defaults and disclosures
         run: ./tests/desktop/evolution-defaults-contract-test.sh
+
+      # A control that changes the cursor must also change its appearance.
+      # The workspace indicator opened the overview for two builds while a
+      # person testing it reported they could not see how to switch project
+      # workspaces with a mouse — it was drawn exactly like the inert
+      # separators beside it, and its hoverEnabled was inert because the
+      # MouseArea had no id for anything to bind to.
+      - name: Validate that bar controls show a hover state
+        run: ./tests/desktop/bar-affordance-contract-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
