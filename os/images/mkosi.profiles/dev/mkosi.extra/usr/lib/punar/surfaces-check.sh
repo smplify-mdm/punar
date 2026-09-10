@@ -1040,6 +1040,97 @@ else
     FAILED=1
 fi
 
+# --- group 5f: Punar can open an APPLICATION WINDOW ------------------------
+# THE GATE THE WHOLE MAIL PLAN RESTED ON. docs/design/mail-calendar-contacts.md
+# §4 recorded that no Punar surface had ever been an application window: all
+# seventeen shell surfaces are layer-shell PanelWindows plus the session lock,
+# and FloatingWindow/ApplicationWindow/xdg_toplevel appeared nowhere in the
+# tree. Every estimate past that point was a guess, so the window came before
+# the mail.
+#
+# ASSERTED DIFFERENTLY FROM EVERY OTHER SURFACE HERE, and that difference is
+# the point. The shell's surfaces are driven over IPC and confirmed in
+# `hyprctl -j layers`, because a layer-shell surface is chrome the compositor
+# owns. An application window is an ordinary client: it has no layer, answers
+# no shell IPC, and shows up in `hyprctl -j clients` like Chromium does. So
+# this exercise is the browser exercise's shape — launch it, wait for a real
+# mapped window, prove it is native Wayland, then close it through the
+# compositor's own action and require it to be gone.
+#
+# The class is `punar-mail`, which comes from `//@ pragma AppId punar-mail` in
+# Mail/shell.qml: quickshell reads that before Qt starts and passes it to
+# setDesktopFileName, which becomes the xdg-toplevel app_id. Without the pragma
+# every Quickshell process reports `org.quickshell`, and this assertion would
+# pass for the SHELL ITSELF — a check that cannot distinguish the thing it is
+# testing from the thing testing it.
+if [ -x /usr/lib/punar/punar-mail.sh ]; then
+    mail_client() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -e '[ .[] | select(.class == "punar-mail") ] | length >= 1' >/dev/null 2>&1
+    }
+    mail_gone() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -e '[ .[] | select(.class == "punar-mail") ] | length == 0' >/dev/null 2>&1
+    }
+
+    setsid /usr/lib/punar/punar-mail.sh >/dev/null 2>&1 &
+    if wait_for 120 mail_client; then
+        note "ok   the mail application window opened as an ordinary client"
+
+        # NATIVE WAYLAND, asserted rather than assumed: an xdg-toplevel that
+        # arrived through XWayland would satisfy "a window appeared" while
+        # proving nothing about the path a first-party app will take.
+        mail_xwayland="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "punar-mail") ][0].xwayland')"
+        check_eq "the mail window is native Wayland (xwayland=false)" "false" "${mail_xwayland}"
+
+        # It must be a REAL toplevel with a size, not a zero-size surface that
+        # technically exists. A window a person cannot see is not a window.
+        mail_w="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "punar-mail") ][0].size[0]')"
+        mail_h="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "punar-mail") ][0].size[1]')"
+        if [ "${mail_w:-0}" -gt 200 ] 2>/dev/null && [ "${mail_h:-0}" -gt 200 ] 2>/dev/null; then
+            note "ok   the mail window has a real size (${mail_w}x${mail_h})"
+        else
+            note "FAIL the mail window mapped at ${mail_w:-?}x${mail_h:-?}"
+            FAILED=1
+        fi
+
+        # The title is what a task switcher and the window-actions surface
+        # read, and an untitled toplevel is a product defect rather than a
+        # cosmetic one.
+        mail_title="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "punar-mail") ][0].title')"
+        check_eq "the mail window carries its product title" "Punar Mail" "${mail_title}"
+
+        # CLOSED THROUGH THE COMPOSITOR, the same action PUNAR+Q is bound to,
+        # so this proves the window participates in the ordinary window grammar
+        # rather than merely existing.
+        # Focus it first, then close the focused window — the exact pair
+        # PUNAR+Q performs. `closewindow class:…` is the LEGACY dispatcher
+        # string and this session is Lua-native: it would have parsed,
+        # returned, and closed nothing, and the assertion below would have
+        # blamed the window. The dispatcher gate caught it, which is the
+        # second time on this branch that rule has caught a silent no-op.
+        hyprctl dispatch "hl.dsp.focus({ window = 'class:^(punar-mail)$' })" >/dev/null 2>&1 || true
+        hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+        if wait_for 30 mail_gone; then
+            note "ok   the mail window closed through the compositor"
+        else
+            note "FAIL the mail window did not close on the compositor's close action"
+            FAILED=1
+        fi
+    else
+        note "FAIL the mail application window never appeared in hyprctl clients"
+        FAILED=1
+    fi
+    pkill -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1 || true
+else
+    note "FAIL /usr/lib/punar/punar-mail.sh is not installed or not executable"
+    FAILED=1
+fi
+
 # --- group 5e: every application datadir exists BEFORE the shell starts -----
 # A DIRECTORY THAT IS ABSENT AT STARTUP IS INVISIBLE FOR THE WHOLE SESSION, and
 # that is a property of the toolkit rather than of any Punar code. quickshell

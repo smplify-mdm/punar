@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Mail
+GenericName=Mail and Calendar
+Comment=Mail and calendar for this device
+Exec=/usr/lib/punar/punar-mail.sh
+TryExec=/usr/lib/punar/punar-mail.sh
+Icon=mail-message-new
+Terminal=false
+StartupNotify=true
+StartupWMClass=punar-mail
+Categories=Office;Email;Calendar;
+Keywords=mail;email;calendar;inbox;message;
+X-Punar-Product-Name=Mail
