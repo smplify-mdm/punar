@@ -1,19 +1,17 @@
 #!/bin/sh
 # Punar Mail launcher.
 #
-# The greeter's pattern, verbatim: Mail/shell.qml is its own Quickshell
-# configuration root, while Theme is a shared package module one directory
-# above it. That package root has to be an explicit QML import path or the
-# singleton's colour properties resolve to nothing in an independent engine —
-# a failure the greeter already met and recorded in its own header.
+# IT DELIBERATELY SETS NO ENVIRONMENT. Theme needs /usr/share/punar/shell on the
+# QML import path, and the obvious move — exporting it here, the way
+# greeter-session.sh does — would have been wrong: this wrapper is not the only
+# launch path. Every m*-check.sh in this repository drives a surface with a bare
+# `qs -p /usr/share/punar/shell/...`, so a wrapper-only export leaves Theme
+# unresolved in exactly the CI path meant to prove the surface works. The
+# requirement is a `//@ pragma Env` line inside Mail/shell.qml instead, where it
+# cannot be bypassed.
 #
-# One process per invocation is deliberate for the spike. Whether Mail ends up
-# with a separate sync daemon is a live design question
-# (docs/design/mail-calendar-contacts.md), and a launcher that assumed the
-# answer would be the wrong place to decide it.
+# What remains here is one thing a pragma cannot do: be an Exec= target that
+# accepts a mailto: URI and passes it through.
 set -eu
-
-QML_IMPORT_PATH=/usr/share/punar/shell
-export QML_IMPORT_PATH
 
 exec qs -p /usr/share/punar/shell/Mail "$@"

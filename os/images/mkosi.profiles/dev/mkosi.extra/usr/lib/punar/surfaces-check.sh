@@ -1057,7 +1057,7 @@ fi
 # mapped window, prove it is native Wayland, then close it through the
 # compositor's own action and require it to be gone.
 #
-# The class is `punar-mail`, which comes from `//@ pragma AppId punar-mail` in
+# The class is `org.punar.Mail`, which comes from `//@ pragma AppId` in
 # Mail/shell.qml: quickshell reads that before Qt starts and passes it to
 # setDesktopFileName, which becomes the xdg-toplevel app_id. Without the pragma
 # every Quickshell process reports `org.quickshell`, and this assertion would
@@ -1066,11 +1066,11 @@ fi
 if [ -x /usr/lib/punar/punar-mail.sh ]; then
     mail_client() {
         hyprctl -j clients 2>/dev/null \
-            | jq -e '[ .[] | select(.class == "punar-mail") ] | length >= 1' >/dev/null 2>&1
+            | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length >= 1' >/dev/null 2>&1
     }
     mail_gone() {
         hyprctl -j clients 2>/dev/null \
-            | jq -e '[ .[] | select(.class == "punar-mail") ] | length == 0' >/dev/null 2>&1
+            | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length == 0' >/dev/null 2>&1
     }
 
     setsid /usr/lib/punar/punar-mail.sh >/dev/null 2>&1 &
@@ -1081,15 +1081,15 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
         # arrived through XWayland would satisfy "a window appeared" while
         # proving nothing about the path a first-party app will take.
         mail_xwayland="$(hyprctl -j clients 2>/dev/null \
-            | jq -r '[ .[] | select(.class == "punar-mail") ][0].xwayland')"
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].xwayland')"
         check_eq "the mail window is native Wayland (xwayland=false)" "false" "${mail_xwayland}"
 
         # It must be a REAL toplevel with a size, not a zero-size surface that
         # technically exists. A window a person cannot see is not a window.
         mail_w="$(hyprctl -j clients 2>/dev/null \
-            | jq -r '[ .[] | select(.class == "punar-mail") ][0].size[0]')"
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].size[0]')"
         mail_h="$(hyprctl -j clients 2>/dev/null \
-            | jq -r '[ .[] | select(.class == "punar-mail") ][0].size[1]')"
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].size[1]')"
         if [ "${mail_w:-0}" -gt 200 ] 2>/dev/null && [ "${mail_h:-0}" -gt 200 ] 2>/dev/null; then
             note "ok   the mail window has a real size (${mail_w}x${mail_h})"
         else
@@ -1101,7 +1101,7 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
         # read, and an untitled toplevel is a product defect rather than a
         # cosmetic one.
         mail_title="$(hyprctl -j clients 2>/dev/null \
-            | jq -r '[ .[] | select(.class == "punar-mail") ][0].title')"
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].title')"
         check_eq "the mail window carries its product title" "Punar Mail" "${mail_title}"
 
         # CLOSED THROUGH THE COMPOSITOR, the same action PUNAR+Q is bound to,
@@ -1113,7 +1113,7 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
         # returned, and closed nothing, and the assertion below would have
         # blamed the window. The dispatcher gate caught it, which is the
         # second time on this branch that rule has caught a silent no-op.
-        hyprctl dispatch "hl.dsp.focus({ window = 'class:^(punar-mail)$' })" >/dev/null 2>&1 || true
+        hyprctl dispatch "hl.dsp.focus({ window = 'class:^(org\\.punar\\.Mail)$' })" >/dev/null 2>&1 || true
         hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
         if wait_for 30 mail_gone; then
             note "ok   the mail window closed through the compositor"

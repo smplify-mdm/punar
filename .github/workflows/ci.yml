@@ -357,6 +357,7 @@ jobs:
             tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
+            tests/desktop/mail-identity-contract-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -416,6 +417,13 @@ jobs:
       # MouseArea had no id for anything to bind to.
       - name: Validate that bar controls show a hover state
         run: ./tests/desktop/bar-affordance-contract-test.sh
+
+      # The app id, the desktop file id and StartupWMClass must agree, because
+      # the shell joins a running window to its product name by the desktop
+      # FILE id and never by StartupWMClass. A disagreement puts the raw
+      # reverse-DNS id back in the bar, silently — nothing errors.
+      - name: Validate Punar Mail's window identity
+        run: ./tests/desktop/mail-identity-contract-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh

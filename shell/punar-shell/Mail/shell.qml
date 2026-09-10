@@ -1,16 +1,36 @@
-//@ pragma AppId punar-mail
+//@ pragma Env QML_IMPORT_PATH = /usr/share/punar/shell
+//@ pragma AppId org.punar.Mail
 // Punar Mail — the first Punar surface that is an APPLICATION WINDOW.
 //
-// THE PRAGMA ABOVE IS LOAD-BEARING and must stay on its own line at the top.
-// quickshell parses `//@ pragma AppId <value>` out of this file before Qt
-// starts (src/launch/launch.cpp:116) and hands it to
-// QGuiApplication::setDesktopFileName, which is what becomes the xdg-toplevel
-// app_id on Wayland. Without it every Quickshell process reports the default
-// `org.quickshell`, so the bar, the window-actions surface and the launcher
-// index would all see the toolkit rather than the product — and the greeter
-// and the shell would be indistinguishable from this window. `punar-mail`
-// matches punar-mail.desktop, which is how Apps.displayNameForAppId resolves
-// it to the product name a person reads.
+// BOTH PRAGMAS ABOVE ARE LOAD-BEARING and must stay at the very top.
+//
+// Env QML_IMPORT_PATH — Theme is a shared package module one directory above
+// this configuration root, and an independent QML engine will not resolve its
+// colour properties without that root on the import path. The greeter exports
+// it from its session script, and copying that would have been the obvious
+// move and the wrong one: this wrapper is NOT the only launch path. Every
+// m*-check.sh in this repository drives a surface with a bare
+// `qs -p /usr/share/punar/shell/...`, so a wrapper-only export leaves Theme
+// unresolved in exactly the CI path that is supposed to prove the surface
+// works. quickshell applies Env pragmas with qputenv before it constructs the
+// QQmlEngine (launch.cpp:88-110, :185-190), so the requirement lives in the
+// file that depends on it and cannot be bypassed.
+//
+// AppId — quickshell hands this to QGuiApplication::setDesktopFileName
+// (launch.cpp:293), which is what Qt sends as the xdg-toplevel app_id on
+// Wayland. Left at the default every Quickshell process announces itself as
+// `org.quickshell`: window rules could not target this window, the bar and the
+// overview could not name it, startup notification would never match the
+// launcher, and the greeter, the shell and this window would be
+// indistinguishable to the compositor.
+//
+// IT IS REVERSE-DNS, AND THE DESKTOP FILE HAS TO MATCH IT EXACTLY.
+// Apps.displayNameForAppId joins a runtime app id to a desktop entry by the
+// entry's FILE ID and nothing else — not StartupWMClass, which the shell never
+// reads. So `org.punar.Mail` requires org.punar.Mail.desktop; naming the file
+// punar-mail.desktop while the window announced org.punar.Mail would put the
+// raw id back in the bar, which is the bug that was fixed this morning.
+// tests/desktop/mail-identity-contract-test.sh asserts all three agree.
 //
 // WHAT THIS IS AND IS NOT. This is the window spike named in
 // docs/design/mail-calendar-contacts.md §4 as the gate every estimate past it
