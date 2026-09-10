@@ -1040,6 +1040,58 @@ else
     FAILED=1
 fi
 
+# --- group 5e: every application datadir exists BEFORE the shell starts -----
+# A DIRECTORY THAT IS ABSENT AT STARTUP IS INVISIBLE FOR THE WHOLE SESSION, and
+# that is a property of the toolkit rather than of any Punar code. quickshell
+# 0.3.0 src/core/desktopentrymonitor.cpp:46 —
+#
+#     if (!QDir(path).exists()) continue;
+#
+# — inside startMonitoring(), which is private and runs exactly ONCE from the
+# constructor. A datadir missing at that instant is skipped whole (the
+# `continue` also skips addPathAndParents, so not even its parents are watched)
+# and nothing re-arms it: the rescan path never re-monitors, there is no
+# polling, and no QML hook forces one.
+#
+# That is what made the first app a person installed invisible to the
+# freedesktop index for the rest of the session. /var/lib/flatpak does not exist
+# on a fresh device — the image build's flatpak state lives in the root slot and
+# PUNAR-DATA's @var subvolume is mounted over /var and shadows it — so the shell
+# skipped it at boot, flatpak created it minutes later, and nothing was
+# watching. The bar printed the raw app id, and the icon and command-centre
+# search missed it too, because all three read that one model.
+#
+# ASSERTED OVER XDG_DATA_DIRS ITSELF rather than over a list of paths written
+# here, so it covers the datadir somebody adds next. A path in that variable is
+# a promise that applications found there will appear; a promise this desktop
+# can only keep if the directory is present when the shell starts.
+sc_missing=""
+sc_seen=0
+for sc_dir in $(printf '%s' "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" | tr ':' ' '); do
+    [ -n "${sc_dir}" ] || continue
+    sc_seen=$((sc_seen + 1))
+    [ -d "${sc_dir}/applications" ] || sc_missing="${sc_missing} ${sc_dir}/applications"
+done
+if [ "${sc_seen}" -eq 0 ]; then
+    note "FAIL XDG_DATA_DIRS is empty in the session, so no application index exists"
+    FAILED=1
+elif [ -n "${sc_missing}" ]; then
+    note "FAIL application datadirs absent at startup, so anything installed into them stays invisible:${sc_missing}"
+    FAILED=1
+else
+    note "ok   all ${sc_seen} application datadirs exist, so each one is watched"
+fi
+
+# The flatpak export path by name as well as by the sweep above, because it is
+# the one that regressed and the one a person meets first: it is where every
+# catalogue install lands its desktop entry.
+if [ -d /var/lib/flatpak/exports/share/applications ]; then
+    note "ok   the flatpak export directory exists before any app is installed"
+else
+    note "FAIL /var/lib/flatpak/exports/share/applications is absent; the first installed app will be invisible"
+    FAILED=1
+fi
+
 # --- group 5a: typing a workspace number goes there, and renames nothing ----
 # THE OLD BEHAVIOUR WAS DESTRUCTIVE, not merely unhelpful. milestone-2.md §153
 # names the command centre the discoverable surface for go-to-workspace, and
