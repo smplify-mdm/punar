@@ -310,7 +310,7 @@ as_punar "${CTL}" --json web-apps launch linear --dry-run \
     > "${RUN_DIR}/m11-argv-dryrun.txt" 2>&1
 jq_check "dry-run is an exact closed Chromium argv with origin and context" \
     "${RUN_DIR}/m11-argv-dryrun.txt" \
-    '.program == "/usr/lib/chromium/chromium" and (.argv | length) == 7 and (.argv | index("--app=https://linear.app")) != null and (.argv | index("--class=punar-webapp-linear")) != null and (.argv | map(select(startswith("--user-data-dir="))) | length) == 1'
+    '.program == "/usr/lib/chromium/chromium" and (.argv | length) == 8 and (.argv | index("--app=https://linear.app")) != null and (.argv | index("--class=punar-webapp-linear")) != null and (.argv | index("--password-store=basic")) != null and (.argv | map(select(startswith("--user-data-dir="))) | length) == 1'
 if grep -F -f "${DENYLIST}" "${RUN_DIR}/m11-argv-dryrun.txt" >/dev/null 2>&1; then
     note "FAIL dry-run argv contains a forbidden Chromium token"
     FAILED=1

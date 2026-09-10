@@ -48,6 +48,13 @@ refuses "${WEBAPPS}" '"--password-store=detect"'
 # And the runtime exercise must keep proving the consequence, not just the
 # flag: no gcr-prompter window may exist while the browser is up.
 contains "${SURFACES}" 'gcr-prompter'
+# The M11 dry-run asserts the argv by exact LENGTH, so it fails on a flag it
+# has never heard of. That is the point — the vocabulary is closed — but it
+# means every change to the builder has a second place to update, and a jq
+# filter is not something a grep for flag names will find. Pin both halves
+# here, where they are cheap to notice.
+contains "${M11_CHECK}" '(.argv | length) == 8'
+contains "${M11_CHECK}" '(.argv | index("--password-store=basic")) != null'
 
 # Hyprland 0.56's Lua provider rejects `keyword source`. The root-derived,
 # user-owned fragment must itself be Lua and changes must reload a clean rule

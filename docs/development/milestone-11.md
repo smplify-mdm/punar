@@ -1434,9 +1434,10 @@ for the missing live assertions.
 14. `punarctl web-apps install https://linear.app --name Linear --context atlas`
     succeeds; the record's `origin` is `https://linear.app`.
 15. `punarctl web-apps launch linear --dry-run --json` prints the exact argv
-    it *would* exec; assert it is exactly the seven-flag vocabulary, that
-    `--app=https://linear.app` is present, and that **no** token from
-    `forbidden-tokens.txt` appears. Nothing is launched (no network).
+    it *would* exec; assert it is exactly the eight-flag vocabulary, that
+    `--app=https://linear.app` and `--password-store=basic` are present, and
+    that **no** token from `forbidden-tokens.txt` appears. Nothing is launched
+    (no network).
 
 **4 · The window is native (the money shot).**
 
