@@ -3,6 +3,13 @@
 #
 #   ./tools/render-surface.sh Mail            → /tmp/punar-render/Mail.png
 #   ./tools/render-surface.sh Mail 1400 900
+#   PUNAR_RENDER_THEME=panel ./tools/render-surface.sh Mail   → Mail.panel.png
+#
+# THE THEME ARGUMENT IS NOT A CONVENIENCE. Punar ships two moods and the token
+# set flips wholesale between them: `shellRaise2` collapses to `panelSurface` on
+# panel, so a fill that separates on paper becomes the ground; and panelInk3
+# measures 3.39:1 against a panel tint, below the 4.5 text floor, so text that
+# passes on paper fails there. A surface reviewed in one mood is half reviewed.
 #
 # WHY THIS EXISTS. Punar's QML runs only under Quickshell on a Wayland
 # compositor, so for a long time the only way to see a surface was to build an
@@ -34,6 +41,11 @@ set -euo pipefail
 SURFACE="${1:?usage: render-surface.sh <SurfaceDir> [width] [height]}"
 WIDTH="${2:-1400}"
 HEIGHT="${3:-900}"
+# A theme id from shell/theme/themes/<id>.theme.json. Empty means the shipped
+# default pointer, which is `paper`.
+THEME="${PUNAR_RENDER_THEME:-}"
+SUFFIX=""
+[ -z "${THEME}" ] || SUFFIX=".${THEME}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${PUNAR_RENDER_OUT:-/tmp/punar-render}"
 IMAGE="${PUNAR_RENDER_IMAGE:-punar-render}"
@@ -64,6 +76,8 @@ docker run --rm \
     --env "PUNAR_SURFACE=${SURFACE}" \
     --env "PUNAR_W=${WIDTH}" \
     --env "PUNAR_H=${HEIGHT}" \
+    --env "PUNAR_THEME=${THEME}" \
+    --env "PUNAR_SUFFIX=${SUFFIX}" \
     "${IMAGE}" sh -eu -c '
       # Stage exactly as the image does, so absolute paths resolve.
       mkdir -p /usr/share/punar/theme/themes /usr/share/fonts/punar
@@ -74,6 +88,23 @@ docker run --rm \
             /work/os/modules/desktop/fonts/geist-mono /usr/share/fonts/punar/
       fc-cache -f >/dev/null 2>&1 || true
 
+      # /etc/punar/theme.json is the first system pointer candidate Theme.qml
+      # consults, so writing one selects the theme without touching the tree.
+      # The mood is stated explicitly rather than left to the theme document
+      # defaultMood, so the render names the mood it asked for.
+      # NO SINGLE QUOTES ANYWHERE IN THIS BLOCK, in a comment or in code: the
+      # whole container script is one single-quoted sh -c argument, so a lone
+      # apostrophe terminates it and spills the remainder into the host shell.
+      # The first version of this block used printf with a single-quoted format
+      # string, which broke the quoting silently: the pointer was never written,
+      # the render succeeded, and it was byte-identical to the paper one. Only
+      # comparing the two hashes caught it.
+      if [ -n "${PUNAR_THEME}" ]; then
+        mkdir -p /etc/punar
+        printf "{\"kind\":\"PunarThemePointer\",\"active\":\"%s\",\"mood\":\"%s\"}\n" \
+          "${PUNAR_THEME}" "${PUNAR_THEME}" > /etc/punar/theme.json
+      fi
+
       export XDG_RUNTIME_DIR=/tmp/xdg
       mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
       export WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1
@@ -83,16 +114,16 @@ docker run --rm \
 
       cat > /tmp/sway.cfg <<CFG
 output HEADLESS-1 resolution ${PUNAR_W}x${PUNAR_H}
-exec sh -c "qs -p /usr/share/punar/shell/${PUNAR_SURFACE} >/out/${PUNAR_SURFACE}.log 2>&1"
-exec sh -c "sleep 12; grim /out/${PUNAR_SURFACE}.png 2>>/out/${PUNAR_SURFACE}.log; swaymsg exit"
+exec sh -c "qs -p /usr/share/punar/shell/${PUNAR_SURFACE} >/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log 2>&1"
+exec sh -c "sleep 12; grim /out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.png 2>>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log; swaymsg exit"
 CFG
       sway -c /tmp/sway.cfg >/out/sway.log 2>&1 || true
     ' || true
 
-if [ -s "${OUT_DIR}/${SURFACE}.png" ]; then
-    echo "==> ${OUT_DIR}/${SURFACE}.png ($(wc -c < "${OUT_DIR}/${SURFACE}.png" | tr -d ' ') bytes)"
+if [ -s "${OUT_DIR}/${SURFACE}${SUFFIX}.png" ]; then
+    echo "==> ${OUT_DIR}/${SURFACE}${SUFFIX}.png ($(wc -c < "${OUT_DIR}/${SURFACE}${SUFFIX}.png" | tr -d ' ') bytes)"
 else
     echo "==> no image produced; quickshell said:" >&2
-    sed 's/\x1b\[[0-9;]*m//g' "${OUT_DIR}/${SURFACE}.log" 2>/dev/null | tail -25 >&2
+    sed 's/\x1b\[[0-9;]*m//g' "${OUT_DIR}/${SURFACE}${SUFFIX}.log" 2>/dev/null | tail -25 >&2
     exit 1
 fi

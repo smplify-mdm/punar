@@ -174,6 +174,14 @@ ShellRoot {
         // person's identity or is derived from the message.
         required property color fill
         required property color textInk
+        // A chip states itself with a FILL on paper and, when its fill is the
+        // ground, with an EDGE. §2's deliberate asymmetry: the panel block has
+        // no muted/raise2, so shellMuted resolves to panelSurface and a chip
+        // filled with it disappears — which is exactly what the attachment chip
+        // did on panel, degrading to bare text beside label chips that kept
+        // their pill. Rendering the dark mood is the only reason that was
+        // found; it is invisible in the source and correct on paper.
+        required property bool edged
 
         // A TINT, NOT AN OUTLINE. The reference fills its chips and draws no
         // border, and side by side an outlined chip reads as a CONTROL —
@@ -186,7 +194,8 @@ ShellRoot {
         width: chipText.implicitWidth + 12
         radius: Theme.radiusTag
         color: chipRoot.fill
-        border.width: 0
+        border.width: chipRoot.edged ? Theme.hairline : 0
+        border.color: Theme.shellBorder
 
         Text {
             id: chipText
@@ -684,6 +693,8 @@ ShellRoot {
                                     text: threadRow.t.labels[index].toUpperCase()
                                     fill: root.labelTint(fixtures.slotFor(threadRow.t.labels[index]))
                                     textInk: root.labelInk()
+                                    // An identity tint is visible on both moods.
+                                    edged: false
                                 }
                             }
                             Text {
@@ -701,6 +712,9 @@ ShellRoot {
                                 // person, so it carries no identity hue.
                                 fill: Theme.shellMuted
                                 textInk: Theme.shellInk3
+                                // On panel that fill IS the ground, so the chip
+                                // states itself with an edge instead.
+                                edged: Theme.moodPanel
                             }
                         }
 
