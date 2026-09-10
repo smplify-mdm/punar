@@ -822,7 +822,7 @@ if wait_for 180 chromium_client; then
         | jq -r '[ .[] | select(.class | ascii_downcase | test("chromium")) ][0].pid')"
     if [ -n "${cpid}" ] && [ -r "/proc/${cpid}/cmdline" ]; then
         cargs="$(tr '\0' ' ' < "/proc/${cpid}/cmdline")"
-        for flag in --no-first-run --no-default-browser-check; do
+        for flag in --no-first-run --no-default-browser-check --password-store=basic; do
             case " ${cargs} " in
                 *" ${flag} "*) note "ok   chromium argv carries ${flag}" ;;
                 *) note "FAIL chromium argv missing ${flag} — closed browser defaults were not applied"
@@ -837,6 +837,29 @@ if wait_for 180 chromium_client; then
         printf '%s\n' "${cargs}" > /run/punar/surfaces-chromium-argv.txt
     else
         note "FAIL could not read chromium argv (pid='${cpid}')"
+        FAILED=1
+    fi
+
+    # NO SECRET-SERVICE PROMPT MAY EXIST WHILE THE BROWSER IS UP. A browser
+    # left to ask org.freedesktop.secrets for its safe-storage key gets a
+    # gcr-prompter window from gnome-keyring — which this image ships for
+    # third-party apps, not for Chromium — and that window takes focus from
+    # whatever is asserted next. The menubar check failed exactly that way
+    # once, and the bar was RIGHT: it faithfully named the window that had
+    # focus. Assert the absence here, at the cause, so the flag returning to
+    # `detect` can never again surface as an unrelated-looking focus
+    # disagreement. Matched on the class Hyprland reports, which is what the
+    # failing report named.
+    secret_prompter() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class | ascii_downcase
+                       | test("gcr-prompter|gcr-viewer|org.gnome.keyring")) ][0].class // ""'
+    }
+    prompter="$(secret_prompter)"
+    if [ -z "${prompter}" ]; then
+        note "ok   no secret-service prompt window while the browser is up"
+    else
+        note "FAIL a secret-service prompter window exists ('${prompter}') — the browser is asking org.freedesktop.secrets for its safe-storage key"
         FAILED=1
     fi
 
@@ -859,6 +882,10 @@ if wait_for 180 chromium_client; then
         note "ok   the menubar names the focused window ($(ipc bar app | tr -d '[:space:]\"'))"
     else
         note "FAIL menubar/focus disagree — hyprland says '$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""')', bar says '$(ipc bar app | tr -d '[:space:]\"')'"
+        # Say WHICH window stole focus when the thief is a known one. The bar
+        # naming a prompter is the bar working, not the bar failing.
+        stealer="$(secret_prompter)"
+        [ -n "${stealer}" ] && note "FAIL   cause: '${stealer}' took focus — a secret-service prompt, not a menubar fault"
         FAILED=1
     fi
 

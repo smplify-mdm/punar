@@ -429,7 +429,7 @@ renderer.
 | Thing | Where | Note |
 |---|---|---|
 | Chord | `PUNAR + B` → `punarctl web-apps browse` | Active context |
-| Launch argv | `punarctl` closed builder | Real binary; seven allowed flags |
+| Launch argv | `punarctl` closed builder | Real binary; eight allowed flags |
 | Default handler | `/etc/xdg/mimeapps.list` → `punar-browser.desktop` | `http`, `https`, `text/html` |
 | `xdg-open` | `xdg-utils` package | Newly present |
 
@@ -447,6 +447,15 @@ notification action, a terminal URL activation, the command center's
 handler either. A **human** could reach a browser through the chord; the
 **system** could not reach one at all, and every such path failed with
 command-not-found.
+
+**Why the browser keeps its own key.** `--password-store=basic` is in the
+closed argv because Chromium otherwise asks `org.freedesktop.secrets` for the
+key that decrypts its saved passwords and cookies, and the Secret Service the
+image ships for third-party apps has no per-application access control — any
+app granted that bus name can read the item back. See milestone-11.md §3.4 for
+the observed bus traffic and the trade this accepts. The surfaces exercise
+asserts both halves: the flag is on the live `/proc/<pid>/cmdline`, and no
+`gcr-prompter` window exists at any point while the browser is up.
 
 **Override semantics.** A user's chosen MIME default still outranks
 `/etc/xdg/mimeapps.list`; choosing Firefox remains ordinary desktop policy.

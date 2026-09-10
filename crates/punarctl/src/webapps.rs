@@ -40,7 +40,7 @@ const MAX_MANIFEST_BYTES: u64 = 4096;
 // below into only one input among several.
 const CHROMIUM_PROGRAM: &str = "/usr/lib/chromium/chromium";
 const FIXED_DISABLE_FEATURES: &str = "PunarNone";
-const ALLOWED_FLAG_PREFIXES: [&str; 7] = [
+const ALLOWED_FLAG_PREFIXES: [&str; 8] = [
     "--app=",
     "--user-data-dir=",
     "--class=",
@@ -48,6 +48,7 @@ const ALLOWED_FLAG_PREFIXES: [&str; 7] = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=PunarNone",
+    "--password-store=basic",
 ];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -990,6 +991,27 @@ fn chromium_args_for_target(
         OsString::from("--no-first-run"),
         OsString::from("--no-default-browser-check"),
         OsString::from(format!("--disable-features={FIXED_DISABLE_FEATURES}")),
+        // THE BROWSER PUNAR SHIPS IS NOT A CLIENT OF THE DEVICE-WIDE SECRET
+        // STORE. Left to itself Chromium asks org.freedesktop.secrets for its
+        // "Safe Storage" key on every start — observed on the pinned snapshot's
+        // own Chromium 151 under XDG_CURRENT_DESKTOP=Hyprland, which is not a
+        // desktop it recognizes. The image ships gnome-keyring so that
+        // third-party apps have a Secret Service at all, and
+        // docs/design/third-party-apps.md says in as many words what that
+        // protocol is: there is NO per-application access control, so every
+        // caller holding the bus name can read every unlocked item. Chromium's
+        // key is the one that decrypts its saved passwords and cookies, so
+        // leaving it there hands the browser's credentials to any app whose
+        // Flatpak metadata asks for `org.freedesktop.secrets=talk`. Punar's
+        // enforcement point is the sandbox, and the sandbox withholds the
+        // user's home — it deliberately does not withhold that bus name.
+        //
+        // `basic` keeps the key in the profile directory instead, obfuscated
+        // rather than protected. That is the honest trade and it is the right
+        // way round: it is weaker only against something already reading this
+        // user's home as this user, which can read the whole profile anyway,
+        // and the disk is encrypted at rest.
+        OsString::from("--password-store=basic"),
     ]);
     for arg in &args {
         let arg = arg.to_string_lossy();
@@ -1283,8 +1305,13 @@ mod tests {
     fn chromium_builder_has_only_the_closed_flag_vocabulary() {
         let args =
             chromium_args_for_profile(Some(&app()), Path::new("/home/alice/atlas"), true).unwrap();
-        assert_eq!(args.len(), 7);
+        assert_eq!(args.len(), 8);
         assert!(args.contains(&OsString::from("--ozone-platform=wayland")));
+        // The browser keeps its own key rather than asking the device-wide
+        // Secret Service for it. Asserted by value, not by prefix: `basic` is
+        // the whole point, and `--password-store=gnome-libsecret` would satisfy
+        // a prefix check while doing exactly what this flag exists to stop.
+        assert!(args.contains(&OsString::from("--password-store=basic")));
         for arg in args {
             let arg = arg.to_string_lossy();
             assert!(
@@ -1304,7 +1331,7 @@ mod tests {
             chromium_args_for_profile(Some(&app()), Path::new("/home/alice/atlas"), true).unwrap();
         let preview = launch_preview(&args);
         assert_eq!(preview["program"], json!("/usr/lib/chromium/chromium"));
-        assert_eq!(preview["argv"].as_array().unwrap().len(), 7);
+        assert_eq!(preview["argv"].as_array().unwrap().len(), 8);
         assert!(preview.get("command").is_none());
         assert!(preview.get("shell").is_none());
     }
@@ -1314,8 +1341,8 @@ mod tests {
         let mut args =
             chromium_args_for_profile(None, Path::new("/home/alice/personal"), false).unwrap();
         append_navigation_urls(&mut args, &["https://example.com/docs".into()]).unwrap();
-        assert_eq!(args[5], OsString::from("--"));
-        assert_eq!(args[6], OsString::from("https://example.com/docs"));
+        assert_eq!(args[6], OsString::from("--"));
+        assert_eq!(args[7], OsString::from("https://example.com/docs"));
 
         assert!(append_navigation_urls(&mut args, &["--no-sandbox".into()]).is_err());
     }

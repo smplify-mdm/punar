@@ -10,6 +10,7 @@ COMMON_WEBAPPS="${REPO_ROOT}/crates/punar-common/src/webapp.rs"
 SESSION="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh"
 HYPR_CONFIG="${REPO_ROOT}/os/modules/desktop/hypr/hyprland.lua"
 M11_CHECK="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m11-check.sh"
+SURFACES="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
 ICON_B64="${REPO_ROOT}/browser/integration/fixtures/notes/icon.png.b64"
 
 contains() {
@@ -34,6 +35,19 @@ refuses() {
 # exercise even though the Wayland socket and environment were both valid.
 contains "${WEBAPPS}" '"--ozone-platform=wayland"'
 refuses "${WEBAPPS}" '"--ozone-platform-hint=auto"'
+
+# The browser keeps its own safe-storage key. gnome-keyring is on the image so
+# THIRD-PARTY apps have a Secret Service; that protocol has no per-application
+# access control, so any caller holding the bus name can read Chromium's key
+# and with it the browser's saved passwords and cookies. Asserted by exact
+# value: `gnome-libsecret` or a bare `detect` would satisfy a prefix check
+# while doing precisely what this flag exists to stop.
+contains "${WEBAPPS}" '"--password-store=basic"'
+refuses "${WEBAPPS}" '"--password-store=gnome-libsecret"'
+refuses "${WEBAPPS}" '"--password-store=detect"'
+# And the runtime exercise must keep proving the consequence, not just the
+# flag: no gcr-prompter window may exist while the browser is up.
+contains "${SURFACES}" 'gcr-prompter'
 
 # Hyprland 0.56's Lua provider rejects `keyword source`. The root-derived,
 # user-owned fragment must itself be Lua and changes must reload a clean rule
