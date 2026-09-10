@@ -68,6 +68,112 @@ import Theme
 ShellRoot {
     id: root
 
+    // INLINE COMPONENTS LIVE ON THE FILE ROOT, AND THAT IS NOT A STYLE
+    // CHOICE. An inline component is a file-scoped TYPE; declaring one
+    // nested inside a Column or a Row makes the engine refuse the whole
+    // file, and the only symptom is a window that never maps. Every one of
+    // the twenty-odd inline components in the shipped shell sits at this
+    // exact depth — a direct child of its file's root object — and this
+    // file being the sole exception is what cost three CI cycles.
+
+    component RailHead: Text {
+        font.family: Theme.fontMono
+        font.pixelSize: 9
+        font.weight: 600
+        font.letterSpacing: Theme.tracking(9, 0.14)
+        color: Theme.shellInk3
+        leftPadding: 16
+        topPadding: 14
+        bottomPadding: 6
+    }
+
+    component RailRow: Item {
+        id: railRow
+
+        required property string label
+        required property int tally
+        required property bool current
+        required property bool verbatim
+
+        width: parent.width
+        height: 24
+
+        Rectangle {
+            anchors.fill: parent
+            color: Theme.shellMuted
+            visible: railRow.current
+        }
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 2
+            color: Theme.shellFg
+            visible: railRow.current
+        }
+
+        Text {
+            anchors.left: parent.left
+            anchors.leftMargin: 16
+            anchors.right: tallyText.left
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            // Server strings print verbatim; Punar's own view
+            // names are product vocabulary and take the
+            // masthead's sentence case.
+            text: railRow.label
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            font.family: Theme.fontSans
+            font.pixelSize: 12
+            font.weight: railRow.current ? 500 : 400
+            color: railRow.current ? Theme.shellFg : Theme.shellInk2
+        }
+
+        Text {
+            id: tallyText
+
+            anchors.right: parent.right
+            anchors.rightMargin: 16
+            anchors.verticalCenter: parent.verticalCenter
+            visible: railRow.tally > 0
+            text: railRow.tally
+            font.family: Theme.fontMono
+            font.pixelSize: 10
+            font.weight: 500
+            color: Theme.shellInk3
+        }
+    }
+
+    component Chip: Rectangle {
+        id: chipRoot
+
+        required property string text
+        required property bool derived
+
+        height: 17
+        width: chipText.implicitWidth + 12
+        radius: Theme.radiusTag
+        color: "transparent"
+        border.width: Theme.hairline
+        border.color: Theme.shellBorder
+
+        Text {
+            id: chipText
+
+            anchors.centerIn: parent
+            text: chipRoot.text
+            font.family: Theme.fontMono
+            font.pixelSize: 9.5
+            font.weight: 600
+            font.letterSpacing: Theme.tracking(9.5, 0.12)
+            // The attachment chip is the one DERIVED
+            // chip and is distinguished from a label by
+            // weight of ink, not by a second silhouette.
+            color: chipRoot.derived ? Theme.shellInk3 : Theme.shellFg
+        }
+    }
+
     // A real xdg-toplevel. The compositor tiles it like any other client, which
     // is the point: Punar's window grammar already knows how to arrange
     // windows, and an application that invents its own panes inside one window
@@ -246,77 +352,10 @@ ShellRoot {
                     anchors.topMargin: 14
                     spacing: 0
 
-                    component RailHead: Text {
-                        font.family: Theme.fontMono
-                        font.pixelSize: 9
-                        font.weight: 600
-                        font.letterSpacing: Theme.tracking(9, 0.14)
-                        color: Theme.shellInk3
-                        leftPadding: 16
-                        topPadding: 14
-                        bottomPadding: 6
-                    }
 
                     // A rail row prints a name and, when it has one, a count.
                     // A count of zero is ABSENT rather than rendered as "0":
                     // nothing is not a quantity.
-                    component RailRow: Item {
-                        id: railRow
-
-                        required property string label
-                        required property int tally
-                        required property bool current
-                        required property bool verbatim
-
-                        width: rail.width
-                        height: 24
-
-                        Rectangle {
-                            anchors.fill: parent
-                            color: Theme.shellMuted
-                            visible: railRow.current
-                        }
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: 2
-                            color: Theme.shellFg
-                            visible: railRow.current
-                        }
-
-                        Text {
-                            anchors.left: parent.left
-                            anchors.leftMargin: 16
-                            anchors.right: tallyText.left
-                            anchors.rightMargin: 8
-                            anchors.verticalCenter: parent.verticalCenter
-                            // Server strings print verbatim; Punar's own view
-                            // names are product vocabulary and take the
-                            // masthead's sentence case.
-                            text: railRow.label
-                            elide: Text.ElideRight
-                            textFormat: Text.PlainText
-                            font.family: Theme.fontSans
-                            font.pixelSize: 12
-                            font.weight: railRow.current ? 500 : 400
-                            color: railRow.current ? Theme.shellFg : Theme.shellInk2
-                        }
-
-                        Text {
-                            id: tallyText
-
-                            anchors.right: parent.right
-                            anchors.rightMargin: 16
-                            anchors.verticalCenter: parent.verticalCenter
-                            visible: railRow.tally > 0
-                            text: railRow.tally
-                            font.family: Theme.fontMono
-                            font.pixelSize: 10
-                            font.weight: 500
-                            color: Theme.shellInk3
-                        }
-                    }
 
                     RailHead {
                         text: "ACCOUNT"
@@ -540,34 +579,6 @@ ShellRoot {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 4
 
-                            component Chip: Rectangle {
-                                id: chipRoot
-
-                                required property string text
-                                required property bool derived
-
-                                height: 17
-                                width: chipText.implicitWidth + 12
-                                radius: Theme.radiusTag
-                                color: "transparent"
-                                border.width: Theme.hairline
-                                border.color: Theme.shellBorder
-
-                                Text {
-                                    id: chipText
-
-                                    anchors.centerIn: parent
-                                    text: chipRoot.text
-                                    font.family: Theme.fontMono
-                                    font.pixelSize: 9.5
-                                    font.weight: 600
-                                    font.letterSpacing: Theme.tracking(9.5, 0.12)
-                                    // The attachment chip is the one DERIVED
-                                    // chip and is distinguished from a label by
-                                    // weight of ink, not by a second silhouette.
-                                    color: chipRoot.derived ? Theme.shellInk3 : Theme.shellFg
-                                }
-                            }
 
                             Repeater {
                                 model: Math.min(2, threadRow.t.labels.length)

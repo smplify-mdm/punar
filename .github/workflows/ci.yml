@@ -358,6 +358,7 @@ jobs:
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
+            tests/desktop/qml-inline-component-depth-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -424,6 +425,13 @@ jobs:
       # reverse-DNS id back in the bar, silently — nothing errors.
       - name: Validate Punar Mail's window identity
         run: ./tests/desktop/mail-identity-contract-test.sh
+
+      # An inline component nested below the file root makes the QML engine
+      # refuse the whole file, and qmllint reports it CLEAN — the only symptom
+      # is a surface that never appears. Three CI cycles were spent on exactly
+      # that, so it is now caught in seconds by a script.
+      - name: Validate inline component placement
+        run: ./tests/desktop/qml-inline-component-depth-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh

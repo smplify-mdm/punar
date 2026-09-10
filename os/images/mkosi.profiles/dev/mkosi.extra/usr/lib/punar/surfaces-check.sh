@@ -1163,11 +1163,27 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
     else
         # The report is what boot-test.sh prints on failure, so the reason has
         # to land IN it rather than in a file nobody exports.
-        mail_why="$(tr -d '\r' < /run/punar/mail-launch.log 2>/dev/null \
-            | grep -v '^$' | tail -n 3 | tr '\n' ' ' | cut -c1-300)"
+        # PREFER THE LINE THAT EXPLAINS. A plain tail caught quickshell's own
+        # "Saving logs to …" banner and said nothing: the process starts, logs,
+        # and then fails to load QML, so the interesting lines are in the
+        # MIDDLE. Same shape as punard's backend_failure_detail — look for a
+        # complaint first, fall back to the tail only when there is none.
+        # ANSI colour is stripped because quickshell colourises its log and the
+        # escapes ate a third of the budget.
+        mail_log="$(tr -d '\r' < /run/punar/mail-launch.log 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^$')"
+        mail_why="$(printf '%s\n' "${mail_log}" \
+            | grep -iE 'error|warning|cannot|unable|no such|not a type|is not|undefined|failed' \
+            | grep -viE 'saving logs|libEGL warning: egl: failed to create dri2' \
+            | tail -n 4 | tr '\n' ' ' | cut -c1-500)"
+        [ -n "${mail_why}" ] || mail_why="$(printf '%s\n' "${mail_log}" \
+            | tail -n 4 | tr '\n' ' ' | cut -c1-500)"
         note "FAIL the mail application window never appeared in hyprctl clients: ${mail_why:-no output on stderr}"
         FAILED=1
     fi
+    # The note is bounded; the log is not. Copy it where boot-test.sh's export
+    # will find it, so a diagnosis never depends on what fitted in 500 bytes.
+    cp /run/punar/mail-launch.log /run/punar/surfaces-mail-launch.txt 2>/dev/null || true
     pkill -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1 || true
 else
     note "FAIL /usr/lib/punar/punar-mail.sh is not installed or not executable"
