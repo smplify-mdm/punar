@@ -68,6 +68,23 @@ import Theme
 ShellRoot {
     id: root
 
+    IdentityRing {
+        id: identity
+    }
+
+    // The mood decision lives here, with the surface that knows it, rather than
+    // in the palette. On panel, panelInk3 measures 3.39:1 against a panel tint
+    // and fails the 4.5 text floor, so panel steps up to panelInk2 at 5.81:1;
+    // paper has headroom either way.
+    function labelTint(slot: int): color {
+        var i = slot >= 0 && slot < 8 ? slot : identity.neutralSlot;
+        return Theme.moodPanel ? identity.panelTint[i] : identity.paperTint[i];
+    }
+
+    function labelInk(): color {
+        return Theme.moodPanel ? Theme.panelInk2 : Theme.ink2;
+    }
+
     // INLINE COMPONENTS LIVE ON THE FILE ROOT, AND THAT IS NOT A STYLE
     // CHOICE. An inline component is a file-scoped TYPE; declaring one
     // nested inside a Column or a Row makes the engine refuse the whole
@@ -149,14 +166,27 @@ ShellRoot {
         id: chipRoot
 
         required property string text
-        required property bool derived
+        // COLOURS ARE PASSED IN, not looked up. An inline component lives at
+        // the file root and is its own scope, so reaching for an id declared
+        // inside the window would be a cross-scope reference the engine cannot
+        // resolve soundly. Handing the resolved values in keeps the chip a
+        // pure renderer and lets the caller decide whether this chip carries a
+        // person's identity or is derived from the message.
+        required property color fill
+        required property color textInk
 
-        height: 17
+        // A TINT, NOT AN OUTLINE. The reference fills its chips and draws no
+        // border, and side by side an outlined chip reads as a CONTROL —
+        // something to press — while a filled one reads as a property of the
+        // row. Structure stays monochrome per §2, so this is `muted`: the same
+        // raised ground the focused row uses, at an elevation the language
+        // already ships. A per-label hue belongs here once labels carry
+        // identity colour; the shape is ready for it.
+        height: 16
         width: chipText.implicitWidth + 12
         radius: Theme.radiusTag
-        color: "transparent"
-        border.width: Theme.hairline
-        border.color: Theme.shellBorder
+        color: chipRoot.fill
+        border.width: 0
 
         Text {
             id: chipText
@@ -164,13 +194,13 @@ ShellRoot {
             anchors.centerIn: parent
             text: chipRoot.text
             font.family: Theme.fontMono
-            font.pixelSize: 9.5
+            font.pixelSize: Theme.metaSize
             font.weight: 600
-            font.letterSpacing: Theme.tracking(9.5, 0.12)
+            font.letterSpacing: Theme.tracking(Theme.metaSize, 0.12)
             // The attachment chip is the one DERIVED
             // chip and is distinguished from a label by
             // weight of ink, not by a second silhouette.
-            color: chipRoot.derived ? Theme.shellInk3 : Theme.shellFg
+            color: chipRoot.textInk
         }
     }
 
@@ -273,12 +303,17 @@ ShellRoot {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 3
 
+                    // THE VIEW NAME LEADS, and the wordmark is gone. The bar
+                    // already says PUNAR, permanently, three pixels above this
+                    // one — repeating it inside the window spent the most
+                    // valuable line on the screen restating what the desktop
+                    // never stops saying. The reference gives this line to the
+                    // view for the same reason.
                     Text {
-                        text: "PUNAR · MAIL · INBOX"
-                        font.family: Theme.fontMono
-                        font.pixelSize: 10
+                        text: "Inbox"
+                        font.family: Theme.fontSans
+                        font.pixelSize: 15
                         font.weight: 600
-                        font.letterSpacing: Theme.tracking(10, 0.15)
                         color: Theme.shellFg
                     }
                     Text {
@@ -299,12 +334,16 @@ ShellRoot {
 
                     Text {
                         anchors.right: parent.right
-                        text: "IN:INBOX"
-                        font.family: Theme.fontMono
-                        font.pixelSize: 10
-                        font.weight: 600
-                        font.letterSpacing: Theme.tracking(10, 0.15)
-                        color: Theme.shellFg
+                        // ONE NUMBER, COMPUTED FROM WHAT IS ON SCREEN. The
+                        // rail printed a hand-written 12 while this printed the
+                        // fixture's real 3, so two numbers about the same thing
+                        // disagreed in one window — the exact dishonesty this
+                        // language exists to prevent. Both now read the model.
+                        text: fixtures.unreadCount + " unread"
+                        font.family: Theme.fontSans
+                        font.pixelSize: 12
+                        font.weight: 400
+                        color: Theme.shellInk3
                     }
                     Text {
                         anchors.right: parent.right
@@ -312,7 +351,7 @@ ShellRoot {
                         // the sync clock; this one prints a constant, because a
                         // surface that invents a plausible timestamp is lying
                         // in the one register this design cares most about.
-                        text: fixtures.unreadCount + " UNREAD · FIXTURE DATA"
+                        text: "FIXTURE DATA"
                         font.family: Theme.fontMono
                         font.pixelSize: 9
                         font.weight: 500
@@ -343,7 +382,7 @@ ShellRoot {
                 anchors.left: parent.left
                 anchors.top: mastheadRule.bottom
                 anchors.bottom: footerRule.top
-                width: 208
+                width: 260
 
                 Column {
                     anchors.left: parent.left
@@ -378,7 +417,9 @@ ShellRoot {
                             required property var modelData
 
                             label: modelData.name
-                            tally: modelData.count
+                            // -1 means "ask the model", so the rail and the
+                            // masthead cannot drift apart.
+                            tally: modelData.count === -1 ? fixtures.unreadCount : modelData.count
                             current: modelData.current
                             verbatim: false
                         }
@@ -431,7 +472,7 @@ ShellRoot {
                     required property var modelData
 
                     width: list.width
-                    height: row.modelData.thread === null ? 34 : 40
+                    height: row.modelData.thread === null ? 30 : 34
 
                     // GROUP HEAD. Its hairline is the only horizontal line in
                     // the whole field — there are no rules between rows, and
@@ -441,36 +482,35 @@ ShellRoot {
                         anchors.fill: parent
                         visible: row.modelData.thread === null
 
+                        // THE HEAD SITS ON ITS RULE. It was top-aligned with
+                        // eleven pixels of air below it, so each head read as
+                        // belonging to the group ABOVE — the rule looked like a
+                        // divider between rows rather than an underline for the
+                        // label. Three pixels of clearance is enough to say
+                        // "this line belongs to what follows".
                         Text {
                             anchors.left: parent.left
                             anchors.leftMargin: 16
                             anchors.bottom: headRule.top
-                            anchors.bottomMargin: 5
-                            text: row.modelData.head.toUpperCase()
-                            font.family: Theme.fontMono
-                            font.pixelSize: 11
-                            font.weight: 500
-                            font.letterSpacing: Theme.tracking(11, 0.12)
-                            color: Theme.shellInk3
-                        }
-                        Text {
-                            anchors.right: parent.right
-                            anchors.rightMargin: 16
-                            anchors.bottom: headRule.top
-                            anchors.bottomMargin: 5
-                            text: row.modelData.count
-                            font.family: Theme.fontMono
+                            anchors.bottomMargin: 3
+                            text: row.modelData.head
+                            font.family: Theme.fontSans
                             font.pixelSize: 11
                             font.weight: 500
                             color: Theme.shellInk3
                         }
+                        // NO GROUP COUNT. The reference prints none, and it was
+                        // the only number on the screen nobody asked for: the
+                        // rows are right there to be counted, and a tally on a
+                        // time bucket answers a question no one reading mail is
+                        // holding.
                         Rectangle {
                             id: headRule
 
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
-                            anchors.bottomMargin: 6
+                            anchors.bottomMargin: 4
                             height: Theme.hairline
                             color: Theme.shellBorder
                         }
@@ -510,13 +550,34 @@ ShellRoot {
                             id: mark
 
                             anchors.left: parent.left
-                            anchors.leftMargin: 16
+                            anchors.leftMargin: 14
                             anchors.verticalCenter: parent.verticalCenter
-                            width: 16
+                            width: 12
                             visible: threadRow.t.marked === true
                             text: "\u00d7"
                             font.family: Theme.fontMono
                             font.pixelSize: 12
+                            color: Theme.shellFg
+                        }
+
+                        // UNREAD DOT, restored. The recorded design said weight
+                        // ALONE and dropped the dot; seeing the two side by side
+                        // the reference is right that a scanner wants a mark at
+                        // a fixed x, because weight is only legible once your
+                        // eye is already on the word. Both are kept: the dot
+                        // finds the row, the weight survives the dot being
+                        // invisible to anyone who cannot separate it from the
+                        // ground. It is INK, not the reference's brand blue.
+                        Rectangle {
+                            id: unread
+
+                            anchors.left: parent.left
+                            anchors.leftMargin: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 5
+                            height: 5
+                            radius: 2.5
+                            visible: threadRow.t.unread === true && !mark.visible
                             color: Theme.shellFg
                         }
 
@@ -525,14 +586,14 @@ ShellRoot {
                             id: who
 
                             anchors.left: parent.left
-                            anchors.leftMargin: 32
+                            anchors.leftMargin: 30
                             anchors.verticalCenter: parent.verticalCenter
-                            width: 168
+                            width: 190
                             text: threadRow.t.correspondent
                             elide: Text.ElideRight
                             textFormat: Text.PlainText
                             font.family: Theme.fontSans
-                            font.pixelSize: 12.5
+                            font.pixelSize: 13
                             font.weight: threadRow.t.unread ? 500 : 400
                             color: threadRow.t.unread ? Theme.shellFg : Theme.shellInk2
                         }
@@ -555,7 +616,41 @@ ShellRoot {
                         // [03] subject · preview — elides as ONE string with a
                         // single ellipsis, so the line never breaks twice.
                         Text {
+                            id: subject
+
                             anchors.left: depth.right
+                            anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            // Bounded, so a long subject cannot push the preview
+                            // off the row; the preview takes whatever is left.
+                            width: Math.min(implicitWidth,
+                                (chips.x - depth.x - 8) * 0.62)
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
+                            font.family: Theme.fontSans
+                            font.pixelSize: 13
+                            font.weight: threadRow.t.unread ? 500 : 400
+                            color: threadRow.t.unread ? Theme.shellFg : Theme.shellInk2
+                            // TWO TEXTS, NOT ONE STRING. The design asked for a
+                            // separator between subject and preview and the
+                            // first build used three spaces, so the two ran
+                            // together as one sentence and the subject had no
+                            // end. They are drawn separately now — subject in
+                            // the row's own weight, preview always ink-3 and
+                            // 400 — so the boundary is carried by contrast
+                            // rather than by punctuation, and only the preview
+                            // elides.
+                            text: threadRow.t.subject
+                        }
+
+                        // THE PREVIEW IS A SEPARATE TEXT, always ink-3 and 400.
+                        // The first build joined subject and preview with three
+                        // spaces into one string, so they ran together as a
+                        // single sentence and the subject had no end. The
+                        // boundary is carried by contrast now rather than by
+                        // punctuation, and only the preview elides.
+                        Text {
+                            anchors.left: subject.right
                             anchors.leftMargin: 8
                             anchors.right: chips.left
                             anchors.rightMargin: 12
@@ -563,10 +658,10 @@ ShellRoot {
                             elide: Text.ElideRight
                             textFormat: Text.PlainText
                             font.family: Theme.fontSans
-                            font.pixelSize: 12.5
-                            font.weight: threadRow.t.unread ? 500 : 400
-                            color: threadRow.t.unread ? Theme.shellFg : Theme.shellInk2
-                            text: threadRow.t.subject + "   " + threadRow.t.preview
+                            font.pixelSize: 13
+                            font.weight: 400
+                            color: Theme.shellInk3
+                            text: threadRow.t.preview
                         }
 
                         // [04] chips, right-aligned, never wrapping. A third
@@ -587,7 +682,8 @@ ShellRoot {
                                     required property int index
 
                                     text: threadRow.t.labels[index].toUpperCase()
-                                    derived: false
+                                    fill: root.labelTint(fixtures.slotFor(threadRow.t.labels[index]))
+                                    textInk: root.labelInk()
                                 }
                             }
                             Text {
@@ -595,13 +691,16 @@ ShellRoot {
                                 visible: threadRow.t.labels.length > 2
                                 text: "+" + (threadRow.t.labels.length - 2)
                                 font.family: Theme.fontMono
-                                font.pixelSize: 9.5
+                                font.pixelSize: Theme.metaSize
                                 color: Theme.shellInk3
                             }
                             Chip {
                                 visible: threadRow.t.attachment !== ""
                                 text: threadRow.t.attachment
-                                derived: true
+                                // Derived from the message, not assigned by a
+                                // person, so it carries no identity hue.
+                                fill: Theme.shellMuted
+                                textInk: Theme.shellInk3
                             }
                         }
 

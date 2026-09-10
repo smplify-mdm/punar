@@ -25,12 +25,36 @@ QtObject {
     readonly property string syncedAt: "08:26"
 
     // VIEWS carry counts; a count of 0 is absent rather than rendered as "0".
+    // Inbox carries -1, meaning "ask the model" — it printed a hand-written 12
+    // while the masthead printed the fixture's real 3, and two numbers about
+    // the same thing disagreeing in one window is the failure this whole
+    // language is built to avoid.
     readonly property var views: [
-        { "name": "Inbox", "count": 12, "current": true },
+        { "name": "Inbox", "count": -1, "current": true },
         { "name": "Starred", "count": 3, "current": false },
         { "name": "Attachments", "count": 0, "current": false },
         { "name": "Drafts", "count": 1, "current": false }
     ]
+
+    // WHICH IDENTITY SLOT EACH LABEL CARRIES. A real client stores the person's
+    // own choice; a fixture states it, because deriving a hue from a hash of the
+    // name would look identical here and be wrong in the one way that matters —
+    // the colour would not be theirs. An unlisted label falls to the neutral.
+    readonly property var labelSlot: ({
+        "Receipts": 1,
+        "Work": 5,
+        "Release": 3,
+        "Travel": 4,
+        "Decisions": 6,
+        "Q3": 2,
+        "Automated": 7,
+        "Personal": 0
+    })
+
+    function slotFor(label: string): int {
+        var v = root.labelSlot[label];
+        return v === undefined ? 7 : v;
+    }
 
     // Server strings, printed VERBATIM and never uppercased — the folder names
     // belong to the server, and rewriting them would be the shell asserting
