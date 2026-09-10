@@ -61,7 +61,22 @@ case "${EXEC}" in
     /usr/lib/punar/punar-mail.sh*) ;;
     *) fail "Exec is '${EXEC}', expected the committed launcher under /usr/lib/punar" ;;
 esac
-[ -x "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mail.sh" ] \
-    || fail "the launcher is missing or not executable"
+LAUNCHER="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mail.sh"
+[ -x "${LAUNCHER}" ] || fail "the launcher is missing or not executable"
+
+# 7 · THE LAUNCHER MUST ESTABLISH THE GRAPHICS ENVIRONMENT. A Punar application
+# is started from a .desktop entry, a systemd unit, a terminal or a CI probe —
+# none of which is a child of Hyprland, and none of which therefore inherits
+# what session.sh configured. Without it, qs on a machine with no usable GPU
+# dies with "libEGL warning: egl: failed to create dri2 screen" and the window
+# never maps. Chromium never hit this only because the SHELL launches it.
+grep -q 'punar_configure_graphics' "${LAUNCHER}" \
+    || fail "the launcher does not configure graphics; the window will not map without a GPU"
+
+# 8 · AND IT MUST NOT SET QML_IMPORT_PATH. That belongs to the pragma, so it
+# survives the bare `qs -p` launches the m*-check scripts use. A wrapper that
+# re-exports it invites the pragma being dropped as redundant.
+! grep -q 'QML_IMPORT_PATH' "${LAUNCHER}" \
+    || fail "the launcher exports QML_IMPORT_PATH; that belongs to the pragma, which covers every launch path"
 
 echo "mail-identity-contract-test: PASS (${APP_ID} agrees in shell.qml, ${APP_ID}.desktop and the gate)"
