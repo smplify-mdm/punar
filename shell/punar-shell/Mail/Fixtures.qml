@@ -136,6 +136,53 @@ QtObject {
         }
     ]
 
+    // MESSAGE BODIES for the threads a reader is most likely to open. Keyed by
+    // correspondent so a thread and its messages cannot drift apart the way two
+    // parallel arrays would.
+    //
+    // `remote` marks a message whose HTML referenced something off-device. The
+    // thread window states that it BLOCKED it — after the fact, on the message
+    // it happened to, rather than as a setting somewhere. A disclosure a person
+    // has to go looking for is not one.
+    readonly property var bodies: ({
+        "Stripe": [
+            {
+                "from": "Stripe", "address": "receipts@stripe.com",
+                "date": "10 Sep 2026 · 14:02", "remote": true,
+                "body": "A copy of invoice 4C21-8890 is attached.\n\nNo action is needed if you have already paid. This receipt is for your records.\n\nAmount  £48.00\nPeriod  1 Aug – 31 Aug 2026"
+            }
+        ],
+        "Aisha Rahman +2": [
+            {
+                "from": "Aisha Rahman", "address": "aisha@example.org",
+                "date": "9 Sep 2026 · 16:20", "remote": false,
+                "body": "First pass at the release notes is in the shared doc. I have left the installer section empty because I could not tell from the changelog whether the ISO path changed."
+            },
+            {
+                "from": "Wei Chen", "address": "wei@example.org",
+                "date": "10 Sep 2026 · 09:04", "remote": false,
+                "body": "It did change — the hybrid ISO now carries both UEFI forms. I can write that paragraph if you would rather not guess at it."
+            },
+            {
+                "from": "Aisha Rahman", "address": "aisha@example.org",
+                "date": "10 Sep 2026 · 11:47", "remote": false,
+                "body": "I have folded in the installer section.\n\nThe rollback paragraph still needs a number from you — how long does the automatic rollback actually take on the ARM64 path? I do not want to write \"quickly\"."
+            }
+        ],
+        "Nadia Okonkwo": [
+            {
+                "from": "Nadia Okonkwo", "address": "nadia@example.net",
+                "date": "9 Sep 2026 · 18:31", "remote": false,
+                "body": "Sorry for the length.\n\nThe short version is that the migration cost is front-loaded and we would be paying it twice: once to move onto the new store, and again in six months when the schema settles. Option one costs more this quarter and less every quarter after.\n\nI am not certain about the second half of that. Happy to be argued out of it."
+            }
+        ]
+    })
+
+    function messagesFor(correspondent: string): var {
+        var m = root.bodies[correspondent];
+        return m === undefined ? [] : m;
+    }
+
     readonly property int unreadCount: {
         var n = 0;
         for (var i = 0; i < root.threads.length; i++)

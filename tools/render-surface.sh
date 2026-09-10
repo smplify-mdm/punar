@@ -4,6 +4,14 @@
 #   ./tools/render-surface.sh Mail            → /tmp/punar-render/Mail.png
 #   ./tools/render-surface.sh Mail 1400 900
 #   PUNAR_RENDER_THEME=panel ./tools/render-surface.sh Mail   → Mail.panel.png
+#   PUNAR_RENDER_IPC="mail open 1" ./tools/render-surface.sh Mail
+#
+# PUNAR_RENDER_IPC drives the surface through its own IpcHandler before the
+# screenshot, so a state that only exists after interaction can be seen. It is
+# deliberately IPC and not synthetic keystrokes: a headless compositor delivers
+# keys to the wrong surface often enough (wl_keyboard.leave does not match the
+# current focus) that a wtype-based harness reports success while pressing
+# nothing, which is worse than not having the feature.
 #
 # THE THEME ARGUMENT IS NOT A CONVENIENCE. Punar ships two moods and the token
 # set flips wholesale between them: `shellRaise2` collapses to `panelSurface` on
@@ -60,7 +68,7 @@ FROM debian:sid
 RUN apt-get update && apt-get install -y --no-install-recommends \
       quickshell sway grim wayland-utils qt6-wayland \
       libqt6svg6 qml6-module-qt-labs-folderlistmodel \
-      fontconfig ca-certificates procps \
+      wtype fontconfig ca-certificates procps \
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
@@ -77,6 +85,7 @@ docker run --rm \
     --env "PUNAR_W=${WIDTH}" \
     --env "PUNAR_H=${HEIGHT}" \
     --env "PUNAR_THEME=${THEME}" \
+    --env "PUNAR_IPC=${PUNAR_RENDER_IPC:-}" \
     --env "PUNAR_SUFFIX=${SUFFIX}" \
     "${IMAGE}" sh -eu -c '
       # Stage exactly as the image does, so absolute paths resolve.
@@ -112,10 +121,27 @@ docker run --rm \
       export WLR_RENDERER=pixman
       export LANG=C.UTF-8
 
+      # THE SHOT SCRIPT IS A FILE, NOT AN INLINE exec. sway parses its config
+      # and expands $name itself, so a loop variable written inline is eaten
+      # before sh ever sees it: the first version produced "Missing argument to
+      # -k" and silently screenshotted the un-keyed state. A separate file has
+      # no sway parsing applied to it at all.
+      cat > /tmp/shot.sh <<SHOT
+sleep 12
+if [ -n "${PUNAR_IPC}" ]; then
+  qs -p /usr/share/punar/shell/${PUNAR_SURFACE} ipc call ${PUNAR_IPC} \
+    >>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log 2>&1 || true
+  sleep 3
+fi
+sleep 1
+grim /out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.png 2>>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log
+swaymsg exit
+SHOT
+
       cat > /tmp/sway.cfg <<CFG
 output HEADLESS-1 resolution ${PUNAR_W}x${PUNAR_H}
 exec sh -c "qs -p /usr/share/punar/shell/${PUNAR_SURFACE} >/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log 2>&1"
-exec sh -c "sleep 12; grim /out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.png 2>>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log; swaymsg exit"
+exec sh /tmp/shot.sh
 CFG
       sway -c /tmp/sway.cfg >/out/sway.log 2>&1 || true
     ' || true

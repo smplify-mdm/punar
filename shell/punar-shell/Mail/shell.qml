@@ -63,6 +63,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Theme
 
 ShellRoot {
@@ -70,6 +71,64 @@ ShellRoot {
 
     IdentityRing {
         id: identity
+    }
+
+    // A row shaped like a thread and carrying nothing. `visible: false` on a
+    // container does NOT stop its children evaluating their bindings, so every
+    // group-head row was running the thread bindings against null and logging a
+    // TypeError per property per row. Harmless, and exactly the kind of noise
+    // that hides the one warning that matters.
+    readonly property var blankThread: ({
+        "correspondent": "", "depth": 0, "subject": "", "preview": "",
+        "labels": [], "attachment": "", "time": "",
+        "unread": false, "marked": false
+    })
+
+    // THE APPLICATION ANSWERS IPC, like every shell surface does.
+    //
+    //   qs -p /usr/share/punar/shell/Mail ipc call mail open 1
+    //   qs -p /usr/share/punar/shell/Mail ipc call mail close
+    //   qs -p /usr/share/punar/shell/Mail ipc call mail state
+    //
+    // Not test scaffolding: the architecture pass asked for this so the command
+    // centre can open a thread by name and CI can drive the window without a
+    // person at a keyboard. It also sidesteps synthetic input entirely — a
+    // headless compositor delivers keys to the wrong surface often enough that
+    // a render harness built on wtype measures nothing, silently.
+    IpcHandler {
+        target: "mail"
+
+        function open(index: int): string {
+            var t = fixtures.threads[index];
+            if (t === undefined)
+                return "no-such-thread";
+            root.openThread = t;
+            return "open " + t.correspondent;
+        }
+        function close(): string {
+            root.openThread = null;
+            return "closed";
+        }
+        function state(): string {
+            return root.openThread === null ? "index" : "thread";
+        }
+    }
+
+    // The open thread, or null. ONE at a time in this build: the model supports
+    // more (each would be its own toplevel) and nothing here assumes a single
+    // one except this property, which is the only line that would change.
+    property var openThread: null
+
+    ThreadWindow {
+        id: threadWindow
+
+        visible: root.openThread !== null
+        thread: root.openThread
+        messages: root.openThread === null ? []
+            : fixtures.messagesFor(root.openThread.correspondent)
+        account: fixtures.account
+        protocol: fixtures.protocol
+        onCloseRequested: root.openThread = null
     }
 
     // The mood decision lives here, with the surface that knows it, rather than
@@ -285,7 +344,16 @@ ShellRoot {
 
             Keys.onEscapePressed: win.visible = false
             Keys.onPressed: function (event) {
-                if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    // OPENING A THREAD IS A COMPOSITOR ACT. This sets a
+                    // property; a second xdg-toplevel appears and Hyprland
+                    // tiles it under whatever layout preset is active. The
+                    // index does not shrink, does not split, and grows no pane.
+                    var r = frame.rows[frame.cursor];
+                    if (r !== undefined && r.thread !== null)
+                        root.openThread = r.thread;
+                    event.accepted = true;
+                } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
                     frame.step(1);
                     event.accepted = true;
                 } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
@@ -533,7 +601,8 @@ ShellRoot {
                         anchors.fill: parent
                         visible: row.modelData.thread !== null
 
-                        readonly property var t: row.modelData.thread
+                        readonly property var t: row.modelData.thread === null
+                            ? root.blankThread : row.modelData.thread
                         readonly property bool focused: row.index === frame.cursor
 
                         // FOCUS is a ground lift plus a 2px ink rule on the
@@ -765,7 +834,7 @@ ShellRoot {
                     anchors.left: parent.left
                     anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "J/K MOVE · ESC CLOSE"
+                    text: "J/K MOVE · ↵ OPEN · ESC CLOSE"
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
