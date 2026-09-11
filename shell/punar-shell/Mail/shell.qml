@@ -699,10 +699,29 @@ ShellRoot {
                             anchors.left: depth.right
                             anchors.leftMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
-                            // Bounded, so a long subject cannot push the preview
-                            // off the row; the preview takes whatever is left.
-                            width: Math.min(implicitWidth,
-                                (chips.x - depth.x - 8) * 0.62)
+                            // THE ROW SHEDS IN PRIORITY ORDER. It used to cap
+                            // the subject at 62% of the space between the depth
+                            // column and the chips, which is right when the row
+                            // is wide and wrong the moment it is not: tiled
+                            // beside an open thread, the subject and the preview
+                            // were BOTH crushed and the list read "Your…",
+                            // "Re: …", "Ihr…". A mail list that cannot show a
+                            // subject is not a mail list.
+                            //
+                            // The subject now takes everything it needs up to
+                            // the whole span; the preview takes what is left and
+                            // disappears when what is left is not enough to read.
+                            // Nothing is hidden silently — the preview is the
+                            // one element on the row that is a convenience
+                            // rather than a fact, which is why it goes first.
+                            // The span is measured from where this text
+                            // actually STARTS (depth.right + its 8px margin) to
+                            // where the chips begin, less their 12px gutter.
+                            // Measuring from depth.x instead over-allocated by
+                            // the depth column's own width plus the gutter, and
+                            // the subject ran under the chips.
+                            width: Math.max(0, Math.min(implicitWidth,
+                                chips.x - 12 - (depth.x + depth.width + 8)))
                             elide: Text.ElideRight
                             textFormat: Text.PlainText
                             font.family: Theme.fontSans
@@ -733,6 +752,9 @@ ShellRoot {
                             anchors.right: chips.left
                             anchors.rightMargin: 12
                             anchors.verticalCenter: parent.verticalCenter
+                            // Below this there is room for a word and an
+                            // ellipsis, which is noise rather than a preview.
+                            visible: width > 90
                             elide: Text.ElideRight
                             textFormat: Text.PlainText
                             font.family: Theme.fontSans
@@ -753,8 +775,17 @@ ShellRoot {
                             spacing: 4
 
 
+                            // TIGHT: tiled beside a thread window there is no
+                            // room for two label pills AND a subject. The labels
+                            // collapse to the count they already use for a third
+                            // label, so the row still SAYS there are labels
+                            // rather than quietly dropping them.
+                            readonly property bool tight: list.width < 560
+                            readonly property int shown: chips.tight ? 0
+                                : Math.min(2, threadRow.t.labels.length)
+
                             Repeater {
-                                model: Math.min(2, threadRow.t.labels.length)
+                                model: chips.shown
 
                                 Chip {
                                     required property int index
@@ -768,8 +799,8 @@ ShellRoot {
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: threadRow.t.labels.length > 2
-                                text: "+" + (threadRow.t.labels.length - 2)
+                                visible: threadRow.t.labels.length > chips.shown
+                                text: "+" + (threadRow.t.labels.length - chips.shown)
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.metaSize
                                 color: Theme.shellInk3
