@@ -448,6 +448,22 @@ ShellRoot {
             shortcutsSurface.releaseIfClosed();
             return result;
         }
+        function unmapped(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcUnmapped();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function sections(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcSections();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
     }
 
     // The M9 approval gate (Plate D-003). It has no keybinding by

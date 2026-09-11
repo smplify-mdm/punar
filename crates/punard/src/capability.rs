@@ -39,15 +39,27 @@ pub struct DescriptorMeta {
 impl DescriptorMeta {
     /// Build the full schema-shaped descriptor from static meta plus live
     /// state. M3 constants (docs/development/milestone-3.md section 4):
-    /// every shipped capability is supported, mutable, reboot-free, locally
-    /// managed (personal mode), root-gated, and approval-free.
-    pub fn describe(&self, current_state: Value, desired_state: Value) -> CapabilityDescriptor {
+    /// every shipped capability is supported, reboot-free, locally managed
+    /// (personal mode), root-gated, and approval-free.
+    ///
+    /// MUTABILITY IS NO LONGER A CONSTANT. It was, and the invariant said so —
+    /// but a device can hold a property worth REPORTING that nothing on it can
+    /// set: whether the credential store isolates applications from one another
+    /// is decided by which provider the image ships, not by a desired state.
+    /// [`Capability::mutable`] answers it, and this takes the answer rather
+    /// than asserting `true` over it.
+    pub fn describe(
+        &self,
+        current_state: Value,
+        desired_state: Value,
+        mutable: bool,
+    ) -> CapabilityDescriptor {
         CapabilityDescriptor {
             capability: self.capability.clone(),
             supported: true,
             current_state,
             desired_state,
-            mutable: true,
+            mutable,
             requires_reboot: false,
             risk: self.risk,
             managed_by: "local".to_string(),
@@ -75,8 +87,22 @@ pub trait Capability: Send + Sync {
     fn observe(&self) -> Result<Value, BackendError>;
 
     /// Drive the system toward `desired`. Callers must have authorized and
-    /// validated first.
+    /// validated first. Never called for a capability whose
+    /// [`Capability::mutable`] is false.
     fn apply(&self, desired: &Value) -> Result<(), BackendError>;
+
+    /// Whether anything on this device can CHANGE this capability.
+    ///
+    /// Defaults to true, which is every backend written before this existed.
+    /// A false answer does not mean "read-only for now": it means the value is
+    /// a property of the image or the hardware, so drift against the desired
+    /// state is real, is worth reporting, and CANNOT be remediated. The
+    /// reconcile loop treats such a capability as alert-only rather than
+    /// retrying an apply that can never succeed — which is what it would have
+    /// done, once per cycle, forever.
+    fn mutable(&self) -> bool {
+        true
+    }
 
     /// Re-observe and report whether the actual state equals `desired`.
     fn verify(&self, desired: &Value) -> Result<bool, BackendError> {
@@ -253,9 +279,11 @@ mod tests {
     #[test]
     fn descriptor_serializes_to_the_schema_field_set() {
         let mock = MockCapability::new("mock.widget", Value::String("on".into()));
-        let d = mock
-            .descriptor()
-            .describe(Value::String("on".into()), Value::String("on".into()));
+        let d = mock.descriptor().describe(
+            Value::String("on".into()),
+            Value::String("on".into()),
+            true,
+        );
         let v = serde_json::to_value(&d).unwrap();
         let obj = v.as_object().unwrap();
         for key in [

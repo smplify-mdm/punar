@@ -249,7 +249,7 @@ Params: none.
   "mode": "personal",
   "enrolled": false,
   "hostname": "punar-desktop",
-  "capabilities_total": 5,
+  "capabilities_total": 6,
   "last_reconcile": "2026-08-25T07:00:13Z",
   "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
   "device": {
@@ -615,25 +615,56 @@ depend on *who is asking* is settled before a password is requested:
 `policy.set` is deliberately **not** root-only. There is no sudo on a Punar
 desktop, so "root only" would mean "nobody can do this at the keyboard".
 
-Result:
+Result — a pin:
 
 ```json
 {"v":1,"id":"1","result":{
   "capability": "security.firewall",
   "pinned_value": "disabled",
+  "effective_value": "disabled",
+  "source": {"kind": "device_specific_override", "rank": 4,
+             "policy_id": "device-admin/owner",
+             "name": "Device administrator"},
+  "changed": true
+}}
+```
+
+and a withdrawal, which hands the path back to whatever was underneath:
+
+```json
+{"v":1,"id":"1","result":{
+  "capability": "security.firewall",
+  "pinned_value": null,
   "effective_value": "enabled",
   "source": {"kind": "organization_baseline", "rank": 2,
              "policy_id": "eng-baseline-v12",
              "name": "Acme Engineering Baseline"},
-  "changed": false
+  "changed": true
 }}
 ```
 
-`pinned_value` and `effective_value` are reported separately and are never
-collapsed, even when they agree: an administrator who pins a value an
-organization outranks has recorded something real (it becomes effective if
-the org layer is withdrawn) *and* changed nothing today, and one "done"
-line would let them believe otherwise.
+`pinned_value` and `effective_value` are reported separately because they
+genuinely differ on a withdrawal — the entry is gone and something else now
+decides — and because collapsing them would make the result a claim about
+the store rather than about the machine.
+
+**A successful pin always makes the pinned value effective**, and that is a
+consequence of step 5 rather than a coincidence: an administrator is refused
+outright when a higher layer already holds the path, so the case where a pin
+is recorded-but-overridden does not arise here. It is the one place
+`policy.set` deliberately behaves *unlike* `capabilities.set`, which records
+a preference even when outranked (section 5.4). The difference is who is
+asking: a user recording a preference under an organization's rule is
+expressing what they would like, and an administrator pinning a value that
+does nothing has simply been misled.
+
+**Withdrawing is exempt from step 5**, and must be. That step looks at who
+wins *now*, and an organization can come to outrank an entry pinned earlier
+— at which point the same test that stops an administrator pinning would
+stop them removing what they already pinned. The entry would sit in the
+store, inert while enrolled and silently back in force the day the device
+unenrolls. A clear can only ever remove a local opinion, so there is nothing
+for the check to protect.
 
 **This is an administrative control, not a security boundary.**
 `docs/design/execution-trust.md` says it plainly — a local root user
@@ -1280,8 +1311,10 @@ or path other than the confirmed target device. An installed system returns
   one-shot M3-store migration (`action: "state.migrate"`,
   `resource: "state_store"`, `source: "service"`, `user_id: "punard"`).
   Both action names match the schema's dotted-lowercase `action` pattern —
-  no schema change. Read methods (including the new `policy.*`) remain
-  unaudited.
+  no schema change. The `policy.*` READS (`policy.effective`,
+  `policy.explain`) remain unaudited; `policy.set` (section 5.8a) is a
+  mutation and is always audited, allow and deny, under
+  `action: "policy.set"` with the capability as the resource.
 - **M5 additions to the audited set:** `enroll.start` and `enroll.stop`
   (resource `"enrollment"`; allow and deny, success and failure; success
   `policy_ids` cite the org policy ids), and `enroll.sync` (resource
@@ -1402,7 +1435,8 @@ render enrollment/compliance chrome without a socket connection or polling
   ```json
   {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
    "compliance_overall": "compliant", "device_class": "laptop",
-   "device_class_source": "observed", "ts": "2026-08-26T09:02:00Z"}
+   "device_class_source": "observed", "architecture": "aarch64",
+   "ts": "2026-08-26T09:02:00Z"}
   ```
 
   (`org_name` is `null` and `enrolled` is `false` on a personal device.)
@@ -1411,6 +1445,15 @@ render enrollment/compliance chrome without a socket connection or polling
   only what the shell renders or uses for its resident-cost decision. A
   missing/unknown class fails to `appliance`, the least-resident experience;
   it never changes a security or privacy guarantee.
+- `architecture` is the device's package architecture as the application
+  catalogue spells it (`x86_64`, `aarch64`). It is here because the catalogue
+  file the shell reads is **identical on every architecture** — each app lists
+  its own per-architecture sources — so without it the shell offered
+  applications that exist only for another CPU and the refusal arrived after
+  the person had chosen one. Consumers fail **open** on a missing value: not
+  yet known means show everything, and punard's own refusal is the backstop.
+  This is display data like the rest of the file and is never an authorization
+  input; `apps.install` re-derives the architecture itself.
 - **Non-authoritative by design**: `/run/punar` is `0755 root:root`; daemons
   write the `0644 root:root` summaries and sessions only read them. Root
   ownership prevents local replacement, but the content remains display data,

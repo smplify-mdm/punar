@@ -590,6 +590,21 @@ Scope {
             /// moment: see settleFirstSession().
             property bool firstSessionSettled: false
 
+            /// THE GREETER HAS ASKED TO BE TORN DOWN and is waiting for the
+            /// desktop to take the screen. It looks like nothing at all is
+            /// happening — greetd has to start the session, session.sh has to
+            /// sync the web-app inventory and probe graphics, Hyprland has to
+            /// come up and the shell has to compile its QML — and on a first
+            /// boot that is many seconds of a screen that appeared to have
+            /// ignored the button. The button's own `busy` state is no help
+            /// here: the login process has already EXITED by this point, so it
+            /// reverted to "Enter desktop" and the machine looked idle.
+            ///
+            /// Sticky on purpose. Nothing clears it, because nothing should:
+            /// the next thing that happens to this surface is that it is
+            /// destroyed.
+            property bool handingOff: false
+
             /// See finishRecovery().
             property bool recoveryHandled: false
 
@@ -622,6 +637,7 @@ Scope {
 
                 if (response !== null && response.ok === true) {
                     panel.firstSessionSettled = true;
+                    panel.handingOff = true;
                     exitGreeter.running = true;
                     return;
                 }
@@ -892,6 +908,7 @@ Scope {
                     response = null;
                 }
                 if (response !== null && response.ok === true) {
+                    panel.handingOff = true;
                     exitGreeter.running = true;
                     return;
                 }
@@ -1609,10 +1626,23 @@ Scope {
                                     id: enterButton
                                     anchors.right: parent.right
                                     label: "Enter desktop"
-                                    busy: firstSession.running
+                                    busy: firstSession.running || panel.handingOff
+                                    enabled: !panel.handingOff
                                     previousFocusTarget: copyButton
                                     onInvoked: panel.startFirstSession()
                                 }
+                            }
+
+                            Text {
+                                width: parent.width
+                                visible: panel.handingOff
+                                text: "Starting your desktop. The first time takes a few seconds."
+                                wrapMode: Text.WordWrap
+                                horizontalAlignment: Text.AlignRight
+                                font.family: Theme.fontSans
+                                font.pixelSize: 13
+                                color: Theme.shellInk3
+                                textFormat: Text.PlainText
                             }
                         }
 
@@ -1697,8 +1727,8 @@ Scope {
                                 Action {
                                     anchors.right: parent.right
                                     label: "Sign in"
-                                    busy: panel.loginBusy
-                                    enabled: !panel.loginBusy
+                                    busy: panel.loginBusy || panel.handingOff
+                                    enabled: !panel.loginBusy && !panel.handingOff
                                     onInvoked: panel.login()
                                 }
                                 // Quiet, and on the left, because it is the rare

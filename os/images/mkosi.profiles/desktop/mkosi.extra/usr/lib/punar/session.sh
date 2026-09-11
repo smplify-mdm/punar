@@ -130,4 +130,24 @@ punar_clear_vt() {
 }
 punar_clear_vt
 
-exec Hyprland --config "${PUNAR_HYPRLAND_CONFIG}"
+# AND NOTHING MAY WRITE TO IT AFTERWARDS, which is the half the clear above was
+# missing. greetd connects a session's stdio straight to the VT — that is how
+# the packaged text greeter works at all — so the compositor's own startup log
+# is printed onto tty1 immediately after this clear runs. It is invisible while
+# the compositor holds DRM and is revealed the instant it exits, which is
+# precisely the handover the clear exists to keep black. Clearing and then
+# printing onto the same terminal removed the previous occupant's text and
+# replaced it with our own.
+#
+# The journal is where a compositor log belongs in any case: `journalctl -t
+# punar-session` reads it, and nothing is lost.
+punar_exec_compositor() {
+    if command -v systemd-cat >/dev/null 2>&1; then
+        exec systemd-cat --identifier=punar-session --priority=info -- "$@"
+    fi
+    # No systemd-cat: still never the terminal. A session-scoped file keeps the
+    # log reachable on a machine where the journal is not available.
+    exec "$@" >>"${XDG_RUNTIME_DIR:-/tmp}/punar-session.log" 2>&1
+}
+
+punar_exec_compositor Hyprland --config "${PUNAR_HYPRLAND_CONFIG}"

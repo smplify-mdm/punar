@@ -806,6 +806,7 @@ run_desktop() {
                      recovery-report.txt \
                      lock-frost-a.png lock-frost-a2.png lock-frost-b.png \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
+                     surfaces-mail-launch.txt surfaces-mail.png \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
                      surfaces-aipanel.png surfaces-overview.png \

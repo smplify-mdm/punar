@@ -885,6 +885,31 @@ DeferredSurfaceBase {
         };
     }
 
+    // A workspace addressed by number. It carries the live name when the
+    // workspace exists and has one, so a person typing "2" sees where they
+    // are going rather than a bare digit echoed back.
+    function workspaceRow(id: int, group: string): var {
+        var live = null;
+        var wss = Hyprland.workspaces.values;
+        for (var i = 0; i < wss.length; i++) {
+            if (wss[i].id === id) {
+                live = wss[i];
+                break;
+            }
+        }
+        var named = live !== null && WorkspaceState.isNamed(live);
+        return {
+            "group": group,
+            "glyph": "WS",
+            "name": named ? "Workspace " + id + " · " + root.titleCase(String(live.name)) : "Workspace " + id,
+            "meta": "Workspace(" + id + ") · " + (live !== null ? "switch" : "opens empty") + " · Punar " + (id <= 9 ? String(id) : "Tab"),
+            "cap": true,
+            "kind": "workspace",
+            "state": "shipped",
+            "arg": String(id)
+        };
+    }
+
     function appRow(entry: var, group: string): var {
         return {
             "group": group,
@@ -1146,7 +1171,15 @@ DeferredSurfaceBase {
         // project verb (a bare "chrom" is a search, not an intent to make a
         // workspace), and no named verb may have answered already (typing
         // "open terminal" means the terminal).
-        if (normalized !== "" && !exact && namedVerbs === 0 && actions.projectVerbUsed(q))
+        // A number addresses a workspace. This row is offered whether or not
+        // a verb was used, because "2" on its own is the shortest thing a
+        // person types when they want workspace 2, and it is placed before
+        // the create row so Enter can never fall through to a rename.
+        var wsAddress = actions.workspaceAddress(q);
+        if (wsAddress > 0)
+            out.push(root.workspaceRow(wsAddress, "Workspaces"));
+        if (normalized !== "" && !exact && namedVerbs === 0 && wsAddress < 0
+                && actions.projectVerbUsed(q))
             out.push(root.projectRow(normalized, "Projects", false));
 
         // ---- applications ----
@@ -1199,6 +1232,15 @@ DeferredSurfaceBase {
                 root.openCatalogApp(item.arg, item.catalog);
             else
                 root.askApp(item.arg);
+            return;
+        case "workspace":
+            // Void, like every other case: ipcRun builds its report line
+            // from kind and meta BEFORE it calls this, so returning a
+            // string here would be a second, silently unused answer.
+            if (actions.focusWorkspaceId(Number(item.arg)))
+                root.dismiss();
+            else
+                root.note = "That workspace could not be reached";
             return;
         case "project":
             if (actions.openProject(item.arg) >= 0)

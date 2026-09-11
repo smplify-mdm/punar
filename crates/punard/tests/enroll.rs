@@ -60,6 +60,9 @@ struct ControlPlaneState {
     /// Fault injection: serve a corrupt policy envelope (contradicted
     /// fixed rank) so the all-or-nothing abort path can be exercised.
     serve_bad_policy: AtomicBool,
+    /// Serve a desired state that turns local policy editing off
+    /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
+    deny_local_admin: AtomicBool,
     token_seq: AtomicUsize,
 }
 
@@ -100,10 +103,15 @@ impl ControlPlaneState {
                 if self.serve_bad_policy.load(Ordering::SeqCst) {
                     envelope["precedence_rank"] = json!(5); // fixed rank is 2
                 }
-                envelope.as_object_mut().unwrap().insert(
-                    "policy".to_string(),
-                    serde_json::from_str::<Value>(ACME_DESIRED).unwrap(),
-                );
+                let mut desired = serde_json::from_str::<Value>(ACME_DESIRED).unwrap();
+                if self.deny_local_admin.load(Ordering::SeqCst) {
+                    desired["spec"]["security"]["localAdmin"] =
+                        json!({ "policyEditing": "denied" });
+                }
+                envelope
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("policy".to_string(), desired);
                 Ok(json!({ "policies": [envelope] }))
             }
             "compliance.report" => {
@@ -756,6 +764,76 @@ fn conflicts_unknown_domains_and_bad_domains_are_typed_errors() {
     let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
     assert_eq!(error["code"], "conflict");
     assert_eq!(error["details"]["state"], "enrolled");
+}
+
+/// An organization can turn local policy editing off — and unenrolling must
+/// give it back.
+///
+/// THE BUG THIS CLOSES was an outlived opinion. `enroll.stop` cleared the org
+/// layers and the application policy but not the local-admin veto, so the
+/// device's owner stayed locked out of their own machine by a policy whose
+/// files had just been deleted, citing an organization it was no longer
+/// enrolled with, until punard happened to restart.
+#[test]
+fn an_organization_can_deny_local_policy_editing_and_unenrolling_gives_it_back() {
+    let dir = test_dir("localadmin");
+    let control_plane = ControlPlane::start(&dir);
+    control_plane
+        .state
+        .deny_local_admin
+        .store(true, Ordering::SeqCst);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+
+    // Before enrollment the owner administers the device.
+    let effective = daemon.result("policy.effective", None);
+    assert_eq!(effective["local_admin"]["allowed"], true);
+
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+
+    let effective = daemon.result("policy.effective", None);
+    assert_eq!(effective["local_admin"]["allowed"], false);
+    assert_eq!(
+        effective["local_admin"]["source"]["policy_id"],
+        "eng-baseline-v12"
+    );
+    // Even root is refused, and the refusal names who decided.
+    let error = daemon.error(
+        "policy.set",
+        Some(json!({
+            "capability": "security.firewall",
+            "value": "disabled",
+            "reason": "the lab bench machines run without it"
+        })),
+    );
+    assert_eq!(error["code"], "denied");
+    assert_eq!(error["details"]["reason"], "local_admin_disabled");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("eng-baseline-v12"),
+        "{error}"
+    );
+
+    // Unenroll — and the veto goes with the layers it arrived with, in this
+    // running daemon, without waiting for a restart.
+    daemon.result("enroll.stop", None);
+    let effective = daemon.result("policy.effective", None);
+    assert_eq!(effective["local_admin"]["allowed"], true);
+    assert!(effective["local_admin"].get("source").is_none());
+
+    let set = daemon.result(
+        "policy.set",
+        Some(json!({
+            "capability": "security.firewall",
+            "value": "disabled",
+            "reason": "the lab bench machines run without it"
+        })),
+    );
+    assert_eq!(set["capability"], "security.firewall");
+    assert_eq!(set["pinned_value"], "disabled");
+    assert_eq!(set["effective_value"], "disabled");
+    assert_eq!(set["source"]["kind"], "device_specific_override");
 }
 
 #[test]

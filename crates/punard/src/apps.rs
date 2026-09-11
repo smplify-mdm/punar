@@ -15,6 +15,7 @@ use std::io::Read;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,11 @@ const INSPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const VENDOR_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Configuring a remote writes a local config file and fetches the GPG key
+/// named by the repo file. It is not a download of app bytes and must not be
+/// given an install-sized budget: a minute is generous, and failing fast here
+/// leaves a person with a real error instead of a half-hour of nothing.
+const REMOTE_ADD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_VENDOR_PACKAGE_BYTES: u64 = 600 * 1024 * 1024;
 const VENDOR_HOME_PERMISSIONS: &[&str] = &[
     "Network access",
@@ -249,6 +255,14 @@ impl AppManager {
         })
     }
 
+    /// The device's package architecture, as the catalogue's `architectures`
+    /// arrays spell it. Published in the shell summary so a surface can decline
+    /// to OFFER an application this machine could never install, rather than
+    /// letting the person discover it from a refusal.
+    pub fn architecture(&self) -> &str {
+        &self.arch
+    }
+
     #[cfg(test)]
     fn with_arch(mut self, arch: &str) -> Self {
         self.arch = arch.to_string();
@@ -322,11 +336,22 @@ impl AppManager {
                 continue;
             };
             let (installed_now, commit, target, update_available) = match source {
-                Source::Flatpak { app_id, commit, .. } => installed
-                    .get(app_id)
-                    .map_or((false, Value::Null, json!(commit), false), |observed| {
-                        (true, json!(observed), json!(commit), observed != commit)
-                    }),
+                Source::Flatpak { app_id, commit, .. } => installed.get(app_id).map_or(
+                    (false, Value::Null, json!(commit), false),
+                    |observed| {
+                        // `observed` is abbreviated here — see
+                        // `installed_flatpaks`. The grid is a display, and one
+                        // subprocess per installed app to un-abbreviate it
+                        // would buy nothing: a prefix test answers "is an
+                        // update waiting" exactly as well.
+                        (
+                            true,
+                            json!(observed),
+                            json!(commit),
+                            !commit_is_pinned(observed, commit),
+                        )
+                    },
+                ),
                 Source::VendorDeb { sha256, .. } => {
                     let digest = self.installed_vendor_digest(&app.id)?;
                     let update_available = digest.as_deref().is_some_and(|value| value != sha256);
@@ -535,7 +560,50 @@ impl AppManager {
             }));
         }
 
-        let commit_arg = format!("--commit={commit}");
+        // THE REMOTE HAS TO EXIST, AND ON A FRESH DEVICE IT DOES NOT.
+        //
+        // mkosi.postinst.chroot runs `flatpak remote-add --system` at BUILD
+        // time, which writes /var/lib/flatpak/repo/config into the root slot.
+        // At boot, PUNAR-DATA's @var subvolume is mounted over /var
+        // (repart.d/install/50-data.conf) and shadows it — deliberately, so an
+        // A/B OS swap neither duplicates nor loses installed app bytes. The
+        // consequence nobody drew: /var/lib/flatpak is EMPTY on a fresh
+        // machine, so no remote exists and every install in the catalogue
+        // failed with "flatpak exited with exit status: 1" before touching the
+        // network. Verified on a real device: the connection table showed NTP
+        // and LLMNR and no TCP to Flathub at all.
+        //
+        // Adding it in a call rather than a boot unit keeps the enabled-unit
+        // manifest unchanged and puts the repair where the need is known. It is
+        // idempotent, the repo file is the signed one named by the catalogue,
+        // and a failure is reported rather than swallowed: an install about to
+        // fail for a missing remote should say THAT. `inspect_flatpak` above
+        // has already made the guarantee for this install; it is restated here
+        // because the install is a separate promise and reconcile may reach it
+        // by a path that skipped the card.
+        self.ensure_remote(remote)?;
+
+        // TWO COMMANDS, BECAUSE FLATPAK HAS NO INSTALL-TIME COMMIT FLAG.
+        //
+        // This used to pass `--commit=` to `flatpak install`, which does not
+        // accept it — only `flatpak update` does. flatpak rejected the whole
+        // command with "error: Unknown option --commit=…", so EVERY catalogue
+        // install failed, and the pin the card promised was never applied by
+        // that flag. Verified against flatpak 1.16.6: `install --help` lists
+        // --no-deploy, --noninteractive and --or-update and no --commit;
+        // `update --help` lists `--commit=COMMIT  Commit to deploy`.
+        //
+        // So: install the ref, then deploy the pinned commit onto it. When the
+        // remote's head already IS the pin — the normal case, since the
+        // catalogue is re-pinned against Flathub — the second command is a
+        // no-op. When it is not, the second command moves the deployment back
+        // to the bytes the person was shown.
+        //
+        // THE HONEST GAP, stated because it is real: between the two commands
+        // the remote's head is deployed, and it may not be the pinned commit.
+        // flatpak offers no way to close that window — there is no
+        // install-a-specific-commit verb — so the pin is enforced by the
+        // deploy below and the verification after it, not by the install.
         run_quiet_with_timeout(
             &self.flatpak_bin,
             &[
@@ -543,16 +611,47 @@ impl AppManager {
                 "--system",
                 "--noninteractive",
                 "--or-update",
-                &commit_arg,
                 remote,
                 r#ref,
             ],
             INSTALL_TIMEOUT,
         )?;
-        let observed = self.installed_commit(app_id)?;
-        if observed.as_deref() != Some(commit.as_str()) {
+        let commit_arg = format!("--commit={commit}");
+        run_quiet_with_timeout(
+            &self.flatpak_bin,
+            &["update", "--system", "--noninteractive", &commit_arg, r#ref],
+            INSTALL_TIMEOUT,
+        )?;
+        // THE WHOLE CHECKSUM, not the listing's twelve-character abbreviation:
+        // this is the comparison the card's promise rests on, so it compares
+        // every byte of the pin. A checksum flatpak will not report is treated
+        // exactly like a wrong one — an unverifiable pin is not a pin.
+        let verdict = match self.deployed_commit(app_id) {
+            Ok(observed) if observed == *commit => Ok(()),
+            Ok(observed) => Err(format!(
+                "{app_id} is deployed at {observed} instead of the pinned {commit}"
+            )),
+            Err(error) => Err(format!(
+                "{app_id} was installed but flatpak would not say which commit is deployed, so the pin could not be confirmed: {error}"
+            )),
+        };
+        if let Err(reason) = verdict {
+            // FAIL CLOSED. The card said Punar pins the exact bytes; bytes are
+            // deployed that are not those bytes, and leaving them installed
+            // while returning an error would make the promise false in the one
+            // case it exists for. Removal is best-effort — if it also fails the
+            // verification error still stands, and it names both facts.
+            let removed = run_quiet_with_timeout(
+                &self.flatpak_bin,
+                &["uninstall", "--system", "--noninteractive", app_id],
+                REMOVE_TIMEOUT,
+            );
             return Err(AppError::Verification(format!(
-                "Flatpak reported success, but {app_id} is at {observed:?} instead of the pinned commit"
+                "Flatpak reported success, but {reason}{}",
+                match removed {
+                    Ok(()) => "; the unpinned copy was removed",
+                    Err(_) => "; the unpinned copy could NOT be removed and is still installed",
+                }
             )));
         }
         Ok(json!({
@@ -608,6 +707,38 @@ impl AppManager {
             .iter()
             .find(|app| app.id == id)
             .ok_or_else(|| AppError::NotFound(id.to_string()))
+    }
+
+    /// Ensure the catalogue's named remote is configured in the system Flatpak
+    /// installation, using the repo file the signed catalogue points at.
+    ///
+    /// `--if-not-exists` makes this a no-op on every boot after the first, and
+    /// the argv is fixed: the only caller-influenced value is a remote id that
+    /// was validated against the catalogue when it loaded.
+    fn ensure_remote(&self, remote_id: &str) -> Result<(), AppError> {
+        let Some(remote) = self
+            .catalog
+            .remotes
+            .iter()
+            .find(|candidate| candidate.id == remote_id)
+        else {
+            return Err(AppError::Backend(format!(
+                "the catalogue names no remote {remote_id:?}, so this application cannot be fetched"
+            )));
+        };
+        let repo_file = remote.repo_file.to_string_lossy().into_owned();
+        run_quiet_with_timeout(
+            &self.flatpak_bin,
+            &[
+                "remote-add",
+                "--system",
+                "--if-not-exists",
+                "--from",
+                &remote.id,
+                &repo_file,
+            ],
+            REMOTE_ADD_TIMEOUT,
+        )
     }
 
     fn select_source<'a>(&self, app: &'a App) -> Result<&'a Source, AppError> {
@@ -1148,6 +1279,18 @@ impl AppManager {
         else {
             unreachable!("inspect_flatpak called for a web source")
         };
+        // THE REMOTE HAS TO EXIST BEFORE THIS LINE, NOT BEFORE THE INSTALL.
+        //
+        // `remote-info` resolves the ref through a configured remote, so on a
+        // fresh device — where PUNAR-DATA's @var subvolume shadows the empty
+        // /var/lib/flatpak the image build populated — the very first card a
+        // person opens fails before it can draw a single permission sentence.
+        // The repair used to sit further down `install`, which meant it only
+        // ever ran after an inspection that had already failed; it appeared to
+        // work in testing solely because a failed install had added the remote
+        // on the way past, so the SECOND attempt found one. Putting it here
+        // covers the card, the install and reconcile with one idempotent call.
+        self.ensure_remote(remote)?;
         let commit_arg = format!("--commit={commit}");
         let arch_arg = format!("--arch={}", self.arch);
         let result = run_with_timeout(
@@ -1185,6 +1328,13 @@ impl AppManager {
         })
     }
 
+    /// The installed system apps, mapped to the checksum of the active
+    /// deployment AS `flatpak list` RENDERS IT — which is abbreviated.
+    ///
+    /// This is the cheap enumeration: one subprocess for the whole set. It
+    /// answers "is it installed" exactly, and "which bytes" only to twelve
+    /// characters. Anything comparing against a catalogue pin wants
+    /// [`Self::deployed_commit`] instead.
     fn installed_flatpaks(&self) -> Result<BTreeMap<String, String>, AppError> {
         if self.catalog.apps.is_empty() {
             return Ok(BTreeMap::new());
@@ -1209,9 +1359,67 @@ impl AppManager {
             .collect())
     }
 
-    fn installed_commit(&self, app_id: &str) -> Result<Option<String>, AppError> {
-        Ok(self.installed_flatpaks()?.remove(app_id))
+    /// The FULL checksum of the deployment currently active for `app_id`.
+    ///
+    /// THE ABBREVIATION IS WHY THIS EXISTS. `flatpak list --columns=…,active`
+    /// prints the checksum ellipsized to twelve characters, and the catalogue
+    /// pins all sixty-four. Comparing the two with `!=` can never be equal, so
+    /// the post-install verification rejected installs that had in fact landed
+    /// on exactly the pinned commit and — failing closed, as it should when the
+    /// bytes really are wrong — uninstalled them. Evolution reported
+    /// `Some("4b6430b6e8b6")` "instead of the pinned commit" whose first twelve
+    /// characters are `4b6430b6e8b6`.
+    ///
+    /// `flatpak info --show-commit` is the only interface that reports the
+    /// whole checksum. A single `--show-` option prints the bare value; more
+    /// than one prints `Label: value` lines, so the last whitespace-separated
+    /// token is taken and then required to be a full checksum. An
+    /// unrecognisable answer is an error, never a shrug: a pin that cannot be
+    /// read is a pin that cannot be enforced.
+    fn deployed_commit(&self, app_id: &str) -> Result<String, AppError> {
+        let result = run_with_timeout(
+            &self.flatpak_bin,
+            &["info", "--system", "--show-commit", app_id],
+            INSPECT_TIMEOUT,
+        )
+        .map_err(|e| AppError::Backend(e.to_string()))?;
+        if !result.success {
+            return Err(AppError::Backend(clean_backend_error(&result.stderr)));
+        }
+        let commit = result
+            .stdout
+            .split_whitespace()
+            .next_back()
+            .unwrap_or_default();
+        // An ostree commit checksum has the shape of any other sha256.
+        if !is_sha256(commit) {
+            return Err(AppError::Backend(format!(
+                "flatpak reported the deployed commit of {app_id} as {commit:?}, which is not a checksum"
+            )));
+        }
+        Ok(commit.to_string())
     }
+
+    /// The full checksum of `app_id`, or `None` when it is not installed.
+    fn installed_commit(&self, app_id: &str) -> Result<Option<String>, AppError> {
+        if !self.installed_flatpaks()?.contains_key(app_id) {
+            return Ok(None);
+        }
+        self.deployed_commit(app_id).map(Some)
+    }
+}
+
+/// Whether the deployment `observed` is the catalogue's pinned `commit`.
+///
+/// `observed` is full whenever it came from [`AppManager::deployed_commit`],
+/// and the twelve-character abbreviation when it came from the cheap listing;
+/// a prefix test is equality for the first and the strongest available answer
+/// for the second. The abbreviated form is only ever used to render "an update
+/// is available" in the app grid — never to decide that installed bytes are
+/// the bytes a person was shown, which is [`AppManager::install`]'s job and
+/// compares full checksums.
+fn commit_is_pinned(observed: &str, pinned: &str) -> bool {
+    observed.len() >= 12 && pinned.starts_with(observed)
 }
 
 fn source_kind(source: &Source) -> &'static str {
@@ -1332,7 +1540,7 @@ fn extract_member_to_file(
         .stderr(Stdio::null())
         .spawn_busy_retry()
         .map_err(backend_io)?;
-    wait_quiet_child(bin, &mut child, timeout)
+    wait_quiet_child(bin, &mut child, timeout, None)
 }
 
 fn extract_text_member(
@@ -1416,23 +1624,58 @@ fn extract_payload(
         .stderr(Stdio::null())
         .spawn_busy_retry()
         .map_err(backend_io)?;
-    wait_quiet_child(bin, &mut child, timeout)
+    wait_quiet_child(bin, &mut child, timeout, None)
 }
 
+/// Wait for a fixed-argv backend child, and — when `capture` names a file its
+/// stderr was redirected to — say what it said.
+///
+/// STDERR USED TO GO TO /dev/null on every caller, and the cost was paid by a
+/// person rather than a log: a failed install produced exactly
+/// "/usr/bin/flatpak exited with exit status: 1" on the install card, and
+/// punard's own next-step text had to GUESS at the cause ("check network
+/// connectivity and `flatpak remotes`") because the daemon had discarded the
+/// one sentence that knew.
 fn wait_quiet_child(
     bin: &Path,
     child: &mut std::process::Child,
     timeout: Duration,
+    capture: Option<&Path>,
 ) -> Result<(), AppError> {
+    // Read at most this much back: enough for any real diagnostic, bounded so a
+    // runaway backend cannot make the daemon allocate on its behalf.
+    const MAX_CAPTURE: u64 = 64 * 1024;
+    let detail = |capture: Option<&Path>| -> String {
+        let Some(path) = capture else {
+            return String::new();
+        };
+        let mut text = String::new();
+        if let Ok(file) = File::open(path) {
+            let _ = file.take(MAX_CAPTURE).read_to_string(&mut text);
+        }
+        let _ = fs::remove_file(path);
+        backend_failure_detail(&text)
+    };
+    let discard = |capture: Option<&Path>| {
+        if let Some(path) = capture {
+            let _ = fs::remove_file(path);
+        }
+    };
+
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) if status.success() => {
+                discard(capture);
+                return Ok(());
+            }
             Ok(Some(status)) => {
-                return Err(AppError::Backend(format!(
-                    "{} exited with {status}",
-                    bin.display()
-                )));
+                let said = detail(capture);
+                return Err(AppError::Backend(if said.is_empty() {
+                    format!("{} exited with {status}", bin.display())
+                } else {
+                    format!("{} exited with {status}: {said}", bin.display())
+                }));
             }
             Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -1440,12 +1683,20 @@ fn wait_quiet_child(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(AppError::Backend(format!(
-                    "{} timed out after {timeout:?}",
-                    bin.display()
-                )));
+                let said = detail(capture);
+                return Err(AppError::Backend(if said.is_empty() {
+                    format!("{} timed out after {timeout:?}", bin.display())
+                } else {
+                    format!(
+                        "{} timed out after {timeout:?}; last said: {said}",
+                        bin.display()
+                    )
+                }));
             }
-            Err(error) => return Err(backend_io(error)),
+            Err(error) => {
+                discard(capture);
+                return Err(backend_io(error));
+            }
         }
     }
 }
@@ -1887,6 +2138,19 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>
                 .to_string(),
         );
     }
+    // THE UNFILTERED SESSION BUS, which app-catalog.md section 8 lists as a
+    // bypass trigger and this function did not implement. It matters more than
+    // the others because it silently invalidates them: `sockets=session-bus`
+    // bind-mounts the REAL bus socket into the sandbox and attaches no
+    // xdg-dbus-proxy, so the app's own [Session Bus Policy] block — every line
+    // this card renders from it — is decorative. Without this trigger the card
+    // showed a tidy list of bus permissions for an app bound by none of them.
+    if has("sockets", "session-bus") {
+        host_access.push(
+            "This app reaches the desktop's message bus without a filter, so the desktop permissions listed for it are not enforced on it."
+                .to_string(),
+        );
+    }
     if has("devices", "all") {
         host_access.push(
             "This app can reach every device on this machine, including cameras, microphones and USB hardware."
@@ -1924,8 +2188,49 @@ fn inspect_permissions(metadata: &str) -> (Containment, Vec<String>, Vec<String>
         let access = if mode == "ro" { "read-only" } else { mode };
         permissions.push(format!("{path} files ({access})"));
     }
-    if !session_bus.is_empty() {
-        permissions.push("Desktop media controls".to_string());
+    // NAME THE BUS, DO NOT PARAPHRASE IT. Every entry in [Session Bus Policy]
+    // used to collapse into the single string "Desktop media controls", which
+    // was wrong for almost every application that has one and catastrophically
+    // wrong for the one that matters most: an app declaring
+    // `org.freedesktop.secrets=talk` can read and write EVERY saved password on
+    // this device, and the card said it wanted media controls.
+    //
+    // That line is the whole of Punar's answer to "who can read my
+    // credentials". The Secret Service protocol has no per-application access
+    // control — anything holding the bus name reads anything unlocked — so the
+    // sandbox declaration, shown before the person agrees, is the enforcement
+    // point. It has to be legible.
+    for name in &session_bus {
+        permissions.push(match name.as_str() {
+            // THE CONSEQUENCE, NOT THE PERMISSION NAME. "Your saved passwords"
+            // reads as though this app is asking about its own, and it is not:
+            // the Secret Service protocol has no per-application separation, so
+            // one grant is a grant over every password every other application
+            // has saved. A person agreeing to this is agreeing to that.
+            "org.freedesktop.secrets" | "org.gnome.keyring.SystemPrompter" => {
+                "Every password saved by every app on this device (read and write) — the desktop's password service has no per-app separation".to_string()
+            }
+            "org.freedesktop.Notifications" => "Send notifications".to_string(),
+            "org.freedesktop.portal.Desktop" => "Desktop portals".to_string(),
+            "org.gnome.OnlineAccounts" => "Your configured online accounts".to_string(),
+            "org.a11y.Bus" => "Accessibility services".to_string(),
+            "org.mpris.MediaPlayer2.*" | "org.mpris.MediaPlayer2" => {
+                "Desktop media controls".to_string()
+            }
+            other => format!("Desktop service {other}"),
+        });
+    }
+    // Sockets that are access, not display. None of these was rendered at all,
+    // so a smartcard reader and a printer queue were invisible on a card whose
+    // entire purpose is to show what an application asked for.
+    if has("sockets", "pcsc") {
+        permissions.push("Smartcards and security keys".to_string());
+    }
+    if has("sockets", "cups") {
+        permissions.push("Printers".to_string());
+    }
+    if has("shared", "ipc") {
+        permissions.push("Shared IPC with the desktop".to_string());
     }
     permissions.sort();
     permissions.dedup();
@@ -1953,38 +2258,74 @@ fn clean_backend_error(stderr: &str) -> String {
     }
 }
 
+/// Distinguishes concurrent captures. Two installs cannot share a file, and a
+/// pid alone would collide with itself across sequential calls in one process.
+static BACKEND_CAPTURE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// The most informative line of a backend's stderr.
+///
+/// [`clean_backend_error`] takes the FIRST line, which is right for the tools
+/// that lead with their complaint. flatpak does not: it narrates progress and
+/// puts the reason last, prefixed `error:`. Taking the first line there yields
+/// a download counter.
+fn backend_failure_detail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let chosen = lines
+        .iter()
+        .rev()
+        .find(|line| line.to_ascii_lowercase().starts_with("error:"))
+        .or_else(|| lines.last())
+        .copied()
+        .unwrap_or_default();
+    chosen.chars().take(240).collect()
+}
+
+/// Run a fixed-argv backend command, and — on failure — say what it said.
+///
+/// STDERR USED TO GO TO /dev/null, and the cost of that was paid by a person
+/// rather than a log. An install that failed produced exactly
+/// "/usr/bin/flatpak exited with exit status: 1" on the card, and punard's own
+/// next-step text had to GUESS at the cause ("check network connectivity and
+/// `flatpak remotes`") because the daemon had thrown away the one sentence that
+/// knew. The two operations behind this function, install and uninstall, are
+/// the ones most likely to fail for a reason worth reading.
+///
+/// A FILE AND NOT A PIPE, deliberately. This function polls `try_wait` in a
+/// loop and never reads the child's output; with a pipe, a backend chatty
+/// enough to fill the buffer would block on write while this loop waited for it
+/// to exit, and an install would hang until the timeout instead of failing. A
+/// file cannot deadlock. It is read only on failure, and bounded.
 fn run_quiet_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Result<(), AppError> {
+    // A FILE AND NOT A PIPE, deliberately. The wait loop polls `try_wait` and
+    // never reads the child's output; with a pipe, a backend chatty enough to
+    // fill the buffer would block on write while the loop waited for it to
+    // exit, so an install would hang until the timeout instead of failing. A
+    // file cannot deadlock, and it is read only on failure.
+    let capture_path = std::env::temp_dir().join(format!(
+        "punard-backend-{}-{}.err",
+        std::process::id(),
+        BACKEND_CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let stderr_target = match File::create(&capture_path) {
+        Ok(file) => Stdio::from(file),
+        // A capture we cannot open must never stop the operation it was only
+        // going to describe.
+        Err(_) => Stdio::null(),
+    };
+    let capture = capture_path.exists().then_some(capture_path.as_path());
+
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr_target)
         .spawn_busy_retry()
         .map_err(|e| AppError::Backend(e.to_string()))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(AppError::Backend(format!(
-                    "{} exited with {status}",
-                    bin.display()
-                )));
-            }
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(AppError::Backend(format!(
-                    "{} timed out after {timeout:?}",
-                    bin.display()
-                )));
-            }
-            Err(e) => return Err(AppError::Backend(e.to_string())),
-        }
-    }
+    wait_quiet_child(bin, &mut child, timeout, capture)
 }
 
 #[cfg(test)]
@@ -2003,7 +2344,7 @@ mod tests {
         let metadata_path = dir.join("metadata");
         fs::write(&metadata_path, metadata).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\nremote-add) : ;;\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; exit 0 ;;\ninfo) exit 1 ;;\n*) exit 1 ;;\nesac\n",
             metadata_path.display()
         );
         fs::write(&bin, script).unwrap();
@@ -2188,6 +2529,102 @@ mod tests {
         );
     }
 
+    /// An application that can read every saved password must SAY so on the
+    /// card, in those words.
+    ///
+    /// This is Evolution's real metadata, and it is the case that made the bug
+    /// worth fixing: `org.freedesktop.secrets=talk` used to render as "Desktop
+    /// media controls". The Secret Service protocol has no per-application
+    /// access control, so this declaration — shown before a person agrees — is
+    /// the entire enforcement point Punar has over who reads credentials. A
+    /// wrong word here is not a cosmetic defect.
+    #[test]
+    fn an_app_that_can_read_every_saved_password_says_so() {
+        let evolution = "[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;fallback-x11;pcsc;\ndevices=dri;\nfilesystems=~/.gnupg;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\norg.gnome.keyring.SystemPrompter=talk\norg.gnome.OnlineAccounts=talk\norg.freedesktop.secrets=talk\n";
+        let (_containment, permissions, _host_access) = inspect_permissions(evolution);
+        assert!(
+            permissions
+                .iter()
+                .any(|p| p.contains("Every password saved by every app")),
+            "the card must name the shared pot, not merely the permission: {permissions:?}"
+        );
+        assert!(
+            !permissions.iter().any(|p| p == "Desktop media controls"),
+            "this app asked for no media controls; claiming it did was the bug: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("Smartcards")),
+            "sockets=pcsc was rendered nowhere at all: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("online accounts")),
+            "org.gnome.OnlineAccounts must be named: {permissions:?}"
+        );
+        assert!(
+            permissions.iter().any(|p| p.contains("Send notifications")),
+            "org.freedesktop.Notifications must be named: {permissions:?}"
+        );
+    }
+
+    /// `sockets=session-bus` invalidates every bus permission the card renders,
+    /// so it has to be a bypass trigger rather than a quiet extra socket.
+    ///
+    /// flatpak bind-mounts the real session-bus socket for this and attaches no
+    /// filtering proxy, so the app's own [Session Bus Policy] block binds
+    /// nothing. Before this, such an app was drawn with a tidy list of bus
+    /// permissions it was not actually held to — which is worse than showing
+    /// nothing, because a list reads as a limit.
+    #[test]
+    fn an_unfiltered_session_bus_is_a_bypass_and_not_a_permission() {
+        let unfiltered = "[Context]\nshared=network;\nsockets=wayland;session-bus;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\n";
+        let (containment, _permissions, host_access) = inspect_permissions(unfiltered);
+        assert_eq!(
+            containment,
+            Containment::Bypass,
+            "an unfiltered session bus is not a sandboxed app"
+        );
+        assert!(
+            host_access.iter().any(|s| s.contains("without a filter")),
+            "the reason must be named: {host_access:?}"
+        );
+
+        // The ordinary case is unchanged: the same declaration WITHOUT the raw
+        // socket stays sandboxed, so this trigger cannot quietly reclassify
+        // every app that talks to the bus at all.
+        let filtered = "[Context]\nshared=network;\nsockets=wayland;\n[Session Bus Policy]\norg.freedesktop.Notifications=talk\n";
+        let (containment, _permissions, host_access) = inspect_permissions(filtered);
+        assert_eq!(containment, Containment::Sandboxed);
+        assert!(host_access.is_empty(), "{host_access:?}");
+    }
+
+    /// flatpak narrates progress and puts its reason LAST, prefixed `error:`.
+    /// Taking the first line — which is right for tools that lead with their
+    /// complaint — yields a download counter, so the selection has to prefer
+    /// the `error:` line.
+    #[test]
+    fn a_backend_failure_quotes_the_line_that_explains_it() {
+        let flatpak = "Looking for matches…\n                       Required runtime for org.gnome.Calendar/aarch64/stable\n                       Downloading… 12%\n                       error: Unable to load summary from remote flathub: Failed to fetch\n";
+        assert_eq!(
+            backend_failure_detail(flatpak),
+            "error: Unable to load summary from remote flathub: Failed to fetch"
+        );
+
+        // No `error:` line: the last thing said is better than the first, which
+        // in a progress-narrating tool is always noise.
+        assert_eq!(
+            backend_failure_detail("Looking for matches…\nsomething went wrong\n"),
+            "something went wrong"
+        );
+
+        // Nothing at all is not a crash and not a fake explanation.
+        assert_eq!(backend_failure_detail(""), "");
+        assert_eq!(backend_failure_detail("\n  \n"), "");
+
+        // Bounded, so a runaway backend cannot dictate the size of an error.
+        let huge = format!("error: {}", "x".repeat(4096));
+        assert_eq!(backend_failure_detail(&huge).chars().count(), 240);
+    }
+
     /// The other direction: an app that really can read everything says so, and
     /// says nothing about devices it cannot touch.
     #[test]
@@ -2209,6 +2646,23 @@ mod tests {
         assert!(host_access.is_empty());
     }
 
+    /// The grid's "an update is waiting" hint reads an abbreviated checksum
+    /// and must not mistake it for drift.
+    #[test]
+    fn an_abbreviated_checksum_still_recognises_its_own_pin() {
+        let pin = "4b6430b6e8b6d4a6cc0714379037059eb7b6c444fedc021fd60ea145a011eedc";
+        assert!(
+            commit_is_pinned("4b6430b6e8b6", pin),
+            "flatpak's own listing"
+        );
+        assert!(commit_is_pinned(pin, pin), "and the whole checksum");
+        assert!(!commit_is_pinned("4b6430b6e8b7", pin), "one character out");
+        // A short prefix is not evidence. Twelve characters is what flatpak
+        // prints; anything shorter is refused rather than charitably matched.
+        assert!(!commit_is_pinned("4b6430b6e8b", pin));
+        assert!(!commit_is_pinned("", pin));
+    }
+
     #[test]
     fn install_requires_the_displayed_digest_and_verifies_the_pinned_commit() {
         let metadata = "[Context]\nshared=network;\nsockets=wayland;\n";
@@ -2218,12 +2672,14 @@ mod tests {
         let argv_path = dir.join("argv");
         let bin = dir.join("stateful-flatpak");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) [ \"$4\" = '--columns=application,active' ] || {{ echo 'unexpected list columns' >&2; exit 2; }}; if [ -f '{}' ]; then printf 'com.spotify.Client\\t%.12s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ \"$3\" = '--show-commit' ] || {{ echo 'unexpected info options' >&2; exit 2; }}; [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(),
             metadata_path.display(),
             state_path.display(),
             state_path.display(),
             state_path.display(),
+            state_path.display(),
+            // the `update --commit=` arm writes the commit it was given
             state_path.display(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             state_path.display(),
@@ -2247,14 +2703,110 @@ mod tests {
         assert!(!state_path.exists(), "a stale card installed nothing");
 
         let installed = manager.install("spotify", &digest, false).unwrap();
+        // THE REMOTE IS CONFIGURED BEFORE THE INSTALL, and this asserts it
+        // through the recorded argv rather than trusting the call site. On a
+        // real device /var is a separate subvolume that shadows what the image
+        // build wrote, so without this every catalogue install fails before it
+        // reaches the network.
+        let argv = fs::read_to_string(&argv_path).unwrap();
+        let remote_add_line = argv
+            .lines()
+            .position(|line| line.starts_with("remote-add "))
+            .expect("the install path configures the remote");
+        let install_line = argv
+            .lines()
+            .position(|line| line.starts_with("install "))
+            .expect("the install ran");
+        assert!(
+            remote_add_line < install_line,
+            "the remote must be configured BEFORE the install, got:\n{argv}"
+        );
+        // AND BEFORE THE INSPECTION, which is the earlier need and the one
+        // that was missed. `remote-info` resolves the ref through a configured
+        // remote, so on a fresh device the permission card itself failed —
+        // never reaching the install whose repair would have fixed it. That
+        // read as working only because a failed first attempt left the remote
+        // behind for the second.
+        let remote_info_line = argv
+            .lines()
+            .position(|line| line.starts_with("remote-info "))
+            .expect("the card inspects the remote metadata");
+        assert!(
+            remote_add_line < remote_info_line,
+            "the remote must be configured BEFORE the metadata is read, got:\n{argv}"
+        );
+        assert!(
+            argv.lines().any(|line| line.starts_with("remote-add ")
+                && line.contains("--if-not-exists")
+                && line.contains("flathub.flatpakrepo")),
+            "remote-add must be idempotent and use the catalogue's signed repo file:\n{argv}"
+        );
         assert_eq!(installed["changed"], true);
         assert_eq!(
             fs::read_to_string(&state_path).unwrap().trim(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         let argv = fs::read_to_string(&argv_path).unwrap();
-        assert!(argv.contains("install --system --noninteractive --or-update --commit=aaaaaaaa"));
+        // THIS ASSERTION USED TO PIN AN INVALID COMMAND. It required
+        // `install … --or-update --commit=aaaaaaaa`, and `flatpak install` has
+        // no --commit option — only `flatpak update` does. flatpak rejected the
+        // whole command with "Unknown option --commit=…", so every catalogue
+        // install failed on a real machine while this test passed: the double's
+        // `install)` arm ignores arguments it does not recognise, exactly as a
+        // stub does and the real program does not.
+        //
+        // So the shape is asserted as two commands, in order, and the pin is
+        // asserted through the STATE the double writes from `--commit=` rather
+        // than through the argv alone.
+        assert!(
+            argv.contains("install --system --noninteractive --or-update flathub app/"),
+            "install must carry no --commit; flatpak rejects it:\n{argv}"
+        );
+        assert!(
+            !argv
+                .lines()
+                .any(|line| line.starts_with("install ") && line.contains("--commit")),
+            "no install line may carry --commit:\n{argv}"
+        );
+        assert!(
+            argv.contains("update --system --noninteractive --commit=aaaaaaaa"),
+            "the pinned commit is deployed by `update`, which is the verb that accepts it:\n{argv}"
+        );
+        let install_at = argv
+            .lines()
+            .position(|l| l.starts_with("install "))
+            .unwrap();
+        let update_at = argv.lines().position(|l| l.starts_with("update ")).unwrap();
+        assert!(
+            install_at < update_at,
+            "the ref must exist before a commit can be deployed onto it:\n{argv}"
+        );
         assert!(!argv.contains("sh -c"));
+
+        // THE ABBREVIATION IS THE POINT OF THIS BLOCK. `flatpak list
+        // --columns=…,active` ellipsizes the checksum to twelve characters
+        // while the catalogue pins sixty-four, so a listing value compared to a
+        // pin with `!=` is unequal even when the right bytes are deployed —
+        // which is how a successful Evolution install got verified as wrong and
+        // then uninstalled. The double abbreviates exactly as flatpak does, so
+        // reintroducing that comparison fails the install assertions above
+        // rather than passing here and failing on the person's machine.
+        let listed = manager.installed_flatpaks().unwrap();
+        assert_eq!(
+            listed.get("com.spotify.Client").map(String::as_str),
+            Some("aaaaaaaaaaaa"),
+            "the listing abbreviates, as flatpak does"
+        );
+        assert_eq!(
+            manager.installed_commit("com.spotify.Client").unwrap(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            "the pin comparison reads the whole checksum"
+        );
+        assert!(
+            argv.lines()
+                .any(|line| line.starts_with("info ") && line.contains("--show-commit")),
+            "the full checksum comes from `flatpak info --show-commit`:\n{argv}"
+        );
 
         fs::write(
             &state_path,

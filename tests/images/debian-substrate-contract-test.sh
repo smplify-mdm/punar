@@ -41,6 +41,15 @@ package_set() {
             print
             next
         }
+        # AN INDENTED COMMENT CONTINUES THE LIST, it does not end it. The rule
+        # above deliberately excludes "#" so a comment is not read as a package
+        # name, and without this line it fell through to the exit below — so a
+        # single explanatory comment inside Packages= made every package AFTER
+        # it invisible to this test. That failed in the most misleading
+        # direction available: "Debian desktop release lacks installer runtime
+        # package zstd", about a package that was present the whole time.
+        collecting && /^[[:space:]]+#/ { next }
+        collecting && /^[[:space:]]*$/ { next }
         collecting { exit }
     ' "$1" | LC_ALL=C sort -u
 }

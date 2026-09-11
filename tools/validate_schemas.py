@@ -69,6 +69,7 @@ STAGED_NETWORK = REPO / "crates/punar-netd/data"
 MANIFEST: list[tuple[str, str | None]] = [
     # --- signed-image application catalog -----------------------------------
     ("catalog/catalog.json", "schemas/catalog/app-catalog.json"),
+    ("catalog/architecture-exceptions.json", "schemas/catalog/architecture-exceptions.json"),
     # --- schemas/**/examples/ ------------------------------------------------
     ("schemas/ai-agent/examples/agent-definition*", "schemas/ai-agent/agent-definition.json"),
     ("schemas/ai-agent/examples/ledger-summary*", "schemas/ai-agent/ledger-summary.json"),
@@ -166,8 +167,67 @@ MANIFEST: list[tuple[str, str | None]] = [
 DOC_SUFFIXES = {".json", ".yaml", ".yml"}
 
 
+def catalog_architecture_error(instance) -> str | None:
+    """CURATION.md admission rule 2, as a gate rather than a habit.
+
+    Every entry must build for both supported architectures, or carry a
+    deliberately labelled official web fallback for the missing one. Entries
+    that meet neither are ACKNOWLEDGED in catalog/architecture-exceptions.json;
+    anything else fails here.
+
+    Why a list and not a warning: `thunderbird` had no aarch64 source and was
+    the catalogue's only mail client, so on an ARM machine the one application
+    a person needed for a whole category simply could not be installed — and
+    nothing said so until they chose it. A warning nobody reads would have
+    produced the same afternoon. A stale entry on the list is an error too: an
+    acknowledgement that has quietly become untrue is worse than none.
+    """
+    exceptions_path = REPO / "catalog/architecture-exceptions.json"
+    try:
+        acknowledged = json.loads(exceptions_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"catalog/architecture-exceptions.json is unreadable: {exc}"
+    supported = acknowledged.get("supported_architectures") or []
+    listed = acknowledged.get("apps") or {}
+    if not supported:
+        return "catalog/architecture-exceptions.json names no supported_architectures"
+
+    unlisted, stale = [], []
+    for app in instance.get("apps", []):
+        covered = set()
+        for source in app.get("sources", []):
+            covered.update(source.get("architectures") or [])
+        missing = [arch for arch in supported if arch not in covered]
+        app_id = app.get("id", "?")
+        if missing and app_id not in listed:
+            unlisted.append(f"{app_id} (no source for {', '.join(missing)})")
+        if not missing and app_id in listed:
+            stale.append(app_id)
+    for app_id, entry in listed.items():
+        if not str((entry or {}).get("reason", "")).strip():
+            unlisted.append(f"{app_id} is acknowledged with no stated reason")
+
+    problems = []
+    if unlisted:
+        problems.append(
+            "CURATION rule 2: "
+            + "; ".join(sorted(unlisted))
+            + " — add an aarch64 source, a labelled web fallback, or an entry in "
+            "catalog/architecture-exceptions.json saying why neither exists"
+        )
+    if stale:
+        problems.append(
+            "stale architecture exception(s) for "
+            + ", ".join(sorted(stale))
+            + " — these now build for every supported architecture; remove them"
+        )
+    return " | ".join(problems) if problems else None
+
+
 def semantic_error(instance, schema_rel: str) -> str | None:
     """Cross-field invariants JSON Schema cannot express."""
+    if schema_rel == "schemas/catalog/app-catalog.json":
+        return catalog_architecture_error(instance)
     if schema_rel != "schemas/install/plan.json":
         return None
     try:

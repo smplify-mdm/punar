@@ -254,6 +254,42 @@ QtObject {
         return /^(?:open|go\s+to|goto|switch\s+to|switch|project|workspace)\s+/i.test(String(query).trim());
     }
 
+    // A BARE NUMBER IS AN ADDRESS, NOT A NAME, and reading it as a name was
+    // destructive rather than merely unhelpful. Spec §13.3 gives 1..9 to
+    // workspaces, so "2", "switch to 2" and "workspace 3" all mean go there.
+    // What happened instead: the digit survived projectArgument, normalized
+    // as a legal project name, matched nothing — knownProjects skips the
+    // unnamed numeric workspaces, which is exactly what a plain workspace 2
+    // is — and so the surface offered to CREATE a project called "2" at
+    // whatever id was free. Pressing Enter renamed a different, unrelated
+    // workspace to "2". milestone-2.md §153 names this surface the
+    // discoverable path for go-to-workspace; it was the path to a rename
+    // nobody asked for.
+    //
+    // Bounded at 99 to match freeWorkspaceId's own range, and leading zeros
+    // are refused so "007" stays available as a project name.
+    function workspaceAddress(query: string): int {
+        var q = root.projectArgument(query).trim();
+        if (!/^[1-9][0-9]?$/.test(q))
+            return -1;
+        return Number(q);
+    }
+
+    // Switch to a workspace by id. Named for what it does, and separate
+    // from openProject, which creates and renames.
+    //
+    // THROUGH HyprlandActions, and the gate that rejected the first version of
+    // this was right for a reason beyond tidiness: `Hyprland.dispatch("workspace
+    // N")` is the LEGACY dispatcher string, and this session is Lua-native. It
+    // would have parsed, returned, and moved nothing — a switch verb that
+    // silently does nothing, which is worse than the rename it replaced.
+    function focusWorkspaceId(id: int): bool {
+        if (id < 1)
+            return false;
+        HyprlandActions.focusWorkspace(id);
+        return true;
+    }
+
     // Every project workspace this device knows: the live ones the
     // compositor reports, plus the stored ones from workspaces.json that
     // have not been recreated this session (WorkspaceState.pendingNames —

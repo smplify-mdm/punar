@@ -104,7 +104,7 @@ fi
 jq_check "status shape (protocol 1, personal, unenrolled, dev_ id, 5 capabilities)" \
     "${RUN_DIR}/m3-status.json" \
     '.protocol_version == 1 and .mode == "personal" and .enrolled == false
-     and (.device_id | test("^dev_[A-Za-z0-9]+$")) and .capabilities_total == 5'
+     and (.device_id | test("^dev_[A-Za-z0-9]+$")) and .capabilities_total == 6'
 jq_check "device class is observed from explicit Linux facts" \
     "${RUN_DIR}/m3-status.json" \
     '.device.source == "observed"

@@ -132,6 +132,81 @@ Singleton {
     // failure for a row nobody classified, and these rows are classified.
     readonly property var byCommand: [["punar-layout.sh", "LAYOUTS"], ["footclient", "SURFACES"], ["foot", "SURFACES"], ["chromium", "SURFACES"], ["wpctl", "MEDIA"], ["grim", "SESSION"]]
 
+    // THE DISPATCHER CHANNEL IS GONE, AND THE SHIPPED SURFACE PROVED IT.
+    // The Lua-native session registers every bind through hl.bind, and
+    // `hyprctl binds -j` reports EVERY one of them with dispatcher
+    // `__lua` and an opaque callback id as the arg — including the ones
+    // that were `exec` under the .conf grammar, which is why byIpcTarget
+    // and byCommand went dark at the same moment as bySection. The
+    // captured proof reads `75 BINDS · 75 ROWS · 0 UNDESCRIBED ·
+    // 75 UNMAPPED` under a single OTHER heading: not one row classified,
+    // and the digit fold never fired. A person opening PUNAR+/ to learn
+    // how to reach another workspace got seventy-five undifferentiated
+    // rows with WORKSPACES AND PROJECTS scrolled off the bottom, which is
+    // exactly the failure spec §12.3 names this surface to prevent and
+    // D-017 Sect V·03 designates it the fallback for.
+    //
+    // So classify on what the Lua session DOES expose. surfaces-check.sh
+    // states the contract in its own words: "their stable runtime
+    // contract is the key and human description". The description is
+    // authored in punar-binds.lua, in this repository, one line from the
+    // bind it names — the same distance byCommand's command strings sit
+    // from theirs.
+    //
+    // ORDERED, and first match wins, because the specific case must beat
+    // the general one: "Move window to workspace 3" is a WORKSPACES row
+    // and "Move window left" is a WINDOWS row, and they share a prefix.
+    // A description this table does not know still falls to OTHER and
+    // still counts as unmapped in the footer — the drift stays loud,
+    // which is the property the dispatcher table was chosen for and the
+    // one worth keeping.
+    readonly property var byDescription: [
+        ["Move window to workspace ", "WORKSPACES AND PROJECTS"],
+        ["Workspace ", "WORKSPACES AND PROJECTS"],
+        ["Previous workspace", "WORKSPACES AND PROJECTS"],
+        ["Project overview", "WORKSPACES AND PROJECTS"],
+        ["Move window into group ", "LAYOUTS"],
+        ["Move window out of group", "LAYOUTS"],
+        ["Move window to left monitor", "WINDOWS"],
+        ["Move window to right monitor", "WINDOWS"],
+        ["Move window to upper monitor", "WINDOWS"],
+        ["Move window to lower monitor", "WINDOWS"],
+        ["Move window ", "WINDOWS"],
+        ["Focus status cluster", "SURFACES"],
+        ["Focus ", "WINDOWS"],
+        ["Close window", "WINDOWS"],
+        ["Window actions", "WINDOWS"],
+        ["Enter resize mode", "WINDOWS"],
+        ["Exit resize mode", "WINDOWS"],
+        ["Resize ", "WINDOWS"],
+        ["Toggle window group", "LAYOUTS"],
+        ["Previous window in group", "LAYOUTS"],
+        ["Next window in group", "LAYOUTS"],
+        ["Toggle fullscreen", "LAYOUTS"],
+        ["Toggle floating", "LAYOUTS"],
+        ["Pin floating window", "LAYOUTS"],
+        ["Center floating window", "LAYOUTS"],
+        ["Previous layout preset", "LAYOUTS"],
+        ["Next layout preset", "LAYOUTS"],
+        ["Open command center", "SURFACES"],
+        ["Open terminal", "SURFACES"],
+        ["Open browser", "SURFACES"],
+        ["AI on this device", "SURFACES"],
+        ["Privacy and network activity", "SURFACES"],
+        ["Toggle scratchpad terminal", "SURFACES"],
+        ["Toggle assistant scratchpad", "SURFACES"],
+        ["Toggle notes scratchpad", "SURFACES"],
+        ["Notification centre", "SURFACES"],
+        ["Shortcut help", "SURFACES"],
+        ["System control", "SURFACES"],
+        ["Screenshot ", "SESSION"],
+        ["Volume ", "MEDIA"],
+        ["Toggle mute", "MEDIA"],
+        ["End session", "SESSION"],
+        ["Lock session", "SESSION"],
+        ["Session menu", "SESSION"]
+    ]
+
     // The keysym DISPLAY table — the one place the shell is allowed to
     // rewrite anything, and it rewrites keys, never descriptions. An
     // unrecognised keysym renders verbatim and is NEVER dropped, which is
@@ -182,7 +257,22 @@ Singleton {
         return out;
     }
 
-    function sectionFor(dispatcher: string, arg: string): string {
+    function sectionFor(dispatcher: string, arg: string, label: string): string {
+        // The dispatcher is tried FIRST and unchanged, so a session that
+        // still reports real Hyprland verbs (a .conf grammar, or a future
+        // Lua plugin that forwards them) classifies exactly as before and
+        // this file needs no second edit to follow it back.
+        var byVerb = table.sectionForDispatcher(dispatcher, arg);
+        if (byVerb !== "OTHER")
+            return byVerb;
+        for (var d = 0; d < table.byDescription.length; d++) {
+            if (label.indexOf(table.byDescription[d][0]) === 0)
+                return table.byDescription[d][1];
+        }
+        return "OTHER";
+    }
+
+    function sectionForDispatcher(dispatcher: string, arg: string): string {
         if (dispatcher === "exec") {
             var at = arg.indexOf("ipc call ");
             if (at >= 0) {
@@ -292,7 +382,7 @@ Singleton {
                 continue;
             }
 
-            var section = table.sectionFor(r.dispatcher, r.arg);
+            var section = table.sectionFor(r.dispatcher, r.arg, r.label);
             if (section === "OTHER")
                 unmappedCount++;
 
@@ -307,7 +397,15 @@ Singleton {
                 "label": r.label,
                 "section": section,
                 "folded": 1,
-                "isMode": r.dispatcher === "submap" && r.arg !== "reset",
+                // A submap ENTRY bind, which the bounded mode block needs
+                // in order to say which chord opens it. Under Lua the
+                // dispatcher is `__lua`, so the shipped surface drew a
+                // "MODE · RESIZE" block whose entry row (PUNAR+R) carried
+                // no Mode tag at all. The description is the other half of
+                // the stable contract and punar-binds.lua writes it in one
+                // shape: "Enter <name> mode".
+                "isMode": (r.dispatcher === "submap" && r.arg !== "reset")
+                    || (r.submap === "" && /^Enter .+ mode$/.test(r.label)),
                 "foldBase": "",
                 "foldFirst": 0,
                 "foldLast": 0,

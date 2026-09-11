@@ -146,7 +146,44 @@ Singleton {
         var entry = root.entryById(value);
         if (entry !== null)
             return root.displayName(entry);
+        // THE SIGNED CATALOG KNOWS THE PRODUCT NAME EVEN WHEN THE FREEDESKTOP
+        // INDEX DOES NOT, and that gap is real rather than theoretical: a
+        // datadir absent when the shell started is never watched (quickshell
+        // 0.3.0 desktopentrymonitor.cpp:46 skips it and never re-arms), so the
+        // first app installed on a fresh device was missing from the index for
+        // the rest of the session and the bar printed `org.gnome.Evolution`.
+        // The tmpfiles rule that pre-creates the flatpak export directory is
+        // the fix for THAT; this is the second line, and it also covers the
+        // ordinary case of an app whose Wayland id matches no desktop-file id
+        // at all.
+        //
+        // No new data and no heuristic: catalogWindowCandidates already builds
+        // the full identity set for an app — id, app_id, desktop_id, package
+        // name, executable basename and every sources[] variant — from a
+        // signed document with a human-authored name. Measured over the shipped
+        // catalogue: 130 apps, 260 distinct candidate ids, ONE collision
+        // (`chatgpt`, which names the web app and its native preview and so
+        // resolves to either safely). First match in catalogue order wins,
+        // which makes that tie deterministic.
+        var catalogName = root.catalogNameForAppId(value);
+        if (catalogName !== "")
+            return catalogName;
         return value === "" ? "Application" : value;
+    }
+
+    /// The signed catalogue's product name for a runtime application id, or ""
+    /// when the catalogue does not know it.
+    function catalogNameForAppId(appId: string): string {
+        var want = String(appId).trim().toLowerCase();
+        if (want === "")
+            return "";
+        var apps = Catalog.entries;
+        for (var i = 0; i < apps.length; i++) {
+            var candidates = root.catalogWindowCandidates(apps[i]);
+            if (candidates[want] === true)
+                return String(apps[i].name || "");
+        }
+        return "";
     }
 
     function windowTitleForAppId(appId: string, title: string): string {

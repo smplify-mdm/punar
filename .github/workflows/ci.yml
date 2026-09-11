@@ -355,6 +355,10 @@ jobs:
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
             tests/desktop/app-launcher-contract-test.sh \
+            tests/desktop/evolution-defaults-contract-test.sh \
+            tests/desktop/bar-affordance-contract-test.sh \
+            tests/desktop/mail-identity-contract-test.sh \
+            tests/desktop/qml-inline-component-depth-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -397,6 +401,37 @@ jobs:
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      # Every GSettings key in the seed is pinned by exact spelling, because
+      # GSettings ignores a key it does not know: a typo ships, changes
+      # nothing, and reports success. The two deliberate omissions are pinned
+      # too — both are things a later edit would helpfully add and both would
+      # remove something the person asked for.
+      - name: Validate the Evolution first-run defaults and disclosures
+        run: ./tests/desktop/evolution-defaults-contract-test.sh
+
+      # A control that changes the cursor must also change its appearance.
+      # The workspace indicator opened the overview for two builds while a
+      # person testing it reported they could not see how to switch project
+      # workspaces with a mouse — it was drawn exactly like the inert
+      # separators beside it, and its hoverEnabled was inert because the
+      # MouseArea had no id for anything to bind to.
+      - name: Validate that bar controls show a hover state
+        run: ./tests/desktop/bar-affordance-contract-test.sh
+
+      # The app id, the desktop file id and StartupWMClass must agree, because
+      # the shell joins a running window to its product name by the desktop
+      # FILE id and never by StartupWMClass. A disagreement puts the raw
+      # reverse-DNS id back in the bar, silently — nothing errors.
+      - name: Validate Punar Mail's window identity
+        run: ./tests/desktop/mail-identity-contract-test.sh
+
+      # An inline component nested below the file root makes the QML engine
+      # refuse the whole file, and qmllint reports it CLEAN — the only symptom
+      # is a surface that never appears. Three CI cycles were spent on exactly
+      # that, so it is now caught in seconds by a script.
+      - name: Validate inline component placement
+        run: ./tests/desktop/qml-inline-component-depth-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh

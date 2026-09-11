@@ -198,9 +198,11 @@ fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
     fs::write(
         &flatpak,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(), metadata_path.display(), state_path.display(),
-            state_path.display(), state_path.display(), state_path.display(), commit,
+            state_path.display(), state_path.display(), state_path.display(),
+            // the `update --commit=` arm writes the commit it was given
+            state_path.display(), commit,
             state_path.display(), state_path.display()
         ),
     )
@@ -1790,6 +1792,104 @@ fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
     assert_eq!(
         explained["result"]["effective_value"], "on",
         "the replay changed nothing"
+    );
+}
+
+/// An administrator can always WITHDRAW their own entry, even after an
+/// organization has come to outrank it.
+///
+/// The trap this closes: the precedence gate looks at who wins *now*. An entry
+/// pinned while nothing outranked it becomes un-removable the moment an org
+/// layer arrives — inert while enrolled, and silently back in force the day the
+/// device unenrolls. A rule nobody can see, nobody can delete, and that returns.
+#[test]
+fn an_administrator_can_withdraw_a_pin_an_organization_has_come_to_outrank() {
+    let envelope = json!({
+        "policy_id": "eng-baseline-v12",
+        "source_kind": "organization_baseline",
+        "precedence_rank": 2,
+        "source_name": "Acme Engineering Baseline",
+        "policy": {
+            "apiVersion": "smplify.io/v1alpha1",
+            "kind": "DeviceDesiredState",
+            "metadata": {"organization": "acme", "device": "dev_test"},
+            "spec": {
+                "security": {"firewall": {"enabled": true}},
+                "update": {"channel": "off"}
+            }
+        }
+    });
+    // The administrator pinned this earlier, when nothing outranked them.
+    let stored = json!({
+        "version": 1,
+        "policies": {
+            "system.update_channel": {
+                "value": "beta",
+                "set_at": "2026-09-01T09:00:00Z",
+                "set_by": "owner",
+                "reason": "we were testing the beta channel"
+            }
+        }
+    });
+    let mock = MockCapability::new("system.update_channel", json!("beta"));
+    let td = TestDaemon::start_with(PeerSource::Fixed(Peer::root()), mock, move |state_dir| {
+        let policy_dir = state_dir.join("policy.d");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("eng-baseline-v12.json"),
+            serde_json::to_string(&envelope).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            state_dir.join("local-policy.json"),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+    });
+
+    // The org wins, so the administrator's entry is inert — and un-pinnable.
+    let explained = td.call(
+        "policy.explain",
+        Some(json!({ "path": "system.update_channel" })),
+    );
+    assert_eq!(
+        explained["result"]["source"]["kind"],
+        "organization_baseline"
+    );
+    assert_eq!(explained["result"]["admin_override_permitted"], false);
+    let repin = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "system.update_channel",
+            "value": "beta",
+            "reason": "trying to pin it again"
+        })),
+    );
+    assert_eq!(repin["error"]["code"], "denied", "{repin}");
+
+    // But withdrawing it must work: a clear can only ever remove a local
+    // opinion, so there is nothing for the precedence gate to protect.
+    let cleared = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "system.update_channel",
+            "value": null,
+            "reason": "the beta test is over"
+        })),
+    );
+    assert!(cleared.get("error").is_none(), "{cleared}");
+    assert_eq!(cleared["result"]["pinned_value"], Value::Null);
+    assert_eq!(cleared["result"]["source"]["kind"], "organization_baseline");
+
+    let stored_after: Value = serde_json::from_str(
+        &std::fs::read_to_string(td.dir.join("state/local-policy.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored_after["policies"]
+            .get("system.update_channel")
+            .is_none(),
+        "the entry is gone from the store, not merely outranked: {stored_after}"
     );
 }
 

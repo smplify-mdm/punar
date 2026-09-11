@@ -46,9 +46,22 @@ return function(ctx)
     bind(mod .. " + comma", hl.dsp.exec_cmd(ctx.layout_script .. " prev"), "Previous layout preset")
     bind(mod .. " + period", hl.dsp.exec_cmd(ctx.layout_script .. " next"), "Next layout preset")
 
+    -- TWO LOOPS, AND THE ORDER IS THE POINT. Plate D-017 Sect I says nine
+    -- workspace binds are one idea, and the shortcut reference folds a
+    -- contiguous digit run into a single row — but only when consecutive
+    -- rows share a description base, because `hyprctl binds -j` reports
+    -- binds in registration order and the reference renders that order.
+    -- Registering them interleaved (Workspace 1, Move window to workspace
+    -- 1, Workspace 2, ...) breaks the run at every step, so the fold never
+    -- fired and the surface printed eighteen near-identical rows into the
+    -- middle of the reference. The shipped proof counted 75 BINDS · 75
+    -- ROWS: not one fold in the whole table.
     for workspace = 1, 9 do
         local key = tostring(workspace)
         bind(mod .. " + " .. key, hl.dsp.focus({ workspace = workspace }), "Workspace " .. key)
+    end
+    for workspace = 1, 9 do
+        local key = tostring(workspace)
         bind(mod .. " + SHIFT + " .. key, hl.dsp.window.move({ workspace = workspace }), "Move window to workspace " .. key)
     end
 

@@ -188,7 +188,7 @@ fi
 as_punar "${CTL}" --json capabilities > "${RUN_DIR}/m11-capabilities.json" 2>&1
 jq_check "browser.policy is the fifth typed capability with a closed desired-state set" \
     "${RUN_DIR}/m11-capabilities.json" \
-    '(.capabilities | length) == 5 and ([.capabilities[].capability] | index("browser.policy")) != null and (.capabilities[] | select(.capability == "browser.policy") | .allowed_desired_states) == ["managed", "unmanaged"]'
+    '(.capabilities | length) == 6 and ([.capabilities[].capability] | index("browser.policy")) != null and (.capabilities[] | select(.capability == "browser.policy") | .allowed_desired_states) == ["managed", "unmanaged"]'
 
 if [ -x /usr/lib/chromium/chromium ]; then
     note "ok   upstream Chromium real binary exists"

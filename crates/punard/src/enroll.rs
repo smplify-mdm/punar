@@ -567,6 +567,13 @@ pub struct StatusSummary {
     pub compliance_overall: String,
     pub device_class: String,
     pub device_class_source: String,
+    /// The device's package architecture (`x86_64`, `aarch64`), so a surface
+    /// can tell BEFORE it offers an application whether this machine could
+    /// install it. The catalogue file the shell reads is identical on every
+    /// architecture — it lists each app's per-architecture sources — so
+    /// without this the shell offered apps that only exist for another CPU
+    /// and the refusal arrived after the person had chosen one.
+    pub architecture: String,
     pub ts: String,
 }
 
@@ -756,6 +763,7 @@ mod tests {
                 compliance_overall: "compliant".into(),
                 device_class: "laptop".into(),
                 device_class_source: "observed".into(),
+                architecture: "aarch64".into(),
                 ts: "2026-08-26T09:02:00Z".into(),
             },
         )
@@ -777,6 +785,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "architecture",
                 "compliance_overall",
                 "device_class",
                 "device_class_source",
@@ -787,6 +796,10 @@ mod tests {
             ]
         );
         assert_eq!(raw["org_name"], "Acme Engineering");
+        // The shell decides whether to OFFER an application on this value, so
+        // an empty or absent one has to be readable as "not known yet" rather
+        // than as an architecture nothing matches.
+        assert_eq!(raw["architecture"], "aarch64");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

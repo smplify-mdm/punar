@@ -3,9 +3,25 @@
 # every login takes the ordinary password path. There is no null-password mode.
 auth      [success=done default=ignore]  pam_exec.so quiet seteuid /usr/bin/punar-onboardd first-login
 auth      required                      pam_unix.so
+# UNLOCK THE LOGIN KEYRING WITH THE PASSWORD THAT JUST UNLOCKED THE MACHINE.
+# Without this line gnome-keyring asks for a SECOND password moments after the
+# first, which is both worse than the problem it solves and the thing every
+# desktop that gets this wrong is remembered for. `optional` throughout: a
+# keyring that will not open must never be able to stop a person signing in.
+#
+# ORDER MATTERS. This must follow pam_unix so the authentication token exists
+# for it to read. On the FIRST login it will not: that path is the pam_exec
+# line above, which consumes a boot-local token and never sees a password, so
+# the login keyring is created on the first ordinary password sign-in instead.
+auth      optional                      pam_gnome_keyring.so
 
 account   required                      pam_unix.so
 
 session   required                      pam_unix.so
 session   optional                      pam_limits.so
 session   optional                      pam_systemd.so
+# auto_start hands the daemon the token captured above. It is a session line
+# rather than an exec because the daemon must inherit the session, not the
+# compositor: a keyring started from Hyprland would die with a compositor
+# restart and take every unlocked secret with it.
+session   optional                      pam_gnome_keyring.so auto_start

@@ -1469,3 +1469,79 @@ the authority and it does not mention any of it.
 ---
 
 *Punar · Field Note design language · `docs/design/third-party-apps.md`*
+
+## Saved passwords, and why this is not a Keychain
+
+Punar ships `gnome-keyring`, which provides `org.freedesktop.secrets`. Without
+it no third-party application on the device can store a credential at all: the
+catalogue's own mail client declares `org.freedesktop.secrets=talk` in its
+Flatpak metadata and re-prompts for its password every launch on an image with
+no provider. That is what shipped, and it is why the package is here.
+
+**It is not an Apple Keychain, and the difference is structural rather than a
+matter of configuration.** Keychain binds an access-control list to each item
+and to a code-signed application identity, and the system asks when a different
+application wants that item. The freedesktop Secret Service protocol has no
+per-application access control of any kind: any process holding the bus name
+can read every item in an unlocked collection. Naming a collection per
+application organises secrets; it does not isolate them.
+
+**The enforcement point Punar actually has is the sandbox, and it acts before
+the secret exists.** A Flatpak reaches `org.freedesktop.secrets` only if its own
+metadata declares it, that declaration is pinned in the catalogue and re-fetched
+by `tools/verify-app-catalog.sh`, and `punard`'s `apps.inspect` renders it on
+the install card as **"Your saved passwords (read and write)"** before a person
+agrees to anything. That is the same shape as macOS's consent prompts — the
+decision is made once, in advance, by the person, with the access named — and
+it is the honest extent of the control. It governs what a catalogue application
+may ask for. It does not constrain a process the person runs from a shell.
+
+Two consequences worth stating plainly rather than discovering:
+
+- An application that has been granted this permission can read secrets saved
+  by a *different* application. Punar cannot prevent that, and no amount of
+  keyring configuration would.
+- The daemon is D-Bus activated and disabled in the user preset
+  (`00-punar-lean.preset`), so nothing runs at idle and it starts the first time
+  an application asks for a secret.
+
+**And the device says so, rather than this paragraph saying so.** The
+`security.credential_isolation` capability observes which provider owns
+`org.freedesktop.secrets` and reports one of `per_application`, `shared` or
+`none`, in the compliance and inventory reports an organization already reads —
+without anyone choosing to disclose it, and without a person having read this
+file.
+
+**Punar reports the fact; the organization decides whether the fact is a
+violation.** The capability has no compiled-in desired state: it takes the
+first-observation seed, so an unenrolled device is compliant with what it is. An
+organization that requires isolation publishes
+`security.credential_isolation: per_application` in its desired-state document,
+and that device then reports non_compliant against its own organization's
+requirement, through the same layer machinery every other capability uses.
+
+The first version of this made `per_application` the compiled-in desired state,
+which put every device into permanent unremediable drift — reconcile never
+converged and a personal machine whose owner had asked for nothing would have
+shown non-compliant forever. A signal that is always on is not a signal; it
+buries the drift that means something. The in-VM M3 exercise caught it, on the
+assertion that a second reconcile is clean.
+
+One property worth keeping: because the desired value is the seed rather than a
+constant, a device whose credential provider LATER disappears drifts against its
+own history and reports it.
+
+It is observed and never applied: the provider is a property of the image, so
+the capability is not mutable and the reconcile loop reports the drift as
+alert-only instead of retrying an apply that could never succeed. An
+unrecognised provider is reported as `shared` rather than given the benefit of
+the doubt, because the two errors are not symmetric — understating isolation
+costs the device nothing, while overstating it tells an organization something
+false about where its credentials are.
+
+Closing the gap properly means Punar brokering credential access itself, with
+per-application policy, rather than shipping a shared bus name — a component to
+build, not a package to install. When it exists it joins the provider list in
+`crates/punard/src/backends/credential_isolation.rs`, the observed value becomes
+`per_application`, and the same report that says non_compliant today starts
+saying compliant without a word of documentation changing.
