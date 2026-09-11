@@ -107,11 +107,32 @@ ShellRoot {
         }
         function close(): string {
             root.openThread = null;
+            root.composing = false;
             return "closed";
         }
+        function compose(): string {
+            root.composing = true;
+            return "composing";
+        }
         function state(): string {
+            if (root.composing)
+                return "compose";
             return root.openThread === null ? "index" : "thread";
         }
+    }
+
+    // Whether a compose window is open. A third toplevel, not a mode of the
+    // index and not a sheet over it: the design allows exactly three window
+    // classes and no modal anywhere.
+    property bool composing: false
+
+    ComposeWindow {
+        id: composeWindow
+
+        visible: root.composing
+        account: fixtures.account
+        protocol: fixtures.protocol
+        onCloseRequested: root.composing = false
     }
 
     // The open thread, or null. ONE at a time in this build: the model supports
@@ -352,6 +373,9 @@ ShellRoot {
                     var r = frame.rows[frame.cursor];
                     if (r !== undefined && r.thread !== null)
                         root.openThread = r.thread;
+                    event.accepted = true;
+                } else if (event.key === Qt.Key_C) {
+                    root.composing = true;
                     event.accepted = true;
                 } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
                     frame.step(1);
@@ -865,7 +889,7 @@ ShellRoot {
                     anchors.left: parent.left
                     anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "J/K MOVE · ↵ OPEN · ESC CLOSE"
+                    text: "J/K MOVE · ↵ OPEN · C COMPOSE · ESC CLOSE"
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
