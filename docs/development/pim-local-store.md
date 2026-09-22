@@ -74,6 +74,13 @@ restart preserves existing cursors. The future service still must wire this
 state into its dispatcher and map a cursor older than retained history to
 `cursor_expired`.
 
+`crates/punar-pimd/src/pager.rs` retains the exact serialized values selected
+for a multi-page list, so a mutation between pages cannot produce a mixed
+snapshot. It is intentionally volatile and bounded: 16 active snapshots,
+8 MiB encoded per snapshot, 32 MiB total and five minutes since last use.
+Missing state fails as `cursor_expired`; it never falls through to current
+store contents. Single-page queries allocate no cache entry.
+
 ## Tests currently required
 
 The crate's unit suite proves:
@@ -107,7 +114,10 @@ The crate's unit suite proves:
 19. unsafe correlation closes without reflection while safe denial and typed
     method errors retain only their validated request correlation; and
 20. a partial frame hits an absolute deadline rather than holding the channel
-    open indefinitely.
+    open indefinitely;
+21. later pages retain the original values after the source mutates;
+22. a page cursor cannot cross a method or canonical filter binding; and
+23. expiry and bounded eviction return cursor expiry instead of live data.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -120,7 +130,7 @@ install or activate `punar-pimd`, it still needs:
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the full store-backed method dispatcher, including durable cursor-key wiring
-  and expiry mapping;
+  and retained-change expiry mapping;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;

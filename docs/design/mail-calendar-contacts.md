@@ -435,7 +435,7 @@ section 2. Those need a real client.
 | 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
 | 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
 | 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
-| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner and durable private signed-cursor key complete; store dispatcher open** |
+| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner, durable signed cursors and bounded stable-page cache complete; store dispatcher open** |
 | 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable library core complete; process/runtime proof open** |
 | 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
 | 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |

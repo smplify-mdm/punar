@@ -130,6 +130,14 @@ no-follow descriptor and validate that exact opened file, closing filename
 check/read races. Key material is zeroized from transient buffers.
 Service-process and dispatcher integration are not yet implemented.
 
+`crates/punar-pimd/src/pager.rs` supplies the stable-snapshot half of list
+pagination. A first page retains the exact provider-neutral values for at most
+five minutes; later pages never fall through to the mutable live store. The
+cache permits at most 16 active snapshots, 8 MiB of encoded data per snapshot
+and 32 MiB total. Expiry, bounded eviction or process restart returns
+`cursor_expired`, so the client refreshes instead of rendering a mixed result.
+Only lists with another page consume cache space.
+
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or

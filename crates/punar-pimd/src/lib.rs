@@ -16,6 +16,7 @@
 mod channel;
 mod connection;
 mod cursor;
+mod pager;
 mod protocol;
 mod store;
 
@@ -25,6 +26,7 @@ pub use channel::{
 };
 pub use connection::{ConnectionError, serve_granted_channel};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
+pub use pager::{PageError, PagedValues, SnapshotPager};
 pub use protocol::{
     ErrorCode, ErrorDetails, FrameError, PimMethod, PimProtocolError, PimRequest, RequestFailure,
     decode_request, encode_error, encode_request_error, encode_success, read_request_frame,

@@ -23,7 +23,7 @@ const MAX_METHOD_BYTES: usize = 96;
 
 /// Closed PIM method table. There is no generic execution, filesystem,
 /// provider, network or secret operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PimMethod {
     ServiceStatus,
     AccountsList,

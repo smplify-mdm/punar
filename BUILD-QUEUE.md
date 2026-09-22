@@ -178,8 +178,10 @@ Next build slice, in order:
    random profile-bound key is now created atomically in service-private state,
    survives restart and rejects corrupt, cross-profile, aliased or
    over-permissive state without replacement. Key reads do not follow symbolic
-   links and validate the exact opened file. The full store dispatcher and
-   production-image staging remain open;
+   links and validate the exact opened file. A bounded five-minute stable-page
+   cache now prevents mutations from mixing old and new records across a list;
+   restart, expiry or eviction returns an explicit cursor expiry. The full
+   store dispatcher and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME
