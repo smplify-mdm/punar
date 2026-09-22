@@ -3178,9 +3178,13 @@ missing or invalid project document installs deny-all for that live session and
 returns a warning; an unavailable enforcement backend is never reported as
 available. Processes outside managed agent cgroups are unchanged.
 
-The generated chain order is security-significant: explicit zone sets first,
-then loopback/link-local, then the project's internet residual; a rate-limited
-deny log precedes an unconditional reject. The limiter never guards the reject.
+The generated chain order is security-significant: explicit root-owned zone
+sets first; then the systemd-resolved stub at `127.0.0.53:53`, but only when
+the project's internet residual is `allow`; then unconditional structural
+rejects for every remaining loopback and IPv4/IPv6 link-local destination;
+then the project's internet residual. A project that needs another local
+service must name it in an explicit zone. A rate-limited deny log precedes
+every unconditional reject. The limiter never guards the reject.
 
 ### 21.3 Connection result and privacy boundary
 

@@ -24,7 +24,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# The workspace uses let-chains, stabilized in Rust 1.88. Keep this aligned
+# with CI's exact toolchain so a green run is also an honest MSRV claim.
+rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]

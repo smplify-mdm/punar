@@ -793,7 +793,7 @@ mod tests {
             "a☂",
         ] {
             assert!(!is_valid_name(name), "{name:?} must be rejected");
-            let src = ATLAS.replace("name: atlas", &format!("name: {:?}", name));
+            let src = ATLAS.replace("name: atlas", &format!("name: {name:?}"));
             let problems = parse_problems(&src);
             assert!(
                 problems.iter().any(|p| p.starts_with("project.name: ")),

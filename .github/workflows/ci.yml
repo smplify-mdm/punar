@@ -187,10 +187,10 @@ jobs:
       - name: Install libpam headers (punar-auth links libpam)
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libpam0g-dev
 
-      - name: Install Rust toolchain (stable, rustfmt + clippy)
+      - name: Install Rust toolchain (1.88, rustfmt + clippy)
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install 1.88 --profile minimal --component rustfmt --component clippy
+          rustup default 1.88
           rustc --version
 
       - name: Cache cargo registry and build artifacts
@@ -346,6 +346,7 @@ jobs:
             tests/images/tree-manifest-test.sh \
             tests/images/developer-baseline-contract-test.sh \
             tests/images/debian-substrate-contract-test.sh \
+            tests/images/bubblewrap-security-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
@@ -441,6 +442,9 @@ jobs:
 
       - name: Test common Debian substrate migration contract
         run: ./tests/images/debian-substrate-contract-test.sh
+
+      - name: Test Bubblewrap security floor
+        run: ./tests/images/bubblewrap-security-contract-test.sh
 
       - name: Test native-vendor OAuth sandbox contract
         run: ./tests/images/vendor-sandbox-contract-test.sh

@@ -3,6 +3,8 @@
 # state; this script only normalizes the pinned substrate to product contracts.
 set -eu
 
+/usr/lib/punar/verify-bubblewrap
+
 if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi

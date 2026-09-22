@@ -135,7 +135,8 @@ stage_env_base_oci() {
     local pkg_sha256='968d1aa8f579fa1ac59c26afa365454369e13cf29848e6400b50028fed0ffda0'
     local ref='localhost/punar-env-base:m6'
     local max_bytes=$((16 * 1024 * 1024))
-    local created='2026-08-20T00:00:00Z'
+    local created
+    created="$(date -u -d "@${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
 
     install -d "${cache_dir}"
     if ! echo "${pkg_sha256}  ${cache_dir}/${pkg}" \

@@ -1,0 +1,52 @@
+#!/bin/sh
+# Fail image construction when the managed-agent sandbox is below Punar's
+# security floor. Runtime repeats this check in punar-env so a damaged or
+# partially updated installation also fails closed before adapter execution.
+set -eu
+
+[ "$#" -le 1 ] || { echo "usage: verify-bubblewrap [BWRAP_PATH]" >&2; exit 2; }
+BWRAP=${1:-/usr/bin/bwrap}
+MINIMUM=0.12.0
+
+[ -x "${BWRAP}" ] || {
+    echo "error: ${BWRAP} is missing or not executable" >&2
+    exit 1
+}
+
+mode="$(stat -c '%a' "${BWRAP}")"
+if [ $((0${mode} & 06000)) -ne 0 ]; then
+    echo "error: ${BWRAP} is setuid or setgid (mode ${mode}); Punar requires unprivileged Bubblewrap" >&2
+    exit 1
+fi
+
+reported="$(${BWRAP} --version)"
+case "${reported}" in
+    'bubblewrap '*) version=${reported#bubblewrap } ;;
+    *)
+        echo "error: unrecognized Bubblewrap version output: ${reported}" >&2
+        exit 1
+        ;;
+esac
+
+major=${version%%.*}
+remainder=${version#*.}
+minor=${remainder%%.*}
+patch=${remainder#*.}
+case "${major}" in '' | *[!0-9]*) echo "error: unrecognized Bubblewrap version: ${version}" >&2; exit 1 ;; esac
+case "${minor}" in '' | *[!0-9]*) echo "error: unrecognized Bubblewrap version: ${version}" >&2; exit 1 ;; esac
+case "${patch}" in '' | *[!0-9]*) echo "error: unrecognized Bubblewrap version: ${version}" >&2; exit 1 ;; esac
+[ "${remainder}" != "${minor}" ] || {
+    echo "error: unrecognized Bubblewrap version: ${version}" >&2
+    exit 1
+}
+[ "${version}" = "${major}.${minor}.${patch}" ] || {
+    echo "error: unrecognized Bubblewrap version: ${version}" >&2
+    exit 1
+}
+
+if [ "${major}" -eq 0 ] && [ "${minor}" -lt 12 ]; then
+    echo "error: Bubblewrap ${version} is below security floor ${MINIMUM} (GHSA-pxhw-h44j-8pfx)" >&2
+    exit 1
+fi
+
+echo "verified Bubblewrap ${version}: >= ${MINIMUM}, unprivileged mode ${mode}"

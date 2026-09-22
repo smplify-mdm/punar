@@ -6,12 +6,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/os/images/arm64/snapshot.env"
 SOURCE_IMAGE="${1:-${REPO_ROOT}/os/images/out/punar-release-arm64.qcow2}"
 RELEASE_DIR="${2:-${REPO_ROOT}/os/images/out/repository/releases/2026.08.28.3}"
 OUTPUT_IMAGE="${3:-${REPO_ROOT}/os/images/out/punar-update-proof-arm64.raw}"
 SLOT_B_UUID="2b1b91a9-cf2c-4e9c-a723-5ec997971662"
 SLOT_B_FS_UUID="724e1a3b-d966-54b7-9a97-8886985eee18"
-BUILDER_TAG="punar-debian-builder:20260820T000000Z-arm64"
+BUILDER_TAG="punar-debian-builder:${PUNAR_DEBIAN_SNAPSHOT}-arm64"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 

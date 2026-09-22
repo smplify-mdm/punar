@@ -11,6 +11,9 @@ usage() {
 [ "$#" -eq 2 ] || usage
 SOURCE_TREE=$1
 OUTPUT_INITRD=$2
+IMAGES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+. "${IMAGES_DIR}/snapshot.env"
 
 [ -d "${SOURCE_TREE}" ] \
     || { echo "error: installer initrd source tree is missing: ${SOURCE_TREE}" >&2; exit 2; }
@@ -35,11 +38,11 @@ if find "${WORK}/tree" -xdev \( -type b -o -type c -o -type p -o -type s \) \
     exit 1
 fi
 
-# The timestamp is the immutable 2026-08-20 snapshot epoch used by the x86
+# The timestamp is the immutable snapshot epoch used by the x86
 # image pipeline. cpio's reproducible mode normalizes device/inode metadata;
 # the explicit owner and sorted input remove checkout UID/GID/order variance,
 # while clamping mtimes removes checkout-time variance.
-find "${WORK}/tree" -exec touch -h --date='@1787184000' -- {} +
+find "${WORK}/tree" -exec touch -h --date="@${PUNAR_SOURCE_DATE_EPOCH}" -- {} +
 (
     cd "${WORK}/tree"
     find . -print0 | LC_ALL=C sort -z \

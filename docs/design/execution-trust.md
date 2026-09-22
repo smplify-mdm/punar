@@ -109,7 +109,7 @@ Verified 2026-08-25 against the Arch official repositories
 | **Landlock** | *Self*-restriction. A process (or its parent) drops its own filesystem/network rights, inherited by descendants. `LANDLOCK_ACCESS_FS_EXECUTE` restricts what *that* domain may execute. | In the stock Arch kernel and in `CONFIG_LSM` by default. | Negligible. | **Cannot express system-wide policy.** Kernel documentation is explicit that Landlock is enabled by the process itself or its parents, not by a system policy, and cannot restrict processes that did not opt in. Useless as a gatekeeper; excellent as *post-approval confinement*. |
 | **AppArmor** | Path-based MAC; a confined profile can deny `x` on a path. | `apparmor` is in `extra` (4.1.7-1; 5.0.2-1 in `extra-testing`), but **it is not active on Arch by default** — the kernel's `CONFIG_LSM` omits it, so it needs an `lsm=…,apparmor,…` boot parameter and an initramfs/bootloader change, plus a profile set to ship and maintain. | Per-syscall profile evaluation for confined tasks. | Unconfined processes are unconfined. Profile-per-program, not a global allowlist; a new unknown binary has no profile and is therefore *unrestricted*, which is the exact opposite of the property wanted here. |
 | **SELinux** | Label-based MAC, capable of `execute` denials fleet-wide. | **Effectively unavailable on Arch**: the official repositories contain no SELinux userland (search returns only `python-selinux`); a working system needs core packages rebuilt from AUR. Adopting it means owning a distribution-wide rebuild. | Policy load + per-access vector cache. | Same structural problem as AppArmor for *new* files: a mislabeled binary usually inherits a permissive type. |
-| **Flatpak + bubblewrap + portals** | Real confinement: `bubblewrap` (in `extra`, 0.11.2-1) mount/user namespaces, a declared permission set, and `xdg-desktop-portal` (already in the Punar image) mediating file, screenshot and device access. | `flatpak` is in `extra` (1:1.18.1-1); portals already installed. | Per-app runtime + storage. | Confines only applications that ship as Flatpaks. Says nothing about a loose ELF binary in `~/Downloads`. Portals mediate only portal-using apps — an ordinary Wayland app has no consent layer at all. |
+| **Flatpak + bubblewrap + portals** | Real confinement: `bubblewrap` (0.12.0-1 at the pinned 2026-09-01 Arch snapshot) mount/user namespaces, a declared permission set, and `xdg-desktop-portal` (already in the Punar image) mediating file, screenshot and device access. Punar refuses older or setuid/setgid Bubblewrap binaries because GHSA-pxhw-h44j-8pfx affects releases before 0.12.0. | `flatpak` is in `extra` (1:1.18.1-1); portals already installed. | Per-app runtime + storage. | Confines only applications that ship as Flatpaks. Says nothing about a loose ELF binary in `~/Downloads`. Portals mediate only portal-using apps — an ordinary Wayland app has no consent layer at all. |
 | **systemd exec sandboxing** | Confines *Punar's own services* (`ProtectSystem`, `NoNewPrivileges`, `CapabilityBoundingSet`, …). Already used. | Native. | Free. | Applies to units, not to user-launched binaries. |
 | **`noexec` mounts** | Genuinely blocks `execve` on a mount. Free, kernel-enforced, no daemon. | Native. | Free. | All-or-nothing: it cannot be lifted for one approved file, so it is incompatible with a consent flow. Blunt on `/tmp`, which is where builds live. |
 | **pacman signature verification** | Verifies package signatures against the pacman keyring web of trust **at install time**. Already the substrate's trust root (ADR-001: vendor-pinned snapshot repos, Punar's own signing key). | Native, mature. | Free at runtime. | Says nothing about the bytes on disk *after* install; provides no exec-time check on its own. |
@@ -1322,7 +1322,9 @@ Verified 2026-08-25.
 - CVE-2018-20483 — wget writing credential-bearing URLs into xattrs, and the
   resulting opt-in change: https://bugzilla.redhat.com/show_bug.cgi?id=1662705
 - Arch official package searches (2026-08-25): `apparmor` 4.1.7-1 (`extra`),
-  `bubblewrap` 0.11.2-1 (`extra`), `flatpak` 1:1.18.1-1 (`extra`);
+  `flatpak` 1:1.18.1-1 (`extra`); the release snapshot was subsequently moved
+  to 2026-09-01 specifically to require `bubblewrap` 0.12.0-1, the first
+  release fixing GHSA-pxhw-h44j-8pfx;
   `fapolicyd` — **no results**; `ima-evm-utils` — **no results**; `selinux` —
   only `python-selinux`. `aur.archlinux.org` was unreachable for automated
   verification (bot protection), so no AUR claim is made.
@@ -1335,5 +1337,5 @@ Verified 2026-08-25.
   `# CONFIG_EVM is not set`. The kernel config is the authority for every
   primitive claim in §2 and it is checked, not cited second-hand.
 - Arch Linux Archive snapshot pinned by `os/images/snapshot.env`
-  (2026/08/20), confirmed present 2026-08-25:
-  https://archive.archlinux.org/repos/2026/08/20/
+  (2026/09/01), confirmed to contain Bubblewrap 0.12.0-1:
+  https://archive.archlinux.org/repos/2026/09/01/

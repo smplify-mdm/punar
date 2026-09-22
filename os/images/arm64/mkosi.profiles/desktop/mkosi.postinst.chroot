@@ -3,6 +3,8 @@
 # created here; release onboarding owns that transaction.
 set -eu
 
+/usr/lib/punar/verify-bubblewrap
+
 # Stable admission group shared by every human account, regardless of the
 # username chosen in onboarding. It must predate tmpfiles and daemon startup.
 if ! getent group punar >/dev/null 2>&1; then

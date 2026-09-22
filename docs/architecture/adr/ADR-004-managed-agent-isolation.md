@@ -19,7 +19,9 @@ ADR-007 network policy, avoid a resident privileged launcher, work on both
 supported architectures, and fail closed if an isolation primitive or exact
 network proof is missing. All desktop image profiles include `/usr/bin/bwrap`
 through the `bubblewrap` package. That dependency is a compile-time image
-contract as well as a runtime preflight.
+contract as well as a runtime preflight. The image and launcher require
+Bubblewrap 0.12.0 or newer, refuse setuid/setgid installations, and fail closed
+below that floor because GHSA-pxhw-h44j-8pfx affects earlier releases.
 
 ## Options considered
 
@@ -86,7 +88,11 @@ The namespace contains:
 - the declared project only at `/workspace`, read-write, read-only, or replaced
   by an empty read-only directory according to `filesystem.project`; its
   canonical directory must be strictly below HOME, and it plus every ancestor
-  to HOME must belong to the invoking uid and not be group/world-writable;
+  to HOME must belong to the invoking uid and not be group/world-writable. The
+  complete project tree must stay on that device, contain only directories,
+  regular files and unresolved symbolic links, and contain every hard-link name
+  for each regular-file inode. Sockets, FIFOs, devices, nested mounts and a
+  hard link whose other name is outside the project are rejected before launch;
 - a fresh per-session home and XDG runtime tree below the user's private
   `/run/user/<uid>`, mounted at the account's normal home and runtime paths;
 - only resolver files under an otherwise empty `/run`; agentd, netd, punard and
@@ -134,7 +140,10 @@ home and never the user's real home. The row is explicitly rendered as
   scope exists.
 - The agent cannot escape its mount namespace through the exposed filesystem.
   A project symlink to another host path resolves against the sparse namespace,
-  where that destination is absent.
+  where that destination is absent. Preflight also refuses external hard-link
+  aliases and host IPC objects inside the project, so a same-uid process cannot
+  smuggle an otherwise hidden file or socket into `/workspace` by directory
+  entry alone.
 - **Real Claude compatibility is not claimed.** Claude's complete package
   closure and secure persistent OAuth/authentication state are still open.
   `claude-code` real launch currently fails explicitly before a scope is

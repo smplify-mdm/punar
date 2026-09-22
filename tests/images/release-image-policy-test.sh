@@ -4,6 +4,8 @@
 set -eu
 
 REPO_ROOT=$(cd -- "$(dirname "$0")/../.." && pwd)
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/os/images/snapshot.env"
 CHECKER="${REPO_ROOT}/os/images/check-release-image.sh"
 FINALIZE="${REPO_ROOT}/os/images/mkosi.finalize"
 ARM_POSTINSTALL="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot"
@@ -67,8 +69,8 @@ printf '%s\n' \
     'ID=punar-test-substrate' \
     'VERSION_ID=1' \
     'IMAGE_ID=punar-desktop' \
-    'IMAGE_VERSION=2026.08.20.1' \
-    'PUNAR_SNAPSHOT_PIN=20260820T000000Z' \
+    "IMAGE_VERSION=${PUNAR_BASE_IMAGE_VERSION}" \
+    "PUNAR_SNAPSHOT_PIN=${PUNAR_SNAPSHOT_PIN}" \
     > "${CLEAN}/usr/lib/os-release"
 cp "${CLEAN}/usr/lib/os-release" "${CLEAN}/etc/os-release"
 printf '%s\n' \
@@ -142,7 +144,7 @@ mutate_a0() {
         'VERSION_ID=1' \
         'IMAGE_ID=punar-desktop' \
         'IMAGE_VERSION=latest' \
-        'PUNAR_SNAPSHOT_PIN=20260820T000000Z' \
+        "PUNAR_SNAPSHOT_PIN=${PUNAR_SNAPSHOT_PIN}" \
         > "${CASE}/usr/lib/os-release"
 }
 mutate_a2() { printf '%s\n' 'punar:x:1000:1000::/home/punar:/bin/sh' >> "${CASE}/etc/passwd"; }
@@ -227,8 +229,8 @@ ARCHITECTURE=x86-64 \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
-PUNAR_IMAGE_VERSION=2026.08.20.1 \
-PUNAR_SNAPSHOT_PIN=20260820T000000Z \
+PUNAR_IMAGE_VERSION="${PUNAR_BASE_IMAGE_VERSION}" \
+PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
 echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
@@ -244,8 +246,8 @@ ARCHITECTURE=x86-64 \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
-PUNAR_IMAGE_VERSION=2026.08.20.1 \
-PUNAR_SNAPSHOT_PIN=20260820T000000Z \
+PUNAR_IMAGE_VERSION="${PUNAR_BASE_IMAGE_VERSION}" \
+PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${MINIMAL}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service" ]
 echo 'ok   mkosi finalize leaves the minimal dev profile free of desktop mount policy'
