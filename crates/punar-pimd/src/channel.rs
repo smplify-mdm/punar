@@ -7,10 +7,11 @@
 //! inherited endpoint is the capability; a same-UID process cannot connect by
 //! guessing a path because there is no path.
 //!
-//! This module implements and tests only the descriptor-transfer primitive.
-//! The future service must still verify that its control-channel peer is root,
-//! bind the instance to the expected profile, sandbox the application launch,
-//! and make the application process non-dumpable before production staging.
+//! This module implements and tests the descriptor-transfer primitive and
+//! verifies the kernel-attested control-channel peer is root before it reads a
+//! grant. The future service must still bind the instance to the expected
+//! profile, sandbox the application launch, and make the application process
+//! non-dumpable before production staging.
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
@@ -35,6 +36,8 @@ pub enum AdmissionError {
     Malformed(String),
     #[error("PIM capability grant is for another profile")]
     ProfileMismatch,
+    #[error("PIM capability grant did not come from the privileged broker")]
+    BrokerMismatch,
 }
 
 /// Fixed first-party client identity stamped by the privileged launcher.
@@ -228,6 +231,19 @@ pub fn receive_client_channel(
     control: impl AsFd,
     expected_uid: u32,
 ) -> Result<GrantedChannel, AdmissionError> {
+    receive_client_channel_from_broker(control, expected_uid, 0)
+}
+
+fn receive_client_channel_from_broker(
+    control: impl AsFd,
+    expected_uid: u32,
+    expected_broker_uid: u32,
+) -> Result<GrantedChannel, AdmissionError> {
+    let credentials = rustix::net::sockopt::socket_peercred(&control)?;
+    if credentials.uid.as_raw() != expected_broker_uid {
+        return Err(AdmissionError::BrokerMismatch);
+    }
+
     let mut payload = [0_u8; MAX_GRANT_BYTES];
     let mut vectors = [IoSliceMut::new(&mut payload)];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
@@ -281,13 +297,24 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
+    fn receive_from_test_broker(
+        control: impl AsFd,
+        expected_uid: u32,
+    ) -> Result<GrantedChannel, AdmissionError> {
+        receive_client_channel_from_broker(
+            control,
+            expected_uid,
+            rustix::process::getuid().as_raw(),
+        )
+    }
+
     #[test]
     fn one_unnamed_endpoint_is_transferred_and_carries_application_data() {
         let (broker, service) = control_channel_pair().unwrap();
         let (application, service_endpoint) = client_channel_pair().unwrap();
         let grant = ClientGrant::new("grant_A1", 1000, PimClient::Calendar);
         send_client_channel(&broker, service_endpoint, &grant).unwrap();
-        let admitted = receive_client_channel(&service, 1000).unwrap();
+        let admitted = receive_from_test_broker(&service, 1000).unwrap();
         assert_eq!(admitted.grant, grant);
 
         let mut application = UnixStream::from(application);
@@ -309,8 +336,30 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_client_channel(&service, 1001),
+            receive_from_test_broker(&service, 1001),
             Err(AdmissionError::ProfileMismatch)
+        ));
+    }
+
+    #[test]
+    fn untrusted_control_peer_is_rejected_before_the_grant_is_read() {
+        let (broker, service) = control_channel_pair().unwrap();
+        let (_application, service_endpoint) = client_channel_pair().unwrap();
+        send_client_channel(
+            &broker,
+            service_endpoint,
+            &ClientGrant::new("grant_A3", 1000, PimClient::Mail),
+        )
+        .unwrap();
+        let current_uid = rustix::process::getuid().as_raw();
+        let different_uid = if current_uid == u32::MAX {
+            current_uid - 1
+        } else {
+            current_uid + 1
+        };
+        assert!(matches!(
+            receive_client_channel_from_broker(&service, 1000, different_uid),
+            Err(AdmissionError::BrokerMismatch)
         ));
     }
 
@@ -324,7 +373,7 @@ mod tests {
             br#"{"v":1,"grant_id":"grant_A3","profile_uid":1000,"client":"mail","admin":true}"#,
         );
         assert!(matches!(
-            receive_client_channel(&service, 1000),
+            receive_from_test_broker(&service, 1000),
             Err(AdmissionError::Malformed(_))
         ));
     }
@@ -343,7 +392,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_client_channel(&service, 1000),
+            receive_from_test_broker(&service, 1000),
             Err(AdmissionError::Malformed(_))
         ));
     }
@@ -367,7 +416,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_client_channel(&service, 1000),
+            receive_from_test_broker(&service, 1000),
             Err(AdmissionError::Malformed(_))
         ));
     }

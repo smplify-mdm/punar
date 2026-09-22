@@ -166,8 +166,9 @@ Next build slice, in order:
    credential fields. ADR-009 now selects an unnamed inherited capability
    channel instead of an application-connectable socket, and the safe
    `SCM_RIGHTS` transfer primitive rejects cross-profile, extended,
-   absent/extra-descriptor and cross-client method attempts. The protocol
-   layer now adds bounded newline framing, a closed typed method table,
+   absent/extra-descriptor and cross-client method attempts; it also verifies
+   the kernel-attested control peer is root before reading a grant. The
+   protocol layer now adds bounded newline framing, a closed typed method table,
    authorization-before-parameter parsing, safe correlation/error reflection
    and exact success/error envelopes. The inherited connection runner enforces
    an absolute ten-second deadline independently for each request and response,

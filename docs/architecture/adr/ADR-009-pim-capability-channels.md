@@ -1,6 +1,6 @@
 # ADR-009 — Unnamed capability channels for first-party PIM applications
 
-- Status: **Accepted — transfer primitive implemented; privileged launch and runtime proof remain open**
+- Status: **Accepted — transfer and root-peer admission implemented; privileged launch and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§10–11, 29, 44, 61;
   `docs/api/pim-ipc.md`; ADR-008
@@ -103,9 +103,10 @@ application code/configuration. Punar may add an LSM label later, but an absent
 label never becomes an allow path.
 
 The implementation in `crates/punar-pimd/src/channel.rs` covers descriptor
-creation, bounded transfer, strict grant parsing, profile binding and the
-least-privilege method table using safe `rustix` APIs. It is a library proof,
-not yet a shipping launcher or service.
+creation, bounded transfer, kernel-attested root control-peer admission,
+strict grant parsing, profile binding and the least-privilege method table
+using safe `rustix` APIs. It rejects a non-root control peer before reading its
+grant. It is a library proof, not yet a shipping launcher or service.
 
 ## Consequences
 

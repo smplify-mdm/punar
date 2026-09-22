@@ -33,7 +33,10 @@ opens a process or network boundary. The accepted external contract remains
 transport primitive: an unnamed application/service stream endpoint is moved
 over a bounded root/service-only sequenced-packet control channel with
 `SCM_RIGHTS`. The receiver requires one descriptor, one strict grant header,
-the bound profile uid and the client's least-privilege method partition.
+the bound profile uid and the client's least-privilege method partition. It
+also checks the control socket's kernel-attested peer uid is root before it
+reads the grant; a service cannot accidentally treat an accessible control
+socket as sufficient authority.
 
 `crates/punar-pimd/src/protocol.rs` implements the next boundary without
 opening a service: 8 MiB request and 16 MiB response caps, newline framing,
@@ -136,7 +139,9 @@ The crate's unit suite proves:
 28. malformed record ids return `invalid_params` without resource disclosure;
 29. hard-linked and symbolic-link state paths fail closed without touching the
     target; and
-30. oversized state is rejected before an unbounded allocation or JSON parse.
+30. oversized state is rejected before an unbounded allocation or JSON parse;
+    and
+31. a non-root control peer is denied before its grant is read.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
