@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "id": "exec-1",
+  "method": "system.exec",
+  "params": {
+    "command": "printenv"
+  }
+}

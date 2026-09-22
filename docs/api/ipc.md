@@ -1,5 +1,9 @@
 # Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13; M9 approvals, privilege and the secret broker in §14–§16)
 
+Mail, Calendar and Reminders use a separate profile-scoped service and closed
+contract: [`pim-ipc.md`](pim-ipc.md). PIM content and account operations are
+not methods on the device-level `punard` socket.
+
 Status: **contract for the M3 implementation** (spec section 76, Milestone 3)
 **plus the Milestone 4 and Milestone 5 additions** — marked "M4"/"M5"
 throughout; the protocol version stays `v: 1` per section 3.3 (new methods

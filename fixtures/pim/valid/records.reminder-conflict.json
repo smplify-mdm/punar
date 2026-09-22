@@ -1,0 +1,27 @@
+{
+  "kind": "reminder",
+  "reminder_id": "reminder_A1",
+  "list_id": "list_local1",
+  "title": "Publish the release notes",
+  "notes": "Resolve the date before publishing.",
+  "due": {
+    "kind": "date_time",
+    "at": "2026-09-24T09:00:00-04:00",
+    "timezone": "America/Toronto"
+  },
+  "recurrence_rule": null,
+  "completed_at": null,
+  "sync": {
+    "state": "conflict",
+    "local_revision": 7,
+    "remote_revision": "etag-9",
+    "updated_at": "2026-09-22T19:01:00Z",
+    "last_error": null,
+    "conflict": {
+      "conflict_id": "conflict_A1",
+      "fields": ["due"],
+      "detected_at": "2026-09-22T19:01:00Z",
+      "resolution_options": ["keep_local", "use_remote"]
+    }
+  }
+}

@@ -1,0 +1,141 @@
+# Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
+
+Status: **accepted contract; service not implemented.** The machine-readable
+authority is
+[`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
+provider-neutral records in
+[`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
+credential custody and the open-standards-first provider sequence. No shipping
+image may expose Mail, Calendar or Reminders as account-backed applications
+until the authorization and credential negative gates in that ADR pass.
+
+## 1. Boundary and transport
+
+Each Linux profile has a separate socket-activated service instance and state
+root. The instance identity determines the profile. A request has no
+`profile_id`, uid, home path or state path field; callers cannot select another
+profile by parameter.
+
+The intended transport is a Unix `SOCK_STREAM` channel handed to a verified
+first-party application launch. The final path/capability mechanism remains an
+implementation spike and is a production blocker. A filesystem-readable socket
+plus `SO_PEERCRED` uid alone is insufficient because unrelated applications run
+as the same human uid. There is no localhost TCP control API.
+
+Messages are newline-delimited UTF-8 JSON. One connection processes requests
+in order. Request lines are bounded to 8 MiB (a plain-text draft may be 4 MiB);
+response lines are bounded to 16 MiB (a thread may contain bounded bodies and
+attachment metadata). Ordinary reads have a 10-second bound. Mutations return
+an operation record rather than holding a UI connection across remote sync;
+sync and provider work have their own bounded jobs, cancellation and backoff.
+
+The envelope is:
+
+```json
+{"v":1,"id":"reminder-1","method":"reminders.complete","params":{"reminder_id":"reminder_A1","if_revision":7,"completed":true}}
+```
+
+Success echoes `v`, `id` and `method` and carries one method-specific `result`.
+Failure echoes the same fields and carries one typed `error`. Exactly one of
+`result` or `error` is present. Version `1` and the method set are closed;
+unknown methods and properties fail rather than being ignored.
+
+## 2. Identity, credentials and content
+
+- The service verifies profile ownership and the first-party launch identity
+  before parsing a method. Cross-profile ids are not a discovery mechanism:
+  they return `not_found`, not ownership information.
+- Normal IPC never contains passwords, authorization codes, access or refresh
+  tokens, provider client secrets, vault keys or callback query strings.
+  `accounts.begin_connect` carries only a provider type. OAuth browser launch
+  and the short-lived password-entry helper use the separate ADR-008 paths.
+- QML windows have no direct network authority. The service owns transport,
+  parsing, sync, durable state and credential use.
+- Mail bodies, event descriptions and reminder notes may cross this IPC because
+  the first-party applications must render them. They are content, not audit
+  data: they never enter device audit, Smplify inventory or diagnostics.
+- `service.status` may report the bound profile id/uid as observed service
+  identity. Requests never provide or override either value.
+
+## 3. Closed method set
+
+| Area | Methods | Result |
+|---|---|---|
+| Service | `service.status` | bound profile, encryption posture, connectivity and account count |
+| Accounts | `accounts.list`, `accounts.begin_connect`, `accounts.cancel_connect`, `accounts.remove` | account pages, setup state or operation |
+| Sync | `sync.trigger` | bounded asynchronous operation |
+| Mail | `mail.list`, `mail.thread`, `mail.message_body`, `mail.draft_create`, `mail.draft_update`, `mail.send`, `mail.archive`, `mail.delete` | page, bounded thread/body chunk, draft or operation |
+| Calendar | `calendar.list`, `events.list`, `events.create`, `events.update`, `events.delete`, `events.respond` | page, event or operation |
+| Reminders | `reminder_lists.list`, `reminders.list`, `reminders.create`, `reminders.update`, `reminders.complete`, `reminders.delete` | page, reminder or operation |
+| Contacts | `contacts.search` | bounded address-completion page |
+| Change stream | `changes.since` | ordered bounded change page and next cursor |
+
+There is no SQL, file read, URL fetch, shell, exec, arbitrary provider request,
+generic secret get/set or raw protocol method.
+
+## 4. Pagination and change cursors
+
+List methods take an opaque cursor or `null` and a bounded limit. A returned
+page carries:
+
+- `next_cursor`: the next page within the same stable snapshot, or `null`;
+- `snapshot_cursor`: the change cursor representing that snapshot.
+
+A cursor is integrity protected and bound to the profile, method, filter set,
+sort and snapshot. Reusing it with another method/filter/profile returns
+`invalid_cursor`. A cursor outside the retained change window returns
+`cursor_expired`; the client must refresh a snapshot and must not guess a
+replacement.
+
+`changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
+`has_more` requires the client to continue before rendering the cursor as
+current. Change events identify records but do not repeat message bodies or
+other content. Clients fetch changed records through their typed method.
+
+## 5. Offline and conflict behavior
+
+Every mutable record carries `sync` metadata with one of:
+
+- `local_only` — intentionally never submitted to a provider;
+- `synced` — local and observed remote revisions agree;
+- `pending` — a durable local mutation awaits upload;
+- `offline` — work is retained and waits for connectivity;
+- `conflict` — local and remote changes require a typed resolution;
+- `error` — a named bounded failure needs retry or user action.
+
+Offline is a state, not data loss. A mutation may return
+`queued_offline`; the local change and change cursor are durable before the
+response. Updates, completion, sends and destructive actions use
+`if_revision`; a stale value returns `conflict` with `current_revision` and
+does not overwrite either side. Conflict records name fields and permitted
+resolution strategies without placing the two content bodies in logs.
+
+## 6. Errors
+
+The closed error set is encoded in the schema:
+
+`malformed_request`, `unsupported_version`, `unknown_method`,
+`invalid_params`, `denied`, `not_found`, `conflict`, `offline`,
+`invalid_cursor`, `cursor_expired`, `rate_limited`,
+`storage_encryption_required`, `upstream_auth_required`,
+`upstream_unreachable`, `unsupported_provider`, and `internal`.
+
+Messages are safe user-facing prose. `details` is deliberately small: a
+resource id, current revision, retry time or supported protocol versions. Raw
+server responses, URLs, headers and credential material are not error details.
+
+## 7. Required contract tests
+
+The schema harness validates positive status, reminder mutation, change-page
+and conflict records. Negative fixtures prove that:
+
+- a password cannot enter `accounts.begin_connect`;
+- a request cannot add a `profile_id` override;
+- a response cannot pair a method with the wrong result kind;
+- generic `system.exec` is not a method;
+- an account record cannot expose a refresh token; and
+- `sync.state=conflict` cannot omit typed conflict details.
+
+Runtime work must add peer/capability denial, frame/time limits, cursor
+tampering/expiry, crash/restart, power-loss, offline queue, optimistic
+concurrency and secret-leak scans before a production application is exposed.

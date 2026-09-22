@@ -85,8 +85,13 @@ The first storage implementation may rely on full-disk encryption for content
 at rest, but tokens and passwords require a separately reviewed credential
 path. The current `punar-secrets` daemon is a short-lived, non-persistent agent
 credential broker; silently turning it into an OAuth vault would invalidate
-its “no state directory” security promise. Persistent account credentials need
-their own ADR and negative tests before any provider sign-in is enabled.
+its “no state directory” security promise. Persistent account credentials are
+governed by
+[`ADR-008`](../architecture/adr/ADR-008-pim-account-credentials.md): a
+service-private per-profile vault owned by the socket-activated PIM service,
+never a new state directory for `punar-secrets`. The architecture decision is
+accepted; its negative tests and runtime proof remain prerequisites for any
+provider sign-in.
 
 One Linux profile/uid owns one PIM service and one data root. Personal and work
 profiles therefore do not share account metadata, indexes, notifications or
@@ -106,11 +111,13 @@ The data model is provider-neutral. The transport layer is replaceable:
 | Reminders | local + CalDAV `VTODO` | Google Tasks / Microsoft To Do APIs |
 | Contacts | CardDAV | Google People / Microsoft Graph |
 
-Both routes are required for the finished product. The first implementation
-sequence remains an explicit product choice: open standards yield a
-provider-neutral, self-hostable vertical slice; Google/Microsoft yield the
-most familiar sign-in path but require provider registrations, tenant-policy
-handling and production OAuth custody.
+Both routes are required for the finished product. ADR-008 selects **open
+standards first**: local Calendar and Reminders, then one complete
+IMAP/SMTP + CalDAV/CardDAV account vertical slice. Google and Microsoft follow
+against the same typed model and remain release gates. This order proves the
+provider-neutral, self-hostable path before provider registrations,
+tenant-policy handling and production OAuth custody can shape the common
+schema.
 
 ### 0.5 Security and privacy floor
 
@@ -417,7 +424,8 @@ section 2. Those need a real client.
 | 0 | Evolution disclosure and first-run suppression | **complete** |
 | 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
 | 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
-| 3 | Decide first provider sequence; write persistent-credential ADR and typed PIM IPC/schema | days |
+| 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
+| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract complete; service implementation proof open** |
 | 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | weeks |
 | 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
 | 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |

@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "thread-1",
+  "method": "mail.thread",
+  "result": {
+    "kind": "operation",
+    "operation_id": "op_A1",
+    "state": "completed",
+    "resource_id": "thread_A1",
+    "change_cursor": "cursor_5"
+  }
+}

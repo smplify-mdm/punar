@@ -117,6 +117,8 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/policy/*/ai-policy-*", "schemas/policy/ai-policy.json"),
     ("fixtures/policy/*/model-governance-*", "schemas/policy/model-governance.json"),
     ("fixtures/policy/*/policy-source-*", "schemas/policy/policy-source.json"),
+    ("fixtures/pim/*/ipc-message.*", "schemas/pim/ipc-message.json"),
+    ("fixtures/pim/*/records.*", "schemas/pim/records.json"),
     ("fixtures/project/*/project-environment.*", "schemas/project/project-environment.json"),
     ("fixtures/update/*/release-manifest*", "schemas/update/release-manifest.json"),
     ("fixtures/update/*/channel-metadata*", "schemas/update/channel-metadata.json"),

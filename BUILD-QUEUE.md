@@ -150,12 +150,14 @@ data into Calendar or Reminders.
 
 Next build slice, in order:
 
-1. settle the first provider sequence and write the persistent-account-
-   credential ADR — do not repurpose `punar-secrets`, whose no-state promise is
-   a security contract;
-2. define the versioned PIM schema and closed typed IPC, including profile/uid
-   ownership, pagination, change cursors, offline/conflict states and negative
-   fixtures;
+1. **decision complete:** ADR-008 selects open standards first and a
+   service-private per-profile vault owned by socket-activated `punar-pimd`;
+   implementation and hostile-caller proof remain open. Do not repurpose
+   `punar-secrets`, whose no-state promise is a security contract;
+2. **contract complete:** `schemas/pim/` and `docs/api/pim-ipc.md` define the
+   closed v1 envelope, profile-bound ownership, pagination/change cursors,
+   offline/conflict states and credential/profile-override negative fixtures;
+   the service and runtime authorization proof remain open;
 3. build a lazy per-user `punar-pimd` with local-only Calendar and Reminders,
    real empty states and zero production fixture data;
 4. complete one real account vertical slice before replacing Mail's fixture

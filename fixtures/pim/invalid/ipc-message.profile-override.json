@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "id": "cross-profile",
+  "method": "accounts.list",
+  "params": {
+    "cursor": null,
+    "limit": 20
+  },
+  "profile_id": "profile_other"
+}
