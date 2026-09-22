@@ -143,7 +143,9 @@ before input exists, clears the password on every result and exits. The
 service receives it into a zeroizing buffer and relays it through the narrower
 one-use credential channel into the vault. The ordinary Mail and Settings
 windows never receive the password, and malformed, extended, cancelled or
-oversized entry fails before an account is published. The implemented library
+oversized entry fails before an account is published. The helper receives only
+a closed result code and optional successful account id, never provider text.
+The implemented library
 coordinator validates
 service-private server configuration, creates incoming/outgoing credential
 records together, invokes a closed verification interface, publishes the

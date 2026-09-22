@@ -37,8 +37,8 @@ mod sync_runtime;
 mod vault;
 
 pub use account_entry::{
-    AccountEntryError, AccountEntryHelper, OpenProtocolSetup, account_entry_pair,
-    complete_account_entry,
+    AccountEntryCode, AccountEntryError, AccountEntryHelper, AccountEntryOutcome,
+    OpenProtocolSetup, account_entry_pair, complete_account_entry,
 };
 pub use account_setup::{
     AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError,

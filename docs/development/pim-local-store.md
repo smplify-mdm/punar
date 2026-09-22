@@ -224,7 +224,8 @@ The crate's unit suite proves:
 56. a colliding setup attempt cannot replace an existing account password; and
 57. the protected account-entry session keeps the password out of its strict
     identity/server frame, zeroizes helper input, rejects extensions, wrong
-    versions, cancellation and oversize, and commits only after verification.
+    versions, cancellation and oversize, returns only a closed helper outcome,
+    and commits only after verification.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
