@@ -19,7 +19,10 @@ opens a process or network boundary. The accepted external contract remains
   checks;
 - local-only, pending and durable-offline mutation posture;
 - an ordered bounded change log including deletion tombstones;
-- 0600 state files in a 0700 service directory;
+- exact 0600 state files in an owned, exact 0700 service directory;
+- descriptor-relative state reads that do not follow symbolic links and reject
+  hard-linked aliases, foreign ownership and inputs above a 64 MiB pre-parse
+  cap;
 - same-directory exclusive temporary writes, file `fsync`, atomic rename and
   parent-directory `fsync` before a mutation reports success;
 - fail-closed handling for corrupt, future-version, cross-profile,
@@ -100,7 +103,7 @@ The crate's unit suite proves:
 4. offline queue posture survives restart;
 5. deletion emits and preserves a tombstone;
 6. corrupt state fails closed and is not replaced;
-7. cross-profile and over-permissive files are refused;
+7. cross-profile, foreign-owned and non-exact-mode files are refused;
 8. v0 migration creates an exact durable backup and is idempotent; and
 9. future versions fail closed and remain untouched;
 10. one unnamed endpoint transfers and carries application data;
@@ -130,7 +133,10 @@ The crate's unit suite proves:
 25. a local calendar mutation is durable and appears in the change stream;
 26. stale revisions return a typed conflict without rewriting state; and
 27. a mismatched grant uid is denied before malformed params are parsed; and
-28. malformed record ids return `invalid_params` without resource disclosure.
+28. malformed record ids return `invalid_params` without resource disclosure;
+29. hard-linked and symbolic-link state paths fail closed without touching the
+    target; and
+30. oversized state is rejected before an unbounded allocation or JSON parse.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.

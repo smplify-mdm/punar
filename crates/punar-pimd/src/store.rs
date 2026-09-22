@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -20,6 +20,7 @@ use crate::{
 const STORE_VERSION: u32 = 1;
 const MAX_CHANGES: usize = 4096;
 const MAX_CHANGE_PAGE: usize = 1000;
+const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const PRIVATE_DIR_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
@@ -683,28 +684,78 @@ fn prepare_private_parent(path: &Path) -> Result<(), StoreError> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| StoreError::Invalid("store path has no parent".into()))?;
-    fs::create_dir_all(parent)?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) => {
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != rustix::process::getuid().as_raw()
+            {
+                return Err(StoreError::Corrupt(
+                    "store parent is not a private owned directory".into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(parent)?,
+        Err(error) => return Err(error.into()),
+    }
     fs::set_permissions(parent, fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o777 != PRIVATE_DIR_MODE
+    {
+        return Err(StoreError::Corrupt(
+            "store parent permissions are not private".into(),
+        ));
+    }
     Ok(())
 }
 
 fn read_private(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let descriptor = match rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::LOOP) => {
+            return Err(StoreError::Corrupt(
+                "state path must not be a symbolic link".into(),
+            ));
+        }
+        Err(error) => return Err(io::Error::from(error).into()),
     };
-    if !metadata.file_type().is_file() {
+    let input = File::from(descriptor);
+    let metadata = input.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.nlink() != 1
+    {
         return Err(StoreError::Corrupt(
-            "state path is not a regular file".into(),
+            "state path is not a private owned regular file".into(),
         ));
     }
-    if metadata.permissions().mode() & 0o077 != 0 {
+    if metadata.permissions().mode() & 0o777 != PRIVATE_FILE_MODE {
         return Err(StoreError::Corrupt(
-            "state file is readable or writable by another user".into(),
+            "state file mode is not exactly private".into(),
         ));
     }
-    Ok(Some(fs::read(path)?))
+    if metadata.len() > MAX_STORE_BYTES {
+        return Err(StoreError::Corrupt(
+            "state file exceeds its size cap".into(),
+        ));
+    }
+    let initial_capacity = usize::try_from(metadata.len()).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    input.take(MAX_STORE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STORE_BYTES {
+        return Err(StoreError::Corrupt(
+            "state file exceeds its size cap".into(),
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 fn persist(path: &Path, state: &State) -> Result<(), StoreError> {
@@ -1343,6 +1394,56 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, StoreError::Corrupt(_)));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn linked_store_state_is_refused_without_touching_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let path = temp_store("linked");
+        open(&path);
+        let original = fs::read(&path).unwrap();
+        let alias = path.with_file_name("state-alias.json");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(matches!(
+            PimStore::open(&path, "profile_alice", 1000),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(&alias).unwrap();
+
+        let target = path.with_file_name("state-target.json");
+        fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(matches!(
+            PimStore::open(&path, "profile_alice", 1000),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(fs::read(&target).unwrap(), original);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn oversized_store_state_is_rejected_before_allocation() {
+        let path = temp_store("oversized");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            path.parent().unwrap(),
+            fs::Permissions::from_mode(PRIVATE_DIR_MODE),
+        )
+        .unwrap();
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(PRIVATE_FILE_MODE)
+            .open(&path)
+            .unwrap();
+        output.set_len(MAX_STORE_BYTES + 1).unwrap();
+        assert!(matches!(
+            PimStore::open(&path, "profile_alice", 1000),
+            Err(StoreError::Corrupt(_))
+        ));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
