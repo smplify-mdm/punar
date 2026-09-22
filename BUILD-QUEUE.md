@@ -202,8 +202,11 @@ Next build slice, in order:
    and new records across a list; restart, expiry or eviction returns an
    explicit cursor expiry. The full dispatcher is now in progress: status,
    honest empty accounts, structural Calendar/Reminder lists, local
-   event/reminder mutations, typed conflicts and the durable change stream are
-   store-backed. The first Mail ingest boundary now converts bounded untrusted
+   event/reminder mutations, typed conflicts, provider-neutral account
+   metadata/listing and the durable change stream are store-backed. Account
+   metadata has a one-way v1-to-v2 migration and contains no credential or
+   provider endpoint field; no setup path can create it yet. The first Mail
+   ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
    event/reminder reads, durable Mail storage, IMAP/SMTP, provider/account

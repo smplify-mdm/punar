@@ -113,9 +113,10 @@ Missing state fails as `cursor_expired`; it never falls through to current
 store contents. Single-page queries allocate no cache entry.
 
 `crates/punar-pimd/src/dispatcher.rs` now provides the first store-backed
-method slice: service status, honest empty account state, structural Calendar
-and Reminder lists, durable local event/reminder mutations and the bounded
-change stream. It checks the grant uid before method params, uses the strict
+method slice: service status with the real durable account count,
+provider-neutral account listing, structural Calendar and Reminder lists,
+durable local event/reminder mutations and the bounded change stream. It checks
+the grant uid before method params, uses the strict
 store validators, returns typed optimistic conflicts and signs a mutation's
 change cursor only after the durable write. It intentionally leaves provider,
 Mail/contact and filtered event/reminder methods unstaged.
@@ -188,8 +189,12 @@ The crate's unit suite proves:
 45. actual HTML sets the remote-content block and no HTML/remote URL reaches
     the returned body;
 46. attachment bytes are discarded while bounded metadata remains;
-47. oversized mail is refused before parse and Unicode truncation is safe; and
-48. missing/invalid senders fail instead of receiving a fixture identity.
+47. oversized mail is refused before parse and Unicode truncation is safe;
+48. missing/invalid senders fail instead of receiving a fixture identity;
+49. provider-neutral account metadata survives restart and contains no
+    credential/token/server field; and
+50. the v1-to-v2 migration adds an empty account index without losing local
+    data and leaves an exact durable backup.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -202,7 +207,8 @@ install or activate `punar-pimd`, it still needs:
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
-  event responses, account/provider, Mail and contacts methods;
+  event responses, account setup/removal coordination, Mail and contacts
+  methods;
 - credential-vault integration with account transactions plus the fixed
   launcher, executable and UI for the short-lived password-entry helper;
 - power-loss/fault-injection tests in addition to restart tests;

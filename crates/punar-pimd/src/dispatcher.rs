@@ -60,7 +60,7 @@ impl LocalDispatcher {
                     "profile_uid": snapshot.profile_uid,
                     "storage_encryption": "unverified",
                     "connectivity": "unknown",
-                    "accounts": 0,
+                    "accounts": snapshot.accounts.len(),
                     "last_change_cursor": self.pager.seal_change_cursor(snapshot.revision).map_err(map_page_error)?,
                 }))
             }
@@ -70,7 +70,7 @@ impl LocalDispatcher {
                     request.method,
                     ACCOUNT_LIST_BINDING,
                     snapshot.revision,
-                    &Vec::<Value>::new(),
+                    &snapshot.accounts,
                     params,
                 )?;
                 Ok(page_result("account_page", page))

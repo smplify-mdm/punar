@@ -1,6 +1,6 @@
 //! Crash-durable, fixture-free local Calendar and Reminders store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Calendar, CalendarEvent, CalendarEventKind, CalendarKind, ChangeEvent, ChangeEventKind,
-    ChangeOperation, EntityKind, EventInput, EventWhen, Reminder, ReminderDue, ReminderInput,
-    ReminderKind, ReminderList, ReminderListKind, SyncMetadata,
+    Account, AccountAuthState, AccountKind, Calendar, CalendarEvent, CalendarEventKind,
+    CalendarKind, ChangeEvent, ChangeEventKind, ChangeOperation, EntityKind, EventInput, EventWhen,
+    Reminder, ReminderDue, ReminderInput, ReminderKind, ReminderList, ReminderListKind,
+    SyncMetadata,
 };
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 const MAX_CHANGES: usize = 4096;
 const MAX_CHANGE_PAGE: usize = 1000;
 const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
@@ -58,6 +59,7 @@ pub struct Snapshot {
     pub profile_id: String,
     pub profile_uid: u32,
     pub revision: u64,
+    pub accounts: Vec<Account>,
     pub calendars: Vec<Calendar>,
     pub events: Vec<CalendarEvent>,
     pub reminder_lists: Vec<ReminderList>,
@@ -83,6 +85,23 @@ struct StoredChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
+    schema_version: u32,
+    profile_id: String,
+    profile_uid: u32,
+    revision: u64,
+    accounts: BTreeMap<String, Account>,
+    calendars: BTreeMap<String, Calendar>,
+    events: BTreeMap<String, CalendarEvent>,
+    reminder_lists: BTreeMap<String, ReminderList>,
+    reminders: BTreeMap<String, Reminder>,
+    changes: Vec<StoredChange>,
+}
+
+/// The prior unshipped durable local-only format. Version 2 adds account
+/// metadata but never credential values or provider configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateV1 {
     schema_version: u32,
     profile_id: String,
     profile_uid: u32,
@@ -144,11 +163,56 @@ impl PimStore {
             profile_id: state.profile_id.clone(),
             profile_uid: state.profile_uid,
             revision: state.revision,
+            accounts: state.accounts.values().cloned().collect(),
             calendars: state.calendars.values().cloned().collect(),
             events: state.events.values().cloned().collect(),
             reminder_lists: state.reminder_lists.values().cloned().collect(),
             reminders: state.reminders.values().cloned().collect(),
         }
+    }
+
+    /// Persist provider-neutral account metadata only after the account
+    /// coordinator has verified the remote service and committed credentials.
+    /// Passwords, tokens and server configuration are not representable here.
+    pub fn register_account(&self, account: Account, now: &str) -> Result<Account, StoreError> {
+        validate_timestamp(now)?;
+        validate_account(&account)?;
+        self.commit(|state| {
+            if state.accounts.contains_key(&account.account_id) {
+                return Err(StoreError::Invalid("account already exists".into()));
+            }
+            let account_id = account.account_id.clone();
+            state.accounts.insert(account_id.clone(), account.clone());
+            state.record_change(
+                EntityKind::Account,
+                ChangeOperation::Upsert,
+                &account_id,
+                1,
+                now,
+            )?;
+            Ok(account)
+        })
+    }
+
+    /// Remove metadata after the service coordinator has stopped provider work
+    /// and removed the corresponding vault records. It is intentionally not an
+    /// application-level transaction by itself.
+    pub fn remove_account_metadata(&self, account_id: &str, now: &str) -> Result<(), StoreError> {
+        validate_timestamp(now)?;
+        validate_account_id(account_id)?;
+        self.commit(|state| {
+            if state.accounts.remove(account_id).is_none() {
+                return Err(StoreError::NotFound);
+            }
+            state.record_change(
+                EntityKind::Account,
+                ChangeOperation::Delete,
+                account_id,
+                1,
+                now,
+            )?;
+            Ok(())
+        })
     }
 
     pub fn create_event(
@@ -497,6 +561,7 @@ impl State {
             profile_id: profile_id.to_string(),
             profile_uid,
             revision: 0,
+            accounts: BTreeMap::new(),
             calendars: BTreeMap::from([(calendar_id, calendar)]),
             events: BTreeMap::new(),
             reminder_lists: BTreeMap::from([(list_id, list)]),
@@ -516,10 +581,14 @@ impl State {
             return Err(StoreError::ProfileMismatch);
         }
         validate_profile_id(&self.profile_id)?;
+        validate_keyed_records(&self.accounts, |record| &record.account_id, "account")?;
         validate_keyed_records(&self.calendars, |record| &record.calendar_id, "calendar")?;
         validate_keyed_records(&self.events, |record| &record.event_id, "event")?;
         validate_keyed_records(&self.reminder_lists, |record| &record.list_id, "list")?;
         validate_keyed_records(&self.reminders, |record| &record.reminder_id, "reminder")?;
+        for account in self.accounts.values() {
+            validate_account(account)?;
+        }
         for calendar in self.calendars.values() {
             validate_calendar(calendar)?;
         }
@@ -639,13 +708,46 @@ fn load_or_migrate(
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| StoreError::Corrupt("missing integer schema_version".into()))?;
     match version {
-        1 => serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string())),
+        2 => serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string())),
+        1 => migrate_v1(path, bytes, profile_id, profile_uid),
         0 => migrate_v0(path, bytes, profile_id, profile_uid),
         found => Err(StoreError::UnsupportedVersion {
             found: u32::try_from(found).unwrap_or(u32::MAX),
             supported: STORE_VERSION,
         }),
     }
+}
+
+fn migrate_v1(
+    path: &Path,
+    bytes: &[u8],
+    profile_id: &str,
+    profile_uid: u32,
+) -> Result<State, StoreError> {
+    let old: StateV1 =
+        serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    if old.schema_version != 1 {
+        return Err(StoreError::Corrupt("invalid v1 marker".into()));
+    }
+    if old.profile_id != profile_id || old.profile_uid != profile_uid {
+        return Err(StoreError::ProfileMismatch);
+    }
+    let state = State {
+        schema_version: STORE_VERSION,
+        profile_id: old.profile_id,
+        profile_uid: old.profile_uid,
+        revision: old.revision,
+        accounts: BTreeMap::new(),
+        calendars: old.calendars,
+        events: old.events,
+        reminder_lists: old.reminder_lists,
+        reminders: old.reminders,
+        changes: old.changes,
+    };
+    state.validate(profile_id, profile_uid)?;
+    persist_backup(path, bytes, "pre-v2")?;
+    persist(path, &state)?;
+    Ok(state)
 }
 
 fn migrate_v0(
@@ -667,6 +769,7 @@ fn migrate_v0(
         profile_id: old.profile_id,
         profile_uid: old.profile_uid,
         revision: 0,
+        accounts: BTreeMap::new(),
         calendars: old.calendars,
         events: old.events,
         reminder_lists: old.reminder_lists,
@@ -674,7 +777,7 @@ fn migrate_v0(
         changes: Vec::new(),
     };
     state.validate(profile_id, profile_uid)?;
-    persist_backup(path, bytes)?;
+    persist_backup(path, bytes, "pre-v1")?;
     persist(path, &state)?;
     Ok(state)
 }
@@ -766,12 +869,12 @@ fn persist(path: &Path, state: &State) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn persist_backup(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+fn persist_backup(path: &Path, bytes: &[u8], suffix: &str) -> Result<(), StoreError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| StoreError::Invalid("store path has no UTF-8 file name".into()))?;
-    let backup = path.with_file_name(format!("{file_name}.pre-v1"));
+    let backup = path.with_file_name(format!("{file_name}.{suffix}"));
     match fs::read(&backup) {
         Ok(existing) if existing == bytes => return Ok(()),
         Ok(_) => {
@@ -1032,6 +1135,44 @@ fn validate_reminder(reminder: &Reminder) -> Result<(), StoreError> {
     validate_sync(&reminder.sync)
 }
 
+fn validate_account(account: &Account) -> Result<(), StoreError> {
+    if account.kind != AccountKind::Account {
+        return Err(StoreError::Corrupt("account kind is invalid".into()));
+    }
+    validate_account_id(&account.account_id)?;
+    bounded_nonempty(&account.display_name, 160, "account display name")?;
+    if let Some(address) = &account.primary_address {
+        validate_email(address)?;
+    }
+    if account.capabilities.is_empty() || account.capabilities.len() > 4 {
+        return Err(StoreError::Invalid(
+            "account capabilities are empty or oversized".into(),
+        ));
+    }
+    let unique = account
+        .capabilities
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if unique.len() != account.capabilities.len() {
+        return Err(StoreError::Invalid(
+            "account capabilities contain duplicates".into(),
+        ));
+    }
+    if account.auth_state == AccountAuthState::Ready && account.primary_address.is_none() {
+        return Err(StoreError::Invalid(
+            "ready account has no primary address".into(),
+        ));
+    }
+    if let Some(last_sync_at) = &account.last_sync_at {
+        validate_timestamp(last_sync_at)?;
+    }
+    if let Some(next_retry_at) = &account.next_retry_at {
+        validate_timestamp(next_retry_at)?;
+    }
+    Ok(())
+}
+
 fn validate_sync(sync: &SyncMetadata) -> Result<(), StoreError> {
     if sync.local_revision == 0 {
         return Err(StoreError::Corrupt(
@@ -1219,12 +1360,31 @@ mod tests {
         }
     }
 
+    fn account(account_id: &str) -> Account {
+        Account {
+            kind: AccountKind::Account,
+            account_id: account_id.to_string(),
+            provider_type: crate::ProviderType::OpenProtocols,
+            display_name: "Work mail".to_string(),
+            primary_address: Some(crate::EmailAddress {
+                name: Some("Alice".to_string()),
+                address: "alice@example.com".to_string(),
+            }),
+            capabilities: vec![crate::AccountCapability::Mail],
+            auth_state: AccountAuthState::Ready,
+            connectivity: crate::Connectivity::Online,
+            last_sync_at: None,
+            next_retry_at: None,
+        }
+    }
+
     #[test]
     fn fresh_store_has_only_blank_structural_containers() {
         let path = temp_store("empty");
         let snapshot = open(&path).snapshot();
         assert_eq!(snapshot.calendars.len(), 1);
         assert_eq!(snapshot.reminder_lists.len(), 1);
+        assert!(snapshot.accounts.is_empty());
         assert!(snapshot.events.is_empty());
         assert!(snapshot.reminders.is_empty());
         assert_eq!(snapshot.revision, 0);
@@ -1244,6 +1404,34 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn account_metadata_is_durable_and_removal_emits_no_credentials() {
+        let path = temp_store("account");
+        let store = open(&path);
+        let registered = store.register_account(account("acct_A1"), NOW).unwrap();
+        assert_eq!(
+            registered.primary_address.unwrap().address,
+            "alice@example.com"
+        );
+        drop(store);
+
+        let reopened = open(&path);
+        assert_eq!(reopened.snapshot().accounts.len(), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        for forbidden in ["password", "access_token", "refresh_token", "client_secret"] {
+            assert!(!text.contains(forbidden), "persisted {forbidden}");
+        }
+        reopened
+            .remove_account_metadata("acct_A1", "2026-09-22T16:01:00Z")
+            .unwrap();
+        assert!(open(&path).snapshot().accounts.is_empty());
+        let changes = open(&path).changes_since(0, 10).unwrap().changes;
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].entity_kind, EntityKind::Account);
+        assert_eq!(changes[1].operation, ChangeOperation::Delete);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1482,12 +1670,42 @@ mod tests {
     }
 
     #[test]
+    fn v1_migration_adds_an_empty_account_index_without_losing_state() {
+        let path = temp_store("v1-migration");
+        let store = open(&path);
+        store
+            .create_reminder(
+                reminder_input(&store.snapshot(), "Preserve me"),
+                MutationMode::LocalOnly,
+                NOW,
+            )
+            .unwrap();
+        drop(store);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schema_version"] = serde_json::json!(1);
+        value.as_object_mut().unwrap().remove("accounts");
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let migrated = open(&path).snapshot();
+        assert_eq!(migrated.reminders[0].title, "Preserve me");
+        assert!(migrated.accounts.is_empty());
+        assert_eq!(
+            fs::read(path.with_file_name("state.json.pre-v2")).unwrap(),
+            bytes
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn future_version_is_refused_without_rewriting() {
         let path = temp_store("future");
         open(&path);
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["schema_version"] = serde_json::json!(2);
+        value["schema_version"] = serde_json::json!(3);
         let bytes = serde_json::to_vec_pretty(&value).unwrap();
         fs::write(&path, &bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1498,8 +1716,8 @@ mod tests {
         assert!(matches!(
             error,
             StoreError::UnsupportedVersion {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             }
         ));
         assert_eq!(fs::read(&path).unwrap(), bytes);

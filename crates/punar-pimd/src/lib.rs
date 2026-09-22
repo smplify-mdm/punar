@@ -192,6 +192,63 @@ pub struct EmailAddress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    Account,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    OpenProtocols,
+    Google,
+    Microsoft,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountCapability {
+    Mail,
+    Calendar,
+    Reminders,
+    Contacts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountAuthState {
+    Ready,
+    ActionRequired,
+    Revoked,
+    Removing,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Connectivity {
+    Online,
+    Offline,
+    Limited,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Account {
+    pub kind: AccountKind,
+    pub account_id: String,
+    pub provider_type: ProviderType,
+    pub display_name: String,
+    pub primary_address: Option<EmailAddress>,
+    pub capabilities: Vec<AccountCapability>,
+    pub auth_state: AccountAuthState,
+    pub connectivity: Connectivity,
+    pub last_sync_at: Option<String>,
+    pub next_retry_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MailSummaryKind {
     MailSummary,
 }
@@ -245,6 +302,25 @@ pub struct MailMessage {
     pub remote_content_blocked: bool,
     pub attachments: Vec<Attachment>,
     pub attachments_complete: bool,
+    pub sync: SyncMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailThreadKind {
+    MailThread,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailThread {
+    pub kind: MailThreadKind,
+    pub thread_id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub messages: Vec<MailMessage>,
+    pub next_cursor: Option<String>,
+    pub snapshot_cursor: String,
     pub sync: SyncMetadata,
 }
 
@@ -367,10 +443,15 @@ pub struct ReminderInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
+    Account,
+    MailSummary,
+    MailThread,
+    MailDraft,
     Calendar,
     CalendarEvent,
     ReminderList,
     Reminder,
+    Contact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

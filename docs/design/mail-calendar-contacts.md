@@ -18,7 +18,10 @@
 > production image entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
 > attachment payloads; it has no transport or durable inbox yet. Calendar and
-> Reminders remain unavailable to users.
+> Reminders remain unavailable to users. Provider-neutral account metadata now
+> survives restart and backs `accounts.list`, but no sign-in workflow is
+> allowed to create it until credential, remote verification and rollback are
+> one transaction.
 > No part of this status may be shortened to “Mail is built” until the runtime
 > gates in section 9 pass.
 
