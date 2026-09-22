@@ -145,9 +145,11 @@ never receives the password. The implemented library coordinator validates
 service-private server configuration, creates incoming/outgoing credential
 records together, invokes a closed verification interface, publishes the
 ready account only after success and removes staged records on every checked
-failure. The executable, fixed launcher, real TLS/provider adapter, crash
-reconciliation and QML account flow remain implementation work; this library
-is not a sign-in feature.
+failure. A TLS-only verifier now authenticates both configured endpoints, and
+a bounded read-only INBOX adapter can use the incoming credential inside a
+short-lived sync worker. The executable, fixed launcher, crash reconciliation
+and QML account flow remain implementation work; this library is not a sign-in
+feature.
 
 Account removal is a transaction: stop new work, revoke remote authorization
 when the provider supports it, delete the local credential and sync cursors,

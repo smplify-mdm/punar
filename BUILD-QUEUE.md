@@ -225,7 +225,11 @@ Next build slice, in order:
    stream are store-backed. Mail pages come only from the parsed durable store;
    their continuation state is capped, time-bound and signed to the selected
    account/thread plus the durable Mail revision, so sync invalidates rather
-   than mixes pages. Account
+   than mixes pages. `sync.trigger` now acknowledges before provider work,
+   coalesces repeated account triggers, permits at most two concurrent jobs,
+   catches worker failure and exits after one bounded batch; online, offline,
+   authentication-required and closed error state persist without provider
+   text. There is no resident timer or automatic retry loop. Account
    metadata and service-private open-protocol configuration now have one-way
    v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
    normal application IPC, and credentials remain only in the vault. The
@@ -234,8 +238,9 @@ Next build slice, in order:
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, the asynchronous sync job/runtime, provider/account
-   methods and production-image staging remain open;
+   event/reminder reads, account setup/removal IPC, the fixed service/launcher
+   runtime, automatic backoff scheduling and production-image staging remain
+   open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

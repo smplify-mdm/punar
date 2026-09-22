@@ -8,7 +8,7 @@
 //! stream without accepting profile or credential fields from an application.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -18,6 +18,7 @@ use crate::{
     AccountCapability, ClientGrant, CursorPosition, CursorSigner, ErrorCode, ErrorDetails,
     EventInput, MailStore, MailStoreError, MutationMode, PageError, PagedValues, PimMethod,
     PimProtocolError, PimRequest, PimStore, ReminderInput, SnapshotPager, StoreError,
+    SyncCoordinator, SyncTriggerError,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -28,10 +29,11 @@ const MAIL_CURSOR_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_MAIL_CURSORS: usize = 1024;
 
 pub struct LocalDispatcher {
-    store: PimStore,
-    mail_store: MailStore,
+    store: Arc<PimStore>,
+    mail_store: Arc<MailStore>,
     pager: SnapshotPager,
     mail_cursors: Mutex<HashMap<u64, MailCursorState>>,
+    sync: Option<Arc<SyncCoordinator>>,
 }
 
 struct MailCursorState {
@@ -42,11 +44,31 @@ struct MailCursorState {
 impl LocalDispatcher {
     #[must_use]
     pub fn new(store: PimStore, mail_store: MailStore, signer: CursorSigner) -> Self {
+        Self::from_shared(Arc::new(store), Arc::new(mail_store), signer, None)
+    }
+
+    #[must_use]
+    pub fn with_sync(
+        store: Arc<PimStore>,
+        mail_store: Arc<MailStore>,
+        signer: CursorSigner,
+        sync: Arc<SyncCoordinator>,
+    ) -> Self {
+        Self::from_shared(store, mail_store, signer, Some(sync))
+    }
+
+    fn from_shared(
+        store: Arc<PimStore>,
+        mail_store: Arc<MailStore>,
+        signer: CursorSigner,
+        sync: Option<Arc<SyncCoordinator>>,
+    ) -> Self {
         Self {
             store,
             mail_store,
             pager: SnapshotPager::new(signer),
             mail_cursors: Mutex::new(HashMap::new()),
+            sync,
         }
     }
 
@@ -119,6 +141,21 @@ impl LocalDispatcher {
             PimMethod::MailThread => {
                 let params = request.parse_params::<MailThreadParams>()?;
                 self.mail_thread(params)
+            }
+            PimMethod::SyncTrigger => {
+                let params = request.parse_params::<SyncParams>()?;
+                let account_id = params.account_id.ok_or_else(invalid_params)?;
+                let sync = self.sync.as_ref().ok_or_else(internal)?;
+                let accepted = sync.trigger(&account_id).map_err(map_sync_trigger_error)?;
+                Ok(json!({
+                    "kind": "operation",
+                    "operation_id": accepted.operation_id,
+                    "state": "accepted",
+                    "resource_id": accepted.account_id,
+                    "change_cursor": self.pager
+                        .seal_change_cursor(snapshot.revision)
+                        .map_err(map_page_error)?,
+                }))
             }
             PimMethod::EventsCreate => {
                 let params = request.parse_params::<EventCreateParams>()?;
@@ -490,6 +527,12 @@ struct MailThreadParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SyncParams {
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EventCreateParams {
     event: EventInput,
 }
@@ -634,6 +677,27 @@ fn map_mail_store_error(error: MailStoreError) -> PimProtocolError {
     }
 }
 
+fn map_sync_trigger_error(error: SyncTriggerError) -> PimProtocolError {
+    match error {
+        SyncTriggerError::NotFound => {
+            PimProtocolError::new(ErrorCode::NotFound, "The Mail account was not found.")
+        }
+        SyncTriggerError::UnsupportedAccount => PimProtocolError::new(
+            ErrorCode::UnsupportedProvider,
+            "This account does not support Mail synchronization.",
+        ),
+        SyncTriggerError::AuthRequired => PimProtocolError::new(
+            ErrorCode::UpstreamAuthRequired,
+            "The Mail account needs attention before it can synchronize.",
+        ),
+        SyncTriggerError::RateLimited => PimProtocolError::new(
+            ErrorCode::RateLimited,
+            "Too many Mail accounts are synchronizing; try again shortly.",
+        ),
+        SyncTriggerError::Runtime => internal(),
+    }
+}
+
 fn mail_list_binding(account_id: &str, snapshot: bool) -> Vec<u8> {
     format!(
         "mail.list:v1\0{account_id}\0inbox\0{}",
@@ -685,8 +749,9 @@ mod tests {
     use super::*;
     use crate::{
         Account, AccountAuthState, AccountKind, Connectivity, EmailAddress, MailBatchItem,
-        MailIngestInput, MailServerConfig, MailServerSecurity, OpenProtocolConfig, PimClient,
-        ProviderType, decode_request, ingest_message,
+        MailIngestInput, MailServerConfig, MailServerSecurity, MailSyncReport, MailSyncRunner,
+        OpenProtocolConfig, PimClient, ProviderType, SyncCoordinator, SyncFailure, decode_request,
+        ingest_message,
     };
     use serde_json::json;
     use std::fs;
@@ -704,6 +769,34 @@ mod tests {
 
         fn with_mail() -> Self {
             Self::build(true)
+        }
+
+        fn with_sync() -> Self {
+            let mut suffix = [0_u8; 12];
+            getrandom::fill(&mut suffix).unwrap();
+            let suffix = suffix
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let root = std::env::temp_dir().join(format!("punar-pimd-dispatch-test-{suffix}"));
+            let store =
+                Arc::new(PimStore::open(&root.join("store.json"), "profile_A1", 1000).unwrap());
+            store
+                .register_open_protocol_account(
+                    account("acct_A1", "Alice"),
+                    provider_config("alice@example.com"),
+                    "2026-09-22T17:00:00Z",
+                )
+                .unwrap();
+            let mail_store =
+                Arc::new(MailStore::open(&root.join("mail.redb"), "profile_A1", 1000).unwrap());
+            let runner: Arc<dyn MailSyncRunner> = Arc::new(ImmediateSync);
+            let sync = SyncCoordinator::new(Arc::clone(&store), runner);
+            let signer = CursorSigner::from_key([9; 32], "profile_A1").unwrap();
+            Self {
+                root,
+                dispatcher: LocalDispatcher::with_sync(store, mail_store, signer, sync),
+            }
         }
 
         fn build(with_mail: bool) -> Self {
@@ -1031,6 +1124,48 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn settings_sync_trigger_returns_an_accepted_operation_without_network_blocking() {
+        let fixture = Fixture::with_sync();
+        let operation = fixture
+            .call(
+                PimClient::Settings,
+                "sync.trigger",
+                json!({"account_id":"acct_A1"}),
+            )
+            .unwrap();
+        assert_eq!(operation["kind"], "operation");
+        assert_eq!(operation["state"], "accepted");
+        assert_eq!(operation["resource_id"], "acct_A1");
+        assert!(
+            operation["operation_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("op_")
+        );
+        let started = Instant::now();
+        while fixture.dispatcher.store.snapshot().accounts[0]
+            .last_sync_at
+            .is_none()
+        {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+    }
+
+    struct ImmediateSync;
+
+    impl MailSyncRunner for ImmediateSync {
+        fn sync_account(&self, _account_id: &str) -> Result<MailSyncReport, SyncFailure> {
+            Ok(MailSyncReport {
+                uid_validity: 7,
+                last_uid: 1,
+                fetched: 1,
+                skipped_malformed: 0,
+            })
+        }
     }
 
     fn account(account_id: &str, display_name: &str) -> Account {

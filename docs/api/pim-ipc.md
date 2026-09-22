@@ -3,8 +3,10 @@
 Status: **accepted contract; service not exposed.** The fixture-free,
 profile-bound Calendar/Reminders persistence core and a LUKS-gated encrypted
 credential-vault library now exist in `crates/punar-pimd`, but there is
-deliberately no application listener, executable, provider adapter or
-production image staging yet. The machine-readable authority is
+deliberately no application listener, executable or production image staging
+yet. A TLS-only open-protocol verifier, bounded read-only INBOX adapter and
+non-resident sync coordinator exist below that unstaged boundary. The
+machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
 [`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
@@ -78,8 +80,10 @@ rather than being ignored.
   they return `not_found`, not ownership information.
 - The broker stamps one of `mail`, `calendar`, `reminders` or `settings` on
   each transferred channel. The service enforces the closed per-client method
-  partition before parsing params; for example Mail cannot delete an event and
-  Reminders cannot remove an account.
+  partition before parsing params. Mail, Calendar and Reminders may read the
+  bounded non-secret account records needed to label their own UI, but only
+  Settings may begin, cancel or remove an account or trigger sync. For example,
+  Mail cannot delete an event and Reminders cannot remove an account.
 - Normal IPC never contains passwords, authorization codes, access or refresh
   tokens, provider client secrets, vault keys or callback query strings.
   `accounts.begin_connect` carries only a provider type. OAuth browser launch
@@ -171,11 +175,21 @@ the durable Mail revision. A sync between pages therefore returns
 `cursor_expired` instead of mixing inbox generations. The dispatcher rechecks
 the trusted grant uid before parsing params, maps optimistic conflicts to
 bounded typed errors and emits signed cursors only after persistence succeeds.
-Account setup/removal IPC, sync job scheduling, Mail mutation/send, contacts,
-event responses and filtered event/reminder reads remain explicitly unstaged;
-this partial dispatcher is not installed in a production image.
+Account setup/removal IPC, automatic retry scheduling, Mail mutation/send,
+contacts, event responses and filtered event/reminder reads remain explicitly
+unstaged; this partial dispatcher is not installed in a production image.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
+
+`sync.trigger` never performs provider I/O on the application request thread.
+The service returns an `accepted` operation, coalesces another trigger for the
+same account into that operation, admits at most two account jobs at once and
+exits each worker after one bounded INBOX batch. Success or a closed
+offline/auth-required/error result is persisted on the public account record;
+provider response text and credentials are not representable. There is no
+timer or automatic retry loop yet: the stored `next_retry_at` is UI/state for
+the later socket-activated scheduler, not a promise that an unstaged daemon is
+resident.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or
 other content. Clients fetch changed records through their typed method.

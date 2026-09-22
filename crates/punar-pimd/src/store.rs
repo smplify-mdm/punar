@@ -13,9 +13,9 @@ use thiserror::Error;
 
 use crate::{
     Account, AccountAuthState, AccountKind, Calendar, CalendarEvent, CalendarEventKind,
-    CalendarKind, ChangeEvent, ChangeEventKind, ChangeOperation, EntityKind, EventInput, EventWhen,
-    OpenProtocolConfig, ProviderType, Reminder, ReminderDue, ReminderInput, ReminderKind,
-    ReminderList, ReminderListKind, SyncMetadata,
+    CalendarKind, ChangeEvent, ChangeEventKind, ChangeOperation, Connectivity, EntityKind,
+    EventInput, EventWhen, OpenProtocolConfig, ProviderType, Reminder, ReminderDue, ReminderInput,
+    ReminderKind, ReminderList, ReminderListKind, SyncMetadata,
 };
 
 const STORE_VERSION: u32 = 3;
@@ -52,6 +52,14 @@ pub enum StoreError {
 pub enum MutationMode {
     LocalOnly,
     QueueForSync { offline: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AccountSyncOutcome {
+    Success,
+    AuthRequired,
+    Offline { retry_at: String },
+    Error { retry_at: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +292,63 @@ impl PimStore {
                 now,
             )?;
             Ok(())
+        })
+    }
+
+    /// Persist the user-visible result of a bounded provider sync. Provider
+    /// text and credential material are intentionally absent from this closed
+    /// outcome set.
+    pub(crate) fn record_account_sync_outcome(
+        &self,
+        account_id: &str,
+        outcome: AccountSyncOutcome,
+        now: &str,
+    ) -> Result<Account, StoreError> {
+        validate_timestamp(now)?;
+        validate_account_id(account_id)?;
+        let retry_at = match &outcome {
+            AccountSyncOutcome::Offline { retry_at } | AccountSyncOutcome::Error { retry_at } => {
+                validate_timestamp(retry_at)?;
+                Some(retry_at.clone())
+            }
+            AccountSyncOutcome::Success | AccountSyncOutcome::AuthRequired => None,
+        };
+        self.commit(|state| {
+            let account = state
+                .accounts
+                .get_mut(account_id)
+                .ok_or(StoreError::NotFound)?;
+            match outcome {
+                AccountSyncOutcome::Success => {
+                    account.auth_state = AccountAuthState::Ready;
+                    account.connectivity = Connectivity::Online;
+                    account.last_sync_at = Some(now.to_string());
+                    account.next_retry_at = None;
+                }
+                AccountSyncOutcome::AuthRequired => {
+                    account.auth_state = AccountAuthState::ActionRequired;
+                    account.connectivity = Connectivity::Limited;
+                    account.next_retry_at = None;
+                }
+                AccountSyncOutcome::Offline { .. } => {
+                    account.connectivity = Connectivity::Offline;
+                    account.next_retry_at = retry_at;
+                }
+                AccountSyncOutcome::Error { .. } => {
+                    account.auth_state = AccountAuthState::Error;
+                    account.connectivity = Connectivity::Limited;
+                    account.next_retry_at = retry_at;
+                }
+            }
+            let account = account.clone();
+            state.record_change(
+                EntityKind::Account,
+                ChangeOperation::Upsert,
+                account_id,
+                1,
+                now,
+            )?;
+            Ok(account)
         })
     }
 
@@ -1629,6 +1694,53 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].entity_kind, EntityKind::Account);
         assert_eq!(changes[1].operation, ChangeOperation::Delete);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn account_sync_outcomes_are_durable_bounded_public_state() {
+        let path = temp_store("account-sync-outcome");
+        let store = open(&path);
+        store
+            .register_open_protocol_account(account("acct_A1"), provider_config(), NOW)
+            .unwrap();
+        let offline = store
+            .record_account_sync_outcome(
+                "acct_A1",
+                AccountSyncOutcome::Offline {
+                    retry_at: "2026-09-22T17:05:00Z".into(),
+                },
+                "2026-09-22T17:00:01Z",
+            )
+            .unwrap();
+        assert_eq!(offline.connectivity, Connectivity::Offline);
+        assert_eq!(
+            offline.next_retry_at.as_deref(),
+            Some("2026-09-22T17:05:00Z")
+        );
+
+        let synced = store
+            .record_account_sync_outcome(
+                "acct_A1",
+                AccountSyncOutcome::Success,
+                "2026-09-22T17:06:00Z",
+            )
+            .unwrap();
+        assert_eq!(synced.auth_state, AccountAuthState::Ready);
+        assert_eq!(synced.connectivity, Connectivity::Online);
+        assert_eq!(synced.last_sync_at.as_deref(), Some("2026-09-22T17:06:00Z"));
+        assert!(synced.next_retry_at.is_none());
+        drop(store);
+
+        let reopened = open(&path);
+        let account = &reopened.snapshot().accounts[0];
+        assert_eq!(
+            account.last_sync_at.as_deref(),
+            Some("2026-09-22T17:06:00Z")
+        );
+        assert_eq!(account.connectivity, Connectivity::Online);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("password"));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

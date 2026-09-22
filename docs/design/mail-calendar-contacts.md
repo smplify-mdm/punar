@@ -1,6 +1,6 @@
 # Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-22): COMMITTED CORE SUITE; LOCAL DATA AND CREDENTIAL CORE STARTED.** A real
+> **Status (2026-09-22): COMMITTED CORE SUITE; REAL MAIL BACKEND IN PROGRESS.** A real
 > xdg-toplevel window prototype exists at `shell/punar-shell/Mail/`: index,
 > thread and plain-text compose all map, tile, resize and close as ordinary
 > application windows. It still reads fixture data and speaks to no account,
@@ -22,13 +22,20 @@
 > crash-reconciliation proof. A bounded adapter now opens INBOX read-only,
 > fetches at most twenty UIDs per transaction through the same TLS/deadline
 > boundary, isolates malformed messages and commits records plus cursor
-> atomically. It has not yet passed a live-provider or service-runtime test.
+> atomically. A non-resident sync coordinator now acknowledges `sync.trigger`
+> before network work, caps concurrent account jobs at two, coalesces repeated
+> triggers, catches worker failure, and persists only bounded public
+> online/offline/auth-required state. It has not yet passed a live-provider or
+> service-runtime test.
 > ADR-012 adds a separate
 > descriptor-bound, crash-durable Mail record store with an 8 MiB cache,
 > atomic batch/cursor commits, restart persistence, duplicate suppression,
-> UIDVALIDITY replacement and account removal. There
-> is still no service listener, application binding, network adapter or
-> production image entry. A first bounded MIME ingest layer now produces only
+> UIDVALIDITY replacement and account removal. Store-backed `mail.list` and
+> `mail.thread` now expose only parsed durable records through signed,
+> revision-bound cursors, and the three apps may read non-secret account
+> metadata while account lifecycle remains Settings-only. There is still no
+> service listener, fixed launcher/bridge, live-provider proof or production
+> image entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
 > attachment payloads. Calendar and
 > Reminders remain unavailable to users. Provider-neutral account metadata and
@@ -467,7 +474,7 @@ section 2. Those need a real client.
 | 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
 | 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
 | 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
-| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner, durable signed cursors and bounded stable-page cache complete; local dispatcher in progress** |
+| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner, durable signed cursors, bounded stable-page cache, read-only Mail dispatch and async sync admission complete; remaining dispatcher methods open** |
 | 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable library core complete; process/runtime proof open** |
 | 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
 | 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |

@@ -59,6 +59,7 @@ impl PimClient {
             Self::Mail => matches!(
                 method,
                 "service.status"
+                    | "accounts.list"
                     | "mail.list"
                     | "mail.thread"
                     | "mail.message_body"
@@ -73,6 +74,7 @@ impl PimClient {
             Self::Calendar => matches!(
                 method,
                 "service.status"
+                    | "accounts.list"
                     | "calendar.list"
                     | "events.list"
                     | "events.create"
@@ -85,6 +87,7 @@ impl PimClient {
             Self::Reminders => matches!(
                 method,
                 "service.status"
+                    | "accounts.list"
                     | "reminder_lists.list"
                     | "reminders.list"
                     | "reminders.create"
@@ -424,10 +427,14 @@ mod tests {
     #[test]
     fn each_client_has_a_closed_least_privilege_method_set() {
         assert!(PimClient::Mail.allows_method("mail.thread"));
+        assert!(PimClient::Mail.allows_method("accounts.list"));
+        assert!(!PimClient::Mail.allows_method("accounts.remove"));
         assert!(!PimClient::Mail.allows_method("events.delete"));
         assert!(PimClient::Calendar.allows_method("events.update"));
+        assert!(PimClient::Calendar.allows_method("accounts.list"));
         assert!(!PimClient::Calendar.allows_method("mail.send"));
         assert!(PimClient::Reminders.allows_method("reminders.complete"));
+        assert!(PimClient::Reminders.allows_method("accounts.list"));
         assert!(!PimClient::Reminders.allows_method("accounts.remove"));
         assert!(PimClient::Settings.allows_method("accounts.begin_connect"));
         assert!(!PimClient::Settings.allows_method("mail.message_body"));

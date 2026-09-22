@@ -32,6 +32,7 @@ mod process_security;
 mod protocol;
 mod service;
 mod store;
+mod sync_runtime;
 mod vault;
 
 pub use account_setup::{
@@ -61,6 +62,10 @@ pub use protocol::{
 };
 pub use service::{PimService, PimServiceError};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
+pub use sync_runtime::{
+    AcceptedSync, MailSyncRunner, OpenProtocolSyncRunner, SyncCoordinator, SyncFailure,
+    SyncTriggerError,
+};
 pub use vault::{CredentialKind, CredentialVault, EncryptedStorageProof, VaultError};
 
 use serde::{Deserialize, Serialize};

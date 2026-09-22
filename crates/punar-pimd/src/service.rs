@@ -7,6 +7,8 @@
 
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -14,8 +16,8 @@ use thiserror::Error;
 use crate::channel::receive_client_channel_from_broker;
 use crate::{
     AdmissionError, ConnectionError, CursorKeyError, CursorSigner, LocalDispatcher, MailStore,
-    MailStoreError, PimStore, ProcessSecurityError, StoreError, lock_down_current_process,
-    receive_client_channel, serve_granted_channel,
+    MailStoreError, OpenProtocolSyncRunner, PimStore, ProcessSecurityError, StoreError,
+    SyncCoordinator, lock_down_current_process, receive_client_channel, serve_granted_channel,
 };
 
 #[derive(Debug, Error)]
@@ -48,12 +50,28 @@ impl PimService {
         profile_uid: u32,
     ) -> Result<Self, PimServiceError> {
         lock_down_current_process()?;
-        let store = PimStore::open(&state_root.join("records.json"), profile_id, profile_uid)?;
-        let mail_store = MailStore::open(&state_root.join("mail.redb"), profile_id, profile_uid)?;
+        let store = Arc::new(PimStore::open(
+            &state_root.join("records.json"),
+            profile_id,
+            profile_uid,
+        )?);
+        let mail_store = Arc::new(MailStore::open(
+            &state_root.join("mail.redb"),
+            profile_id,
+            profile_uid,
+        )?);
         let signer = CursorSigner::load_or_create(&state_root.join("cursor-key.json"), profile_id)?;
+        let runner = Arc::new(OpenProtocolSyncRunner::new(
+            Arc::clone(&store),
+            Arc::clone(&mail_store),
+            state_root,
+            profile_id,
+            Duration::from_secs(20),
+        ));
+        let sync = SyncCoordinator::new(Arc::clone(&store), runner);
         Ok(Self {
             profile_uid,
-            dispatcher: LocalDispatcher::new(store, mail_store, signer),
+            dispatcher: LocalDispatcher::with_sync(store, mail_store, signer, sync),
         })
     }
 

@@ -88,10 +88,19 @@ number as authority.
 Client kind is authorization, not decoration. Before method-specific params
 are parsed, `punar-pimd` applies a closed method partition:
 
-- Mail: mail reads/mutations, contact completion and changes;
-- Calendar: calendar/event reads/mutations, contact completion and changes;
-- Reminders: reminder/list reads/mutations and changes;
-- Settings: accounts, sync and status.
+- Mail: read-only account metadata, mail reads/mutations, contact completion
+  and changes;
+- Calendar: read-only account metadata, calendar/event reads/mutations,
+  contact completion and changes;
+- Reminders: read-only account metadata, reminder/list reads/mutations and
+  changes;
+- Settings: account lifecycle, sync and status.
+
+All three applications need the same bounded public account records to name
+their rail, distinguish an empty synced account from no account, and show
+authentication/connectivity recovery. Those records contain no provider
+endpoint or credential. Only Settings can begin, cancel or remove an account
+or trigger synchronization.
 
 No client kind admits generic execution, arbitrary storage, raw provider
 requests, credential retrieval or another app's mutations.
