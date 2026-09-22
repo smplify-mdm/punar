@@ -179,7 +179,12 @@ Next build slice, in order:
    now locks down before opening the profile store/cursor key, accepts one
    root-brokered channel and drives the strict dispatcher without creating an
    application listener. The socket-activated process and fixed launcher
-   remain open. The
+   remain open. A service-private credential-vault library now encrypts each
+   record with XChaCha20-Poly1305, binds it to the schema/profile/account/kind,
+   zeroizes caller input and held keys, refuses plaintext or unproven storage,
+   and durably removes account secrets. Its proof is bound to the state path's
+   actual device id and cryptsetup's kernel `CRYPT-LUKS2-` mapper identity;
+   service/account integration and the password-entry helper remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,

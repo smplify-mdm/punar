@@ -116,6 +116,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -128,6 +129,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -684,6 +686,7 @@ name = "punar-pimd"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chacha20poly1305",
  "getrandom 0.4.3",
  "hmac 0.12.1",
  "punar-common",

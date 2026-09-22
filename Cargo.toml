@@ -90,3 +90,7 @@ hmac = "0.12"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+# PIM credential records use RustCrypto's externally reviewed AEAD lineage
+# rather than first-party cryptography. 0.11 is already locked transitively by
+# the exact HPKE dependency; the direct feature adds key/cipher zeroization.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }

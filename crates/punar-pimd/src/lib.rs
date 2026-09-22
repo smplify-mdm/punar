@@ -1,11 +1,12 @@
 //! `punar-pimd` — profile-scoped personal-information data service.
 //!
-//! This first implementation slice deliberately contains only the durable,
-//! local Calendar and Reminders core. It has no network client, credential
-//! field, provider adapter, socket or resident background loop. That keeps the
-//! production authorization boundary honest while the local data semantics are
-//! exercised independently. The executable and socket activation arrive only
-//! after ADR-008's hostile same-UID caller gate has a proven mechanism.
+//! The implementation contains the durable local Calendar/Reminders core and
+//! a LUKS-gated service-private encrypted credential vault. It still has no
+//! network client, provider adapter, application listener or resident
+//! background loop. That keeps the production authorization boundary honest
+//! while durability and credential custody are exercised independently. The
+//! executable and socket activation arrive only after ADR-008's hostile
+//! same-UID caller gate has a proven mechanism.
 //!
 //! A newly opened store contains one blank local calendar and one blank local
 //! reminder list. Those are structural containers, not demo content: accounts,
@@ -22,6 +23,7 @@ mod process_security;
 mod protocol;
 mod service;
 mod store;
+mod vault;
 
 pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
@@ -39,6 +41,7 @@ pub use protocol::{
 };
 pub use service::{PimService, PimServiceError};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
+pub use vault::{CredentialKind, CredentialVault, EncryptedStorageProof, VaultError};
 
 use serde::{Deserialize, Serialize};
 

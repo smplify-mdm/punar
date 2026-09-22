@@ -1,6 +1,6 @@
 # ADR-008 — Persistent PIM account credentials and first provider sequence
 
-- Status: **Accepted — architecture only; implementation and runtime proof remain open**
+- Status: **Accepted — record vault implemented as an unstaged library; service integration and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–11, 15–16,
   30, 36, 44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 7–9;
@@ -105,16 +105,28 @@ has a distinct service identity and a private state directory; the profile uid
 cannot read its database or vault files directly. One profile instance cannot
 name or open another profile's accounts, state, callback listener or vault.
 
-Credential records use envelope encryption. Each record is authenticated with
-its schema version, profile id, account id and credential kind as associated
-data. The exact primitive and library require a supply-chain review before
-implementation; inventing cryptography in Punar is forbidden. For the first
-slice the wrapping key is service-private on the already encrypted LUKS2 data
-volume. This prevents same-uid file reads but **does not add an independent
-offline cryptographic boundary beyond LUKS2**, and the UI must not claim that
-it does. A device without verified encrypted storage cannot persist a real PIM
-credential. When separately keyed profile storage ships, the wrapping key
-moves under that profile key and account records are rewrapped transactionally.
+Credential records use XChaCha20-Poly1305 from RustCrypto's
+`chacha20poly1305` 0.11 crate, locked by checksum in `Cargo.lock`; Punar does
+not implement a cipher. The selected crate has an MSRV below Punar's pin, was
+already present in the reviewed dependency closure through the exact HPKE
+dependency, publishes the extended-nonce construction through the common
+RustCrypto AEAD API, and its ChaCha20-Poly1305 lineage has a public NCC Group
+implementation review. The version's official changelog and source were
+reviewed before making it a direct dependency. This is dependency selection,
+not a claim that Punar itself has received an independent security audit.
+
+Every record gets a kernel-random 192-bit nonce and is authenticated with its
+schema version, profile id, account id and credential kind as associated data.
+The wrapping key is a random service-private 256-bit file on the already
+encrypted LUKS2 data volume, is zeroized on drop, and never enters normal PIM
+IPC. Vault open checks the state directory's actual device id against the
+kernel device-mapper UUID and requires cryptsetup's `CRYPT-LUKS2-` identity;
+a UI assertion or file mode is not encryption evidence. This prevents same-uid
+file reads but **does not add an independent offline cryptographic boundary
+beyond LUKS2**, and the UI must not claim that it does. A device without
+verified encrypted storage cannot persist a real PIM credential. When
+separately keyed profile storage ships, the wrapping key moves under that
+profile key and account records are rewrapped transactionally.
 
 The normal PIM IPC carries opaque account ids and operation results only. It
 never carries credential values. OAuth uses the governed external browser,
@@ -205,3 +217,13 @@ production desktop entry or MIME handler may ship.
   the constrained-device RAM, wakeup or storage budget.
 - The app launch-capability spike cannot deny a hostile same-uid caller without
   an LSM, per-app uid or broader desktop isolation change.
+
+## Cryptographic dependency review sources
+
+- RustCrypto `chacha20poly1305` 0.11 API and XChaCha20-Poly1305 usage:
+  <https://docs.rs/chacha20poly1305/0.11.0/chacha20poly1305/>
+- RustCrypto 0.11.0 changelog and dependency/MSRV changes:
+  <https://github.com/RustCrypto/AEADs/blob/master/chacha20poly1305/CHANGELOG.md>
+- NCC Group's public RustCrypto AES-GCM and ChaCha20-Poly1305 implementation
+  review (2020):
+  <https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/>

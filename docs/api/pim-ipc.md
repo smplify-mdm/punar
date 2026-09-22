@@ -1,9 +1,10 @@
 # Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
 
 Status: **accepted contract; service not exposed.** The fixture-free,
-profile-bound Calendar/Reminders persistence core now exists in
-`crates/punar-pimd`, but there is deliberately no socket, executable, provider
-adapter or production image staging yet. The machine-readable authority is
+profile-bound Calendar/Reminders persistence core and a LUKS-gated encrypted
+credential-vault library now exist in `crates/punar-pimd`, but there is
+deliberately no application listener, executable, provider adapter or
+production image staging yet. The machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
 [`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
@@ -83,6 +84,10 @@ rather than being ignored.
   tokens, provider client secrets, vault keys or callback query strings.
   `accounts.begin_connect` carries only a provider type. OAuth browser launch
   and the short-lived password-entry helper use the separate ADR-008 paths.
+- The implemented vault encrypts each credential with profile/account/kind
+  associated data and refuses to open unless the service-private state path is
+  kernel-observed on a LUKS2 device-mapper filesystem. It is not yet wired to
+  an account/provider method, so this fact does not make sign-in available.
 - QML windows have no direct network authority. The service owns transport,
   parsing, sync, durable state and credential use.
 - Mail bodies, event descriptions and reminder notes may cross this IPC because

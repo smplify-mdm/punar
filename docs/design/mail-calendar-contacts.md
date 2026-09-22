@@ -1,6 +1,6 @@
 # Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-22): COMMITTED CORE SUITE; LOCAL DATA CORE STARTED.** A real
+> **Status (2026-09-22): COMMITTED CORE SUITE; LOCAL DATA AND CREDENTIAL CORE STARTED.** A real
 > xdg-toplevel window prototype exists at `shell/punar-shell/Mail/`: index,
 > thread and plain-text compose all map, tile, resize and close as ordinary
 > application windows. It still reads fixture data and speaks to no account,
@@ -8,11 +8,13 @@
 > only by the dev/CI image profile and are absent from production images.
 > The profile-bound `punar-pimd` crate now provides crash-durable, fixture-free
 > local Calendar/Reminders records, revisions and change history plus bounded,
-> strictly authorized application-protocol parsing. It is not a service yet:
-> no socket, application binding, credential vault, network adapter or
-> production image entry exists. Calendar and Reminders remain unavailable to
-> users. No part of this status may be shortened to “Mail is built” until the
-> runtime gates in section 9 pass.
+> strictly authorized application-protocol parsing. An unstaged encrypted
+> credential-vault library now refuses non-LUKS storage and keeps values out of
+> ordinary IPC, but it is not connected to account setup or a provider. There
+> is still no service listener, application binding, network adapter or
+> production image entry. Calendar and Reminders remain unavailable to users.
+> No part of this status may be shortened to “Mail is built” until the runtime
+> gates in section 9 pass.
 
 Origin: a person installed the Evolution Flatpak from the catalogue and its
 first run presented a *"Do you want to make Evolution your default email
@@ -91,17 +93,19 @@ Mail / Calendar / Reminders QML windows
         profile-scoped credential storage
 ```
 
-The first storage implementation may rely on full-disk encryption for content
-at rest, but tokens and passwords require a separately reviewed credential
-path. The current `punar-secrets` daemon is a short-lived, non-persistent agent
+The first storage implementation relies on full-disk encryption for content at
+rest. Its separately reviewed credential path now exists as an unstaged
+library: each record is XChaCha20-Poly1305 encrypted with bound context, and
+vault open requires kernel-observed LUKS2 backing. The current `punar-secrets`
+daemon is a short-lived, non-persistent agent
 credential broker; silently turning it into an OAuth vault would invalidate
 its “no state directory” security promise. Persistent account credentials are
 governed by
 [`ADR-008`](../architecture/adr/ADR-008-pim-account-credentials.md): a
 service-private per-profile vault owned by the socket-activated PIM service,
-never a new state directory for `punar-secrets`. The architecture decision is
-accepted; its negative tests and runtime proof remain prerequisites for any
-provider sign-in.
+never a new state directory for `punar-secrets`. The record-level negative
+tests now pass; service integration, password-helper secrecy and hostile
+runtime proof remain prerequisites for any provider sign-in.
 
 One Linux profile/uid owns one PIM service and one data root. Personal and work
 profiles therefore do not share account metadata, indexes, notifications or

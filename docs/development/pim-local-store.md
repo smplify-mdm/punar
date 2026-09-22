@@ -59,9 +59,18 @@ dispatcher until EOF. It deliberately binds no listener and is not yet an
 installed daemon; that keeps the still-missing fixed launcher and runtime
 sandbox gate visible.
 
-The store contains no password, OAuth code/token, provider secret or encryption
-key field. QML is not linked to it. It starts no resident process and performs
-no periodic work.
+`crates/punar-pimd/src/vault.rs` adds an unstaged service-private credential
+vault. It requires the state path's real filesystem device to resolve to a
+kernel device-mapper UUID beginning `CRYPT-LUKS2-`, creates a private random
+wrapping key, and encrypts each record independently with XChaCha20-Poly1305.
+Schema version, profile id, account id and credential kind are associated data,
+so copied or relabelled ciphertext fails authentication. Caller input and
+temporary plaintext are zeroized, files are exact 0600/no-follow/single-link,
+and removing an account durably removes all of its records. The ordinary data
+store and IPC still contain no password, OAuth code/token, provider secret or
+encryption key field. The vault is not yet connected to an account method,
+provider adapter or password helper. QML is not linked to it. It starts no
+resident process and performs no periodic work.
 
 ## Why the blank containers are not demo data
 
@@ -158,7 +167,16 @@ The crate's unit suite proves:
 32. process lockdown is idempotent and verifies zero core limits,
     non-dumpable state and `no_new_privs`; and
 33. an admitted Settings channel reaches the bound fixture-free service
-    through the real parser/dispatcher and reports zero accounts.
+    through the real parser/dispatcher and reports zero accounts; and
+34. plaintext and paths without kernel-observed LUKS2 backing cannot open a
+    credential vault;
+35. encrypted credentials survive restart while their plaintext never reaches
+    the state file;
+36. ciphertext or associated-data relabelling fails authentication;
+37. account removal is durable and leaves other accounts untouched; and
+38. linked, cross-profile and symbolic vault state fails closed without
+    replacing or following it; and
+39. even rejected oversized credential input is zeroized before returning.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -172,7 +190,8 @@ install or activate `punar-pimd`, it still needs:
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
   event responses, account/provider, Mail and contacts methods;
-- service-private credential wrapping on verified encrypted storage;
+- credential-vault integration with the service, account transactions and a
+  short-lived non-dumpable password-entry helper;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
