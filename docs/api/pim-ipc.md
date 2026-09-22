@@ -49,8 +49,11 @@ Malformed frames without independently valid correlation fields close without
 reflection; an error response is produced only when both `id` and `method`
 are safe. `crates/punar-pimd/src/connection.rs` consumes only an already-granted
 unnamed channel and applies the absolute frame deadlines; it creates no
-listener. The production service loop remains blocked on the privileged launch
-proof in ADR-009.
+listener. `crates/punar-pimd/src/service.rs` now composes process lockdown,
+private state/key open, root-broker admission and that connection runner for
+one bound profile and one already-connected control channel. The production
+listener/activation loop remains blocked on the privileged launch proof in
+ADR-009.
 
 The envelope is:
 

@@ -20,6 +20,7 @@ mod dispatcher;
 mod pager;
 mod process_security;
 mod protocol;
+mod service;
 mod store;
 
 pub use channel::{
@@ -36,6 +37,7 @@ pub use protocol::{
     decode_request, encode_error, encode_request_error, encode_success, read_request_frame,
     write_response_frame,
 };
+pub use service::{PimService, PimServiceError};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
 
 use serde::{Deserialize, Serialize};

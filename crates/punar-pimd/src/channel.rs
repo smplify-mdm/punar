@@ -234,7 +234,7 @@ pub fn receive_client_channel(
     receive_client_channel_from_broker(control, expected_uid, 0)
 }
 
-fn receive_client_channel_from_broker(
+pub(crate) fn receive_client_channel_from_broker(
     control: impl AsFd,
     expected_uid: u32,
     expected_broker_uid: u32,

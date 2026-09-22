@@ -175,8 +175,11 @@ Next build slice, in order:
    including slow byte-drip peers. A single verified lockdown primitive now
    sets hard/soft core limits to zero, makes the caller non-dumpable and sets
    `no_new_privs`; wiring it into the privileged fixed launch/service and the
-   hostile same-uid runtime theft proof remain open. The socket-activated
-   process also remains open. The
+   hostile same-uid runtime theft proof remain open. A first composition root
+   now locks down before opening the profile store/cursor key, accepts one
+   root-brokered channel and drives the strict dispatcher without creating an
+   application listener. The socket-activated process and fixed launcher
+   remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,

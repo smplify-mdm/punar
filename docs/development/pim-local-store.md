@@ -52,6 +52,13 @@ zero, the process is non-dumpable and `no_new_privs` is set. The future fixed
 launcher and service must call it before handing over a capability or loading
 account data; the library alone does not prove that runtime ordering.
 
+`crates/punar-pimd/src/service.rs` is the first composition root for one bound
+profile. It locks down the process before opening records or the cursor key,
+admits one kernel-authenticated root-brokered channel, and serves the strict
+dispatcher until EOF. It deliberately binds no listener and is not yet an
+installed daemon; that keeps the still-missing fixed launcher and runtime
+sandbox gate visible.
+
 The store contains no password, OAuth code/token, provider secret or encryption
 key field. QML is not linked to it. It starts no resident process and performs
 no periodic work.
@@ -149,7 +156,9 @@ The crate's unit suite proves:
     and
 31. a non-root control peer is denied before its grant is read; and
 32. process lockdown is idempotent and verifies zero core limits,
-    non-dumpable state and `no_new_privs`.
+    non-dumpable state and `no_new_privs`; and
+33. an admitted Settings channel reaches the bound fixture-free service
+    through the real parser/dispatcher and reports zero accounts.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
