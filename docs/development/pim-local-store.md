@@ -46,6 +46,12 @@ text are never reflected. A disallowed client receives `denied` even when the
 method-specific params are malformed, proving the service will not parse an
 unauthorized operation first.
 
+`crates/punar-pimd/src/process_security.rs` provides one irreversible,
+postcondition-checked process lockdown operation: hard and soft core limits are
+zero, the process is non-dumpable and `no_new_privs` is set. The future fixed
+launcher and service must call it before handing over a capability or loading
+account data; the library alone does not prove that runtime ordering.
+
 The store contains no password, OAuth code/token, provider secret or encryption
 key field. QML is not linked to it. It starts no resident process and performs
 no periodic work.
@@ -141,7 +147,9 @@ The crate's unit suite proves:
     target; and
 30. oversized state is rejected before an unbounded allocation or JSON parse;
     and
-31. a non-root control peer is denied before its grant is read.
+31. a non-root control peer is denied before its grant is read; and
+32. process lockdown is idempotent and verifies zero core limits,
+    non-dumpable state and `no_new_privs`.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.

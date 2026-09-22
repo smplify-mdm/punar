@@ -54,7 +54,7 @@ clap = { version = "4", features = ["derive"] }
 # punar-common's shared audit rotation lock; PIM private-state validation uses
 # the safe `process::getuid` wrapper rather than libc/unsafe ownership checks —
 # same crate, no new transitive package.
-rustix = { version = "1", features = ["net", "fs", "process"] }
+rustix = { version = "1", features = ["net", "fs", "process", "thread"] }
 # signal-hook (M3): safe SIGTERM/SIGINT handling for punard graceful shutdown
 # (M7: punar-agentd shuts down the same way).
 # sigaction is not reachable from safe std or safe rustix; signal-hook is the

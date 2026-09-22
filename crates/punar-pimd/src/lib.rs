@@ -18,6 +18,7 @@ mod connection;
 mod cursor;
 mod dispatcher;
 mod pager;
+mod process_security;
 mod protocol;
 mod store;
 
@@ -29,6 +30,7 @@ pub use connection::{ConnectionError, serve_granted_channel};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use dispatcher::LocalDispatcher;
 pub use pager::{PageError, PagedValues, SnapshotPager};
+pub use process_security::{ProcessSecurityError, lock_down_current_process};
 pub use protocol::{
     ErrorCode, ErrorDetails, FrameError, PimMethod, PimProtocolError, PimRequest, RequestFailure,
     decode_request, encode_error, encode_request_error, encode_success, read_request_frame,

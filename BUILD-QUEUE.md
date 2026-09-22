@@ -172,8 +172,11 @@ Next build slice, in order:
    authorization-before-parameter parsing, safe correlation/error reflection
    and exact success/error envelopes. The inherited connection runner enforces
    an absolute ten-second deadline independently for each request and response,
-   including slow byte-drip peers. Privileged launch, non-dumpable sandbox
-   proof and socket-activated process remain open. The
+   including slow byte-drip peers. A single verified lockdown primitive now
+   sets hard/soft core limits to zero, makes the caller non-dumpable and sets
+   `no_new_privs`; wiring it into the privileged fixed launch/service and the
+   hostile same-uid runtime theft proof remain open. The socket-activated
+   process also remains open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,

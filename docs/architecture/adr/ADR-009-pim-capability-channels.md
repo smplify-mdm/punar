@@ -107,6 +107,10 @@ creation, bounded transfer, kernel-attested root control-peer admission,
 strict grant parsing, profile binding and the least-privilege method table
 using safe `rustix` APIs. It rejects a non-root control peer before reading its
 grant. It is a library proof, not yet a shipping launcher or service.
+`crates/punar-pimd/src/process_security.rs` now groups and verifies the
+irreversible process-side controls: `RLIMIT_CORE=0`, non-dumpable state and
+`no_new_privs`. The fixed launcher/service still must invoke this before
+authority or untrusted content and pass the hostile runtime theft gate.
 
 ## Consequences
 
