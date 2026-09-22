@@ -20,13 +20,15 @@ FIXTURE=/usr/share/punar/fixtures/projects/atlas
 LAUNCH_OUT="${RUN_DIR}/m12-launch.txt"
 PROBE_RESULTS="${ATLAS}/.punar-agent-net-results"
 PROBE_READY="${ATLAS}/.punar-agent-net-ready"
-PROBE_FIFO="${ATLAS}/.punar-agent-net-go"
+PROBE_GATE="${ATLAS}/.punar-agent-net-gate"
+LEGACY_PROBE_FIFO="${ATLAS}/.punar-agent-net-go"
 ISOLATION_RESULTS="${ATLAS}/.punar-agent-isolation-results"
 FAILED=0
 SID=""
 TAG=""
 SCOPE=""
 LAUNCH_PID=""
+GATE_LOCKED=0
 
 : > "${REPORT}"
 note() { printf '%s\n' "$*" >> "${REPORT}"; }
@@ -95,6 +97,11 @@ stop_user_unit() {
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup() {
+    if [ "${GATE_LOCKED}" -eq 1 ]; then
+        flock -u 9 >/dev/null 2>&1 || true
+        exec 9>&-
+        GATE_LOCKED=0
+    fi
     [ -n "${SCOPE}" ] && stop_user_unit "${SCOPE}"
     stop_user_unit punar-m12-listener-allow.service
     stop_user_unit punar-m12-listener-deny.service
@@ -167,21 +174,32 @@ check_true "same-user out-of-scope control reaches 127.0.0.7:9418" "$?"
 
 # 4. Launch the real managed-session path with only the dev mock binary
 # substituted. ADR-004's trusted gate now prevents adapter exec until netd has
-# read back the exact kernel rule. The FIFO below schedules the traffic probes
-# deterministically; it is no longer the policy-attachment barrier.
+# read back the exact kernel rule. A lock on a regular project file schedules
+# the traffic probes without putting a FIFO inside the validated project tree.
+# The regular file is safe for the production launcher's closed file-type
+# policy; the held advisory lock is a dev/CI synchronization detail only.
 mkdir -p "${ATLAS}"
 cp "${FIXTURE}/project-environment.yaml" "${FIXTURE}/project-network-policy.json" "${ATLAS}/"
 chown -R punar:punar "${ATLAS}"
-rm -f "${PROBE_FIFO}" "${PROBE_RESULTS}" "${PROBE_READY}" \
+rm -f "${PROBE_GATE}" "${LEGACY_PROBE_FIFO}" \
+    "${PROBE_RESULTS}" "${PROBE_READY}" \
     "${ISOLATION_RESULTS}" "${LAUNCH_OUT}"
-mkfifo -m 600 "${PROBE_FIFO}"
-chown punar:punar "${PROBE_FIFO}"
-as_punar systemd-run --user --pipe --wait --collect --quiet \
-    --unit=punar-m12-launch --setenv=PUNAR_AGENT_MOCK=1 \
-    --setenv=PUNAR_MOCK_AGENT_NET=1 \
-    --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
-    -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code \
-    > "${LAUNCH_OUT}" 2>&1 &
+: > "${PROBE_GATE}"
+chmod 600 "${PROBE_GATE}"
+chown punar:punar "${PROBE_GATE}"
+exec 9> "${PROBE_GATE}"
+flock -x 9
+GATE_LOCKED=1
+(
+    # Never leak the root-owned lock into the transient user launch. The
+    # parent shell alone owns it and releases it after the policy checks.
+    exec 9>&-
+    as_punar systemd-run --user --pipe --wait --collect --quiet \
+        --unit=punar-m12-launch --setenv=PUNAR_AGENT_MOCK=1 \
+        --setenv=PUNAR_MOCK_AGENT_NET=1 \
+        --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
+        -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code
+) > "${LAUNCH_OUT}" 2>&1 &
 LAUNCH_PID=$!
 
 waited=0
@@ -282,7 +300,9 @@ jq_check "environment JSON reports network enforcement as enforced" \
 # released the adapter: the readiness audit above already proves that event.
 "${CTL}" network apply atlas > "${RUN_DIR}/m12-apply.txt" 2>&1
 check_true "root policy apply succeeds" "$?"
-printf 'go\n' > "${PROBE_FIFO}"
+flock -u 9
+exec 9>&-
+GATE_LOCKED=0
 waited=0
 while [ "${waited}" -lt 30 ] && [ ! -f "${PROBE_READY}" ]; do
     sleep 1
