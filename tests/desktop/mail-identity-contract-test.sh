@@ -68,9 +68,9 @@ grep -q 'FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED' "${QML}" \
     || fail "the production image still ships the fixture-backed Mail desktop entry"
 [ ! -e "${PRODUCT_EXTRA}/usr/lib/punar/punar-mail.sh" ] \
     || fail "the production image still ships the fixture-backed Mail launcher"
-grep -Fq 'rm -rf "${extra}/usr/share/punar/shell/Mail"' "${STAGER}" \
+grep -Fq "rm -rf \"\${extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
     || fail "desktop staging does not remove Mail fixture QML from the production image"
-grep -Fq 'cp -R "${shell_src}/Mail" "${dev_extra}/usr/share/punar/shell/Mail"' "${STAGER}" \
+grep -Fq "cp -R \"\${shell_src}/Mail\" \"\${dev_extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
     || fail "desktop staging does not restore the Mail probe in the dev/CI overlay"
 
 # 5 · and the in-VM gate must be looking for the same window, or it silently
