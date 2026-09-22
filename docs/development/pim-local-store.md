@@ -234,7 +234,7 @@ install or activate `punar-pimd`, it still needs:
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
-  event responses, account setup/removal IPC, Mail and contacts methods;
+  event responses, account setup IPC, Mail mutations and contacts methods;
 - the fixed launcher, executable and UI for the short-lived password-entry
   helper, plus crash reconciliation for interrupted account transactions;
 - power-loss/fault-injection tests in addition to restart tests;

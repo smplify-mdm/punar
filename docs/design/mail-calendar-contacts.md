@@ -34,7 +34,9 @@
 > removes cached messages, Mail sync cursors, credentials, private server
 > configuration and public metadata, with restart coverage. It requires a
 > profile-store-bound removal permit which blocks new sync and waits a bounded
-> time for existing provider work; the path is not yet application-callable.
+> time for existing provider work. The Settings-only `accounts.remove`
+> dispatcher path now invokes this lifecycle and refuses retained local data,
+> but no installed service/launcher can grant that capability yet.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account

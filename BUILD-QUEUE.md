@@ -238,11 +238,13 @@ Next build slice, in order:
    v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
    normal application IPC, and credentials remain only in the vault. The
    library coordinator can create and remove this state after a verifier
-   succeeds, but no application-callable setup path exists yet. The first Mail
+   succeeds. Settings-only `accounts.remove` now reaches the guarded removal
+   lifecycle, requires deletion of local private data, and returns only closed
+   errors; no application-callable setup path exists yet. The first Mail
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, account setup/removal IPC, the fixed service/launcher
+   event/reminder reads, account setup IPC, the fixed service/launcher
    runtime, automatic backoff scheduling and production-image staging remain
    open;
 4. complete one real account vertical slice before replacing Mail's fixture

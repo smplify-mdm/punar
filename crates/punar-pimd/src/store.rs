@@ -1460,7 +1460,7 @@ fn validate_opaque_id(value: &str) -> Result<(), StoreError> {
     }
 }
 
-fn validate_account_id(value: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_account_id(value: &str) -> Result<(), StoreError> {
     let suffix = value
         .strip_prefix("acct_")
         .ok_or_else(|| StoreError::Invalid("account id has invalid prefix".into()))?;

@@ -36,8 +36,9 @@ mod sync_runtime;
 mod vault;
 
 pub use account_setup::{
-    AccountCoordinator, AccountSetupError, OpenProtocolAccountInput, OpenProtocolVerifier,
-    ProviderCheckError, VerifiedOpenProtocolIdentity,
+    AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError,
+    OpenProtocolAccountInput, OpenProtocolVerifier, ProviderCheckError,
+    VerifiedOpenProtocolIdentity,
 };
 pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,

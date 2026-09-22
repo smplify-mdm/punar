@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::store::validate_account_id;
 use crate::{
-    AccountCapability, ClientGrant, CursorPosition, CursorSigner, ErrorCode, ErrorDetails,
-    EventInput, MailStore, MailStoreError, MutationMode, PageError, PagedValues, PimMethod,
-    PimProtocolError, PimRequest, PimStore, ReminderInput, SnapshotPager, StoreError,
-    SyncCoordinator, SyncTriggerError,
+    AccountCapability, AccountLifecycle, AccountLifecycleError, ClientGrant, CursorPosition,
+    CursorSigner, ErrorCode, ErrorDetails, EventInput, MailStore, MailStoreError, MutationMode,
+    PageError, PagedValues, PimMethod, PimProtocolError, PimRequest, PimStore, ReminderInput,
+    SnapshotPager, StoreError, SyncCoordinator, SyncTriggerError,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -34,6 +35,7 @@ pub struct LocalDispatcher {
     pager: SnapshotPager,
     mail_cursors: Mutex<HashMap<u64, MailCursorState>>,
     sync: Option<Arc<SyncCoordinator>>,
+    account_lifecycle: Option<Arc<dyn AccountLifecycle>>,
 }
 
 struct MailCursorState {
@@ -44,7 +46,7 @@ struct MailCursorState {
 impl LocalDispatcher {
     #[must_use]
     pub fn new(store: PimStore, mail_store: MailStore, signer: CursorSigner) -> Self {
-        Self::from_shared(Arc::new(store), Arc::new(mail_store), signer, None)
+        Self::from_shared(Arc::new(store), Arc::new(mail_store), signer, None, None)
     }
 
     #[must_use]
@@ -54,7 +56,24 @@ impl LocalDispatcher {
         signer: CursorSigner,
         sync: Arc<SyncCoordinator>,
     ) -> Self {
-        Self::from_shared(store, mail_store, signer, Some(sync))
+        Self::from_shared(store, mail_store, signer, Some(sync), None)
+    }
+
+    #[must_use]
+    pub fn with_runtime(
+        store: Arc<PimStore>,
+        mail_store: Arc<MailStore>,
+        signer: CursorSigner,
+        sync: Arc<SyncCoordinator>,
+        account_lifecycle: Arc<dyn AccountLifecycle>,
+    ) -> Self {
+        Self::from_shared(
+            store,
+            mail_store,
+            signer,
+            Some(sync),
+            Some(account_lifecycle),
+        )
     }
 
     fn from_shared(
@@ -62,6 +81,7 @@ impl LocalDispatcher {
         mail_store: Arc<MailStore>,
         signer: CursorSigner,
         sync: Option<Arc<SyncCoordinator>>,
+        account_lifecycle: Option<Arc<dyn AccountLifecycle>>,
     ) -> Self {
         Self {
             store,
@@ -69,6 +89,7 @@ impl LocalDispatcher {
             pager: SnapshotPager::new(signer),
             mail_cursors: Mutex::new(HashMap::new()),
             sync,
+            account_lifecycle,
         }
     }
 
@@ -112,6 +133,15 @@ impl LocalDispatcher {
                 )?;
                 Ok(page_result("account_page", page))
             }
+            PimMethod::AccountsRemove => {
+                let params = request.parse_params::<RemoveAccountParams>()?;
+                validate_account_id(&params.account_id).map_err(map_store_error)?;
+                let lifecycle = self.account_lifecycle.as_ref().ok_or_else(internal)?;
+                lifecycle
+                    .remove_account(&params.account_id, params.delete_local_data)
+                    .map_err(map_account_lifecycle_error)?;
+                self.completed_operation(&params.account_id)
+            }
             PimMethod::CalendarList => {
                 let params = request.parse_params::<PageParams>()?;
                 let page = self.page(
@@ -145,6 +175,7 @@ impl LocalDispatcher {
             PimMethod::SyncTrigger => {
                 let params = request.parse_params::<SyncParams>()?;
                 let account_id = params.account_id.ok_or_else(invalid_params)?;
+                validate_account_id(&account_id).map_err(map_store_error)?;
                 let sync = self.sync.as_ref().ok_or_else(internal)?;
                 let accepted = sync.trigger(&account_id).map_err(map_sync_trigger_error)?;
                 Ok(json!({
@@ -304,6 +335,7 @@ impl LocalDispatcher {
             return Err(invalid_params());
         }
         let account_id = params.account_id.ok_or_else(invalid_params)?;
+        validate_account_id(&account_id).map_err(map_store_error)?;
         let account = snapshot
             .accounts
             .iter()
@@ -493,6 +525,13 @@ struct PageParams {
     cursor: Option<String>,
     #[serde(default = "default_page_limit")]
     limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveAccountParams {
+    account_id: String,
+    delete_local_data: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -701,6 +740,27 @@ fn map_sync_trigger_error(error: SyncTriggerError) -> PimProtocolError {
     }
 }
 
+fn map_account_lifecycle_error(error: AccountLifecycleError) -> PimProtocolError {
+    match error {
+        AccountLifecycleError::NotFound => {
+            PimProtocolError::new(ErrorCode::NotFound, "The Mail account was not found.")
+        }
+        AccountLifecycleError::Busy => PimProtocolError::new(
+            ErrorCode::Conflict,
+            "The Mail account is still finishing another operation.",
+        ),
+        AccountLifecycleError::LocalDataDeletionRequired => PimProtocolError::new(
+            ErrorCode::InvalidParams,
+            "Removing this account must delete its local private data.",
+        ),
+        AccountLifecycleError::StorageEncryptionRequired => PimProtocolError::new(
+            ErrorCode::StorageEncryptionRequired,
+            "Verified storage encryption is required for Mail accounts.",
+        ),
+        AccountLifecycleError::Internal => internal(),
+    }
+}
+
 fn mail_list_binding(account_id: &str, snapshot: bool) -> Vec<u8> {
     format!(
         "mail.list:v1\0{account_id}\0inbox\0{}",
@@ -799,6 +859,36 @@ mod tests {
             Self {
                 root,
                 dispatcher: LocalDispatcher::with_sync(store, mail_store, signer, sync),
+            }
+        }
+
+        fn with_lifecycle(lifecycle: Arc<dyn AccountLifecycle>) -> Self {
+            let mut suffix = [0_u8; 12];
+            getrandom::fill(&mut suffix).unwrap();
+            let suffix = suffix
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let root = std::env::temp_dir().join(format!("punar-pimd-dispatch-test-{suffix}"));
+            let store =
+                Arc::new(PimStore::open(&root.join("store.json"), "profile_A1", 1000).unwrap());
+            store
+                .register_open_protocol_account(
+                    account("acct_A1", "Alice"),
+                    provider_config("alice@example.com"),
+                    "2026-09-22T17:00:00Z",
+                )
+                .unwrap();
+            let mail_store =
+                Arc::new(MailStore::open(&root.join("mail.redb"), "profile_A1", 1000).unwrap());
+            let runner: Arc<dyn MailSyncRunner> = Arc::new(ImmediateSync);
+            let sync = SyncCoordinator::new(Arc::clone(&store), runner);
+            let signer = CursorSigner::from_key([9; 32], "profile_A1").unwrap();
+            Self {
+                root,
+                dispatcher: LocalDispatcher::with_runtime(
+                    store, mail_store, signer, sync, lifecycle,
+                ),
             }
         }
 
@@ -1155,6 +1245,69 @@ mod tests {
         {
             assert!(started.elapsed() < Duration::from_secs(2));
             std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn settings_account_removal_uses_only_the_guarded_lifecycle() {
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        let lifecycle_trait: Arc<dyn AccountLifecycle> = lifecycle.clone();
+        let fixture = Fixture::with_lifecycle(lifecycle_trait);
+        let operation = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.remove",
+                json!({"account_id":"acct_A1","delete_local_data":true}),
+            )
+            .unwrap();
+        assert_eq!(operation["kind"], "operation");
+        assert_eq!(operation["state"], "completed");
+        assert_eq!(operation["resource_id"], "acct_A1");
+        assert_eq!(
+            lifecycle.calls.lock().unwrap().as_slice(),
+            &[("acct_A1".to_string(), true)]
+        );
+
+        let error = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.remove",
+                json!({"account_id":"acct_A1","delete_local_data":false}),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+
+        let error = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.remove",
+                json!({"account_id":"../../vault","delete_local_data":true}),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(lifecycle.calls.lock().unwrap().len(), 2);
+    }
+
+    #[derive(Default)]
+    struct RecordingLifecycle {
+        calls: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl AccountLifecycle for RecordingLifecycle {
+        fn remove_account(
+            &self,
+            account_id: &str,
+            delete_local_data: bool,
+        ) -> Result<(), AccountLifecycleError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((account_id.to_string(), delete_local_data));
+            if delete_local_data {
+                Ok(())
+            } else {
+                Err(AccountLifecycleError::LocalDataDeletionRequired)
+            }
         }
     }
 

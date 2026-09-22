@@ -77,6 +77,30 @@ pub enum AccountSetupError {
     RemovalPermitMismatch,
 }
 
+/// Closed account-lifecycle failures safe to translate onto Settings IPC.
+/// Filesystem paths, provider responses and credential details cannot appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum AccountLifecycleError {
+    #[error("mail account was not found")]
+    NotFound,
+    #[error("mail account removal is already active or still synchronizing")]
+    Busy,
+    #[error("mail account removal must delete local private data")]
+    LocalDataDeletionRequired,
+    #[error("verified storage encryption is required")]
+    StorageEncryptionRequired,
+    #[error("mail account removal failed internally")]
+    Internal,
+}
+
+pub trait AccountLifecycle: Send + Sync + 'static {
+    fn remove_account(
+        &self,
+        account_id: &str,
+        delete_local_data: bool,
+    ) -> Result<(), AccountLifecycleError>;
+}
+
 pub struct AccountCoordinator<'a, V> {
     store: &'a PimStore,
     mail_store: &'a MailStore,

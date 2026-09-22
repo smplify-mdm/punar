@@ -6,7 +6,7 @@
 //! a root-brokered capability, then serve the strict local dispatcher.
 
 use std::os::fd::AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,10 +15,15 @@ use thiserror::Error;
 #[cfg(test)]
 use crate::channel::receive_client_channel_from_broker;
 use crate::{
-    AdmissionError, ConnectionError, CursorKeyError, CursorSigner, LocalDispatcher, MailStore,
-    MailStoreError, OpenProtocolSyncRunner, PimStore, ProcessSecurityError, StoreError,
-    SyncCoordinator, lock_down_current_process, receive_client_channel, serve_granted_channel,
+    AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError, AdmissionError,
+    ConnectionError, CredentialVault, CursorKeyError, CursorSigner, EncryptedStorageProof,
+    LocalDispatcher, MailStore, MailStoreError, NetworkOpenProtocolVerifier,
+    OpenProtocolSyncRunner, PimStore, ProcessSecurityError, StoreError, SyncCoordinator,
+    SyncQuiesceError, VaultError, lock_down_current_process, receive_client_channel,
+    serve_granted_channel,
 };
+
+const ACCOUNT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Error)]
 pub enum PimServiceError {
@@ -39,6 +44,41 @@ pub enum PimServiceError {
 pub struct PimService {
     profile_uid: u32,
     dispatcher: LocalDispatcher,
+}
+
+struct BoundAccountLifecycle {
+    store: Arc<PimStore>,
+    mail_store: Arc<MailStore>,
+    sync: Arc<SyncCoordinator>,
+    state_root: PathBuf,
+    profile_id: String,
+}
+
+impl AccountLifecycle for BoundAccountLifecycle {
+    fn remove_account(
+        &self,
+        account_id: &str,
+        delete_local_data: bool,
+    ) -> Result<(), AccountLifecycleError> {
+        if !delete_local_data {
+            return Err(AccountLifecycleError::LocalDataDeletionRequired);
+        }
+        let permit = self
+            .sync
+            .begin_account_removal(account_id, ACCOUNT_REMOVAL_TIMEOUT)
+            .map_err(map_quiesce_error)?;
+        let proof = EncryptedStorageProof::verify(&self.state_root).map_err(map_vault_error)?;
+        let vault = CredentialVault::open(&self.state_root, &self.profile_id, &proof)
+            .map_err(map_vault_error)?;
+        AccountCoordinator::new(
+            &self.store,
+            &self.mail_store,
+            &vault,
+            NetworkOpenProtocolVerifier::default(),
+        )
+        .remove_account(&permit, &punar_common::time::utc_now_rfc3339())
+        .map_err(map_account_setup_error)
+    }
 }
 
 impl PimService {
@@ -69,9 +109,16 @@ impl PimService {
             Duration::from_secs(20),
         ));
         let sync = SyncCoordinator::new(Arc::clone(&store), runner);
+        let lifecycle: Arc<dyn AccountLifecycle> = Arc::new(BoundAccountLifecycle {
+            store: Arc::clone(&store),
+            mail_store: Arc::clone(&mail_store),
+            sync: Arc::clone(&sync),
+            state_root: state_root.to_path_buf(),
+            profile_id: profile_id.to_string(),
+        });
         Ok(Self {
             profile_uid,
-            dispatcher: LocalDispatcher::with_sync(store, mail_store, signer, sync),
+            dispatcher: LocalDispatcher::with_runtime(store, mail_store, signer, sync, lifecycle),
         })
     }
 
@@ -97,6 +144,42 @@ impl PimService {
     ) -> Result<(), PimServiceError> {
         let granted = receive_client_channel_from_broker(control, self.profile_uid, broker_uid)?;
         self.serve_granted(granted)
+    }
+}
+
+fn map_quiesce_error(error: SyncQuiesceError) -> AccountLifecycleError {
+    match error {
+        SyncQuiesceError::NotFound => AccountLifecycleError::NotFound,
+        SyncQuiesceError::AlreadyRemoving | SyncQuiesceError::Busy => AccountLifecycleError::Busy,
+    }
+}
+
+fn map_vault_error(error: VaultError) -> AccountLifecycleError {
+    match error {
+        VaultError::StorageEncryptionRequired => AccountLifecycleError::StorageEncryptionRequired,
+        VaultError::NotFound
+        | VaultError::Io(_)
+        | VaultError::Invalid
+        | VaultError::ProfileMismatch
+        | VaultError::Crypto
+        | VaultError::Entropy
+        | VaultError::CredentialEntry(_) => AccountLifecycleError::Internal,
+    }
+}
+
+fn map_account_setup_error(error: AccountSetupError) -> AccountLifecycleError {
+    match error {
+        AccountSetupError::Store(StoreError::NotFound) => AccountLifecycleError::NotFound,
+        AccountSetupError::Vault(VaultError::StorageEncryptionRequired) => {
+            AccountLifecycleError::StorageEncryptionRequired
+        }
+        AccountSetupError::Store(_)
+        | AccountSetupError::Vault(_)
+        | AccountSetupError::MailStore(_)
+        | AccountSetupError::Provider(_)
+        | AccountSetupError::Entropy
+        | AccountSetupError::Cleanup
+        | AccountSetupError::RemovalPermitMismatch => AccountLifecycleError::Internal,
     }
 }
 
