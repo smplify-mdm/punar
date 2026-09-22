@@ -90,6 +90,7 @@ hmac = "0.12"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 # PIM credential records use RustCrypto's externally reviewed AEAD lineage
 # rather than first-party cryptography. 0.11 is already locked transitively by
 # the exact HPKE dependency; the direct feature adds key/cipher zeroization.
@@ -104,6 +105,7 @@ mail-parser = { version = "=0.11.9", default-features = false }
 # and DKIM here: this first slice only verifies authenticated submission.
 async-imap = { version = "=0.11.3", default-features = false, features = ["runtime-tokio"] }
 mail-send = { version = "=0.6.0", default-features = false, features = ["ring", "tls12"] }
+redb = { version = "=2.6.3", default-features = false }
 rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-platform-verifier = "=0.7.0"
 tokio = { version = "=1.51.0", default-features = false, features = ["io-util", "net", "rt", "time"] }

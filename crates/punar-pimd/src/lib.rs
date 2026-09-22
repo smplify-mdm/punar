@@ -1,9 +1,10 @@
 //! `punar-pimd` — profile-scoped personal-information data service.
 //!
-//! The implementation contains the durable local Calendar/Reminders core and
-//! a LUKS-gated service-private encrypted credential vault plus an unnamed,
-//! one-use entry channel that moves a password directly from a locked-down
-//! helper into that vault. It still has no network client, provider adapter,
+//! The implementation contains durable local Calendar/Reminders and Mail
+//! record stores plus a LUKS-gated service-private encrypted credential vault
+//! and an unnamed, one-use entry channel that moves a password from a locked-down
+//! helper into that vault. It now has unstaged TLS-only IMAP/SMTP account
+//! verification and a bounded read-only INBOX synchronizer, but still has no
 //! application listener or resident background loop. That keeps the
 //! production authorization boundary honest while durability and credential
 //! custody are exercised independently. The executable and socket activation
@@ -23,7 +24,9 @@ mod credential_entry;
 mod cursor;
 mod dispatcher;
 mod mail_ingest;
+mod mail_store;
 mod open_protocol_provider;
+mod open_protocol_sync;
 mod pager;
 mod process_security;
 mod protocol;
@@ -44,7 +47,11 @@ pub use credential_entry::{CredentialEntryError, CredentialEntryHelper, credenti
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use dispatcher::LocalDispatcher;
 pub use mail_ingest::{MailIngestError, MailIngestInput, ParsedMail, ingest_message};
+pub use mail_store::{
+    MailBatchItem, MailStore, MailStoreError, MailSummaryPage, MailSyncCursor, MailThreadPage,
+};
 pub use open_protocol_provider::NetworkOpenProtocolVerifier;
+pub use open_protocol_sync::{MailSyncReport, OpenProtocolMailSynchronizer, OpenProtocolSyncError};
 pub use pager::{PageError, PagedValues, SnapshotPager};
 pub use process_security::{ProcessSecurityError, lock_down_current_process};
 pub use protocol::{

@@ -1,6 +1,6 @@
 # PIM local store — durable core before service exposure
 
-Status: **implemented and tested as a library; not installed in an image.**
+Status: **implemented and tested as libraries; not installed in an image.**
 
 `crates/punar-pimd` is the first executable-code slice behind Punar Mail,
 Calendar and Reminders. It deliberately solves local data durability before it
@@ -13,6 +13,10 @@ opens a process or network boundary. The accepted external contract remains
 - one state root bound to one `profile_id` and Linux uid;
 - one blank local **Personal** calendar and one blank local **Reminders** list;
 - zero accounts, messages, events, reminders or activity fixtures;
+- a separate descriptor-bound redb Mail store with an 8 MiB cache, bounded
+  batch/page/file/message ceilings, atomic message-plus-cursor commits,
+  restart persistence, idempotent delivery, UIDVALIDITY replacement and
+  account removal;
 - provider-neutral Calendar and Reminders records matching
   `schemas/pim/records.json`;
 - create, update, complete and delete operations with optimistic revision
@@ -234,10 +238,11 @@ install or activate `punar-pimd`, it still needs:
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
-- durable Mail records, bounded mailbox synchronization and restart tests.
-  ADR-011 and the current library now provide the first TLS-verified
-  IMAP/SMTP authentication adapter, but no mailbox is selected or synchronized
-  yet; and
+- live-provider/service-runtime restart tests for the bounded INBOX
+  synchronizer. The current library selects INBOX read-only, plans at most
+  twenty numerical UIDs per transaction, isolates malformed messages and
+  atomically commits parsed records with the cursor, but has not yet exercised
+  real credentials against a live provider; and
 - a real application binding with empty, offline, conflict and error states.
 
 No desktop entry, MIME handler or onboarding suggestion is enabled by this

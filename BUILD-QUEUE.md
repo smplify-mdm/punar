@@ -197,8 +197,16 @@ Next build slice, in order:
    verifier: implicit TLS or required STARTTLS, platform CA validation, fixed
    deadlines, closed errors and a 1 MiB aggregate IMAP verification-response
    cap. Its 89-package resolved dependency increase is not yet an image-size
-   measurement. Mailbox selection/fetch, SMTP send, bounded retry and durable
-   sync state remain open. The
+   measurement. A bounded adapter now selects INBOX read-only, fetches at most
+   twenty numerical UIDs through the same TLS/deadline boundary, isolates
+   malformed records, and atomically advances the durable cursor with parsed
+   messages. Live-provider/runtime proof, SMTP send and bounded retry remain
+   open. ADR-012 adds a separate descriptor-bound, copy-on-write Mail
+   database with an 8 MiB cache, atomic batch/cursor commits, idempotent
+   delivery, restart persistence, UIDVALIDITY replacement, paging and complete
+   account removal. It stores only ADR-010's bounded Punar records, never raw
+   MIME, HTML or attachment payloads. Search indexing, power-loss injection,
+   scale/resource measurement and live IMAP proof remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,
@@ -222,7 +230,7 @@ Next build slice, in order:
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, durable Mail storage and sync, provider/account
+   event/reminder reads, Mail sync, provider/account
    methods and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

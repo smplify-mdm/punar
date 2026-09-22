@@ -18,12 +18,19 @@
 > and rolls back checked failures. ADR-011 now supplies a real implicit-TLS or
 > STARTTLS IMAP plus authenticated SMTP verifier with platform certificate
 > validation, fixed deadlines and a 1 MiB aggregate IMAP response cap. There
-> is still no fixed helper executable, sign-in UI, mailbox synchronization,
-> durable inbox, SMTP send path or crash-reconciliation proof. There
+> is still no fixed helper executable, sign-in UI, SMTP send path or
+> crash-reconciliation proof. A bounded adapter now opens INBOX read-only,
+> fetches at most twenty UIDs per transaction through the same TLS/deadline
+> boundary, isolates malformed messages and commits records plus cursor
+> atomically. It has not yet passed a live-provider or service-runtime test.
+> ADR-012 adds a separate
+> descriptor-bound, crash-durable Mail record store with an 8 MiB cache,
+> atomic batch/cursor commits, restart persistence, duplicate suppression,
+> UIDVALIDITY replacement and account removal. There
 > is still no service listener, application binding, network adapter or
 > production image entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
-> attachment payloads; it has no transport or durable inbox yet. Calendar and
+> attachment payloads. Calendar and
 > Reminders remain unavailable to users. Provider-neutral account metadata and
 > service-private server configuration now survive restart and the former
 > backs `accounts.list`, but there is no application-callable sign-in workflow.
@@ -295,8 +302,10 @@ That reframes the decision entirely, and it splits in two:
   mail path in one memory-safe process with no GNOME runtime at all. The first
   piece now pins `mail-parser` 0.11.9 behind the bounded, plain-text-only
   conversion in ADR-010. ADR-011 selects `async-imap`, `mail-send` and Rustls
-  for the open-protocol authentication boundary; message synchronization,
-  durable Mail storage and message building remain open.
+  for the open-protocol authentication boundary. ADR-012 selects redb 2.6.3
+  for descriptor-bound durable Mail records. A bounded initial/incremental
+  INBOX adapter now joins those two boundaries, but live-provider/runtime
+  proof, searchable indexing and message building remain open.
 
 Rejected on measurement: Akonadi and `kimap` (size), Stalwart (a server, not a
 client engine), notmuch (a local indexer, no transport), libetpan

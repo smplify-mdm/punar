@@ -1,6 +1,6 @@
 # ADR-011 — TLS-only open-protocol mail transport
 
-- Status: **Accepted — account verification implemented as an unstaged library; message synchronization remains open**
+- Status: **Accepted — account verification and bounded INBOX synchronization implemented as unstaged libraries; live-provider/runtime proof remains open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–12, 15–16,
   44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 3, 7–9
@@ -56,8 +56,11 @@ runtime service composition must make that ownership explicit before staging.
   lockfile. This is source-build cost, not a measured image-size or idle-RAM
   result. Release image delta and service peak memory must be measured before
   production staging.
-- The current slice proves authentication only. It does not select a mailbox,
-  fetch messages, persist a sync cursor, send mail, or establish retry/backoff.
+- The next library slice now opens INBOX read-only and fetches at most twenty
+  numerical UIDs per transaction. It requests only 32 MiB plus one byte per
+  message, converts responses through ADR-010 and atomically commits them with
+  ADR-012's cursor. It still does not send mail or establish scheduled
+  retry/backoff, and it has no live-provider integration proof yet.
 - SMTP response bounding currently relies on `mail-send`'s parser and timeout;
   it must receive an explicit adversarial-response proof before sending ships.
 - Cancellation and crash reconciliation across the credential/account
@@ -74,7 +77,8 @@ runtime service composition must make that ownership explicit before staging.
 4. The service runtime never nests this blocking verifier inside another Tokio
    runtime and releases all connections after verification.
 5. Initial and incremental synchronization retain the same TLS, deadline,
-   response-size and error-redaction guarantees.
+   response-size and error-redaction guarantees. The bounded range planner is
+   unit-proven; a hostile live-server test remains required.
 6. x86_64 and ARM64 builds pass with the pinned Rust toolchain, and the image,
    peak-memory and idle-residency deltas remain within the release budgets.
 

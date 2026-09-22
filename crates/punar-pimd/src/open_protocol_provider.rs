@@ -52,6 +52,10 @@ impl NetworkOpenProtocolVerifier {
         Self { deadline }
     }
 
+    pub(crate) fn deadline(&self) -> Duration {
+        self.deadline
+    }
+
     async fn verify_async(
         &self,
         config: &OpenProtocolConfig,
@@ -66,7 +70,9 @@ impl NetworkOpenProtocolVerifier {
         config: &OpenProtocolConfig,
         password: &str,
     ) -> Result<(), ProviderCheckError> {
-        let (stream, needs_greeting) = self.connect_imap(&config.imap).await?;
+        let (stream, needs_greeting) = self
+            .connect_imap_bounded(&config.imap, MAX_IMAP_VERIFY_BYTES)
+            .await?;
         let mut client = Client::new(stream);
         if needs_greeting {
             let greeting = timeout(self.deadline, client.read_response())
@@ -89,9 +95,10 @@ impl NetworkOpenProtocolVerifier {
         Ok(())
     }
 
-    async fn connect_imap(
+    pub(crate) async fn connect_imap_bounded(
         &self,
         server: &MailServerConfig,
+        max_read: usize,
     ) -> Result<(BoundedIo<TlsStream<TcpStream>>, bool), ProviderCheckError> {
         let tcp = timeout(
             self.deadline,
@@ -111,10 +118,10 @@ impl NetworkOpenProtocolVerifier {
                     .await
                     .map_err(|_| ProviderCheckError::Unreachable)?
                     .map_err(|_| ProviderCheckError::Tls)?;
-                Ok((BoundedIo::new(stream, MAX_IMAP_VERIFY_BYTES), true))
+                Ok((BoundedIo::new(stream, max_read), true))
             }
             MailServerSecurity::StartTls => {
-                let mut client = Client::new(BoundedIo::new(tcp, MAX_IMAP_VERIFY_BYTES));
+                let mut client = Client::new(BoundedIo::new(tcp, max_read));
                 let greeting = timeout(self.deadline, client.read_response())
                     .await
                     .map_err(|_| ProviderCheckError::Unreachable)?
@@ -134,7 +141,7 @@ impl NetworkOpenProtocolVerifier {
                     .await
                     .map_err(|_| ProviderCheckError::Unreachable)?
                     .map_err(|_| ProviderCheckError::Tls)?;
-                Ok((BoundedIo::new(stream, MAX_IMAP_VERIFY_BYTES), false))
+                Ok((BoundedIo::new(stream, max_read), false))
             }
         }
     }
@@ -188,7 +195,7 @@ fn tls_connector() -> Result<TlsConnector, ProviderCheckError> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-fn map_imap_login_error(error: async_imap::error::Error) -> ProviderCheckError {
+pub(crate) fn map_imap_login_error(error: async_imap::error::Error) -> ProviderCheckError {
     match error {
         async_imap::error::Error::No(_) => ProviderCheckError::InvalidCredentials,
         async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost => {
@@ -212,7 +219,7 @@ fn map_smtp_error(error: mail_send::Error) -> ProviderCheckError {
 /// Aggregate read cap used around the third-party IMAP parser. It also limits
 /// each individual read so a peer cannot force a large transient allocation.
 #[derive(Debug)]
-struct BoundedIo<T> {
+pub(crate) struct BoundedIo<T> {
     inner: T,
     read: usize,
     max_read: usize,
