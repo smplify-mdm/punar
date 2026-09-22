@@ -1,6 +1,6 @@
 # ADR-008 — Persistent PIM account credentials and first provider sequence
 
-- Status: **Accepted — record vault implemented as an unstaged library; service integration and runtime proof remain open**
+- Status: **Accepted — record vault and one-use entry channel implemented as unstaged libraries; fixed launcher, account integration and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–11, 15–16,
   30, 36, 44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 7–9;
@@ -134,9 +134,15 @@ authorization-code flow with PKCE, unpredictable state and nonce, and an exact
 short-lived loopback callback owned by the service; no embedded web view and no
 custom callback handed through an arbitrary browser tab. Native public clients
 do not embed a client secret. Password-based open-protocol setup uses a
-separate, short-lived credential-entry helper with no durable state; it sends
-the value over a pre-established private channel, becomes non-dumpable, clears
-its buffers and exits. The ordinary Mail window never receives the password.
+separate, short-lived credential-entry helper with no durable state. The
+implemented channel primitive is an unnamed `SOCK_SEQPACKET` pair with a fixed
+64 KiB frame limit and five-minute deadline. The helper becomes non-dumpable,
+disables core dumps and future privilege gain before input exists, sends
+exactly one value over the pre-established private endpoint, clears its input
+on every result and exits. The service receives into a zeroizing buffer and
+moves that value directly into the encrypted vault. The ordinary Mail window
+never receives the password. The executable, fixed launcher and QML account
+flow remain implementation work; this library is not a sign-in feature.
 
 Account removal is a transaction: stop new work, revoke remote authorization
 when the provider supports it, delete the local credential and sync cursors,
@@ -177,10 +183,11 @@ production desktop entry or MIME handler may ship.
 - Third-party applications may continue to use `org.freedesktop.secrets` under
   their disclosed permissions; that compatibility path is separate from the
   first-party vault and is still reported as shared where appropriate.
-- A password-entry helper and a verifiable first-party launch capability are
-  new implementation work. Falling back to a normal text field, a world- or
-  user-readable socket, peer uid alone, or a generic “get secret” method is not
-  permitted.
+- A fixed password-entry executable/launcher and a verifiable first-party
+  launch capability remain implementation work. The one-use transport and
+  pre-input process lockdown are implemented as an unstaged library. Falling
+  back to a normal Mail text field, a world- or user-readable socket, peer uid
+  alone, or a generic “get secret” method is not permitted.
 
 ## Required proof before provider sign-in ships
 

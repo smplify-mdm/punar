@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,6 +23,8 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::credential_entry::{CredentialEntryError, receive_credential};
 
 const VAULT_VERSION: u8 = 1;
 const KEY_BYTES: usize = 32;
@@ -49,6 +52,8 @@ pub enum VaultError {
     NotFound,
     #[error("PIM credential entropy is unavailable")]
     Entropy,
+    #[error(transparent)]
+    CredentialEntry(#[from] CredentialEntryError),
 }
 
 /// Closed credential classes used internally by provider adapters. Values are
@@ -188,6 +193,18 @@ impl CredentialVault {
         let result = self.store_inner(account_id, kind, secret);
         secret.zeroize();
         result
+    }
+
+    /// Receive a value from the one-use non-dumpable entry helper and move it
+    /// directly into the encrypted vault. The normal PIM IPC is not involved.
+    pub fn receive_and_store(
+        &self,
+        account_id: &str,
+        kind: CredentialKind,
+        channel: OwnedFd,
+    ) -> Result<(), VaultError> {
+        let mut secret = receive_credential(channel)?;
+        self.store(account_id, kind, &mut secret)
     }
 
     fn store_inner(
@@ -806,6 +823,32 @@ mod tests {
                 .is_err()
         );
         assert!(oversized.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn one_use_entry_channel_moves_a_password_directly_into_the_vault() {
+        let tree = TempTree::new();
+        let root = tree.state_root();
+        let proof = tree.proof();
+        let vault = CredentialVault::open(&root, "profile_A1", &proof).unwrap();
+        let (helper, service) = crate::credential_entry_pair().unwrap();
+        let sender = std::thread::spawn(move || {
+            let helper = crate::CredentialEntryHelper::lock_down(helper).unwrap();
+            let mut secret = b"one-use-password".to_vec();
+            helper.submit(&mut secret).unwrap();
+            assert!(secret.iter().all(|byte| *byte == 0));
+        });
+        vault
+            .receive_and_store("acct_A1", CredentialKind::IncomingPassword, service)
+            .unwrap();
+        sender.join().unwrap();
+        vault
+            .with_secret("acct_A1", CredentialKind::IncomingPassword, |value| {
+                assert_eq!(value, b"one-use-password");
+            })
+            .unwrap();
+        let disk = fs::read(root.join("credentials.json")).unwrap();
+        assert!(!disk.windows(7).any(|window| window == b"one-use"));
     }
 
     #[test]

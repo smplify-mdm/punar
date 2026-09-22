@@ -10,7 +10,10 @@
 > local Calendar/Reminders records, revisions and change history plus bounded,
 > strictly authorized application-protocol parsing. An unstaged encrypted
 > credential-vault library now refuses non-LUKS storage and keeps values out of
-> ordinary IPC, but it is not connected to account setup or a provider. There
+> ordinary IPC. A tested unnamed one-use credential-entry channel locks its
+> helper down before input exists and transfers a bounded value directly into
+> the vault. There is still no fixed helper executable, sign-in UI, account
+> transaction or provider connection. There
 > is still no service listener, application binding, network adapter or
 > production image entry. Calendar and Reminders remain unavailable to users.
 > No part of this status may be shortened to “Mail is built” until the runtime
@@ -104,8 +107,9 @@ governed by
 [`ADR-008`](../architecture/adr/ADR-008-pim-account-credentials.md): a
 service-private per-profile vault owned by the socket-activated PIM service,
 never a new state directory for `punar-secrets`. The record-level negative
-tests now pass; service integration, password-helper secrecy and hostile
-runtime proof remain prerequisites for any provider sign-in.
+tests and the helper-to-vault one-use transfer now pass; fixed-launcher/UI
+integration, account transactions and hostile runtime proof remain
+prerequisites for any provider sign-in.
 
 One Linux profile/uid owns one PIM service and one data root. Personal and work
 profiles therefore do not share account metadata, indexes, notifications or

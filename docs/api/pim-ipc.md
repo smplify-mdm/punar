@@ -84,6 +84,11 @@ rather than being ignored.
   tokens, provider client secrets, vault keys or callback query strings.
   `accounts.begin_connect` carries only a provider type. OAuth browser launch
   and the short-lived password-entry helper use the separate ADR-008 paths.
+- The password path now has a tested unnamed one-use sequenced-packet channel.
+  Its helper endpoint becomes non-dumpable, disables core dumps and future
+  privilege gain before input exists; one bounded value is then moved directly
+  into the vault and both caller and receiver buffers are cleared. The fixed
+  helper executable, launcher and account-setup UI are not implemented yet.
 - The implemented vault encrypts each credential with profile/account/kind
   associated data and refuses to open unless the service-private state path is
   kernel-observed on a LUKS2 device-mapper filesystem. It is not yet wired to

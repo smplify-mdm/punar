@@ -184,7 +184,11 @@ Next build slice, in order:
    zeroizes caller input and held keys, refuses plaintext or unproven storage,
    and durably removes account secrets. Its proof is bound to the state path's
    actual device id and cryptsetup's kernel `CRYPT-LUKS2-` mapper identity;
-   service/account integration and the password-entry helper remain open. The
+   a bounded unnamed one-use credential-entry channel now locks the helper down
+   before input exists, distinguishes cancellation, rejects oversized frames,
+   clears caller input and moves the received value directly into that vault.
+   The fixed helper executable/launcher, QML account flow and transactional
+   service/account integration remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,

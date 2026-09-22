@@ -1,12 +1,14 @@
 //! `punar-pimd` — profile-scoped personal-information data service.
 //!
 //! The implementation contains the durable local Calendar/Reminders core and
-//! a LUKS-gated service-private encrypted credential vault. It still has no
-//! network client, provider adapter, application listener or resident
-//! background loop. That keeps the production authorization boundary honest
-//! while durability and credential custody are exercised independently. The
-//! executable and socket activation arrive only after ADR-008's hostile
-//! same-UID caller gate has a proven mechanism.
+//! a LUKS-gated service-private encrypted credential vault plus an unnamed,
+//! one-use entry channel that moves a password directly from a locked-down
+//! helper into that vault. It still has no network client, provider adapter,
+//! application listener or resident background loop. That keeps the
+//! production authorization boundary honest while durability and credential
+//! custody are exercised independently. The executable and socket activation
+//! arrive only after ADR-008's hostile same-UID caller gate has a proven
+//! mechanism.
 //!
 //! A newly opened store contains one blank local calendar and one blank local
 //! reminder list. Those are structural containers, not demo content: accounts,
@@ -16,6 +18,7 @@
 
 mod channel;
 mod connection;
+mod credential_entry;
 mod cursor;
 mod dispatcher;
 mod pager;
@@ -30,6 +33,7 @@ pub use channel::{
     control_channel_pair, receive_client_channel, send_client_channel,
 };
 pub use connection::{ConnectionError, serve_granted_channel};
+pub use credential_entry::{CredentialEntryError, CredentialEntryHelper, credential_entry_pair};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use dispatcher::LocalDispatcher;
 pub use pager::{PageError, PagedValues, SnapshotPager};

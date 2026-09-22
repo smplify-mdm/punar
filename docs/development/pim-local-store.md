@@ -68,9 +68,12 @@ so copied or relabelled ciphertext fails authentication. Caller input and
 temporary plaintext are zeroized, files are exact 0600/no-follow/single-link,
 and removing an account durably removes all of its records. The ordinary data
 store and IPC still contain no password, OAuth code/token, provider secret or
-encryption key field. The vault is not yet connected to an account method,
-provider adapter or password helper. QML is not linked to it. It starts no
-resident process and performs no periodic work.
+encryption key field. `credential_entry.rs` now provides an unnamed one-use
+channel whose helper locks down before input exists, rejects empty/oversized
+values, clears caller input and moves the service-side value directly into the
+vault. No fixed helper executable, launcher, QML flow, account transaction or
+provider adapter exists yet. It starts no resident process and performs no
+periodic work.
 
 ## Why the blank containers are not demo data
 
@@ -176,7 +179,11 @@ The crate's unit suite proves:
 37. account removal is durable and leaves other accounts untouched; and
 38. linked, cross-profile and symbolic vault state fails closed without
     replacing or following it; and
-39. even rejected oversized credential input is zeroized before returning.
+39. even rejected oversized credential input is zeroized before returning;
+40. helper lockdown precedes input and exactly one value reaches the service;
+41. helper close is cancellation and cannot be mistaken for an empty password;
+42. oversized helper input and hostile oversized packets fail closed; and
+43. helper-to-vault transfer leaves no plaintext in the persisted files.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -190,8 +197,8 @@ install or activate `punar-pimd`, it still needs:
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
   event responses, account/provider, Mail and contacts methods;
-- credential-vault integration with the service, account transactions and a
-  short-lived non-dumpable password-entry helper;
+- credential-vault integration with account transactions plus the fixed
+  launcher, executable and UI for the short-lived password-entry helper;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
