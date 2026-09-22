@@ -16,6 +16,7 @@
 mod channel;
 mod connection;
 mod cursor;
+mod dispatcher;
 mod pager;
 mod protocol;
 mod store;
@@ -26,6 +27,7 @@ pub use channel::{
 };
 pub use connection::{ConnectionError, serve_granted_channel};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
+pub use dispatcher::LocalDispatcher;
 pub use pager::{PageError, PagedValues, SnapshotPager};
 pub use protocol::{
     ErrorCode, ErrorDetails, FrameError, PimMethod, PimProtocolError, PimRequest, RequestFailure,
@@ -212,7 +214,8 @@ pub enum CalendarEventKind {
 
 /// Caller-supplied event fields. Identity and synchronization metadata are
 /// always minted by the service, never accepted from an application.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventInput {
     pub calendar_id: String,
     pub title: String,
@@ -269,7 +272,8 @@ pub enum ReminderKind {
 
 /// Caller-supplied reminder fields. Identity, completion state and sync
 /// metadata are service-owned.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReminderInput {
     pub list_id: String,
     pub title: String,

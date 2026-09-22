@@ -110,6 +110,22 @@ impl SnapshotPager {
         self.next_at(method, filter_binding, cursor, limit, Instant::now())
     }
 
+    /// Seal the latest durable change sequence returned with a snapshot or
+    /// mutation. Change cursors use one fixed binding because the v1 stream has
+    /// no caller-selected filters.
+    pub fn seal_change_cursor(&self, sequence: u64) -> Result<String, PageError> {
+        self.change_cursor(sequence)
+    }
+
+    /// Open a change cursor and recover only its durable sequence. The signer
+    /// independently enforces profile, method and binding identity.
+    pub fn open_change_cursor(&self, cursor: &str) -> Result<u64, PageError> {
+        self.signer
+            .open(cursor, PimMethod::ChangesSince, CHANGE_CURSOR_BINDING)
+            .map(|position| position.position)
+            .map_err(|_| PageError::InvalidCursor)
+    }
+
     fn start_at<T: Serialize>(
         &self,
         method: PimMethod,

@@ -138,6 +138,16 @@ and 32 MiB total. Expiry, bounded eviction or process restart returns
 `cursor_expired`, so the client refreshes instead of rendering a mixed result.
 Only lists with another page consume cache space.
 
+`crates/punar-pimd/src/dispatcher.rs` now connects the protocol to the durable
+local store for `service.status`, honest empty `accounts.list`,
+`calendar.list`, `reminder_lists.list`, local event/reminder create, update,
+complete and delete operations, plus `changes.since`. It rechecks the trusted
+grant uid before parsing params, maps optimistic conflicts to bounded typed
+errors and emits signed change cursors only after persistence succeeds.
+Provider/account setup, Mail, contacts, event responses and filtered
+event/reminder reads remain explicitly unstaged; this partial dispatcher is not
+installed in a production image.
+
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or

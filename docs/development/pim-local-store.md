@@ -81,6 +81,14 @@ snapshot. It is intentionally volatile and bounded: 16 active snapshots,
 Missing state fails as `cursor_expired`; it never falls through to current
 store contents. Single-page queries allocate no cache entry.
 
+`crates/punar-pimd/src/dispatcher.rs` now provides the first store-backed
+method slice: service status, honest empty account state, structural Calendar
+and Reminder lists, durable local event/reminder mutations and the bounded
+change stream. It checks the grant uid before method params, uses the strict
+store validators, returns typed optimistic conflicts and signs a mutation's
+change cursor only after the durable write. It intentionally leaves provider,
+Mail/contact and filtered event/reminder methods unstaged.
+
 ## Tests currently required
 
 The crate's unit suite proves:
@@ -117,7 +125,12 @@ The crate's unit suite proves:
     open indefinitely;
 21. later pages retain the original values after the source mutates;
 22. a page cursor cannot cross a method or canonical filter binding; and
-23. expiry and bounded eviction return cursor expiry instead of live data.
+23. expiry and bounded eviction return cursor expiry instead of live data;
+24. service status and structural lists contain no demo/account records;
+25. a local calendar mutation is durable and appears in the change stream;
+26. stale revisions return a typed conflict without rewriting state; and
+27. a mismatched grant uid is denied before malformed params are parsed; and
+28. malformed record ids return `invalid_params` without resource disclosure.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -129,8 +142,8 @@ install or activate `punar-pimd`, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
-- the full store-backed method dispatcher, including durable cursor-key wiring
-  and retained-change expiry mapping;
+- the remaining store-backed method dispatcher: filtered event/reminder reads,
+  event responses, account/provider, Mail and contacts methods;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;

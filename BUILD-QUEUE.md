@@ -181,7 +181,11 @@ Next build slice, in order:
    links and validate the exact opened file. A bounded five-minute stable-page
    cache now prevents mutations from mixing old and new records across a list;
    restart, expiry or eviction returns an explicit cursor expiry. The full
-   store dispatcher and production-image staging remain open;
+   dispatcher is now in progress: status, honest empty accounts, structural
+   Calendar/Reminder lists, local event/reminder mutations, typed conflicts
+   and the durable change stream are store-backed. Filtered event/reminder
+   reads, provider/account/Mail methods and production-image staging remain
+   open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

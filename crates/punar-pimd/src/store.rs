@@ -202,6 +202,7 @@ impl PimStore {
         now: &str,
     ) -> Result<CalendarEvent, StoreError> {
         validate_timestamp(now)?;
+        validate_opaque_id(event_id)?;
         validate_event_input(&input)?;
         let event_id = event_id.to_string();
         self.commit(|state| {
@@ -246,6 +247,7 @@ impl PimStore {
         now: &str,
     ) -> Result<(), StoreError> {
         validate_timestamp(now)?;
+        validate_opaque_id(event_id)?;
         let event_id = event_id.to_string();
         self.commit(|state| {
             let revision = state
@@ -317,6 +319,7 @@ impl PimStore {
         now: &str,
     ) -> Result<Reminder, StoreError> {
         validate_timestamp(now)?;
+        validate_opaque_id(reminder_id)?;
         validate_reminder_input(&input)?;
         let reminder_id = reminder_id.to_string();
         self.commit(|state| {
@@ -358,6 +361,7 @@ impl PimStore {
         now: &str,
     ) -> Result<Reminder, StoreError> {
         validate_timestamp(now)?;
+        validate_opaque_id(reminder_id)?;
         let reminder_id = reminder_id.to_string();
         self.commit(|state| {
             let (record, revision) = {
@@ -388,6 +392,7 @@ impl PimStore {
         now: &str,
     ) -> Result<(), StoreError> {
         validate_timestamp(now)?;
+        validate_opaque_id(reminder_id)?;
         let reminder_id = reminder_id.to_string();
         self.commit(|state| {
             let revision = state

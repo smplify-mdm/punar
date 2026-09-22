@@ -191,7 +191,7 @@ pub struct PimProtocolError {
 }
 
 impl PimProtocolError {
-    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
