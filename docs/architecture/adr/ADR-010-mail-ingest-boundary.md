@@ -1,6 +1,6 @@
 # ADR-010 — Bounded mail ingest and rendering boundary
 
-- Status: **Accepted — bounded MIME-to-record conversion implemented as an unstaged library; transport and durable Mail storage remain open**
+- Status: **Accepted — bounded MIME-to-record conversion implemented as an unstaged library; ADR-011 selects and implements authentication transport, while durable Mail storage and synchronization remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–12, 15–16,
   44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 3, 7–9
@@ -37,8 +37,9 @@ size metadata is retained with `not_downloaded`. Opening an attachment must be
 a separate fetch, quarantine and release flow. Body and attachment completeness
 are reported separately rather than silently claiming truncated data is whole.
 
-The parser has no network authority. IMAP/SMTP adapters remain responsible for
-TLS, authentication, incremental cursors, download limits and backoff. The QML
+The parser has no network authority. ADR-011's IMAP/SMTP verifier now owns
+TLS-authenticated account checks, but the future synchronization adapter remains
+responsible for incremental cursors, download limits and backoff. The QML
 window remains responsible only for rendering the already-bounded plain-text
 records it receives through the authorized PIM channel.
 

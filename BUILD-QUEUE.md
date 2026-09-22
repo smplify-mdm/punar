@@ -192,8 +192,13 @@ Next build slice, in order:
    and outgoing vault records, requires provider verification before making an
    account ready, rolls staged credentials back on every checked failure and
    removes metadata/configuration/credentials together. The fixed helper
-   executable/launcher, real provider verifier, QML account flow and
-   crash-reconciliation proof remain open. The
+   executable/launcher, QML account flow and crash-reconciliation proof remain
+   open. ADR-011 now pins a Rust-1.88-compatible, TLS-only open-protocol
+   verifier: implicit TLS or required STARTTLS, platform CA validation, fixed
+   deadlines, closed errors and a 1 MiB aggregate IMAP verification-response
+   cap. Its 89-package resolved dependency increase is not yet an image-size
+   measurement. Mailbox selection/fetch, SMTP send, bounded retry and durable
+   sync state remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,
@@ -217,8 +222,7 @@ Next build slice, in order:
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, durable Mail storage, real IMAP/SMTP verification and
-   sync, provider/account
+   event/reminder reads, durable Mail storage and sync, provider/account
    methods and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

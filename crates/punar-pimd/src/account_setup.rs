@@ -26,6 +26,8 @@ pub enum ProviderCheckError {
     Tls,
     #[error("mail provider returned an invalid response")]
     InvalidResponse,
+    #[error("mail provider verification could not start")]
+    Internal,
 }
 
 /// Identity returned only after an adapter has authenticated both incoming
@@ -36,12 +38,21 @@ pub struct VerifiedOpenProtocolIdentity {
     pub primary_address: EmailAddress,
 }
 
+/// User-visible identity kept separate from the provider login name. Some
+/// self-hosted servers authenticate a short username rather than an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenProtocolAccountInput {
+    pub display_name: String,
+    pub primary_address: EmailAddress,
+}
+
 /// Service-internal verification boundary. Implementations must authenticate
 /// both configured endpoints and must not retain `password` after returning.
 pub trait OpenProtocolVerifier {
     fn verify(
         &self,
         config: &OpenProtocolConfig,
+        identity: &OpenProtocolAccountInput,
         password: &[u8],
     ) -> Result<VerifiedOpenProtocolIdentity, ProviderCheckError>;
 }
@@ -81,12 +92,21 @@ impl<'a, V: OpenProtocolVerifier> AccountCoordinator<'a, V> {
     /// accepted as an ordinary argument or returned to the caller.
     pub fn connect_open_protocol(
         &self,
+        identity: OpenProtocolAccountInput,
         config: OpenProtocolConfig,
         credential_channel: OwnedFd,
         now: &str,
     ) -> Result<Account, AccountSetupError> {
         let account_id = mint_account_id()?;
-        self.store.validate_open_protocol_config(&config)?;
+        let candidate = ready_account(
+            account_id.clone(),
+            VerifiedOpenProtocolIdentity {
+                display_name: identity.display_name.clone(),
+                primary_address: identity.primary_address.clone(),
+            },
+        );
+        self.store
+            .validate_open_protocol_candidate(&candidate, &config)?;
 
         self.vault
             .receive_and_store_shared_password(&account_id, credential_channel)?;
@@ -94,7 +114,7 @@ impl<'a, V: OpenProtocolVerifier> AccountCoordinator<'a, V> {
         let verified = match self.vault.with_secret(
             &account_id,
             CredentialKind::IncomingPassword,
-            |password| self.verifier.verify(&config, password),
+            |password| self.verifier.verify(&config, &identity, password),
         ) {
             Ok(Ok(identity)) => identity,
             Ok(Err(error)) => {
@@ -126,9 +146,20 @@ impl<'a, V: OpenProtocolVerifier> AccountCoordinator<'a, V> {
         account_id: &str,
     ) -> Result<VerifiedOpenProtocolIdentity, AccountSetupError> {
         let config = self.store.open_protocol_config(account_id)?;
+        let account = self
+            .store
+            .snapshot()
+            .accounts
+            .into_iter()
+            .find(|account| account.account_id == account_id)
+            .ok_or(StoreError::NotFound)?;
+        let identity = OpenProtocolAccountInput {
+            display_name: account.display_name,
+            primary_address: account.primary_address.ok_or(StoreError::NotFound)?,
+        };
         self.vault
             .with_secret(account_id, CredentialKind::IncomingPassword, |password| {
-                self.verifier.verify(&config, password)
+                self.verifier.verify(&config, &identity, password)
             })?
             .map_err(Into::into)
     }
@@ -200,9 +231,11 @@ mod tests {
         fn verify(
             &self,
             config: &OpenProtocolConfig,
+            identity: &OpenProtocolAccountInput,
             password: &[u8],
         ) -> Result<VerifiedOpenProtocolIdentity, ProviderCheckError> {
-            assert_eq!(config.username, "alice@example.com");
+            assert_eq!(config.username, "alice-login");
+            assert_eq!(identity.primary_address.address, "alice@example.com");
             assert_eq!(password, b"app-password");
             self.outcome?;
             Ok(VerifiedOpenProtocolIdentity {
@@ -250,7 +283,7 @@ mod tests {
 
     fn config() -> OpenProtocolConfig {
         OpenProtocolConfig {
-            username: "alice@example.com".into(),
+            username: "alice-login".into(),
             imap: MailServerConfig {
                 host: "imap.example.com".into(),
                 port: 993,
@@ -260,6 +293,16 @@ mod tests {
                 host: "smtp.example.com".into(),
                 port: 465,
                 security: MailServerSecurity::Tls,
+            },
+        }
+    }
+
+    fn identity() -> OpenProtocolAccountInput {
+        OpenProtocolAccountInput {
+            display_name: "Alice Work".into(),
+            primary_address: EmailAddress {
+                name: Some("Alice".into()),
+                address: "alice@example.com".into(),
             },
         }
     }
@@ -289,6 +332,7 @@ mod tests {
         let (store, vault) = open(state);
         let (service, sender) = send_password();
         let result = AccountCoordinator::new(&store, &vault, verifier).connect_open_protocol(
+            identity(),
             config(),
             service,
             NOW,
@@ -413,7 +457,7 @@ mod tests {
                 invalid_identity: false,
             },
         )
-        .connect_open_protocol(invalid, service, NOW);
+        .connect_open_protocol(identity(), invalid, service, NOW);
         drop(helper);
         assert!(matches!(result, Err(AccountSetupError::Store(_))));
         assert!(store.snapshot().accounts.is_empty());

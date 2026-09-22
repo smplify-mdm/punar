@@ -15,8 +15,11 @@
 > the vault. A library-only coordinator now validates service-private IMAP/SMTP
 > configuration, stages separately typed credentials, invokes a closed
 > provider-verification interface, publishes the account only after success
-> and rolls back checked failures. There is still no fixed helper executable,
-> sign-in UI, real provider connection or crash-reconciliation proof. There
+> and rolls back checked failures. ADR-011 now supplies a real implicit-TLS or
+> STARTTLS IMAP plus authenticated SMTP verifier with platform certificate
+> validation, fixed deadlines and a 1 MiB aggregate IMAP response cap. There
+> is still no fixed helper executable, sign-in UI, mailbox synchronization,
+> durable inbox, SMTP send path or crash-reconciliation proof. There
 > is still no service listener, application binding, network adapter or
 > production image entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
@@ -291,7 +294,9 @@ That reframes the decision entirely, and it splits in two:
   `async-imap`, `mail-send`, `mail-parser`, `mail-builder` — which keeps the
   mail path in one memory-safe process with no GNOME runtime at all. The first
   piece now pins `mail-parser` 0.11.9 behind the bounded, plain-text-only
-  conversion in ADR-010; transport and message building remain unselected.
+  conversion in ADR-010. ADR-011 selects `async-imap`, `mail-send` and Rustls
+  for the open-protocol authentication boundary; message synchronization,
+  durable Mail storage and message building remain open.
 
 Rejected on measurement: Akonadi and `kimap` (size), Stalwart (a server, not a
 client engine), notmuch (a local indexer, no transport), libetpan

@@ -98,3 +98,13 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 # reviewed patch and keep its optional legacy encodings/serialization disabled;
 # Punar copies only bounded plain text and metadata into its own records.
 mail-parser = { version = "=0.11.9", default-features = false }
+# Open-protocol Mail uses one reviewed Tokio/rustls stack on both architectures.
+# Exact versions keep the Rust 1.88 floor and dependency review reproducible.
+# SMTP deliberately omits obsolete MD5 authentication features, MIME building
+# and DKIM here: this first slice only verifies authenticated submission.
+async-imap = { version = "=0.11.3", default-features = false, features = ["runtime-tokio"] }
+mail-send = { version = "=0.6.0", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-platform-verifier = "=0.7.0"
+tokio = { version = "=1.51.0", default-features = false, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }

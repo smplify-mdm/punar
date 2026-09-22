@@ -23,6 +23,7 @@ mod credential_entry;
 mod cursor;
 mod dispatcher;
 mod mail_ingest;
+mod open_protocol_provider;
 mod pager;
 mod process_security;
 mod protocol;
@@ -31,8 +32,8 @@ mod store;
 mod vault;
 
 pub use account_setup::{
-    AccountCoordinator, AccountSetupError, OpenProtocolVerifier, ProviderCheckError,
-    VerifiedOpenProtocolIdentity,
+    AccountCoordinator, AccountSetupError, OpenProtocolAccountInput, OpenProtocolVerifier,
+    ProviderCheckError, VerifiedOpenProtocolIdentity,
 };
 pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
@@ -43,6 +44,7 @@ pub use credential_entry::{CredentialEntryError, CredentialEntryHelper, credenti
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use dispatcher::LocalDispatcher;
 pub use mail_ingest::{MailIngestError, MailIngestInput, ParsedMail, ingest_message};
+pub use open_protocol_provider::NetworkOpenProtocolVerifier;
 pub use pager::{PageError, PagedValues, SnapshotPager};
 pub use process_security::{ProcessSecurityError, lock_down_current_process};
 pub use protocol::{

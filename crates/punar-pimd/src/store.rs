@@ -227,11 +227,28 @@ impl PimStore {
         })
     }
 
-    pub(crate) fn validate_open_protocol_config(
+    pub(crate) fn validate_open_protocol_candidate(
         &self,
+        account: &Account,
         config: &OpenProtocolConfig,
     ) -> Result<(), StoreError> {
-        validate_open_protocol_config(config)
+        validate_account(account)?;
+        validate_open_protocol_config(config)?;
+        if account.provider_type != ProviderType::OpenProtocols {
+            return Err(StoreError::Invalid(
+                "open-protocol configuration has the wrong provider type".into(),
+            ));
+        }
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .accounts
+            .contains_key(&account.account_id)
+        {
+            return Err(StoreError::Invalid("account already exists".into()));
+        }
+        Ok(())
     }
 
     pub(crate) fn open_protocol_config(

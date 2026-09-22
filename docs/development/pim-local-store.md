@@ -80,10 +80,11 @@ channel whose helper locks down before input exists, rejects empty/oversized
 values, clears caller input and moves the service-side value directly into the
 vault. `account_setup.rs` coordinates validation, dual typed credential
 commit, provider verification, durable account publication, removal and
-checked-failure rollback. Its provider verifier is still an interface, not a
-network implementation. No fixed helper executable, launcher, QML flow or
-real provider adapter exists yet. It starts no resident process and performs
-no periodic work.
+checked-failure rollback. The coordinator keeps a closed verifier interface;
+ADR-011 now supplies its real TLS-only IMAP/SMTP implementation with platform certificate validation, fixed
+deadlines and bounded IMAP verification reads. No fixed helper executable,
+launcher, QML flow or mailbox synchronization adapter exists yet. It starts no
+resident process and performs no periodic work.
 
 ## Why the blank containers are not demo data
 
@@ -233,8 +234,10 @@ install or activate `punar-pimd`, it still needs:
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
-- a real TLS-verified IMAP/SMTP adapter, durable Mail records, bounded sync and
-  restart tests; and
+- durable Mail records, bounded mailbox synchronization and restart tests.
+  ADR-011 and the current library now provide the first TLS-verified
+  IMAP/SMTP authentication adapter, but no mailbox is selected or synchronized
+  yet; and
 - a real application binding with empty, offline, conflict and error states.
 
 No desktop entry, MIME handler or onboarding suggestion is enabled by this
