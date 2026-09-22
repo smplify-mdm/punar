@@ -170,8 +170,11 @@ Next build slice, in order:
    layer now adds bounded newline framing, a closed typed method table,
    authorization-before-parameter parsing, safe correlation/error reflection
    and exact success/error envelopes. Privileged launch, read deadlines,
-   non-dumpable sandbox proof, socket-activated process, signed cursors, the
-   full store dispatcher and production-image staging remain open;
+   non-dumpable sandbox proof and socket-activated process remain open. The
+   HMAC cursor primitive now binds opaque positions to the profile, method and
+   hashed filter/sort set and rejects tampering/cross-context replay; durable
+   private cursor-key injection, the full store dispatcher and
+   production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

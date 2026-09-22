@@ -7,9 +7,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 getrandom = { workspace = true }
+hmac = { workspace = true }
 punar-common = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }

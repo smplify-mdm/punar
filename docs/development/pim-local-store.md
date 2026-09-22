@@ -64,9 +64,12 @@ revision returns a conflict and performs no write. Offline provider-bound work
 is represented in the persisted record before success returns; a future sync
 adapter can resume it after a crash without relying on an in-memory queue.
 
-The change sequence in this library is internal. It must not be exposed as the
-IPC cursor. The service layer must integrity-protect it and bind it to the
-profile, method, filters and snapshot as `pim-ipc.md` requires.
+The change sequence in this library is internal and is never exposed directly.
+`crates/punar-pimd/src/cursor.rs` now wraps a sequence/position with an
+HMAC-SHA-256 cursor bound to the profile, typed method and hashed canonical
+filter/sort set. Tampering and cross-profile/method/filter/key reuse fail
+closed. The future service still must persist and inject the random private
+cursor key and map a cursor older than retained history to `cursor_expired`.
 
 ## Tests currently required
 
@@ -92,7 +95,9 @@ The crate's unit suite proves:
 14. unsafe correlation fields are not reflected, while a safe unknown method
     receives a schema-valid `unknown_method` response; and
 15. typed parameters reject extensions only after the app/method partition
-    admits the call.
+    admits the call;
+16. cursor payload/signature tampering, cross-profile/method/filter/key replay,
+    extensions and constant keys fail closed without exposing raw bindings.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -104,8 +109,8 @@ install or activate `punar-pimd`, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
-- read/write deadlines, signed cursors and the full store-backed method
-  dispatcher;
+- read/write deadlines, durable private cursor-key injection and the full
+  store-backed method dispatcher;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;

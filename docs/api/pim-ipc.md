@@ -114,6 +114,14 @@ sort and snapshot. Reusing it with another method/filter/profile returns
 `cursor_expired`; the client must refresh a snapshot and must not guess a
 replacement.
 
+`crates/punar-pimd/src/cursor.rs` now implements that integrity primitive with
+HMAC-SHA-256 and constant-time verification. The payload carries only fixed
+digests of the profile and canonical filter/sort binding, not their raw values,
+and is capped below the schema's 512-byte limit. The service must inject a
+random durable 32-byte key from private profile state; the implementation
+refuses an all-zero key. Key persistence and dispatcher integration are not
+yet implemented.
+
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or
@@ -163,6 +171,8 @@ and conflict records. Negative fixtures prove that:
 - an account record cannot expose a refresh token; and
 - `sync.state=conflict` cannot omit typed conflict details.
 
-Runtime work must add peer/capability denial, frame/time limits, cursor
-tampering/expiry, crash/restart, power-loss, offline queue, optimistic
+Runtime work must add peer/capability denial, read/write time limits, retained
+history expiry, crash/restart, power-loss, offline queue, optimistic
 concurrency and secret-leak scans before a production application is exposed.
+Frame limits, cross-client denial and cursor tampering/replay are already unit
+tested below the unexposed service boundary.

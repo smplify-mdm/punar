@@ -85,6 +85,7 @@ unicode-segmentation = "1"
 # suites: this protocol fixes one reviewed suite and does not negotiate.
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "chacha", "x25519"] }
 base64 = "0.22"
+hmac = "0.12"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
