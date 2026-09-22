@@ -63,8 +63,8 @@ pub use protocol::{
 pub use service::{PimService, PimServiceError};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
 pub use sync_runtime::{
-    AcceptedSync, MailSyncRunner, OpenProtocolSyncRunner, SyncCoordinator, SyncFailure,
-    SyncTriggerError,
+    AcceptedSync, AccountRemovalPermit, MailSyncRunner, OpenProtocolSyncRunner, SyncCoordinator,
+    SyncFailure, SyncQuiesceError, SyncTriggerError,
 };
 pub use vault::{CredentialKind, CredentialVault, EncryptedStorageProof, VaultError};
 

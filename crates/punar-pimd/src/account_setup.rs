@@ -5,15 +5,17 @@
 //! coordinator validates configuration, commits both typed vault records,
 //! verifies IMAP and SMTP through a provider adapter, and only then publishes
 //! the account metadata. Every pre-commit failure removes the staged secret.
+//! Removal requires a profile-bound sync-quiescence permit before it erases
+//! cached Mail, credentials and public metadata.
 
 use std::os::fd::OwnedFd;
 
 use thiserror::Error;
 
 use crate::{
-    Account, AccountAuthState, AccountCapability, AccountKind, Connectivity, CredentialKind,
-    CredentialVault, EmailAddress, OpenProtocolConfig, PimStore, ProviderType, StoreError,
-    VaultError,
+    Account, AccountAuthState, AccountCapability, AccountKind, AccountRemovalPermit, Connectivity,
+    CredentialKind, CredentialVault, EmailAddress, MailStore, MailStoreError, OpenProtocolConfig,
+    PimStore, ProviderType, StoreError, VaultError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -64,24 +66,35 @@ pub enum AccountSetupError {
     #[error(transparent)]
     Vault(#[from] VaultError),
     #[error(transparent)]
+    MailStore(#[from] MailStoreError),
+    #[error(transparent)]
     Provider(#[from] ProviderCheckError),
     #[error("mail account identifier entropy is unavailable")]
     Entropy,
     #[error("mail account setup failed and staged credentials could not be removed")]
     Cleanup,
+    #[error("mail account removal permit belongs to another profile service")]
+    RemovalPermitMismatch,
 }
 
 pub struct AccountCoordinator<'a, V> {
     store: &'a PimStore,
+    mail_store: &'a MailStore,
     vault: &'a CredentialVault,
     verifier: V,
 }
 
 impl<'a, V: OpenProtocolVerifier> AccountCoordinator<'a, V> {
     #[must_use]
-    pub fn new(store: &'a PimStore, vault: &'a CredentialVault, verifier: V) -> Self {
+    pub fn new(
+        store: &'a PimStore,
+        mail_store: &'a MailStore,
+        vault: &'a CredentialVault,
+        verifier: V,
+    ) -> Self {
         Self {
             store,
+            mail_store,
             vault,
             verifier,
         }
@@ -164,12 +177,22 @@ impl<'a, V: OpenProtocolVerifier> AccountCoordinator<'a, V> {
             .map_err(Into::into)
     }
 
-    /// Remove public metadata first, then erase all credential records. If a
-    /// crash occurs between those writes, any leftover ciphertext is an
-    /// unreachable orphan and cannot resurrect the account.
-    pub fn remove_account(&self, account_id: &str, now: &str) -> Result<(), AccountSetupError> {
-        self.store.remove_account_metadata(account_id, now)?;
+    /// Remove cached Mail and credentials before publishing the metadata
+    /// deletion. Checked failures therefore leave the account visible and
+    /// retryable until its private state has been erased. Every cleanup step
+    /// before the metadata commit is idempotent.
+    pub fn remove_account(
+        &self,
+        permit: &AccountRemovalPermit,
+        now: &str,
+    ) -> Result<(), AccountSetupError> {
+        if !permit.authorizes(self.store) {
+            return Err(AccountSetupError::RemovalPermitMismatch);
+        }
+        let account_id = permit.account_id();
+        self.mail_store.remove_account(account_id)?;
         self.vault.remove_account(account_id)?;
+        self.store.remove_account_metadata(account_id, now)?;
         Ok(())
     }
 
@@ -213,11 +236,14 @@ fn mint_account_id() -> Result<String, AccountSetupError> {
 mod tests {
     use super::*;
     use crate::{
-        CredentialEntryHelper, MailServerConfig, MailServerSecurity, credential_entry_pair,
+        CredentialEntryHelper, MailBatchItem, MailIngestInput, MailServerConfig,
+        MailServerSecurity, MailSyncReport, MailSyncRunner, SyncCoordinator, SyncFailure,
+        credential_entry_pair, ingest_message,
     };
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const NOW: &str = "2026-09-22T17:00:00Z";
 
@@ -254,6 +280,14 @@ mod tests {
 
     struct TestState(PathBuf);
 
+    struct IdleRunner;
+
+    impl MailSyncRunner for IdleRunner {
+        fn sync_account(&self, _account_id: &str) -> Result<MailSyncReport, SyncFailure> {
+            panic!("account removal test must not start provider work")
+        }
+    }
+
     impl TestState {
         fn new(name: &str) -> Self {
             let nonce = SystemTime::now()
@@ -272,6 +306,10 @@ mod tests {
 
         fn vault(&self) -> PathBuf {
             self.0.join("vault")
+        }
+
+        fn mail(&self) -> PathBuf {
+            self.0.join("mail/mail.redb")
         }
     }
 
@@ -318,9 +356,10 @@ mod tests {
         (service, sender)
     }
 
-    fn open(state: &TestState) -> (PimStore, CredentialVault) {
+    fn open(state: &TestState) -> (Arc<PimStore>, Arc<MailStore>, CredentialVault) {
         (
-            PimStore::open(&state.store(), "profile_A1", 1000).unwrap(),
+            Arc::new(PimStore::open(&state.store(), "profile_A1", 1000).unwrap()),
+            Arc::new(MailStore::open(&state.mail(), "profile_A1", 1000).unwrap()),
             CredentialVault::open_for_test(&state.vault(), "profile_A1").unwrap(),
         )
     }
@@ -328,23 +367,19 @@ mod tests {
     fn connect(
         state: &TestState,
         verifier: Verifier,
-    ) -> Result<(Account, PimStore, CredentialVault), AccountSetupError> {
-        let (store, vault) = open(state);
+    ) -> Result<(Account, Arc<PimStore>, Arc<MailStore>, CredentialVault), AccountSetupError> {
+        let (store, mail_store, vault) = open(state);
         let (service, sender) = send_password();
-        let result = AccountCoordinator::new(&store, &vault, verifier).connect_open_protocol(
-            identity(),
-            config(),
-            service,
-            NOW,
-        );
+        let result = AccountCoordinator::new(&store, &mail_store, &vault, verifier)
+            .connect_open_protocol(identity(), config(), service, NOW);
         sender.join().unwrap();
-        result.map(|account| (account, store, vault))
+        result.map(|account| (account, store, mail_store, vault))
     }
 
     #[test]
     fn verified_account_commits_metadata_config_and_both_typed_credentials() {
         let state = TestState::new("success");
-        let (account, store, vault) = connect(
+        let (account, store, mail_store, vault) = connect(
             &state,
             Verifier {
                 outcome: Ok(()),
@@ -361,10 +396,12 @@ mod tests {
         assert!(vault.contains(&account.account_id, CredentialKind::OutgoingPassword));
 
         drop(store);
+        drop(mail_store);
         drop(vault);
-        let (store, vault) = open(&state);
+        let (store, mail_store, vault) = open(&state);
         let verified = AccountCoordinator::new(
             &store,
+            &mail_store,
             &vault,
             Verifier {
                 outcome: Ok(()),
@@ -387,7 +424,7 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(AccountSetupError::Provider(_))));
-        let (store, vault) = open(&state);
+        let (store, _, vault) = open(&state);
         assert!(store.snapshot().accounts.is_empty());
         let disk = fs::read_to_string(state.vault().join("credentials.json")).unwrap();
         assert!(!disk.contains("acct_"));
@@ -406,16 +443,16 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(AccountSetupError::Store(_))));
-        let (store, _) = open(&state);
+        let (store, _, _) = open(&state);
         assert!(store.snapshot().accounts.is_empty());
         let disk = fs::read_to_string(state.vault().join("credentials.json")).unwrap();
         assert!(!disk.contains("acct_"));
     }
 
     #[test]
-    fn removal_clears_metadata_private_config_and_credentials() {
+    fn removal_clears_metadata_private_config_credentials_and_mail_across_restart() {
         let state = TestState::new("remove");
-        let (account, store, vault) = connect(
+        let (account, store, mail_store, vault) = connect(
             &state,
             Verifier {
                 outcome: Ok(()),
@@ -423,15 +460,63 @@ mod tests {
             },
         )
         .unwrap();
+        let raw = b"From: Example <sender@example.com>\r\n\
+To: Alice <alice@example.com>\r\n\
+Message-ID: <remove-me@example.com>\r\n\
+Date: Mon, 22 Sep 2026 17:00:00 +0000\r\n\
+Subject: Remove me\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\r\n\
+Private cached message";
+        let parsed = ingest_message(MailIngestInput {
+            account_id: &account.account_id,
+            mailbox_id: "INBOX",
+            uid_validity: 7,
+            uid: 1,
+            received_at: NOW,
+            unread: true,
+            starred: false,
+            labels: &["Inbox".to_string()],
+            raw_message: raw,
+        })
+        .unwrap();
+        mail_store
+            .store_batch(
+                &account.account_id,
+                "INBOX",
+                7,
+                vec![MailBatchItem { uid: 1, parsed }],
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            mail_store
+                .list_summaries(&account.account_id, None, 20)
+                .unwrap()
+                .summaries
+                .len(),
+            1
+        );
+        assert!(
+            mail_store
+                .sync_cursor(&account.account_id, "INBOX")
+                .unwrap()
+                .is_some()
+        );
+        let runner: Arc<dyn MailSyncRunner> = Arc::new(IdleRunner);
+        let sync = SyncCoordinator::new(Arc::clone(&store), runner);
+        let permit = sync
+            .begin_account_removal(&account.account_id, Duration::from_secs(1))
+            .unwrap();
         AccountCoordinator::new(
             &store,
+            &mail_store,
             &vault,
             Verifier {
                 outcome: Ok(()),
                 invalid_identity: false,
             },
         )
-        .remove_account(&account.account_id, "2026-09-22T17:01:00Z")
+        .remove_account(&permit, "2026-09-22T17:01:00Z")
         .unwrap();
         assert!(store.snapshot().accounts.is_empty());
         assert!(matches!(
@@ -440,17 +525,51 @@ mod tests {
         ));
         assert!(!vault.contains(&account.account_id, CredentialKind::IncomingPassword));
         assert!(!vault.contains(&account.account_id, CredentialKind::OutgoingPassword));
+        assert!(
+            mail_store
+                .list_summaries(&account.account_id, None, 20)
+                .unwrap()
+                .summaries
+                .is_empty()
+        );
+        assert!(
+            mail_store
+                .sync_cursor(&account.account_id, "INBOX")
+                .unwrap()
+                .is_none()
+        );
+
+        drop(store);
+        drop(mail_store);
+        drop(vault);
+        let (store, mail_store, vault) = open(&state);
+        assert!(store.snapshot().accounts.is_empty());
+        assert!(
+            mail_store
+                .list_summaries(&account.account_id, None, 20)
+                .unwrap()
+                .summaries
+                .is_empty()
+        );
+        assert!(
+            mail_store
+                .sync_cursor(&account.account_id, "INBOX")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!vault.contains(&account.account_id, CredentialKind::IncomingPassword));
     }
 
     #[test]
     fn malformed_server_config_is_rejected_before_credential_entry() {
         let state = TestState::new("invalid-config");
-        let (store, vault) = open(&state);
+        let (store, mail_store, vault) = open(&state);
         let (helper, service) = credential_entry_pair().unwrap();
         let mut invalid = config();
         invalid.imap.host = "bad host".into();
         let result = AccountCoordinator::new(
             &store,
+            &mail_store,
             &vault,
             Verifier {
                 outcome: Ok(()),

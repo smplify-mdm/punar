@@ -6,12 +6,12 @@
 //! work outside the request thread and persists only a closed public outcome.
 //! It owns no loop or timer; every worker exits after one bounded batch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -52,16 +52,64 @@ pub enum SyncTriggerError {
     UnsupportedAccount,
     #[error("account authentication needs attention")]
     AuthRequired,
+    #[error("Mail account removal is in progress")]
+    AccountRemoving,
     #[error("too many Mail synchronizations are active")]
     RateLimited,
     #[error("Mail synchronization worker could not start")]
     Runtime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SyncQuiesceError {
+    #[error("Mail account was not found")]
+    NotFound,
+    #[error("Mail account is already being removed")]
+    AlreadyRemoving,
+    #[error("Mail synchronization did not stop before the removal deadline")]
+    Busy,
+}
+
+#[derive(Default)]
+struct SyncState {
+    in_flight: HashMap<String, String>,
+    removing: HashSet<String>,
+}
+
 pub struct SyncCoordinator {
     store: Arc<PimStore>,
     runner: Arc<dyn MailSyncRunner>,
-    in_flight: Mutex<HashMap<String, String>>,
+    state: Mutex<SyncState>,
+    changed: Condvar,
+}
+
+/// Proof that one account cannot begin new synchronization and that any
+/// already-admitted worker has completed. Dropping it reopens sync admission.
+pub struct AccountRemovalPermit {
+    coordinator: Arc<SyncCoordinator>,
+    account_id: String,
+    active: bool,
+}
+
+impl AccountRemovalPermit {
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    pub(crate) fn authorizes(&self, store: &PimStore) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.coordinator.store), store)
+    }
+}
+
+impl Drop for AccountRemovalPermit {
+    fn drop(&mut self) {
+        if self.active {
+            let mut state = self.coordinator.state.lock().unwrap();
+            state.removing.remove(&self.account_id);
+            self.active = false;
+            self.coordinator.changed.notify_all();
+        }
+    }
 }
 
 impl SyncCoordinator {
@@ -70,7 +118,8 @@ impl SyncCoordinator {
         Arc::new(Self {
             store,
             runner,
-            in_flight: Mutex::new(HashMap::new()),
+            state: Mutex::new(SyncState::default()),
+            changed: Condvar::new(),
         })
     }
 
@@ -91,19 +140,24 @@ impl SyncCoordinator {
             return Err(SyncTriggerError::AuthRequired);
         }
 
-        let mut in_flight = self.in_flight.lock().unwrap();
-        if let Some(operation_id) = in_flight.get(account_id) {
+        let mut state = self.state.lock().unwrap();
+        if state.removing.contains(account_id) {
+            return Err(SyncTriggerError::AccountRemoving);
+        }
+        if let Some(operation_id) = state.in_flight.get(account_id) {
             return Ok(AcceptedSync {
                 operation_id: operation_id.clone(),
                 account_id: account_id.to_string(),
             });
         }
-        if in_flight.len() >= MAX_CONCURRENT_SYNCS {
+        if state.in_flight.len() >= MAX_CONCURRENT_SYNCS {
             return Err(SyncTriggerError::RateLimited);
         }
         let operation_id = mint_operation_id()?;
-        in_flight.insert(account_id.to_string(), operation_id.clone());
-        drop(in_flight);
+        state
+            .in_flight
+            .insert(account_id.to_string(), operation_id.clone());
+        drop(state);
 
         let coordinator = Arc::clone(self);
         let worker_account = account_id.to_string();
@@ -112,12 +166,59 @@ impl SyncCoordinator {
             .spawn(move || coordinator.run_one(worker_account))
             .is_err()
         {
-            self.in_flight.lock().unwrap().remove(account_id);
+            self.state.lock().unwrap().in_flight.remove(account_id);
+            self.changed.notify_all();
             return Err(SyncTriggerError::Runtime);
         }
         Ok(AcceptedSync {
             operation_id,
             account_id: account_id.to_string(),
+        })
+    }
+
+    /// Block new synchronization for one account and wait a bounded time for
+    /// any admitted worker to finish. The returned permit must remain alive
+    /// through private-data and metadata deletion.
+    pub fn begin_account_removal(
+        self: &Arc<Self>,
+        account_id: &str,
+        timeout: Duration,
+    ) -> Result<AccountRemovalPermit, SyncQuiesceError> {
+        if !self
+            .store
+            .snapshot()
+            .accounts
+            .iter()
+            .any(|account| account.account_id == account_id)
+        {
+            return Err(SyncQuiesceError::NotFound);
+        }
+
+        let started = Instant::now();
+        let deadline = started.checked_add(timeout).unwrap_or(started);
+        let mut state = self.state.lock().unwrap();
+        if !state.removing.insert(account_id.to_string()) {
+            return Err(SyncQuiesceError::AlreadyRemoving);
+        }
+        while state.in_flight.contains_key(account_id) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                state.removing.remove(account_id);
+                self.changed.notify_all();
+                return Err(SyncQuiesceError::Busy);
+            };
+            let (next, wait) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if wait.timed_out() && state.in_flight.contains_key(account_id) {
+                state.removing.remove(account_id);
+                self.changed.notify_all();
+                return Err(SyncQuiesceError::Busy);
+            }
+        }
+        drop(state);
+        Ok(AccountRemovalPermit {
+            coordinator: Arc::clone(self),
+            account_id: account_id.to_string(),
+            active: true,
         })
     }
 
@@ -142,12 +243,17 @@ impl SyncCoordinator {
         let _ = self
             .store
             .record_account_sync_outcome(&account_id, outcome, &now);
-        self.in_flight.lock().unwrap().remove(&account_id);
+        self.state.lock().unwrap().in_flight.remove(&account_id);
+        self.changed.notify_all();
     }
 
     #[cfg(test)]
     fn is_in_flight(&self, account_id: &str) -> bool {
-        self.in_flight.lock().unwrap().contains_key(account_id)
+        self.state
+            .lock()
+            .unwrap()
+            .in_flight
+            .contains_key(account_id)
     }
 }
 
@@ -357,6 +463,53 @@ mod tests {
         let account = &store.snapshot().accounts[0];
         assert_eq!(account.auth_state, AccountAuthState::ActionRequired);
         assert!(account.next_retry_at.is_none());
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removal_permit_waits_for_worker_and_blocks_new_sync_until_drop() {
+        let report = MailSyncReport {
+            uid_validity: 7,
+            last_uid: 9,
+            fetched: 2,
+            skipped_malformed: 0,
+        };
+        let (root, _, runner, coordinator) =
+            coordinator("remove-quiesce", Ok(report), Duration::from_millis(30));
+        coordinator.trigger("acct_A1").unwrap();
+        let permit = coordinator
+            .begin_account_removal("acct_A1", Duration::from_secs(1))
+            .unwrap();
+        assert!(!coordinator.is_in_flight("acct_A1"));
+        assert!(matches!(
+            coordinator.trigger("acct_A1"),
+            Err(SyncTriggerError::AccountRemoving)
+        ));
+        drop(permit);
+        coordinator.trigger("acct_A1").unwrap();
+        wait(&coordinator, "acct_A1");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removal_timeout_reopens_sync_admission_without_cancelling_worker() {
+        let report = MailSyncReport {
+            uid_validity: 7,
+            last_uid: 9,
+            fetched: 2,
+            skipped_malformed: 0,
+        };
+        let (root, _, runner, coordinator) =
+            coordinator("remove-timeout", Ok(report), Duration::from_millis(80));
+        let accepted = coordinator.trigger("acct_A1").unwrap();
+        assert!(matches!(
+            coordinator.begin_account_removal("acct_A1", Duration::from_millis(1)),
+            Err(SyncQuiesceError::Busy)
+        ));
+        assert_eq!(coordinator.trigger("acct_A1").unwrap(), accepted);
+        wait(&coordinator, "acct_A1");
         assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
         let _ = fs::remove_dir_all(root);
     }

@@ -30,7 +30,12 @@
 > ADR-012 adds a separate
 > descriptor-bound, crash-durable Mail record store with an 8 MiB cache,
 > atomic batch/cursor commits, restart persistence, duplicate suppression,
-> UIDVALIDITY replacement and account removal. Store-backed `mail.list` and
+> UIDVALIDITY replacement and account removal. The account coordinator now
+> removes cached messages, Mail sync cursors, credentials, private server
+> configuration and public metadata, with restart coverage. It requires a
+> profile-store-bound removal permit which blocks new sync and waits a bounded
+> time for existing provider work; the path is not yet application-callable.
+> Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account
 > metadata while account lifecycle remains Settings-only. There is still no

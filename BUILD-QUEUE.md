@@ -191,7 +191,11 @@ Next build slice, in order:
    configuration before credential entry, atomically creates typed incoming
    and outgoing vault records, requires provider verification before making an
    account ready, rolls staged credentials back on every checked failure and
-   removes metadata/configuration/credentials together. The fixed helper
+   removes cached Mail, sync cursors, metadata, configuration and credentials
+   together, with restart proof. Removal now requires a profile-store-bound
+   permit that blocks new sync admission and waits a bounded time for an
+   already-admitted worker; timeout reopens sync and changes no private data.
+   Settings IPC still needs to invoke that guarded path. The fixed helper
    executable/launcher, QML account flow and crash-reconciliation proof remain
    open. ADR-011 now pins a Rust-1.88-compatible, TLS-only open-protocol
    verifier: implicit TLS or required STARTTLS, platform CA validation, fixed

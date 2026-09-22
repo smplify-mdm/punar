@@ -690,6 +690,9 @@ fn map_sync_trigger_error(error: SyncTriggerError) -> PimProtocolError {
             ErrorCode::UpstreamAuthRequired,
             "The Mail account needs attention before it can synchronize.",
         ),
+        SyncTriggerError::AccountRemoving => {
+            PimProtocolError::new(ErrorCode::Conflict, "The Mail account is being removed.")
+        }
         SyncTriggerError::RateLimited => PimProtocolError::new(
             ErrorCode::RateLimited,
             "Too many Mail accounts are synchronizing; try again shortly.",

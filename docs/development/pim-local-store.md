@@ -217,8 +217,10 @@ The crate's unit suite proves:
     typed credentials and can be reverified after restart;
 54. rejected credentials or invalid verified identity leave no account or
     staged vault record; and
-55. account removal clears public metadata, private configuration and both
-    credential records; and
+55. account removal clears cached Mail, its sync cursor, public metadata,
+    private configuration and both credential records, and restart cannot
+    restore any of them; its profile-bound permit blocks a new sync, waits for
+    an existing worker, and times out before deleting anything; and
 56. a colliding setup attempt cannot replace an existing account password.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
