@@ -16,8 +16,8 @@ use thiserror::Error;
 use crate::PimClient;
 
 const PROTOCOL_VERSION: u64 = 1;
-const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 64;
 const MAX_METHOD_BYTES: usize = 96;
 
@@ -407,6 +407,21 @@ pub fn encode_error(failure: &RequestFailure) -> Result<Option<Vec<u8>>, FrameEr
         method,
         error: &failure.error,
     })?))
+}
+
+/// Encode a method-level error after an admitted request reached its typed
+/// dispatcher. Unlike [`encode_error`], the request correlation fields have
+/// already passed the closed envelope checks.
+pub fn encode_request_error(
+    request: &PimRequest,
+    error: &PimProtocolError,
+) -> Result<Vec<u8>, FrameError> {
+    encode(&ErrorEnvelope {
+        v: PROTOCOL_VERSION,
+        id: &request.id,
+        method: request.method.as_str(),
+        error,
+    })
 }
 
 fn encode(value: &impl Serialize) -> Result<Vec<u8>, FrameError> {

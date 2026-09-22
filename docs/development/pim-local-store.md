@@ -103,7 +103,11 @@ The crate's unit suite proves:
     extensions and constant keys fail closed without exposing raw bindings;
 17. the private cursor key survives restart and keeps prior cursors valid; and
 18. cross-profile, corrupt, over-permissive and hard-linked key state is
-    rejected without replacement.
+    rejected without replacement;
+19. unsafe correlation closes without reflection while safe denial and typed
+    method errors retain only their validated request correlation; and
+20. a partial frame hits an absolute deadline rather than holding the channel
+    open indefinitely.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -115,8 +119,8 @@ install or activate `punar-pimd`, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
-- read/write deadlines and the full store-backed method dispatcher, including
-  durable cursor-key wiring and expiry mapping;
+- the full store-backed method dispatcher, including durable cursor-key wiring
+  and expiry mapping;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;

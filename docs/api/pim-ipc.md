@@ -36,17 +36,21 @@ applications run as the same human uid. There is no localhost TCP control API.
 Messages are newline-delimited UTF-8 JSON. One connection processes requests
 in order. Request lines are bounded to 8 MiB (a plain-text draft may be 4 MiB);
 response lines are bounded to 16 MiB (a thread may contain bounded bodies and
-attachment metadata). Ordinary reads have a 10-second bound. Mutations return
-an operation record rather than holding a UI connection across remote sync;
-sync and provider work have their own bounded jobs, cancellation and backoff.
+attachment metadata). Each complete request and response has its own absolute
+10-second deadline; sending or reading occasional bytes does not reset it.
+Mutations return an operation record rather than holding a UI connection
+across remote sync; sync and provider work have their own bounded jobs,
+cancellation and backoff.
 
 The transport-independent bounded frame reader, strict envelope parser,
 closed method enum, per-client authorization-before-parameter parsing and
 exact success/error encoders now live in `crates/punar-pimd/src/protocol.rs`.
 Malformed frames without independently valid correlation fields close without
 reflection; an error response is produced only when both `id` and `method`
-are safe. The connection timeout and production service loop remain blocked
-on the privileged launch proof in ADR-009.
+are safe. `crates/punar-pimd/src/connection.rs` consumes only an already-granted
+unnamed channel and applies the absolute frame deadlines; it creates no
+listener. The production service loop remains blocked on the privileged launch
+proof in ADR-009.
 
 The envelope is:
 
@@ -174,8 +178,9 @@ and conflict records. Negative fixtures prove that:
 - an account record cannot expose a refresh token; and
 - `sync.state=conflict` cannot omit typed conflict details.
 
-Runtime work must add peer/capability denial, read/write time limits, retained
-history expiry, crash/restart, power-loss, offline queue, optimistic
-concurrency and secret-leak scans before a production application is exposed.
-Frame limits, cross-client denial and cursor tampering/replay are already unit
-tested below the unexposed service boundary.
+Runtime work must add the privileged peer/capability denial proof, retained
+history expiry, power-loss tests and secret-leak scans before a production
+application is exposed. Absolute read/write deadlines, frame limits,
+cross-client denial, crash/restart, offline queue, optimistic concurrency and
+cursor tampering/replay are already unit tested below the unexposed service
+boundary.

@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod channel;
+mod connection;
 mod cursor;
 mod protocol;
 mod store;
@@ -22,10 +23,12 @@ pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
     control_channel_pair, receive_client_channel, send_client_channel,
 };
+pub use connection::{ConnectionError, serve_granted_channel};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use protocol::{
     ErrorCode, ErrorDetails, FrameError, PimMethod, PimProtocolError, PimRequest, RequestFailure,
-    decode_request, encode_error, encode_success, read_request_frame, write_response_frame,
+    decode_request, encode_error, encode_request_error, encode_success, read_request_frame,
+    write_response_frame,
 };
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
 

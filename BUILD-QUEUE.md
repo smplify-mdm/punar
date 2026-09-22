@@ -169,8 +169,10 @@ Next build slice, in order:
    absent/extra-descriptor and cross-client method attempts. The protocol
    layer now adds bounded newline framing, a closed typed method table,
    authorization-before-parameter parsing, safe correlation/error reflection
-   and exact success/error envelopes. Privileged launch, read deadlines,
-   non-dumpable sandbox proof and socket-activated process remain open. The
+   and exact success/error envelopes. The inherited connection runner enforces
+   an absolute ten-second deadline independently for each request and response,
+   including slow byte-drip peers. Privileged launch, non-dumpable sandbox
+   proof and socket-activated process remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,
