@@ -102,8 +102,8 @@ The crate's unit suite proves:
 16. cursor payload/signature tampering, cross-profile/method/filter/key replay,
     extensions and constant keys fail closed without exposing raw bindings;
 17. the private cursor key survives restart and keeps prior cursors valid; and
-18. cross-profile, corrupt, over-permissive and hard-linked key state is
-    rejected without replacement;
+18. cross-profile, corrupt, over-permissive, hard-linked and symbolic-link key
+    state is rejected without replacement or following the link;
 19. unsafe correlation closes without reflection while safe denial and typed
     method errors retain only their validated request correlation; and
 20. a partial frame hits an absolute deadline rather than holding the channel

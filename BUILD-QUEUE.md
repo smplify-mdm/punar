@@ -177,7 +177,8 @@ Next build slice, in order:
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,
    survives restart and rejects corrupt, cross-profile, aliased or
-   over-permissive state without replacement. The full store dispatcher and
+   over-permissive state without replacement. Key reads do not follow symbolic
+   links and validate the exact opened file. The full store dispatcher and
    production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

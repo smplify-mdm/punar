@@ -125,9 +125,10 @@ and is capped below the schema's 512-byte limit. `CursorSigner::load_or_create`
 creates or loads the random 32-byte profile key in private state. Creation is
 durable and create-new; the parent and file must be owned by the service user
 with exact `0700`/`0600` modes, and existing corrupt, cross-profile, aliased or
-over-permissive state is refused without replacement. Key material is zeroized
-from transient buffers. Service-process and dispatcher integration are not yet
-implemented.
+over-permissive state is refused without replacement. Key reads use a
+no-follow descriptor and validate that exact opened file, closing filename
+check/read races. Key material is zeroized from transient buffers.
+Service-process and dispatcher integration are not yet implemented.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 `has_more` requires the client to continue before rendering the cursor as

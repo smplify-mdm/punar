@@ -7,7 +7,7 @@
 //! fixed-size digests of the profile and canonical filter binding are carried.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -265,9 +265,15 @@ fn prepare_private_parent(path: &Path) -> Result<(), CursorKeyError> {
 }
 
 fn load_key(path: &Path, profile_id: &str) -> Result<CursorSigner, CursorKeyError> {
-    let metadata = fs::symlink_metadata(path)?;
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let input = File::from(descriptor);
+    let metadata = input.metadata()?;
     if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.nlink() != 1
         || metadata.permissions().mode() & 0o777 != PRIVATE_FILE_MODE
@@ -275,7 +281,11 @@ fn load_key(path: &Path, profile_id: &str) -> Result<CursorSigner, CursorKeyErro
     {
         return Err(CursorKeyError::Invalid);
     }
-    let mut bytes = Zeroizing::new(fs::read(path)?);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    input.take(513).read_to_end(&mut bytes)?;
+    if bytes.len() > 512 {
+        return Err(CursorKeyError::Invalid);
+    }
     let mut document: CursorKeyDocument =
         serde_json::from_slice(&bytes).map_err(|_| CursorKeyError::Invalid)?;
     bytes.zeroize();
@@ -582,5 +592,22 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
         fs::hard_link(&path, tree.0.join("cursor-key-alias.json")).unwrap();
         assert!(CursorSigner::load_or_create(&path, "profile_A1").is_err());
+    }
+
+    #[test]
+    fn symbolic_key_path_is_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new();
+        fs::create_dir_all(&tree.0).unwrap();
+        fs::set_permissions(&tree.0, fs::Permissions::from_mode(PRIVATE_DIR_MODE)).unwrap();
+        let target = tree.0.join("target.json");
+        fs::write(&target, b"not-a-key\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+        let path = tree.key_path();
+        symlink(&target, &path).unwrap();
+
+        assert!(CursorSigner::load_or_create(&path, "profile_A1").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"not-a-key\n");
     }
 }
