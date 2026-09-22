@@ -1,13 +1,19 @@
 # Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
 
-Status: **accepted contract; service not implemented.** The machine-readable
-authority is
+Status: **accepted contract; service not exposed.** The fixture-free,
+profile-bound Calendar/Reminders persistence core now exists in
+`crates/punar-pimd`, but there is deliberately no socket, executable, provider
+adapter or production image staging yet. The machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
 [`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
 credential custody and the open-standards-first provider sequence. No shipping
 image may expose Mail, Calendar or Reminders as account-backed applications
 until the authorization and credential negative gates in that ADR pass.
+
+The local-store implementation and its intentionally narrower boundary are
+recorded in
+[`docs/development/pim-local-store.md`](../development/pim-local-store.md).
 
 ## 1. Boundary and transport
 

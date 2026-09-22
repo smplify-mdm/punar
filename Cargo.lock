@@ -670,6 +670,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "punar-pimd"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "punar-common",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "punar-policy"
 version = "0.1.0"
 dependencies = [

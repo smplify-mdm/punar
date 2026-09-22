@@ -13,6 +13,7 @@ members = [
     "crates/punar-mock-smplify",
     "crates/punar-netd",
     "crates/punar-onboard",
+    "crates/punar-pimd",
     "crates/punar-policy",
     "crates/punar-recovery",
     "crates/punar-secrets",

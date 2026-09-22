@@ -158,8 +158,12 @@ Next build slice, in order:
    closed v1 envelope, profile-bound ownership, pagination/change cursors,
    offline/conflict states and credential/profile-override negative fixtures;
    the service and runtime authorization proof remain open;
-3. build a lazy per-user `punar-pimd` with local-only Calendar and Reminders,
-   real empty states and zero production fixture data;
+3. **durable core in progress:** `crates/punar-pimd` now owns a profile-bound,
+   crash-durable local Calendar/Reminders store with blank structural
+   containers, zero sample records, optimistic revisions, retained tombstones,
+   offline intent, restart/corruption/mode/profile/migration tests and no
+   credential fields; the socket-activated process, hostile-caller admission,
+   signed cursors, IPC dispatch and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

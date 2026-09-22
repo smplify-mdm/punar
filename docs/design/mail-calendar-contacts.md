@@ -1,14 +1,17 @@
 # Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-22): COMMITTED CORE SUITE; BACKEND NOT BUILT.** A real
+> **Status (2026-09-22): COMMITTED CORE SUITE; LOCAL DATA CORE STARTED.** A real
 > xdg-toplevel window prototype exists at `shell/punar-shell/Mail/`: index,
 > thread and plain-text compose all map, tile, resize and close as ordinary
 > application windows. It still reads fixture data and speaks to no account,
 > server or store, so the QML, launcher and hidden prototype entry are staged
 > only by the dev/CI image profile and are absent from production images.
-> Calendar is design-only. Reminders and the shared
-> account/sync service do not exist. No part of this status may be shortened to
-> “Mail is built” until the runtime gates in section 9 pass.
+> The profile-bound `punar-pimd` crate now provides crash-durable, fixture-free
+> local Calendar/Reminders records, revisions and change history. It is not a
+> service yet: no socket, application binding, credential vault, network
+> adapter or production image entry exists. Calendar and Reminders remain
+> unavailable to users. No part of this status may be shortened to “Mail is
+> built” until the runtime gates in section 9 pass.
 
 Origin: a person installed the Evolution Flatpak from the catalogue and its
 first run presented a *"Do you want to make Evolution your default email
@@ -65,6 +68,12 @@ appear as an installed consumer feature.
 `punar-pimd` is the proposed shared per-user service. It is event-driven and
 starts on first use; it does not become another always-resident desktop
 process merely because the image contains these apps.
+
+The first implementation slice is intentionally below that service boundary:
+[`pim-local-store.md`](../development/pim-local-store.md) documents the local
+Calendar/Reminders store and why it is compiled and tested without installing
+or activating a daemon. That sequencing prevents a filesystem socket plus
+same-UID checks from accidentally becoming the authorization design.
 
 ```text
 Mail / Calendar / Reminders QML windows

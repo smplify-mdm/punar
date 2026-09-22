@@ -8,7 +8,7 @@
 //! that would break the in-VM m5-check breaks these host tests first.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -555,8 +555,17 @@ fn oversized_lines_are_a_framing_violation() {
         r#"{{"v":1,"id":"t-big","method":"org.discover","params":{{"domain":"{}"}}}}"#,
         "a".repeat(5000)
     );
-    stream.write_all(huge.as_bytes()).unwrap();
-    stream.write_all(b"\n").unwrap();
+    // The bounded reader is allowed to reject and close as soon as the byte
+    // limit is crossed; it need not wait for the sender to finish the rest of
+    // the oversized frame. Depending on socket scheduling, either write can
+    // therefore observe EPIPE after the server has already queued its error.
+    // That is the strict behavior this test is proving, not a test failure.
+    if let Err(error) = stream
+        .write_all(huge.as_bytes())
+        .and_then(|()| stream.write_all(b"\n"))
+    {
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
     let response = read_response(&mut stream).expect("error response before close");
     assert_eq!(response["error"]["code"], "malformed_request");
     assert!(read_response(&mut stream).is_none(), "connection closed");
