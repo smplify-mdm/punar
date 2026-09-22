@@ -26,13 +26,50 @@ use rustix::net::{SocketFlags, SocketType, accept_with, sockopt};
 use thiserror::Error;
 
 const PROFILE_UID_ENV: &str = "PUNAR_PROFILE_UID";
+const SURFACE_ENV: &str = "PUNAR_MAIL_SURFACE";
 const LAUNCH_FD_NAME: &str = "launch";
 const QML_PROGRAM: &str = "/usr/bin/qs";
-const QML_ROOT: &str = "/usr/share/punar/shell/Mail";
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const UI_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const UI_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Mail,
+    Accounts,
+}
+
+impl Surface {
+    fn parse(value: Option<std::ffi::OsString>) -> Result<Self, BridgeError> {
+        match value.and_then(|value| value.into_string().ok()).as_deref() {
+            Some("mail") => Ok(Self::Mail),
+            Some("accounts") => Ok(Self::Accounts),
+            _ => Err(BridgeError::InvalidActivation),
+        }
+    }
+
+    fn runtime_root(self) -> &'static str {
+        match self {
+            Self::Mail => "/run/punar-mail",
+            Self::Accounts => "/run/punar-mail-accounts",
+        }
+    }
+
+    fn qml_root(self) -> &'static str {
+        match self {
+            Self::Mail => "/usr/share/punar/shell/Mail",
+            Self::Accounts => "/usr/share/punar/shell/MailAccounts",
+        }
+    }
+
+    fn socket_env(self) -> &'static str {
+        match self {
+            Self::Mail => "PUNAR_MAIL_SOCKET",
+            Self::Accounts => "PUNAR_MAIL_ACCOUNTS_SOCKET",
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 enum BridgeError {
@@ -75,6 +112,7 @@ fn run() -> Result<(), BridgeError> {
         return Err(BridgeError::InvalidActivation);
     }
     let profile_uid = parse_profile_uid(env::var_os(PROFILE_UID_ENV))?;
+    let surface = Surface::parse(env::var_os(SURFACE_ENV))?;
     let launch_listener = select_activation_descriptor(
         sd_listen_fds::get()?
             .into_iter()
@@ -85,7 +123,7 @@ fn run() -> Result<(), BridgeError> {
     lock_down_current_process()?;
     let launch_control = accept_with(&launch_listener, SocketFlags::CLOEXEC)?;
     let capabilities = receive_mail_launch(launch_control, profile_uid)?;
-    serve_mail_ui(profile_uid, capabilities)
+    serve_mail_ui(profile_uid, surface, capabilities)
 }
 
 fn parse_profile_uid(value: Option<std::ffi::OsString>) -> Result<u32, BridgeError> {
@@ -119,9 +157,10 @@ fn select_activation_descriptor(
 
 fn serve_mail_ui(
     profile_uid: u32,
+    surface: Surface,
     capabilities: MailLaunchCapabilities,
 ) -> Result<(), BridgeError> {
-    let runtime_dir = PathBuf::from("/run/punar-mail").join(profile_uid.to_string());
+    let runtime_dir = PathBuf::from(surface.runtime_root()).join(profile_uid.to_string());
     verify_runtime_dir(&runtime_dir)?;
     let ui_path = runtime_dir.join("ui.sock");
     remove_stale_socket(&ui_path)?;
@@ -130,6 +169,7 @@ fn serve_mail_ui(
 
     let mut child = launch_qml(
         profile_uid,
+        surface,
         &runtime_dir,
         &ui_path,
         capabilities.wayland_channel,
@@ -164,6 +204,7 @@ fn remove_stale_socket(path: &Path) -> Result<(), BridgeError> {
 
 fn launch_qml(
     profile_uid: u32,
+    surface: Surface,
     runtime_dir: &Path,
     ui_path: &Path,
     wayland_channel: OwnedFd,
@@ -174,12 +215,12 @@ fn launch_qml(
     let profile_uid = profile_uid.to_string();
 
     let spawn = Command::new(QML_PROGRAM)
-        .args(["-p", QML_ROOT])
+        .args(["-p", surface.qml_root()])
         .env_clear()
         .env("HOME", runtime_dir)
         .env("LANG", "C.UTF-8")
         .env("PATH", "/usr/bin")
-        .env("PUNAR_MAIL_SOCKET", ui_path)
+        .env(surface.socket_env(), ui_path)
         .env("PUNAR_PROFILE_UID", profile_uid)
         .env("QML_IMPORT_PATH", "/usr/share/punar/shell")
         .env("QT_QPA_PLATFORM", "wayland")
@@ -330,6 +371,13 @@ mod tests {
         for value in [None, Some("0".into()), Some("01000".into())] {
             assert!(parse_profile_uid(value).is_err());
         }
+        assert_eq!(Surface::parse(Some("mail".into())).unwrap(), Surface::Mail);
+        assert_eq!(
+            Surface::parse(Some("accounts".into())).unwrap(),
+            Surface::Accounts
+        );
+        assert!(Surface::parse(None).is_err());
+        assert!(Surface::parse(Some("other".into())).is_err());
 
         let root = temp_root();
         fs::create_dir_all(&root).unwrap();

@@ -180,6 +180,10 @@ stage_desktop_extra() {
         "${extra}/usr/local/share/applications/chromium.desktop"
     install -m 0644 "${mod}/applications/org.punar.Mail.desktop" \
         "${extra}/usr/local/share/applications/org.punar.Mail.desktop"
+    install -m 0644 "${mod}/applications/org.punar.MailAccount.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.MailAccount.desktop"
+    install -m 0644 "${mod}/applications/org.punar.MailAccounts.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.MailAccounts.desktop"
     # fontconfig defaults (sorts before 60-latin so preferences win).
     cp "${mod}/fonts/50-punar-fonts.conf" "${extra}/etc/fonts/conf.d/"
     # Vendored fonts, OFL.txt alongside each family (license requirement).
@@ -400,6 +404,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-authd" \
         "${cargo_target}/release/punar-pimd" \
         "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
         "${extra}/usr/bin/"
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \

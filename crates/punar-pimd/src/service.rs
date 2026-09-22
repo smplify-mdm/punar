@@ -1,9 +1,9 @@
 //! Composition root for one profile-bound PIM service instance.
 //!
-//! This still creates no listener and is not staged in an image. It proves the
-//! security-sensitive ordering for an already-authenticated control
-//! connection: lock down the process, open only the bound profile state, admit
-//! a root-brokered capability, then serve the strict local dispatcher.
+//! The staged socket-activated service preserves the security-sensitive
+//! ordering for authenticated control connections: lock down the process,
+//! open only the bound profile state, admit a root-brokered capability, then
+//! serve the strict local dispatcher.
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -124,6 +124,7 @@ impl PimService {
         let entry_runner: Arc<dyn AccountEntryRunner> = Arc::new(OpenProtocolEntryRunner::new(
             Arc::clone(&store),
             Arc::clone(&mail_store),
+            Arc::clone(&sync),
             state_root,
             profile_id,
         ));

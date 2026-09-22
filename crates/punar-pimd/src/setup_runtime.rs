@@ -19,8 +19,8 @@ use thiserror::Error;
 
 use crate::{
     AccountCoordinator, AccountEntryCode, CredentialVault, EncryptedStorageProof, MailStore,
-    NetworkOpenProtocolVerifier, PimStore, ProviderType, VaultError, account_entry_pair,
-    complete_account_entry,
+    NetworkOpenProtocolVerifier, PimStore, ProviderType, SyncCoordinator, VaultError,
+    account_entry_pair, complete_account_entry,
 };
 
 const MAX_SETUP_SESSIONS: usize = 4;
@@ -232,6 +232,7 @@ fn mint_setup_id() -> Result<String, AccountConnectError> {
 pub struct OpenProtocolEntryRunner {
     store: Arc<PimStore>,
     mail_store: Arc<MailStore>,
+    sync: Arc<SyncCoordinator>,
     state_root: PathBuf,
     profile_id: String,
 }
@@ -241,12 +242,14 @@ impl OpenProtocolEntryRunner {
     pub fn new(
         store: Arc<PimStore>,
         mail_store: Arc<MailStore>,
+        sync: Arc<SyncCoordinator>,
         state_root: &Path,
         profile_id: &str,
     ) -> Self {
         Self {
             store,
             mail_store,
+            sync,
             state_root: state_root.to_path_buf(),
             profile_id: profile_id.to_string(),
         }
@@ -275,11 +278,15 @@ impl AccountEntryRunner for OpenProtocolEntryRunner {
             &vault,
             NetworkOpenProtocolVerifier::default(),
         );
-        let _ = complete_account_entry(
+        if let Ok(account) = complete_account_entry(
             &coordinator,
             channel,
             &punar_common::time::utc_now_rfc3339(),
-        );
+        ) {
+            // A verified connection immediately starts one bounded first
+            // inbox sync. No resident timer or retry loop is created.
+            let _ = self.sync.trigger(&account.account_id);
+        }
     }
 }
 

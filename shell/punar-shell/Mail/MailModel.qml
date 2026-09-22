@@ -23,6 +23,10 @@ QtObject {
     property var views: [{ "name": "Inbox", "count": -1, "current": true }]
     property int nextRequest: 1
     property var requests: ({})
+    property var activeAccount: null
+    property var syncBaseline: null
+    property bool syncing: false
+    property int syncPolls: 0
 
     readonly property int unreadCount: {
         var count = 0;
@@ -45,6 +49,8 @@ QtObject {
     }
 
     readonly property string footerStatus: {
+        if (root.syncing)
+            return "SYNCING INBOX · STORED MAIL STAYS AVAILABLE";
         if (root.state === "ready" || root.state === "empty")
             return root.syncedAt === "" ? "LOCAL MAIL · WAITING FOR FIRST SYNC"
                 : "LAST SYNC · " + root.syncedAt;
@@ -87,7 +93,7 @@ QtObject {
     function bootstrap(): void {
         root.state = "connecting";
         root.detail = "Reading your account list…";
-        root.request("accounts.list", { "cursor": null, "limit": 100 }, null);
+        root.request("accounts.list", { "cursor": null, "limit": 100 }, "bootstrap");
     }
 
     function openThread(thread: var): void {
@@ -119,14 +125,16 @@ QtObject {
             return;
         }
         if (pending.method === "accounts.list")
-            acceptAccounts(response.result);
+            acceptAccounts(response.result, pending.context);
+        else if (pending.method === "sync.trigger")
+            acceptSync();
         else if (pending.method === "mail.list")
             acceptInbox(response.result);
         else if (pending.method === "mail.thread")
             acceptThread(pending.context, response.result);
     }
 
-    function acceptAccounts(result: var): void {
+    function acceptAccounts(result: var, context: var): void {
         var accounts = result.items === undefined ? [] : result.items;
         var selected = null;
         for (var i = 0; i < accounts.length; i++) {
@@ -140,6 +148,8 @@ QtObject {
             root.detail = "Open Settings → Accounts to connect one.";
             root.account = "";
             root.protocol = "";
+            root.activeAccount = null;
+            root.syncing = false;
             root.threads = [];
             return;
         }
@@ -148,12 +158,35 @@ QtObject {
         root.protocol = selected.provider_type === "open_protocols" ? "IMAP"
             : selected.provider_type.toUpperCase();
         root.syncedAt = formatSync(selected.last_sync_at);
+        root.activeAccount = selected;
         if (selected.auth_state !== "ready") {
             root.state = "auth_required";
             root.detail = "Open Settings → Accounts to sign in again.";
+            root.syncing = false;
             root.threads = [];
             return;
         }
+
+        if (context === "sync_poll") {
+            var completed = root.syncBaseline === null
+                || selected.last_sync_at !== root.syncBaseline.last_sync_at
+                || selected.next_retry_at !== root.syncBaseline.next_retry_at
+                || selected.connectivity !== root.syncBaseline.connectivity
+                || selected.auth_state !== root.syncBaseline.auth_state;
+            if (completed || root.syncPolls >= 30) {
+                root.syncing = false;
+                root.loadInbox(selected);
+            } else {
+                syncPollTimer.start();
+            }
+            return;
+        }
+
+        root.loadInbox(selected);
+        root.startSync(selected);
+    }
+
+    function loadInbox(selected: var): void {
         root.state = "loading";
         root.detail = selected.connectivity === "offline"
             ? "Offline · showing mail stored on this device…"
@@ -165,6 +198,32 @@ QtObject {
             "cursor": null,
             "limit": 100
         }, selected);
+    }
+
+    function startSync(selected: var): void {
+        if (root.syncing || selected === null || selected.auth_state !== "ready")
+            return;
+        root.syncing = true;
+        root.syncPolls = 0;
+        root.syncBaseline = {
+            "last_sync_at": selected.last_sync_at,
+            "next_retry_at": selected.next_retry_at,
+            "connectivity": selected.connectivity,
+            "auth_state": selected.auth_state
+        };
+        root.request("sync.trigger", { "account_id": selected.account_id }, selected);
+    }
+
+    function acceptSync(): void {
+        root.syncPolls = 0;
+        syncPollTimer.start();
+    }
+
+    function pollSync(): void {
+        if (!root.syncing)
+            return;
+        root.syncPolls++;
+        root.request("accounts.list", { "cursor": null, "limit": 100 }, "sync_poll");
     }
 
     function acceptInbox(result: var): void {
@@ -196,6 +255,17 @@ QtObject {
             root.threadFailed(pending.context, message);
             return;
         }
+        if (pending.method === "sync.trigger" || pending.context === "sync_poll") {
+            root.syncing = false;
+            if (code === "upstream_auth_required") {
+                root.state = "auth_required";
+                root.detail = message;
+                root.threads = [];
+            } else if (root.state !== "ready" && root.state !== "empty") {
+                root.detail = message;
+            }
+            return;
+        }
         root.state = code === "upstream_auth_required" ? "auth_required" : "error";
         root.detail = message;
         root.threads = [];
@@ -206,6 +276,7 @@ QtObject {
             return;
         root.state = "error";
         root.detail = message;
+        root.syncing = false;
         root.threads = [];
     }
 
@@ -301,6 +372,23 @@ QtObject {
             return "";
         var date = parsed(iso);
         return date === null ? "" : Qt.formatDateTime(date, "d MMM · HH:mm").toUpperCase();
+    }
+
+    property Timer syncPollTimer: Timer {
+        interval: 1000
+        repeat: false
+        onTriggered: root.pollSync()
+    }
+
+    // Mail has no resident background process. While its window is open, one
+    // bounded refresh every five minutes lets new messages arrive without
+    // turning the service into an always-running daemon.
+    property Timer refreshTimer: Timer {
+        interval: 5 * 60 * 1000
+        repeat: true
+        running: root.enabled && root.activeAccount !== null
+            && (root.state === "ready" || root.state === "empty")
+        onTriggered: root.startSync(root.activeAccount)
     }
 
     property Socket transport: Socket {

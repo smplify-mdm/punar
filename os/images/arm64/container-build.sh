@@ -99,6 +99,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-authd" \
         "${cargo_target}/release/punar-pimd" \
         "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
         "${extra}/usr/bin/"
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \
@@ -110,7 +111,8 @@ stage_punar_binaries() {
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
         punar-netd punar-onboard punar-onboardd punar-greet \
-        punar-auth punar-authd punar-pimd punar-mail-bridge; do
+        punar-auth punar-authd punar-pimd punar-mail-bridge \
+        punar-mail-account-bridge; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2

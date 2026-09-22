@@ -219,6 +219,8 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always |
 | `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always |
 | `pim.mail.open` | **human with a verified live desktop session; own uid only** | no | agent denials |
+| `pim.mail.account_add` | **human with a verified live desktop session; own uid only** | verified account transaction | agent denials |
+| `pim.mail.account_manage` | **human with a verified live desktop session; own uid only** | account removal only after explicit in-window confirmation | agent denials |
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
@@ -908,6 +910,52 @@ denied before either capability is issued.
 Result: `{"opening":true,"application":"mail"}` after the handoff succeeds.
 The UI may still show a truthful empty, account-required, authentication, or
 sync error state; it never substitutes fixture mail for a live failure.
+
+### 5.15c `pim.mail.account_add`
+
+Params: none. This opens the separate one-use Mail account-entry surface; it
+does not widen the Mail application's read capability. The caller cannot
+supply a provider, host, port, username, password, account id, path, command,
+URL, executable, or environment value. `punard` forwards only the
+kernel-attested caller uid and pid to the same fixed broker used by Mail.
+
+After verifying the live desktop session, the broker requests an opaque setup
+id over a temporary Settings capability, consumes the corresponding one-use
+credential-entry endpoint from `punar-pimd`, and transfers exactly that
+endpoint plus the verified Wayland connection to the locked
+`punar-mail-account` identity. Provider configuration crosses only the
+one-use endpoint. The password is a separate bounded frame and never appears
+in JSON, argv, environment, ordinary Mail IPC, or logs. The entry service has
+no network namespace, device access, or PIM state path; `punar-pimd` alone
+performs TLS verification and the encrypted transactional commit. A failed
+handoff cancels the setup id. Successful verification immediately queues one
+bounded first INBOX sync.
+
+Result: `{"opening":true,"application":"mail-account-setup"}` after the
+protected handoff succeeds. The visible setup surface reports only the closed
+outcomes `connected`, `invalid_credentials`, `provider_unreachable`,
+`tls_validation_failed`, `invalid_configuration`,
+`storage_encryption_required`, or `internal`; provider response text and
+credential material are not representable.
+
+### 5.15d `pim.mail.account_manage`
+
+Params: none. This opens a separate locked account-management surface with a
+Settings-scoped PIM channel and verified Wayland stream. Mail itself never
+receives `accounts.remove`. The caller cannot select an account, command,
+path, endpoint, provider, or secret in the launch request; selection and an
+explicit destructive confirmation happen inside the protected window.
+
+Removal always calls `accounts.remove` with `delete_local_data: true` and the
+selected opaque account id from the service-provided list. `punar-pimd`
+quiesces synchronization before deleting cached messages, provider
+configuration, encrypted credentials, and public account metadata. It never
+deletes remote provider data. The account manager runs under its own locked
+identity with no network namespace, device access, or PIM state path and has
+zero idle residency.
+
+Result: `{"opening":true,"application":"mail-accounts"}` after the protected
+handoff succeeds.
 
 ### 5.16 `update.status`
 

@@ -32,6 +32,24 @@ if ! getent passwd punar-mail >/dev/null 2>&1; then
         --no-create-home --shell /usr/bin/nologin punar-mail
 fi
 
+# Account entry is a separate one-use surface. It never inherits Mail's
+# read capability and never owns PIM state.
+if ! getent group punar-mail-account >/dev/null 2>&1; then
+    groupadd --system punar-mail-account
+fi
+if ! getent passwd punar-mail-account >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-account --home-dir /run/punar-mail-account \
+        --no-create-home --shell /usr/bin/nologin punar-mail-account
+fi
+
+if ! getent group punar-mail-accounts >/dev/null 2>&1; then
+    groupadd --system punar-mail-accounts
+fi
+if ! getent passwd punar-mail-accounts >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-accounts --home-dir /run/punar-mail-accounts \
+        --no-create-home --shell /usr/bin/nologin punar-mail-accounts
+fi
+
 # The package normally owns this locked account. Keep the product adapter
 # explicit so every substrate gives greetd the same non-login identity and
 # the onboarding socket can enforce its SO_PEERCRED allowlist.

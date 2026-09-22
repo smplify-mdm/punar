@@ -48,6 +48,8 @@ pub enum PimClient {
     Calendar,
     Reminders,
     Settings,
+    AccountConnect,
+    AccountManager,
 }
 
 impl PimClient {
@@ -60,6 +62,7 @@ impl PimClient {
                 method,
                 "service.status"
                     | "accounts.list"
+                    | "sync.trigger"
                     | "mail.list"
                     | "mail.thread"
                     | "mail.message_body"
@@ -106,6 +109,10 @@ impl PimClient {
                     | "sync.trigger"
                     | "changes.since"
             ),
+            Self::AccountConnect => {
+                matches!(method, "accounts.begin_connect" | "accounts.cancel_connect")
+            }
+            Self::AccountManager => matches!(method, "accounts.list" | "accounts.remove"),
         }
     }
 }
@@ -438,11 +445,19 @@ mod tests {
         assert!(!PimClient::Reminders.allows_method("accounts.remove"));
         assert!(PimClient::Settings.allows_method("accounts.begin_connect"));
         assert!(!PimClient::Settings.allows_method("mail.message_body"));
+        assert!(PimClient::AccountConnect.allows_method("accounts.begin_connect"));
+        assert!(PimClient::AccountConnect.allows_method("accounts.cancel_connect"));
+        assert!(!PimClient::AccountConnect.allows_method("accounts.list"));
+        assert!(PimClient::AccountManager.allows_method("accounts.list"));
+        assert!(PimClient::AccountManager.allows_method("accounts.remove"));
+        assert!(!PimClient::AccountManager.allows_method("sync.trigger"));
         for client in [
             PimClient::Mail,
             PimClient::Calendar,
             PimClient::Reminders,
             PimClient::Settings,
+            PimClient::AccountConnect,
+            PimClient::AccountManager,
         ] {
             assert!(!client.allows_method("system.exec"));
             assert!(!client.allows_method("secrets.get"));

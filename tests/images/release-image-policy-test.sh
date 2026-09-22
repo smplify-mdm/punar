@@ -37,6 +37,14 @@ for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL
         echo "FAIL Mail service: locked account missing from ${postinstall}" >&2
         exit 1
     }
+    grep -Fq 'useradd --system --gid punar-mail-account' "${postinstall}" || {
+        echo "FAIL Mail account entry: locked account missing from ${postinstall}" >&2
+        exit 1
+    }
+    grep -Fq 'useradd --system --gid punar-mail-accounts' "${postinstall}" || {
+        echo "FAIL Mail account manager: locked account missing from ${postinstall}" >&2
+        exit 1
+    }
 done
 for socket in punar-pimd-application@.socket punar-pimd-account-helper@.socket; do
     unit="${PIM_UNIT_ROOT}/${socket}"
@@ -77,12 +85,52 @@ for unit in "${MAIL_SOCKET}" "${MAIL_SERVICE}"; do
         exit 1
     fi
 done
+ACCOUNTS_SOCKET="${PIM_UNIT_ROOT}/punar-mail-accounts@.socket"
+ACCOUNTS_SERVICE="${PIM_UNIT_ROOT}/punar-mail-accounts@.service"
+grep -qx 'ListenSequentialPacket=/run/punar-mail-accounts-control/%i/launch.sock' "${ACCOUNTS_SOCKET}"
+grep -qx 'FileDescriptorName=launch' "${ACCOUNTS_SOCKET}"
+grep -qx 'SocketUser=root' "${ACCOUNTS_SOCKET}"
+grep -qx 'SocketGroup=root' "${ACCOUNTS_SOCKET}"
+grep -qx 'SocketMode=0600' "${ACCOUNTS_SOCKET}"
+grep -qx 'User=punar-mail-accounts' "${ACCOUNTS_SERVICE}"
+grep -qx 'PrivateNetwork=yes' "${ACCOUNTS_SERVICE}"
+grep -qx 'PrivateDevices=yes' "${ACCOUNTS_SERVICE}"
+grep -qx 'ProtectSystem=strict' "${ACCOUNTS_SERVICE}"
+grep -qx 'RestrictAddressFamilies=AF_UNIX' "${ACCOUNTS_SERVICE}"
+for unit in "${ACCOUNTS_SOCKET}" "${ACCOUNTS_SERVICE}"; do
+    if grep -q '^\[Install\]' "${unit}"; then
+        echo "FAIL Mail account manager: $(basename "${unit}") must not be image-enabled" >&2
+        exit 1
+    fi
+done
+ACCOUNT_SOCKET="${PIM_UNIT_ROOT}/punar-mail-account@.socket"
+ACCOUNT_SERVICE="${PIM_UNIT_ROOT}/punar-mail-account@.service"
+grep -qx 'ListenSequentialPacket=/run/punar-mail-account-control/%i/launch.sock' "${ACCOUNT_SOCKET}"
+grep -qx 'FileDescriptorName=launch' "${ACCOUNT_SOCKET}"
+grep -qx 'SocketUser=root' "${ACCOUNT_SOCKET}"
+grep -qx 'SocketGroup=root' "${ACCOUNT_SOCKET}"
+grep -qx 'SocketMode=0600' "${ACCOUNT_SOCKET}"
+grep -qx 'User=punar-mail-account' "${ACCOUNT_SERVICE}"
+grep -qx 'PrivateNetwork=yes' "${ACCOUNT_SERVICE}"
+grep -qx 'PrivateDevices=yes' "${ACCOUNT_SERVICE}"
+grep -qx 'ProtectSystem=strict' "${ACCOUNT_SERVICE}"
+grep -qx 'RestrictAddressFamilies=AF_UNIX' "${ACCOUNT_SERVICE}"
+for unit in "${ACCOUNT_SOCKET}" "${ACCOUNT_SERVICE}"; do
+    if grep -q '^\[Install\]' "${unit}"; then
+        echo "FAIL Mail account entry: $(basename "${unit}") must not be image-enabled" >&2
+        exit 1
+    fi
+done
 for stager in \
     "${DESKTOP_STAGER}" \
     "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
     "${REPO_ROOT}/os/images/arm64/container-build.sh"; do
     grep -Fq 'release/punar-mail-bridge' "${stager}" || {
         echo "FAIL Mail service: bridge binary is not staged by ${stager}" >&2
+        exit 1
+    }
+    grep -Fq 'release/punar-mail-account-bridge' "${stager}" || {
+        echo "FAIL Mail account entry: bridge binary is not staged by ${stager}" >&2
         exit 1
     }
     grep -Fq 'release/punar-pim-launch' "${stager}" || {

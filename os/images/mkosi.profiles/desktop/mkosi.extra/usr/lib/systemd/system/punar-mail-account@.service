@@ -1,26 +1,25 @@
 [Unit]
-Description=Punar profile-scoped Mail application for UID %i
+Description=Punar one-use Mail account setup for profile UID %i
 Documentation=file:/usr/share/doc/punar/pim-ipc.md
-Requires=punar-mail@%i.socket
-After=punar-mail@%i.socket
+Requires=punar-mail-account@%i.socket
+After=punar-mail-account@%i.socket
 
 [Service]
 Type=simple
-User=punar-mail
-Group=punar-mail
+User=punar-mail-account
+Group=punar-mail-account
 Environment=PUNAR_PROFILE_UID=%i
-Environment=PUNAR_MAIL_SURFACE=mail
-ExecStart=/usr/bin/punar-mail-bridge
-Sockets=punar-mail@%i.socket
-RuntimeDirectory=punar-mail/%i
+ExecStart=/usr/bin/punar-mail-account-bridge
+Sockets=punar-mail-account@%i.socket
+RuntimeDirectory=punar-mail-account/%i
 RuntimeDirectoryMode=0700
 UMask=0077
 Restart=no
 TimeoutStopSec=5s
 
-# Mail receives exactly two inherited capabilities: its Mail-scoped PIM stream
-# and the already-connected Wayland stream. Network and device namespaces stay
-# closed; the QML scene graph uses Qt's software backend.
+# The entry surface receives only a one-use credential channel and a verified
+# Wayland stream. Provider networking and encrypted storage remain exclusively
+# inside punar-pimd.
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateNetwork=yes
@@ -48,4 +47,4 @@ IPAccounting=yes
 StandardOutput=journal
 StandardError=journal
 
-# Deliberately no [Install]. The application has zero idle residency.
+# Deliberately no [Install]. Account setup has zero idle residency.

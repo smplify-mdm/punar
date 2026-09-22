@@ -10,26 +10,41 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 use punar_pimd::{
-    ClientGrant, MailLaunch, PimClient, client_channel_pair, send_client_channel, send_mail_launch,
+    AccountHelperClaim, AccountLaunch, ClientGrant, MailLaunch, PimClient, ProviderType,
+    client_channel_pair, receive_account_helper_channel, send_account_helper_claim,
+    send_account_launch, send_client_channel, send_mail_launch,
 };
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, connect, socket_with};
+use serde::Deserialize;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 const PROC_ROOT: &str = "/proc";
 const COMPOSITOR: &str = "/usr/bin/Hyprland";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const MAX_ENVIRON_BYTES: u64 = 1024 * 1024;
+const MAX_PIM_RESPONSE_BYTES: u64 = 8 * 1024;
+const PIM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchKind {
+    Mail,
+    AccountAdd,
+    AccountManage,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LaunchRequest {
+    kind: LaunchKind,
     profile_uid: u32,
     caller_pid: i32,
 }
@@ -48,6 +63,8 @@ enum BrokerError {
     Activation,
     #[error("Mail capability handoff failed")]
     Handoff,
+    #[error("Mail account setup protocol failed")]
+    Protocol,
     #[error("Mail broker I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("Mail broker kernel operation failed: {0}")]
@@ -70,42 +87,107 @@ fn run() -> Result<(), BrokerError> {
     }
     let request = parse_request(env::args_os().collect())?;
     let wayland = connect_verified_wayland(Path::new(PROC_ROOT), request)?;
-    activate_services(request.profile_uid)?;
+    activate_services(request.profile_uid, request.kind)?;
 
+    match request.kind {
+        LaunchKind::Mail => launch_mail(request.profile_uid, wayland),
+        LaunchKind::AccountAdd => launch_account_add(request.profile_uid, wayland),
+        LaunchKind::AccountManage => launch_account_manage(request.profile_uid, wayland),
+    }
+}
+
+fn launch_mail(profile_uid: u32, wayland: UnixStream) -> Result<(), BrokerError> {
+    let mail_endpoint = grant_pim_channel(profile_uid, PimClient::Mail)?;
     let pim_control = connect_seqpacket(&PathBuf::from(format!(
-        "/run/punar-pimd/{}/application.sock",
-        request.profile_uid
+        "/run/punar-mail-control/{profile_uid}/launch.sock"
     )))?;
-    let mail_control = connect_seqpacket(&PathBuf::from(format!(
-        "/run/punar-mail-control/{}/launch.sock",
-        request.profile_uid
-    )))?;
-    let (mail_endpoint, pim_endpoint) = client_channel_pair().map_err(|_| BrokerError::Handoff)?;
     let id = launch_id()?;
-    send_client_channel(
-        &pim_control,
-        pim_endpoint,
-        &ClientGrant::new(
-            id.replacen("launch_", "grant_", 1),
-            request.profile_uid,
-            PimClient::Mail,
-        ),
-    )
-    .map_err(|_| BrokerError::Handoff)?;
     send_mail_launch(
-        &mail_control,
+        &pim_control,
         mail_endpoint,
         wayland.into(),
-        &MailLaunch::new(id, request.profile_uid),
+        &MailLaunch::new(id, profile_uid),
     )
     .map_err(|_| BrokerError::Handoff)?;
     Ok(())
 }
 
+fn launch_account_add(profile_uid: u32, wayland: UnixStream) -> Result<(), BrokerError> {
+    let settings_endpoint = grant_pim_channel(profile_uid, PimClient::AccountConnect)?;
+    let mut settings = UnixStream::from(settings_endpoint);
+    settings.set_read_timeout(Some(PIM_REQUEST_TIMEOUT))?;
+    settings.set_write_timeout(Some(PIM_REQUEST_TIMEOUT))?;
+    let setup_id = begin_account_connect(&mut settings)?;
+
+    let result = (|| {
+        let helper_control = connect_seqpacket(&PathBuf::from(format!(
+            "/run/punar-pimd/{profile_uid}/account-helper.sock"
+        )))?;
+        send_account_helper_claim(
+            &helper_control,
+            &AccountHelperClaim::new(&setup_id, profile_uid),
+        )
+        .map_err(|_| BrokerError::Handoff)?;
+        let helper = receive_account_helper_channel(&helper_control, &setup_id, profile_uid)
+            .map_err(|_| BrokerError::Handoff)?;
+        let account_control = connect_seqpacket(&PathBuf::from(format!(
+            "/run/punar-mail-account-control/{profile_uid}/launch.sock"
+        )))?;
+        send_account_launch(
+            &account_control,
+            helper.channel,
+            wayland.into(),
+            &AccountLaunch::new(launch_id()?, &setup_id, profile_uid),
+        )
+        .map_err(|_| BrokerError::Handoff)
+    })();
+
+    if result.is_err() {
+        let _ = cancel_account_connect(&mut settings, &setup_id);
+    }
+    result
+}
+
+fn launch_account_manage(profile_uid: u32, wayland: UnixStream) -> Result<(), BrokerError> {
+    let settings_endpoint = grant_pim_channel(profile_uid, PimClient::AccountManager)?;
+    let control = connect_seqpacket(&PathBuf::from(format!(
+        "/run/punar-mail-accounts-control/{profile_uid}/launch.sock"
+    )))?;
+    send_mail_launch(
+        &control,
+        settings_endpoint,
+        wayland.into(),
+        &MailLaunch::new(launch_id()?, profile_uid),
+    )
+    .map_err(|_| BrokerError::Handoff)
+}
+
+fn grant_pim_channel(profile_uid: u32, client: PimClient) -> Result<OwnedFd, BrokerError> {
+    let pim_control = connect_seqpacket(&PathBuf::from(format!(
+        "/run/punar-pimd/{profile_uid}/application.sock"
+    )))?;
+    let (application_endpoint, pim_endpoint) =
+        client_channel_pair().map_err(|_| BrokerError::Handoff)?;
+    let grant_id = launch_id()?.replacen("launch_", "grant_", 1);
+    send_client_channel(
+        &pim_control,
+        pim_endpoint,
+        &ClientGrant::new(grant_id, profile_uid, client),
+    )
+    .map_err(|_| BrokerError::Handoff)?;
+    Ok(application_endpoint)
+}
+
 fn parse_request(args: Vec<std::ffi::OsString>) -> Result<LaunchRequest, BrokerError> {
-    if args.len() != 4 || args[1] != "mail" {
+    if args.len() != 4 {
         return Err(BrokerError::InvalidRequest);
     }
+    let kind = match args[1].to_str() {
+        Some("mail") => LaunchKind::Mail,
+        Some("account-add") => LaunchKind::AccountAdd,
+        Some("account-manage") => LaunchKind::AccountManage,
+        _ => return Err(BrokerError::InvalidRequest),
+    };
     let uid = canonical_number(&args[2])?;
     let pid = canonical_number(&args[3])?;
     let caller_pid = i32::try_from(pid).map_err(|_| BrokerError::InvalidRequest)?;
@@ -113,6 +195,7 @@ fn parse_request(args: Vec<std::ffi::OsString>) -> Result<LaunchRequest, BrokerE
         return Err(BrokerError::InvalidRequest);
     }
     Ok(LaunchRequest {
+        kind,
         profile_uid: uid,
         caller_pid,
     })
@@ -230,12 +313,8 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, BrokerError> {
     Ok(bytes)
 }
 
-fn activate_services(uid: u32) -> Result<(), BrokerError> {
-    let units = [
-        format!("punar-pimd-application@{uid}.socket"),
-        format!("punar-pimd-account-helper@{uid}.socket"),
-        format!("punar-mail@{uid}.socket"),
-    ];
+fn activate_services(uid: u32, kind: LaunchKind) -> Result<(), BrokerError> {
+    let units = service_units(uid, kind);
     let status = Command::new(SYSTEMCTL)
         .args(["--no-ask-password", "--quiet", "start"])
         .args(units)
@@ -248,6 +327,115 @@ fn activate_services(uid: u32) -> Result<(), BrokerError> {
     } else {
         Err(BrokerError::Activation)
     }
+}
+
+fn service_units(uid: u32, kind: LaunchKind) -> Vec<String> {
+    let mut units = vec![format!("punar-pimd-application@{uid}.socket")];
+    if kind == LaunchKind::AccountAdd {
+        units.push(format!("punar-pimd-account-helper@{uid}.socket"));
+    }
+    units.push(match kind {
+        LaunchKind::Mail => format!("punar-mail@{uid}.socket"),
+        LaunchKind::AccountAdd => format!("punar-mail-account@{uid}.socket"),
+        LaunchKind::AccountManage => format!("punar-mail-accounts@{uid}.socket"),
+    });
+    units
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PimResponse {
+    v: u64,
+    id: String,
+    method: String,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginConnectResult {
+    kind: String,
+    setup_id: String,
+    provider_type: ProviderType,
+    state: String,
+}
+
+fn begin_account_connect(stream: &mut UnixStream) -> Result<String, BrokerError> {
+    let value = pim_call(
+        stream,
+        "account-connect-1",
+        "accounts.begin_connect",
+        json!({"provider_type": "open_protocols"}),
+    )?;
+    let result: BeginConnectResult =
+        serde_json::from_value(value).map_err(|_| BrokerError::Protocol)?;
+    if result.kind != "account_setup"
+        || result.provider_type != ProviderType::OpenProtocols
+        || result.state != "awaiting_credentials"
+        || !valid_setup_id(&result.setup_id)
+    {
+        return Err(BrokerError::Protocol);
+    }
+    Ok(result.setup_id)
+}
+
+fn cancel_account_connect(stream: &mut UnixStream, setup_id: &str) -> Result<(), BrokerError> {
+    let _ = pim_call(
+        stream,
+        "account-cancel-1",
+        "accounts.cancel_connect",
+        json!({"setup_id": setup_id}),
+    )?;
+    Ok(())
+}
+
+fn pim_call(
+    stream: &mut UnixStream,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, BrokerError> {
+    let request = serde_json::to_vec(&json!({
+        "v": 1,
+        "id": id,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|_| BrokerError::Protocol)?;
+    stream.write_all(&request)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut frame = Vec::new();
+    let mut bounded = BufReader::new(&mut *stream).take(MAX_PIM_RESPONSE_BYTES + 2);
+    let read = bounded.read_until(b'\n', &mut frame)?;
+    if read == 0 || frame.last() != Some(&b'\n') || frame.len() as u64 > MAX_PIM_RESPONSE_BYTES + 1
+    {
+        return Err(BrokerError::Protocol);
+    }
+    frame.pop();
+    if frame.last() == Some(&b'\r') {
+        frame.pop();
+    }
+    let response: PimResponse =
+        serde_json::from_slice(&frame).map_err(|_| BrokerError::Protocol)?;
+    if response.v != 1 || response.id != id || response.method != method || response.error.is_some()
+    {
+        return Err(BrokerError::Protocol);
+    }
+    response.result.ok_or(BrokerError::Protocol)
+}
+
+fn valid_setup_id(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("setup_") else {
+        return false;
+    };
+    value.len() <= 80
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn connect_seqpacket(path: &Path) -> Result<OwnedFd, BrokerError> {
@@ -286,8 +474,25 @@ mod tests {
             "42".into(),
         ])
         .unwrap();
+        assert_eq!(parsed.kind, LaunchKind::Mail);
         assert_eq!(parsed.profile_uid, 1000);
         assert_eq!(parsed.caller_pid, 42);
+        let account = parse_request(vec![
+            "broker".into(),
+            "account-add".into(),
+            "1000".into(),
+            "42".into(),
+        ])
+        .unwrap();
+        assert_eq!(account.kind, LaunchKind::AccountAdd);
+        let manager = parse_request(vec![
+            "broker".into(),
+            "account-manage".into(),
+            "1000".into(),
+            "42".into(),
+        ])
+        .unwrap();
+        assert_eq!(manager.kind, LaunchKind::AccountManage);
         for args in [
             vec!["broker".into()],
             vec![
@@ -299,9 +504,50 @@ mod tests {
             vec!["broker".into(), "mail".into(), "0".into(), "42".into()],
             vec!["broker".into(), "mail".into(), "01000".into(), "42".into()],
             vec!["broker".into(), "mail".into(), "1000".into(), "0".into()],
+            vec![
+                "broker".into(),
+                "account-remove".into(),
+                "1000".into(),
+                "42".into(),
+            ],
         ] {
             assert!(parse_request(args).is_err());
         }
+    }
+
+    #[test]
+    fn setup_ids_are_closed_and_bounded() {
+        assert!(valid_setup_id("setup_A1"));
+        assert!(!valid_setup_id("setup_"));
+        assert!(!valid_setup_id("setup_a-b"));
+        assert!(!valid_setup_id("other_A1"));
+        assert!(!valid_setup_id(&format!("setup_{}", "a".repeat(80))));
+    }
+
+    #[test]
+    fn broker_explicitly_starts_only_each_launch_entry_socket() {
+        assert_eq!(
+            service_units(1000, LaunchKind::Mail),
+            [
+                "punar-pimd-application@1000.socket",
+                "punar-mail@1000.socket",
+            ]
+        );
+        assert_eq!(
+            service_units(1000, LaunchKind::AccountAdd),
+            [
+                "punar-pimd-application@1000.socket",
+                "punar-pimd-account-helper@1000.socket",
+                "punar-mail-account@1000.socket",
+            ]
+        );
+        assert_eq!(
+            service_units(1000, LaunchKind::AccountManage),
+            [
+                "punar-pimd-application@1000.socket",
+                "punar-mail-accounts@1000.socket",
+            ]
+        );
     }
 
     #[test]

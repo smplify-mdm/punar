@@ -967,6 +967,80 @@ fn mail_open_passes_only_kernel_identity_to_the_fixed_broker() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn mail_account_add_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-account-broker");
+            let record = dir.join("mail-account-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.account_add", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail-account-setup");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-account-broker-args")).unwrap(),
+        "account-add\n1000\n4242\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mail_account_manage_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-accounts-broker");
+            let record = dir.join("mail-accounts-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.account_manage", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail-accounts");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-accounts-broker-args")).unwrap(),
+        "account-manage\n1000\n4242\n"
+    );
+}
+
 #[test]
 fn mail_open_refuses_an_unverifiable_session_before_spawning() {
     let td = TestDaemon::start_as_uid(1000);

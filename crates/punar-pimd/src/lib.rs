@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 mod account_entry;
+mod account_launch;
 mod account_setup;
 mod channel;
 mod connection;
@@ -41,6 +42,10 @@ mod vault;
 pub use account_entry::{
     AccountEntryCode, AccountEntryError, AccountEntryHelper, AccountEntryOutcome,
     OpenProtocolSetup, account_entry_pair, complete_account_entry,
+};
+pub use account_launch::{
+    AccountLaunch, AccountLaunchCapabilities, AccountLaunchError, receive_account_launch,
+    send_account_launch,
 };
 pub use account_setup::{
     AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError,

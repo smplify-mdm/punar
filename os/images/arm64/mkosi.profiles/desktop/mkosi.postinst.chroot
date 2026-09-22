@@ -27,6 +27,22 @@ if ! getent passwd punar-mail >/dev/null 2>&1; then
         --no-create-home --shell /usr/sbin/nologin punar-mail
 fi
 
+if ! getent group punar-mail-account >/dev/null 2>&1; then
+    groupadd --system punar-mail-account
+fi
+if ! getent passwd punar-mail-account >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-account --home-dir /run/punar-mail-account \
+        --no-create-home --shell /usr/sbin/nologin punar-mail-account
+fi
+
+if ! getent group punar-mail-accounts >/dev/null 2>&1; then
+    groupadd --system punar-mail-accounts
+fi
+if ! getent passwd punar-mail-accounts >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-accounts --home-dir /run/punar-mail-accounts \
+        --no-create-home --shell /usr/sbin/nologin punar-mail-accounts
+fi
+
 # Match x86 product policy: rootless Podman is available on demand, while its
 # user API socket and periodic lifecycle jobs remain explicitly opt-in.
 systemctl --global disable \

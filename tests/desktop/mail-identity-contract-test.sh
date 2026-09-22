@@ -24,6 +24,10 @@ PRODUCT_DESKTOP_SOURCE="${REPO_ROOT}/os/modules/desktop/applications/org.punar.M
 DEV_APPS="${DEV_EXTRA}/usr/local/share/applications"
 GATE="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
 STAGER="${REPO_ROOT}/os/images/scripts/container-build.sh"
+ACCOUNT_QML="${REPO_ROOT}/shell/punar-shell/MailAccount/shell.qml"
+ACCOUNT_DESKTOP="${REPO_ROOT}/os/modules/desktop/applications/org.punar.MailAccount.desktop"
+ACCOUNTS_QML="${REPO_ROOT}/shell/punar-shell/MailAccounts/shell.qml"
+ACCOUNTS_DESKTOP="${REPO_ROOT}/os/modules/desktop/applications/org.punar.MailAccounts.desktop"
 
 fail() { echo "mail-identity-contract-test: FAIL: $*" >&2; exit 1; }
 
@@ -84,6 +88,32 @@ grep -Fq "rm -f \"\${extra}/usr/share/punar/shell/Mail/Fixtures.qml\"" "${STAGER
     || fail "desktop staging still removes the live Mail application"
 grep -Fq "cp -R \"\${shell_src}/Mail\" \"\${dev_extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
     || fail "desktop staging does not restore the Mail probe in the dev/CI overlay"
+
+# The account-entry surface is a separate identity and reaches only the
+# no-parameter protected launch method. It must never be folded into Mail's
+# read capability or launched as a normal same-uid QML process.
+[ -f "${ACCOUNT_QML}" ] || fail "no MailAccount/shell.qml"
+ACCOUNT_APP_ID=$(sed -n 's|^//@ pragma AppId  *\([^ ]*\) *$|\1|p' "${ACCOUNT_QML}" | head -1)
+[ "${ACCOUNT_APP_ID}" = "org.punar.MailAccount" ] \
+    || fail "Mail account surface has unstable app id '${ACCOUNT_APP_ID}'"
+[ -f "${ACCOUNT_DESKTOP}" ] || fail "no ${ACCOUNT_APP_ID}.desktop"
+grep -qx "StartupWMClass=${ACCOUNT_APP_ID}" "${ACCOUNT_DESKTOP}" \
+    || fail "Mail account desktop identity does not match its Wayland app id"
+grep -qx 'Exec=punarctl mail account-add' "${ACCOUNT_DESKTOP}" \
+    || fail "Mail account entry bypasses the protected no-parameter launcher"
+grep -Fq 'install -m 0644 "${mod}/applications/org.punar.MailAccount.desktop"' "${STAGER}" \
+    || fail "desktop staging does not install the protected Mail account entry"
+[ -f "${ACCOUNTS_QML}" ] || fail "no MailAccounts/shell.qml"
+ACCOUNTS_APP_ID=$(sed -n 's|^//@ pragma AppId  *\([^ ]*\) *$|\1|p' "${ACCOUNTS_QML}" | head -1)
+[ "${ACCOUNTS_APP_ID}" = "org.punar.MailAccounts" ] \
+    || fail "Mail account manager has unstable app id '${ACCOUNTS_APP_ID}'"
+[ -f "${ACCOUNTS_DESKTOP}" ] || fail "no ${ACCOUNTS_APP_ID}.desktop"
+grep -qx "StartupWMClass=${ACCOUNTS_APP_ID}" "${ACCOUNTS_DESKTOP}" \
+    || fail "Mail account manager desktop identity does not match its Wayland app id"
+grep -qx 'Exec=punarctl mail account-manage' "${ACCOUNTS_DESKTOP}" \
+    || fail "Mail account manager bypasses the protected no-parameter launcher"
+grep -Fq 'install -m 0644 "${mod}/applications/org.punar.MailAccounts.desktop"' "${STAGER}" \
+    || fail "desktop staging does not install the protected Mail account manager"
 
 # 5 · and the in-VM gate must be looking for the same window, or it silently
 # asserts nothing: `select(.class == "…")` matching no client makes every

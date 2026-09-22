@@ -80,6 +80,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-authd" \
         "${cargo_target}/release/punar-pimd" \
         "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
         "${extra}/usr/bin/"
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \

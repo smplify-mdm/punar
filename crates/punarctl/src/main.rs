@@ -258,6 +258,10 @@ enum CapabilitiesCommand {
 enum MailCommand {
     /// Open Mail in the current signed desktop session.
     Open,
+    /// Connect a Mail account through the protected one-use setup window.
+    AccountAdd,
+    /// Review or remove Mail accounts through the protected Settings window.
+    AccountManage,
 }
 
 #[derive(Subcommand)]
@@ -3624,6 +3628,24 @@ fn main() -> ExitCode {
         Command::WebApps { command } => webapps::run(command, &client, &style, json),
         Command::Mail { command } => match command {
             MailCommand::Open => match client.call("pim.mail.open", None) {
+                Ok(result) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error),
+            },
+            MailCommand::AccountAdd => match client.call("pim.mail.account_add", None) {
+                Ok(result) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error),
+            },
+            MailCommand::AccountManage => match client.call("pim.mail.account_manage", None) {
                 Ok(result) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&result).unwrap());

@@ -1190,6 +1190,111 @@ else
     FAILED=1
 fi
 
+# --- group 5g: production Mail capability launches work in the real VM -----
+# The fixture above proves the application-window shell independently of the
+# protected PIM stack. These three launches exercise the product path a person
+# actually selects: unprivileged punarctl -> fixed root broker -> dormant,
+# locked service identity -> inherited PIM and Wayland capabilities -> QML.
+#
+# This development image intentionally has no LUKS-backed /var, so this gate
+# MUST NOT submit credentials. It does prove that account entry opens, account
+# management can read an honest empty list, and Mail can present an honest
+# no-account state without demo data. The encrypted installed-image acceptance
+# test owns real credential entry and provider synchronization.
+production_mail_surface() {
+    pms_class="$1"
+    hyprctl -j clients 2>/dev/null \
+        | jq -e --arg class "${pms_class}" \
+            'any(.[]; .class == $class)' >/dev/null 2>&1
+}
+
+production_mail_gone() {
+    pmg_class="$1"
+    ! production_mail_surface "${pmg_class}"
+}
+
+check_production_mail_surface() {
+    cps_command="$1"
+    cps_class="$2"
+    cps_title="$3"
+    cps_proof="$4"
+    cps_log="$5"
+
+    setsid punarctl mail "${cps_command}" >"${cps_log}" 2>&1 &
+    if wait_for 60 production_mail_surface "${cps_class}"; then
+        cps_xwayland="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].xwayland')"
+        check_eq "${cps_title} is native Wayland" "false" "${cps_xwayland}"
+
+        cps_window_title="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].title')"
+        check_eq "${cps_title} carries its product title" "${cps_title}" "${cps_window_title}"
+
+        cps_size="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].size | @tsv')"
+        cps_width="$(printf '%s' "${cps_size}" | cut -f1)"
+        cps_height="$(printf '%s' "${cps_size}" | cut -f2)"
+        if [ "${cps_width:-0}" -gt 200 ] 2>/dev/null \
+            && [ "${cps_height:-0}" -gt 200 ] 2>/dev/null; then
+            note "ok   ${cps_title} has a real size (${cps_width}x${cps_height})"
+        else
+            note "FAIL ${cps_title} mapped at ${cps_width:-?}x${cps_height:-?}"
+            FAILED=1
+        fi
+
+        if grim "${cps_proof}" 2>/dev/null; then
+            note "ok   ${cps_title} proof captured ($(wc -c < "${cps_proof}" | tr -d ' ') bytes)"
+        else
+            note "info ${cps_title} screenshot unavailable (grim failed; paint not asserted)"
+        fi
+
+        cps_address="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].address')"
+        hyprctl dispatch "hl.dsp.focus({ window = 'address:${cps_address}' })" >/dev/null 2>&1 || true
+        hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+        if wait_for 30 production_mail_gone "${cps_class}"; then
+            note "ok   ${cps_title} closed through the compositor"
+        else
+            note "FAIL ${cps_title} did not close through the compositor"
+            FAILED=1
+        fi
+    else
+        cps_why="$(tr -d '\r' < "${cps_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^$' \
+            | tail -n 6 | tr '\n' ' ' | cut -c1-500)"
+        note "FAIL ${cps_title} never appeared through the protected launch: ${cps_why:-no output}"
+        FAILED=1
+    fi
+}
+
+if command -v punarctl >/dev/null 2>&1; then
+    check_production_mail_surface account-add org.punar.MailAccount \
+        "Connect a mail account" /run/punar/surfaces-mail-account.png \
+        /run/punar/mail-account-launch.log
+    check_production_mail_surface account-manage org.punar.MailAccounts \
+        "Mail Account Settings" /run/punar/surfaces-mail-accounts.png \
+        /run/punar/mail-accounts-launch.log
+    check_production_mail_surface open org.punar.Mail \
+        "Punar Mail" /run/punar/surfaces-mail-production.png \
+        /run/punar/mail-production-launch.log
+
+    pim_service="punar-pimd@$(id -u).service"
+    pim_dormant() { ! systemctl is-active --quiet "${pim_service}" 2>/dev/null; }
+    if wait_for 45 pim_dormant; then
+        note "ok   the protected PIM service returned to zero process residency"
+    else
+        note "FAIL the protected PIM service stayed resident after every Mail window closed"
+        FAILED=1
+    fi
+else
+    note "FAIL punarctl is unavailable for protected Mail launch checks"
+    FAILED=1
+fi
+
 # --- group 5e: every application datadir exists BEFORE the shell starts -----
 # A DIRECTORY THAT IS ABSENT AT STARTUP IS INVISIBLE FOR THE WHOLE SESSION, and
 # that is a property of the toolkit rather than of any Punar code. quickshell

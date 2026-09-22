@@ -1553,6 +1553,8 @@ impl Inner {
                 self.handle_webapps_context_delete(peer, params)
             }
             Method::PimMailOpen => self.handle_pim_mail_open(peer),
+            Method::PimMailAccountAdd => self.handle_pim_mail_account_add(peer),
+            Method::PimMailAccountManage => self.handle_pim_mail_account_manage(peer),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::UpdateApply(params) => self.handle_update_apply(peer, params),
@@ -2397,12 +2399,43 @@ impl Inner {
     /// path, account, endpoint, environment value, or capability.
     #[cfg(target_os = "linux")]
     fn handle_pim_mail_open(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(peer, "pim.mail.open", "mail", "mail")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_account_add(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(
+            peer,
+            "pim.mail.account_add",
+            "account-add",
+            "mail-account-setup",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_account_manage(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(
+            peer,
+            "pim.mail.account_manage",
+            "account-manage",
+            "mail-accounts",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_launch(
+        &self,
+        peer: &Peer,
+        action: &str,
+        broker_mode: &str,
+        application: &str,
+    ) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
         if actor.source == PrincipalKind::AiAgent {
             self.log_audit(AuditEvent::action(
                 &self.device_id,
                 &actor,
-                "pim.mail.open",
+                action,
                 "mail",
                 Decision::Deny,
                 AuditOutcome::Denied,
@@ -2428,7 +2461,7 @@ impl Inner {
             ));
         }
         let status = Command::new(&self.cfg.pim_launch_broker)
-            .args(["mail", &peer.uid.to_string(), &pid.to_string()])
+            .args([broker_mode, &peer.uid.to_string(), &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2437,11 +2470,21 @@ impl Inner {
         if !status.success() {
             return Err(mail_launch_unavailable());
         }
-        Ok(json!({ "opening": true, "application": "mail" }))
+        Ok(json!({ "opening": true, "application": application }))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn handle_pim_mail_open(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_account_add(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_account_manage(&self, _peer: &Peer) -> Result<Value, IpcError> {
         Err(mail_launch_unavailable())
     }
 

@@ -685,6 +685,8 @@ mod tests {
                     PimClient::Calendar,
                     PimClient::Reminders,
                     PimClient::Settings,
+                    PimClient::AccountConnect,
+                    PimClient::AccountManager,
                 ]
                 .into_iter()
                 .any(|client| client.allows_method(method.as_str()))

@@ -1,11 +1,12 @@
 # Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-22): COMMITTED CORE SUITE; REAL MAIL BACKEND IN PROGRESS.** A real
-> xdg-toplevel window prototype exists at `shell/punar-shell/Mail/`: index,
-> thread and plain-text compose all map, tile, resize and close as ordinary
-> application windows. It still reads fixture data and speaks to no account,
-> server or store, so the QML, launcher and hidden prototype entry are staged
-> only by the dev/CI image profile and are absent from production images.
+> **Status (2026-09-22): COMMITTED CORE SUITE; FIRST REAL MAIL VERTICAL SLICE
+> AWAITING INSTALLED-IMAGE ACCEPTANCE.** The production Mail index and thread
+> windows now read only the protected local store; fixture data is opt-in,
+> visibly labelled, dev-only, and removed from product staging. Mail opens
+> through a human-only fixed broker which passes a Mail-scoped capability and
+> a verified Wayland stream to a locked identity with no network or device
+> access.
 > The profile-bound `punar-pimd` crate now provides crash-durable, fixture-free
 > local Calendar/Reminders records, revisions and change history plus bounded,
 > strictly authorized application-protocol parsing. Encrypted credential-vault
@@ -20,18 +21,22 @@
 > coordinator now validates service-private IMAP/SMTP
 > configuration, stages separately typed credentials, invokes a closed
 > provider-verification interface, publishes the account only after success
-> and rolls back checked failures. ADR-011 now supplies a real implicit-TLS or
+> and rolls back checked failures. A separate protected account window now
+> carries setup and password as distinct bounded frames, and a separate account
+> manager lists/removes only real profile accounts. ADR-011 supplies a real implicit-TLS or
 > STARTTLS IMAP plus authenticated SMTP verifier with platform certificate
-> validation, fixed deadlines and a 1 MiB aggregate IMAP response cap. There
-> is still no fixed helper executable, sign-in UI, SMTP send path or
-> crash-reconciliation proof. A bounded adapter now opens INBOX read-only,
+> validation, fixed deadlines and a 1 MiB aggregate IMAP response cap. The
+> fixed launcher/helper and open-protocol sign-in UI are implemented; OAuth,
+> SMTP send and crash-injection proof remain open. A bounded adapter opens INBOX read-only,
 > fetches at most twenty UIDs per transaction through the same TLS/deadline
 > boundary, isolates malformed messages and commits records plus cursor
 > atomically. A non-resident sync coordinator now acknowledges `sync.trigger`
 > before network work, caps concurrent account jobs at two, coalesces repeated
 > triggers, catches worker failure, and persists only bounded public
-> online/offline/auth-required state. It has not yet passed a live-provider or
-> service-runtime test.
+> online/offline/auth-required state. Account completion starts the first sync;
+> opening Mail refreshes immediately and every five minutes while the window is
+> open, without creating a resident background daemon. Live-provider and
+> encrypted installed-image tests remain open.
 > ADR-012 adds a separate
 > descriptor-bound, crash-durable Mail record store with an 8 MiB cache,
 > atomic batch/cursor commits, restart persistence, duplicate suppression,
@@ -39,33 +44,34 @@
 > removes cached messages, Mail sync cursors, credentials, private server
 > configuration and public metadata, with restart coverage. It requires a
 > profile-store-bound removal permit which blocks new sync and waits a bounded
-> time for existing provider work. The Settings-only `accounts.remove`
-> dispatcher path now invokes this lifecycle and refuses retained local data,
-> but no installed service/launcher can grant that capability yet.
-> Settings-only `accounts.begin_connect` and `accounts.cancel_connect` now
+> time for existing provider work. The account-manager-only `accounts.remove`
+> path invokes this lifecycle, refuses retained local data, and is reachable
+> only through its locked launch identity.
+> Broker-only `accounts.begin_connect` and `accounts.cancel_connect` now
 > create and cancel bounded five-minute open-protocol setup sessions. They
 > expose only an opaque id, admit no credential field, and keep the one-use
 > helper descriptor reserved for the privileged launcher. The service-side
-> root-broker exchange now transfers that endpoint exactly once with closed
-> refusal codes, but the fixed broker/helper executables remain missing.
+> root-broker exchange transfers that endpoint exactly once with closed
+> refusal codes; the installed broker and helper expose no caller-selected
+> path, command, endpoint, account id or secret field.
 > A bounded non-resident service loop now serves application and helper control
 > planes concurrently and exits after the final idle interval. A production
 > executable and hardened systemd units are staged: they accept exactly the two
-> named root-only activation descriptors, run under a locked service identity
-> and have no install target. They remain dormant until a fixed broker and
-> hostile same-uid runtime proof exist.
+> named root-only activation descriptors, run under locked service identities
+> and have no install target. The fixed broker is implemented; installed-image
+> hostile-caller and zero-residency measurements remain gates.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account
-> metadata while account lifecycle remains Settings-only. There is still no
-> user-accessible service connection, fixed launcher/bridge, live-provider
-> proof or production application entry. A first bounded MIME ingest layer now produces only
+> metadata while account lifecycle remains in narrower account-only clients.
+> Production desktop entries and launch bridges now exist; live-provider proof
+> is still open. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
 > attachment payloads. Calendar and
 > Reminders remain unavailable to users. Provider-neutral account metadata and
-> service-private server configuration now survive restart and the former
-> backs `accounts.list`, but the protected helper is not launchable from a user
-> interface yet, so there is still no complete sign-in workflow.
+> service-private server configuration survive restart and the former backs
+> `accounts.list`. The first complete app-password sign-in path is implemented;
+> browser OAuth remains required before the provider set is complete.
 > No part of this status may be shortened to “Mail is built” until the runtime
 > gates in section 9 pass.
 
@@ -497,12 +503,13 @@ section 2. Those need a real client.
 |-------|-------------|------|
 | 0 | Evolution disclosure and first-run suppression | **complete** |
 | 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
-| 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
+| 2 | Responsive Mail index/thread UI; explicit dev-only fixture data | **production read path is fixture-free; fixture stays hidden and is removed from product staging** |
 | 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
 | 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner, durable signed cursors, bounded stable-page cache, read-only Mail dispatch and async sync admission complete; remaining dispatcher methods open** |
-| 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable library core complete; process/runtime proof open** |
-| 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
-| 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |
+| 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable core and non-resident process staged; installed-image proof open** |
+| 5 | First real account vertical slice: connect, initial/incremental receive, restart, disconnect and delete-local-data | **implemented; encrypted VM and live-provider acceptance open** |
+| 5b | Mail send/reply/draft/archive/delete/search/attachment lifecycle | open |
+| 6 | Build Calendar and Reminders inside the adopted app grammar | open |
 | 7 | Second provider family plus managed configuration, profile-isolation and recovery tests | weeks |
 | 8 | Dual-architecture image, resource, malformed-input, OAuth, offline and real-provider acceptance | weeks |
 

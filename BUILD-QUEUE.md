@@ -140,17 +140,23 @@ These are now core OS applications, not optional catalogue entries. The exact
 product/security contract and staged acceptance gates live in
 [`docs/design/mail-calendar-contacts.md`](docs/design/mail-calendar-contacts.md).
 
-Current truth: the Mail index/thread/compose work proves ordinary responsive
-application windows but still uses fixture data, so its QML, launcher and
-desktop entry exist only in the composable dev/CI profile and own no MIME
-handlers. The production image contains none of that fixture-backed surface.
-Calendar and Reminders have a tested local-data library but no user-facing
-window or service connection. A tested non-resident account/sync runtime,
-strict socket-activated executable and hardened per-profile systemd units are
-now staged in the production image. Both sockets are root-only and deliberately
-have no install target, so the service remains dormant until the fixed broker
-and account UI are complete. Do not surface the Mail prototype as a real app and do not duplicate
-its fixture data into Calendar or Reminders.
+Current truth: production Mail is fixture-free and reads only the protected
+profile store. A human-only fixed broker launches it under a locked identity
+with a Mail-scoped capability and verified Wayland stream; the window has no
+network or device access. Separate locked account-entry and account-manager
+surfaces now connect TLS-only IMAP/SMTP accounts, start an initial bounded
+INBOX sync, list accounts, and remove credentials/configuration/cached mail
+locally. Mail refreshes on open and every five minutes while visible. Fixtures
+remain explicitly labelled, opt-in and dev-only, and production staging removes
+them. The Rust/QML contracts pass locally. Encrypted installed-image, real
+provider, hostile-runtime, restart, and removal acceptance remain open, along
+with OAuth and the send/reply/draft/archive/delete/search/attachment lifecycle.
+Calendar and Reminders still have a tested local-data core but no user-facing
+window.
+
+The detailed history below records how this slice was reached; where it calls
+the fixed broker/helper or account UI missing, the current-truth paragraph
+above supersedes it.
 
 Next build slice, in order:
 

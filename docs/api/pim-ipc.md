@@ -1,7 +1,7 @@
 # Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
 
-Status: **accepted contract; protected read-only Mail path exposed, account
-setup still closed.** The fixture-free,
+Status: **accepted contract; protected read-only Mail and one-use account
+connection paths exposed.** The fixture-free,
 profile-bound Calendar/Reminders persistence core, LUKS-gated encrypted vault,
 TLS-only open-protocol verifier, bounded read-only INBOX adapter and
 non-resident sync coordinator exist in `crates/punar-pimd`. A production
@@ -10,16 +10,23 @@ the image stages hardened per-profile service/socket units. Those sockets are
 root-only and have no install target. A human-only `pim.mail.open` call now
 uses a fixed root broker to verify the live desktop session and transfer an
 own-profile Mail channel plus an already-connected Wayland descriptor to a
-separate locked `punar-mail` service. Neither the human uid nor another app can
-open either root control socket. Account setup and credential entry are not
-yet exposed. The
+separate locked `punar-mail` service. A second human-only
+`pim.mail.account_add` call transfers one opaque account-entry capability and
+the verified display stream to a separate locked `punar-mail-account` service;
+passwords never enter ordinary Mail IPC, JSON, argv, environment, or logs.
+`punar-pimd` verifies both TLS mail endpoints, commits atomically into the
+LUKS-gated vault, and queues the first bounded INBOX sync. Neither the human uid
+nor another app can open any root control socket. Account listing and removal
+are exposed only through a third locked `punar-mail-accounts` Settings surface;
+removal quiesces sync and deletes cached mail, provider configuration and
+encrypted credentials locally without claiming to delete remote mail. The
 machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
 [`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
-credential custody and the open-standards-first provider sequence. No shipping
-image may expose account connection until the authorization and credential
-negative gates in that ADR pass.
+credential custody and the open-standards-first provider sequence. Release
+promotion may not enable account connection until the authorization,
+credential, encrypted-image and live-provider gates in that ADR pass.
 
 The local-store implementation and its intentionally narrower boundary are
 recorded in
@@ -93,12 +100,16 @@ rather than being ignored.
 - The service verifies profile ownership and the first-party launch identity
   before parsing a method. Cross-profile ids are not a discovery mechanism:
   they return `not_found`, not ownership information.
-- The broker stamps one of `mail`, `calendar`, `reminders` or `settings` on
+- The broker stamps one of `mail`, `calendar`, `reminders`, `settings`,
+  `account_connect`, or `account_manager` on
   each transferred channel. The service enforces the closed per-client method
   partition before parsing params. Mail, Calendar and Reminders may read the
-  bounded non-secret account records needed to label their own UI, but only
-  Settings may begin, cancel or remove an account or trigger sync. For example,
-  Mail cannot delete an event and Reminders cannot remove an account.
+  bounded non-secret account records needed to label their own UI. Mail may
+  request a bounded sync for an account it can already read. The general
+  Settings identity may manage accounts and trigger sync; the password-entry
+  broker can only begin or cancel a setup, and the account manager can only
+  list or remove accounts. Mail cannot delete an event and Reminders cannot
+  remove an account.
 - Normal IPC never contains passwords, authorization codes, access or refresh
   tokens, provider client secrets, vault keys or callback query strings.
   `accounts.begin_connect` carries only a provider type. OAuth browser launch
@@ -112,8 +123,11 @@ rather than being ignored.
   helper descriptor remains available only to the privileged launcher side of
   the service and never crosses application IPC. Its strict root-broker control
   exchange accepts only the opaque id and profile uid, returns no provider
-  data, and transfers exactly one descriptor only on success. The fixed helper
-  executable, launcher and account-setup UI are not implemented yet.
+  data, and transfers exactly one descriptor only on success. The installed
+  fixed launcher now claims that descriptor and hands it, plus a verified
+  Wayland stream, to a locked one-use account-entry service. Its QML sends
+  configuration and the password as separate bounded frames; a failed attempt
+  cannot reuse the consumed credential capability.
 - The implemented vault encrypts each credential with profile/account/kind
   associated data and refuses to open unless the service-private state path is
   kernel-observed on a LUKS2 device-mapper filesystem. A library coordinator
@@ -121,9 +135,10 @@ rather than being ignored.
   interface, publishes private server settings plus public account metadata
   only after verification, and rolls back checked failures. A TLS-only network
   verifier authenticates both configured IMAP and SMTP endpoints under fixed
-  deadlines. The application-callable begin/cancel methods are implemented,
-  but the fixed helper executable and launcher are not, so this still does not
-  make sign-in available.
+  deadlines. The installed account-entry surface exposes Gmail and iCloud
+  presets plus custom TLS IMAP/SMTP settings. It requires an app password where
+  the provider does; OAuth provider registration remains a later acceptance
+  gate.
 - QML windows have no direct network authority. The service owns transport,
   parsing, sync, durable state and credential use.
 - Mail bodies, event descriptions and reminder notes may cross this IPC because
@@ -202,9 +217,11 @@ The setup methods expose only an opaque id and closed state; they cannot carry
 a password, server configuration or helper descriptor. Automatic retry
 scheduling, Mail mutation/send, contacts, event responses and filtered
 event/reminder reads remain explicitly unavailable. Mail can now reach this
-dispatcher through the protected read-only launch path. Settings/account
-connection remains unexposed, so a fresh profile still has no way to add an
-account.
+dispatcher through the protected launch path, ask for one bounded refresh on
+open, and refresh every five minutes while its window is open. A fresh profile
+can add an open-protocol account through the separate one-use account surface,
+and can list or remove it through the separate account manager. Live-provider
+and installed encrypted-image acceptance remain open.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 
@@ -214,9 +231,10 @@ same account into that operation, admits at most two account jobs at once and
 exits each worker after one bounded INBOX batch. Success or a closed
 offline/auth-required/error result is persisted on the public account record;
 provider response text and credentials are not representable. There is no
-timer or automatic retry loop yet: the stored `next_retry_at` is UI/state for
-a later scheduler, not a promise that the dormant socket-activated service is
-resident or will retry without a new explicit trigger.
+resident background timer: Mail requests a bounded refresh while its window is
+open, and closing the window lets the socket-activated service return to zero
+residency. The stored `next_retry_at` remains the service's bounded retry
+posture rather than an always-running scheduler.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or
 other content. Clients fetch changed records through their typed method.

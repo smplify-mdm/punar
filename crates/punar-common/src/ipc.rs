@@ -920,6 +920,14 @@ pub enum Method {
     /// own-profile, read-only PIM capability. Human only; accepts no path,
     /// command, account identifier, or secret material.
     PimMailOpen,
+    /// `pim.mail.account_add` — open the one-use protected Mail account
+    /// connection surface. Human only; accepts no provider, endpoint,
+    /// account identifier, path, command, or secret material.
+    PimMailAccountAdd,
+    /// `pim.mail.account_manage` — open the protected Mail account management
+    /// surface with a Settings-scoped PIM capability. Human only; accepts no
+    /// account id, path, command, endpoint, or secret material.
+    PimMailAccountManage,
     /// `update.status` — read-only, local release/channel/health/rollback
     /// evidence. Any admitted peer may inspect it; no check or mutation is
     /// hidden behind this method.
@@ -959,7 +967,7 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 42] = [
+    pub const NAMES: [&'static str; 44] = [
         "status",
         "capabilities.list",
         "capabilities.get",
@@ -992,6 +1000,8 @@ impl Method {
         "webapps.context_create",
         "webapps.context_delete",
         "pim.mail.open",
+        "pim.mail.account_add",
+        "pim.mail.account_manage",
         "update.status",
         "update.check",
         "update.apply",
@@ -1040,6 +1050,8 @@ impl Method {
             Method::WebAppsContextCreate(_) => "webapps.context_create",
             Method::WebAppsContextDelete(_) => "webapps.context_delete",
             Method::PimMailOpen => "pim.mail.open",
+            Method::PimMailAccountAdd => "pim.mail.account_add",
+            Method::PimMailAccountManage => "pim.mail.account_manage",
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
             Method::UpdateApply(_) => "update.apply",
@@ -1117,7 +1129,7 @@ impl Method {
             | Method::WebAppsContextDelete(_) => false,
             // The handler separately enforces human-only, own-profile launch
             // from a live desktop process. It is not root-only.
-            Method::PimMailOpen => false,
+            Method::PimMailOpen | Method::PimMailAccountAdd | Method::PimMailAccountManage => false,
             Method::UpdateStatus => false,
             Method::UpdateCheck(_)
             | Method::UpdateApply(_)
@@ -1144,6 +1156,8 @@ impl Method {
             | Method::PrivilegeStatus
             | Method::AppsList
             | Method::PimMailOpen
+            | Method::PimMailAccountAdd
+            | Method::PimMailAccountManage
             | Method::UpdateStatus
             | Method::UpdateReconcileCandidate
             | Method::InstallTargets
@@ -1260,6 +1274,12 @@ impl Method {
                 Self::parse_required_params(method, params).map(Method::WebAppsContextDelete)
             }
             "pim.mail.open" => Self::expect_no_params(method, params).map(|()| Method::PimMailOpen),
+            "pim.mail.account_add" => {
+                Self::expect_no_params(method, params).map(|()| Method::PimMailAccountAdd)
+            }
+            "pim.mail.account_manage" => {
+                Self::expect_no_params(method, params).map(|()| Method::PimMailAccountManage)
+            }
             "update.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
@@ -2382,6 +2402,8 @@ mod tests {
                 purge_data: true,
             }),
             Method::PimMailOpen,
+            Method::PimMailAccountAdd,
+            Method::PimMailAccountManage,
             Method::UpdateStatus,
             Method::UpdateCheck(UpdateCheckParams { force: false }),
             Method::UpdateApply(UpdateApplyParams {
@@ -2600,6 +2622,8 @@ mod tests {
             "reconcile",
             "apps.list",
             "pim.mail.open",
+            "pim.mail.account_add",
+            "pim.mail.account_manage",
             "update.status",
             "install.targets",
             "install.status",
