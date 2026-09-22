@@ -134,6 +134,41 @@ fixes. Use the newest run on the current remote head rather than treating that
 historical run as current. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
 
+### 1.2 First-party daily suite — Mail, Calendar and Reminders
+
+These are now core OS applications, not optional catalogue entries. The exact
+product/security contract and staged acceptance gates live in
+[`docs/design/mail-calendar-contacts.md`](docs/design/mail-calendar-contacts.md).
+
+Current truth: the Mail index/thread/compose work proves ordinary responsive
+application windows but still uses fixture data, so its QML, launcher and
+desktop entry exist only in the composable dev/CI profile and own no MIME
+handlers. The production image contains none of that fixture-backed surface.
+Calendar is design-only. Reminders and the shared account/sync service are
+absent. Do not surface the prototype as a real app and do not duplicate its
+data into Calendar or Reminders.
+
+Next build slice, in order:
+
+1. settle the first provider sequence and write the persistent-account-
+   credential ADR — do not repurpose `punar-secrets`, whose no-state promise is
+   a security contract;
+2. define the versioned PIM schema and closed typed IPC, including profile/uid
+   ownership, pagination, change cursors, offline/conflict states and negative
+   fixtures;
+3. build a lazy per-user `punar-pimd` with local-only Calendar and Reminders,
+   real empty states and zero production fixture data;
+4. complete one real account vertical slice before replacing Mail's fixture
+   bindings or adding provider logos;
+5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME
+   ownership and onboarding suggestions.
+
+Every slice must retain the existing x86_64/ARM64 image and resource gates.
+Google/Microsoft sign-in, open IMAP/SMTP + CalDAV, managed configuration,
+profile separation, hostile-content rendering and account removal are all
+definition-of-done items; a polished inbox with fixture rows closes none of
+them.
+
 ---
 
 ## 2. Latency and memory — finish what is measured

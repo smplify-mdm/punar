@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Punar Mail's identity must agree in three places at once.
+# Punar's non-shipping Mail window probe must have one stable runtime identity
+# while remaining impossible to mistake for a working mail application.
 #
 # WHY THIS IS A TEST AND NOT A CONVENTION. `//@ pragma AppId` becomes the
 # xdg-toplevel app_id on Wayland. Apps.displayNameForAppId joins that runtime id
@@ -17,8 +18,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 QML="${REPO_ROOT}/shell/punar-shell/Mail/shell.qml"
-APPS="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/local/share/applications"
+PRODUCT_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra"
+DEV_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra"
+APPS="${DEV_EXTRA}/usr/local/share/applications"
 GATE="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
+STAGER="${REPO_ROOT}/os/images/scripts/container-build.sh"
 
 fail() { echo "mail-identity-contract-test: FAIL: $*" >&2; exit 1; }
 
@@ -49,6 +53,26 @@ WMCLASS=$(sed -n 's|^StartupWMClass=||p' "${DESKTOP}" | head -1)
 [ "${WMCLASS}" = "${APP_ID}" ] \
     || fail "StartupWMClass is '${WMCLASS}', app id is '${APP_ID}'"
 
+# The surface is deliberately fixture-backed. It exists only in the dev/CI
+# overlay for the graphical xdg-toplevel gate; the release image must contain
+# neither its launcher nor its data.
+grep -qx 'NoDisplay=true' "${DESKTOP}" \
+    || fail "the fixture-backed Mail probe is visible in the application launcher"
+grep -qx 'Name=Mail interface prototype' "${DESKTOP}" \
+    || fail "the hidden probe does not name itself as a prototype"
+! grep -q '^MimeType=' "${DESKTOP}" \
+    || fail "the fixture-backed probe claims a real mail or calendar MIME handler"
+grep -q 'FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED' "${QML}" \
+    || fail "the prototype no longer discloses its fixture state on its own surface"
+[ ! -e "${PRODUCT_EXTRA}/usr/local/share/applications/${APP_ID}.desktop" ] \
+    || fail "the production image still ships the fixture-backed Mail desktop entry"
+[ ! -e "${PRODUCT_EXTRA}/usr/lib/punar/punar-mail.sh" ] \
+    || fail "the production image still ships the fixture-backed Mail launcher"
+grep -Fq 'rm -rf "${extra}/usr/share/punar/shell/Mail"' "${STAGER}" \
+    || fail "desktop staging does not remove Mail fixture QML from the production image"
+grep -Fq 'cp -R "${shell_src}/Mail" "${dev_extra}/usr/share/punar/shell/Mail"' "${STAGER}" \
+    || fail "desktop staging does not restore the Mail probe in the dev/CI overlay"
+
 # 5 · and the in-VM gate must be looking for the same window, or it silently
 # asserts nothing: `select(.class == "…")` matching no client makes every
 # downstream check read a null it then compares against.
@@ -61,7 +85,7 @@ case "${EXEC}" in
     /usr/lib/punar/punar-mail.sh*) ;;
     *) fail "Exec is '${EXEC}', expected the committed launcher under /usr/lib/punar" ;;
 esac
-LAUNCHER="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-mail.sh"
+LAUNCHER="${DEV_EXTRA}/usr/lib/punar/punar-mail.sh"
 [ -x "${LAUNCHER}" ] || fail "the launcher is missing or not executable"
 
 # 7 · THE LAUNCHER MUST ESTABLISH THE GRAPHICS ENVIRONMENT. A Punar application
@@ -79,4 +103,4 @@ grep -q 'punar_configure_graphics' "${LAUNCHER}" \
 ! grep -q 'QML_IMPORT_PATH' "${LAUNCHER}" \
     || fail "the launcher exports QML_IMPORT_PATH; that belongs to the pragma, which covers every launch path"
 
-echo "mail-identity-contract-test: PASS (${APP_ID} agrees in shell.qml, ${APP_ID}.desktop and the gate)"
+echo "mail-identity-contract-test: PASS (${APP_ID} is stable, dev-only and absent from production staging)"

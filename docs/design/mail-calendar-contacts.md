@@ -1,10 +1,14 @@
-# Mail, calendar and contacts — design plan
+# Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-09): DESIGN ONLY. Nothing here is built.** No first-party
-> mail client exists, no milestone funds one, and the sections describing one
-> are drawn dashed in the honesty grammar's sense: they are a claim about
-> intent, not about the machine. What IS actionable today is section 2 (the
-> security finding) and section 6 (the configuration-only remediation).
+> **Status (2026-09-22): COMMITTED CORE SUITE; BACKEND NOT BUILT.** A real
+> xdg-toplevel window prototype exists at `shell/punar-shell/Mail/`: index,
+> thread and plain-text compose all map, tile, resize and close as ordinary
+> application windows. It still reads fixture data and speaks to no account,
+> server or store, so the QML, launcher and hidden prototype entry are staged
+> only by the dev/CI image profile and are absent from production images.
+> Calendar is design-only. Reminders and the shared
+> account/sync service do not exist. No part of this status may be shortened to
+> “Mail is built” until the runtime gates in section 9 pass.
 
 Origin: a person installed the Evolution Flatpak from the catalogue and its
 first run presented a *"Do you want to make Evolution your default email
@@ -13,18 +17,155 @@ Adwaita styling, on a desktop whose entire design language is the opposite of
 that. The complaint was correct and it is two complaints: the onboarding is
 noise, and the application does not belong to this operating system.
 
-This document separates what can be fixed by configuration this week from what
-requires Punar to own the client, and records the measurements that decide it.
+On 2026-09-22 the product decision changed from “is a first-party client worth
+building?” to **“Mail, Calendar and Reminders are default first-party apps.”**
+Contacts is shared address-completion data in the first release, not a fourth
+headline app. The generic names are deliberate: users should not need to know
+which toolkit or protocol implements an operating-system basic.
+
+This document now owns both the already-measured decisions and the staged path
+from the honest prototype to real account-backed applications.
+
+---
+
+## 0 · Product contract
+
+### 0.1 What ships
+
+- **Mail** — multiple accounts, inbox and saved views, search, threads,
+  attachments, plain-text compose, labels, archive/delete, drafts and send.
+- **Calendar** — local and synced calendars, agenda plus adaptive day/week
+  grid, invitations, availability, time zones and recurring events.
+- **Reminders** — local lists, Today, Upcoming, projects, recurrence, notes,
+  completion history and CalDAV `VTODO` where the provider supports it.
+- **Contacts data** — address completion and attendee lookup shared by Mail and
+  Calendar. A standalone Contacts app is a later decision, not implied by this
+  plan.
+
+All three applications are installed by default only after they operate on
+real local data. Before that, prototypes remain dev/CI-only,
+`NoDisplay=true`, own no MIME type, and never enter a production image or
+appear as an installed consumer feature.
+
+### 0.2 What does not ship
+
+- no sample inbox, calendar, people, reminders, accounts, sync success or
+  activity on a production image;
+- no forced cloud account in OS onboarding — account setup is an optional
+  first-desktop action and remains available later in System Control;
+- no remote classifier reading every message, no AI training claim, and no
+  “smart” feature whose locality and data flow are unstated;
+- no embedded provider web view. OAuth uses the user's governed browser with
+  PKCE, state/nonce validation and an exact callback;
+- no direct network access from QML windows. A bounded per-user service owns
+  transport, sync, parsing and durable state.
+
+### 0.3 Architecture boundary
+
+`punar-pimd` is the proposed shared per-user service. It is event-driven and
+starts on first use; it does not become another always-resident desktop
+process merely because the image contains these apps.
+
+```text
+Mail / Calendar / Reminders QML windows
+                  │ typed local IPC · no credentials · no arbitrary SQL
+                  ▼
+        punar-pimd (one per Linux profile/uid)
+        ├─ account metadata + sync cursors
+        ├─ local mail/calendar/task indexes
+        ├─ MIME and iCalendar parsing
+        ├─ provider/transport adapters
+        └─ notifications + bounded change stream
+                  │ opaque credential handles only
+                  ▼
+        profile-scoped credential storage
+```
+
+The first storage implementation may rely on full-disk encryption for content
+at rest, but tokens and passwords require a separately reviewed credential
+path. The current `punar-secrets` daemon is a short-lived, non-persistent agent
+credential broker; silently turning it into an OAuth vault would invalidate
+its “no state directory” security promise. Persistent account credentials need
+their own ADR and negative tests before any provider sign-in is enabled.
+
+One Linux profile/uid owns one PIM service and one data root. Personal and work
+profiles therefore do not share account metadata, indexes, notifications or
+credential handles. A managed policy may allow or require provider types and
+configuration, but content and credentials never enter Smplify inventory or
+audit. Device-level disk encryption protects the volume beneath every profile;
+profile-level keys may narrow it later and never replace that foundation.
+
+### 0.4 Provider model
+
+The data model is provider-neutral. The transport layer is replaceable:
+
+| Capability | Open-standard adapter | Provider adapter |
+|---|---|---|
+| Mail | IMAP + SMTP; JMAP when advertised | Gmail API / Microsoft Graph where policy or server capability requires it |
+| Calendar | CalDAV | Google Calendar API / Microsoft Graph |
+| Reminders | local + CalDAV `VTODO` | Google Tasks / Microsoft To Do APIs |
+| Contacts | CardDAV | Google People / Microsoft Graph |
+
+Both routes are required for the finished product. The first implementation
+sequence remains an explicit product choice: open standards yield a
+provider-neutral, self-hostable vertical slice; Google/Microsoft yield the
+most familiar sign-in path but require provider registrations, tenant-policy
+handling and production OAuth custody.
+
+### 0.5 Security and privacy floor
+
+- message bodies are parsed as untrusted input; malformed MIME/iCalendar data
+  must not crash the sync service or UI;
+- remote images and other remote body content are blocked by default and the
+  message states that fact where it occurred;
+- version one composes `text/plain`; HTML mail is displayed only after a
+  separately sandboxed, networkless renderer and sanitizer pass adversarial
+  fixtures;
+- attachments open through the ordinary execution-trust/quarantine path, not
+  by MIME-triggered process launch;
+- sync uses TLS with certificate validation, bounded responses, backoff and no
+  retry loop; offline is a normal state and never destroys cached data;
+- apps receive rendered records and opaque ids, never refresh tokens,
+  passwords or provider client secrets;
+- notification contents are user-controlled per account/view and respect the
+  active profile; lock-screen previews default to sender plus subject only
+  after the user opts in;
+- AI assistance is absent by default. A future local model or explicit remote
+  service must declare exactly what leaves the device for each action.
+
+### 0.6 Shared interaction grammar
+
+The suite inherits Field Note rather than Notion's trade dress: warm paper or
+panel mood, hairline structure, Instrument Sans content, Geist Mono metadata,
+and user identity colour only on user data. The shared rail contains accounts,
+views/lists/calendars and sync truth; the main plane contains the work. Counts
+are quiet facts. Status colour remains reserved for actual policy/sync state.
+
+Mail keeps the current prototype's decisive choice: opening a thread creates a
+second ordinary window and lets the compositor tile it. Calendar changes from
+agenda on a narrow tiled window to the largest usable 1/3/5/7-day grid on a
+wide window. Reminders uses one dense list with Today/Upcoming/Projects in the
+rail; opening details creates a document window rather than squeezing a third
+pane into the list.
+
+Cross-app actions are explicit and local: “Make reminder” from a message and
+“Insert availability” from compose create a reviewable draft in the target
+app. Nothing silently copies message contents or sends invitations.
 
 ---
 
 ## 1 · What the reference gets right
 
-The stated reference is Notion Mail, which is being shut down. What is worth
+The stated reference is Notion Mail. [Notion's own help
+center](https://www.notion.com/help/notion-mail-inbox-is-going-away-what-to-do-next)
+says its inbox shuts down on **2026-09-22**; the Homebrew cask still describes
+and distributes the final desktop build. It is therefore an interaction
+reference, never a dependency or long-term platform choice. What is worth
 taking from it is structural and unprotectable; what is not worth taking is its
-trade dress. **Never copy** its name, wordmark, logo, icon set (the compose
-pencil included — icons are trade dress, information architecture is not), its
-copy, or its specific colour and spacing signature.
+trade dress.
+**Never copy** its name, wordmark, logo, icon set (the compose pencil included
+— icons are trade dress, information architecture is not), its copy, or its
+specific colour and spacing signature.
 
 The five ideas, abstracted:
 
@@ -273,14 +414,76 @@ section 2. Those need a real client.
 
 | Stage | Deliverable | Cost |
 |-------|-------------|------|
-| 0 | Section 2's disclosure on the catalogue card | hours |
-| 1 | Section 6's per-user GSettings seed in `punar-onboardd` | days |
-| 2 | Answer the window question (§4) with a spike, not a plan | days |
-| 3 | Extract the genuinely duplicated primitives into `shell/punar-shell/Ui/` — `Data` (3 sites, byte-identical) first, `Meta` (18 sites) next. Justified on its own, independent of mail. | days |
-| 4 | Plate **D-018** `docs/design/mockups/mail.html`, drawn dashed throughout | days |
-| 5 | GTK-less EDS package for calendar/contacts; Rust mail path | weeks |
-| 6 | The client | months |
+| 0 | Evolution disclosure and first-run suppression | **complete** |
+| 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
+| 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
+| 3 | Decide first provider sequence; write persistent-credential ADR and typed PIM IPC/schema | days |
+| 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | weeks |
+| 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
+| 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |
+| 7 | Second provider family plus managed configuration, profile-isolation and recovery tests | weeks |
+| 8 | Dual-architecture image, resource, malformed-input, OAuth, offline and real-provider acceptance | weeks |
 
-Stages 0–3 are worth doing whether or not the client is ever built. Stage 2 is
-the gate: until an xdg-toplevel exists in this repository, every estimate past
-it is a guess.
+The old window-cost uncertainty is closed. The gating unknowns are now
+persistent credential custody, provider registration, protocol correctness and
+hostile-content handling — all security boundaries, none safely replaceable by
+more fixture UI.
+
+---
+
+## 8 · Application-specific first views
+
+### Mail
+
+The current rail + time-grouped list remains the base. With no account, the
+main plane contains one honest empty state: `NO MAIL ACCOUNTS` plus a working
+`CONNECT ACCOUNT` action. With an account but no cached messages it says
+whether sync has not started, is offline, failed with a named next step, or
+completed with an empty inbox. Those states never collapse to the same blank.
+
+### Calendar
+
+The default is Agenda in a narrow/tiled window and the derived 1/3/5/7-day grid
+when space permits. The rail groups calendars by account, then local calendars.
+The first action is `NEW EVENT`; selecting a time range opens an event document
+window. Month remains out of version one until it can represent partial sync
+honestly.
+
+### Reminders
+
+The first view is Today, not an analytics dashboard. A single-line quick
+capture sits at the list boundary; parsing dates happens locally and previews
+the interpretation before save. Each row has a real checkbox, title, due/repeat
+metadata and list name. Overdue is a word and ordering state, not red decoration.
+Completed items move to a quiet, collapsed history and remain searchable.
+
+---
+
+## 9 · Definition of done
+
+The suite is not a product claim until all of these pass on both x86_64 and
+ARM64 images:
+
+1. Production image boots with no accounts and shows no synthetic person,
+   message, event, reminder, count, sync timestamp or success state.
+2. Connect, cancel, OAuth denial, revoked token, MFA/tenant refusal and network
+   loss each produce a distinct recoverable state with no secret in logs.
+3. Initial and incremental sync survive restart, duplicate delivery, clock
+   change, pagination, malformed content and server conflict without data loss.
+4. Mail can receive, search, open, reply, draft, send, archive and delete;
+   Calendar can create/edit/delete/respond and handle recurrence/time zones;
+   Reminders can create/edit/complete/recur and sync where supported.
+5. Remote body content is blocked by default; the renderer has no network;
+   attachments traverse quarantine/execution trust; adversarial fixtures pass.
+6. Personal and work profiles cannot see each other's accounts, data,
+   notifications, OAuth callbacks or search results. Managed inventory contains
+   configuration/compliance only, never content or credentials.
+7. Every action is keyboard-operable, screen-reader named, contrast-gated,
+   localizable and usable in the compositor's side-by-side minimum sizes.
+8. UI windows have no direct network authority. Typed IPC is bounded, peer
+   checked, versioned, negative-tested and carries no credential values.
+9. Idle RAM/CPU/write budgets are measured with the service stopped and with a
+   representative synced account; sync work is bounded and backoff is proven.
+10. Account removal revokes authorization when possible, stops sync, removes
+    local credentials and offers an explicit, separately confirmed local-data
+    deletion path.

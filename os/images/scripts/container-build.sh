@@ -113,6 +113,7 @@ stage_desktop_extra() {
            "${extra}/usr/share/punar/network" \
            "${extra}/usr/share/punar/repart.d" \
            "${extra}/usr/share/punar/fixtures" \
+           "${dev_extra}/usr/share/punar/shell/Mail" \
            "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
@@ -124,6 +125,7 @@ stage_desktop_extra() {
              "${extra}/usr/share/punar/repart.d/install-raspberry-pi" \
              "${extra}/usr/share/punar/repart.d/install-encrypted" \
              "${extra}/usr/share/punar/repart.d/install-streaming" \
+             "${dev_extra}/usr/share/punar/shell" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
              "${dev_extra}/usr/share/punar/fixtures/projects/atlas" \
              "${dev_extra}/usr/share/punar/fixtures/webapps/notes"
@@ -181,6 +183,12 @@ stage_desktop_extra() {
     # Hyprland exec-once: qs -p /usr/share/punar/shell).
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
+    # The Mail xdg-toplevel currently proves only window behavior and contains
+    # explicit fixture messages. Production images carry no demo PIM data or
+    # non-functional launcher: stage the complete probe only in the composable
+    # dev/CI overlay until punar-pimd supplies real account-backed records.
+    rm -rf "${extra}/usr/share/punar/shell/Mail"
+    cp -R "${shell_src}/Mail" "${dev_extra}/usr/share/punar/shell/Mail"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
     # Theme documents + the shipped pointer (docs/design/theme-system.md
     # §3.2/§3.4). Theme.qml's resolution order is

@@ -125,6 +125,12 @@ Singleton {
             return "System Monitor";
         if (value === "lstopo")
             return "Hardware Information";
+        // The first-party mail surface is a hidden, fixture-backed window
+        // capability probe. It must never appear in the launcher, but when CI
+        // or a developer opens it directly the bar still needs a truthful
+        // product label instead of a raw reverse-DNS id.
+        if (value === "org.punar.mail")
+            return "Mail interface prototype";
         return "";
     }
 
