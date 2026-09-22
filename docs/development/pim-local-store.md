@@ -26,6 +26,12 @@ opens a process or network boundary. The accepted external contract remains
   over-permissive and structurally inconsistent state;
 - a one-way v0-to-v1 migration with a durable, non-overwritten backup.
 
+`crates/punar-pimd/src/channel.rs` additionally proves the accepted ADR-009
+transport primitive: an unnamed application/service stream endpoint is moved
+over a bounded root/service-only sequenced-packet control channel with
+`SCM_RIGHTS`. The receiver requires one descriptor, one strict grant header,
+the bound profile uid and the client's least-privilege method partition.
+
 The store contains no password, OAuth code/token, provider secret or encryption
 key field. QML is not linked to it. It starts no resident process and performs
 no periodic work.
@@ -67,7 +73,12 @@ The crate's unit suite proves:
 6. corrupt state fails closed and is not replaced;
 7. cross-profile and over-permissive files are refused;
 8. v0 migration creates an exact durable backup and is idempotent; and
-9. future versions fail closed and remain untouched.
+9. future versions fail closed and remain untouched;
+10. one unnamed endpoint transfers and carries application data;
+11. cross-profile, extended, descriptor-free and extra-descriptor grants fail
+    closed; and
+12. Mail, Calendar, Reminders and Settings cannot invoke one another's
+    mutation sets or generic execution/secret methods.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -77,8 +88,8 @@ because it is a Cargo workspace member.
 This work does **not** close Build Queue stage 3. Before a production image may
 install or activate `punar-pimd`, it still needs:
 
-- a hostile same-UID application admission mechanism stronger than
-  `SO_PEERCRED` alone;
+- the privileged half of ADR-009: fixed app launch with direct descriptor
+  inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - bounded IPC framing, deadlines, signed cursors and the full closed method
   dispatcher;
 - service-private credential wrapping on verified encrypted storage;

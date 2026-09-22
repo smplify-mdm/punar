@@ -162,8 +162,12 @@ Next build slice, in order:
    crash-durable local Calendar/Reminders store with blank structural
    containers, zero sample records, optimistic revisions, retained tombstones,
    offline intent, restart/corruption/mode/profile/migration tests and no
-   credential fields; the socket-activated process, hostile-caller admission,
-   signed cursors, IPC dispatch and production-image staging remain open;
+   credential fields. ADR-009 now selects an unnamed inherited capability
+   channel instead of an application-connectable socket, and the safe
+   `SCM_RIGHTS` transfer primitive rejects cross-profile, extended,
+   absent/extra-descriptor and cross-client method attempts; privileged launch,
+   non-dumpable sandbox proof, socket-activated process, signed cursors, IPC
+   dispatch and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

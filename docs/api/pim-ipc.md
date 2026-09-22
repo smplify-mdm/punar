@@ -18,15 +18,20 @@ recorded in
 ## 1. Boundary and transport
 
 Each Linux profile has a separate socket-activated service instance and state
-root. The instance identity determines the profile. A request has no
+root. The instance identity determines the profile. Applications do not
+connect to a filesystem or abstract-namespace PIM socket. ADR-009 requires a
+privileged launcher to give each fixed first-party application one end of an
+unnamed Unix socket and transfer the other end to the service over its private
+control plane. A request has no
 `profile_id`, uid, home path or state path field; callers cannot select another
 profile by parameter.
 
-The intended transport is a Unix `SOCK_STREAM` channel handed to a verified
-first-party application launch. The final path/capability mechanism remains an
-implementation spike and is a production blocker. A filesystem-readable socket
-plus `SO_PEERCRED` uid alone is insufficient because unrelated applications run
-as the same human uid. There is no localhost TCP control API.
+The application transport is that preconnected Unix `SOCK_STREAM` capability
+channel. The tested descriptor-transfer primitive lives in
+`crates/punar-pimd/src/channel.rs`; privileged launch, non-dumpable sandbox and
+hostile-process runtime proof remain production blockers. A filesystem-readable
+socket plus `SO_PEERCRED` uid alone is explicitly forbidden because unrelated
+applications run as the same human uid. There is no localhost TCP control API.
 
 Messages are newline-delimited UTF-8 JSON. One connection processes requests
 in order. Request lines are bounded to 8 MiB (a plain-text draft may be 4 MiB);
@@ -51,6 +56,10 @@ unknown methods and properties fail rather than being ignored.
 - The service verifies profile ownership and the first-party launch identity
   before parsing a method. Cross-profile ids are not a discovery mechanism:
   they return `not_found`, not ownership information.
+- The broker stamps one of `mail`, `calendar`, `reminders` or `settings` on
+  each transferred channel. The service enforces the closed per-client method
+  partition before parsing params; for example Mail cannot delete an event and
+  Reminders cannot remove an account.
 - Normal IPC never contains passwords, authorization codes, access or refresh
   tokens, provider client secrets, vault keys or callback query strings.
   `accounts.begin_connect` carries only a provider type. OAuth browser launch

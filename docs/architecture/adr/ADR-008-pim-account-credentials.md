@@ -134,12 +134,14 @@ retry mechanism. Logs, audit, crash reports, notifications, portal inventory
 and diagnostics contain credential classes and result states only, never
 values or callback query strings.
 
-The per-profile socket must verify the peer uid and a first-party application
-launch identity. Peer uid alone is insufficient because unrelated applications
-run as the same person. The exact launch-capability mechanism is an
-implementation prerequisite: until a hostile same-uid caller is denied read,
-mutation and account-removal methods, the fixture-backed apps remain dev/CI
-only and no production desktop entry or MIME handler may ship.
+The application channel follows
+[`ADR-009`](ADR-009-pim-capability-channels.md): a privileged broker hands an
+unnamed preconnected Unix endpoint directly to a fixed first-party launch and
+transfers its peer to the service. There is no application-connectable PIM
+socket. Peer uid alone remains insufficient because unrelated applications run
+as the same person. Until the broker, non-dumpable sandbox and hostile same-uid
+denial pass at runtime, the fixture-backed apps remain dev/CI only and no
+production desktop entry or MIME handler may ship.
 
 ## Consequences
 

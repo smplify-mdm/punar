@@ -13,8 +13,13 @@
 
 #![forbid(unsafe_code)]
 
+mod channel;
 mod store;
 
+pub use channel::{
+    AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
+    control_channel_pair, receive_client_channel, send_client_channel,
+};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
 
 use serde::{Deserialize, Serialize};
