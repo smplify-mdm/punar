@@ -32,12 +32,9 @@
 // raw id back in the bar, which is the bug that was fixed this morning.
 // tests/desktop/mail-identity-contract-test.sh asserts all three agree.
 //
-// WHAT THIS IS AND IS NOT. This is the window spike named in
-// docs/design/mail-calendar-contacts.md §4 as the gate every estimate past it
-// depended on: until an xdg-toplevel existed in this repository, the cost of a
-// first-party client was a guess. It is not a mail client. It reads no mail,
-// speaks to no server, and stores nothing, and it says so on its own face in
-// the honesty grammar rather than drawing a convincing empty inbox.
+// Production reads only from the descriptor-backed MailModel. The old visual
+// fixture remains available to explicit developer screenshot runs through
+// PUNAR_MAIL_FIXTURES=1; connection failure never selects it implicitly.
 //
 // THE QUESTION IT ANSWERS. Every one of the seventeen shell surfaces is a
 // layer-shell PanelWindow (plus Lock, a WlSessionLock); FloatingWindow,
@@ -69,6 +66,22 @@ import Theme
 ShellRoot {
     id: root
 
+    readonly property bool fixtureMode: Quickshell.env("PUNAR_MAIL_FIXTURES") === "1"
+
+    MailModel {
+        id: liveMailbox
+        enabled: !root.fixtureMode
+    }
+
+    Loader {
+        id: fixtureLoader
+        active: root.fixtureMode
+        source: root.fixtureMode ? "Fixtures.qml" : ""
+    }
+
+    readonly property var mailbox: root.fixtureMode && fixtureLoader.item !== null
+        ? fixtureLoader.item : liveMailbox
+
     IdentityRing {
         id: identity
     }
@@ -99,10 +112,10 @@ ShellRoot {
         target: "mail"
 
         function open(index: int): string {
-            var t = fixtures.threads[index];
+            var t = root.mailbox.threads[index];
             if (t === undefined)
                 return "no-such-thread";
-            root.openThread = t;
+            root.showThread(t);
             return "open " + t.correspondent;
         }
         function close(): string {
@@ -111,6 +124,8 @@ ShellRoot {
             return "closed";
         }
         function compose(): string {
+            if (!root.fixtureMode)
+                return "sending-not-available";
             root.composing = true;
             return "composing";
         }
@@ -126,12 +141,23 @@ ShellRoot {
     // classes and no modal anywhere.
     property bool composing: false
 
+    function showThread(thread: var): void {
+        root.openThread = thread;
+        root.openMessages = [];
+        root.threadStatus = root.fixtureMode ? "FIXTURE DATA · NOTHING IS CONNECTED"
+            : "READING THREAD…";
+        if (root.fixtureMode)
+            root.openMessages = root.mailbox.messagesFor(thread.correspondent);
+        else
+            liveMailbox.openThread(thread);
+    }
+
     ComposeWindow {
         id: composeWindow
 
         visible: root.composing
-        account: fixtures.account
-        protocol: fixtures.protocol
+        account: root.mailbox.account
+        protocol: root.mailbox.protocol
         onCloseRequested: root.composing = false
     }
 
@@ -139,16 +165,37 @@ ShellRoot {
     // more (each would be its own toplevel) and nothing here assumes a single
     // one except this property, which is the only line that would change.
     property var openThread: null
+    property var openMessages: []
+    property string threadStatus: ""
+
+    Connections {
+        target: liveMailbox
+
+        function onThreadLoaded(thread, messages): void {
+            if (root.openThread !== null && root.openThread.thread_id === thread.thread_id) {
+                root.openMessages = messages;
+                root.threadStatus = "LOCAL COPY · REMOTE CONTENT BLOCKED BY DEFAULT";
+            }
+        }
+
+        function onThreadFailed(thread, message): void {
+            if (root.openThread !== null && root.openThread.thread_id === thread.thread_id) {
+                root.openMessages = [];
+                root.threadStatus = message.toUpperCase();
+            }
+        }
+    }
 
     ThreadWindow {
         id: threadWindow
 
         visible: root.openThread !== null
         thread: root.openThread
-        messages: root.openThread === null ? []
-            : fixtures.messagesFor(root.openThread.correspondent)
-        account: fixtures.account
-        protocol: fixtures.protocol
+        messages: root.openMessages
+        account: root.mailbox.account
+        protocol: root.mailbox.protocol
+        statusText: root.threadStatus
+        fixtureMode: root.fixtureMode
         onCloseRequested: root.openThread = null
     }
 
@@ -320,11 +367,6 @@ ShellRoot {
             anchors.fill: parent
             focus: true
 
-            // ---- model -------------------------------------------------
-            Fixtures {
-                id: fixtures
-            }
-
             // The list is flat and carries its own group heads, because a
             // section header that scrolls with its section is one item in one
             // list — and a ListView with sticky headers would need a second
@@ -333,8 +375,8 @@ ShellRoot {
                 var out = [];
                 var group = "";
                 var pending = -1;
-                for (var i = 0; i < fixtures.threads.length; i++) {
-                    var t = fixtures.threads[i];
+                for (var i = 0; i < root.mailbox.threads.length; i++) {
+                    var t = root.mailbox.threads[i];
                     if (t.group !== group) {
                         group = t.group;
                         out.push({ "head": group, "count": 0, "thread": null });
@@ -372,9 +414,9 @@ ShellRoot {
                     // index does not shrink, does not split, and grows no pane.
                     var r = frame.rows[frame.cursor];
                     if (r !== undefined && r.thread !== null)
-                        root.openThread = r.thread;
+                        root.showThread(r.thread);
                     event.accepted = true;
-                } else if (event.key === Qt.Key_C) {
+                } else if (root.fixtureMode && event.key === Qt.Key_C) {
                     root.composing = true;
                     event.accepted = true;
                 } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
@@ -418,7 +460,8 @@ ShellRoot {
                         color: Theme.shellFg
                     }
                     Text {
-                        text: fixtures.account.toUpperCase() + " · " + fixtures.protocol
+                        text: root.mailbox.account === "" ? "LOCAL · PRIVATE"
+                            : root.mailbox.account.toUpperCase() + " · " + root.mailbox.protocol
                         font.family: Theme.fontMono
                         font.pixelSize: 9
                         font.weight: 500
@@ -440,7 +483,7 @@ ShellRoot {
                         // fixture's real 3, so two numbers about the same thing
                         // disagreed in one window — the exact dishonesty this
                         // language exists to prevent. Both now read the model.
-                        text: fixtures.unreadCount + " unread"
+                        text: root.mailbox.unreadCount + " unread"
                         font.family: Theme.fontSans
                         font.pixelSize: 12
                         font.weight: 400
@@ -448,11 +491,9 @@ ShellRoot {
                     }
                     Text {
                         anchors.right: parent.right
-                        // FIXTURE, and the footer says so. A real client prints
-                        // the sync clock; this one prints a constant, because a
-                        // surface that invents a plausible timestamp is lying
-                        // in the one register this design cares most about.
-                        text: "FIXTURE DATA"
+                        text: root.fixtureMode ? "FIXTURE DATA"
+                            : root.mailbox.syncedAt === "" ? "NOT YET SYNCED"
+                                : "SYNCED · " + root.mailbox.syncedAt
                         font.family: Theme.fontMono
                         font.pixelSize: 9
                         font.weight: 500
@@ -502,7 +543,7 @@ ShellRoot {
                         topPadding: 0
                     }
                     RailRow {
-                        label: fixtures.account
+                        label: root.mailbox.account === "" ? "No account" : root.mailbox.account
                         tally: 0
                         current: false
                         verbatim: true
@@ -512,7 +553,7 @@ ShellRoot {
                         text: "VIEWS"
                     }
                     Repeater {
-                        model: fixtures.views
+                        model: root.mailbox.views
 
                         RailRow {
                             required property var modelData
@@ -520,7 +561,7 @@ ShellRoot {
                             label: modelData.name
                             // -1 means "ask the model", so the rail and the
                             // masthead cannot drift apart.
-                            tally: modelData.count === -1 ? fixtures.unreadCount : modelData.count
+                            tally: modelData.count === -1 ? root.mailbox.unreadCount : modelData.count
                             current: modelData.current
                             verbatim: false
                         }
@@ -530,7 +571,7 @@ ShellRoot {
                         text: "FOLDERS · IMAP"
                     }
                     Repeater {
-                        model: fixtures.folders
+                        model: root.mailbox.folders
 
                         RailRow {
                             required property string modelData
@@ -815,7 +856,7 @@ ShellRoot {
                                     required property int index
 
                                     text: threadRow.t.labels[index].toUpperCase()
-                                    fill: root.labelTint(fixtures.slotFor(threadRow.t.labels[index]))
+                                    fill: root.labelTint(root.mailbox.slotFor(threadRow.t.labels[index]))
                                     textInk: root.labelInk()
                                     // An identity tint is visible on both moods.
                                     edged: false
@@ -889,7 +930,8 @@ ShellRoot {
                     anchors.left: parent.left
                     anchors.leftMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "J/K MOVE · ↵ OPEN · C COMPOSE · ESC CLOSE"
+                    text: root.fixtureMode ? "J/K MOVE · ↵ OPEN · C COMPOSE · ESC CLOSE"
+                        : "J/K MOVE · ↵ OPEN · ESC CLOSE"
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
@@ -900,14 +942,41 @@ ShellRoot {
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    // THE ONLY HONEST THING THIS SURFACE CAN SAY. Every string
-                    // above is written by hand; no account exists, no server
-                    // was contacted, and nothing was read from disk.
-                    text: "FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED"
+                    text: root.fixtureMode ? "FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED"
+                        : root.mailbox.footerStatus
                     font.family: Theme.fontMono
                     font.pixelSize: 8
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(8, 0.13)
+                    color: Theme.shellInk3
+                }
+            }
+
+            Column {
+                anchors.centerIn: list
+                width: Math.min(440, list.width - 48)
+                spacing: 8
+                visible: !root.fixtureMode && root.mailbox.state !== "ready"
+
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: root.mailbox.stateTitle
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    font.family: Theme.fontSans
+                    font.pixelSize: 22
+                    font.weight: 600
+                    color: Theme.shellFg
+                }
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: root.mailbox.detail
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    font.family: Theme.fontSans
+                    font.pixelSize: 13
                     color: Theme.shellInk3
                 }
             }

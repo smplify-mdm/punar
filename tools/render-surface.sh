@@ -86,6 +86,7 @@ docker run --rm \
     --env "PUNAR_H=${HEIGHT}" \
     --env "PUNAR_THEME=${THEME}" \
     --env "PUNAR_IPC=${PUNAR_RENDER_IPC:-}" \
+    --env "PUNAR_MAIL_FIXTURES=${PUNAR_RENDER_MAIL_FIXTURES:-}" \
     --env "PUNAR_SUFFIX=${SUFFIX}" \
     "${IMAGE}" sh -eu -c '
       # Stage exactly as the image does, so absolute paths resolve.

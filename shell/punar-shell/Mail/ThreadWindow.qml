@@ -28,6 +28,8 @@ FloatingWindow {
     required property var messages
     required property string account
     required property string protocol
+    required property string statusText
+    required property bool fixtureMode
 
     title: win.thread === null ? "Thread" : win.thread.subject
     minimumSize: Qt.size(520, 380)
@@ -113,7 +115,7 @@ FloatingWindow {
                 }
                 Text {
                     anchors.right: parent.right
-                    text: "FIXTURE DATA"
+                    text: win.fixtureMode ? "FIXTURE DATA" : "PLAIN TEXT · LOCAL COPY"
                     font.family: Theme.fontMono
                     font.pixelSize: 9
                     font.weight: 500
@@ -314,7 +316,7 @@ FloatingWindow {
                 anchors.right: parent.right
                 anchors.rightMargin: 16
                 anchors.verticalCenter: parent.verticalCenter
-                text: "FIXTURE DATA · NOTHING IS CONNECTED"
+                text: win.statusText
                 font.family: Theme.fontMono
                 font.pixelSize: 8
                 font.weight: 500

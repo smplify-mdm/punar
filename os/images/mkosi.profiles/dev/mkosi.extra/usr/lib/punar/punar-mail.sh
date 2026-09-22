@@ -11,4 +11,4 @@ set -eu
 . /usr/lib/punar/punar-graphics-env.sh
 punar_configure_graphics
 
-exec qs -p /usr/share/punar/shell/Mail "$@"
+PUNAR_MAIL_FIXTURES=1 exec qs -p /usr/share/punar/shell/Mail "$@"
