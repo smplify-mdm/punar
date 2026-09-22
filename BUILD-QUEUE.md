@@ -187,8 +187,13 @@ Next build slice, in order:
    a bounded unnamed one-use credential-entry channel now locks the helper down
    before input exists, distinguishes cancellation, rejects oversized frames,
    clears caller input and moves the received value directly into that vault.
-   The fixed helper executable/launcher, QML account flow and transactional
-   service/account integration remain open. The
+   A service-internal account coordinator now validates private IMAP/SMTP
+   configuration before credential entry, atomically creates typed incoming
+   and outgoing vault records, requires provider verification before making an
+   account ready, rolls staged credentials back on every checked failure and
+   removes metadata/configuration/credentials together. The fixed helper
+   executable/launcher, real provider verifier, QML account flow and
+   crash-reconciliation proof remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
    hashed filter/sort set and rejects tampering/cross-context replay. Its
    random profile-bound key is now created atomically in service-private state,
@@ -204,12 +209,16 @@ Next build slice, in order:
    honest empty accounts, structural Calendar/Reminder lists, local
    event/reminder mutations, typed conflicts, provider-neutral account
    metadata/listing and the durable change stream are store-backed. Account
-   metadata has a one-way v1-to-v2 migration and contains no credential or
-   provider endpoint field; no setup path can create it yet. The first Mail
+   metadata and service-private open-protocol configuration now have one-way
+   v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
+   normal application IPC, and credentials remain only in the vault. The
+   library coordinator can create and remove this state after a verifier
+   succeeds, but no application-callable setup path exists yet. The first Mail
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, durable Mail storage, IMAP/SMTP, provider/account
+   event/reminder reads, durable Mail storage, real IMAP/SMTP verification and
+   sync, provider/account
    methods and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

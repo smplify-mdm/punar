@@ -14,11 +14,11 @@ use thiserror::Error;
 use crate::{
     Account, AccountAuthState, AccountKind, Calendar, CalendarEvent, CalendarEventKind,
     CalendarKind, ChangeEvent, ChangeEventKind, ChangeOperation, EntityKind, EventInput, EventWhen,
-    Reminder, ReminderDue, ReminderInput, ReminderKind, ReminderList, ReminderListKind,
-    SyncMetadata,
+    OpenProtocolConfig, ProviderType, Reminder, ReminderDue, ReminderInput, ReminderKind,
+    ReminderList, ReminderListKind, SyncMetadata,
 };
 
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 3;
 const MAX_CHANGES: usize = 4096;
 const MAX_CHANGE_PAGE: usize = 1000;
 const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
@@ -90,6 +90,7 @@ struct State {
     profile_uid: u32,
     revision: u64,
     accounts: BTreeMap<String, Account>,
+    open_protocol_configs: BTreeMap<String, OpenProtocolConfig>,
     calendars: BTreeMap<String, Calendar>,
     events: BTreeMap<String, CalendarEvent>,
     reminder_lists: BTreeMap<String, ReminderList>,
@@ -106,6 +107,23 @@ struct StateV1 {
     profile_id: String,
     profile_uid: u32,
     revision: u64,
+    calendars: BTreeMap<String, Calendar>,
+    events: BTreeMap<String, CalendarEvent>,
+    reminder_lists: BTreeMap<String, ReminderList>,
+    reminders: BTreeMap<String, Reminder>,
+    changes: Vec<StoredChange>,
+}
+
+/// Version 2 added public account metadata without the service-private server
+/// configuration required to resume synchronization.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateV2 {
+    schema_version: u32,
+    profile_id: String,
+    profile_uid: u32,
+    revision: u64,
+    accounts: BTreeMap<String, Account>,
     calendars: BTreeMap<String, Calendar>,
     events: BTreeMap<String, CalendarEvent>,
     reminder_lists: BTreeMap<String, ReminderList>,
@@ -173,16 +191,31 @@ impl PimStore {
 
     /// Persist provider-neutral account metadata only after the account
     /// coordinator has verified the remote service and committed credentials.
-    /// Passwords, tokens and server configuration are not representable here.
-    pub fn register_account(&self, account: Account, now: &str) -> Result<Account, StoreError> {
+    /// Passwords and tokens are not representable here; non-secret server
+    /// configuration remains service-private and is not included in snapshots.
+    pub(crate) fn register_open_protocol_account(
+        &self,
+        account: Account,
+        config: OpenProtocolConfig,
+        now: &str,
+    ) -> Result<Account, StoreError> {
         validate_timestamp(now)?;
         validate_account(&account)?;
+        validate_open_protocol_config(&config)?;
+        if account.provider_type != ProviderType::OpenProtocols {
+            return Err(StoreError::Invalid(
+                "open-protocol configuration has the wrong provider type".into(),
+            ));
+        }
         self.commit(|state| {
             if state.accounts.contains_key(&account.account_id) {
                 return Err(StoreError::Invalid("account already exists".into()));
             }
             let account_id = account.account_id.clone();
             state.accounts.insert(account_id.clone(), account.clone());
+            state
+                .open_protocol_configs
+                .insert(account_id.clone(), config);
             state.record_change(
                 EntityKind::Account,
                 ChangeOperation::Upsert,
@@ -192,6 +225,27 @@ impl PimStore {
             )?;
             Ok(account)
         })
+    }
+
+    pub(crate) fn validate_open_protocol_config(
+        &self,
+        config: &OpenProtocolConfig,
+    ) -> Result<(), StoreError> {
+        validate_open_protocol_config(config)
+    }
+
+    pub(crate) fn open_protocol_config(
+        &self,
+        account_id: &str,
+    ) -> Result<OpenProtocolConfig, StoreError> {
+        validate_account_id(account_id)?;
+        self.state
+            .lock()
+            .unwrap()
+            .open_protocol_configs
+            .get(account_id)
+            .cloned()
+            .ok_or(StoreError::NotFound)
     }
 
     /// Remove metadata after the service coordinator has stopped provider work
@@ -204,6 +258,7 @@ impl PimStore {
             if state.accounts.remove(account_id).is_none() {
                 return Err(StoreError::NotFound);
             }
+            state.open_protocol_configs.remove(account_id);
             state.record_change(
                 EntityKind::Account,
                 ChangeOperation::Delete,
@@ -562,6 +617,7 @@ impl State {
             profile_uid,
             revision: 0,
             accounts: BTreeMap::new(),
+            open_protocol_configs: BTreeMap::new(),
             calendars: BTreeMap::from([(calendar_id, calendar)]),
             events: BTreeMap::new(),
             reminder_lists: BTreeMap::from([(list_id, list)]),
@@ -582,6 +638,27 @@ impl State {
         }
         validate_profile_id(&self.profile_id)?;
         validate_keyed_records(&self.accounts, |record| &record.account_id, "account")?;
+        for (account_id, config) in &self.open_protocol_configs {
+            validate_account_id(account_id)?;
+            let account = self.accounts.get(account_id).ok_or_else(|| {
+                StoreError::Corrupt("server configuration references missing account".into())
+            })?;
+            if account.provider_type != ProviderType::OpenProtocols {
+                return Err(StoreError::Corrupt(
+                    "server configuration has the wrong provider type".into(),
+                ));
+            }
+            validate_open_protocol_config(config)?;
+        }
+        if self.accounts.values().any(|account| {
+            account.provider_type == ProviderType::OpenProtocols
+                && account.auth_state == AccountAuthState::Ready
+                && !self.open_protocol_configs.contains_key(&account.account_id)
+        }) {
+            return Err(StoreError::Corrupt(
+                "ready open-protocol account has no server configuration".into(),
+            ));
+        }
         validate_keyed_records(&self.calendars, |record| &record.calendar_id, "calendar")?;
         validate_keyed_records(&self.events, |record| &record.event_id, "event")?;
         validate_keyed_records(&self.reminder_lists, |record| &record.list_id, "list")?;
@@ -708,7 +785,8 @@ fn load_or_migrate(
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| StoreError::Corrupt("missing integer schema_version".into()))?;
     match version {
-        2 => serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string())),
+        3 => serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string())),
+        2 => migrate_v2(path, bytes, profile_id, profile_uid),
         1 => migrate_v1(path, bytes, profile_id, profile_uid),
         0 => migrate_v0(path, bytes, profile_id, profile_uid),
         found => Err(StoreError::UnsupportedVersion {
@@ -716,6 +794,46 @@ fn load_or_migrate(
             supported: STORE_VERSION,
         }),
     }
+}
+
+fn migrate_v2(
+    path: &Path,
+    bytes: &[u8],
+    profile_id: &str,
+    profile_uid: u32,
+) -> Result<State, StoreError> {
+    let old: StateV2 =
+        serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    if old.schema_version != 2 {
+        return Err(StoreError::Corrupt("invalid v2 marker".into()));
+    }
+    if old.profile_id != profile_id || old.profile_uid != profile_uid {
+        return Err(StoreError::ProfileMismatch);
+    }
+    let mut accounts = old.accounts;
+    for account in accounts.values_mut() {
+        if account.provider_type == ProviderType::OpenProtocols {
+            account.auth_state = AccountAuthState::ActionRequired;
+            account.connectivity = crate::Connectivity::Unknown;
+        }
+    }
+    let state = State {
+        schema_version: STORE_VERSION,
+        profile_id: old.profile_id,
+        profile_uid: old.profile_uid,
+        revision: old.revision,
+        accounts,
+        open_protocol_configs: BTreeMap::new(),
+        calendars: old.calendars,
+        events: old.events,
+        reminder_lists: old.reminder_lists,
+        reminders: old.reminders,
+        changes: old.changes,
+    };
+    state.validate(profile_id, profile_uid)?;
+    persist_backup(path, bytes, "pre-v3")?;
+    persist(path, &state)?;
+    Ok(state)
 }
 
 fn migrate_v1(
@@ -738,6 +856,7 @@ fn migrate_v1(
         profile_uid: old.profile_uid,
         revision: old.revision,
         accounts: BTreeMap::new(),
+        open_protocol_configs: BTreeMap::new(),
         calendars: old.calendars,
         events: old.events,
         reminder_lists: old.reminder_lists,
@@ -745,7 +864,7 @@ fn migrate_v1(
         changes: old.changes,
     };
     state.validate(profile_id, profile_uid)?;
-    persist_backup(path, bytes, "pre-v2")?;
+    persist_backup(path, bytes, "pre-v3")?;
     persist(path, &state)?;
     Ok(state)
 }
@@ -770,6 +889,7 @@ fn migrate_v0(
         profile_uid: old.profile_uid,
         revision: 0,
         accounts: BTreeMap::new(),
+        open_protocol_configs: BTreeMap::new(),
         calendars: old.calendars,
         events: old.events,
         reminder_lists: old.reminder_lists,
@@ -1173,6 +1293,44 @@ fn validate_account(account: &Account) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_open_protocol_config(config: &OpenProtocolConfig) -> Result<(), StoreError> {
+    bounded_nonempty(&config.username, 320, "provider username")?;
+    if config.username.chars().any(char::is_control) {
+        return Err(StoreError::Invalid(
+            "provider username contains control characters".into(),
+        ));
+    }
+    validate_mail_server(&config.imap)?;
+    validate_mail_server(&config.smtp)
+}
+
+fn validate_mail_server(config: &crate::MailServerConfig) -> Result<(), StoreError> {
+    if config.port == 0 || !valid_server_host(&config.host) {
+        return Err(StoreError::Invalid(
+            "mail server host or port is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_server_host(value: &str) -> bool {
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let value = value.strip_suffix('.').unwrap_or(value);
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn validate_sync(sync: &SyncMetadata) -> Result<(), StoreError> {
     if sync.local_revision == 0 {
         return Err(StoreError::Corrupt(
@@ -1378,6 +1536,22 @@ mod tests {
         }
     }
 
+    fn provider_config() -> OpenProtocolConfig {
+        OpenProtocolConfig {
+            username: "alice@example.com".to_string(),
+            imap: crate::MailServerConfig {
+                host: "imap.example.com".to_string(),
+                port: 993,
+                security: crate::MailServerSecurity::Tls,
+            },
+            smtp: crate::MailServerConfig {
+                host: "smtp.example.com".to_string(),
+                port: 465,
+                security: crate::MailServerSecurity::Tls,
+            },
+        }
+    }
+
     #[test]
     fn fresh_store_has_only_blank_structural_containers() {
         let path = temp_store("empty");
@@ -1411,7 +1585,9 @@ mod tests {
     fn account_metadata_is_durable_and_removal_emits_no_credentials() {
         let path = temp_store("account");
         let store = open(&path);
-        let registered = store.register_account(account("acct_A1"), NOW).unwrap();
+        let registered = store
+            .register_open_protocol_account(account("acct_A1"), provider_config(), NOW)
+            .unwrap();
         assert_eq!(
             registered.primary_address.unwrap().address,
             "alice@example.com"
@@ -1420,6 +1596,10 @@ mod tests {
 
         let reopened = open(&path);
         assert_eq!(reopened.snapshot().accounts.len(), 1);
+        assert_eq!(
+            reopened.open_protocol_config("acct_A1").unwrap(),
+            provider_config()
+        );
         let text = fs::read_to_string(&path).unwrap();
         for forbidden in ["password", "access_token", "refresh_token", "client_secret"] {
             assert!(!text.contains(forbidden), "persisted {forbidden}");
@@ -1685,6 +1865,10 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         value["schema_version"] = serde_json::json!(1);
         value.as_object_mut().unwrap().remove("accounts");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("open_protocol_configs");
         let bytes = serde_json::to_vec_pretty(&value).unwrap();
         fs::write(&path, &bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1693,7 +1877,43 @@ mod tests {
         assert_eq!(migrated.reminders[0].title, "Preserve me");
         assert!(migrated.accounts.is_empty());
         assert_eq!(
-            fs::read(path.with_file_name("state.json.pre-v2")).unwrap(),
+            fs::read(path.with_file_name("state.json.pre-v3")).unwrap(),
+            bytes
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn v2_migration_marks_unconfigured_accounts_as_action_required() {
+        let path = temp_store("v2-migration");
+        let store = open(&path);
+        store
+            .register_open_protocol_account(account("acct_A1"), provider_config(), NOW)
+            .unwrap();
+        drop(store);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schema_version"] = serde_json::json!(2);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("open_protocol_configs");
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let migrated = open(&path).snapshot();
+        assert_eq!(migrated.accounts.len(), 1);
+        assert_eq!(
+            migrated.accounts[0].auth_state,
+            AccountAuthState::ActionRequired
+        );
+        assert!(matches!(
+            open(&path).open_protocol_config("acct_A1"),
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(
+            fs::read(path.with_file_name("state.json.pre-v3")).unwrap(),
             bytes
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -1705,7 +1925,7 @@ mod tests {
         open(&path);
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["schema_version"] = serde_json::json!(3);
+        value["schema_version"] = serde_json::json!(4);
         let bytes = serde_json::to_vec_pretty(&value).unwrap();
         fs::write(&path, &bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1716,8 +1936,8 @@ mod tests {
         assert!(matches!(
             error,
             StoreError::UnsupportedVersion {
-                found: 3,
-                supported: 2
+                found: 4,
+                supported: 3
             }
         ));
         assert_eq!(fs::read(&path).unwrap(), bytes);

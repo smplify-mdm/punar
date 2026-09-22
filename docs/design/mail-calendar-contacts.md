@@ -12,16 +12,18 @@
 > credential-vault library now refuses non-LUKS storage and keeps values out of
 > ordinary IPC. A tested unnamed one-use credential-entry channel locks its
 > helper down before input exists and transfers a bounded value directly into
-> the vault. There is still no fixed helper executable, sign-in UI, account
-> transaction or provider connection. There
+> the vault. A library-only coordinator now validates service-private IMAP/SMTP
+> configuration, stages separately typed credentials, invokes a closed
+> provider-verification interface, publishes the account only after success
+> and rolls back checked failures. There is still no fixed helper executable,
+> sign-in UI, real provider connection or crash-reconciliation proof. There
 > is still no service listener, application binding, network adapter or
 > production image entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
 > attachment payloads; it has no transport or durable inbox yet. Calendar and
-> Reminders remain unavailable to users. Provider-neutral account metadata now
-> survives restart and backs `accounts.list`, but no sign-in workflow is
-> allowed to create it until credential, remote verification and rollback are
-> one transaction.
+> Reminders remain unavailable to users. Provider-neutral account metadata and
+> service-private server configuration now survive restart and the former
+> backs `accounts.list`, but there is no application-callable sign-in workflow.
 > No part of this status may be shortened to “Mail is built” until the runtime
 > gates in section 9 pass.
 

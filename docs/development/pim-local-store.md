@@ -27,7 +27,12 @@ opens a process or network boundary. The accepted external contract remains
   parent-directory `fsync` before a mutation reports success;
 - fail-closed handling for corrupt, future-version, cross-profile,
   over-permissive and structurally inconsistent state;
-- a one-way v0-to-v1 migration with a durable, non-overwritten backup.
+- one-way v0/v1/v2-to-v3 migrations with durable, non-overwritten backups;
+- durable provider-neutral account metadata plus service-private IMAP/SMTP
+  configuration that never appears in application snapshots; and
+- a transaction coordinator that stages one shared app password as separately
+  typed incoming/outgoing vault records, verifies the provider, publishes the
+  ready account only after success and rolls back checked failures.
 
 `crates/punar-pimd/src/channel.rs` additionally proves the accepted ADR-009
 transport primitive: an unnamed application/service stream endpoint is moved
@@ -68,12 +73,17 @@ so copied or relabelled ciphertext fails authentication. Caller input and
 temporary plaintext are zeroized, files are exact 0600/no-follow/single-link,
 and removing an account durably removes all of its records. The ordinary data
 store and IPC still contain no password, OAuth code/token, provider secret or
-encryption key field. `credential_entry.rs` now provides an unnamed one-use
+encryption key field. Non-secret IMAP/SMTP hosts, ports and username are kept
+in the service-private store and excluded from `Snapshot` and ordinary IPC.
+`credential_entry.rs` now provides an unnamed one-use
 channel whose helper locks down before input exists, rejects empty/oversized
 values, clears caller input and moves the service-side value directly into the
-vault. No fixed helper executable, launcher, QML flow, account transaction or
-provider adapter exists yet. It starts no resident process and performs no
-periodic work.
+vault. `account_setup.rs` coordinates validation, dual typed credential
+commit, provider verification, durable account publication, removal and
+checked-failure rollback. Its provider verifier is still an interface, not a
+network implementation. No fixed helper executable, launcher, QML flow or
+real provider adapter exists yet. It starts no resident process and performs
+no periodic work.
 
 ## Why the blank containers are not demo data
 
@@ -192,9 +202,19 @@ The crate's unit suite proves:
 47. oversized mail is refused before parse and Unicode truncation is safe;
 48. missing/invalid senders fail instead of receiving a fixture identity;
 49. provider-neutral account metadata survives restart and contains no
-    credential/token/server field; and
-50. the v1-to-v2 migration adds an empty account index without losing local
-    data and leaves an exact durable backup.
+    credential or token field;
+50. service-private server configuration survives restart without appearing
+    in the public snapshot;
+51. v1/v2-to-v3 migration preserves local data, marks legacy unconfigured
+    accounts as requiring action and leaves exact durable backups;
+52. malformed server configuration fails before credential entry;
+53. a verified account atomically persists private configuration plus both
+    typed credentials and can be reverified after restart;
+54. rejected credentials or invalid verified identity leave no account or
+    staged vault record; and
+55. account removal clears public metadata, private configuration and both
+    credential records; and
+56. a colliding setup attempt cannot replace an existing account password.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -207,14 +227,14 @@ install or activate `punar-pimd`, it still needs:
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
-  event responses, account setup/removal coordination, Mail and contacts
-  methods;
-- credential-vault integration with account transactions plus the fixed
-  launcher, executable and UI for the short-lived password-entry helper;
+  event responses, account setup/removal IPC, Mail and contacts methods;
+- the fixed launcher, executable and UI for the short-lived password-entry
+  helper, plus crash reconciliation for interrupted account transactions;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
-- durable Mail records plus bounded IMAP/SMTP transport and restart tests; and
+- a real TLS-verified IMAP/SMTP adapter, durable Mail records, bounded sync and
+  restart tests; and
 - a real application binding with empty, offline, conflict and error states.
 
 No desktop entry, MIME handler or onboarding suggestion is enabled by this

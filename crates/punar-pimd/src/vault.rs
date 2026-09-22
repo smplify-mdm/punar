@@ -207,12 +207,73 @@ impl CredentialVault {
         self.store(account_id, kind, &mut secret)
     }
 
+    /// Receive one open-protocol password and commit the IMAP and SMTP
+    /// credential records together. Many providers issue one app password for
+    /// both services; keeping two typed records lets each adapter request only
+    /// the credential class it needs without making the entry helper send the
+    /// secret twice.
+    pub(crate) fn receive_and_store_shared_password(
+        &self,
+        account_id: &str,
+        channel: OwnedFd,
+    ) -> Result<(), VaultError> {
+        let secret = receive_credential(channel)?;
+        validate_account_id(account_id)?;
+
+        let mut state = self.state.lock().unwrap();
+        if state
+            .records
+            .values()
+            .any(|record| record.account_id == account_id)
+        {
+            return Err(VaultError::Invalid);
+        }
+        let incoming =
+            self.encrypt_record(account_id, CredentialKind::IncomingPassword, &secret)?;
+        let outgoing =
+            self.encrypt_record(account_id, CredentialKind::OutgoingPassword, &secret)?;
+        let mut candidate = state.clone();
+        candidate.records.insert(
+            record_key(account_id, CredentialKind::IncomingPassword),
+            incoming,
+        );
+        candidate.records.insert(
+            record_key(account_id, CredentialKind::OutgoingPassword),
+            outgoing,
+        );
+        validate_state(&candidate, &self.profile_id)?;
+        persist_state(&self.path, &candidate)?;
+        *state = candidate;
+        Ok(())
+    }
+
     fn store_inner(
         &self,
         account_id: &str,
         kind: CredentialKind,
         secret: &[u8],
     ) -> Result<(), VaultError> {
+        validate_account_id(account_id)?;
+        if secret.is_empty() || secret.len() > MAX_SECRET_BYTES {
+            return Err(VaultError::Invalid);
+        }
+        let record = self.encrypt_record(account_id, kind, secret)?;
+        let key = record_key(account_id, kind);
+        let mut state = self.state.lock().unwrap();
+        let mut candidate = state.clone();
+        candidate.records.insert(key, record);
+        validate_state(&candidate, &self.profile_id)?;
+        persist_state(&self.path, &candidate)?;
+        *state = candidate;
+        Ok(())
+    }
+
+    fn encrypt_record(
+        &self,
+        account_id: &str,
+        kind: CredentialKind,
+        secret: &[u8],
+    ) -> Result<EncryptedRecord, VaultError> {
         validate_account_id(account_id)?;
         if secret.is_empty() || secret.len() > MAX_SECRET_BYTES {
             return Err(VaultError::Invalid);
@@ -231,34 +292,19 @@ impl CredentialVault {
                 },
             )
             .map_err(|_| VaultError::Crypto)?;
-        let record = EncryptedRecord {
+        Ok(EncryptedRecord {
             v: VAULT_VERSION,
             profile_id: self.profile_id.clone(),
             account_id: account_id.to_string(),
             kind,
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
-        };
-        let key = record_key(account_id, kind);
-        let mut state = self.state.lock().unwrap();
-        let mut candidate = state.clone();
-        candidate.records.insert(key, record);
-        validate_state(&candidate, &self.profile_id)?;
-        persist_state(&self.path, &candidate)?;
-        *state = candidate;
-        Ok(())
+        })
     }
 
     /// Use one decrypted value inside the service. The temporary plaintext is
     /// zeroized immediately after the callback returns and cannot be obtained
     /// through the public IPC dispatcher.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the first provider adapter is the next staged consumer"
-        )
-    )]
     pub(crate) fn with_secret<T>(
         &self,
         account_id: &str,
@@ -331,6 +377,15 @@ impl CredentialVault {
             .unwrap()
             .records
             .contains_key(&record_key(account_id, kind))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_test(state_root: &Path, profile_id: &str) -> Result<Self, VaultError> {
+        let proof = EncryptedStorageProof {
+            dev: nearest_existing_device(state_root)?,
+            device: "test-device".into(),
+        };
+        Self::open(state_root, profile_id, &proof)
     }
 }
 
@@ -849,6 +904,41 @@ mod tests {
             .unwrap();
         let disk = fs::read(root.join("credentials.json")).unwrap();
         assert!(!disk.windows(7).any(|window| window == b"one-use"));
+    }
+
+    #[test]
+    fn account_setup_never_replaces_an_existing_password() {
+        let tree = TempTree::new();
+        let root = tree.state_root();
+        let proof = tree.proof();
+        let vault = CredentialVault::open(&root, "profile_A1", &proof).unwrap();
+
+        for (password, expected) in [
+            (b"original-password".as_slice(), true),
+            (b"replacement-password".as_slice(), false),
+        ] {
+            let (helper, service) = crate::credential_entry_pair().unwrap();
+            let password = password.to_vec();
+            let sender = std::thread::spawn(move || {
+                let helper = crate::CredentialEntryHelper::lock_down(helper).unwrap();
+                let mut password = password;
+                helper.submit(&mut password).unwrap();
+            });
+            let result = vault.receive_and_store_shared_password("acct_A1", service);
+            sender.join().unwrap();
+            assert_eq!(result.is_ok(), expected);
+        }
+
+        for kind in [
+            CredentialKind::IncomingPassword,
+            CredentialKind::OutgoingPassword,
+        ] {
+            vault
+                .with_secret("acct_A1", kind, |value| {
+                    assert_eq!(value, b"original-password");
+                })
+                .unwrap();
+        }
     }
 
     #[test]

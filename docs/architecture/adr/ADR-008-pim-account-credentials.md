@@ -141,8 +141,13 @@ disables core dumps and future privilege gain before input exists, sends
 exactly one value over the pre-established private endpoint, clears its input
 on every result and exits. The service receives into a zeroizing buffer and
 moves that value directly into the encrypted vault. The ordinary Mail window
-never receives the password. The executable, fixed launcher and QML account
-flow remain implementation work; this library is not a sign-in feature.
+never receives the password. The implemented library coordinator validates
+service-private server configuration, creates incoming/outgoing credential
+records together, invokes a closed verification interface, publishes the
+ready account only after success and removes staged records on every checked
+failure. The executable, fixed launcher, real TLS/provider adapter, crash
+reconciliation and QML account flow remain implementation work; this library
+is not a sign-in feature.
 
 Account removal is a transaction: stop new work, revoke remote authorization
 when the provider supports it, delete the local credential and sync cursors,
@@ -184,8 +189,9 @@ production desktop entry or MIME handler may ship.
   their disclosed permissions; that compatibility path is separate from the
   first-party vault and is still reported as shared where appropriate.
 - A fixed password-entry executable/launcher and a verifiable first-party
-  launch capability remain implementation work. The one-use transport and
-  pre-input process lockdown are implemented as an unstaged library. Falling
+  launch capability remain implementation work. The one-use transport,
+  pre-input process lockdown and checked-failure account coordinator are
+  implemented as an unstaged library. Falling
   back to a normal Mail text field, a world- or user-readable socket, peer uid
   alone, or a generic “get secret” method is not permitted.
 

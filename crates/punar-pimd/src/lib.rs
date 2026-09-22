@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_setup;
 mod channel;
 mod connection;
 mod credential_entry;
@@ -29,6 +30,10 @@ mod service;
 mod store;
 mod vault;
 
+pub use account_setup::{
+    AccountCoordinator, AccountSetupError, OpenProtocolVerifier, ProviderCheckError,
+    VerifiedOpenProtocolIdentity,
+};
 pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
     control_channel_pair, receive_client_channel, send_client_channel,
@@ -245,6 +250,31 @@ pub struct Account {
     pub connectivity: Connectivity,
     pub last_sync_at: Option<String>,
     pub next_retry_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailServerSecurity {
+    Tls,
+    StartTls,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub security: MailServerSecurity,
+}
+
+/// Service-private, non-secret configuration for an open-protocol account.
+/// It never appears in application records or normal PIM IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenProtocolConfig {
+    pub username: String,
+    pub imap: MailServerConfig,
+    pub smtp: MailServerConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

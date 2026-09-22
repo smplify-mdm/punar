@@ -91,8 +91,12 @@ rather than being ignored.
   helper executable, launcher and account-setup UI are not implemented yet.
 - The implemented vault encrypts each credential with profile/account/kind
   associated data and refuses to open unless the service-private state path is
-  kernel-observed on a LUKS2 device-mapper filesystem. It is not yet wired to
-  an account/provider method, so this fact does not make sign-in available.
+  kernel-observed on a LUKS2 device-mapper filesystem. A library coordinator
+  now stores separately typed IMAP/SMTP records, calls a provider-verification
+  interface, publishes private server settings plus public account metadata
+  only after verification, and rolls back checked failures. There is no real
+  provider adapter or application-callable setup method yet, so this does not
+  make sign-in available.
 - QML windows have no direct network authority. The service owns transport,
   parsing, sync, durable state and credential use.
 - Mail bodies, event descriptions and reminder notes may cross this IPC because
@@ -159,8 +163,8 @@ status reports the durable account count rather than a fixture constant. It
 rechecks the trusted
 grant uid before parsing params, maps optimistic conflicts to bounded typed
 errors and emits signed change cursors only after persistence succeeds.
-Account setup/removal coordination, Mail, contacts, event responses and
-filtered event/reminder reads remain explicitly unstaged; this partial
+Account setup/removal IPC, real provider verification, Mail, contacts, event
+responses and filtered event/reminder reads remain explicitly unstaged; this partial
 dispatcher is not installed in a production image.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
