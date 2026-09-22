@@ -33,6 +33,10 @@ for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL
         echo "FAIL PIM service: locked account missing from ${postinstall}" >&2
         exit 1
     }
+    grep -Fq 'useradd --system --gid punar-mail' "${postinstall}" || {
+        echo "FAIL Mail service: locked account missing from ${postinstall}" >&2
+        exit 1
+    }
 done
 for socket in punar-pimd-application@.socket punar-pimd-account-helper@.socket; do
     unit="${PIM_UNIT_ROOT}/${socket}"
@@ -55,7 +59,43 @@ if grep -q '^\[Install\]' "${PIM_UNIT_ROOT}/punar-pimd@.service"; then
     echo 'FAIL PIM service: profile service must not be image-enabled' >&2
     exit 1
 fi
-echo 'ok   PIM service is profile-scoped, root-brokered, hardened and dormant'
+MAIL_SOCKET="${PIM_UNIT_ROOT}/punar-mail@.socket"
+MAIL_SERVICE="${PIM_UNIT_ROOT}/punar-mail@.service"
+grep -qx 'ListenSequentialPacket=/run/punar-mail-control/%i/launch.sock' "${MAIL_SOCKET}"
+grep -qx 'FileDescriptorName=launch' "${MAIL_SOCKET}"
+grep -qx 'SocketUser=root' "${MAIL_SOCKET}"
+grep -qx 'SocketGroup=root' "${MAIL_SOCKET}"
+grep -qx 'SocketMode=0600' "${MAIL_SOCKET}"
+grep -qx 'User=punar-mail' "${MAIL_SERVICE}"
+grep -qx 'PrivateNetwork=yes' "${MAIL_SERVICE}"
+grep -qx 'PrivateDevices=yes' "${MAIL_SERVICE}"
+grep -qx 'ProtectSystem=strict' "${MAIL_SERVICE}"
+grep -qx 'RestrictAddressFamilies=AF_UNIX' "${MAIL_SERVICE}"
+for unit in "${MAIL_SOCKET}" "${MAIL_SERVICE}"; do
+    if grep -q '^\[Install\]' "${unit}"; then
+        echo "FAIL Mail service: $(basename "${unit}") must not be image-enabled" >&2
+        exit 1
+    fi
+done
+for stager in \
+    "${DESKTOP_STAGER}" \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    "${REPO_ROOT}/os/images/arm64/container-build.sh"; do
+    grep -Fq 'release/punar-mail-bridge' "${stager}" || {
+        echo "FAIL Mail service: bridge binary is not staged by ${stager}" >&2
+        exit 1
+    }
+    grep -Fq 'release/punar-pim-launch' "${stager}" || {
+        echo "FAIL Mail service: privileged launch broker is not staged by ${stager}" >&2
+        exit 1
+    }
+done
+grep -Fq 'install -m 0750 "${cargo_target}/release/punar-pim-launch"' \
+    "${DESKTOP_STAGER}" || {
+    echo 'FAIL Mail service: privileged broker is not staged root-only' >&2
+    exit 1
+}
+echo 'ok   PIM and Mail services are profile-scoped, root-brokered, hardened and dormant'
 
 # Browser pages used to exercise storage isolation are dev/CI input. Catch a
 # destination regression here in seconds rather than after the release image

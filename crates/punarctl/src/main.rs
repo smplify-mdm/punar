@@ -151,6 +151,12 @@ enum Command {
         #[command(subcommand)]
         command: webapps::WebAppsCommand,
     },
+    /// Open a first-party personal information application through its
+    /// protected, profile-scoped capability bridge.
+    Mail {
+        #[command(subcommand)]
+        command: MailCommand,
+    },
     /// Show whether tracked settings still match, and what was put back.
     Compliance,
     /// Inspect effective policy.
@@ -246,6 +252,12 @@ enum CapabilitiesCommand {
         /// daemon validates it against the capability's allowed states.
         desired_state: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MailCommand {
+    /// Open Mail in the current signed desktop session.
+    Open,
 }
 
 #[derive(Subcommand)]
@@ -3610,6 +3622,17 @@ fn main() -> ExitCode {
             }
         },
         Command::WebApps { command } => webapps::run(command, &client, &style, json),
+        Command::Mail { command } => match command {
+            MailCommand::Open => match client.call("pim.mail.open", None) {
+                Ok(result) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error),
+            },
+        },
         Command::Audit { command } => match command {
             AuditCommand::Tail { n } => {
                 let hostname = local_hostname();

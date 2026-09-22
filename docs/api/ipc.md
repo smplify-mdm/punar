@@ -218,6 +218,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `webapps.list` / `webapps.get` | any connected peer; own uid only | no | no |
 | `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always |
 | `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always |
+| `pim.mail.open` | **human with a verified live desktop session; own uid only** | no | agent denials |
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
 | `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
@@ -887,6 +888,26 @@ the browser. `--all` enforces managed application policy independently for
 every installed id and returns explicit `updated`, `current`, and `failed`
 counts plus named failures, so a partial transaction is never presented as
 fully successful. An AI-attributed peer cannot invoke the mutation.
+
+### 5.15b `pim.mail.open`
+
+Params: none. This is a closed first-party launch method, not a generic process
+launcher. The caller cannot supply an executable, path, account, endpoint,
+environment value, URL, command, or secret. `punard` forwards only the
+kernel-attested caller uid and pid to a fixed root-owned broker.
+
+The broker verifies that pid belongs to the same non-system uid, derives a
+strict `wayland-N` socket only from `/run/user/<uid>`, verifies the socket peer
+and the root-owned Hyprland executable, and then transfers exactly two unnamed
+capabilities to the dormant Mail bridge: a profile-scoped read-only Mail
+channel and the verified Wayland connection. Mail is not given a general PIM
+control socket, settings methods, credential-entry channel, filesystem path,
+or network namespace. Agent-attributed callers and unverifiable sessions are
+denied before either capability is issued.
+
+Result: `{"opening":true,"application":"mail"}` after the handoff succeeds.
+The UI may still show a truthful empty, account-required, authentication, or
+sync error state; it never substitutes fixture mail for a live failure.
 
 ### 5.16 `update.status`
 

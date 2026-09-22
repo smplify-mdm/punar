@@ -19,6 +19,14 @@ if ! getent passwd punar-pim >/dev/null 2>&1; then
         --no-create-home --shell /usr/sbin/nologin punar-pim
 fi
 
+if ! getent group punar-mail >/dev/null 2>&1; then
+    groupadd --system punar-mail
+fi
+if ! getent passwd punar-mail >/dev/null 2>&1; then
+    useradd --system --gid punar-mail --home-dir /run/punar-mail \
+        --no-create-home --shell /usr/sbin/nologin punar-mail
+fi
+
 # Match x86 product policy: rootless Podman is available on demand, while its
 # user API socket and periodic lifecycle jobs remain explicitly opt-in.
 systemctl --global disable \

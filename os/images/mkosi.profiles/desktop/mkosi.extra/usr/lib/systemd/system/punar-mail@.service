@@ -1,0 +1,50 @@
+[Unit]
+Description=Punar profile-scoped Mail application for UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+Requires=punar-mail@%i.socket
+After=punar-mail@%i.socket
+
+[Service]
+Type=simple
+User=punar-mail
+Group=punar-mail
+Environment=PUNAR_PROFILE_UID=%i
+ExecStart=/usr/bin/punar-mail-bridge
+Sockets=punar-mail@%i.socket
+RuntimeDirectory=punar-mail/%i
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=no
+TimeoutStopSec=5s
+
+# Mail receives exactly two inherited capabilities: its read-only PIM stream
+# and the already-connected Wayland stream. Network and device namespaces stay
+# closed; the QML scene graph uses Qt's software backend.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CPUAccounting=yes
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install]. The application has zero idle residency.

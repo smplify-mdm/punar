@@ -183,6 +183,10 @@ fn launch_qml(
         .env("PUNAR_PROFILE_UID", profile_uid)
         .env("QML_IMPORT_PATH", "/usr/share/punar/shell")
         .env("QT_QPA_PLATFORM", "wayland")
+        // The locked service deliberately has no DRM devices. Keep Qt's
+        // scene graph on its software backend instead of silently widening
+        // the Mail process' hardware authority.
+        .env("QT_QUICK_BACKEND", "software")
         .env("WAYLAND_SOCKET", raw_wayland)
         .env("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
         .env("XDG_RUNTIME_DIR", runtime_dir)

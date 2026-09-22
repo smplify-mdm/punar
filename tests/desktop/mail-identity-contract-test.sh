@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Punar's non-shipping Mail window probe must have one stable runtime identity
-# while remaining impossible to mistake for a working mail application.
+# Punar Mail and its explicit developer fixture must share one stable runtime
+# identity without allowing fixture data into a product image.
 #
 # WHY THIS IS A TEST AND NOT A CONVENTION. `//@ pragma AppId` becomes the
 # xdg-toplevel app_id on Wayland. Apps.displayNameForAppId joins that runtime id
@@ -20,7 +20,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 QML="${REPO_ROOT}/shell/punar-shell/Mail/shell.qml"
 PRODUCT_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra"
 DEV_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra"
-APPS="${DEV_EXTRA}/usr/local/share/applications"
+PRODUCT_DESKTOP_SOURCE="${REPO_ROOT}/os/modules/desktop/applications/org.punar.Mail.desktop"
+DEV_APPS="${DEV_EXTRA}/usr/local/share/applications"
 GATE="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
 STAGER="${REPO_ROOT}/os/images/scripts/container-build.sh"
 
@@ -44,7 +45,7 @@ head -5 "${QML}" | grep -q '^//@ pragma Env QML_IMPORT_PATH = /usr/share/punar/s
 
 # 3 · the desktop entry's FILE ID must equal the app id, because that is the
 # only key the shell joins on.
-DESKTOP="${APPS}/${APP_ID}.desktop"
+DESKTOP="${PRODUCT_DESKTOP_SOURCE}"
 [ -f "${DESKTOP}" ] \
     || fail "no ${APP_ID}.desktop — the app id and the desktop file id must match or the bar prints the raw id"
 
@@ -53,23 +54,34 @@ WMCLASS=$(sed -n 's|^StartupWMClass=||p' "${DESKTOP}" | head -1)
 [ "${WMCLASS}" = "${APP_ID}" ] \
     || fail "StartupWMClass is '${WMCLASS}', app id is '${APP_ID}'"
 
-# The surface is deliberately fixture-backed. It exists only in the dev/CI
-# overlay for the graphical xdg-toplevel gate; the release image must contain
-# neither its launcher nor its data.
-grep -qx 'NoDisplay=true' "${DESKTOP}" \
-    || fail "the fixture-backed Mail probe is visible in the application launcher"
-grep -qx 'Name=Mail interface prototype' "${DESKTOP}" \
-    || fail "the hidden probe does not name itself as a prototype"
+# The product entry is a visible generic Mail application and reaches only the
+# closed punard launch method. It never starts QML directly.
+grep -qx 'Name=Mail' "${DESKTOP}" || fail "the product entry is not generically named Mail"
+! grep -q '^NoDisplay=true$' "${DESKTOP}" \
+    || fail "the real Mail application is hidden from the launcher"
+grep -qx 'Exec=punarctl mail open' "${DESKTOP}" \
+    || fail "the product entry bypasses the protected Mail launch method"
 ! grep -q '^MimeType=' "${DESKTOP}" \
-    || fail "the fixture-backed probe claims a real mail or calendar MIME handler"
+    || fail "Mail claims a message MIME handler before compose/import exists"
+
+# The complete fixture surface remains a visibly labelled, hidden dev-only
+# overlay. Production staging removes only Fixtures.qml, never the live model.
+DEV_DESKTOP="${DEV_APPS}/${APP_ID}.desktop"
+[ -f "${DEV_DESKTOP}" ] || fail "the developer Mail fixture entry is missing"
+grep -qx 'NoDisplay=true' "${DEV_DESKTOP}" \
+    || fail "the fixture-backed Mail probe is visible in the application launcher"
+grep -qx 'Name=Mail interface prototype' "${DEV_DESKTOP}" \
+    || fail "the hidden probe does not name itself as a prototype"
 grep -q 'FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED' "${QML}" \
     || fail "the prototype no longer discloses its fixture state on its own surface"
-[ ! -e "${PRODUCT_EXTRA}/usr/local/share/applications/${APP_ID}.desktop" ] \
-    || fail "the production image still ships the fixture-backed Mail desktop entry"
 [ ! -e "${PRODUCT_EXTRA}/usr/lib/punar/punar-mail.sh" ] \
     || fail "the production image still ships the fixture-backed Mail launcher"
-grep -Fq "rm -rf \"\${extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
-    || fail "desktop staging does not remove Mail fixture QML from the production image"
+grep -Fq 'install -m 0644 "${mod}/applications/org.punar.Mail.desktop"' "${STAGER}" \
+    || fail "desktop staging does not install the product Mail entry"
+grep -Fq "rm -f \"\${extra}/usr/share/punar/shell/Mail/Fixtures.qml\"" "${STAGER}" \
+    || fail "desktop staging does not remove Mail fixture data from the production image"
+! grep -Fq "rm -rf \"\${extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
+    || fail "desktop staging still removes the live Mail application"
 grep -Fq "cp -R \"\${shell_src}/Mail\" \"\${dev_extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
     || fail "desktop staging does not restore the Mail probe in the dev/CI overlay"
 
@@ -80,7 +92,7 @@ grep -q "select(.class == \"${APP_ID}\")" "${GATE}" \
     || fail "surfaces-check.sh does not look for class ${APP_ID}; the window gate would match nothing"
 
 # 6 · the launcher must exist and be the Exec target.
-EXEC=$(sed -n 's|^Exec=||p' "${DESKTOP}" | head -1)
+EXEC=$(sed -n 's|^Exec=||p' "${DEV_DESKTOP}" | head -1)
 case "${EXEC}" in
     /usr/lib/punar/punar-mail.sh*) ;;
     *) fail "Exec is '${EXEC}', expected the committed launcher under /usr/lib/punar" ;;
@@ -103,4 +115,4 @@ grep -q 'punar_configure_graphics' "${LAUNCHER}" \
 ! grep -q 'QML_IMPORT_PATH' "${LAUNCHER}" \
     || fail "the launcher exports QML_IMPORT_PATH; that belongs to the pragma, which covers every launch path"
 
-echo "mail-identity-contract-test: PASS (${APP_ID} is stable, dev-only and absent from production staging)"
+echo "mail-identity-contract-test: PASS (${APP_ID} is stable; product is brokered and fixtures are dev-only)"

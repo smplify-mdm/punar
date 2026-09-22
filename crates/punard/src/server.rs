@@ -11,6 +11,8 @@
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -232,6 +234,10 @@ pub struct DaemonConfig {
     /// Cross-architecture integration-test seam. Production always leaves
     /// this unset and uses the compiled target architecture.
     pub app_arch_override: Option<String>,
+    /// Root-only fixed broker used to hand least-privilege PIM and Wayland
+    /// capabilities to first-party desktop applications. Production never
+    /// accepts this path over IPC; the field is injectable only for tests.
+    pub pim_launch_broker: PathBuf,
     /// Root-private, freshly rendered Chromium policy source consumed by
     /// the `browser.policy` capability backend.
     pub browser_policy_source: PathBuf,
@@ -296,6 +302,7 @@ impl DaemonConfig {
             app_catalog_path: None,
             flatpak_bin: PathBuf::from("/usr/bin/flatpak"),
             app_arch_override: None,
+            pim_launch_broker: PathBuf::from("/usr/lib/punar/punar-pim-launch"),
             browser_policy_source,
             live_mode: false,
             installer_sources: InstallerSources::default(),
@@ -1029,6 +1036,14 @@ fn app_ipc_error(error: AppError) -> IpcError {
     )
 }
 
+fn mail_launch_unavailable() -> IpcError {
+    IpcError::with_details(
+        ErrorCode::ApplyFailed,
+        "Mail could not establish its protected desktop connection. No mailbox capability was issued. Next step: sign in to the desktop again, then reopen Mail.",
+        json!({ "component": "pim_mail_launch" }),
+    )
+}
+
 fn webapp_ipc_error(error: WebAppError) -> IpcError {
     let (code, next) = match &error {
         WebAppError::Invalid(_) => (
@@ -1537,6 +1552,7 @@ impl Inner {
             Method::WebAppsContextDelete(params) => {
                 self.handle_webapps_context_delete(peer, params)
             }
+            Method::PimMailOpen => self.handle_pim_mail_open(peer),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::UpdateApply(params) => self.handle_update_apply(peer, params),
@@ -2374,6 +2390,59 @@ impl Inner {
 
     fn handle_apps_list(&self) -> Result<Value, IpcError> {
         self.apps.list().map_err(app_ipc_error)
+    }
+
+    /// Open Mail through a fixed, root-only broker. The caller contributes
+    /// only its kernel-attested uid and pid; it cannot select an executable,
+    /// path, account, endpoint, environment value, or capability.
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_open(&self, peer: &Peer) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        if actor.source == PrincipalKind::AiAgent {
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &actor,
+                "pim.mail.open",
+                "mail",
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "An AI agent may not open a personal mailbox. Policy: personal defaults — Mail must be opened by the person at the device. Next step: open Mail from Command Center yourself.",
+                json!({ "decision": "deny", "policy_ids": ["personal-defaults"] }),
+            ));
+        }
+        let pid = peer.pid.filter(|pid| *pid > 0).ok_or_else(|| {
+            IpcError::with_details(
+                ErrorCode::Denied,
+                "Mail could not verify the desktop session that requested it. No mailbox capability was issued. Next step: open Mail from the signed desktop session.",
+                json!({ "decision": "deny", "reason": "missing_peer_pid" }),
+            )
+        })?;
+        if peer.uid == 0 {
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "Mail does not open inside the system account. No mailbox capability was issued. Next step: sign in to your desktop account and open Mail there.",
+                json!({ "decision": "deny", "reason": "system_profile" }),
+            ));
+        }
+        let status = Command::new(&self.cfg.pim_launch_broker)
+            .args(["mail", &peer.uid.to_string(), &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| mail_launch_unavailable())?;
+        if !status.success() {
+            return Err(mail_launch_unavailable());
+        }
+        Ok(json!({ "opening": true, "application": "mail" }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_open(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable())
     }
 
     fn app_mutation_authorized(

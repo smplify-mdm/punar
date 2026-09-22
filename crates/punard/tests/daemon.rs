@@ -930,6 +930,51 @@ fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     assert_eq!(td.audit_lines().len(), baseline);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn mail_open_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-broker");
+            let record = dir.join("mail-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.open", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-broker-args")).unwrap(),
+        "mail\n1000\n4242\n"
+    );
+}
+
+#[test]
+fn mail_open_refuses_an_unverifiable_session_before_spawning() {
+    let td = TestDaemon::start_as_uid(1000);
+    let denied = td.call("pim.mail.open", None);
+    assert_eq!(denied["error"]["code"], "denied", "{denied}");
+    assert_eq!(denied["error"]["details"]["reason"], "missing_peer_pid");
+}
+
 #[test]
 fn update_check_is_root_only_authenticated_cached_and_audited() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {

@@ -1,20 +1,25 @@
 # Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
 
-Status: **accepted contract; service staged but not exposed.** The fixture-free,
+Status: **accepted contract; protected read-only Mail path exposed, account
+setup still closed.** The fixture-free,
 profile-bound Calendar/Reminders persistence core, LUKS-gated encrypted vault,
 TLS-only open-protocol verifier, bounded read-only INBOX adapter and
 non-resident sync coordinator exist in `crates/punar-pimd`. A production
 executable now accepts exactly two named systemd activation descriptors and
 the image stages hardened per-profile service/socket units. Those sockets are
-root-only and have no install target, so no user or application can activate
-or connect to this incomplete service yet. The
+root-only and have no install target. A human-only `pim.mail.open` call now
+uses a fixed root broker to verify the live desktop session and transfer an
+own-profile Mail channel plus an already-connected Wayland descriptor to a
+separate locked `punar-mail` service. Neither the human uid nor another app can
+open either root control socket. Account setup and credential entry are not
+yet exposed. The
 machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
 [`schemas/pim/records.json`](../../schemas/pim/records.json). ADR-008 owns
 credential custody and the open-standards-first provider sequence. No shipping
-image may expose Mail, Calendar or Reminders as account-backed applications
-until the authorization and credential negative gates in that ADR pass.
+image may expose account connection until the authorization and credential
+negative gates in that ADR pass.
 
 The local-store implementation and its intentionally narrower boundary are
 recorded in
@@ -33,8 +38,9 @@ profile by parameter.
 
 The application transport is that preconnected Unix `SOCK_STREAM` capability
 channel. The tested descriptor-transfer primitive lives in
-`crates/punar-pimd/src/channel.rs`; privileged launch, non-dumpable sandbox and
-hostile-process runtime proof remain production blockers. A filesystem-readable
+`crates/punar-pimd/src/channel.rs`. Mail's production launch path now uses a
+root-only fixed broker, a non-dumpable locked bridge, a separate service uid,
+and a private `0700` runtime socket. A filesystem-readable
 socket plus `SO_PEERCRED` uid alone is explicitly forbidden because unrelated
 applications run as the same human uid. There is no localhost TCP control API.
 
@@ -63,8 +69,9 @@ interval using an unnamed completion socket rather than a polling timer. The
 socket-activated executable rejects unnamed, missing, extra, non-listening or
 non-`SOCK_SEQPACKET` descriptors. The staged units run as the locked
 `punar-pim` identity, keep each uid's state in an exact 0700 systemd state
-directory, and grant no ambient capability. Fixed privileged launch and the
-hostile same-uid runtime proof in ADR-009 remain blockers before activation.
+directory, and grant no ambient capability. The Mail bridge additionally has
+no network namespace or device access; its Qt scene graph uses the software
+backend rather than broadening that authority.
 
 The envelope is:
 
@@ -194,8 +201,10 @@ bounded typed errors and emits signed cursors only after persistence succeeds.
 The setup methods expose only an opaque id and closed state; they cannot carry
 a password, server configuration or helper descriptor. Automatic retry
 scheduling, Mail mutation/send, contacts, event responses and filtered
-event/reminder reads remain explicitly unavailable; this partial dispatcher is
-inside a dormant production service and has no application-facing launch path.
+event/reminder reads remain explicitly unavailable. Mail can now reach this
+dispatcher through the protected read-only launch path. Settings/account
+connection remains unexposed, so a fresh profile still has no way to add an
+account.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 

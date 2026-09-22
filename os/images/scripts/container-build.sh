@@ -117,6 +117,7 @@ stage_desktop_extra() {
            "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
+             "${extra}/usr/share/doc/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
              "${extra}/usr/share/punar/browser" \
@@ -129,6 +130,9 @@ stage_desktop_extra() {
              "${dev_extra}/usr/share/punar/fixtures/acme" \
              "${dev_extra}/usr/share/punar/fixtures/projects/atlas" \
              "${dev_extra}/usr/share/punar/fixtures/webapps/notes"
+
+    install -m 0644 "${REPO_ROOT}/docs/api/pim-ipc.md" \
+        "${extra}/usr/share/doc/punar/pim-ipc.md"
 
     # Hyprland config. Lua is the supported provider from 0.55 onward; 0.56
     # warns on every legacy .conf session and 0.57 removes that parser.
@@ -174,6 +178,8 @@ stage_desktop_extra() {
         "${extra}/usr/local/share/applications/punar-browser.desktop"
     install -m 0644 "${REPO_ROOT}/browser/integration/chromium.desktop" \
         "${extra}/usr/local/share/applications/chromium.desktop"
+    install -m 0644 "${mod}/applications/org.punar.Mail.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.Mail.desktop"
     # fontconfig defaults (sorts before 60-latin so preferences win).
     cp "${mod}/fonts/50-punar-fonts.conf" "${extra}/etc/fonts/conf.d/"
     # Vendored fonts, OFL.txt alongside each family (license requirement).
@@ -183,11 +189,11 @@ stage_desktop_extra() {
     # Hyprland exec-once: qs -p /usr/share/punar/shell).
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
-    # The Mail xdg-toplevel currently proves only window behavior and contains
-    # explicit fixture messages. Production images carry no demo PIM data or
-    # non-functional launcher: stage the complete probe only in the composable
-    # dev/CI overlay until punar-pimd supplies real account-backed records.
-    rm -rf "${extra}/usr/share/punar/shell/Mail"
+    # Mail's live model reaches punar-pimd only through the root-brokered,
+    # profile-scoped capability bridge. Production receives the application
+    # but never its screenshot fixtures; developer images overlay the complete
+    # source and opt in explicitly with PUNAR_MAIL_FIXTURES=1.
+    rm -f "${extra}/usr/share/punar/shell/Mail/Fixtures.qml"
     cp -R "${shell_src}/Mail" "${dev_extra}/usr/share/punar/shell/Mail"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
     # Theme documents + the shipped pointer (docs/design/theme-system.md
@@ -393,7 +399,11 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
         "${cargo_target}/release/punar-pimd" \
+        "${cargo_target}/release/punar-mail-bridge" \
         "${extra}/usr/bin/"
+    install -d "${extra}/usr/lib/punar"
+    install -m 0750 "${cargo_target}/release/punar-pim-launch" \
+        "${extra}/usr/lib/punar/punar-pim-launch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
         "${dev_extra}/usr/bin/"
@@ -421,6 +431,7 @@ reset_staged_binaries() {
     # desktop build can never leak product/mock binaries into punar-dev.
     rm -rf "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
            "${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
+    rm -f "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch"
 }
 
 # M6 offline container base image (milestone-6.md §6): `punar-env up` needs

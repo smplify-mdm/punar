@@ -98,7 +98,11 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
         "${cargo_target}/release/punar-pimd" \
+        "${cargo_target}/release/punar-mail-bridge" \
         "${extra}/usr/bin/"
+    install -d "${extra}/usr/lib/punar"
+    install -m 0750 "${cargo_target}/release/punar-pim-launch" \
+        "${extra}/usr/lib/punar/punar-pim-launch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
         "${dev_extra}/usr/bin/"
@@ -106,13 +110,18 @@ stage_punar_binaries() {
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
         punar-netd punar-onboard punar-onboardd punar-greet \
-        punar-auth punar-authd punar-pimd; do
+        punar-auth punar-authd punar-pimd punar-mail-bridge; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2
             exit 1
         }
     done
+    readelf -h "${extra}/usr/lib/punar/punar-pim-launch" \
+        | grep -q 'Machine:.*AArch64' || {
+        echo "error: punar-pim-launch is not an AArch64 binary" >&2
+        exit 1
+    }
     readelf -h "${dev_extra}/usr/bin/punar-mock-smplify" \
         | grep -q 'Machine:.*AArch64' || {
         echo "error: punar-mock-smplify is not an AArch64 binary" >&2
@@ -247,6 +256,7 @@ reset_staged_architecture_content() {
     rm -rf "${ARM64_DIR}/mkosi.extra/usr/bin" \
            "${ARM64_DIR}/mkosi.extra/usr/share/punar/oci" \
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
+           "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch" \
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci" \
            "${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
 
