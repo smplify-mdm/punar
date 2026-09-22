@@ -24,6 +24,7 @@ mod cursor;
 mod daemon;
 mod dispatcher;
 mod mail_ingest;
+mod mail_launch;
 mod mail_store;
 mod open_protocol_provider;
 mod open_protocol_sync;
@@ -56,6 +57,9 @@ pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use daemon::{PimDaemonError, serve_profile};
 pub use dispatcher::LocalDispatcher;
 pub use mail_ingest::{MailIngestError, MailIngestInput, ParsedMail, ingest_message};
+pub use mail_launch::{
+    MailLaunch, MailLaunchCapabilities, MailLaunchError, receive_mail_launch, send_mail_launch,
+};
 pub use mail_store::{
     MailBatchItem, MailStore, MailStoreError, MailSummaryPage, MailSyncCursor, MailThreadPage,
 };
