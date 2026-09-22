@@ -148,7 +148,10 @@ a closed result code and optional successful account id, never provider text.
 Settings begins this flow with only a provider type and receives an opaque
 setup id. The service admits at most four five-minute sessions, supports
 cancellation, and keeps the corresponding one-use helper descriptor on a
-privileged-only claim path outside ordinary application IPC.
+privileged-only claim path outside ordinary application IPC. That claim path
+now verifies a root kernel peer, a strict matching profile/setup frame and no
+incoming descriptor before returning exactly one helper endpoint or a closed
+refusal.
 The implemented library
 coordinator validates
 service-private server configuration, creates incoming/outgoing credential

@@ -126,8 +126,11 @@ than an application method. Settings may allocate or cancel an opaque bounded
 setup session, but it cannot claim the helper descriptor. The service retains
 that descriptor for a privileged fixed launcher, expires unclaimed sessions
 after five minutes and admits at most four. The claim API is implemented in
-the service composition root; its root-only broker protocol and executable
-launch are still required before production staging.
+the service composition root. Its separate bounded control exchange verifies
+the kernel peer is root before reading the request, accepts no descriptor or
+secret in the claim, and returns either one close-on-exec endpoint or a closed
+refusal. The fixed broker/helper executable launch is still required before
+production staging.
 
 ## Consequences
 

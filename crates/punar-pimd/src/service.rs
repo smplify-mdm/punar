@@ -14,13 +14,16 @@ use thiserror::Error;
 
 #[cfg(test)]
 use crate::channel::receive_client_channel_from_broker;
+#[cfg(test)]
+use crate::setup_control::receive_account_helper_claim_from_broker;
 use crate::{
     AccountConnectError, AccountConnectLifecycle, AccountCoordinator, AccountEntryRunner,
-    AccountLifecycle, AccountLifecycleError, AccountSetupError, AdmissionError, ConnectionError,
-    CredentialVault, CursorKeyError, CursorSigner, EncryptedStorageProof, LocalDispatcher,
-    MailStore, MailStoreError, NetworkOpenProtocolVerifier, OpenProtocolEntryRunner,
-    OpenProtocolSyncRunner, PimStore, ProcessSecurityError, SetupSessionCoordinator, StoreError,
-    SyncCoordinator, SyncQuiesceError, VaultError, lock_down_current_process,
+    AccountHelperClaim, AccountHelperControlError, AccountHelperReplyCode, AccountLifecycle,
+    AccountLifecycleError, AccountSetupError, AdmissionError, ConnectionError, CredentialVault,
+    CursorKeyError, CursorSigner, EncryptedStorageProof, LocalDispatcher, MailStore,
+    MailStoreError, NetworkOpenProtocolVerifier, OpenProtocolEntryRunner, OpenProtocolSyncRunner,
+    PimStore, ProcessSecurityError, SetupSessionCoordinator, StoreError, SyncCoordinator,
+    SyncQuiesceError, VaultError, lock_down_current_process, receive_account_helper_claim,
     receive_client_channel, serve_granted_channel,
 };
 
@@ -40,6 +43,8 @@ pub enum PimServiceError {
     Admission(#[from] AdmissionError),
     #[error(transparent)]
     Connection(#[from] ConnectionError),
+    #[error(transparent)]
+    AccountHelperControl(#[from] AccountHelperControlError),
 }
 
 pub struct PimService {
@@ -146,6 +151,13 @@ impl PimService {
         self.account_connect.claim_helper(setup_id)
     }
 
+    /// Serve one root-brokered helper claim. A closed refusal contains no
+    /// descriptor; success consumes the setup's one helper endpoint.
+    pub fn serve_account_helper_control(&self, control: impl AsFd) -> Result<(), PimServiceError> {
+        let claim = receive_account_helper_claim(&control, self.profile_uid)?;
+        self.answer_account_helper_claim(control, &claim)
+    }
+
     /// Admit exactly one channel from a kernel-attested root control peer and
     /// serve it until orderly EOF or a connection-fatal frame error.
     pub fn serve_control(&self, control: impl AsFd) -> Result<(), PimServiceError> {
@@ -160,6 +172,35 @@ impl PimService {
         Ok(())
     }
 
+    fn answer_account_helper_claim(
+        &self,
+        control: impl AsFd,
+        claim: &AccountHelperClaim,
+    ) -> Result<(), PimServiceError> {
+        match self.claim_account_helper(&claim.setup_id) {
+            Ok(channel) => {
+                crate::setup_control::send_account_helper_grant(control, claim, channel)?
+            }
+            Err(AccountConnectError::NotFound) => {
+                crate::setup_control::send_account_helper_refusal(
+                    control,
+                    claim,
+                    AccountHelperReplyCode::NotFound,
+                )?
+            }
+            Err(
+                AccountConnectError::UnsupportedProvider
+                | AccountConnectError::RateLimited
+                | AccountConnectError::Runtime,
+            ) => crate::setup_control::send_account_helper_refusal(
+                control,
+                claim,
+                AccountHelperReplyCode::Internal,
+            )?,
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn serve_control_from_uid(
         &self,
@@ -168,6 +209,17 @@ impl PimService {
     ) -> Result<(), PimServiceError> {
         let granted = receive_client_channel_from_broker(control, self.profile_uid, broker_uid)?;
         self.serve_granted(granted)
+    }
+
+    #[cfg(test)]
+    fn serve_account_helper_control_from_uid(
+        &self,
+        control: impl AsFd,
+        broker_uid: u32,
+    ) -> Result<(), PimServiceError> {
+        let claim =
+            receive_account_helper_claim_from_broker(&control, self.profile_uid, broker_uid)?;
+        self.answer_account_helper_claim(control, &claim)
     }
 }
 
@@ -211,7 +263,9 @@ fn map_account_setup_error(error: AccountSetupError) -> AccountLifecycleError {
 mod tests {
     use super::*;
     use crate::{
-        ClientGrant, PimClient, client_channel_pair, control_channel_pair, send_client_channel,
+        AccountHelperClaim, AccountHelperControlError, AccountHelperReplyCode, ClientGrant,
+        PimClient, ProviderType, client_channel_pair, control_channel_pair,
+        receive_account_helper_channel, send_account_helper_claim, send_client_channel,
     };
     use serde_json::Value;
     use std::fs;
@@ -273,6 +327,55 @@ mod tests {
         assert!(!response.to_string().contains("demo"));
 
         worker.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn root_broker_claims_each_setup_helper_exactly_once() {
+        let root = temp_root();
+        let profile_uid = rustix::process::getuid().as_raw();
+        let service = PimService::open(&root, "profile_A1", profile_uid).unwrap();
+        let status = service
+            .account_connect
+            .begin(ProviderType::OpenProtocols)
+            .unwrap();
+
+        let (broker, service_control) = control_channel_pair().unwrap();
+        send_account_helper_claim(
+            &broker,
+            &AccountHelperClaim::new(&status.setup_id, profile_uid),
+        )
+        .unwrap();
+        service
+            .serve_account_helper_control_from_uid(
+                &service_control,
+                rustix::process::getuid().as_raw(),
+            )
+            .unwrap();
+        let granted =
+            receive_account_helper_channel(&broker, &status.setup_id, profile_uid).unwrap();
+        assert_eq!(granted.setup_id, status.setup_id);
+        drop(granted);
+
+        let (broker, service_control) = control_channel_pair().unwrap();
+        send_account_helper_claim(
+            &broker,
+            &AccountHelperClaim::new(&status.setup_id, profile_uid),
+        )
+        .unwrap();
+        service
+            .serve_account_helper_control_from_uid(
+                &service_control,
+                rustix::process::getuid().as_raw(),
+            )
+            .unwrap();
+        assert!(matches!(
+            receive_account_helper_channel(&broker, &status.setup_id, profile_uid),
+            Err(AccountHelperControlError::Refused(
+                AccountHelperReplyCode::NotFound
+            ))
+        ));
+
         let _ = fs::remove_dir_all(root);
     }
 }

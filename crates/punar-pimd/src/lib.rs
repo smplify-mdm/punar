@@ -32,6 +32,7 @@ mod pager;
 mod process_security;
 mod protocol;
 mod service;
+mod setup_control;
 mod setup_runtime;
 mod store;
 mod sync_runtime;
@@ -68,6 +69,10 @@ pub use protocol::{
     write_response_frame,
 };
 pub use service::{PimService, PimServiceError};
+pub use setup_control::{
+    AccountHelperClaim, AccountHelperControlError, AccountHelperReplyCode, GrantedAccountHelper,
+    receive_account_helper_channel, receive_account_helper_claim, send_account_helper_claim,
+};
 pub use setup_runtime::{
     AccountConnectError, AccountConnectLifecycle, AccountEntryRunner, AccountSetupStage,
     AccountSetupStatus, OpenProtocolEntryRunner, SetupSessionCoordinator,

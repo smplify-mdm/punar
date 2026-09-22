@@ -195,8 +195,11 @@ Next build slice, in order:
    five-minute setup-session coordinator now backs Settings-only
    `accounts.begin_connect` and `accounts.cancel_connect`, admits at most four
    sessions, returns only an opaque setup id, and keeps the helper descriptor
-   outside application IPC. It supports open-protocol accounts only and has no
-   fixed executable or UI yet.
+   outside application IPC. A second strict root-broker control exchange now
+   claims that descriptor exactly once, rejects wrong-profile, extended,
+   descriptor-bearing and non-root requests, and returns only a closed refusal
+   or one unnamed endpoint. It supports open-protocol accounts only and has no
+   fixed broker executable or UI yet.
    A service-internal account coordinator now validates private IMAP/SMTP
    configuration before credential entry, atomically creates typed incoming
    and outgoing vault records, requires provider verification before making an

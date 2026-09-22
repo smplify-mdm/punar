@@ -45,7 +45,9 @@
 > Settings-only `accounts.begin_connect` and `accounts.cancel_connect` now
 > create and cancel bounded five-minute open-protocol setup sessions. They
 > expose only an opaque id, admit no credential field, and keep the one-use
-> helper descriptor reserved for the still-missing privileged launcher.
+> helper descriptor reserved for the privileged launcher. The service-side
+> root-broker exchange now transfers that endpoint exactly once with closed
+> refusal codes, but the fixed broker/helper executables remain missing.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account

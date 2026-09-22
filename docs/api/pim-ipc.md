@@ -95,8 +95,10 @@ rather than being ignored.
   now create or cancel a bounded five-minute setup session using only a
   provider type and opaque setup id. At most four sessions exist; the one-use
   helper descriptor remains available only to the privileged launcher side of
-  the service and never crosses application IPC. The fixed helper executable,
-  launcher and account-setup UI are not implemented yet.
+  the service and never crosses application IPC. Its strict root-broker control
+  exchange accepts only the opaque id and profile uid, returns no provider
+  data, and transfers exactly one descriptor only on success. The fixed helper
+  executable, launcher and account-setup UI are not implemented yet.
 - The implemented vault encrypts each credential with profile/account/kind
   associated data and refuses to open unless the service-private state path is
   kernel-observed on a LUKS2 device-mapper filesystem. A library coordinator

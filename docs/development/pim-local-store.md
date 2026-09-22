@@ -70,6 +70,9 @@ sandbox gate visible. It now also owns a bounded account-setup coordinator:
 Settings can create/cancel an opaque open-protocol setup id, while only the
 privileged launcher side can consume the associated one-use helper descriptor.
 Unclaimed sessions expire after five minutes and no more than four can exist.
+The root-broker exchange verifies its kernel peer before reading the strict
+claim, rejects profile/extension/descriptor confusion, and returns no endpoint
+on a closed refusal.
 
 `crates/punar-pimd/src/vault.rs` adds an unstaged service-private credential
 vault. It requires the state path's real filesystem device to resolve to a
@@ -232,7 +235,9 @@ The crate's unit suite proves:
     and commits only after verification; and
 58. Settings setup begins with only a provider type, yields an opaque id,
     rejects credential-shaped extensions, limits session count and lifetime,
-    supports cancellation, and makes the helper descriptor one-use.
+    supports cancellation, and makes the helper descriptor one-use; and
+59. a non-root, cross-profile, extended or descriptor-bearing broker claim is
+    refused before it can receive the unnamed helper endpoint.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
