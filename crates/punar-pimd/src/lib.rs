@@ -22,7 +22,7 @@ pub use channel::{
     AdmissionError, ClientGrant, GrantedChannel, PimClient, client_channel_pair,
     control_channel_pair, receive_client_channel, send_client_channel,
 };
-pub use cursor::{CursorError, CursorPosition, CursorSigner};
+pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use protocol::{
     ErrorCode, ErrorDetails, FrameError, PimMethod, PimProtocolError, PimRequest, RequestFailure,
     decode_request, encode_error, encode_success, read_request_frame, write_response_frame,

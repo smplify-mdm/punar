@@ -172,8 +172,10 @@ Next build slice, in order:
    and exact success/error envelopes. Privileged launch, read deadlines,
    non-dumpable sandbox proof and socket-activated process remain open. The
    HMAC cursor primitive now binds opaque positions to the profile, method and
-   hashed filter/sort set and rejects tampering/cross-context replay; durable
-   private cursor-key injection, the full store dispatcher and
+   hashed filter/sort set and rejects tampering/cross-context replay. Its
+   random profile-bound key is now created atomically in service-private state,
+   survives restart and rejects corrupt, cross-profile, aliased or
+   over-permissive state without replacement. The full store dispatcher and
    production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

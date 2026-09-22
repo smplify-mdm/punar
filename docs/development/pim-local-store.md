@@ -68,8 +68,11 @@ The change sequence in this library is internal and is never exposed directly.
 `crates/punar-pimd/src/cursor.rs` now wraps a sequence/position with an
 HMAC-SHA-256 cursor bound to the profile, typed method and hashed canonical
 filter/sort set. Tampering and cross-profile/method/filter/key reuse fail
-closed. The future service still must persist and inject the random private
-cursor key and map a cursor older than retained history to `cursor_expired`.
+closed. The random profile key is persisted with create-new durability, exact
+private ownership/modes and fail-closed corruption, alias and profile checks;
+restart preserves existing cursors. The future service still must wire this
+state into its dispatcher and map a cursor older than retained history to
+`cursor_expired`.
 
 ## Tests currently required
 
@@ -97,7 +100,10 @@ The crate's unit suite proves:
 15. typed parameters reject extensions only after the app/method partition
     admits the call;
 16. cursor payload/signature tampering, cross-profile/method/filter/key replay,
-    extensions and constant keys fail closed without exposing raw bindings.
+    extensions and constant keys fail closed without exposing raw bindings;
+17. the private cursor key survives restart and keeps prior cursors valid; and
+18. cross-profile, corrupt, over-permissive and hard-linked key state is
+    rejected without replacement.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -109,8 +115,8 @@ install or activate `punar-pimd`, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
-- read/write deadlines, durable private cursor-key injection and the full
-  store-backed method dispatcher;
+- read/write deadlines and the full store-backed method dispatcher, including
+  durable cursor-key wiring and expiry mapping;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;

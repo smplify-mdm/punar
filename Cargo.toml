@@ -49,11 +49,12 @@ clap = { version = "4", features = ["derive"] }
 # rustix (M3, docs/development/milestone-3.md section 3): SO_PEERCRED and
 # bind-before-listen for punard's UDS. std's peer_cred is unstable; libc would
 # need `unsafe` (workspace crates are #![forbid(unsafe_code)]); nix is larger.
-# Feature-gated to `net` + (M7) `fs`; transitives (bitflags, linux-raw-sys)
-# pinned by Cargo.lock. M7 adds `fs` for `flock` behind punar-common's audit
-# rotation lock (docs/api/ipc.md section 10.4), now that punard and
-# punar-agentd append to one trail — same crate, no new transitives.
-rustix = { version = "1", features = ["net", "fs"] }
+# Feature-gated to `net` + (M7) `fs` + `process`; transitives (bitflags,
+# linux-raw-sys) are pinned by Cargo.lock. M7 adds `fs` for `flock` behind
+# punar-common's shared audit rotation lock; PIM private-state validation uses
+# the safe `process::getuid` wrapper rather than libc/unsafe ownership checks —
+# same crate, no new transitive package.
+rustix = { version = "1", features = ["net", "fs", "process"] }
 # signal-hook (M3): safe SIGTERM/SIGINT handling for punard graceful shutdown
 # (M7: punar-agentd shuts down the same way).
 # sigaction is not reachable from safe std or safe rustix; signal-hook is the
