@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_entry;
 mod account_setup;
 mod channel;
 mod connection;
@@ -35,6 +36,10 @@ mod store;
 mod sync_runtime;
 mod vault;
 
+pub use account_entry::{
+    AccountEntryError, AccountEntryHelper, OpenProtocolSetup, account_entry_pair,
+    complete_account_entry,
+};
 pub use account_setup::{
     AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError,
     OpenProtocolAccountInput, OpenProtocolVerifier, ProviderCheckError,

@@ -221,7 +221,10 @@ The crate's unit suite proves:
     private configuration and both credential records, and restart cannot
     restore any of them; its profile-bound permit blocks a new sync, waits for
     an existing worker, and times out before deleting anything; and
-56. a colliding setup attempt cannot replace an existing account password.
+56. a colliding setup attempt cannot replace an existing account password; and
+57. the protected account-entry session keeps the password out of its strict
+    identity/server frame, zeroizes helper input, rejects extensions, wrong
+    versions, cancellation and oversize, and commits only after verification.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.

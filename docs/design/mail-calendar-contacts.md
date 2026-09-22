@@ -12,7 +12,11 @@
 > credential-vault library now refuses non-LUKS storage and keeps values out of
 > ordinary IPC. A tested unnamed one-use credential-entry channel locks its
 > helper down before input exists and transfers a bounded value directly into
-> the vault. A library-only coordinator now validates service-private IMAP/SMTP
+> the vault. A protected account-entry session now adds a separate strict
+> identity/server packet before the opaque password packet, rejects extensions
+> and cancellation, and completes the same verified transaction without
+> exposing the password to ordinary application IPC. A library-only
+> coordinator now validates service-private IMAP/SMTP
 > configuration, stages separately typed credentials, invokes a closed
 > provider-verification interface, publishes the account only after success
 > and rolls back checked failures. ADR-011 now supplies a real implicit-TLS or

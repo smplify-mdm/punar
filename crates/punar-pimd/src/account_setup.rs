@@ -10,6 +10,7 @@
 
 use std::os::fd::OwnedFd;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -42,7 +43,8 @@ pub struct VerifiedOpenProtocolIdentity {
 
 /// User-visible identity kept separate from the provider login name. Some
 /// self-hosted servers authenticate a short username rather than an address.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenProtocolAccountInput {
     pub display_name: String,
     pub primary_address: EmailAddress,

@@ -1,6 +1,6 @@
 # ADR-008 — Persistent PIM account credentials and first provider sequence
 
-- Status: **Accepted — record vault and one-use entry channel implemented as unstaged libraries; fixed launcher, account integration and runtime proof remain open**
+- Status: **Accepted — record vault and protected one-use account entry implemented as unstaged libraries; fixed launcher/UI and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–11, 15–16,
   30, 36, 44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 7–9;
@@ -134,14 +134,17 @@ authorization-code flow with PKCE, unpredictable state and nonce, and an exact
 short-lived loopback callback owned by the service; no embedded web view and no
 custom callback handed through an arbitrary browser tab. Native public clients
 do not embed a client secret. Password-based open-protocol setup uses a
-separate, short-lived credential-entry helper with no durable state. The
-implemented channel primitive is an unnamed `SOCK_SEQPACKET` pair with a fixed
-64 KiB frame limit and five-minute deadline. The helper becomes non-dumpable,
-disables core dumps and future privilege gain before input exists, sends
-exactly one value over the pre-established private endpoint, clears its input
-on every result and exits. The service receives into a zeroizing buffer and
-moves that value directly into the encrypted vault. The ordinary Mail window
-never receives the password. The implemented library coordinator validates
+separate, short-lived account-entry helper with no durable state. The
+implemented transport is an unnamed `SOCK_SEQPACKET` pair with a five-minute
+deadline: one bounded strict JSON packet contains only identity and server
+configuration, followed by one opaque password packet capped at 64 KiB. The
+helper becomes non-dumpable, disables core dumps and future privilege gain
+before input exists, clears the password on every result and exits. The
+service receives it into a zeroizing buffer and relays it through the narrower
+one-use credential channel into the vault. The ordinary Mail and Settings
+windows never receive the password, and malformed, extended, cancelled or
+oversized entry fails before an account is published. The implemented library
+coordinator validates
 service-private server configuration, creates incoming/outgoing credential
 records together, invokes a closed verification interface, publishes the
 ready account only after success and removes staged records on every checked
@@ -151,13 +154,15 @@ short-lived sync worker. The executable, fixed launcher, crash reconciliation
 and QML account flow remain implementation work; this library is not a sign-in
 feature.
 
-Account removal is a transaction: stop new work, revoke remote authorization
-when the provider supports it, delete the local credential and sync cursors,
-then separately ask whether cached content should be deleted. Revocation
-failure is reported honestly and does not preserve the local secret as a
-retry mechanism. Logs, audit, crash reports, notifications, portal inventory
-and diagnostics contain credential classes and result states only, never
-values or callback query strings.
+Account removal is a transaction: block new work, wait a bounded time for an
+admitted sync, revoke remote authorization when the provider supports it, then
+delete cached content, sync cursors, credentials, private configuration and
+public metadata. The first implementation requires local private-data deletion
+because it has no honest detached archive mode. Revocation failure is reported
+honestly and does not preserve the local secret as a retry mechanism. Logs,
+audit, crash reports, notifications, portal inventory and diagnostics contain
+credential classes and result states only, never values or callback query
+strings.
 
 The application channel follows
 [`ADR-009`](ADR-009-pim-capability-channels.md): a privileged broker hands an

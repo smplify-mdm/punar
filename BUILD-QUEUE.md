@@ -187,6 +187,10 @@ Next build slice, in order:
    a bounded unnamed one-use credential-entry channel now locks the helper down
    before input exists, distinguishes cancellation, rejects oversized frames,
    clears caller input and moves the received value directly into that vault.
+   A protected one-use account-entry channel now precedes it: a strict bounded
+   packet carries only identity and IMAP/SMTP configuration, a separate opaque
+   packet carries the password, and malformed/extended/cancelled/oversized
+   sessions publish no account. It has no fixed executable or UI yet.
    A service-internal account coordinator now validates private IMAP/SMTP
    configuration before credential entry, atomically creates typed incoming
    and outgoing vault records, requires provider verification before making an
