@@ -32,6 +32,7 @@ mod pager;
 mod process_security;
 mod protocol;
 mod service;
+mod setup_runtime;
 mod store;
 mod sync_runtime;
 mod vault;
@@ -67,6 +68,10 @@ pub use protocol::{
     write_response_frame,
 };
 pub use service::{PimService, PimServiceError};
+pub use setup_runtime::{
+    AccountConnectError, AccountConnectLifecycle, AccountEntryRunner, AccountSetupStage,
+    AccountSetupStatus, OpenProtocolEntryRunner, SetupSessionCoordinator,
+};
 pub use store::{ChangePage, MutationMode, PimStore, Snapshot, StoreError};
 pub use sync_runtime::{
     AcceptedSync, AccountRemovalPermit, MailSyncRunner, OpenProtocolSyncRunner, SyncCoordinator,

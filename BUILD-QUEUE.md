@@ -191,7 +191,11 @@ Next build slice, in order:
    packet carries only identity and IMAP/SMTP configuration, a separate opaque
    packet carries the password, and malformed/extended/cancelled/oversized
    sessions publish no account. The helper receives only a closed result code
-   plus a successful account id; provider text cannot cross back. It has no
+   plus a successful account id; provider text cannot cross back. A bounded
+   five-minute setup-session coordinator now backs Settings-only
+   `accounts.begin_connect` and `accounts.cancel_connect`, admits at most four
+   sessions, returns only an opaque setup id, and keeps the helper descriptor
+   outside application IPC. It supports open-protocol accounts only and has no
    fixed executable or UI yet.
    A service-internal account coordinator now validates private IMAP/SMTP
    configuration before credential entry, atomically creates typed incoming
@@ -201,9 +205,9 @@ Next build slice, in order:
    together, with restart proof. Removal now requires a profile-store-bound
    permit that blocks new sync admission and waits a bounded time for an
    already-admitted worker; timeout reopens sync and changes no private data.
-   Settings IPC still needs to invoke that guarded path. The fixed helper
-   executable/launcher, QML account flow and crash-reconciliation proof remain
-   open. ADR-011 now pins a Rust-1.88-compatible, TLS-only open-protocol
+   Settings-only `accounts.remove` now invokes that guarded path. The fixed
+   helper executable/launcher, QML account flow and crash-reconciliation proof
+   remain open. ADR-011 now pins a Rust-1.88-compatible, TLS-only open-protocol
    verifier: implicit TLS or required STARTTLS, platform CA validation, fixed
    deadlines, closed errors and a 1 MiB aggregate IMAP verification-response
    cap. Its 89-package resolved dependency increase is not yet an image-size
@@ -244,13 +248,15 @@ Next build slice, in order:
    v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
    normal application IPC, and credentials remain only in the vault. The
    library coordinator can create and remove this state after a verifier
-   succeeds. Settings-only `accounts.remove` now reaches the guarded removal
-   lifecycle, requires deletion of local private data, and returns only closed
-   errors; no application-callable setup path exists yet. The first Mail
+   succeeds. Settings-only account setup now creates/cancels bounded opaque
+   sessions without accepting credentials, while `accounts.remove` reaches the
+   guarded removal lifecycle, requires deletion of local private data, and
+   returns only closed errors. A privileged fixed launcher still must claim
+   the one-use helper endpoint and launch the entry UI. The first Mail
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, account setup IPC, the fixed service/launcher
+   event/reminder reads, the fixed service/launcher and account-entry UI
    runtime, automatic backoff scheduling and production-image staging remain
    open;
 4. complete one real account vertical slice before replacing Mail's fixture

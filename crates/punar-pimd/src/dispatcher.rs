@@ -16,10 +16,11 @@ use serde_json::{Value, json};
 
 use crate::store::validate_account_id;
 use crate::{
-    AccountCapability, AccountLifecycle, AccountLifecycleError, ClientGrant, CursorPosition,
-    CursorSigner, ErrorCode, ErrorDetails, EventInput, MailStore, MailStoreError, MutationMode,
-    PageError, PagedValues, PimMethod, PimProtocolError, PimRequest, PimStore, ReminderInput,
-    SnapshotPager, StoreError, SyncCoordinator, SyncTriggerError,
+    AccountCapability, AccountConnectError, AccountConnectLifecycle, AccountLifecycle,
+    AccountLifecycleError, AccountSetupStage, ClientGrant, CursorPosition, CursorSigner, ErrorCode,
+    ErrorDetails, EventInput, MailStore, MailStoreError, MutationMode, PageError, PagedValues,
+    PimMethod, PimProtocolError, PimRequest, PimStore, ProviderType, ReminderInput, SnapshotPager,
+    StoreError, SyncCoordinator, SyncTriggerError,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -36,6 +37,7 @@ pub struct LocalDispatcher {
     mail_cursors: Mutex<HashMap<u64, MailCursorState>>,
     sync: Option<Arc<SyncCoordinator>>,
     account_lifecycle: Option<Arc<dyn AccountLifecycle>>,
+    account_connect: Option<Arc<dyn AccountConnectLifecycle>>,
 }
 
 struct MailCursorState {
@@ -46,7 +48,14 @@ struct MailCursorState {
 impl LocalDispatcher {
     #[must_use]
     pub fn new(store: PimStore, mail_store: MailStore, signer: CursorSigner) -> Self {
-        Self::from_shared(Arc::new(store), Arc::new(mail_store), signer, None, None)
+        Self::from_shared(
+            Arc::new(store),
+            Arc::new(mail_store),
+            signer,
+            None,
+            None,
+            None,
+        )
     }
 
     #[must_use]
@@ -56,7 +65,7 @@ impl LocalDispatcher {
         signer: CursorSigner,
         sync: Arc<SyncCoordinator>,
     ) -> Self {
-        Self::from_shared(store, mail_store, signer, Some(sync), None)
+        Self::from_shared(store, mail_store, signer, Some(sync), None, None)
     }
 
     #[must_use]
@@ -66,6 +75,7 @@ impl LocalDispatcher {
         signer: CursorSigner,
         sync: Arc<SyncCoordinator>,
         account_lifecycle: Arc<dyn AccountLifecycle>,
+        account_connect: Arc<dyn AccountConnectLifecycle>,
     ) -> Self {
         Self::from_shared(
             store,
@@ -73,6 +83,7 @@ impl LocalDispatcher {
             signer,
             Some(sync),
             Some(account_lifecycle),
+            Some(account_connect),
         )
     }
 
@@ -82,6 +93,7 @@ impl LocalDispatcher {
         signer: CursorSigner,
         sync: Option<Arc<SyncCoordinator>>,
         account_lifecycle: Option<Arc<dyn AccountLifecycle>>,
+        account_connect: Option<Arc<dyn AccountConnectLifecycle>>,
     ) -> Self {
         Self {
             store,
@@ -90,6 +102,7 @@ impl LocalDispatcher {
             mail_cursors: Mutex::new(HashMap::new()),
             sync,
             account_lifecycle,
+            account_connect,
         }
     }
 
@@ -132,6 +145,30 @@ impl LocalDispatcher {
                     params,
                 )?;
                 Ok(page_result("account_page", page))
+            }
+            PimMethod::AccountsBeginConnect => {
+                let params = request.parse_params::<BeginConnectParams>()?;
+                let lifecycle = self.account_connect.as_ref().ok_or_else(internal)?;
+                let setup = lifecycle
+                    .begin(params.provider_type)
+                    .map_err(map_account_connect_error)?;
+                Ok(json!({
+                    "kind": "account_setup",
+                    "setup_id": setup.setup_id,
+                    "provider_type": setup.provider_type,
+                    "state": match setup.state {
+                        AccountSetupStage::AwaitingCredentials => "awaiting_credentials",
+                        AccountSetupStage::Discovering => "discovering",
+                    },
+                }))
+            }
+            PimMethod::AccountsCancelConnect => {
+                let params = request.parse_params::<CancelConnectParams>()?;
+                let lifecycle = self.account_connect.as_ref().ok_or_else(internal)?;
+                lifecycle
+                    .cancel(&params.setup_id)
+                    .map_err(map_account_connect_error)?;
+                self.completed_operation(&params.setup_id)
             }
             PimMethod::AccountsRemove => {
                 let params = request.parse_params::<RemoveAccountParams>()?;
@@ -534,6 +571,18 @@ struct RemoveAccountParams {
     delete_local_data: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginConnectParams {
+    provider_type: ProviderType,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelConnectParams {
+    setup_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MailView {
@@ -761,6 +810,24 @@ fn map_account_lifecycle_error(error: AccountLifecycleError) -> PimProtocolError
     }
 }
 
+fn map_account_connect_error(error: AccountConnectError) -> PimProtocolError {
+    match error {
+        AccountConnectError::UnsupportedProvider => PimProtocolError::new(
+            ErrorCode::UnsupportedProvider,
+            "This account provider is not available yet.",
+        ),
+        AccountConnectError::RateLimited => PimProtocolError::new(
+            ErrorCode::RateLimited,
+            "Too many account setup sessions are active; try again shortly.",
+        ),
+        AccountConnectError::NotFound => PimProtocolError::new(
+            ErrorCode::NotFound,
+            "The account setup session was not found.",
+        ),
+        AccountConnectError::Runtime => internal(),
+    }
+}
+
 fn mail_list_binding(account_id: &str, snapshot: bool) -> Vec<u8> {
     format!(
         "mail.list:v1\0{account_id}\0inbox\0{}",
@@ -863,6 +930,14 @@ mod tests {
         }
 
         fn with_lifecycle(lifecycle: Arc<dyn AccountLifecycle>) -> Self {
+            let connect: Arc<dyn AccountConnectLifecycle> = Arc::new(RecordingConnect::default());
+            Self::with_account_runtime(lifecycle, connect)
+        }
+
+        fn with_account_runtime(
+            lifecycle: Arc<dyn AccountLifecycle>,
+            connect: Arc<dyn AccountConnectLifecycle>,
+        ) -> Self {
             let mut suffix = [0_u8; 12];
             getrandom::fill(&mut suffix).unwrap();
             let suffix = suffix
@@ -887,7 +962,7 @@ mod tests {
             Self {
                 root,
                 dispatcher: LocalDispatcher::with_runtime(
-                    store, mail_store, signer, sync, lifecycle,
+                    store, mail_store, signer, sync, lifecycle, connect,
                 ),
             }
         }
@@ -1288,6 +1363,59 @@ mod tests {
         assert_eq!(lifecycle.calls.lock().unwrap().len(), 2);
     }
 
+    #[test]
+    fn settings_account_setup_is_opaque_bounded_and_cancellable() {
+        let lifecycle: Arc<dyn AccountLifecycle> = Arc::new(RecordingLifecycle::default());
+        let connect = Arc::new(RecordingConnect::default());
+        let connect_trait: Arc<dyn AccountConnectLifecycle> = connect.clone();
+        let fixture = Fixture::with_account_runtime(lifecycle, connect_trait);
+
+        let setup = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.begin_connect",
+                json!({"provider_type":"open_protocols"}),
+            )
+            .unwrap();
+        assert_eq!(setup["kind"], "account_setup");
+        assert_eq!(setup["setup_id"], "setup_A1");
+        assert_eq!(setup["provider_type"], "open_protocols");
+        assert_eq!(setup["state"], "awaiting_credentials");
+        assert_eq!(
+            connect.begins.lock().unwrap().as_slice(),
+            &[ProviderType::OpenProtocols]
+        );
+
+        let operation = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.cancel_connect",
+                json!({"setup_id":"setup_A1"}),
+            )
+            .unwrap();
+        assert_eq!(operation["state"], "completed");
+        assert_eq!(operation["resource_id"], "setup_A1");
+        assert_eq!(connect.cancels.lock().unwrap().as_slice(), &["setup_A1"]);
+
+        let unsupported = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.begin_connect",
+                json!({"provider_type":"google"}),
+            )
+            .unwrap_err();
+        assert_eq!(unsupported.code, ErrorCode::UnsupportedProvider);
+
+        let secret = fixture
+            .call(
+                PimClient::Settings,
+                "accounts.begin_connect",
+                json!({"provider_type":"open_protocols","password":"never accepted"}),
+            )
+            .unwrap_err();
+        assert_eq!(secret.code, ErrorCode::InvalidParams);
+    }
+
     #[derive(Default)]
     struct RecordingLifecycle {
         calls: Mutex<Vec<(String, bool)>>,
@@ -1308,6 +1436,34 @@ mod tests {
             } else {
                 Err(AccountLifecycleError::LocalDataDeletionRequired)
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingConnect {
+        begins: Mutex<Vec<ProviderType>>,
+        cancels: Mutex<Vec<String>>,
+    }
+
+    impl AccountConnectLifecycle for RecordingConnect {
+        fn begin(
+            &self,
+            provider_type: ProviderType,
+        ) -> Result<crate::AccountSetupStatus, AccountConnectError> {
+            self.begins.lock().unwrap().push(provider_type);
+            if provider_type != ProviderType::OpenProtocols {
+                return Err(AccountConnectError::UnsupportedProvider);
+            }
+            Ok(crate::AccountSetupStatus {
+                setup_id: "setup_A1".into(),
+                provider_type,
+                state: AccountSetupStage::AwaitingCredentials,
+            })
+        }
+
+        fn cancel(&self, setup_id: &str) -> Result<(), AccountConnectError> {
+            self.cancels.lock().unwrap().push(setup_id.to_string());
+            Ok(())
         }
     }
 

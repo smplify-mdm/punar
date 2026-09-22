@@ -91,8 +91,12 @@ rather than being ignored.
 - The password path now has a tested unnamed one-use sequenced-packet channel.
   Its helper endpoint becomes non-dumpable, disables core dumps and future
   privilege gain before input exists; one bounded value is then moved directly
-  into the vault and both caller and receiver buffers are cleared. The fixed
-  helper executable, launcher and account-setup UI are not implemented yet.
+  into the vault and both caller and receiver buffers are cleared. Settings can
+  now create or cancel a bounded five-minute setup session using only a
+  provider type and opaque setup id. At most four sessions exist; the one-use
+  helper descriptor remains available only to the privileged launcher side of
+  the service and never crosses application IPC. The fixed helper executable,
+  launcher and account-setup UI are not implemented yet.
 - The implemented vault encrypts each credential with profile/account/kind
   associated data and refuses to open unless the service-private state path is
   kernel-observed on a LUKS2 device-mapper filesystem. A library coordinator
@@ -100,8 +104,9 @@ rather than being ignored.
   interface, publishes private server settings plus public account metadata
   only after verification, and rolls back checked failures. A TLS-only network
   verifier authenticates both configured IMAP and SMTP endpoints under fixed
-  deadlines. The fixed helper executable and application-callable setup method
-  are not implemented yet, so this still does not make sign-in available.
+  deadlines. The application-callable begin/cancel methods are implemented,
+  but the fixed helper executable and launcher are not, so this still does not
+  make sign-in available.
 - QML windows have no direct network authority. The service owns transport,
   parsing, sync, durable state and credential use.
 - Mail bodies, event descriptions and reminder notes may cross this IPC because
@@ -165,7 +170,8 @@ and 32 MiB total. Expiry, bounded eviction or process restart returns
 Only lists with another page consume cache space.
 
 `crates/punar-pimd/src/dispatcher.rs` now connects the protocol to the durable
-local stores for `service.status`, `accounts.list`, `calendar.list`,
+local stores/runtime for `service.status`, `accounts.list`,
+`accounts.begin_connect`, `accounts.cancel_connect`, `accounts.remove`, `calendar.list`,
 `reminder_lists.list`, local event/reminder create, update, complete and delete
 operations, `mail.list`, `mail.thread`, and `changes.since`. Service status
 reports the durable account count rather than a fixture constant. Mail reads
@@ -175,9 +181,11 @@ the durable Mail revision. A sync between pages therefore returns
 `cursor_expired` instead of mixing inbox generations. The dispatcher rechecks
 the trusted grant uid before parsing params, maps optimistic conflicts to
 bounded typed errors and emits signed cursors only after persistence succeeds.
-Account setup/removal IPC, automatic retry scheduling, Mail mutation/send,
-contacts, event responses and filtered event/reminder reads remain explicitly
-unstaged; this partial dispatcher is not installed in a production image.
+The setup methods expose only an opaque id and closed state; they cannot carry
+a password, server configuration or helper descriptor. Automatic retry
+scheduling, Mail mutation/send, contacts, event responses and filtered
+event/reminder reads remain explicitly unstaged; this partial dispatcher is
+not installed in a production image.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 

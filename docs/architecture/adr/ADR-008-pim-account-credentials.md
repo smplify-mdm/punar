@@ -1,6 +1,6 @@
 # ADR-008 — Persistent PIM account credentials and first provider sequence
 
-- Status: **Accepted — record vault and protected one-use account entry implemented as unstaged libraries; fixed launcher/UI and runtime proof remain open**
+- Status: **Accepted — record vault, protected entry and bounded setup sessions implemented as unstaged libraries; fixed launcher/UI and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–11, 15–16,
   30, 36, 44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 7–9;
@@ -145,6 +145,10 @@ one-use credential channel into the vault. The ordinary Mail and Settings
 windows never receive the password, and malformed, extended, cancelled or
 oversized entry fails before an account is published. The helper receives only
 a closed result code and optional successful account id, never provider text.
+Settings begins this flow with only a provider type and receives an opaque
+setup id. The service admits at most four five-minute sessions, supports
+cancellation, and keeps the corresponding one-use helper descriptor on a
+privileged-only claim path outside ordinary application IPC.
 The implemented library
 coordinator validates
 service-private server configuration, creates incoming/outgoing credential
@@ -153,8 +157,8 @@ ready account only after success and removes staged records on every checked
 failure. A TLS-only verifier now authenticates both configured endpoints, and
 a bounded read-only INBOX adapter can use the incoming credential inside a
 short-lived sync worker. The executable, fixed launcher, crash reconciliation
-and QML account flow remain implementation work; this library is not a sign-in
-feature.
+and QML account flow remain implementation work; the privileged claim path is
+not yet wired to a fixed executable, so this is not a sign-in feature.
 
 Account removal is a transaction: block new work, wait a bounded time for an
 admitted sync, revoke remote authorization when the provider supports it, then

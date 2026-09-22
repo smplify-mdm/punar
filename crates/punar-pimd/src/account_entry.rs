@@ -191,6 +191,26 @@ fn send_outcome(
     send_packet(channel, &frame)
 }
 
+pub(crate) fn reject_account_entry(
+    channel: OwnedFd,
+    code: AccountEntryCode,
+) -> Result<(), AccountEntryError> {
+    if code == AccountEntryCode::Connected {
+        return Err(AccountEntryError::Invalid);
+    }
+    let channel = UnixDatagram::from(channel);
+    channel.set_write_timeout(Some(ENTRY_DEADLINE))?;
+    send_outcome(
+        &channel,
+        &AccountEntryOutcome {
+            v: ENTRY_VERSION,
+            ok: false,
+            code,
+            account_id: None,
+        },
+    )
+}
+
 fn receive_outcome(channel: &UnixDatagram) -> Result<AccountEntryOutcome, AccountEntryError> {
     channel.set_read_timeout(Some(ENTRY_DEADLINE))?;
     let frame = receive_packet(channel, MAX_OUTCOME_BYTES)?;

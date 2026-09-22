@@ -42,6 +42,10 @@
 > time for existing provider work. The Settings-only `accounts.remove`
 > dispatcher path now invokes this lifecycle and refuses retained local data,
 > but no installed service/launcher can grant that capability yet.
+> Settings-only `accounts.begin_connect` and `accounts.cancel_connect` now
+> create and cancel bounded five-minute open-protocol setup sessions. They
+> expose only an opaque id, admit no credential field, and keep the one-use
+> helper descriptor reserved for the still-missing privileged launcher.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account
@@ -52,7 +56,8 @@
 > attachment payloads. Calendar and
 > Reminders remain unavailable to users. Provider-neutral account metadata and
 > service-private server configuration now survive restart and the former
-> backs `accounts.list`, but there is no application-callable sign-in workflow.
+> backs `accounts.list`, but the protected helper is not launchable from a user
+> interface yet, so there is still no complete sign-in workflow.
 > No part of this status may be shortened to “Mail is built” until the runtime
 > gates in section 9 pass.
 

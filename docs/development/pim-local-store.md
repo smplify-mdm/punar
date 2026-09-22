@@ -66,7 +66,10 @@ profile. It locks down the process before opening records or the cursor key,
 admits one kernel-authenticated root-brokered channel, and serves the strict
 dispatcher until EOF. It deliberately binds no listener and is not yet an
 installed daemon; that keeps the still-missing fixed launcher and runtime
-sandbox gate visible.
+sandbox gate visible. It now also owns a bounded account-setup coordinator:
+Settings can create/cancel an opaque open-protocol setup id, while only the
+privileged launcher side can consume the associated one-use helper descriptor.
+Unclaimed sessions expire after five minutes and no more than four can exist.
 
 `crates/punar-pimd/src/vault.rs` adds an unstaged service-private credential
 vault. It requires the state path's real filesystem device to resolve to a
@@ -86,9 +89,10 @@ vault. `account_setup.rs` coordinates validation, dual typed credential
 commit, provider verification, durable account publication, removal and
 checked-failure rollback. The coordinator keeps a closed verifier interface;
 ADR-011 now supplies its real TLS-only IMAP/SMTP implementation with platform certificate validation, fixed
-deadlines and bounded IMAP verification reads. No fixed helper executable,
-launcher, QML flow or mailbox synchronization adapter exists yet. It starts no
-resident process and performs no periodic work.
+deadlines and bounded IMAP verification reads. A bounded read-only INBOX
+adapter and non-resident sync coordinator now persist parsed Mail plus its
+cursor; no fixed helper executable, launcher or QML flow exists yet. It starts
+no resident process and performs no periodic work.
 
 ## Why the blank containers are not demo data
 
@@ -225,7 +229,10 @@ The crate's unit suite proves:
 57. the protected account-entry session keeps the password out of its strict
     identity/server frame, zeroizes helper input, rejects extensions, wrong
     versions, cancellation and oversize, returns only a closed helper outcome,
-    and commits only after verification.
+    and commits only after verification; and
+58. Settings setup begins with only a provider type, yields an opaque id,
+    rejects credential-shaped extensions, limits session count and lifetime,
+    supports cancellation, and makes the helper descriptor one-use.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -238,7 +245,7 @@ install or activate `punar-pimd`, it still needs:
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
 - the remaining store-backed method dispatcher: filtered event/reminder reads,
-  event responses, account setup IPC, Mail mutations and contacts methods;
+  event responses, Mail mutations and contacts methods;
 - the fixed launcher, executable and UI for the short-lived password-entry
   helper, plus crash reconciliation for interrupted account transactions;
 - power-loss/fault-injection tests in addition to restart tests;

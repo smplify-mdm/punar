@@ -5,7 +5,7 @@
 //! connection: lock down the process, open only the bound profile state, admit
 //! a root-brokered capability, then serve the strict local dispatcher.
 
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,12 +15,13 @@ use thiserror::Error;
 #[cfg(test)]
 use crate::channel::receive_client_channel_from_broker;
 use crate::{
-    AccountCoordinator, AccountLifecycle, AccountLifecycleError, AccountSetupError, AdmissionError,
-    ConnectionError, CredentialVault, CursorKeyError, CursorSigner, EncryptedStorageProof,
-    LocalDispatcher, MailStore, MailStoreError, NetworkOpenProtocolVerifier,
-    OpenProtocolSyncRunner, PimStore, ProcessSecurityError, StoreError, SyncCoordinator,
-    SyncQuiesceError, VaultError, lock_down_current_process, receive_client_channel,
-    serve_granted_channel,
+    AccountConnectError, AccountConnectLifecycle, AccountCoordinator, AccountEntryRunner,
+    AccountLifecycle, AccountLifecycleError, AccountSetupError, AdmissionError, ConnectionError,
+    CredentialVault, CursorKeyError, CursorSigner, EncryptedStorageProof, LocalDispatcher,
+    MailStore, MailStoreError, NetworkOpenProtocolVerifier, OpenProtocolEntryRunner,
+    OpenProtocolSyncRunner, PimStore, ProcessSecurityError, SetupSessionCoordinator, StoreError,
+    SyncCoordinator, SyncQuiesceError, VaultError, lock_down_current_process,
+    receive_client_channel, serve_granted_channel,
 };
 
 const ACCOUNT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(25);
@@ -44,6 +45,7 @@ pub enum PimServiceError {
 pub struct PimService {
     profile_uid: u32,
     dispatcher: LocalDispatcher,
+    account_connect: Arc<SetupSessionCoordinator>,
 }
 
 struct BoundAccountLifecycle {
@@ -116,10 +118,32 @@ impl PimService {
             state_root: state_root.to_path_buf(),
             profile_id: profile_id.to_string(),
         });
+        let entry_runner: Arc<dyn AccountEntryRunner> = Arc::new(OpenProtocolEntryRunner::new(
+            Arc::clone(&store),
+            Arc::clone(&mail_store),
+            state_root,
+            profile_id,
+        ));
+        let account_connect = SetupSessionCoordinator::new(entry_runner);
+        let account_connect_lifecycle: Arc<dyn AccountConnectLifecycle> = account_connect.clone();
         Ok(Self {
             profile_uid,
-            dispatcher: LocalDispatcher::with_runtime(store, mail_store, signer, sync, lifecycle),
+            dispatcher: LocalDispatcher::with_runtime(
+                store,
+                mail_store,
+                signer,
+                sync,
+                lifecycle,
+                account_connect_lifecycle,
+            ),
+            account_connect,
         })
+    }
+
+    /// Privileged-launcher side of protected account entry. The descriptor is
+    /// intentionally unavailable through the application request protocol.
+    pub fn claim_account_helper(&self, setup_id: &str) -> Result<OwnedFd, AccountConnectError> {
+        self.account_connect.claim_helper(setup_id)
     }
 
     /// Admit exactly one channel from a kernel-attested root control peer and

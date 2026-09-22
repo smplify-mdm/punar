@@ -121,6 +121,14 @@ irreversible process-side controls: `RLIMIT_CORE=0`, non-dumpable state and
 `no_new_privs`. The fixed launcher/service still must invoke this before
 authority or untrusted content and pass the hostile runtime theft gate.
 
+Account credential entry uses a separate unnamed `SOCK_SEQPACKET` pair rather
+than an application method. Settings may allocate or cancel an opaque bounded
+setup session, but it cannot claim the helper descriptor. The service retains
+that descriptor for a privileged fixed launcher, expires unclaimed sessions
+after five minutes and admits at most four. The claim API is implemented in
+the service composition root; its root-only broker protocol and executable
+launch are still required before production staging.
+
 ## Consequences
 
 - Same-uid applications have no address to connect to and no token to steal
