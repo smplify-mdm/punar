@@ -55,6 +55,10 @@ clap = { version = "4", features = ["derive"] }
 # the safe `process::getuid` wrapper rather than libc/unsafe ownership checks —
 # same crate, no new transitive package.
 rustix = { version = "1", features = ["net", "fs", "process", "thread", "event"] }
+# Socket activation hands punar-pimd only the two systemd-owned, named
+# descriptors it expects. This pure-Rust parser owns the received descriptors
+# immediately and adds no resident runtime or libsystemd dependency.
+sd-listen-fds = "=0.2.0"
 # signal-hook (M3): safe SIGTERM/SIGINT handling for punard graceful shutdown
 # (M7: punar-agentd shuts down the same way).
 # sigaction is not reachable from safe std or safe rustix; signal-hook is the

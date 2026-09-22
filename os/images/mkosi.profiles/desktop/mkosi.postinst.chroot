@@ -11,6 +11,17 @@ if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi
 
+# Mail, Calendar and Reminders state belongs to a locked service identity, not
+# to the signed-in uid. This prevents an arbitrary same-uid process from
+# opening account metadata, messages or encrypted credential material.
+if ! getent group punar-pim >/dev/null 2>&1; then
+    groupadd --system punar-pim
+fi
+if ! getent passwd punar-pim >/dev/null 2>&1; then
+    useradd --system --gid punar-pim --home-dir /var/lib/punar-pim \
+        --no-create-home --shell /usr/bin/nologin punar-pim
+fi
+
 # The package normally owns this locked account. Keep the product adapter
 # explicit so every substrate gives greetd the same non-login identity and
 # the onboarding socket can enforce its SO_PEERCRED allowlist.

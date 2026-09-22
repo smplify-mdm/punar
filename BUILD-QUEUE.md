@@ -145,9 +145,11 @@ application windows but still uses fixture data, so its QML, launcher and
 desktop entry exist only in the composable dev/CI profile and own no MIME
 handlers. The production image contains none of that fixture-backed surface.
 Calendar and Reminders have a tested local-data library but no user-facing
-window or service connection. A tested non-resident account/sync runtime now
-exists as an unstaged library, but its executable and systemd activation are
-absent. Do not surface the Mail prototype as a real app and do not duplicate
+window or service connection. A tested non-resident account/sync runtime,
+strict socket-activated executable and hardened per-profile systemd units are
+now staged in the production image. Both sockets are root-only and deliberately
+have no install target, so the service remains dormant until the fixed broker
+and account UI are complete. Do not surface the Mail prototype as a real app and do not duplicate
 its fixture data into Calendar or Reminders.
 
 Next build slice, in order:
@@ -179,8 +181,11 @@ Next build slice, in order:
    hostile same-uid runtime theft proof remain open. A first composition root
    now locks down before opening the profile store/cursor key, accepts one
    root-brokered channel and drives the strict dispatcher without creating an
-   application listener. The socket-activated process and fixed launcher
-   remain open. A service-private credential-vault library now encrypts each
+   application-owned listener. The staged socket-activated executable accepts
+   exactly two named listening sequenced-packet descriptors, derives only a
+   strict uid-bound profile/state path, and runs as a locked `punar-pim`
+   identity inside a hardened service. Its two root-only socket units have no
+   install target; the fixed launcher remains open. A service-private credential-vault library now encrypts each
    record with XChaCha20-Poly1305, binds it to the schema/profile/account/kind,
    zeroizes caller input and held keys, refuses plaintext or unproven storage,
    and durably removes account secrets. Its proof is bound to the state path's
@@ -205,8 +210,9 @@ Next build slice, in order:
    and unnamed worker completion, caps active connections at 32, performs no
    provider work on the accept path and exits after a bounded zero-work idle
    interval. Its integration test drives Settings, creates and claims a setup,
-   and observes clean idle exit. systemd activation and the production binary
-   remain open.
+   and observes clean idle exit. The image now stages that production binary
+   and its dormant systemd activation units; fixed-broker activation, in-image
+   zero-residency measurement and descriptor-theft proof remain open.
    A service-internal account coordinator now validates private IMAP/SMTP
    configuration before credential entry, atomically creates typed incoming
    and outgoing vault records, requires provider verification before making an

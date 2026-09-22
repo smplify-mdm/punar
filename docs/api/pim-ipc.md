@@ -1,11 +1,13 @@
 # Punar PIM local IPC — `punar-pimd` wire contract (v1alpha1)
 
-Status: **accepted contract; service not exposed.** The fixture-free,
-profile-bound Calendar/Reminders persistence core and a LUKS-gated encrypted
-credential-vault library now exist in `crates/punar-pimd`, but there is
-deliberately no application listener, executable or production image staging
-yet. A TLS-only open-protocol verifier, bounded read-only INBOX adapter and
-non-resident sync coordinator exist below that unstaged boundary. The
+Status: **accepted contract; service staged but not exposed.** The fixture-free,
+profile-bound Calendar/Reminders persistence core, LUKS-gated encrypted vault,
+TLS-only open-protocol verifier, bounded read-only INBOX adapter and
+non-resident sync coordinator exist in `crates/punar-pimd`. A production
+executable now accepts exactly two named systemd activation descriptors and
+the image stages hardened per-profile service/socket units. Those sockets are
+root-only and have no install target, so no user or application can activate
+or connect to this incomplete service yet. The
 machine-readable authority is
 [`schemas/pim/ipc-message.json`](../../schemas/pim/ipc-message.json), with
 provider-neutral records in
@@ -55,11 +57,14 @@ unnamed channel and applies the absolute frame deadlines; it creates no
 listener. `crates/punar-pimd/src/service.rs` now composes process lockdown,
 private state/key open, root-broker admission and that connection runner for
 one bound profile and one already-connected control channel. The production
-runtime library now polls separate root-only application-grant and helper-claim
+runtime now polls separate root-only application-grant and helper-claim
 listeners, caps active connections at 32, and exits after a bounded idle
 interval using an unnamed completion socket rather than a polling timer. The
-systemd activation units and executable remain blocked on the privileged launch
-proof in ADR-009.
+socket-activated executable rejects unnamed, missing, extra, non-listening or
+non-`SOCK_SEQPACKET` descriptors. The staged units run as the locked
+`punar-pim` identity, keep each uid's state in an exact 0700 systemd state
+directory, and grant no ambient capability. Fixed privileged launch and the
+hostile same-uid runtime proof in ADR-009 remain blockers before activation.
 
 The envelope is:
 
@@ -189,8 +194,8 @@ bounded typed errors and emits signed cursors only after persistence succeeds.
 The setup methods expose only an opaque id and closed state; they cannot carry
 a password, server configuration or helper descriptor. Automatic retry
 scheduling, Mail mutation/send, contacts, event responses and filtered
-event/reminder reads remain explicitly unstaged; this partial dispatcher is
-not installed in a production image.
+event/reminder reads remain explicitly unavailable; this partial dispatcher is
+inside a dormant production service and has no application-facing launch path.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 
@@ -201,8 +206,8 @@ exits each worker after one bounded INBOX batch. Success or a closed
 offline/auth-required/error result is persisted on the public account record;
 provider response text and credentials are not representable. There is no
 timer or automatic retry loop yet: the stored `next_retry_at` is UI/state for
-the later socket-activated scheduler, not a promise that an unstaged daemon is
-resident.
+a later scheduler, not a promise that the dormant socket-activated service is
+resident or will retry without a new explicit trigger.
 `has_more` requires the client to continue before rendering the cursor as
 current. Change events identify records but do not repeat message bodies or
 other content. Clients fetch changed records through their typed method.

@@ -1,6 +1,6 @@
 # PIM local store — durable core before service exposure
 
-Status: **implemented and tested as libraries; not installed in an image.**
+Status: **implemented and tested; dormant service executable staged.**
 
 `crates/punar-pimd` is the first executable-code slice behind Punar Mail,
 Calendar and Reminders. It deliberately solves local data durability before it
@@ -57,16 +57,17 @@ unauthorized operation first.
 
 `crates/punar-pimd/src/process_security.rs` provides one irreversible,
 postcondition-checked process lockdown operation: hard and soft core limits are
-zero, the process is non-dumpable and `no_new_privs` is set. The future fixed
-launcher and service must call it before handing over a capability or loading
-account data; the library alone does not prove that runtime ordering.
+zero, the process is non-dumpable and `no_new_privs` is set. The composition
+root applies it before loading account data. Fixed application launch must
+apply the equivalent boundary before handing a capability to a UI.
 
 `crates/punar-pimd/src/service.rs` is the first composition root for one bound
 profile. It locks down the process before opening records or the cursor key,
 admits one kernel-authenticated root-brokered channel, and serves the strict
-dispatcher until EOF. It deliberately binds no listener and is not yet an
-installed daemon; that keeps the still-missing fixed launcher and runtime
-sandbox gate visible. It now also owns a bounded account-setup coordinator:
+dispatcher until EOF. It deliberately binds no listener; systemd owns the two
+root-only activation sockets staged in the image. They have no install target,
+which keeps the still-missing fixed launcher and runtime theft gate visible.
+It now also owns a bounded account-setup coordinator:
 Settings can create/cancel an opaque open-protocol setup id, while only the
 privileged launcher side can consume the associated one-use helper descriptor.
 Unclaimed sessions expire after five minutes and no more than four can exist.
@@ -78,8 +79,11 @@ on a closed refusal.
 listeners without binding an application address itself. It polls application
 grants, helper claims and unnamed worker completion, caps active connections
 at 32, and exits after a bounded no-work interval. The integration test drives
-both control planes and observes idle exit; systemd activation and the shipping
-binary are still absent.
+both control planes and observes idle exit. The `punar-pimd` executable accepts
+only the two expected named listening `SOCK_SEQPACKET` descriptors and derives
+its fixed profile identity/state path from one strict uid. Hardened systemd
+units stage this binary under a locked service account but deliberately do not
+enable either profile socket.
 
 `crates/punar-pimd/src/vault.rs` adds an unstaged service-private credential
 vault. It requires the state path's real filesystem device to resolve to a
@@ -254,7 +258,7 @@ because it is a Cargo workspace member.
 ## Explicitly still blocked
 
 This work does **not** close Build Queue stage 3. Before a production image may
-install or activate `punar-pimd`, it still needs:
+activate `punar-pimd` for a user application, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
@@ -263,7 +267,8 @@ install or activate `punar-pimd`, it still needs:
 - the fixed launcher, executable and UI for the short-lived password-entry
   helper, plus crash reconciliation for interrupted account transactions;
 - power-loss/fault-injection tests in addition to restart tests;
-- per-profile systemd socket/service units with zero idle residency proof;
+- fixed-broker activation of both staged per-profile sockets plus in-image
+  zero-idle-residency and hostile same-uid descriptor-theft proof;
 - schema-parity, fuzz and hostile-content tests; and
 - live-provider/service-runtime restart tests for the bounded INBOX
   synchronizer. The current library selects INBOX read-only, plans at most

@@ -1,6 +1,6 @@
 # ADR-009 — Unnamed capability channels for first-party PIM applications
 
-- Status: **Accepted — transfer and root-peer admission implemented; privileged launch and runtime proof remain open**
+- Status: **Accepted — dormant socket-activated service staged; privileged launch and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§10–11, 29, 44, 61;
   `docs/api/pim-ipc.md`; ADR-008
@@ -115,7 +115,8 @@ The implementation in `crates/punar-pimd/src/channel.rs` covers descriptor
 creation, bounded transfer, kernel-attested root control-peer admission,
 strict grant parsing, profile binding and the least-privilege method table
 using safe `rustix` APIs. It rejects a non-root control peer before reading its
-grant. It is a library proof, not yet a shipping launcher or service.
+grant. The image now stages a dormant socket-activated service, but not the
+shipping application launcher.
 `crates/punar-pimd/src/process_security.rs` now groups and verifies the
 irreversible process-side controls: `RLIMIT_CORE=0`, non-dumpable state and
 `no_new_privs`. The fixed launcher/service still must invoke this before
@@ -133,11 +134,14 @@ refusal. The fixed broker/helper executable launch is still required before
 production staging.
 
 The profile service runtime accepts these two control planes on separate
-root/service-only sequenced-packet listeners. It polls them together with an
+root-only sequenced-packet listeners. It polls them together with an
 unnamed worker-completion socket, admits at most 32 connections, and exits
-after a bounded interval with no active work. The loop is integration-tested
-but remains an unstaged library until systemd owns the listeners and the fixed
-broker executable is proven.
+after a bounded interval with no active work. The loop is integration-tested.
+The staged executable accepts exactly the two systemd-named listening
+descriptors, runs as a locked service identity and derives a fixed uid-bound
+state path. Both socket units are 0600 root:root and have no install target;
+the fixed broker must start them together before any client can reach the
+service.
 
 ## Consequences
 
@@ -156,7 +160,7 @@ broker executable is proven.
   attacker must not duplicate the inherited descriptor through `/proc`,
   ptrace or `pidfd_getfd`.
 
-## Required runtime proof before production staging
+## Required runtime proof before production activation
 
 1. The production image has no filesystem, abstract or TCP PIM application
    listener.

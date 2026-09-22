@@ -9,6 +9,14 @@ if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi
 
+if ! getent group punar-pim >/dev/null 2>&1; then
+    groupadd --system punar-pim
+fi
+if ! getent passwd punar-pim >/dev/null 2>&1; then
+    useradd --system --gid punar-pim --home-dir /var/lib/punar-pim \
+        --no-create-home --shell /usr/sbin/nologin punar-pim
+fi
+
 systemctl --global disable \
     podman-auto-update.service podman-auto-update.timer \
     podman-clean-transient.service podman-restart.service \

@@ -3,13 +3,11 @@
 //! The implementation contains durable local Calendar/Reminders and Mail
 //! record stores plus a LUKS-gated service-private encrypted credential vault
 //! and an unnamed, one-use entry channel that moves a password from a locked-down
-//! helper into that vault. It now has unstaged TLS-only IMAP/SMTP account
-//! verification and a bounded read-only INBOX synchronizer, but still has no
-//! application listener or resident background loop. That keeps the
-//! production authorization boundary honest while durability and credential
-//! custody are exercised independently. The executable and socket activation
-//! arrive only after ADR-008's hostile same-UID caller gate has a proven
-//! mechanism.
+//! helper into that vault. It has TLS-only IMAP/SMTP account verification, a
+//! bounded read-only INBOX synchronizer and a non-resident socket-activated
+//! runtime. The image sockets remain root-only and dormant until the fixed
+//! broker and account-entry UI are connected, so staging the service does not
+//! create a same-UID authorization bypass or a misleading production surface.
 //!
 //! A newly opened store contains one blank local calendar and one blank local
 //! reminder list. Those are structural containers, not demo content: accounts,

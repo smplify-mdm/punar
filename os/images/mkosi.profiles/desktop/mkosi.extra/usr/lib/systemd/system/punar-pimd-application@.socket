@@ -1,0 +1,18 @@
+[Unit]
+Description=Punar private application channel for profile UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+
+[Socket]
+ListenSequentialPacket=/run/punar-pimd/%i/application.sock
+FileDescriptorName=application
+Service=punar-pimd@%i.service
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Backlog=32
+RemoveOnStop=yes
+
+# Deliberately no [Install]. The fixed root broker will start both profile
+# sockets in one transaction; exposing either to a session is not an image
+# enablement decision.

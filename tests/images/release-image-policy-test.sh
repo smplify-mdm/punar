@@ -9,7 +9,10 @@ REPO_ROOT=$(cd -- "$(dirname "$0")/../.." && pwd)
 CHECKER="${REPO_ROOT}/os/images/check-release-image.sh"
 FINALIZE="${REPO_ROOT}/os/images/mkosi.finalize"
 ARM_POSTINSTALL="${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot"
+AMD_POSTINSTALL="${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.postinst.chroot"
+ARCH_POSTINSTALL="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.postinst.chroot"
 DESKTOP_STAGER="${REPO_ROOT}/os/images/scripts/container-build.sh"
+PIM_UNIT_ROOT="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/punar-release-policy.XXXXXX")
 trap 'rm -rf "${TEST_ROOT}"' EXIT INT TERM
 
@@ -21,6 +24,38 @@ grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
     echo 'FAIL ARM adapter: seatd must remain masked when Debian presets run' >&2
     exit 1
 }
+
+# PIM state is never owned by a login account, and both socket-activated
+# control planes remain dormant and root-only until the fixed broker starts
+# them together for a concrete profile.
+for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL}"; do
+    grep -Fq 'useradd --system --gid punar-pim' "${postinstall}" || {
+        echo "FAIL PIM service: locked account missing from ${postinstall}" >&2
+        exit 1
+    }
+done
+for socket in punar-pimd-application@.socket punar-pimd-account-helper@.socket; do
+    unit="${PIM_UNIT_ROOT}/${socket}"
+    grep -qx 'SocketUser=root' "${unit}"
+    grep -qx 'SocketGroup=root' "${unit}"
+    grep -qx 'SocketMode=0600' "${unit}"
+    if grep -q '^\[Install\]' "${unit}"; then
+        echo "FAIL PIM service: ${socket} must not be image-enabled" >&2
+        exit 1
+    fi
+done
+grep -qx 'FileDescriptorName=application' \
+    "${PIM_UNIT_ROOT}/punar-pimd-application@.socket"
+grep -qx 'FileDescriptorName=account-helper' \
+    "${PIM_UNIT_ROOT}/punar-pimd-account-helper@.socket"
+grep -qx 'User=punar-pim' "${PIM_UNIT_ROOT}/punar-pimd@.service"
+grep -qx 'StateDirectory=punar-pim/%i' "${PIM_UNIT_ROOT}/punar-pimd@.service"
+grep -qx 'ProtectSystem=strict' "${PIM_UNIT_ROOT}/punar-pimd@.service"
+if grep -q '^\[Install\]' "${PIM_UNIT_ROOT}/punar-pimd@.service"; then
+    echo 'FAIL PIM service: profile service must not be image-enabled' >&2
+    exit 1
+fi
+echo 'ok   PIM service is profile-scoped, root-brokered, hardened and dormant'
 
 # Browser pages used to exercise storage isolation are dev/CI input. Catch a
 # destination regression here in seconds rather than after the release image

@@ -154,6 +154,7 @@ fn poll_controls(
         None
     };
     poll(&mut fds, timeout.as_ref())?;
+    refuse_broken_poll(&fds)?;
     Ok(Ready {
         application: fds[0].revents().contains(PollFlags::IN),
         helper: fds[1].revents().contains(PollFlags::IN),
@@ -164,10 +165,19 @@ fn poll_controls(
 fn poll_completion_only(completion_read: &OwnedFd) -> Result<Ready, rustix::io::Errno> {
     let mut fds = [PollFd::new(completion_read, PollFlags::IN)];
     poll(&mut fds, None)?;
+    refuse_broken_poll(&fds)?;
     Ok(Ready {
         completion: fds[0].revents().contains(PollFlags::IN),
         ..Ready::default()
     })
+}
+
+fn refuse_broken_poll(fds: &[PollFd<'_>]) -> Result<(), rustix::io::Errno> {
+    let broken = PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL;
+    if fds.iter().any(|fd| fd.revents().intersects(broken)) {
+        return Err(rustix::io::Errno::IO);
+    }
+    Ok(())
 }
 
 fn spawn_connection(

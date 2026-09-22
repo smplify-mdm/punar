@@ -1,0 +1,17 @@
+[Unit]
+Description=Punar protected Mail account-entry channel for profile UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+
+[Socket]
+ListenSequentialPacket=/run/punar-pimd/%i/account-helper.sock
+FileDescriptorName=account-helper
+Service=punar-pimd@%i.service
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Backlog=4
+RemoveOnStop=yes
+
+# Deliberately no [Install]. It is started with the application socket only by
+# the fixed broker; an unprivileged app never receives this listening endpoint.

@@ -61,6 +61,7 @@ stage_punar_binaries() {
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
                 -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
+                -p punar-pimd \
                 -p punar-mock-smplify
     )
 
@@ -77,6 +78,7 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-greet" \
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
+        "${cargo_target}/release/punar-pimd" \
         "${extra}/usr/bin/"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \

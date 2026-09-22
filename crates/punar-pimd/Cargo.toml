@@ -20,6 +20,7 @@ redb = { workspace = true }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 rustix = { workspace = true }
+sd-listen-fds = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

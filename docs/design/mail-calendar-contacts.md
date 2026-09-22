@@ -8,9 +8,9 @@
 > only by the dev/CI image profile and are absent from production images.
 > The profile-bound `punar-pimd` crate now provides crash-durable, fixture-free
 > local Calendar/Reminders records, revisions and change history plus bounded,
-> strictly authorized application-protocol parsing. An unstaged encrypted
-> credential-vault library now refuses non-LUKS storage and keeps values out of
-> ordinary IPC. A tested unnamed one-use credential-entry channel locks its
+> strictly authorized application-protocol parsing. Encrypted credential-vault
+> code behind the dormant service refuses non-LUKS storage and keeps values
+> out of ordinary IPC. A tested unnamed one-use credential-entry channel locks its
 > helper down before input exists and transfers a bounded value directly into
 > the vault. A protected account-entry session now adds a separate strict
 > identity/server packet before the opaque password packet, rejects extensions
@@ -49,14 +49,17 @@
 > root-broker exchange now transfers that endpoint exactly once with closed
 > refusal codes, but the fixed broker/helper executables remain missing.
 > A bounded non-resident service loop now serves application and helper control
-> planes concurrently and exits after the final idle interval; it is not yet a
-> systemd-activated production process.
+> planes concurrently and exits after the final idle interval. A production
+> executable and hardened systemd units are staged: they accept exactly the two
+> named root-only activation descriptors, run under a locked service identity
+> and have no install target. They remain dormant until a fixed broker and
+> hostile same-uid runtime proof exist.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account
 > metadata while account lifecycle remains Settings-only. There is still no
-> service listener, fixed launcher/bridge, live-provider proof or production
-> image entry. A first bounded MIME ingest layer now produces only
+> user-accessible service connection, fixed launcher/bridge, live-provider
+> proof or production application entry. A first bounded MIME ingest layer now produces only
 > plain-text Mail records, explicitly blocks HTML remote content and discards
 > attachment payloads. Calendar and
 > Reminders remain unavailable to users. Provider-neutral account metadata and
@@ -144,8 +147,8 @@ Mail / Calendar / Reminders QML windows
 ```
 
 The first storage implementation relies on full-disk encryption for content at
-rest. Its separately reviewed credential path now exists as an unstaged
-library: each record is XChaCha20-Poly1305 encrypted with bound context, and
+rest. Its separately reviewed credential path now exists behind the dormant
+service boundary: each record is XChaCha20-Poly1305 encrypted with bound context, and
 vault open requires kernel-observed LUKS2 backing. The current `punar-secrets`
 daemon is a short-lived, non-persistent agent
 credential broker; silently turning it into an OAuth vault would invalidate

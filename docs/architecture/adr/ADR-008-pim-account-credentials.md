@@ -1,6 +1,6 @@
 # ADR-008 — Persistent PIM account credentials and first provider sequence
 
-- Status: **Accepted — record vault, protected entry and bounded setup sessions implemented as unstaged libraries; fixed launcher/UI and runtime proof remain open**
+- Status: **Accepted — record vault and dormant service staged; fixed helper/UI and runtime proof remain open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–11, 15–16,
   30, 36, 44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 7–9;
@@ -207,7 +207,7 @@ production desktop entry or MIME handler may ship.
 - A fixed password-entry executable/launcher and a verifiable first-party
   launch capability remain implementation work. The one-use transport,
   pre-input process lockdown and checked-failure account coordinator are
-  implemented as an unstaged library. Falling
+  included only behind the dormant root-only service boundary. Falling
   back to a normal Mail text field, a world- or user-readable socket, peer uid
   alone, or a generic “get secret” method is not permitted.
 
