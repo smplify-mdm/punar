@@ -132,6 +132,13 @@ secret in the claim, and returns either one close-on-exec endpoint or a closed
 refusal. The fixed broker/helper executable launch is still required before
 production staging.
 
+The profile service runtime accepts these two control planes on separate
+root/service-only sequenced-packet listeners. It polls them together with an
+unnamed worker-completion socket, admits at most 32 connections, and exits
+after a bounded interval with no active work. The loop is integration-tested
+but remains an unstaged library until systemd owns the listeners and the fixed
+broker executable is proven.
+
 ## Consequences
 
 - Same-uid applications have no address to connect to and no token to steal

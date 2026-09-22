@@ -145,9 +145,10 @@ application windows but still uses fixture data, so its QML, launcher and
 desktop entry exist only in the composable dev/CI profile and own no MIME
 handlers. The production image contains none of that fixture-backed surface.
 Calendar and Reminders have a tested local-data library but no user-facing
-window or service connection. The shared account/sync process is absent. Do
-not surface the Mail prototype as a real app and do not duplicate its fixture
-data into Calendar or Reminders.
+window or service connection. A tested non-resident account/sync runtime now
+exists as an unstaged library, but its executable and systemd activation are
+absent. Do not surface the Mail prototype as a real app and do not duplicate
+its fixture data into Calendar or Reminders.
 
 Next build slice, in order:
 
@@ -200,6 +201,12 @@ Next build slice, in order:
    descriptor-bearing and non-root requests, and returns only a closed refusal
    or one unnamed endpoint. It supports open-protocol accounts only and has no
    fixed broker executable or UI yet.
+   A two-control-plane service loop now polls application grants, helper claims
+   and unnamed worker completion, caps active connections at 32, performs no
+   provider work on the accept path and exits after a bounded zero-work idle
+   interval. Its integration test drives Settings, creates and claims a setup,
+   and observes clean idle exit. systemd activation and the production binary
+   remain open.
    A service-internal account coordinator now validates private IMAP/SMTP
    configuration before credential entry, atomically creates typed incoming
    and outgoing vault records, requires provider verification before making an

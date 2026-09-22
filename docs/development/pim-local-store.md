@@ -74,6 +74,13 @@ The root-broker exchange verifies its kernel peer before reading the strict
 claim, rejects profile/extension/descriptor confusion, and returns no endpoint
 on a closed refusal.
 
+`crates/punar-pimd/src/daemon.rs` composes two already-owned sequenced-packet
+listeners without binding an application address itself. It polls application
+grants, helper claims and unnamed worker completion, caps active connections
+at 32, and exits after a bounded no-work interval. The integration test drives
+both control planes and observes idle exit; systemd activation and the shipping
+binary are still absent.
+
 `crates/punar-pimd/src/vault.rs` adds an unstaged service-private credential
 vault. It requires the state path's real filesystem device to resolve to a
 kernel device-mapper UUID beginning `CRYPT-LUKS2-`, creates a private random
@@ -237,7 +244,9 @@ The crate's unit suite proves:
     rejects credential-shaped extensions, limits session count and lifetime,
     supports cancellation, and makes the helper descriptor one-use; and
 59. a non-root, cross-profile, extended or descriptor-bearing broker claim is
-    refused before it can receive the unnamed helper endpoint.
+    refused before it can receive the unnamed helper endpoint; and
+60. the non-resident runtime serves Settings plus a helper claim concurrently,
+    caps admission and returns to zero residency after the final connection.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.

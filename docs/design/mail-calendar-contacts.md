@@ -48,6 +48,9 @@
 > helper descriptor reserved for the privileged launcher. The service-side
 > root-broker exchange now transfers that endpoint exactly once with closed
 > refusal codes, but the fixed broker/helper executables remain missing.
+> A bounded non-resident service loop now serves application and helper control
+> planes concurrently and exits after the final idle interval; it is not yet a
+> systemd-activated production process.
 > Store-backed `mail.list` and
 > `mail.thread` now expose only parsed durable records through signed,
 > revision-bound cursors, and the three apps may read non-secret account

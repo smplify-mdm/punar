@@ -12,9 +12,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-#[cfg(test)]
 use crate::channel::receive_client_channel_from_broker;
-#[cfg(test)]
 use crate::setup_control::receive_account_helper_claim_from_broker;
 use crate::{
     AccountConnectError, AccountConnectLifecycle, AccountCoordinator, AccountEntryRunner,
@@ -201,8 +199,7 @@ impl PimService {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn serve_control_from_uid(
+    pub(crate) fn serve_control_from_uid(
         &self,
         control: impl AsFd,
         broker_uid: u32,
@@ -211,8 +208,7 @@ impl PimService {
         self.serve_granted(granted)
     }
 
-    #[cfg(test)]
-    fn serve_account_helper_control_from_uid(
+    pub(crate) fn serve_account_helper_control_from_uid(
         &self,
         control: impl AsFd,
         broker_uid: u32,

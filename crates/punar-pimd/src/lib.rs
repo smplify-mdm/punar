@@ -23,6 +23,7 @@ mod channel;
 mod connection;
 mod credential_entry;
 mod cursor;
+mod daemon;
 mod dispatcher;
 mod mail_ingest;
 mod mail_store;
@@ -54,6 +55,7 @@ pub use channel::{
 pub use connection::{ConnectionError, serve_granted_channel};
 pub use credential_entry::{CredentialEntryError, CredentialEntryHelper, credential_entry_pair};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
+pub use daemon::{PimDaemonError, serve_profile};
 pub use dispatcher::LocalDispatcher;
 pub use mail_ingest::{MailIngestError, MailIngestInput, ParsedMail, ingest_message};
 pub use mail_store::{

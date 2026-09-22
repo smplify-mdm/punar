@@ -55,8 +55,11 @@ unnamed channel and applies the absolute frame deadlines; it creates no
 listener. `crates/punar-pimd/src/service.rs` now composes process lockdown,
 private state/key open, root-broker admission and that connection runner for
 one bound profile and one already-connected control channel. The production
-listener/activation loop remains blocked on the privileged launch proof in
-ADR-009.
+runtime library now polls separate root-only application-grant and helper-claim
+listeners, caps active connections at 32, and exits after a bounded idle
+interval using an unnamed completion socket rather than a polling timer. The
+systemd activation units and executable remain blocked on the privileged launch
+proof in ADR-009.
 
 The envelope is:
 
