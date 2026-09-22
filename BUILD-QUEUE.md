@@ -144,8 +144,9 @@ Current truth: the Mail index/thread/compose work proves ordinary responsive
 application windows but still uses fixture data, so its QML, launcher and
 desktop entry exist only in the composable dev/CI profile and own no MIME
 handlers. The production image contains none of that fixture-backed surface.
-Calendar is design-only. Reminders and the shared account/sync service are
-absent. Do not surface the prototype as a real app and do not duplicate its
+Calendar and Reminders have a tested local-data library but no user-facing
+window or service connection. The shared account/sync process is absent. Do
+not surface the Mail prototype as a real app and do not duplicate its fixture
 data into Calendar or Reminders.
 
 Next build slice, in order:
@@ -165,9 +166,12 @@ Next build slice, in order:
    credential fields. ADR-009 now selects an unnamed inherited capability
    channel instead of an application-connectable socket, and the safe
    `SCM_RIGHTS` transfer primitive rejects cross-profile, extended,
-   absent/extra-descriptor and cross-client method attempts; privileged launch,
-   non-dumpable sandbox proof, socket-activated process, signed cursors, IPC
-   dispatch and production-image staging remain open;
+   absent/extra-descriptor and cross-client method attempts. The protocol
+   layer now adds bounded newline framing, a closed typed method table,
+   authorization-before-parameter parsing, safe correlation/error reflection
+   and exact success/error envelopes. Privileged launch, read deadlines,
+   non-dumpable sandbox proof, socket-activated process, signed cursors, the
+   full store dispatcher and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

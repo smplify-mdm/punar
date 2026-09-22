@@ -40,6 +40,14 @@ attachment metadata). Ordinary reads have a 10-second bound. Mutations return
 an operation record rather than holding a UI connection across remote sync;
 sync and provider work have their own bounded jobs, cancellation and backoff.
 
+The transport-independent bounded frame reader, strict envelope parser,
+closed method enum, per-client authorization-before-parameter parsing and
+exact success/error encoders now live in `crates/punar-pimd/src/protocol.rs`.
+Malformed frames without independently valid correlation fields close without
+reflection; an error response is produced only when both `id` and `method`
+are safe. The connection timeout and production service loop remain blocked
+on the privileged launch proof in ADR-009.
+
 The envelope is:
 
 ```json
@@ -47,9 +55,13 @@ The envelope is:
 ```
 
 Success echoes `v`, `id` and `method` and carries one method-specific `result`.
-Failure echoes the same fields and carries one typed `error`. Exactly one of
-`result` or `error` is present. Version `1` and the method set are closed;
-unknown methods and properties fail rather than being ignored.
+Failure echoes safe `id` and `method` fields and carries one typed `error`.
+Every response is encoded as protocol version `1`; an unsupported request
+version receives `supported_versions: [1]` rather than making the service emit
+an unsupported envelope. Exactly one of `result` or `error` is present. The
+request method set is closed; an `unknown_method` error may echo only a method
+name that passes the strict dotted-name grammar. Unknown properties fail
+rather than being ignored.
 
 ## 2. Identity, credentials and content
 

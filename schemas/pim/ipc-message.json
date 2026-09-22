@@ -52,6 +52,13 @@
         "changes.since"
       ]
     },
+    "response_method": {
+      "description": "A successful response is further constrained to the closed method set by its result mapping. An error may echo a syntactically safe unknown method so the caller can correlate unknown_method without the service reflecting arbitrary text.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
     "empty_params": {
       "type": "object",
       "properties": {},
@@ -757,7 +764,7 @@
       "properties": {
         "v": { "const": 1 },
         "id": { "$ref": "#/$defs/request_id" },
-        "method": { "$ref": "#/$defs/method" },
+        "method": { "$ref": "#/$defs/response_method" },
         "result": {},
         "error": { "$ref": "#/$defs/error" }
       },

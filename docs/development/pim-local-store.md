@@ -32,6 +32,14 @@ over a bounded root/service-only sequenced-packet control channel with
 `SCM_RIGHTS`. The receiver requires one descriptor, one strict grant header,
 the bound profile uid and the client's least-privilege method partition.
 
+`crates/punar-pimd/src/protocol.rs` implements the next boundary without
+opening a service: 8 MiB request and 16 MiB response caps, newline framing,
+strict v1 envelopes, the closed method enum, authorization before typed params,
+safe error correlation and exact result/error responses. Unsafe ids and method
+text are never reflected. A disallowed client receives `denied` even when the
+method-specific params are malformed, proving the service will not parse an
+unauthorized operation first.
+
 The store contains no password, OAuth code/token, provider secret or encryption
 key field. QML is not linked to it. It starts no resident process and performs
 no periodic work.
@@ -78,7 +86,13 @@ The crate's unit suite proves:
 11. cross-profile, extended, descriptor-free and extra-descriptor grants fail
     closed; and
 12. Mail, Calendar, Reminders and Settings cannot invoke one another's
-    mutation sets or generic execution/secret methods.
+    mutation sets or generic execution/secret methods;
+13. oversized and unterminated frames fail before dispatch, and responses are
+    newline-delimited and bounded;
+14. unsafe correlation fields are not reflected, while a safe unknown method
+    receives a schema-valid `unknown_method` response; and
+15. typed parameters reject extensions only after the app/method partition
+    admits the call.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -90,7 +104,7 @@ install or activate `punar-pimd`, it still needs:
 
 - the privileged half of ADR-009: fixed app launch with direct descriptor
   inheritance, non-dumpable state, sandboxing and hostile same-UID theft tests;
-- bounded IPC framing, deadlines, signed cursors and the full closed method
+- read/write deadlines, signed cursors and the full store-backed method
   dispatcher;
 - service-private credential wrapping on verified encrypted storage;
 - power-loss/fault-injection tests in addition to restart tests;

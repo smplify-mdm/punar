@@ -7,11 +7,12 @@
 > server or store, so the QML, launcher and hidden prototype entry are staged
 > only by the dev/CI image profile and are absent from production images.
 > The profile-bound `punar-pimd` crate now provides crash-durable, fixture-free
-> local Calendar/Reminders records, revisions and change history. It is not a
-> service yet: no socket, application binding, credential vault, network
-> adapter or production image entry exists. Calendar and Reminders remain
-> unavailable to users. No part of this status may be shortened to “Mail is
-> built” until the runtime gates in section 9 pass.
+> local Calendar/Reminders records, revisions and change history plus bounded,
+> strictly authorized application-protocol parsing. It is not a service yet:
+> no socket, application binding, credential vault, network adapter or
+> production image entry exists. Calendar and Reminders remain unavailable to
+> users. No part of this status may be shortened to “Mail is built” until the
+> runtime gates in section 9 pass.
 
 Origin: a person installed the Evolution Flatpak from the catalogue and its
 first run presented a *"Do you want to make Evolution your default email
@@ -434,8 +435,8 @@ section 2. Those need a real client.
 | 1 | Ordinary xdg-toplevel spike with stable app identity | **complete** |
 | 2 | Responsive Mail index, thread and plain-text compose on explicit fixture data | **complete prototype; hidden from shipping launcher** |
 | 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
-| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract complete; service implementation proof open** |
-| 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | weeks |
+| 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract + bounded/authorized parser complete; signed cursors and store dispatcher open** |
+| 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable library core complete; process/runtime proof open** |
 | 5 | First real account vertical slice: connect, initial sync, incremental sync, send/create/update/complete, disconnect and delete-local-data | weeks |
 | 6 | Replace every fixture binding in Mail; build Calendar and Reminders inside the adopted app grammar | weeks |
 | 7 | Second provider family plus managed configuration, profile-isolation and recovery tests | weeks |

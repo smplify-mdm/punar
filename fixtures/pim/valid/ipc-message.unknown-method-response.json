@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "id": "request-unknown-1",
+  "method": "system.exec",
+  "error": {
+    "code": "unknown_method",
+    "message": "The requested method does not exist.",
+    "details": {}
+  }
+}
