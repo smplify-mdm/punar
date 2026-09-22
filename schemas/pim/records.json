@@ -355,6 +355,7 @@
           "items": { "$ref": "#/$defs/attachment" },
           "maxItems": 128
         },
+        "attachments_complete": { "type": "boolean" },
         "sync": { "$ref": "#/$defs/sync_metadata" }
       },
       "required": [
@@ -367,6 +368,7 @@
         "body_complete",
         "remote_content_blocked",
         "attachments",
+        "attachments_complete",
         "sync"
       ],
       "additionalProperties": false

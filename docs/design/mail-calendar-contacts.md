@@ -15,7 +15,10 @@
 > the vault. There is still no fixed helper executable, sign-in UI, account
 > transaction or provider connection. There
 > is still no service listener, application binding, network adapter or
-> production image entry. Calendar and Reminders remain unavailable to users.
+> production image entry. A first bounded MIME ingest layer now produces only
+> plain-text Mail records, explicitly blocks HTML remote content and discards
+> attachment payloads; it has no transport or durable inbox yet. Calendar and
+> Reminders remain unavailable to users.
 > No part of this status may be shortened to “Mail is built” until the runtime
 > gates in section 9 pass.
 
@@ -281,7 +284,9 @@ That reframes the decision entirely, and it splits in two:
   per-file SPDX headers; Punar is Apache-2.0).
 - **Mail: do not use `libcamel`.** Prefer Rust crates in Punar's own process —
   `async-imap`, `mail-send`, `mail-parser`, `mail-builder` — which keeps the
-  mail path in one memory-safe process with no GNOME runtime at all.
+  mail path in one memory-safe process with no GNOME runtime at all. The first
+  piece now pins `mail-parser` 0.11.9 behind the bounded, plain-text-only
+  conversion in ADR-010; transport and message building remain unselected.
 
 Rejected on measurement: Akonadi and `kimap` (size), Stalwart (a server, not a
 client engine), notmuch (a local indexer, no transport), libetpan

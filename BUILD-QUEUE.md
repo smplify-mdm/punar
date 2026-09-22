@@ -203,8 +203,11 @@ Next build slice, in order:
    explicit cursor expiry. The full dispatcher is now in progress: status,
    honest empty accounts, structural Calendar/Reminder lists, local
    event/reminder mutations, typed conflicts and the durable change stream are
-   store-backed. Filtered event/reminder reads, provider/account/Mail methods
-   and production-image staging remain open;
+   store-backed. The first Mail ingest boundary now converts bounded untrusted
+   RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
+   discards attachment payloads and never invents a missing sender. Filtered
+   event/reminder reads, durable Mail storage, IMAP/SMTP, provider/account
+   methods and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;
 5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME

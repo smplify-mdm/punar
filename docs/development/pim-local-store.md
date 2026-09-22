@@ -183,7 +183,13 @@ The crate's unit suite proves:
 40. helper lockdown precedes input and exactly one value reaches the service;
 41. helper close is cancellation and cannot be mistaken for an empty password;
 42. oversized helper input and hostile oversized packets fail closed; and
-43. helper-to-vault transfer leaves no plaintext in the persisted files.
+43. helper-to-vault transfer leaves no plaintext in the persisted files;
+44. bounded MIME input creates stable schema-shaped plain-text records;
+45. actual HTML sets the remote-content block and no HTML/remote URL reaches
+    the returned body;
+46. attachment bytes are discarded while bounded metadata remains;
+47. oversized mail is refused before parse and Unicode truncation is safe; and
+48. missing/invalid senders fail instead of receiving a fixture identity.
 
 Both x86_64 and ARM64 workspace jobs compile and test this crate automatically
 because it is a Cargo workspace member.
@@ -202,6 +208,7 @@ install or activate `punar-pimd`, it still needs:
 - power-loss/fault-injection tests in addition to restart tests;
 - per-profile systemd socket/service units with zero idle residency proof;
 - schema-parity, fuzz and hostile-content tests; and
+- durable Mail records plus bounded IMAP/SMTP transport and restart tests; and
 - a real application binding with empty, offline, conflict and error states.
 
 No desktop entry, MIME handler or onboarding suggestion is enabled by this

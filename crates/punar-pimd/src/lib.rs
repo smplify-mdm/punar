@@ -21,6 +21,7 @@ mod connection;
 mod credential_entry;
 mod cursor;
 mod dispatcher;
+mod mail_ingest;
 mod pager;
 mod process_security;
 mod protocol;
@@ -36,6 +37,7 @@ pub use connection::{ConnectionError, serve_granted_channel};
 pub use credential_entry::{CredentialEntryError, CredentialEntryHelper, credential_entry_pair};
 pub use cursor::{CursorError, CursorKeyError, CursorPosition, CursorSigner};
 pub use dispatcher::LocalDispatcher;
+pub use mail_ingest::{MailIngestError, MailIngestInput, ParsedMail, ingest_message};
 pub use pager::{PageError, PagedValues, SnapshotPager};
 pub use process_security::{ProcessSecurityError, lock_down_current_process};
 pub use protocol::{
@@ -124,6 +126,17 @@ impl SyncMetadata {
         }
     }
 
+    fn synced(now: &str, remote_revision: String) -> Self {
+        Self {
+            state: SyncState::Synced,
+            local_revision: 1,
+            remote_revision: Some(remote_revision),
+            updated_at: now.to_string(),
+            last_error: None,
+            conflict: None,
+        }
+    }
+
     fn advance(&mut self, mode: MutationMode, now: &str) {
         self.local_revision += 1;
         self.state = match mode {
@@ -175,6 +188,64 @@ pub enum EventWhen {
 pub struct EmailAddress {
     pub name: Option<String>,
     pub address: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailSummaryKind {
+    MailSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailSummary {
+    pub kind: MailSummaryKind,
+    pub thread_id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub correspondents: Vec<EmailAddress>,
+    pub preview: String,
+    pub received_at: String,
+    pub unread: bool,
+    pub starred: bool,
+    pub attachments_count: u32,
+    pub labels: Vec<String>,
+    pub sync: SyncMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentQuarantineState {
+    NotDownloaded,
+    Quarantined,
+    Released,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attachment {
+    pub attachment_id: String,
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub quarantine_state: AttachmentQuarantineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailMessage {
+    pub message_id: String,
+    pub sender: EmailAddress,
+    pub to: Vec<EmailAddress>,
+    pub cc: Vec<EmailAddress>,
+    pub sent_at: String,
+    pub plain_text: String,
+    pub body_complete: bool,
+    pub remote_content_blocked: bool,
+    pub attachments: Vec<Attachment>,
+    pub attachments_complete: bool,
+    pub sync: SyncMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
