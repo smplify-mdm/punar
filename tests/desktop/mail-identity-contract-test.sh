@@ -80,6 +80,8 @@ grep -q 'FIXTURE DATA · NO ACCOUNT · NOTHING IS CONNECTED' "${QML}" \
     || fail "the prototype no longer discloses its fixture state on its own surface"
 [ ! -e "${PRODUCT_EXTRA}/usr/lib/punar/punar-mail.sh" ] \
     || fail "the production image still ships the fixture-backed Mail launcher"
+# The expansion syntax is the literal staging contract we are searching for.
+# shellcheck disable=SC2016
 grep -Fq 'install -m 0644 "${mod}/applications/org.punar.Mail.desktop"' "${STAGER}" \
     || fail "desktop staging does not install the product Mail entry"
 grep -Fq "rm -f \"\${extra}/usr/share/punar/shell/Mail/Fixtures.qml\"" "${STAGER}" \
@@ -101,6 +103,7 @@ grep -qx "StartupWMClass=${ACCOUNT_APP_ID}" "${ACCOUNT_DESKTOP}" \
     || fail "Mail account desktop identity does not match its Wayland app id"
 grep -qx 'Exec=punarctl mail account-add' "${ACCOUNT_DESKTOP}" \
     || fail "Mail account entry bypasses the protected no-parameter launcher"
+# shellcheck disable=SC2016
 grep -Fq 'install -m 0644 "${mod}/applications/org.punar.MailAccount.desktop"' "${STAGER}" \
     || fail "desktop staging does not install the protected Mail account entry"
 [ -f "${ACCOUNTS_QML}" ] || fail "no MailAccounts/shell.qml"
@@ -112,6 +115,7 @@ grep -qx "StartupWMClass=${ACCOUNTS_APP_ID}" "${ACCOUNTS_DESKTOP}" \
     || fail "Mail account manager desktop identity does not match its Wayland app id"
 grep -qx 'Exec=punarctl mail account-manage' "${ACCOUNTS_DESKTOP}" \
     || fail "Mail account manager bypasses the protected no-parameter launcher"
+# shellcheck disable=SC2016
 grep -Fq 'install -m 0644 "${mod}/applications/org.punar.MailAccounts.desktop"' "${STAGER}" \
     || fail "desktop staging does not install the protected Mail account manager"
 

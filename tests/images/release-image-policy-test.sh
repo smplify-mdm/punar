@@ -138,6 +138,8 @@ for stager in \
         exit 1
     }
 done
+# The expansion syntax is the literal staging contract we are searching for.
+# shellcheck disable=SC2016
 grep -Fq 'install -m 0750 "${cargo_target}/release/punar-pim-launch"' \
     "${DESKTOP_STAGER}" || {
     echo 'FAIL Mail service: privileged broker is not staged root-only' >&2
