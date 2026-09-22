@@ -94,9 +94,10 @@ rather than being ignored.
   kernel-observed on a LUKS2 device-mapper filesystem. A library coordinator
   now stores separately typed IMAP/SMTP records, calls a provider-verification
   interface, publishes private server settings plus public account metadata
-  only after verification, and rolls back checked failures. There is no real
-  provider adapter or application-callable setup method yet, so this does not
-  make sign-in available.
+  only after verification, and rolls back checked failures. A TLS-only network
+  verifier authenticates both configured IMAP and SMTP endpoints under fixed
+  deadlines. The fixed helper executable and application-callable setup method
+  are not implemented yet, so this still does not make sign-in available.
 - QML windows have no direct network authority. The service owns transport,
   parsing, sync, durable state and credential use.
 - Mail bodies, event descriptions and reminder notes may cross this IPC because
@@ -145,7 +146,11 @@ with exact `0700`/`0600` modes, and existing corrupt, cross-profile, aliased or
 over-permissive state is refused without replacement. Key reads use a
 no-follow descriptor and validate that exact opened file, closing filename
 check/read races. Key material is zeroized from transient buffers.
-Service-process and dispatcher integration are not yet implemented.
+The profile service loads this signer before admitting an application channel.
+The dispatcher uses it for structural lists, the change stream, and Mail page
+and thread cursors. Mail continuation positions remain only in the private
+service process, expire after five minutes, and are capped at 1,024 entries;
+the cursor carries a random signed token rather than a database key.
 
 `crates/punar-pimd/src/pager.rs` supplies the stable-snapshot half of list
 pagination. A first page retains the exact provider-neutral values for at most
@@ -156,16 +161,19 @@ and 32 MiB total. Expiry, bounded eviction or process restart returns
 Only lists with another page consume cache space.
 
 `crates/punar-pimd/src/dispatcher.rs` now connects the protocol to the durable
-local store for `service.status`, honest empty `accounts.list`,
-`accounts.list`, `calendar.list`, `reminder_lists.list`, local event/reminder
-create, update, complete and delete operations, plus `changes.since`. Service
-status reports the durable account count rather than a fixture constant. It
-rechecks the trusted
-grant uid before parsing params, maps optimistic conflicts to bounded typed
-errors and emits signed change cursors only after persistence succeeds.
-Account setup/removal IPC, real provider verification, Mail, contacts, event
-responses and filtered event/reminder reads remain explicitly unstaged; this partial
-dispatcher is not installed in a production image.
+local stores for `service.status`, `accounts.list`, `calendar.list`,
+`reminder_lists.list`, local event/reminder create, update, complete and delete
+operations, `mail.list`, `mail.thread`, and `changes.since`. Service status
+reports the durable account count rather than a fixture constant. Mail reads
+come only from the parsed durable store: no fixture fallback is possible.
+Their signed cursors are bound to the profile, method, account or thread, and
+the durable Mail revision. A sync between pages therefore returns
+`cursor_expired` instead of mixing inbox generations. The dispatcher rechecks
+the trusted grant uid before parsing params, maps optimistic conflicts to
+bounded typed errors and emits signed cursors only after persistence succeeds.
+Account setup/removal IPC, sync job scheduling, Mail mutation/send, contacts,
+event responses and filtered event/reminder reads remain explicitly unstaged;
+this partial dispatcher is not installed in a production image.
 
 `changes.since` returns ordered upsert/delete metadata and a `next_cursor`.
 `has_more` requires the client to continue before rendering the cursor as

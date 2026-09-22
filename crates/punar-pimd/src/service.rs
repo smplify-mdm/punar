@@ -13,9 +13,9 @@ use thiserror::Error;
 #[cfg(test)]
 use crate::channel::receive_client_channel_from_broker;
 use crate::{
-    AdmissionError, ConnectionError, CursorKeyError, CursorSigner, LocalDispatcher, PimStore,
-    ProcessSecurityError, StoreError, lock_down_current_process, receive_client_channel,
-    serve_granted_channel,
+    AdmissionError, ConnectionError, CursorKeyError, CursorSigner, LocalDispatcher, MailStore,
+    MailStoreError, PimStore, ProcessSecurityError, StoreError, lock_down_current_process,
+    receive_client_channel, serve_granted_channel,
 };
 
 #[derive(Debug, Error)]
@@ -26,6 +26,8 @@ pub enum PimServiceError {
     Store(#[from] StoreError),
     #[error(transparent)]
     CursorKey(#[from] CursorKeyError),
+    #[error(transparent)]
+    MailStore(#[from] MailStoreError),
     #[error(transparent)]
     Admission(#[from] AdmissionError),
     #[error(transparent)]
@@ -47,10 +49,11 @@ impl PimService {
     ) -> Result<Self, PimServiceError> {
         lock_down_current_process()?;
         let store = PimStore::open(&state_root.join("records.json"), profile_id, profile_uid)?;
+        let mail_store = MailStore::open(&state_root.join("mail.redb"), profile_id, profile_uid)?;
         let signer = CursorSigner::load_or_create(&state_root.join("cursor-key.json"), profile_id)?;
         Ok(Self {
             profile_uid,
-            dispatcher: LocalDispatcher::new(store, signer),
+            dispatcher: LocalDispatcher::new(store, mail_store, signer),
         })
     }
 

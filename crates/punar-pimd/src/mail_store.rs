@@ -51,6 +51,8 @@ pub enum MailStoreError {
     Invalid(String),
     #[error("Mail record was not found")]
     NotFound,
+    #[error("Mail snapshot changed while it was being paged")]
+    CursorExpired,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,8 @@ pub struct MailBatchItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailSummaryPage {
     pub summaries: Vec<MailSummary>,
+    /// Durable Mail revision observed by the same read transaction.
+    pub revision: u64,
     /// Internal stable key. The application-facing layer must integrity-protect
     /// and bind it through the existing cursor signer before returning it.
     pub next_before: Option<String>,
@@ -74,6 +78,8 @@ pub struct MailThreadPage {
     pub subject: String,
     pub messages: Vec<MailMessage>,
     pub next_offset: Option<usize>,
+    pub revision: u64,
+    pub sync: crate::SyncMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +288,7 @@ impl MailStore {
                 .insert(cursor_key.as_str(), cursor_bytes.as_slice())
                 .map_err(database_error)?;
         }
+        advance_revision(&transaction)?;
         transaction.commit().map_err(database_error)?;
         self.validate_identity()?;
         Ok(cursor)
@@ -292,6 +299,19 @@ impl MailStore {
         account_id: &str,
         before: Option<&str>,
         limit: usize,
+    ) -> Result<MailSummaryPage, MailStoreError> {
+        self.list_summaries_at(account_id, before, limit, None)
+    }
+
+    /// Read one account page from exactly `expected_revision` when supplied.
+    /// This turns a sync between pages into cursor expiry instead of a mixed
+    /// inbox snapshot.
+    pub fn list_summaries_at(
+        &self,
+        account_id: &str,
+        before: Option<&str>,
+        limit: usize,
+        expected_revision: Option<u64>,
     ) -> Result<MailSummaryPage, MailStoreError> {
         self.validate_identity()?;
         validate_account_id(account_id)?;
@@ -310,6 +330,10 @@ impl MailStore {
         }
 
         let transaction = self.database.begin_read().map_err(database_error)?;
+        let revision = read_revision(&transaction)?;
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(MailStoreError::CursorExpired);
+        }
         let order = transaction
             .open_table(THREAD_ORDER)
             .map_err(database_error)?;
@@ -336,6 +360,7 @@ impl MailStore {
         Ok(MailSummaryPage {
             summaries,
             next_before,
+            revision,
         })
     }
 
@@ -346,8 +371,50 @@ impl MailStore {
         offset: usize,
         limit: usize,
     ) -> Result<MailThreadPage, MailStoreError> {
+        self.thread_at(account_id, thread_id, offset, limit, None)
+    }
+
+    pub fn thread_at(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+        offset: usize,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<MailThreadPage, MailStoreError> {
         self.validate_identity()?;
         validate_account_id(account_id)?;
+        self.thread_page(
+            Some(account_id),
+            thread_id,
+            offset,
+            limit,
+            expected_revision,
+        )
+    }
+
+    /// Resolve a thread inside this already profile-bound store. Applications
+    /// never provide an account id for `mail.thread`, so the store derives it
+    /// from the indexed summary rather than accepting caller authority.
+    pub fn thread_for_profile(
+        &self,
+        thread_id: &str,
+        offset: usize,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<MailThreadPage, MailStoreError> {
+        self.validate_identity()?;
+        self.thread_page(None, thread_id, offset, limit, expected_revision)
+    }
+
+    fn thread_page(
+        &self,
+        account_id: Option<&str>,
+        thread_id: &str,
+        offset: usize,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<MailThreadPage, MailStoreError> {
         validate_opaque_id(thread_id, "thread_")?;
         if limit == 0 || limit > MAX_THREAD_PAGE {
             return Err(MailStoreError::Invalid(format!(
@@ -355,13 +422,17 @@ impl MailStore {
             )));
         }
         let transaction = self.database.begin_read().map_err(database_error)?;
+        let revision = read_revision(&transaction)?;
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(MailStoreError::CursorExpired);
+        }
         let threads = transaction.open_table(THREADS).map_err(database_error)?;
         let thread = threads
             .get(thread_id)
             .map_err(database_error)?
             .ok_or(MailStoreError::NotFound)?;
         let thread: StoredThread = decode(thread.value())?;
-        if thread.summary.account_id != account_id {
+        if account_id.is_some_and(|account_id| thread.summary.account_id != account_id) {
             return Err(MailStoreError::NotFound);
         }
         if offset > thread.message_ids.len() {
@@ -386,6 +457,8 @@ impl MailStore {
             subject: thread.summary.subject,
             messages,
             next_offset,
+            revision,
+            sync: thread.summary.sync,
         })
     }
 
@@ -439,6 +512,7 @@ impl MailStore {
             }
         }
         rebuild_threads(&transaction, &touched_threads)?;
+        advance_revision(&transaction)?;
         transaction.commit().map_err(database_error)?;
         self.validate_identity()
     }
@@ -492,6 +566,20 @@ impl MailStore {
                     }
                 }
             }
+            let revision = meta
+                .get("revision")
+                .map_err(database_error)?
+                .map(|value| value.value().to_string());
+            match revision {
+                None => {
+                    meta.insert("revision", "0").map_err(database_error)?;
+                }
+                Some(value) => {
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| MailStoreError::Corrupt("Mail revision is invalid".into()))?;
+                }
+            }
         }
         transaction.commit().map_err(database_error)?;
         sync_parent(&self.path);
@@ -515,6 +603,36 @@ impl MailStore {
         }
         Ok(())
     }
+}
+
+fn read_revision(transaction: &redb::ReadTransaction) -> Result<u64, MailStoreError> {
+    let meta = transaction.open_table(META).map_err(database_error)?;
+    let revision = meta
+        .get("revision")
+        .map_err(database_error)?
+        .ok_or_else(|| MailStoreError::Corrupt("Mail revision is absent".into()))?;
+    revision
+        .value()
+        .parse::<u64>()
+        .map_err(|_| MailStoreError::Corrupt("Mail revision is invalid".into()))
+}
+
+fn advance_revision(transaction: &redb::WriteTransaction) -> Result<(), MailStoreError> {
+    let mut meta = transaction.open_table(META).map_err(database_error)?;
+    let current = meta
+        .get("revision")
+        .map_err(database_error)?
+        .ok_or_else(|| MailStoreError::Corrupt("Mail revision is absent".into()))?
+        .value()
+        .parse::<u64>()
+        .map_err(|_| MailStoreError::Corrupt("Mail revision is invalid".into()))?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| MailStoreError::Corrupt("Mail revision overflowed".into()))?
+        .to_string();
+    meta.insert("revision", next.as_str())
+        .map_err(database_error)?;
+    Ok(())
 }
 
 fn remove_mailbox_generation(

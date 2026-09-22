@@ -221,7 +221,11 @@ Next build slice, in order:
    explicit cursor expiry. The full dispatcher is now in progress: status,
    honest empty accounts, structural Calendar/Reminder lists, local
    event/reminder mutations, typed conflicts, provider-neutral account
-   metadata/listing and the durable change stream are store-backed. Account
+   metadata/listing, read-only `mail.list`/`mail.thread`, and the durable change
+   stream are store-backed. Mail pages come only from the parsed durable store;
+   their continuation state is capped, time-bound and signed to the selected
+   account/thread plus the durable Mail revision, so sync invalidates rather
+   than mixes pages. Account
    metadata and service-private open-protocol configuration now have one-way
    v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
    normal application IPC, and credentials remain only in the vault. The
@@ -230,7 +234,7 @@ Next build slice, in order:
    ingest boundary now converts bounded untrusted
    RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
    discards attachment payloads and never invents a missing sender. Filtered
-   event/reminder reads, Mail sync, provider/account
+   event/reminder reads, the asynchronous sync job/runtime, provider/account
    methods and production-image staging remain open;
 4. complete one real account vertical slice before replacing Mail's fixture
    bindings or adding provider logos;

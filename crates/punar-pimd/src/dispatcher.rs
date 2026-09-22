@@ -1,37 +1,52 @@
-//! Store-backed dispatch for the provider-free Calendar/Reminders slice.
+//! Store-backed dispatch for local Calendar/Reminders and read-only Mail.
 //!
-//! This is deliberately not a complete PIM service: provider accounts, mail,
-//! contacts, event filtering and reminder filtering remain closed until their
-//! semantics are implemented. The methods below prove that admitted
-//! capability channels can reach durable local mutations, stable structural
-//! lists and the bounded change stream without accepting profile or credential
-//! fields from an application.
+//! This is deliberately not a complete PIM service: account lifecycle, Mail
+//! mutation/send, contacts, event filtering and reminder filtering remain
+//! closed until their semantics are implemented. The methods below prove that
+//! admitted capability channels can reach durable local mutations, stable
+//! structural lists, revision-consistent Mail pages and the bounded change
+//! stream without accepting profile or credential fields from an application.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    ClientGrant, CursorSigner, ErrorCode, ErrorDetails, EventInput, MutationMode, PageError,
-    PagedValues, PimMethod, PimProtocolError, PimRequest, PimStore, ReminderInput, SnapshotPager,
-    StoreError,
+    AccountCapability, ClientGrant, CursorPosition, CursorSigner, ErrorCode, ErrorDetails,
+    EventInput, MailStore, MailStoreError, MutationMode, PageError, PagedValues, PimMethod,
+    PimProtocolError, PimRequest, PimStore, ReminderInput, SnapshotPager, StoreError,
 };
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const CALENDAR_LIST_BINDING: &[u8] = b"calendar.list:calendar_id:v1";
 const REMINDER_LIST_BINDING: &[u8] = b"reminder_lists.list:list_id:v1";
 const ACCOUNT_LIST_BINDING: &[u8] = b"accounts.list:account_id:v1";
+const MAIL_CURSOR_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_MAIL_CURSORS: usize = 1024;
 
 pub struct LocalDispatcher {
     store: PimStore,
+    mail_store: MailStore,
     pager: SnapshotPager,
+    mail_cursors: Mutex<HashMap<u64, MailCursorState>>,
+}
+
+struct MailCursorState {
+    before: String,
+    last_used: Instant,
 }
 
 impl LocalDispatcher {
     #[must_use]
-    pub fn new(store: PimStore, signer: CursorSigner) -> Self {
+    pub fn new(store: PimStore, mail_store: MailStore, signer: CursorSigner) -> Self {
         Self {
             store,
+            mail_store,
             pager: SnapshotPager::new(signer),
+            mail_cursors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -96,6 +111,14 @@ impl LocalDispatcher {
                     params,
                 )?;
                 Ok(page_result("reminder_list_page", page))
+            }
+            PimMethod::MailList => {
+                let params = request.parse_params::<MailListParams>()?;
+                self.mail_list(&snapshot, params)
+            }
+            PimMethod::MailThread => {
+                let params = request.parse_params::<MailThreadParams>()?;
+                self.mail_thread(params)
             }
             PimMethod::EventsCreate => {
                 let params = request.parse_params::<EventCreateParams>()?;
@@ -234,6 +257,192 @@ impl LocalDispatcher {
             "change_cursor": self.pager.seal_change_cursor(revision).map_err(map_page_error)?,
         }))
     }
+
+    fn mail_list(
+        &self,
+        snapshot: &crate::Snapshot,
+        params: MailListParams,
+    ) -> Result<Value, PimProtocolError> {
+        if params.view != MailView::Inbox || params.query.is_some() {
+            return Err(invalid_params());
+        }
+        let account_id = params.account_id.ok_or_else(invalid_params)?;
+        let account = snapshot
+            .accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .ok_or_else(|| {
+                PimProtocolError::new(ErrorCode::NotFound, "The Mail account was not found.")
+            })?;
+        if !account.capabilities.contains(&AccountCapability::Mail) {
+            return Err(invalid_params());
+        }
+
+        let page_binding = mail_list_binding(&account_id, false);
+        let snapshot_binding = mail_list_binding(&account_id, true);
+        let (before, expected_revision) = match params.cursor {
+            Some(cursor) => {
+                let position = self
+                    .pager
+                    .open_position(&cursor, PimMethod::MailList, &page_binding)
+                    .map_err(map_page_error)?;
+                let before = self.mail_cursor_before(position.position)?;
+                (Some(before), Some(position.snapshot))
+            }
+            None => (None, None),
+        };
+        let page = self
+            .mail_store
+            .list_summaries_at(
+                &account_id,
+                before.as_deref(),
+                params.limit,
+                expected_revision,
+            )
+            .map_err(map_mail_store_error)?;
+        let next_cursor = page
+            .next_before
+            .as_deref()
+            .map(|before| {
+                let token = self.remember_mail_cursor(before)?;
+                self.pager
+                    .seal_position(
+                        PimMethod::MailList,
+                        &page_binding,
+                        CursorPosition {
+                            snapshot: page.revision,
+                            position: token,
+                        },
+                    )
+                    .map_err(map_page_error)
+            })
+            .transpose()?;
+        let snapshot_cursor = self
+            .pager
+            .seal_position(
+                PimMethod::MailList,
+                &snapshot_binding,
+                CursorPosition {
+                    snapshot: page.revision,
+                    position: 0,
+                },
+            )
+            .map_err(map_page_error)?;
+        Ok(json!({
+            "kind": "mail_page",
+            "items": page.summaries,
+            "page": {
+                "next_cursor": next_cursor,
+                "snapshot_cursor": snapshot_cursor,
+            },
+        }))
+    }
+
+    fn mail_thread(&self, params: MailThreadParams) -> Result<Value, PimProtocolError> {
+        let page_binding = mail_thread_binding(&params.thread_id, false);
+        let snapshot_binding = mail_thread_binding(&params.thread_id, true);
+        let (offset, expected_revision) = match params.cursor {
+            Some(cursor) => {
+                let position = self
+                    .pager
+                    .open_position(&cursor, PimMethod::MailThread, &page_binding)
+                    .map_err(map_page_error)?;
+                let offset = usize::try_from(position.position).map_err(|_| invalid_params())?;
+                (offset, Some(position.snapshot))
+            }
+            None => (0, None),
+        };
+        let page = self
+            .mail_store
+            .thread_for_profile(&params.thread_id, offset, params.limit, expected_revision)
+            .map_err(map_mail_store_error)?;
+        let next_cursor = page
+            .next_offset
+            .map(|offset| {
+                self.pager
+                    .seal_position(
+                        PimMethod::MailThread,
+                        &page_binding,
+                        CursorPosition {
+                            snapshot: page.revision,
+                            position: u64::try_from(offset).map_err(|_| invalid_params())?,
+                        },
+                    )
+                    .map_err(map_page_error)
+            })
+            .transpose()?;
+        let snapshot_cursor = self
+            .pager
+            .seal_position(
+                PimMethod::MailThread,
+                &snapshot_binding,
+                CursorPosition {
+                    snapshot: page.revision,
+                    position: 0,
+                },
+            )
+            .map_err(map_page_error)?;
+        Ok(json!({
+            "kind": "mail_thread",
+            "thread_id": page.thread_id,
+            "account_id": page.account_id,
+            "subject": page.subject,
+            "messages": page.messages,
+            "next_cursor": next_cursor,
+            "snapshot_cursor": snapshot_cursor,
+            "sync": page.sync,
+        }))
+    }
+
+    fn remember_mail_cursor(&self, before: &str) -> Result<u64, PimProtocolError> {
+        let now = Instant::now();
+        let mut cursors = self.mail_cursors.lock().unwrap();
+        cursors.retain(|_, state| {
+            now.checked_duration_since(state.last_used)
+                .is_none_or(|age| age < MAIL_CURSOR_TTL)
+        });
+        if cursors.len() >= MAX_MAIL_CURSORS
+            && let Some(oldest) = cursors
+                .iter()
+                .min_by_key(|(_, state)| state.last_used)
+                .map(|(token, _)| *token)
+        {
+            cursors.remove(&oldest);
+        }
+        for _ in 0..8 {
+            let mut bytes = [0_u8; 8];
+            getrandom::fill(&mut bytes).map_err(|_| internal())?;
+            let token = u64::from_le_bytes(bytes);
+            if token != 0 && !cursors.contains_key(&token) {
+                cursors.insert(
+                    token,
+                    MailCursorState {
+                        before: before.to_string(),
+                        last_used: now,
+                    },
+                );
+                return Ok(token);
+            }
+        }
+        Err(internal())
+    }
+
+    fn mail_cursor_before(&self, token: u64) -> Result<String, PimProtocolError> {
+        let now = Instant::now();
+        let mut cursors = self.mail_cursors.lock().unwrap();
+        cursors.retain(|_, state| {
+            now.checked_duration_since(state.last_used)
+                .is_none_or(|age| age < MAIL_CURSOR_TTL)
+        });
+        let state = cursors.get_mut(&token).ok_or_else(|| {
+            PimProtocolError::new(
+                ErrorCode::CursorExpired,
+                "The Mail page snapshot expired; refresh the inbox.",
+            )
+        })?;
+        state.last_used = now;
+        Ok(state.before.clone())
+    }
 }
 
 #[derive(Deserialize)]
@@ -246,6 +455,36 @@ struct PageParams {
     #[serde(default)]
     cursor: Option<String>,
     #[serde(default = "default_page_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MailView {
+    Inbox,
+    Starred,
+    Attachments,
+    Drafts,
+    Sent,
+    Archive,
+    Junk,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailListParams {
+    account_id: Option<String>,
+    view: MailView,
+    query: Option<String>,
+    cursor: Option<String>,
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailThreadParams {
+    thread_id: String,
+    cursor: Option<String>,
     limit: usize,
 }
 
@@ -376,6 +615,41 @@ fn map_store_error(error: StoreError) -> PimProtocolError {
     }
 }
 
+fn map_mail_store_error(error: MailStoreError) -> PimProtocolError {
+    match error {
+        MailStoreError::Invalid(_) => invalid_params(),
+        MailStoreError::NotFound => PimProtocolError::new(
+            ErrorCode::NotFound,
+            "The requested Mail record was not found.",
+        ),
+        MailStoreError::CursorExpired => PimProtocolError::new(
+            ErrorCode::CursorExpired,
+            "The Mail snapshot changed; refresh the inbox.",
+        ),
+        MailStoreError::ProfileMismatch => PimProtocolError::new(
+            ErrorCode::Denied,
+            "The Mail store belongs to another profile.",
+        ),
+        MailStoreError::Io(_) | MailStoreError::Database | MailStoreError::Corrupt(_) => internal(),
+    }
+}
+
+fn mail_list_binding(account_id: &str, snapshot: bool) -> Vec<u8> {
+    format!(
+        "mail.list:v1\0{account_id}\0inbox\0{}",
+        if snapshot { "snapshot" } else { "page" }
+    )
+    .into_bytes()
+}
+
+fn mail_thread_binding(thread_id: &str, snapshot: bool) -> Vec<u8> {
+    format!(
+        "mail.thread:v1\0{thread_id}\0{}",
+        if snapshot { "snapshot" } else { "page" }
+    )
+    .into_bytes()
+}
+
 fn invalid_params() -> PimProtocolError {
     PimProtocolError::new(
         ErrorCode::InvalidParams,
@@ -409,7 +683,11 @@ fn mint_operation_id() -> Result<String, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PimClient, decode_request};
+    use crate::{
+        Account, AccountAuthState, AccountKind, Connectivity, EmailAddress, MailBatchItem,
+        MailIngestInput, MailServerConfig, MailServerSecurity, OpenProtocolConfig, PimClient,
+        ProviderType, decode_request, ingest_message,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -421,6 +699,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::build(false)
+        }
+
+        fn with_mail() -> Self {
+            Self::build(true)
+        }
+
+        fn build(with_mail: bool) -> Self {
             let mut suffix = [0_u8; 12];
             getrandom::fill(&mut suffix).unwrap();
             let suffix = suffix
@@ -429,10 +715,36 @@ mod tests {
                 .collect::<String>();
             let root = std::env::temp_dir().join(format!("punar-pimd-dispatch-test-{suffix}"));
             let store = PimStore::open(&root.join("store.json"), "profile_A1", 1000).unwrap();
+            let mail_store = MailStore::open(&root.join("mail.redb"), "profile_A1", 1000).unwrap();
+            if with_mail {
+                store
+                    .register_open_protocol_account(
+                        account("acct_A1", "Alice"),
+                        provider_config("alice@example.com"),
+                        "2026-09-22T17:00:00Z",
+                    )
+                    .unwrap();
+                store
+                    .register_open_protocol_account(
+                        account("acct_B2", "Bob"),
+                        provider_config("bob@example.com"),
+                        "2026-09-22T17:00:00Z",
+                    )
+                    .unwrap();
+                mail_store
+                    .store_batch(
+                        "acct_A1",
+                        "INBOX",
+                        7,
+                        vec![mail_item(1, "First", "One"), mail_item(2, "Second", "Two")],
+                        2,
+                    )
+                    .unwrap();
+            }
             let signer = CursorSigner::from_key([9; 32], "profile_A1").unwrap();
             Self {
                 root,
-                dispatcher: LocalDispatcher::new(store, signer),
+                dispatcher: LocalDispatcher::new(store, mail_store, signer),
             }
         }
 
@@ -583,5 +895,196 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidParams);
         assert!(error.details.resource_id.is_none());
+    }
+
+    #[test]
+    fn mail_pages_and_threads_are_real_store_records_without_fixture_fallbacks() {
+        let fixture = Fixture::with_mail();
+        let first = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_A1",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":null,
+                    "limit":1
+                }),
+            )
+            .unwrap();
+        assert_eq!(first["kind"], "mail_page");
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        assert!(first["page"]["next_cursor"].is_string());
+        assert!(!first.to_string().to_lowercase().contains("fixture"));
+        assert!(!first.to_string().to_lowercase().contains("demo"));
+
+        let second = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_A1",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":first["page"]["next_cursor"],
+                    "limit":1
+                }),
+            )
+            .unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            first["items"][0]["thread_id"],
+            second["items"][0]["thread_id"]
+        );
+
+        let thread = fixture
+            .call(
+                PimClient::Mail,
+                "mail.thread",
+                json!({
+                    "thread_id":first["items"][0]["thread_id"],
+                    "cursor":null,
+                    "limit":20
+                }),
+            )
+            .unwrap();
+        assert_eq!(thread["kind"], "mail_thread");
+        assert_eq!(thread["account_id"], "acct_A1");
+        assert_eq!(thread["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mail_cursor_cannot_cross_accounts_or_survive_a_sync_revision() {
+        let fixture = Fixture::with_mail();
+        let first = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_A1",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":null,
+                    "limit":1
+                }),
+            )
+            .unwrap();
+        let cursor = first["page"]["next_cursor"].clone();
+        let cross_account = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_B2",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":cursor,
+                    "limit":1
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(cross_account.code, ErrorCode::InvalidCursor);
+
+        fixture
+            .dispatcher
+            .mail_store
+            .store_batch(
+                "acct_A1",
+                "INBOX",
+                7,
+                vec![mail_item(3, "Third", "Three")],
+                3,
+            )
+            .unwrap();
+        let stale = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_A1",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":first["page"]["next_cursor"],
+                    "limit":1
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, ErrorCode::CursorExpired);
+    }
+
+    #[test]
+    fn malformed_mail_params_are_rejected_before_store_access() {
+        let fixture = Fixture::with_mail();
+        let error = fixture
+            .call(
+                PimClient::Mail,
+                "mail.list",
+                json!({
+                    "account_id":"acct_A1",
+                    "view":"inbox",
+                    "query":null,
+                    "cursor":null,
+                    "limit":20,
+                    "password":"must never be accepted"
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    fn account(account_id: &str, display_name: &str) -> Account {
+        Account {
+            kind: AccountKind::Account,
+            account_id: account_id.into(),
+            provider_type: ProviderType::OpenProtocols,
+            display_name: display_name.into(),
+            primary_address: Some(EmailAddress {
+                name: Some(display_name.into()),
+                address: format!("{}@example.com", display_name.to_lowercase()),
+            }),
+            capabilities: vec![AccountCapability::Mail],
+            auth_state: AccountAuthState::Ready,
+            connectivity: Connectivity::Online,
+            last_sync_at: None,
+            next_retry_at: None,
+        }
+    }
+
+    fn provider_config(username: &str) -> OpenProtocolConfig {
+        OpenProtocolConfig {
+            username: username.into(),
+            imap: MailServerConfig {
+                host: "imap.example.com".into(),
+                port: 993,
+                security: MailServerSecurity::Tls,
+            },
+            smtp: MailServerConfig {
+                host: "smtp.example.com".into(),
+                port: 465,
+                security: MailServerSecurity::Tls,
+            },
+        }
+    }
+
+    fn mail_item(uid: u32, subject: &str, body: &str) -> MailBatchItem {
+        let raw = format!(
+            "From: Sender {uid} <sender{uid}@example.com>\r\nTo: Alice <alice@example.com>\r\nMessage-ID: <dispatch-{uid}@example.com>\r\nDate: Mon, 22 Sep 2026 16:00:0{uid} +0000\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+        );
+        MailBatchItem {
+            uid,
+            parsed: ingest_message(MailIngestInput {
+                account_id: "acct_A1",
+                mailbox_id: "INBOX",
+                uid_validity: 7,
+                uid,
+                received_at: "2026-09-22T16:00:00Z",
+                unread: true,
+                starred: false,
+                labels: &["Inbox".into()],
+                raw_message: raw.as_bytes(),
+            })
+            .unwrap(),
+        }
     }
 }

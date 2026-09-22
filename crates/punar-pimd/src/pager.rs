@@ -126,6 +126,33 @@ impl SnapshotPager {
             .map_err(|_| PageError::InvalidCursor)
     }
 
+    /// Seal a bounded service-owned position for a method/filter binding.
+    /// This is used by durable stores whose continuation state is smaller than
+    /// a retained value snapshot. Callers must independently reject stale
+    /// `snapshot` revisions before reading the next page.
+    pub(crate) fn seal_position(
+        &self,
+        method: PimMethod,
+        filter_binding: &[u8],
+        position: CursorPosition,
+    ) -> Result<String, PageError> {
+        self.signer
+            .seal(method, filter_binding, position)
+            .map_err(|_| PageError::Encode)
+    }
+
+    /// Open only a cursor sealed for this exact method/filter binding.
+    pub(crate) fn open_position(
+        &self,
+        cursor: &str,
+        method: PimMethod,
+        filter_binding: &[u8],
+    ) -> Result<CursorPosition, PageError> {
+        self.signer
+            .open(cursor, method, filter_binding)
+            .map_err(|_| PageError::InvalidCursor)
+    }
+
     fn start_at<T: Serialize>(
         &self,
         method: PimMethod,

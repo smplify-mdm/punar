@@ -1,6 +1,6 @@
 # ADR-012 — Descriptor-bound durable Mail record store
 
-- Status: **Accepted — unstaged durable record store implemented; real synchronization and application binding remain open**
+- Status: **Accepted — unstaged durable record store, read-only synchronization and service dispatch implemented; live runtime proof remains open**
 - Date: 2026-09-22
 - Spec references: `docs/product/SPEC_v0.2.md` §§1.22, 10–12, 15–16,
   44, 53, 61; `docs/design/mail-calendar-contacts.md` §§0, 3, 7–9
@@ -45,12 +45,22 @@ One batch is capped at 200 messages, one record at 2 MiB, application pages at
 are safety ceilings, not product promises; quota UX and account-specific
 retention remain open.
 
+Every committed sync/removal transaction also advances a durable Mail
+revision. The application dispatcher reads that revision in the same database
+transaction as each summary/thread page. Continuation cursors are HMAC-bound
+to the profile, method, selected account or thread and that revision. Database
+positions stay in a five-minute, 1,024-entry service-private cache behind
+random cursor tokens. A sync between pages returns `cursor_expired`; raw order
+keys never enter application IPC.
+
 ## Consequences
 
 - Mail no longer rewrites the Calendar/Reminders state file and can retain a
   real inbox across service and device restarts.
 - Account removal deletes its message records, thread indexes and sync cursors
   in one transaction; a UIDVALIDITY reset affects only its mailbox.
+- `mail.list` and `mail.thread` can now read only durable provider-neutral
+  records through the admitted Mail capability; there is no fixture fallback.
 - The file-descriptor boundary preserves the same no-follow and path-identity
   posture as the smaller PIM stores without a custom native VFS.
 - Full-text search is not supplied by the engine. Punar must add and measure a
