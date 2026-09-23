@@ -1072,6 +1072,9 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
         hyprctl -j clients 2>/dev/null \
             | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length == 0' >/dev/null 2>&1
     }
+    mail_process_gone() {
+        ! pgrep -u "$(id -un)" -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1
+    }
 
     # KEEP THE LAUNCHER'S OUTPUT. Discarding it to /dev/null cost a full CI
     # cycle: an id colliding with a property name made QML refuse to load the
@@ -1160,6 +1163,16 @@ if [ -x /usr/lib/punar/punar-mail.sh ]; then
             note "FAIL the mail window did not close on the compositor's close action"
             FAILED=1
         fi
+        # The window is gone; the PROCESS must be too. Quickshell only hides a
+        # window the compositor closes, so Mail exits itself (onClosed) — a
+        # hidden, resident Mail is the residency punar-mail@.service forbids,
+        # and it is what broke m2-check's shell restart on 2026-09-23.
+        if wait_for 15 mail_process_gone; then
+            note "ok   the mail process exited with its window"
+        else
+            note "FAIL the mail process stayed resident after its window closed: $(pgrep -u "$(id -un)" -af '/usr/share/punar/shell/Mail' 2>/dev/null | tr '\n' ';')"
+            FAILED=1
+        fi
     else
         # The report is what boot-test.sh prints on failure, so the reason has
         # to land IN it rather than in a file nobody exports.
@@ -1213,12 +1226,21 @@ production_mail_gone() {
     ! production_mail_surface "${pmg_class}"
 }
 
+# Every production Mail surface is a transient unit under its own locked
+# service user, with "zero idle residency" written into the unit file. The
+# session user cannot signal it, so the only honest residency check is the
+# unit's own state.
+mail_unit_inactive() {
+    ! systemctl is-active --quiet "$1" 2>/dev/null
+}
+
 check_production_mail_surface() {
     cps_command="$1"
     cps_class="$2"
     cps_title="$3"
     cps_proof="$4"
     cps_log="$5"
+    cps_unit="$6"
 
     setsid punarctl mail "${cps_command}" >"${cps_log}" 2>&1 &
     if wait_for 60 production_mail_surface "${cps_class}"; then
@@ -1262,6 +1284,16 @@ check_production_mail_surface() {
             note "FAIL ${cps_title} did not close through the compositor"
             FAILED=1
         fi
+        # The window is gone; the SERVICE must be too. A hidden-but-resident
+        # QML process would hold the mailbox capability with no window and no
+        # way for the person to end it — and it is what m2-check's shell
+        # restart tripped over on 2026-09-23.
+        if wait_for 15 mail_unit_inactive "${cps_unit}"; then
+            note "ok   ${cps_unit} left with its window"
+        else
+            note "FAIL ${cps_unit} stayed resident after its window closed"
+            FAILED=1
+        fi
     else
         cps_why="$(tr -d '\r' < "${cps_log}" 2>/dev/null \
             | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^$' \
@@ -1274,13 +1306,13 @@ check_production_mail_surface() {
 if command -v punarctl >/dev/null 2>&1; then
     check_production_mail_surface account-add org.punar.MailAccount \
         "Connect a mail account" /run/punar/surfaces-mail-account.png \
-        /run/punar/mail-account-launch.log
+        /run/punar/mail-account-launch.log "punar-mail-account@$(id -u).service"
     check_production_mail_surface account-manage org.punar.MailAccounts \
         "Mail Account Settings" /run/punar/surfaces-mail-accounts.png \
-        /run/punar/mail-accounts-launch.log
+        /run/punar/mail-accounts-launch.log "punar-mail-accounts@$(id -u).service"
     check_production_mail_surface open org.punar.Mail \
         "Punar Mail" /run/punar/surfaces-mail-production.png \
-        /run/punar/mail-production-launch.log
+        /run/punar/mail-production-launch.log "punar-mail@$(id -u).service"
 
     pim_service="punar-pimd@$(id -u).service"
     pim_dormant() { ! systemctl is-active --quiet "${pim_service}" 2>/dev/null; }

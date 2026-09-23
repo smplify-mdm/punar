@@ -5,6 +5,9 @@
 #   ./tools/render-surface.sh Mail 1400 900
 #   PUNAR_RENDER_THEME=panel ./tools/render-surface.sh Mail   → Mail.panel.png
 #   PUNAR_RENDER_IPC="mail open 1" ./tools/render-surface.sh Mail
+#   PUNAR_RENDER_CLOSE=1 ./tools/render-surface.sh Mail     → also closes the
+#                              window through the compositor after the shot
+#                              and fails unless the process exits with it
 #
 # PUNAR_RENDER_IPC drives the surface through its own IpcHandler before the
 # screenshot, so a state that only exists after interaction can be seen. It is
@@ -86,6 +89,7 @@ docker run --rm \
     --env "PUNAR_H=${HEIGHT}" \
     --env "PUNAR_THEME=${THEME}" \
     --env "PUNAR_IPC=${PUNAR_RENDER_IPC:-}" \
+    --env "PUNAR_CLOSE=${PUNAR_RENDER_CLOSE:-}" \
     --env "PUNAR_MAIL_FIXTURES=${PUNAR_RENDER_MAIL_FIXTURES:-}" \
     --env "PUNAR_SUFFIX=${SUFFIX}" \
     "${IMAGE}" sh -eu -c '
@@ -136,6 +140,20 @@ if [ -n "${PUNAR_IPC}" ]; then
 fi
 sleep 1
 grim /out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.png 2>>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log
+if [ -n "${PUNAR_CLOSE}" ]; then
+  # A compositor close only HIDES a Quickshell window; an application window
+  # has to exit itself. The anchored pattern skips the sh -c wrapper.
+  swaymsg kill >>/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.log 2>&1 || true
+  n=0
+  while pgrep -f "^qs -p /usr/share/punar/shell/${PUNAR_SURFACE}" >/dev/null 2>&1 && [ \$n -lt 20 ]; do
+    sleep 0.5; n=\$((n+1))
+  done
+  if pgrep -af "^qs -p /usr/share/punar/shell/${PUNAR_SURFACE}" >/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.resident 2>/dev/null; then
+    echo "close-exit: FAIL (still running 10s after the compositor closed the window)" >/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.close
+  else
+    echo "close-exit: ok (process left with its window)" >/out/${PUNAR_SURFACE}${PUNAR_SUFFIX}.close
+  fi
+fi
 swaymsg exit
 SHOT
 
@@ -147,6 +165,15 @@ CFG
       sway -c /tmp/sway.cfg >/out/sway.log 2>&1 || true
     ' || true
 
+if [ -n "${PUNAR_RENDER_CLOSE:-}" ]; then
+    if [ -s "${OUT_DIR}/${SURFACE}${SUFFIX}.close" ]; then
+        echo "==> $(cat "${OUT_DIR}/${SURFACE}${SUFFIX}.close")"
+        grep -q '^close-exit: ok' "${OUT_DIR}/${SURFACE}${SUFFIX}.close" || exit 1
+    else
+        echo "==> close probe produced no verdict (window never appeared?)" >&2
+        exit 1
+    fi
+fi
 if [ -s "${OUT_DIR}/${SURFACE}${SUFFIX}.png" ]; then
     echo "==> ${OUT_DIR}/${SURFACE}${SUFFIX}.png ($(wc -c < "${OUT_DIR}/${SURFACE}${SUFFIX}.png" | tr -d ' ') bytes)"
 else

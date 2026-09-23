@@ -357,6 +357,19 @@ ShellRoot {
         implicitHeight: 720
         color: Theme.shellSurface
 
+        // CLOSING THE INDEX EXITS THE APPLICATION. punar-mail@.service states
+        // the contract in its own file: "the application has zero idle
+        // residency". A Quickshell window that the compositor closes is only
+        // HIDDEN (ProxyWindowBase::onVisibleChanged emits closed() and the
+        // process keeps running), so without this handler every Mail launch
+        // left a qs process holding the mailbox capability with no window —
+        // invisible to the person, resident under the locked service user,
+        // and unkillable by anything running as the session user. That is
+        // the residency the design forbids, and it is exactly what broke the
+        // M2 gate's shell restart on 2026-09-23. Thread and compose windows
+        // are children of the index: when it goes, they go.
+        onClosed: Qt.quit()
+
         // ESC CLOSES, and on day one that is the whole keyboard contract. The
         // in-app grammar (bare keys, no modifier, because every OS chord
         // carries the Punar key) is specified in the design and deliberately
@@ -405,7 +418,7 @@ ShellRoot {
                 }
             }
 
-            Keys.onEscapePressed: win.visible = false
+            Keys.onEscapePressed: Qt.quit()
             Keys.onPressed: function (event) {
                 if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                     // OPENING A THREAD IS A COMPOSITOR ACT. This sets a
