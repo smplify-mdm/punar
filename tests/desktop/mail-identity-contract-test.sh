@@ -70,8 +70,20 @@ grep -qx 'Exec=punarctl mail open' "${DESKTOP}" \
 
 # The complete fixture surface remains a visibly labelled, hidden dev-only
 # overlay. Production staging removes only Fixtures.qml, never the live model.
-DEV_DESKTOP="${DEV_APPS}/${APP_ID}.desktop"
+#
+# ITS FILE ID MUST NOT BE THE PRODUCT'S. The dev profile overlays the desktop
+# profile at identical paths, so a dev entry named ${APP_ID}.desktop replaces
+# the product entry in every dev image: Mail disappears from the launcher
+# (NoDisplay) and the bar names the real window a prototype. That shipped on
+# 2026-09-23 and was caught only by reading the overlay by hand.
+DEV_DESKTOP="${DEV_APPS}/org.punar.MailPrototype.desktop"
 [ -f "${DEV_DESKTOP}" ] || fail "the developer Mail fixture entry is missing"
+[ ! -e "${DEV_APPS}/${APP_ID}.desktop" ] \
+    || fail "the dev overlay ships ${APP_ID}.desktop, which shadows the product entry in the dev image"
+# The bar's name for the window comes from the entry it joins to, never from
+# a hard-coded table: a table entry keyed on the app id relabels the product.
+! grep -q 'Mail interface prototype' "${REPO_ROOT}/shell/punar-shell/Services/Apps.qml" \
+    || fail "Apps.qml hard-codes the prototype label for ${APP_ID}; the product window would carry it"
 grep -qx 'NoDisplay=true' "${DEV_DESKTOP}" \
     || fail "the fixture-backed Mail probe is visible in the application launcher"
 grep -qx 'Name=Mail interface prototype' "${DEV_DESKTOP}" \

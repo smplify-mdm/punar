@@ -125,12 +125,11 @@ Singleton {
             return "System Monitor";
         if (value === "lstopo")
             return "Hardware Information";
-        // The first-party mail surface is a hidden, fixture-backed window
-        // capability probe. It must never appear in the launcher, but when CI
-        // or a developer opens it directly the bar still needs a truthful
-        // product label instead of a raw reverse-DNS id.
-        if (value === "org.punar.mail")
-            return "Mail interface prototype";
+        // No case for org.punar.mail. One existed while Mail was only a
+        // fixture-backed probe; once the product shipped with its own entry
+        // (Name=Mail, joined by file id) it relabelled the REAL Mail window
+        // as the prototype in every image, because this table is consulted
+        // before the desktop entry. The entry is the truth now.
         return "";
     }
 
