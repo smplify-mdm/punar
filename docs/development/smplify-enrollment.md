@@ -110,7 +110,11 @@ long-polls inside a call.
 
 ## 4. Smplify backend — Phase 0 (gating) and later
 
-Verified by reading `manager-smp-1214/multi-module-mdm-project`:
+Verified by reading `manager-smp-1214/multi-module-mdm-project`. B0 and B3
+landed on 2026-09-23 in the checkout the local Tilt backend is built from
+(`com.smplify.mdm.manager`, branch `smp-1405-punar-phase0`, 8/8 tests) and
+the local backend resolves `IMAGE_ID=punar-desktop` to `punar`; B1 and B4
+remain the shipping gates.
 
 | # | Change | Why | Est. |
 |---|---|---|---|
