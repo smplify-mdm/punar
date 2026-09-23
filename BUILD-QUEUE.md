@@ -148,8 +148,10 @@ surfaces now connect TLS-only IMAP/SMTP accounts, start an initial bounded
 INBOX sync, list accounts, and remove credentials/configuration/cached mail
 locally. Mail refreshes on open and every five minutes while visible. Fixtures
 remain explicitly labelled, opt-in and dev-only, and production staging removes
-them. The Rust/QML contracts pass locally. Encrypted installed-image, real
-provider, hostile-runtime, restart, and removal acceptance remain open, along
+them. The Rust/QML contracts pass locally. An encrypted ARM64 installed image
+now boots through LUKS2 and opens the protected account-entry window through
+the fixed broker without relaxing `ProtectHome=yes`; live-provider,
+hostile-runtime, restart, and removal acceptance remain open, along
 with OAuth and the send/reply/draft/archive/delete/search/attachment lifecycle.
 Calendar and Reminders still have a tested local-data core but no user-facing
 window.

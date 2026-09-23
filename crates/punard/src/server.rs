@@ -1036,11 +1036,11 @@ fn app_ipc_error(error: AppError) -> IpcError {
     )
 }
 
-fn mail_launch_unavailable() -> IpcError {
+fn mail_launch_unavailable(reason: &str) -> IpcError {
     IpcError::with_details(
         ErrorCode::ApplyFailed,
         "Mail could not establish its protected desktop connection. No mailbox capability was issued. Next step: sign in to the desktop again, then reopen Mail.",
-        json!({ "component": "pim_mail_launch" }),
+        json!({ "component": "pim_mail_launch", "reason": reason }),
     )
 }
 
@@ -2464,28 +2464,36 @@ impl Inner {
             .args([broker_mode, &peer.uid.to_string(), &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // The fixed, root-owned broker emits only a closed error category;
+            // keep it in punard's journal so a refused desktop handoff is
+            // diagnosable without ever reflecting process paths, account data,
+            // or credentials into the user-facing protocol response.
+            .stderr(Stdio::inherit())
             .status()
-            .map_err(|_| mail_launch_unavailable())?;
+            .map_err(|_| mail_launch_unavailable("broker_spawn_failed"))?;
         if !status.success() {
-            return Err(mail_launch_unavailable());
+            let reason = status
+                .code()
+                .map(|code| format!("broker_exit_{code}"))
+                .unwrap_or_else(|| "broker_signal".to_string());
+            return Err(mail_launch_unavailable(&reason));
         }
         Ok(json!({ "opening": true, "application": application }))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn handle_pim_mail_open(&self, _peer: &Peer) -> Result<Value, IpcError> {
-        Err(mail_launch_unavailable())
+        Err(mail_launch_unavailable("unsupported_platform"))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn handle_pim_mail_account_add(&self, _peer: &Peer) -> Result<Value, IpcError> {
-        Err(mail_launch_unavailable())
+        Err(mail_launch_unavailable("unsupported_platform"))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn handle_pim_mail_account_manage(&self, _peer: &Peer) -> Result<Value, IpcError> {
-        Err(mail_launch_unavailable())
+        Err(mail_launch_unavailable("unsupported_platform"))
     }
 
     fn app_mutation_authorized(

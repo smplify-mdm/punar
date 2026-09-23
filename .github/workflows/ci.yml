@@ -310,7 +310,8 @@ jobs:
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh tools/install-test.sh \
             tools/build-amd64-debian-image.sh \
-            tools/build-arm64-image.sh tools/boot-test-arm64.sh \
+            tools/build-arm64-image.sh tools/build-encrypted-arm64-acceptance-image.sh \
+            tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
             tools/build-release-bundle.sh \
@@ -817,7 +818,7 @@ jobs:
             os/images/cache/debian-arm64-pkgs
             os/images/cache/cargo-arm64
             os/images/cache/cargo-target-arm64
-          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/**', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
+          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
           restore-keys: punar-arm64-debian-${{ runner.arch }}-
 
       - name: Build native ARM64 minimal + desktop images

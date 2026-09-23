@@ -71,12 +71,34 @@ enum BrokerError {
     Kernel(#[from] rustix::io::Errno),
 }
 
+impl BrokerError {
+    /// Stable, non-secret support codes for the privileged launch boundary.
+    ///
+    /// `punard` deliberately does not reflect the broker's stderr into the
+    /// desktop protocol. Distinct exit codes still let diagnostics identify
+    /// which closed failure class refused the launch without disclosing a
+    /// process path, account value, or credential.
+    fn exit_code(&self) -> u8 {
+        match self {
+            Self::InvalidRequest => 2,
+            Self::NotRoot => 3,
+            Self::SessionVerification => 4,
+            Self::SessionUnavailable => 5,
+            Self::Activation => 6,
+            Self::Handoff => 7,
+            Self::Protocol => 8,
+            Self::Io(_) => 9,
+            Self::Kernel(_) => 10,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("punar-pim-launch: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(error.exit_code())
         }
     }
 }
@@ -223,6 +245,7 @@ fn connect_verified_wayland(
             .join("environ"),
     )?;
     let display = display_from_environ(&environ, request.profile_uid)?;
+    let display = display_through_caller_root(proc_root, request.caller_pid, &display)?;
     let stream = UnixStream::connect(display).map_err(|_| BrokerError::SessionUnavailable)?;
     let peer = rustix::net::sockopt::socket_peercred(&stream)?;
     if peer.uid.as_raw() != request.profile_uid {
@@ -236,6 +259,26 @@ fn connect_verified_wayland(
         Path::new(COMPOSITOR),
     )?;
     Ok(stream)
+}
+
+fn display_through_caller_root(
+    proc_root: &Path,
+    caller_pid: i32,
+    display: &Path,
+) -> Result<PathBuf, BrokerError> {
+    let caller_root = proc_root.join(caller_pid.to_string()).join("root");
+    let caller_root_metadata = fs::metadata(&caller_root)?;
+    let broker_root_metadata = fs::metadata("/")?;
+    if !caller_root_metadata.file_type().is_dir()
+        || caller_root_metadata.dev() != broker_root_metadata.dev()
+        || caller_root_metadata.ino() != broker_root_metadata.ino()
+    {
+        return Err(BrokerError::SessionVerification);
+    }
+    let relative = display
+        .strip_prefix("/")
+        .map_err(|_| BrokerError::SessionVerification)?;
+    Ok(caller_root.join(relative))
 }
 
 fn verify_process_uid(proc_root: &Path, pid: i32, expected_uid: u32) -> Result<(), BrokerError> {
@@ -466,6 +509,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn broker_failure_codes_are_stable_and_closed() {
+        assert_eq!(BrokerError::InvalidRequest.exit_code(), 2);
+        assert_eq!(BrokerError::NotRoot.exit_code(), 3);
+        assert_eq!(BrokerError::SessionVerification.exit_code(), 4);
+        assert_eq!(BrokerError::SessionUnavailable.exit_code(), 5);
+        assert_eq!(BrokerError::Activation.exit_code(), 6);
+        assert_eq!(BrokerError::Handoff.exit_code(), 7);
+        assert_eq!(BrokerError::Protocol.exit_code(), 8);
+        assert_eq!(BrokerError::Io(io::Error::other("test")).exit_code(), 9);
+        assert_eq!(BrokerError::Kernel(rustix::io::Errno::INVAL).exit_code(), 10);
+    }
+
+    #[test]
     fn request_has_one_fixed_app_and_canonical_numeric_identity() {
         let parsed = parse_request(vec![
             "broker".into(),
@@ -566,6 +622,40 @@ mod tests {
         ] {
             assert!(display_from_environ(environ, 1000).is_err());
         }
+    }
+
+    #[test]
+    fn sandboxed_broker_reaches_only_the_verified_callers_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "punar-pim-launch-caller-root-{}",
+            launch_id().unwrap()
+        ));
+        let proc = root.join("42");
+        fs::create_dir_all(&proc).unwrap();
+        symlink("/", proc.join("root")).unwrap();
+        assert_eq!(
+            display_through_caller_root(
+                &root,
+                42,
+                Path::new("/run/user/1000/wayland-1")
+            )
+            .unwrap(),
+            proc.join("root/run/user/1000/wayland-1")
+        );
+
+        fs::remove_file(proc.join("root")).unwrap();
+        fs::create_dir(proc.join("root")).unwrap();
+        assert!(
+            display_through_caller_root(
+                &root,
+                42,
+                Path::new("/run/user/1000/wayland-1")
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Mail, calendar, reminders and contacts — product and engineering plan
 
-> **Status (2026-09-22): COMMITTED CORE SUITE; FIRST REAL MAIL VERTICAL SLICE
-> AWAITING INSTALLED-IMAGE ACCEPTANCE.** The production Mail index and thread
+> **Status (2026-09-23): COMMITTED CORE SUITE; FIRST REAL MAIL VERTICAL SLICE
+> IN INSTALLED-IMAGE ACCEPTANCE.** The production Mail index and thread
 > windows now read only the protected local store; fixture data is opt-in,
 > visibly labelled, dev-only, and removed from product staging. Mail opens
 > through a human-only fixed broker which passes a Mail-scoped capability and
@@ -35,8 +35,12 @@
 > triggers, catches worker failure, and persists only bounded public
 > online/offline/auth-required state. Account completion starts the first sync;
 > opening Mail refreshes immediately and every five minutes while the window is
-> open, without creating a resident background daemon. Live-provider and
-> encrypted installed-image tests remain open.
+> open, without creating a resident background daemon. An encrypted ARM64
+> installed image now boots through LUKS2 and opens the protected account-entry
+> window through the fixed broker. The broker reaches the verified caller's
+> Wayland socket without relaxing `ProtectHome=yes` or widening the control
+> daemon's filesystem view. Live-provider, restart and removal acceptance
+> remain open.
 > ADR-012 adds a separate
 > descriptor-bound, crash-durable Mail record store with an 8 MiB cache,
 > atomic batch/cursor commits, restart persistence, duplicate suppression,
@@ -507,7 +511,7 @@ section 2. Those need a real client.
 | 3 | Open-standards-first sequence + persistent-credential ADR | **decision complete in ADR-008; implementation proof open** |
 | 3b | Versioned typed PIM IPC/schema, ownership/pagination/change cursors/offline/conflict negative fixtures | **contract, deadline-bound authorized channel runner, durable signed cursors, bounded stable-page cache, read-only Mail dispatch and async sync admission complete; remaining dispatcher methods open** |
 | 4 | `punar-pimd` local-only store with empty account state, local Calendar and Reminders, restart/offline/migration tests | **durable core and non-resident process staged; installed-image proof open** |
-| 5 | First real account vertical slice: connect, initial/incremental receive, restart, disconnect and delete-local-data | **implemented; encrypted VM and live-provider acceptance open** |
+| 5 | First real account vertical slice: connect, initial/incremental receive, restart, disconnect and delete-local-data | **implemented; encrypted ARM64 boot and protected account-entry launch pass locally; live-provider, restart and removal acceptance remain open** |
 | 5b | Mail send/reply/draft/archive/delete/search/attachment lifecycle | open |
 | 6 | Build Calendar and Reminders inside the adopted app grammar | open |
 | 7 | Second provider family plus managed configuration, profile-isolation and recovery tests | weeks |
