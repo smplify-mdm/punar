@@ -26,6 +26,15 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/repart.d/
 mkosi.profiles/desktop/mkosi.extra/usr/bin/
 mkosi.profiles/dev/mkosi.extra/usr/share/punar/fixtures/
 mkosi.profiles/dev/mkosi.extra/usr/bin/
+# Mail: the three product desktop entries are staged from
+# os/modules/desktop/applications, the PIM IPC contract from docs/api, and the
+# fixture-complete Mail tree into the dev profile — all by
+# scripts/container-build.sh, all with a source of truth elsewhere.
+mkosi.profiles/desktop/mkosi.extra/usr/local/share/applications/org.punar.Mail.desktop
+mkosi.profiles/desktop/mkosi.extra/usr/local/share/applications/org.punar.MailAccount.desktop
+mkosi.profiles/desktop/mkosi.extra/usr/local/share/applications/org.punar.MailAccounts.desktop
+mkosi.profiles/desktop/mkosi.extra/usr/share/doc/
+mkosi.profiles/dev/mkosi.extra/usr/share/punar/shell/
 # M6: the punar-env-base OCI archive + digest note, assembled from the pinned
 # snapshot's busybox by scripts/container-build.sh (stage_env_base_oci) on
 # every build — never commit (milestone-6.md §6.2).
@@ -51,5 +60,6 @@ mkosi.profiles/desktop/mkosi.extra/usr/share/punar/secrets/
 arm64/mkosi.extra/usr/bin/
 arm64/mkosi.extra/usr/share/punar/oci/
 arm64/mkosi.profiles/desktop/mkosi.extra/usr/bin/
+arm64/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch
 arm64/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci/
 arm64/mkosi.profiles/dev/mkosi.extra/usr/bin/

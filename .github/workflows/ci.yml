@@ -311,6 +311,7 @@ jobs:
             tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh tools/install-test.sh \
             tools/build-amd64-debian-image.sh \
             tools/build-arm64-image.sh tools/build-encrypted-arm64-acceptance-image.sh \
+            tools/prepare-mail-acceptance-lab.sh tests/acceptance/mail-tls-provider-test.sh \
             tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
