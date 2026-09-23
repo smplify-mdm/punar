@@ -11,7 +11,10 @@
 #   - on a dev/CI image only: a drop-in that points punard back at the
 #     built-in agent instead of the mock.
 # The CA, keys and document never enter a production image; the lab edge
-# runs in a container on the host and terminates TLS in front of plain HTTP.
+# (tools/smplify-lab-edge.py, standard library only) terminates TLS on the
+# Mac's loopback in front of the plain-HTTP port-forward — the guest reaches
+# the host's loopback as 10.0.2.2, so nothing is exposed on another
+# interface.
 #
 # Honest limits: the local edge does not request the device certificate, so
 # the device presents none — server-side device identity (backend B1/B2 in
@@ -28,7 +31,7 @@ SOURCE_IMAGE="${1:-${OUT_DIR}/punar-release-arm64.qcow2}"
 OUTPUT_IMAGE="${2:-${OUT_DIR}/punar-smplify-lab-arm64.qcow2}"
 LAB_DOMAIN="${PUNAR_SMPLIFY_LAB_DOMAIN:-smplify.lab}"
 LAB_PORT="${PUNAR_SMPLIFY_LAB_PORT:-8443}"
-LAB_BACKEND="${PUNAR_SMPLIFY_LAB_BACKEND:-http://host.docker.internal:9003}"
+LAB_BACKEND="${PUNAR_SMPLIFY_LAB_BACKEND:-127.0.0.1:9003}"
 LAB_ORG_ID="${PUNAR_SMPLIFY_LAB_ORG_ID:-smplify-lab}"
 LAB_ORG_NAME="${PUNAR_SMPLIFY_LAB_ORG_NAME:-Smplify Lab}"
 LAB_DIR="${OUTPUT_IMAGE%.qcow2}.lab"
@@ -120,27 +123,20 @@ cat > "${LAB_DIR}/organization.json" <<EOT
 }
 EOT
 
-# --- the host-side edge: TLS in front of the Tilt port-forward -------------
-cat > "${LAB_DIR}/Caddyfile" <<EOT
-${LAB_DOMAIN}:${LAB_PORT} {
-    tls /certs/server.crt /certs/server.key
-    reverse_proxy ${LAB_BACKEND}
-}
-EOT
+# --- the host-side edge: TLS on loopback in front of the Tilt port-forward --
 cat > "${LAB_DIR}/start-edge.sh" <<EOT
 #!/usr/bin/env bash
-# The lab edge: terminates TLS for ${LAB_DOMAIN}:${LAB_PORT} and forwards to
-# ${LAB_BACKEND} (the local Smplify). Ctrl-C stops it.
+# The lab edge: terminates TLS for ${LAB_DOMAIN}:${LAB_PORT} on 127.0.0.1 and
+# forwards to ${LAB_BACKEND} (the local Smplify). Ctrl-C stops it.
 set -euo pipefail
-exec docker run --rm --name punar-smplify-lab-edge \\
-    -p "${LAB_PORT}:${LAB_PORT}" \\
-    -v '${LAB_DIR}/Caddyfile:/etc/caddy/Caddyfile:ro' \\
-    -v '${LAB_DIR}/server.crt:/certs/server.crt:ro' \\
-    -v '${LAB_DIR}/server.key:/certs/server.key:ro' \\
-    caddy:2.10.0
+exec python3 '${REPO_ROOT}/tools/smplify-lab-edge.py' \\
+    --certificate '${LAB_DIR}/server.crt' \\
+    --private-key '${LAB_DIR}/server.key' \\
+    --listen '127.0.0.1:${LAB_PORT}' \\
+    --backend '${LAB_BACKEND}'
 EOT
 chmod 0700 "${LAB_DIR}/start-edge.sh"
-chmod 0600 "${LAB_DIR}"/ca.* "${LAB_DIR}"/server.* "${LAB_DIR}/organization.json" "${LAB_DIR}/Caddyfile"
+chmod 0600 "${LAB_DIR}"/ca.* "${LAB_DIR}"/server.* "${LAB_DIR}/organization.json"
 
 SOURCE_CONTAINER="$(container_path "${SOURCE_IMAGE}")"
 OUTPUT_CONTAINER="$(container_path "${OUTPUT_IMAGE}")"
