@@ -60,5 +60,7 @@ IPAccounting=yes
 StandardOutput=journal
 StandardError=journal
 
-[Install]
-WantedBy=multi-user.target
+# Deliberately no [Install]: the image ships the multi-user.target.wants
+# symlink itself (like punard.service), and the release check's byte-exact
+# enabled-units manifest lists exactly that one link. An [Install] section
+# would let the preset add a second link under /etc and fail A9.
