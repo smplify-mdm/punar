@@ -1,0 +1,64 @@
+# punar-smplifyd — Punar's built-in Smplify device agent: identity and
+# transport only (docs/development/smplify-enrollment.md). It generates the
+# device key, redeems the enrollment code for a certificate and carries
+# punard's control-plane calls to Smplify over mutually authenticated TLS. It
+# reads five os-release keys and the hostname, applies nothing, decides
+# nothing, and answers only root on its own socket. punard remains the single
+# process that mutates the OS.
+[Unit]
+Description=Punar built-in Smplify device agent (identity and transport)
+Documentation=file:/usr/share/doc/punar/smplify-enrollment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=punar-smplifyd
+Group=punar-smplifyd
+ExecStart=/usr/bin/punar-smplifyd run
+# The socket lives here, 0600, in a directory root can traverse. Root is the
+# only peer the daemon answers (SO_PEERCRED); the mode keeps everyone else
+# from even connecting.
+RuntimeDirectory=punar-smplifyd
+RuntimeDirectoryMode=0755
+# Key, certificate, CA and the token digest: 0600 files in a 0700 directory
+# the service user owns. Nothing else on the device can read the key.
+StateDirectory=punar-smplifyd
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=5s
+
+# Same discipline as punar-pimd@.service: no capabilities, no devices, no
+# home, read-only system, TCP only for the outbound HTTPS hop.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CPUAccounting=yes
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

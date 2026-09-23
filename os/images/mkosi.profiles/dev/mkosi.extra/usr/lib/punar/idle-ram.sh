@@ -16,7 +16,7 @@ SAMPLE_INTERVAL="${PUNAR_RAM_SAMPLE_INTERVAL:-10}"
 RUN_DIR=/run/punar
 EXPORT_PORT=/dev/virtio-ports/punar.export
 RUNTIME_REPORT="${RUN_DIR}/runtime-report.txt"
-PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service"
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service punar-smplifyd.service"
 
 mkdir -p "${RUN_DIR}"
 : > "${RUNTIME_REPORT}"

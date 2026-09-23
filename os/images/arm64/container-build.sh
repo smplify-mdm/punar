@@ -80,7 +80,7 @@ stage_punar_binaries() {
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
                 -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
-                -p punar-pimd \
+                -p punar-pimd -p punar-smplifyd \
                 -p punar-mock-smplify
     )
 
@@ -100,6 +100,8 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-pimd" \
         "${cargo_target}/release/punar-mail-bridge" \
         "${cargo_target}/release/punar-mail-account-bridge" \
+
+        "${cargo_target}/release/punar-smplifyd" \
         "${extra}/usr/bin/"
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \
@@ -112,7 +114,7 @@ stage_punar_binaries() {
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
         punar-netd punar-onboard punar-onboardd punar-greet \
         punar-auth punar-authd punar-pimd punar-mail-bridge \
-        punar-mail-account-bridge; do
+        punar-mail-account-bridge punar-smplifyd; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2

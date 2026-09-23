@@ -19,6 +19,17 @@ if ! getent passwd punar-pim >/dev/null 2>&1; then
         --no-create-home --shell /usr/sbin/nologin punar-pim
 fi
 
+# The built-in Smplify device agent holds the device key and certificate
+# under its own locked identity; punard talks to it over a root-only socket
+# and nothing else on the device can read the key.
+if ! getent group punar-smplifyd >/dev/null 2>&1; then
+    groupadd --system punar-smplifyd
+fi
+if ! getent passwd punar-smplifyd >/dev/null 2>&1; then
+    useradd --system --gid punar-smplifyd --home-dir /var/lib/punar-smplifyd \
+        --no-create-home --shell /usr/sbin/nologin punar-smplifyd
+fi
+
 if ! getent group punar-mail >/dev/null 2>&1; then
     groupadd --system punar-mail
 fi

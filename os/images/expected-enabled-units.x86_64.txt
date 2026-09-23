@@ -70,6 +70,7 @@ usr/lib/systemd/system/multi-user.target.wants/punar-agentd.service -> ../punar-
 usr/lib/systemd/system/multi-user.target.wants/punar-identity-materialize.service -> ../punar-identity-materialize.service
 usr/lib/systemd/system/multi-user.target.wants/punar-netd.service -> ../punar-netd.service
 usr/lib/systemd/system/multi-user.target.wants/punar-secrets.service -> ../punar-secrets.service
+usr/lib/systemd/system/multi-user.target.wants/punar-smplifyd.service -> ../punar-smplifyd.service
 usr/lib/systemd/system/multi-user.target.wants/punard-reconcile.timer -> ../punard-reconcile.timer
 usr/lib/systemd/system/multi-user.target.wants/punard.service -> ../punard.service
 usr/lib/systemd/system/multi-user.target.wants/systemd-ask-password-wall.path -> ../systemd-ask-password-wall.path

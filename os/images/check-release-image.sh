@@ -131,6 +131,7 @@ scan_dev_paths() {
         -o -name 'desktop-ready.sh' \
         -o -name 'foo-agent-fixture.sh' \
         -o -name 'punar-mock-agent' \
+        -o -name '10-mock-control-plane.conf' \
         -o -name 'in-agent-scope.sh' \) -print
 
     [ -e "${ROOT}/usr/bin/punar-mock-smplify" ] \
