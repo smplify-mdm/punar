@@ -518,7 +518,10 @@ mod tests {
         assert_eq!(BrokerError::Handoff.exit_code(), 7);
         assert_eq!(BrokerError::Protocol.exit_code(), 8);
         assert_eq!(BrokerError::Io(io::Error::other("test")).exit_code(), 9);
-        assert_eq!(BrokerError::Kernel(rustix::io::Errno::INVAL).exit_code(), 10);
+        assert_eq!(
+            BrokerError::Kernel(rustix::io::Errno::INVAL).exit_code(),
+            10
+        );
     }
 
     #[test]
@@ -636,24 +639,14 @@ mod tests {
         fs::create_dir_all(&proc).unwrap();
         symlink("/", proc.join("root")).unwrap();
         assert_eq!(
-            display_through_caller_root(
-                &root,
-                42,
-                Path::new("/run/user/1000/wayland-1")
-            )
-            .unwrap(),
+            display_through_caller_root(&root, 42, Path::new("/run/user/1000/wayland-1")).unwrap(),
             proc.join("root/run/user/1000/wayland-1")
         );
 
         fs::remove_file(proc.join("root")).unwrap();
         fs::create_dir(proc.join("root")).unwrap();
         assert!(
-            display_through_caller_root(
-                &root,
-                42,
-                Path::new("/run/user/1000/wayland-1")
-            )
-            .is_err()
+            display_through_caller_root(&root, 42, Path::new("/run/user/1000/wayland-1")).is_err()
         );
         let _ = fs::remove_dir_all(root);
     }
