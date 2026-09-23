@@ -443,10 +443,10 @@ pub fn render_monogram_png(name: &str, origin: &str) -> Vec<u8> {
     if initials.is_empty() {
         initials.push('W');
     }
-    if initials.len() == 1 {
-        if let Some(second) = name.chars().skip(1).find(|c| c.is_ascii_alphanumeric()) {
-            initials.push(second.to_ascii_uppercase());
-        }
+    if initials.len() == 1
+        && let Some(second) = name.chars().skip(1).find(|c| c.is_ascii_alphanumeric())
+    {
+        initials.push(second.to_ascii_uppercase());
     }
 
     let scale = 18usize;

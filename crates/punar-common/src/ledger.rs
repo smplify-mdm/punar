@@ -901,13 +901,13 @@ impl LedgerRecord {
                 self.agent
             ));
         }
-        if let Some(project) = &self.project {
-            if !category_pattern_ok(ResourceCategory::Repositories, project.as_str()) {
-                violations.push(format!(
-                    "project {:?} does not match the repositories pattern",
-                    project.as_str()
-                ));
-            }
+        if let Some(project) = &self.project
+            && !category_pattern_ok(ResourceCategory::Repositories, project.as_str())
+        {
+            violations.push(format!(
+                "project {:?} does not match the repositories pattern",
+                project.as_str()
+            ));
         }
         // Every reference is projected into `security_events[].event_id`,
         // which the schema pins to `^evt_[A-Za-z0-9]+$`.

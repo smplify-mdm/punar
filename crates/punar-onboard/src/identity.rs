@@ -1064,7 +1064,7 @@ fn random_recovery_code() -> Result<String, IdentityError> {
         while bits >= 5 && emitted < 30 {
             bits -= 5;
             let index = ((accumulator >> bits) & 0x1f) as usize;
-            if emitted > 0 && emitted % 5 == 0 {
+            if emitted > 0 && emitted.is_multiple_of(5) {
                 out.push('-');
             }
             out.push(ALPHABET[index] as char);

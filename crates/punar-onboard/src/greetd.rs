@@ -81,10 +81,10 @@ pub fn start_session(
                         return Err(GreetError::Unsupported);
                     }
                 }
-                if answered_secret {
-                    if let Some(secret) = password.as_mut() {
-                        secret.zeroize();
-                    }
+                if answered_secret
+                    && let Some(secret) = password.as_mut()
+                {
+                    secret.zeroize();
                 }
                 response = receive(&mut stream)?;
             }
