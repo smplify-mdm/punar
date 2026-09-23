@@ -163,7 +163,12 @@ fn serve_account_ui(
     let result = accept_ui(&listener).and_then(|mut ui| {
         ui.set_read_timeout(Some(UI_ENTRY_TIMEOUT))?;
         ui.set_write_timeout(Some(UI_ENTRY_TIMEOUT))?;
-        let (setup, mut password) = read_ui_entry(&mut ui)?;
+        // The person closing the window before entering anything is a cancel,
+        // not a failure: the interface exits with its window and the unit
+        // must leave cleanly rather than record a failed entry.
+        let Some((setup, mut password)) = read_ui_entry(&mut BufReader::new(&mut ui))? else {
+            return Ok(());
+        };
         let helper = AccountEntryHelper::lock_down(capabilities.entry_channel)?;
         let outcome = helper.submit(&setup, &mut password)?;
         let frame = serde_json::to_vec(&UiOutcome {
@@ -183,17 +188,23 @@ fn serve_account_ui(
     finish_child(&mut child, result)
 }
 
-fn read_ui_entry(
-    ui: &mut UnixStream,
-) -> Result<(OpenProtocolSetup, Zeroizing<Vec<u8>>), BridgeError> {
-    let mut reader = BufReader::new(ui);
-    let setup = read_frame(&mut reader, MAX_SETUP_BYTES)?;
+/// A complete entry: the account setup and the secret, which is wiped on drop.
+type UiEntry = (OpenProtocolSetup, Zeroizing<Vec<u8>>);
+
+/// Reads the setup frame and the secret frame. `Ok(None)` means the interface
+/// closed the stream before sending anything — the person closed the window —
+/// which is the one EOF that is a cancel rather than a malformed entry.
+fn read_ui_entry(reader: &mut impl BufRead) -> Result<Option<UiEntry>, BridgeError> {
+    let Some(setup) = read_frame(reader, MAX_SETUP_BYTES)? else {
+        return Ok(None);
+    };
     let frame: UiSetupFrame =
         serde_json::from_slice(&setup).map_err(|_| BridgeError::InvalidFrame)?;
     if frame.v != 1 {
         return Err(BridgeError::InvalidFrame);
     }
-    let password = Zeroizing::new(read_frame(&mut reader, MAX_PASSWORD_BYTES)?);
+    let password =
+        Zeroizing::new(read_frame(reader, MAX_PASSWORD_BYTES)?.ok_or(BridgeError::InvalidFrame)?);
     if password.is_empty()
         || password
             .iter()
@@ -201,21 +212,24 @@ fn read_ui_entry(
     {
         return Err(BridgeError::InvalidFrame);
     }
-    Ok((frame.setup, password))
+    Ok(Some((frame.setup, password)))
 }
 
-fn read_frame(reader: &mut impl BufRead, maximum: usize) -> Result<Vec<u8>, BridgeError> {
+fn read_frame(reader: &mut impl BufRead, maximum: usize) -> Result<Option<Vec<u8>>, BridgeError> {
     let mut frame = Vec::new();
     let mut bounded = Read::take(reader, (maximum + 2) as u64);
     let read = bounded.read_until(b'\n', &mut frame)?;
-    if read == 0 || frame.last() != Some(&b'\n') || frame.len() > maximum + 1 {
+    if read == 0 {
+        return Ok(None);
+    }
+    if frame.last() != Some(&b'\n') || frame.len() > maximum + 1 {
         return Err(BridgeError::InvalidFrame);
     }
     frame.pop();
     if frame.last() == Some(&b'\r') {
         return Err(BridgeError::InvalidFrame);
     }
-    Ok(frame)
+    Ok(Some(frame))
 }
 
 fn account_entry_code(code: punar_pimd::AccountEntryCode) -> &'static str {
@@ -373,31 +387,29 @@ mod tests {
         let mut input = Vec::from(setup.as_slice());
         input.extend_from_slice(b"\nsecret-value\n");
         let mut cursor = std::io::Cursor::new(input);
-        let (decoded, password) = read_ui_entry_stream(&mut cursor).unwrap();
+        let (decoded, password) = read_ui_entry(&mut cursor).unwrap().expect("a full entry");
         assert_eq!(decoded.config.imap.host, "imap.example.com");
         assert_eq!(&*password, b"secret-value");
 
         let mut bad = std::io::Cursor::new(b"{}\n\n".to_vec());
-        assert!(read_ui_entry_stream(&mut bad).is_err());
+        assert!(read_ui_entry(&mut bad).is_err());
     }
 
-    fn read_ui_entry_stream(
-        stream: &mut impl BufRead,
-    ) -> Result<(OpenProtocolSetup, Zeroizing<Vec<u8>>), BridgeError> {
-        let setup = read_frame(stream, MAX_SETUP_BYTES)?;
-        let frame: UiSetupFrame =
-            serde_json::from_slice(&setup).map_err(|_| BridgeError::InvalidFrame)?;
-        if frame.v != 1 {
-            return Err(BridgeError::InvalidFrame);
-        }
-        let password = Zeroizing::new(read_frame(stream, MAX_PASSWORD_BYTES)?);
-        if password.is_empty()
-            || password
-                .iter()
-                .any(|byte| *byte == 0 || *byte == b'\r' || *byte == b'\n')
-        {
-            return Err(BridgeError::InvalidFrame);
-        }
-        Ok((frame.setup, password))
+    #[test]
+    fn closing_the_interface_before_entry_is_a_cancel_not_a_failure() {
+        // The window was closed without submitting: nothing on the stream.
+        let mut closed = std::io::Cursor::new(Vec::new());
+        assert!(read_ui_entry(&mut closed).unwrap().is_none());
+
+        // A setup frame with no secret behind it is a half entry, and stays a
+        // malformed one: only the empty stream is a cancel.
+        let setup = br#"{"v":1,"setup":{"identity":{"display_name":"Alice","primary_address":{"name":"Alice","address":"alice@example.com"}},"config":{"username":"alice@example.com","imap":{"host":"imap.example.com","port":993,"security":"tls"},"smtp":{"host":"smtp.example.com","port":465,"security":"tls"}}}}"#;
+        let mut half = Vec::from(setup.as_slice());
+        half.push(b'\n');
+        let mut half = std::io::Cursor::new(half);
+        assert!(matches!(
+            read_ui_entry(&mut half),
+            Err(BridgeError::InvalidFrame)
+        ));
     }
 }

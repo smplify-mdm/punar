@@ -219,6 +219,11 @@ ShellRoot {
         id: window
         visible: true
         title: "Mail Account Settings"
+        // CLOSING THE WINDOW EXITS THE APPLICATION. Quickshell only hides a
+        // window the compositor closes; the process — and the transient unit
+        // holding its capability — would stay resident with no window, which
+        // is the residency punar-mail-account@/punar-mail-accounts@ forbid.
+        onClosed: Qt.quit()
         minimumSize: Qt.size(520, 440)
         implicitWidth: 760
         implicitHeight: 620

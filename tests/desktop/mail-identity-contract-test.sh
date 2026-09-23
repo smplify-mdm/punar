@@ -103,6 +103,17 @@ grep -Fq "rm -f \"\${extra}/usr/share/punar/shell/Mail/Fixtures.qml\"" "${STAGER
 grep -Fq "cp -R \"\${shell_src}/Mail\" \"\${dev_extra}/usr/share/punar/shell/Mail\"" "${STAGER}" \
     || fail "desktop staging does not restore the Mail probe in the dev/CI overlay"
 
+# EVERY MAIL SURFACE EXITS WITH ITS WINDOW. Quickshell only hides a window the
+# compositor closes; a surface without onClosed: Qt.quit() stays resident as a
+# hidden process holding its capability, which the transient units forbid and
+# which broke the M2 gate on 2026-09-23 (Mail) and the surfaces gate the same
+# day (MailAccount). surfaces-check proves it at runtime; this catches it in
+# the editor.
+for surface in Mail MailAccount MailAccounts; do
+    grep -q '^\s*onClosed: Qt.quit()$' "${REPO_ROOT}/shell/punar-shell/${surface}/shell.qml" \
+        || fail "${surface}/shell.qml does not exit when its window closes (no 'onClosed: Qt.quit()'); the process would stay resident"
+done
+
 # The account-entry surface is a separate identity and reaches only the
 # no-parameter protected launch method. It must never be folded into Mail's
 # read capability or launched as a normal same-uid QML process.
