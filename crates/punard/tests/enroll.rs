@@ -57,6 +57,9 @@ struct ControlPlaneState {
     compliance: Mutex<Vec<Value>>,
     /// Received inventory lines (`received-inventory.jsonl`).
     inventory: Mutex<Vec<Value>>,
+    /// The `code` each `enroll.register` carried (`None` when absent): the
+    /// enrollment code must reach the control plane and nothing else.
+    codes: Mutex<Vec<Option<String>>>,
     /// Fault injection: serve a corrupt policy envelope (contradicted
     /// fixed rank) so the all-or-nothing abort path can be exercised.
     serve_bad_policy: AtomicBool,
@@ -85,6 +88,10 @@ impl ControlPlaneState {
                 if bootstrap.len() < 32 || !bootstrap.chars().all(|c| c.is_ascii_hexdigit()) {
                     return Err(("invalid_params", "bootstrap must be ≥32 hex chars".into()));
                 }
+                self.codes
+                    .lock()
+                    .unwrap()
+                    .push(params["code"].as_str().map(str::to_string));
                 let seq = self.token_seq.fetch_add(1, Ordering::SeqCst);
                 let token = format!("tok_{seq:08x}{}", "e5d1c0de".repeat(6));
                 self.devices
@@ -945,4 +952,55 @@ fn enrollment_persists_across_restart_and_non_root_set_cites_the_org_policy() {
             .contains("Acme Engineering"),
         "{error}"
     );
+}
+
+/// The enrollment code (a Smplify enrollment token) travels from the
+/// `enroll.start` params to exactly one place — the control plane's
+/// `enroll.register` — and is never written to the state directory, the
+/// audit trail, or the result (SPEC section 49; ipc.md section 5.9).
+#[test]
+fn the_enrollment_code_reaches_the_control_plane_and_nowhere_else() {
+    let dir = test_dir("code");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    let code = "lex_test-code-never-on-disk-7f3a";
+    let result = daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": code})),
+    );
+    assert_eq!(result["org"]["display_name"], "Acme Engineering");
+    assert_eq!(
+        *state.codes.lock().unwrap(),
+        vec![Some(code.to_string())],
+        "the register call carries the code verbatim"
+    );
+    assert!(
+        !result.to_string().contains(code),
+        "enroll.start must never echo the code"
+    );
+    assert!(
+        !daemon
+            .result("enroll.status", None)
+            .to_string()
+            .contains(code),
+        "enroll.status must never expose the code"
+    );
+    daemon.stop();
+    // Nothing on disk — state, policy.d, audit — may contain the code.
+    fn walk(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, needle, hits);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                if bytes.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                    hits.push(path);
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&dir, code, &mut hits);
+    assert!(hits.is_empty(), "the code leaked to disk: {hits:?}");
 }
