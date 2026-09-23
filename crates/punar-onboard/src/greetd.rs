@@ -81,9 +81,7 @@ pub fn start_session(
                         return Err(GreetError::Unsupported);
                     }
                 }
-                if answered_secret
-                    && let Some(secret) = password.as_mut()
-                {
+                if let Some(secret) = password.as_mut().filter(|_| answered_secret) {
                     secret.zeroize();
                 }
                 response = receive(&mut stream)?;
