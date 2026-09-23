@@ -1,0 +1,383 @@
+//! A deliberately small HTTPS/1.1 client: one request per connection, TLS
+//! 1.2+, the platform's root store through the same verifier punar-pimd
+//! uses (ADR-011), an optional client certificate for the device identity,
+//! and a hard wall-clock budget. `http://` is not a scheme this client knows.
+//!
+//! Small on purpose: every byte that reaches Smplify is composed here, and
+//! there is no cookie jar, redirect follower, proxy discovery or connection
+//! pool to reason about.
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls_platform_verifier::BuilderVerifierExt;
+
+/// The largest response body accepted from the control plane.
+pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HttpError {
+    #[error("only https:// URLs are accepted")]
+    Scheme,
+    #[error("malformed URL")]
+    Url,
+    #[error("TLS configuration failed")]
+    Tls,
+    #[error("the host could not be resolved")]
+    Resolve,
+    #[error("connecting timed out")]
+    Timeout,
+    #[error("transport failed ({0})")]
+    Io(ErrorKind),
+    #[error("the response was not HTTP/1.1")]
+    Malformed,
+    #[error("the response was larger than {MAX_RESPONSE_BYTES} bytes")]
+    TooLarge,
+}
+
+impl From<io::Error> for HttpError {
+    fn from(error: io::Error) -> Self {
+        match error.kind() {
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => HttpError::Timeout,
+            kind => HttpError::Io(kind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Url {
+    pub host: String,
+    pub port: u16,
+    /// Path plus query, always starting with `/`.
+    pub path: String,
+}
+
+impl Url {
+    /// Join a path onto a base URL's authority, replacing the base path.
+    pub fn with_path(&self, path: &str) -> Url {
+        Url {
+            host: self.host.clone(),
+            port: self.port,
+            path: if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{path}")
+            },
+        }
+    }
+
+    /// The origin (`https://host[:port]`) for messages and storage.
+    pub fn origin(&self) -> String {
+        if self.port == 443 {
+            format!("https://{}", self.host)
+        } else {
+            format!("https://{}:{}", self.host, self.port)
+        }
+    }
+}
+
+pub fn parse_https_url(raw: &str) -> Result<Url, HttpError> {
+    let rest = raw.strip_prefix("https://").ok_or(HttpError::Scheme)?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return Err(HttpError::Url);
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') => (h, p.parse::<u16>().map_err(|_| HttpError::Url)?),
+        _ => (authority, 443),
+    };
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
+        return Err(HttpError::Url);
+    }
+    Ok(Url {
+        host: host.to_ascii_lowercase(),
+        port,
+        path: path.to_string(),
+    })
+}
+
+/// The device's own certificate and key for the mTLS hop.
+pub struct ClientIdentity {
+    pub certs: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
+}
+
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub url: &'a Url,
+    pub bearer: Option<&'a str>,
+    pub body: Option<&'a [u8]>,
+}
+
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+pub struct Client {
+    config: Arc<ClientConfig>,
+    budget: Duration,
+}
+
+impl Client {
+    pub fn new(identity: Option<ClientIdentity>, budget: Duration) -> Result<Client, HttpError> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|_| HttpError::Tls)?
+            .with_platform_verifier()
+            .map_err(|_| HttpError::Tls)?;
+        let config = match identity {
+            Some(identity) => builder
+                .with_client_auth_cert(identity.certs, identity.key)
+                .map_err(|_| HttpError::Tls)?,
+            None => builder.with_no_client_auth(),
+        };
+        Ok(Client {
+            config: Arc::new(config),
+            budget,
+        })
+    }
+
+    pub fn send(&self, request: &Request<'_>) -> Result<Response, HttpError> {
+        let started = Instant::now();
+        let addrs = (request.url.host.as_str(), request.url.port)
+            .to_socket_addrs()
+            .map_err(|_| HttpError::Resolve)?;
+        let mut tcp = None;
+        for addr in addrs {
+            let remaining = self.remaining(started)?;
+            if let Ok(stream) = TcpStream::connect_timeout(&addr, remaining) {
+                tcp = Some(stream);
+                break;
+            }
+        }
+        let tcp = tcp.ok_or(HttpError::Resolve)?;
+        tcp.set_nodelay(true)?;
+        let server_name =
+            ServerName::try_from(request.url.host.clone()).map_err(|_| HttpError::Url)?;
+        let connection = ClientConnection::new(Arc::clone(&self.config), server_name)
+            .map_err(|_| HttpError::Tls)?;
+        let mut stream = StreamOwned::new(connection, tcp);
+
+        let mut head = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: punar-smplifyd/{}\r\nAccept: application/json\r\nConnection: close\r\n",
+            request.method,
+            request.url.path,
+            host_header(request.url),
+            env!("CARGO_PKG_VERSION"),
+        );
+        if let Some(token) = request.bearer {
+            head.push_str("Authorization: Bearer ");
+            head.push_str(token);
+            head.push_str("\r\n");
+        }
+        if let Some(body) = request.body {
+            head.push_str(&format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                body.len()
+            ));
+        }
+        head.push_str("\r\n");
+
+        stream
+            .sock
+            .set_write_timeout(Some(self.remaining(started)?))?;
+        stream.write_all(head.as_bytes())?;
+        if let Some(body) = request.body {
+            stream.write_all(body)?;
+        }
+        stream.flush()?;
+
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            stream
+                .sock
+                .set_read_timeout(Some(self.remaining(started)?))?;
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    raw.extend_from_slice(&chunk[..n]);
+                    if raw.len() > MAX_RESPONSE_BYTES {
+                        return Err(HttpError::TooLarge);
+                    }
+                }
+                // A peer that closes without close_notify is common; the
+                // bytes so far are the response.
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        parse_response(&raw)
+    }
+
+    fn remaining(&self, started: Instant) -> Result<Duration, HttpError> {
+        let elapsed = started.elapsed();
+        if elapsed >= self.budget {
+            return Err(HttpError::Timeout);
+        }
+        Ok(self.budget - elapsed)
+    }
+}
+
+fn host_header(url: &Url) -> String {
+    if url.port == 443 {
+        url.host.clone()
+    } else {
+        format!("{}:{}", url.host, url.port)
+    }
+}
+
+pub fn parse_response(raw: &[u8]) -> Result<Response, HttpError> {
+    let head_end = find(raw, b"\r\n\r\n").ok_or(HttpError::Malformed)?;
+    let head = std::str::from_utf8(&raw[..head_end]).map_err(|_| HttpError::Malformed)?;
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().ok_or(HttpError::Malformed)?;
+    let mut parts = status_line.splitn(3, ' ');
+    let version = parts.next().ok_or(HttpError::Malformed)?;
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(HttpError::Malformed);
+    }
+    let status = parts
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or(HttpError::Malformed)?;
+    let mut headers = Vec::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(HttpError::Malformed)?;
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    let body_raw = &raw[head_end + 4..];
+    let chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+    });
+    let body = if chunked {
+        dechunk(body_raw)?
+    } else {
+        let declared = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.parse::<usize>().ok());
+        match declared {
+            Some(n) if n <= body_raw.len() => body_raw[..n].to_vec(),
+            Some(_) => return Err(HttpError::Malformed),
+            None => body_raw.to_vec(),
+        }
+    };
+    Ok(Response {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn dechunk(mut raw: &[u8]) -> Result<Vec<u8>, HttpError> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = find(raw, b"\r\n").ok_or(HttpError::Malformed)?;
+        let size_text = std::str::from_utf8(&raw[..line_end]).map_err(|_| HttpError::Malformed)?;
+        let size_text = size_text.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_text, 16).map_err(|_| HttpError::Malformed)?;
+        raw = &raw[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if raw.len() < size + 2 {
+            return Err(HttpError::Malformed);
+        }
+        out.extend_from_slice(&raw[..size]);
+        if out.len() > MAX_RESPONSE_BYTES {
+            return Err(HttpError::TooLarge);
+        }
+        raw = &raw[size + 2..];
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_urls_and_refuses_plaintext() {
+        let u = parse_https_url("https://api.smplify.test:8443/api/v1/x?y=1").unwrap();
+        assert_eq!(
+            (u.host.as_str(), u.port, u.path.as_str()),
+            ("api.smplify.test", 8443, "/api/v1/x?y=1")
+        );
+        assert_eq!(parse_https_url("https://Example.com").unwrap().path, "/");
+        assert_eq!(
+            parse_https_url("https://Example.com").unwrap().host,
+            "example.com"
+        );
+        assert!(matches!(
+            parse_https_url("http://x"),
+            Err(HttpError::Scheme)
+        ));
+        assert!(matches!(
+            parse_https_url("https://u@x"),
+            Err(HttpError::Url)
+        ));
+        assert!(matches!(
+            parse_https_url("https://x:notaport"),
+            Err(HttpError::Url)
+        ));
+        assert_eq!(
+            parse_https_url("https://a.b").unwrap().with_path("c").path,
+            "/c"
+        );
+        assert_eq!(
+            parse_https_url("https://a.b:8443").unwrap().origin(),
+            "https://a.b:8443"
+        );
+    }
+
+    #[test]
+    fn parses_content_length_and_chunked_bodies() {
+        let r = parse_response(b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n{\"a\":1}").unwrap();
+        assert_eq!(r.status, 201);
+        assert_eq!(r.body, b"{\"a\":1}");
+        assert_eq!(r.header("content-type"), Some("application/json"));
+        let r = parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3;ext\r\n:1}\r\n0\r\n\r\n").unwrap();
+        assert_eq!(r.body, b"{\"a\":1}");
+        assert!(matches!(
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort"),
+            Err(HttpError::Malformed)
+        ));
+        assert!(matches!(
+            parse_response(b"garbage"),
+            Err(HttpError::Malformed)
+        ));
+        assert_eq!(
+            parse_response(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .unwrap()
+                .body,
+            b""
+        );
+    }
+}

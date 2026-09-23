@@ -17,6 +17,7 @@ members = [
     "crates/punar-policy",
     "crates/punar-recovery",
     "crates/punar-secrets",
+    "crates/punar-smplifyd",
     "crates/punar-workspace",
     "crates/punarctl",
     "crates/punard",
