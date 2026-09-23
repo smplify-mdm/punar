@@ -407,7 +407,6 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-pimd" \
         "${cargo_target}/release/punar-mail-bridge" \
         "${cargo_target}/release/punar-mail-account-bridge" \
-
         "${cargo_target}/release/punar-smplifyd" \
         "${extra}/usr/bin/"
     install -d "${extra}/usr/lib/punar"
