@@ -553,6 +553,13 @@ pub struct PolicyExplainParams {
 #[serde(deny_unknown_fields)]
 pub struct EnrollStartParams {
     pub org_domain: String,
+    /// The enrollment code the organisation issued (a Smplify enrollment
+    /// token). Optional on the wire because the dev/CI mock needs none;
+    /// the real control plane refuses to register without one. punarctl
+    /// reads it from stdin or a hidden prompt, never from argv, and punard
+    /// never audits or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// Local catalog lookup. `id` asks for one app plus a live source
@@ -2313,6 +2320,7 @@ mod tests {
             }),
             Method::EnrollStart(EnrollStartParams {
                 org_domain: "acme.com".to_string(),
+                code: None,
             }),
             Method::EnrollStatus,
             Method::EnrollStop,

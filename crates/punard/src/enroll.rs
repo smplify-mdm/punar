@@ -35,12 +35,15 @@ use serde_json::{Value, json};
 
 use crate::util::write_atomic;
 
-/// Compiled-in default control-plane endpoint (milestone-5.md section 4.2).
-/// Overridable via the `PUNAR_CONTROL_PLANE_SOCKET` environment variable
-/// (resolved in `main.rs`) or the `--control-plane-socket` flag; host tests
-/// point it at a temp socket. This seam is the documented simulation
-/// boundary — real discovery (DNS/HTTPS + mTLS) is out of scope for M5.
-pub const DEFAULT_CONTROL_PLANE_SOCKET: &str = "/run/punar-mock-smplify/api.sock";
+/// Compiled-in default control-plane endpoint: `punar-smplifyd`, the
+/// built-in Smplify device agent, which serves this same NDJSON contract on
+/// a root-only socket and carries it to Smplify over mutually authenticated
+/// TLS (docs/development/smplify-enrollment.md). Overridable via the
+/// `PUNAR_CONTROL_PLANE_SOCKET` environment variable (resolved in
+/// `main.rs`) or the `--control-plane-socket` flag; the dev/CI image points
+/// it at `punar-mock-smplify` through a unit drop-in, and host tests at a
+/// temp socket.
+pub const DEFAULT_CONTROL_PLANE_SOCKET: &str = "/run/punar-smplifyd/api.sock";
 
 /// Environment override for the control-plane socket path.
 pub const CONTROL_PLANE_SOCKET_ENV: &str = "PUNAR_CONTROL_PLANE_SOCKET";
@@ -192,21 +195,25 @@ impl ControlPlaneClient {
         })
     }
 
-    /// `enroll.register {device_id, bootstrap}` → `(token, attestation)`.
-    /// The bootstrap secret and the returned token are exposed only at this
-    /// wire boundary; both live as [`Redacted`] everywhere else.
+    /// `enroll.register {device_id, bootstrap, code?}` → `(token, attestation)`.
+    /// The bootstrap secret, the enrollment code and the returned token are
+    /// exposed only at this wire boundary; all live as [`Redacted`]
+    /// everywhere else. The code is the organisation-issued enrollment
+    /// token the real control plane redeems; the mock needs none.
     pub fn register(
         &self,
         device_id: &str,
         bootstrap: &Redacted<String>,
+        code: Option<&Redacted<String>>,
     ) -> Result<(Redacted<String>, String), UpstreamError> {
-        let result = self.call(
-            "enroll.register",
-            json!({
-                "device_id": device_id,
-                "bootstrap": bootstrap.expose_secret(),
-            }),
-        )?;
+        let mut params = json!({
+            "device_id": device_id,
+            "bootstrap": bootstrap.expose_secret(),
+        });
+        if let Some(code) = code {
+            params["code"] = Value::String(code.expose_secret().clone());
+        }
+        let result = self.call("enroll.register", params)?;
         let token = result
             .get("device_token")
             .and_then(Value::as_str)
@@ -223,6 +230,18 @@ impl ControlPlaneClient {
             .unwrap_or("simulated")
             .to_string();
         Ok((Redacted::new(token.to_string()), attestation))
+    }
+
+    /// `enroll.unregister {device_token}`: ask the control plane to forget
+    /// this device's identity. Best effort by contract — unenrollment is a
+    /// local restore that must succeed offline (SPEC section 55), so the
+    /// caller logs a failure and continues.
+    pub fn unregister(&self, token: &Redacted<String>) -> Result<(), UpstreamError> {
+        self.call(
+            "enroll.unregister",
+            json!({ "device_token": token.expose_secret() }),
+        )
+        .map(|_| ())
     }
 
     /// `policy.fetch {device_token}` → the policy-source envelopes (each

@@ -353,6 +353,11 @@ struct OrgDiscoverParams {
 struct EnrollRegisterParams {
     device_id: String,
     bootstrap: String,
+    /// The real control plane redeems this; the mock, which stands in for
+    /// it, accepts and ignores it so one punard build serves both.
+    #[serde(default)]
+    #[allow(dead_code)]
+    code: Option<String>,
 }
 
 #[derive(Deserialize)]

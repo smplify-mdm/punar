@@ -7345,7 +7345,7 @@ mod tests {
         .unwrap();
         let client = ControlPlaneClient::new(&socket);
         let (device_token, _) = client
-            .register("dev_fixture001", &Redacted::new("b".repeat(64)))
+            .register("dev_fixture001", &Redacted::new("b".repeat(64)), None)
             .unwrap();
         let evidence = installer
             .attempt_organization_recovery(&result.plan_token, &client, &device_token)

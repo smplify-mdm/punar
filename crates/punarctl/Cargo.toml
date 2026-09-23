@@ -19,7 +19,7 @@ punar-common = { workspace = true }
 # approval waits and `process` lets the VM-only installer gate verify uid 0.
 # None of these kernel interfaces is reachable from safe std, and workspace
 # crates are #![forbid(unsafe_code)].
-rustix = { workspace = true, features = ["event", "process"] }
+rustix = { workspace = true, features = ["event", "process", "termios"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

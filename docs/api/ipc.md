@@ -680,7 +680,7 @@ authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
-Params: `{"org_domain": "acme.com"}`. **Root only**, mutating, always
+Params: `{"org_domain": "acme.com", "code": "…"}` — `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. **Root only**, mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
 the fetched policy ids in `policy_ids`). Processed under the 60 s bound
 (section 2).

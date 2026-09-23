@@ -4392,6 +4392,14 @@ impl Inner {
             stage_error
         };
 
+        // The enrollment code exists only in memory, only for the register
+        // call, and is never audited, logged or returned (SPEC section 49).
+        let code = params
+            .code
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| Redacted::new(c.to_string()));
         // Discover.
         let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
         let org_doc = client
@@ -4447,7 +4455,7 @@ impl Inner {
                 .map_err(|e| fail_audit(self.internal(&format!("bootstrap secret: {e}"))))?,
         );
         let (token, attestation) = client
-            .register(&self.device_id, &bootstrap)
+            .register(&self.device_id, &bootstrap, code.as_ref())
             .map_err(|e| fail_audit(self.upstream_error("register", e)))?;
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
@@ -4750,6 +4758,18 @@ impl Inner {
                          (continuing; the in-memory layer is cleared regardless)"
                     );
                 }
+            }
+        }
+        // Ask the control plane to forget the device identity — best effort:
+        // unenrollment is a local restore that must succeed offline (SPEC
+        // section 55), so a failure here is logged and never blocks it.
+        if let Some(token) = self.device_token.lock().unwrap().as_ref() {
+            let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+            if let Err(e) = client.unregister(token) {
+                eprintln!(
+                    "punard: enroll.stop could not release the upstream identity ({e:?}); \
+                     local unenrollment continues"
+                );
             }
         }
         for name in ["enrollment.json", "device-token"] {

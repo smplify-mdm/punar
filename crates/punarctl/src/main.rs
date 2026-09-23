@@ -710,6 +710,12 @@ enum EnrollCommand {
     Start {
         /// Organization domain, like `acme.com`.
         domain: String,
+        /// Read the enrollment code from standard input (for scripts).
+        /// Without it, punarctl asks on the terminal with echo off. The
+        /// code is never accepted on the command line: /proc/<pid>/cmdline
+        /// is world-readable.
+        #[arg(long)]
+        code_stdin: bool,
     },
     /// Show enrollment state (never the device token).
     Status,
@@ -2246,6 +2252,69 @@ fn approvals_wait(
 /// added (contract section 16.4). The value is wrapped in
 /// [`Redacted`] the moment it exists, so no stray `{:?}` anywhere
 /// downstream can print it.
+/// The enrollment code for `enroll start`. Scripts pipe it with
+/// `--code-stdin`; a person is asked on the controlling terminal with echo
+/// off, exactly like a passphrase. Blank means "no code" — the dev/CI mock
+/// needs none, and the real control plane says so itself if one is
+/// required. There is deliberately no `--code` flag.
+fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCode> {
+    if code_stdin {
+        let mut raw = String::new();
+        if std::io::stdin().read_to_string(&mut raw).is_err() {
+            eprintln!(
+                "punarctl enroll start: the enrollment code could not be read from \
+                 standard input.\n\
+                 Why: with --code-stdin the code arrives on stdin — Punar never accepts \
+                 a secret on argv, because /proc/<pid>/cmdline is world-readable.\n\
+                 Next step: printf %s \"$CODE\" | sudo punarctl enroll start <domain> --code-stdin"
+            );
+            return Err(ExitCode::from(2));
+        }
+        let value = raw.trim().to_string();
+        if value.is_empty() {
+            eprintln!(
+                "punarctl enroll start: no enrollment code arrived on standard input.\n\
+                 Why: --code-stdin means the code is read from stdin.\n\
+                 Next step: printf %s \"$CODE\" | sudo punarctl enroll start <domain> --code-stdin"
+            );
+            return Err(ExitCode::from(2));
+        }
+        return Ok(Some(Redacted::new(value)));
+    }
+    let Ok(mut tty) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    else {
+        // No terminal and no --code-stdin: proceed without a code. The
+        // control plane that needs one refuses with a message that says so.
+        return Ok(None);
+    };
+    use std::io::{BufRead, Write};
+    let _ = write!(tty, "Enrollment code (leave blank if none): ");
+    let _ = tty.flush();
+    let saved = rustix::termios::tcgetattr(&tty).ok();
+    if let Some(saved) = &saved {
+        let mut quiet = saved.clone();
+        quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Flush, &quiet);
+    }
+    let mut line = String::new();
+    let read = std::io::BufReader::new(&tty).read_line(&mut line);
+    if let Some(saved) = &saved {
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Flush, saved);
+    }
+    let _ = writeln!(tty);
+    if read.is_err() {
+        eprintln!(
+            "punarctl enroll start: the enrollment code could not be read from the terminal."
+        );
+        return Err(ExitCode::from(2));
+    }
+    let value = line.trim().to_string();
+    Ok((!value.is_empty()).then(|| Redacted::new(value)))
+}
+
 fn token_from_stdin(verb: &str) -> Result<Redacted<String>, ExitCode> {
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
@@ -3469,21 +3538,28 @@ fn main() -> ExitCode {
         Command::Enroll { command } => {
             let hostname = local_hostname();
             match command {
-                EnrollCommand::Start { domain } => {
-                    // 90 s client budget for this one verb (contract
-                    // section 2): the pipeline runs a full reconcile pass
-                    // server-side.
-                    match client.call_with_timeout(
-                        "enroll.start",
-                        Some(json!({ "org_domain": domain })),
-                        crate::ipc::ENROLL_START_TIMEOUT,
-                    ) {
-                        Ok(result) => render_or_json(json, &result, |v| {
-                            views::enroll_start(&style, v, &hostname)
-                        }),
-                        Err(error) => fail(&error),
+                EnrollCommand::Start { domain, code_stdin } => match enrollment_code(code_stdin) {
+                    Err(exit) => exit,
+                    Ok(code) => {
+                        let mut params = json!({ "org_domain": domain });
+                        if let Some(code) = code {
+                            params["code"] = json!(code.expose_secret());
+                        }
+                        // 90 s client budget for this one verb (contract
+                        // section 2): the pipeline runs a full reconcile pass
+                        // server-side.
+                        match client.call_with_timeout(
+                            "enroll.start",
+                            Some(params),
+                            crate::ipc::ENROLL_START_TIMEOUT,
+                        ) {
+                            Ok(result) => render_or_json(json, &result, |v| {
+                                views::enroll_start(&style, v, &hostname)
+                            }),
+                            Err(error) => fail(&error),
+                        }
                     }
-                }
+                },
                 EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
                     views::enroll_status(&style, v, &hostname)
                 }),
