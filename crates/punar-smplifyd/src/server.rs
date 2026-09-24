@@ -171,6 +171,11 @@ impl Daemon {
             .ok()
             .flatten()
             .unwrap_or_else(|| crate::device::CANONICAL_OS_IDENTIFIER.to_string());
+        eprintln!(
+            "punar-smplifyd: registering with {} as {}",
+            organization.server.origin(),
+            os_identifier
+        );
 
         let csr = identity::generate_csr().map_err(internal)?;
         let enrolled = anonymous
