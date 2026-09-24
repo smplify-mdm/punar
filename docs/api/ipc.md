@@ -131,7 +131,7 @@ Success:
 Error (structured errors, spec section 61):
 
 ```json
-{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}
+{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}
 ```
 
 Exactly one of `result` / `error` is present. `error.message` is **human prose
@@ -202,7 +202,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) |
 | `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  |
 | `enroll.status` (M5)    | any connected peer | no      | no      |
-| `enroll.stop` (M5)      | root, or a person with a fresh `punar-authd` ticket where the organization allows local administration; agents never (section 5.11) | yes  | always  |
+| `enroll.stop` (M5)      | nobody, where the organization enrolled the device as not removable; otherwise root, or a person with a fresh `punar-authd` ticket; agents never (section 5.11) | yes  | always  |
 | `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no |
 | `approvals.create` (M9) | **root only (uid 0)** | yes | always |
 | `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always |
@@ -222,10 +222,10 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `pim.mail.account_add` | **human with a verified live desktop session; own uid only** | verified account transaction | agent denials |
 | `pim.mail.account_manage` | **human with a verified live desktop session; own uid only** | account removal only after explicit in-window confirmation | agent denials |
 | `update.status` | any connected peer | no | no |
-| `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
-| `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
+| `update.check` | **root, or a person with a fresh `punar-authd` ticket; agents never, at any uid** (§5.17) | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
+| `update.apply` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17a) | yes, inactive slot only | always |
 | `update.reconcile_candidate` | **root boot service only in normal operation; agent attribution is a hard denial before uid** | Pi selector/finalization only | required durable outcome audit before pending removal |
-| `update.rollback` | **root human only; agent attribution is a hard denial before uid** | yes, local selector only | always |
+| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17c) | yes, local selector only | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 | `install.apply` | **root attended installer or independently signed unattended provisioner; live environment only** | yes | always (`success`, `denied`, `failure`) |
@@ -242,6 +242,22 @@ gains two authorization rungs *around* the root-only rule — an AI
 authority path for agent-attributed peers (which is where
 `approval_required` is produced) and a time-boxed grant path for humans.
 Both are specified in §14.8; polkit itself is still not used.
+
+**No refusal tells a person to become root (2026-09).** A Punar device
+gives no person root: root is locked, nobody is in `wheel`, and Punar
+authors no sudoers rule (docs/design/onboarding.md §1.6). So a denial's
+next step is one a person can take — the grant for exactly that capability
+(`capabilities.set`), the password confirmation (`policy.set`,
+`enroll.start`, `enroll.stop`), what the device already does on its own
+(`reconcile`, `network.apply`), or, where no person's path exists, a plain
+statement of that and of who can act. A root-only method whose resource is
+not a registered capability (`reconcile`, `update.*`, `install.*`,
+`approvals.create`/`consume`) is refused with `details.resource`, never
+`details.capability`, and never offers `privilege request`, which would
+answer `not_found`. `update.check`, `update.apply` and `update.rollback` take
+the same password confirmation as enrollment (§5.17);
+`update.reconcile_candidate` stays the boot service's, and its refusal says
+so.
 
 ### 5.1 `status`
 
@@ -680,7 +696,7 @@ authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
-Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…"}` — `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
+Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…", "accept_non_removable": true}` — `accept_non_removable` optional, default `false` (step 6 below); `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
 the fetched policy ids in `policy_ids`). Processed under the 60 s bound
 (section 2).
@@ -712,6 +728,24 @@ checks run in this order:
    from here on names a caller who proved who they are. punarctl reads
    `enroll.status` first and does not ask for a code or a password on a
    device that is already enrolled.
+6. **The organization's removal term**, read from the document
+   `org.discover` returned and before `enroll.register`, so an organization
+   never learns of a device that did not enroll
+   (docs/development/smplify-enrollment.md §3.1). `enrollment.removable` is
+   a boolean; absent means `true`, and an ordinary enrollment asks nothing
+   more. A value that is present but not a boolean is `invalid_params`
+   (`details: {"stage": "discover", "reason": "enrollment.removable"}`),
+   never the permissive reading. `false` without `accept_non_removable:
+   true` is `denied` with `details.reason: "non_removable_not_accepted"`,
+   `details.organization` and `details.organization_name`, and a message
+   naming `punarctl enroll start <domain> --accept-non-removable`: an
+   organization cannot make a device non-removable without its user's
+   explicit yes. On a terminal punarctl shows the term, asks for `accept`,
+   and sends the request again with the flag and a fresh password (the
+   first was spent on discovery — nothing is fetched for a caller who has
+   not confirmed); without a terminal, or with `--json`, the refusal is the
+   answer. The term is written to `enrollment.json` and never re-read from
+   a policy fetch.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
@@ -736,7 +770,8 @@ that point removes everything this call created and returns
   "policy_ids": ["eng-baseline-v12"],
   "attestation": "simulated",
   "enrolled_at": "2026-08-26T09:00:00Z",
-  "first_sync": {"compliance": "success", "inventory": "success"}
+  "first_sync": {"compliance": "success", "inventory": "success"},
+  "removable": true
 }}
 ```
 
@@ -758,11 +793,14 @@ Params: none. Read-only, any connected peer, not audited.
   "enrolled_at": "2026-08-26T09:00:00Z",
   "attestation": "simulated",
   "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
-                 "pending": false}
+                 "pending": false},
+  "removable": true
 }}
 ```
 
 Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
+`removable` is the organization's removal term fixed at enrollment
+(§5.9 step 6): whether `enroll.stop` can succeed on this device at all.
 `last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
 while a report is queued (bounded latest-wins queue, spec section 55;
 milestone-5.md section 7). The device token appears in no field.
@@ -772,12 +810,17 @@ milestone-5.md section 7). The device token appears in no field.
 Params: `{}` or none from root; `{"ticket": "…"}` from a person. Mutating,
 always audited (`action: "enroll.stop"`, `resource: "enrollment"`). The gate
 is section 5.9's — agents refused at any uid, a person without a ticket
-refused, the ticket spent before anything changes — with one addition before
-the ticket is spent: **an organization may keep its device.** Where its
-policy has turned local administration off (section 5.7 `local_admin`), a
-person is refused with `details.reason: "local_admin_disabled"` and the
-organization's policy id in `policy_ids`; the ticket is left unspent. Root is
-not subject to it. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
+refused, the ticket spent before anything changes — with one refusal between
+the agent check and the ticket check: **an organization may keep its
+device.** Where it enrolled the device as not removable (§5.9 step 6, with
+the person's explicit yes), every local caller — root included — is refused
+with `details.reason: "enrollment_not_removable"` and
+`details.organization`; a ticket is neither required nor spent, because the
+answer does not depend on who is asking and `enroll.status.removable`
+already says it to anyone. Only erasing and reinstalling the device ends
+such an enrollment; a signed release from the organization is not built.
+punarctl reads `enroll.status` first and asks for neither a yes nor a
+password in that case. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
 deletes `enrollment.json` and the device token, recomputes the merge, runs
 one reconcile pass (recorded user preferences resurface as the winning
 layer per spec section 39), rewrites the section 9 status file. Result:
@@ -1039,7 +1082,31 @@ Strict params:
 {"force":false}
 ```
 
-Root-only and audited. The request may select only whether to bypass the
+or, from a person, `{"force":false,"ticket":"…"}`.
+
+**Who may check, install or roll back** (this section, §5.17a and §5.17c;
+decision: docs/development/update-and-rollback.md §7.3): root, or a person
+who has just confirmed their password — the `enroll.start` shape. In order:
+
+1. **No agent, at any uid** — the `host.system_update` boundary below,
+   widened to any peer whose cgroup names an agent scope; a ticket the agent
+   carried is left unspent. `details.rule: "host.system_update"`.
+2. **A non-root peer must carry a ticket** — `denied`,
+   `details.reason: "reauthentication_required"`, before anything is read or
+   fetched; the message names the `punarctl update …` command that asks.
+3. **The ticket is spent** before any update-source request and before any
+   allow-shaped audit event — `details.reason: "reauthentication_missing"` /
+   `"…_expired"` / `"…_malformed"` as in §5.9. Never forwarded, audited,
+   stored or returned.
+
+A person gets root's authority over updates and no more: the channel is still
+the precedence-resolved `system.update_channel` an organization pins, and the
+same halt, rollout, minimum-version and downgrade admission run after the
+gate. `update.check` needs the ticket because it writes the root-owned
+verified channel cache and contacts the update source; `update.status` needs
+none.
+
+Audited. The request may select only whether to bypass the
 15-minute verified cache. A caller cannot provide a URL, path, channel, key,
 target identity, mirror, artifact, digest, executable, or option. The daemon
 resolves the precedence-winning `system.update_channel`, running image id and
@@ -1102,7 +1169,8 @@ Strict params:
 {"version":"2026.08.27.1","allow_downgrade":false}
 ```
 
-Root-human-only and audited. Agent attribution is evaluated before uid, so a
+plus `"ticket"` from a person. Root, or a person with a fresh confirmation
+(§5.17), and audited. Agent attribution is evaluated before uid, so a
 process inside a `punar-agent-*.scope` is denied even when its peer uid is 0.
 That denial names `host.system_update`; this is a non-overridable OS hard-safety
 boundary. The caller cannot supply a channel, URL, path, key, slot, artifact,
@@ -1136,7 +1204,8 @@ tryboot`; UEFI uses `systemctl reboot`).
 ### 5.17b `update.reconcile_candidate`
 
 Params: none. This internal native-Pi boot-service method accepts no slot,
-path, digest, version or health value. It is root-only and an agent-attributed
+path, digest, version or health value. It is root-only — not a person's verb;
+`punar-update-health.service` calls it at boot — and an agent-attributed
 peer is denied even when uid 0. The daemon binds the durable pending record to
 firmware's read-only boot observation and the fixed selector layout, then
 returns one of three explicit outcomes:
@@ -1181,8 +1250,9 @@ Strict params:
 ```
 
 `null` selects the newest previous locally retained blessed release; a
-canonical version selects that exact retained release. The authorization and
-audit boundary is identical to `update.apply`. No repository is contacted and
+canonical version selects that exact retained release; a person adds
+`"ticket"`. The authorization and audit boundary is identical to
+`update.apply`. No repository is contacted and
 no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
 are rollback candidates; counted, unblessed attempts are excluded. On
 Raspberry Pi, the current and previous selectors are validated before a
@@ -1464,7 +1534,10 @@ or path other than the confirmed target device. An installed system returns
 ## 7. Client behavior (`punarctl`)
 
 - Connects as the invoking user; never elevates itself; the *daemon* is the
-  authorization point. `sudo punarctl …` is the M3 way to run mutating verbs.
+  authorization point. No person on a Punar device is root, so a person's
+  mutating verbs carry a grant (`punarctl privilege request`) or a password
+  confirmation relayed to `punar-authd` (`policy set`, `enroll start`,
+  `enroll stop`).
 - Human output follows Plate D-014 (`docs/design/mockups/cli-grammar.html`):
   tracked-uppercase masthead + U+2500 rule, middle-dot separators, aligned
   columns, ANSI color only on status words; personal mode shows no org rows.

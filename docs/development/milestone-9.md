@@ -696,7 +696,9 @@ does not name.
 
 Policy: personal defaults.
 Next step: add a rule under ai.agents.default.host, or make the change
-yourself: sudo punarctl capabilities set <capability> <state>
+yourself, outside the agent: punarctl privilege request --capability
+<capability> --reason "<why>", then punarctl capabilities set <capability>
+<state>
 ```
 
 `user_package` / `system_package` / `user_management` map to **no

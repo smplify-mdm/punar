@@ -428,7 +428,7 @@ impl Inner {
                         params.project.as_deref().unwrap_or("all"),
                     );
                     return Err(denied(
-                        "Applying network policy requires root because it changes the kernel nftables table. Next step: run `sudo punarctl network apply`.",
+                        "Applying network policy requires root because it changes the kernel nftables table, and no account on a Punar device is root. Next step: none needed — punar-netd applies it on its own when it starts and whenever an agent session starts or ends; `punarctl network status` shows what it enforces now.",
                     ));
                 }
                 let resource = params.project.as_deref().unwrap_or("all");

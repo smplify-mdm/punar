@@ -151,6 +151,16 @@ const ENROLL_START_WORDS: EnrollmentWords = EnrollmentWords {
     asks: "the enrollment code and then your password",
 };
 
+/// How an update verb names itself in its refusals.
+struct UpdateWords {
+    /// Sentence-initial gerund: "Installing an update".
+    doing: &'static str,
+    /// What an agent is refused: "replace or roll back the operating system".
+    agent_may_not: &'static str,
+    /// The command a person runs to do it themselves.
+    retry: String,
+}
+
 const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
     doing: "Unenrolling this device",
     verb: "unenroll this device",
@@ -1003,6 +1013,36 @@ fn source_ref(provenance: &Provenance) -> PolicySourceRef {
     }
 }
 
+/// Who can end this enrollment, said as a next step a person can act on
+/// (docs/development/smplify-enrollment.md section 3.1).
+fn unenroll_next_step(enrollment: &Enrollment) -> String {
+    if enrollment.removable {
+        "`punarctl enroll stop` unenrolls it; it asks for your password.".to_string()
+    } else {
+        format!(
+            "{org} enrolled this device as not removable, so nobody on it can unenroll it: \
+             only erasing and reinstalling the device ends the enrollment. A release sent by \
+             {org} is not built yet.",
+            org = enrollment.org.display_name
+        )
+    }
+}
+
+/// `enrollment.removable` from an organization document: whether a person on
+/// the device may later unenroll it. Absent means removable — the organization
+/// stated no restriction, and the device's owner administers it, as for
+/// `spec.security.localAdmin`. A value that is present but not a boolean is an
+/// error, never the permissive default: an organization that tried to say
+/// something about removal and could not be understood must not get the
+/// opposite of what it meant.
+fn org_document_removable(org_doc: &Value) -> Result<bool, String> {
+    match org_doc.get("enrollment").and_then(|e| e.get("removable")) {
+        None => Ok(true),
+        Some(Value::Bool(removable)) => Ok(*removable),
+        Some(other) => Err(other.to_string()),
+    }
+}
+
 /// The wire `org` object for a persisted [`OrgRecord`].
 fn org_info(org: &OrgRecord) -> OrgInfo {
     OrgInfo {
@@ -1224,7 +1264,7 @@ fn update_check_ipc_error(error: UpdateCheckError) -> IpcError {
             format!(
                 "Punar could not reach its configured update source: {error}. The running release and verified cache were not changed.\n\
                  Policy: governed updates never fall through to another channel or an unverified mirror.\n\
-                 Next step: reconnect the configured update source and retry `sudo punarctl update check`."
+                 Next step: reconnect the configured update source and retry `punarctl update check`."
             ),
             json!({ "stage": stage }),
         );
@@ -1655,20 +1695,17 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.check";
         const RESOURCE: &str = "update_channel";
-        let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                ACTION,
-                RESOURCE,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "checking the governed update channel",
-                Some(RESOURCE),
-                "sudo punarctl update check",
-            ));
-        }
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            RESOURCE,
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Checking for updates",
+                agent_may_not: "check this device's update channel",
+                retry: "punarctl update check".to_string(),
+            },
+        )?;
 
         let channel = self
             .effective
@@ -1735,64 +1772,111 @@ impl Inner {
         }
     }
 
-    fn authorize_system_update(&self, peer: &Peer, action: &str) -> Result<AuditActor, IpcError> {
+    /// Who may change what the operating system runs (docs/development/
+    /// update-and-rollback.md section 7.3): root, or a person who has just
+    /// confirmed their password — the `enroll.start` shape. Order:
+    ///
+    /// 1. **No agent, at any uid** — the M9 `host.system_update` boundary,
+    ///    widened to any peer whose cgroup names an agent scope. A ticket the
+    ///    agent carried is left unspent.
+    /// 2. **A non-root peer must carry a ticket**, refused before anything is
+    ///    read or fetched.
+    /// 3. **The ticket is spent** before any update-source request and before
+    ///    any allow-shaped audit event, so every later outcome names a caller
+    ///    who proved who they are.
+    ///
+    /// A person gets exactly root's authority and no more: the same channel,
+    /// halt, rollout, minimum-version and downgrade admission run after this,
+    /// and the channel is still the precedence-resolved
+    /// `system.update_channel`, which an organization pins.
+    fn admit_update_change(
+        &self,
+        peer: &Peer,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        words: &UpdateWords,
+    ) -> Result<AuditActor, IpcError> {
         let actor = self.actor_of(peer);
-        if actor.source == PrincipalKind::AiAgent {
-            let ruling = self.ai.lock().unwrap().host_ruling("system_update");
-            // An update/rollback is an OS hard-safety boundary for agents,
-            // not an authority an organization can grant back. Cite a loaded
-            // policy only when it actually denies the named rule; otherwise
-            // cite the non-overridable boundary instead of falsely claiming
-            // that an `allow` ruling caused this denial.
-            let denying_ruling = ruling
-                .as_ref()
-                .filter(|value| value.decision == Decision::Deny);
-            let policy_id = denying_ruling
-                .map(|value| value.policy_id.as_str())
-                .unwrap_or("os-hard-safety");
-            let source_name = denying_ruling
-                .map(|value| value.source_name.as_str())
-                .unwrap_or("Punar OS hard safety constraint");
-            let mut event = AuditEvent::action(
-                &self.device_id,
-                &actor,
-                action,
-                "system_image",
-                Decision::Deny,
-                AuditOutcome::Denied,
-            );
-            event.policy_ids = vec![policy_id.to_string()];
-            self.log_audit(event);
-            return Err(IpcError::with_details(
-                ErrorCode::Denied,
-                format!(
-                    "An AI agent may not replace or roll back the operating system.\n\
-                     Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
-                     Next step: make the change yourself with `sudo punarctl update apply <version>` or `sudo punarctl update rollback`."
-                ),
-                json!({
-                    "decision": "deny",
-                    "resource": "system_image",
-                    "rule": "host.system_update",
-                    "agent_session_id": actor.agent_session_id,
-                    "policy_ids": [policy_id],
-                }),
-            ));
-        }
-        if authorize_mutation(peer) != Decision::Allow {
+        self.refuse_agent_system_update(peer, &actor, action, resource, words.agent_may_not)?;
+        if peer.uid != 0 && ticket.is_none() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
                 action,
-                "system_image",
+                resource,
             ));
-            return Err(IpcError::denied_needs_root(
-                "changing the operating-system boot slots",
-                Some("system_image"),
-                "sudo punarctl update apply <version>",
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — what the operating system runs is an \
+                     administrative change, confirmed at the moment it is made.\n\
+                     Next step: run `{}` in a terminal; it asks for your password.",
+                    words.doing, words.retry
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
             ));
         }
+        self.spend_reauth_ticket(peer, &actor, action, resource, ticket, &words.retry)?;
         Ok(actor)
+    }
+
+    /// The M9 boundary for every update verb: an AI agent never replaces,
+    /// rolls back or checks the operating system, at any uid, whatever a
+    /// policy says.
+    fn refuse_agent_system_update(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        agent_may_not: &str,
+    ) -> Result<(), IpcError> {
+        if actor.source != PrincipalKind::AiAgent && self.agent_shaped_peer(peer, actor).is_none() {
+            return Ok(());
+        }
+        let ruling = self.ai.lock().unwrap().host_ruling("system_update");
+        // An update/rollback is an OS hard-safety boundary for agents,
+        // not an authority an organization can grant back. Cite a loaded
+        // policy only when it actually denies the named rule; otherwise
+        // cite the non-overridable boundary instead of falsely claiming
+        // that an `allow` ruling caused this denial.
+        let denying_ruling = ruling
+            .as_ref()
+            .filter(|value| value.decision == Decision::Deny);
+        let policy_id = denying_ruling
+            .map(|value| value.policy_id.as_str())
+            .unwrap_or("os-hard-safety");
+        let source_name = denying_ruling
+            .map(|value| value.source_name.as_str())
+            .unwrap_or("Punar OS hard safety constraint");
+        let mut event = AuditEvent::action(
+            &self.device_id,
+            actor,
+            action,
+            resource,
+            Decision::Deny,
+            AuditOutcome::Denied,
+        );
+        event.policy_ids = vec![policy_id.to_string()];
+        self.log_audit(event);
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "An AI agent may not {agent_may_not}.\n\
+                 Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
+                 Next step: leave it to a person; `punarctl update status` shows what is available."
+            ),
+            json!({
+                "decision": "deny",
+                "resource": resource,
+                "rule": "host.system_update",
+                "agent_session_id": actor.agent_session_id,
+                "policy_ids": [policy_id],
+            }),
+        ))
     }
 
     fn effective_update_channel(&self) -> Result<UpdateChannel, IpcError> {
@@ -1816,7 +1900,17 @@ impl Inner {
         params: &UpdateApplyParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.apply";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Installing an update",
+                agent_may_not: "replace or roll back the operating system",
+                retry: format!("punarctl update apply {}", params.version),
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = (|| -> Result<UpdateApplyResult, IpcError> {
             // Keep even a corrupt/missing effective channel inside the audited
@@ -1920,7 +2014,30 @@ impl Inner {
     /// then exact pending-record removal.
     fn handle_update_reconcile_candidate(&self, peer: &Peer) -> Result<Value, IpcError> {
         const ACTION: &str = "update.reconcile_candidate";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.actor_of(peer);
+        self.refuse_agent_system_update(
+            peer,
+            &actor,
+            ACTION,
+            "system_image",
+            "replace or roll back the operating system",
+        )?;
+        // Not a person's verb: it blesses or reverts a Raspberry Pi candidate
+        // from firmware observation, and the boot health service calls it.
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                "system_image",
+            ));
+            return Err(IpcError::denied_root_only(
+                "Settling a Raspberry Pi update candidate",
+                "system_image",
+                "none needed — punar-update-health.service settles it at boot, after \
+                 the health checks it depends on have run.",
+            ));
+        }
         let _guard = self.update_lock.lock().unwrap();
         let result = if !self.cfg.pi_update_sources.boot_partition_property.exists() {
             Err(PiUpdateError::Conflict(
@@ -1980,7 +2097,17 @@ impl Inner {
         params: &UpdateRollbackParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.rollback";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Rolling back the operating system",
+                agent_may_not: "replace or roll back the operating system",
+                retry: "punarctl update rollback".to_string(),
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = if self.cfg.pi_update_sources.boot_partition_property.exists() {
             self.pi_update
@@ -2034,10 +2161,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation planning",
-                Some(RESOURCE),
-                "run the installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Planning an installation",
+                RESOURCE,
+                "use the installer on the Punar live medium, which runs as root there; \
+                 an installed device's accounts never plan a disk install.",
             ));
         }
         match self.installer.plan(params) {
@@ -2114,10 +2242,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation",
-                Some(RESOURCE),
-                "run the signed installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Installing Punar to a disk",
+                RESOURCE,
+                "use the signed installer on the Punar live medium, which runs as root \
+                 there; an installed device's accounts never write a disk install.",
             ));
         }
         let Some(_guard) = InstallGuard::acquire(&self.install_in_progress) else {
@@ -3692,10 +3821,12 @@ impl Inner {
                 "reconcile",
                 RESOURCE_CAPABILITY_REGISTRY,
             ));
-            return Err(IpcError::denied_needs_root(
-                "the capability registry (reconcile)",
-                Some(RESOURCE_CAPABILITY_REGISTRY),
-                "sudo punarctl reconcile",
+            return Err(IpcError::denied_root_only(
+                "Reconciling the capability registry",
+                RESOURCE_CAPABILITY_REGISTRY,
+                "none needed — punard reconciles on its own at boot and every two \
+                 minutes (punard-reconcile.timer). `punarctl status` shows when it \
+                 last ran; `punarctl policy explain <capability>` shows what it enforces.",
             ));
         }
 
@@ -4376,12 +4507,29 @@ impl Inner {
     /// peer is refused at any uid (enrollment decides who manages the device,
     /// and SPEC section 60 gives an agent no say in that), and a person who
     /// brought no confirmation is refused before anything is parsed or sent.
+    /// `enroll.stop` runs the two checks separately, so that a refusal which
+    /// does not depend on who is asking (a non-removable enrollment) comes
+    /// between them and nobody is asked for a password only to be refused.
     fn admit_enrollment_change(
         &self,
         peer: &Peer,
         actor: &AuditActor,
         action: &str,
         ticket: Option<&str>,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        self.refuse_agent_enrollment_change(peer, actor, action, words, retry)?;
+        self.require_enrollment_ticket(peer, actor, action, ticket, words, retry)
+    }
+
+    /// An agent-shaped peer may not change who manages the device, at any
+    /// uid. First, always.
+    fn refuse_agent_enrollment_change(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
         words: &EnrollmentWords,
         retry: &str,
     ) -> Result<(), IpcError> {
@@ -4406,6 +4554,19 @@ impl Inner {
                 json!({ "decision": "deny", "reason": "agent_scope" }),
             ));
         }
+        Ok(())
+    }
+
+    /// A person must bring a confirmation; root has none to bring.
+    fn require_enrollment_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
         if peer.uid != 0 && ticket.is_none() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
@@ -4440,6 +4601,22 @@ impl Inner {
         ticket: Option<&str>,
         retry: &str,
     ) -> Result<(), IpcError> {
+        self.spend_reauth_ticket(peer, actor, action, RESOURCE_ENROLLMENT, ticket, retry)
+    }
+
+    /// Spend a person's `punar-authd` confirmation for `action` on `resource`
+    /// (root has none to spend). Shared by every method a person reaches with
+    /// their password: the rule — good once, for two minutes, for the account
+    /// that made it — is one rule, not one per method.
+    fn spend_reauth_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        retry: &str,
+    ) -> Result<(), IpcError> {
         if peer.uid == 0 {
             return Ok(());
         }
@@ -4451,12 +4628,7 @@ impl Inner {
         ) else {
             return Ok(());
         };
-        self.log_audit(AuditEvent::denial(
-            &self.device_id,
-            actor,
-            action,
-            RESOURCE_ENROLLMENT,
-        ));
+        self.log_audit(AuditEvent::denial(&self.device_id, actor, action, resource));
         Err(IpcError::with_details(
             ErrorCode::Denied,
             format!(
@@ -4543,7 +4715,13 @@ impl Inner {
                 ));
             }
         };
-        if self.enrollment.lock().unwrap().is_some() {
+        let current = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(unenroll_next_step);
+        if let Some(unenroll) = current {
             self.log_audit(self.enroll_event(
                 &actor,
                 "enroll.start",
@@ -4553,12 +4731,13 @@ impl Inner {
             ));
             return Err(self.conflict(
                 "enrolled",
-                "This device is already enrolled.\n\
-                 Policy: os default — one organization at a time (docs/api/ipc.md \
-                 section 5.9).\n\
-                 Next step: `punarctl enroll status` shows the current organization; \
-                 `punarctl enroll stop` unenrolls."
-                    .to_string(),
+                format!(
+                    "This device is already enrolled.\n\
+                     Policy: os default — one organization at a time (docs/api/ipc.md \
+                     section 5.9).\n\
+                     Next step: `punarctl enroll status` shows the current organization. \
+                     {unenroll}"
+                ),
             ));
         }
         let fail_audit = |stage_error: IpcError| {
@@ -4626,6 +4805,59 @@ impl Inner {
             id: org_id,
             name: org_name,
         };
+        // Removability is the organization's decision, read from its document
+        // once, here, and fixed in enrollment.json — like the remote-query
+        // grant above, never re-read from a later policy fetch, so it cannot be
+        // tightened after the person agreed to it. A non-removable enrollment
+        // needs the person's explicit yes; both refusals come before register,
+        // so the organization never learns of a device that did not enroll.
+        let removable = match org_document_removable(&org_doc) {
+            Ok(removable) => removable,
+            Err(found) => {
+                return Err(fail_audit(IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "{}'s organization document says enrollment.removable is {found}, \
+                         which is not true or false, so this device cannot tell whether it \
+                         could be unenrolled later. Nothing was changed.\n\
+                         Policy: os default — an unreadable enrollment term refuses \
+                         enrollment rather than guessing (docs/development/\
+                         smplify-enrollment.md section 3.1).\n\
+                         Next step: ask {} to correct its organization document.",
+                        org.display_name, org.display_name
+                    ),
+                    json!({ "stage": "discover", "reason": "enrollment.removable" }),
+                )));
+            }
+        };
+        if !removable && !params.accept_non_removable {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "enroll.start",
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{org} enrolls devices so that nobody on them can unenroll them, and \
+                     this request did not accept that. Nothing was changed: this device \
+                     was not registered with {org}.\n\
+                     Policy: {org}'s enrollment terms — once enrolled, only erasing and \
+                     reinstalling this device ends the enrollment; nobody on it, you \
+                     included, can unenroll it.\n\
+                     Next step: if that is what you want, run `punarctl enroll start \
+                     {domain} --accept-non-removable`.",
+                    org = org.display_name
+                ),
+                json!({
+                    "decision": "deny",
+                    "reason": "non_removable_not_accepted",
+                    "organization": org.id,
+                    "organization_name": org.display_name,
+                }),
+            ));
+        }
 
         // Register. The bootstrap secret exists only in memory, only for
         // this call, and only behind Redacted; the returned token likewise
@@ -4773,6 +5005,7 @@ impl Inner {
             last_inventory_hash: None,
             remote_query_scopes,
             last_query: None,
+            removable,
         };
         if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
             rollback_files(&policy_files);
@@ -4839,6 +5072,7 @@ impl Inner {
             attestation: attestation_label,
             enrolled_at,
             first_sync,
+            removable: Some(removable),
         }))
     }
 
@@ -4858,6 +5092,7 @@ impl Inner {
                 last_sync: None,
                 remote_query_scopes: None,
                 last_query: None,
+                removable: None,
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -4880,17 +5115,21 @@ impl Inner {
                     scope: q.scope.clone(),
                     decision: q.decision.clone(),
                 }),
+                removable: Some(e.removable),
             },
         }
     }
 
-    /// `enroll.stop` (contract section 5.11): root-only local restore —
-    /// remove exactly the policy.d files this enrollment wrote, delete the
-    /// stores, recompute, one reconcile pass (recorded user preferences
-    /// resurface per SPEC section 39), rewrite the status file. Local-only
-    /// by design: M5 has no unregister RPC — the control plane keeps its
-    /// device record and received history (unenrollment stops future flow;
-    /// it cannot retract the past). Works with the control plane down.
+    /// `enroll.stop` (contract section 5.11): local restore — remove exactly
+    /// the policy.d files this enrollment wrote, delete the stores,
+    /// recompute, one reconcile pass (recorded user preferences resurface per
+    /// SPEC section 39), rewrite the status file. The control plane is asked
+    /// to forget the device best-effort; unenrollment cannot retract what it
+    /// already received, and works with it down.
+    ///
+    /// Who may: no agent at any uid; nobody at all for an enrollment its
+    /// organization made non-removable; otherwise root, or a person with a
+    /// fresh confirmation (docs/development/smplify-enrollment.md section 3.1).
     fn handle_enroll_stop(
         &self,
         peer: &Peer,
@@ -4898,7 +5137,53 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
         let retry = "punarctl enroll stop";
-        self.admit_enrollment_change(
+        self.refuse_agent_enrollment_change(
+            peer,
+            &actor,
+            "enroll.stop",
+            &ENROLL_STOP_WORDS,
+            retry,
+        )?;
+        // An organization may keep its device: an enrollment it made
+        // non-removable, with the enrolling person's explicit yes, cannot be
+        // undone here by anyone — root included, because the term is enforced
+        // by the one process that can end an enrollment, not merely implied by
+        // nobody holding root (docs/development/smplify-enrollment.md section
+        // 3.1). Checked before a password is asked for or spent: the answer does
+        // not depend on who is asking, and `enroll.status` already tells anyone.
+        let terms = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|e| !e.removable)
+            .map(|e| (e.org.id.clone(), e.org.display_name.clone()));
+        if let Some((org_id, org_name)) = terms {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "enroll.stop",
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "This device's enrollment with {org_name} cannot be undone from the \
+                     device.\n\
+                     Policy: {org_name}'s enrollment terms — it enrolls devices as not \
+                     removable, and that was accepted when this device enrolled \
+                     (docs/development/smplify-enrollment.md section 3.1).\n\
+                     Next step: only erasing and reinstalling the device ends the \
+                     enrollment. A release sent by {org_name} is not built yet."
+                ),
+                json!({
+                    "decision": "deny",
+                    "reason": "enrollment_not_removable",
+                    "organization": org_id,
+                }),
+            ));
+        }
+        self.require_enrollment_ticket(
             peer,
             &actor,
             "enroll.stop",
@@ -4906,40 +5191,6 @@ impl Inner {
             &ENROLL_STOP_WORDS,
             retry,
         )?;
-        // An organization may keep its device. Unenrolling removes every
-        // organization layer at once, so wherever the organization has turned
-        // local administration off, a person may not do it here. Checked
-        // before the ticket is spent: the answer does not depend on who is
-        // asking, and a refusal should not cost a password.
-        if peer.uid != 0 {
-            let local_admin = self.local_admin_status();
-            if !local_admin.allowed {
-                let (name, policy_id) = local_admin
-                    .source
-                    .as_ref()
-                    .map(|src| (src.name.clone(), src.policy_id.clone()))
-                    .unwrap_or_else(|| ("your organization".into(), "unknown".into()));
-                let mut event =
-                    AuditEvent::denial(&self.device_id, &actor, "enroll.stop", RESOURCE_ENROLLMENT);
-                event.policy_ids = vec![policy_id.clone()];
-                self.log_audit(event);
-                return Err(IpcError::with_details(
-                    ErrorCode::Denied,
-                    format!(
-                        "{name} manages this device and has turned local administration \
-                         off ({policy_id}), so it cannot be unenrolled here.\n\
-                         User override: not permitted.\n\
-                         Next step: ask {name} to allow local administration on this \
-                         device, then run `punarctl enroll stop` again."
-                    ),
-                    json!({
-                        "decision": "deny",
-                        "policy_ids": [policy_id],
-                        "reason": "local_admin_disabled",
-                    }),
-                ));
-            }
-        }
         self.spend_enrollment_ticket(peer, &actor, "enroll.stop", params.ticket.as_deref(), retry)?;
         let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
             Some(guard) => guard,

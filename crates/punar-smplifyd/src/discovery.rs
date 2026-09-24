@@ -8,8 +8,10 @@
 //!
 //! The document keeps the shape punard already reads from the mock's
 //! `org.json` (`id`, `name`, `enrollment.display_name`,
-//! `enrollment.remote_query_scopes`, `discovery.domain`) and adds the one
-//! thing the mock never needed: `enrollment.server`, the Smplify API origin.
+//! `enrollment.remote_query_scopes`, `enrollment.removable`,
+//! `discovery.domain`) and adds the one thing the mock never needed:
+//! `enrollment.server`, the Smplify API origin. Enrollment terms such as
+//! `removable` are punard's to judge, so they travel in `document` untouched.
 use std::path::Path;
 use std::time::Duration;
 
@@ -221,6 +223,21 @@ mod tests {
                 "remote_query_scopes": ["inventory"]
             }
         })
+    }
+
+    /// Whether a device may later be unenrolled is the organization's term,
+    /// and punard decides on it; this agent must neither drop nor rewrite it
+    /// (docs/development/smplify-enrollment.md section 3.1).
+    #[test]
+    fn enrollment_terms_reach_punard_untouched() {
+        for removable in [json!(false), json!(true), json!("no")] {
+            let mut d = doc();
+            d["enrollment"]["removable"] = removable.clone();
+            let org = parse_document("acme.com", d).unwrap();
+            assert_eq!(org.document["enrollment"]["removable"], removable);
+        }
+        let org = parse_document("acme.com", doc()).unwrap();
+        assert!(org.document["enrollment"].get("removable").is_none());
     }
 
     #[test]

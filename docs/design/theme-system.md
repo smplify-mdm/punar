@@ -615,8 +615,8 @@ that model exists to make:
    merge, same `policy.explain` output, no new machinery.
 2. **Typed capabilities exist to keep privileged operations narrow and
    audited** (spec §60). `capabilities.set` is root-only. Modelling a palette
-   as one would mean `sudo` — or a JIT grant with a written reason (§48) — to
-   change your colours. That is absurd on its face, and worse, it would push
+   as one would mean a JIT grant with a written reason (§48) to change your
+   colours. That is absurd on its face, and worse, it would push
    users to edit the pointer file directly, defeating the validation gate that
    is the entire point. A gate people route around is not a gate.
 3. **The audit log is for consequential acts** (spec §53). A live preview that
@@ -774,11 +774,12 @@ same thing with the same validation. Two paths, one gate, same voice — spec
 
 The greeter runs before login, as another user, so it cannot read
 `~/.config/punar/theme.json`. It reads the **system pointer**
-`/etc/punar/theme.json`, written by `sudo punarctl theme set <id> --system`.
-That is an ordinary root-owned config file written by root — not an IPC method,
-not a capability, and specifically not a generic root RPC (spec §60): punarctl
-is running *as* root at that point, and no daemon is asked to act on anyone's
-behalf. Deferred: the value of matching the greeter to the desktop is real but
+`/etc/punar/theme.json`, an ordinary root-owned config file — not an IPC
+method, not a capability, and specifically not a generic root RPC (spec §60).
+*(Amended 2026-09-24: this once said `sudo punarctl theme set <id> --system`,
+but no person on a Punar device is root (onboarding.md §1.6). When this lands,
+a person reaches it the way `policy.set` is reached — a password confirmed
+through `punar-authd` — or not at all.)* Deferred: the value of matching the greeter to the desktop is real but
 small, and it can land after the session path works.
 
 ---

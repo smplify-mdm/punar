@@ -33,10 +33,11 @@
 //! right no policy withholds for one's own sessions, because in Milestone
 //! 8 no organization can read the data either.
 //!
-//! The CLI never elevates itself; the daemon is the authorization point
-//! (`sudo punarctl …` is the M3 way to run mutating verbs), and a denial
-//! prints the server's SPEC section 73 message verbatim — who may act, why
-//! this was refused, which policy, and the next step. Never an errno.
+//! The CLI never elevates itself; the daemon is the authorization point (no
+//! person on a Punar device is root — a person's mutating verbs carry a grant
+//! or a password confirmation), and a denial prints the server's SPEC section
+//! 73 message verbatim — who may act, why this was refused, which policy, and
+//! the next step. Never an errno.
 //!
 //! Milestone 9 completes the exit-code table and adds the three verb
 //! families of the approval milestone. `approvals list/get/resolve/wait`
@@ -244,7 +245,8 @@ enum CapabilitiesCommand {
         /// Dotted capability path, like `security.firewall`.
         capability: CapabilityId,
     },
-    /// Set the desired state of one capability (root only in Milestone 3).
+    /// Set the desired state of one capability (root, or a person holding a
+    /// grant for it: `punarctl privilege request`).
     Set {
         /// Dotted capability path, like `security.firewall`.
         capability: CapabilityId,
@@ -636,12 +638,14 @@ enum UpdateCommand {
     /// Show current/desired version, channel, health, and rollback state.
     Status,
     /// Authenticate the configured channel head and record verified metadata.
+    /// Asks for your password: it writes the device's verified update state.
     Check {
         /// Bypass a recent verified cache and require the configured source.
         #[arg(long)]
         force: bool,
     },
     /// Stage one exact signed channel-head release into the inactive slot.
+    /// Asks for your password.
     Apply {
         /// Exact release version reported by `punarctl update check`.
         version: ReleaseVersion,
@@ -657,6 +661,7 @@ enum UpdateCommand {
     #[command(name = "reconcile-candidate", hide = true)]
     ReconcileCandidate,
     /// Select a locally retained last-known-good release for the next boot.
+    /// Asks for your password.
     Rollback {
         /// Exact retained release; omitted selects the newest previous one.
         #[arg(long = "to")]
@@ -717,13 +722,20 @@ enum EnrollCommand {
         /// is world-readable.
         #[arg(long)]
         code_stdin: bool,
+        /// Accept, in advance, that this organization enrolls devices as not
+        /// removable: once enrolled, nobody on the device can unenroll it, and
+        /// only erasing and reinstalling it ends the enrollment. Without it,
+        /// punarctl asks on the terminal when the organization requires it,
+        /// and refuses when there is no terminal to ask on.
+        #[arg(long)]
+        accept_non_removable: bool,
     },
     /// Show enrollment state (never the device token).
     Status,
     /// Unenroll: remove the org policy layers and restore personal state.
-    /// Asks for your password to confirm; refused where your organization has
-    /// turned local administration off (local — the org keeps what it already
-    /// received).
+    /// Asks for your password to confirm; refused when the organization
+    /// enrolled this device as not removable (local — the org keeps what it
+    /// already received).
     Stop {
         /// Skip the interactive confirmation.
         #[arg(long)]
@@ -863,6 +875,20 @@ fn restart_after_update(kind: UpdateRestart) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Add a person's password confirmation to `params` (root has none to add).
+/// No account on a Punar device is root, so checking, installing and rolling
+/// back take the same confirmation as enrolling. Without a terminal the
+/// request goes without one, and punard's refusal says what to run.
+fn with_person_ticket(mut params: Value, purpose: &str) -> Result<Value, ExitCode> {
+    if rustix::process::geteuid().is_root() {
+        return Ok(params);
+    }
+    if let Some(ticket) = admin_ticket(purpose)? {
+        params["ticket"] = json!(ticket.as_str());
+    }
+    Ok(params)
 }
 
 fn update_mutation(
@@ -2255,16 +2281,122 @@ fn approvals_wait(
 /// added (contract section 16.4). The value is wrapped in
 /// [`Redacted`] the moment it exists, so no stray `{:?}` anywhere
 /// downstream can print it.
-/// The enrollment code for `enroll start`. Scripts pipe it with
-/// `--code-stdin`; a person is asked on the controlling terminal with echo
-/// off, exactly like a passphrase. Blank means "no code" — the dev/CI mock
-/// needs none, and the real control plane says so itself if one is
-/// required. There is deliberately no `--code` flag.
-/// The organization this device is already enrolled with, if it is — so a
-/// person is not asked for a code and a password only to be told the device
-/// already belongs to someone. `None` when unenrolled or when the status read
-/// fails; either way `enroll.start` then gives punard's own answer.
-fn already_enrolled(client: &Client) -> Option<String> {
+/// `punarctl enroll start`, once the code is in hand. A person confirms with
+/// their password, as always. When the organization enrolls devices as not
+/// removable and the person has not accepted that yet, punard refuses before
+/// registering and names the organization; on a terminal punarctl then shows
+/// the term and asks, and only an explicit `accept` sends the request again,
+/// with a fresh password — the first one was spent looking the organization
+/// up. Without a terminal, or with --json, punard's refusal is the answer.
+///
+/// Why not ask before the first password: the term lives in the
+/// organization's document, and punard fetches nothing for a caller who has
+/// not yet proved who they are. Learning it earlier would mean a network call
+/// on behalf of an unconfirmed caller, which is the one thing the enrollment
+/// gate exists to prevent.
+fn run_enroll_start(
+    client: &Client,
+    json: bool,
+    domain: &str,
+    code: Option<&Redacted<String>>,
+    accept_non_removable: bool,
+    render: impl Fn(&Value) -> Result<String, String>,
+) -> ExitCode {
+    let mut accept = accept_non_removable;
+    loop {
+        let mut params = json!({ "org_domain": domain });
+        if let Some(code) = code {
+            params["code"] = json!(code.expose_secret());
+        }
+        if accept {
+            params["accept_non_removable"] = json!(true);
+        }
+        // Asked last, so the two-minute confirmation is spent by the call it
+        // was typed for rather than by however long the code took to find.
+        if !rustix::process::geteuid().is_root() {
+            match admin_ticket(&format!("allow enrolling this device with {domain}")) {
+                Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+                Ok(None) => {}
+                Err(exit) => return exit,
+            }
+        }
+        // 90 s client budget for this one verb (contract section 2): the
+        // pipeline runs a full reconcile pass server-side.
+        let error = match client.call_with_timeout(
+            "enroll.start",
+            Some(params),
+            crate::ipc::ENROLL_START_TIMEOUT,
+        ) {
+            Ok(result) => return render_or_json(json, &result, &render),
+            Err(error) => error,
+        };
+        let terms = error
+            .server()
+            .and_then(|e| e.details.as_ref())
+            .filter(|d| d["reason"] == "non_removable_not_accepted")
+            .map(|d| {
+                d["organization_name"]
+                    .as_str()
+                    .unwrap_or(domain)
+                    .to_string()
+            });
+        if let (Some(org), false, false) = (terms, accept, json) {
+            match accept_non_removable_on_terminal(&org) {
+                // Accepted: once more, with the flag and a new password.
+                Some(Ok(true)) => {
+                    accept = true;
+                    continue;
+                }
+                Some(Ok(false)) => {
+                    eprintln!(
+                        "Not accepted, so this device was not enrolled and nothing was \
+                         changed."
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Some(Err(())) => return ExitCode::from(2),
+                // No terminal to ask on: punard's refusal says what to run.
+                None => {}
+            }
+        }
+        return fail(&error);
+    }
+}
+
+/// Show an organization's non-removable term on the controlling terminal and
+/// ask for an explicit `accept`. `None` when there is no terminal, exactly
+/// like the code prompt; `Err` when the answer could not be read.
+fn accept_non_removable_on_terminal(org: &str) -> Option<Result<bool, ()>> {
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let _ = write!(
+        tty,
+        "{org} enrolls devices so that they cannot be unenrolled from the device.\n\
+         Once enrolled, nobody on this device, you included, can unenroll it; only \
+         erasing and reinstalling it ends the enrollment.\n\
+         Nothing has been registered yet. Your password was used to look {org} up, so \
+         you will be asked for it again.\n\
+         Type accept to enroll on these terms: "
+    );
+    let _ = tty.flush();
+    Some(match read_secret_line(&mut tty) {
+        Ok(answer) => Ok(answer.trim() == "accept"),
+        Err(_) => {
+            eprintln!("punarctl: the answer could not be read from the terminal.");
+            Err(())
+        }
+    })
+}
+
+/// The organization this device is already enrolled with, and whether that
+/// enrollment can be undone here, if it is — so a person is not asked for a
+/// code and a password only to be told the device already belongs to someone.
+/// `None` when unenrolled or when the status read fails; either way
+/// `enroll.start` then gives punard's own answer.
+fn already_enrolled(client: &Client) -> Option<(String, bool)> {
     let status = client.call("enroll.status", None).ok()?;
     if status.get("enrolled").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -2274,9 +2406,15 @@ fn already_enrolled(client: &Client) -> Option<String> {
         .as_str()
         .or_else(|| org["name"].as_str())
         .unwrap_or("an organization");
-    Some(name.to_string())
+    let removable = status.get("removable").and_then(Value::as_bool) != Some(false);
+    Some((name.to_string(), removable))
 }
 
+/// The enrollment code for `enroll start`. Scripts pipe it with
+/// `--code-stdin`; a person is asked on the controlling terminal with echo
+/// off, exactly like a passphrase. Blank means "no code" — the dev/CI mock
+/// needs none, and the real control plane says so itself if one is
+/// required. There is deliberately no `--code` flag.
 fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCode> {
     if code_stdin {
         let mut raw = String::new();
@@ -3770,47 +3908,36 @@ fn main() -> ExitCode {
         Command::Enroll { command } => {
             let hostname = local_hostname();
             match command {
-                EnrollCommand::Start { domain, code_stdin } => match already_enrolled(&client) {
-                    Some(org) => {
+                EnrollCommand::Start {
+                    domain,
+                    code_stdin,
+                    accept_non_removable,
+                } => match already_enrolled(&client) {
+                    Some((org, removable)) => {
+                        let next = if removable {
+                            "`punarctl enroll stop` unenrolls it first.".to_string()
+                        } else {
+                            format!(
+                                "none from this device: {org} enrolled it as not removable, \
+                                 so only erasing and reinstalling it ends that enrollment."
+                            )
+                        };
                         eprintln!(
                             "This device is already enrolled with {org}, so nothing was changed.\n\
-                             Next step: `punarctl enroll stop` unenrolls it first."
+                             Next step: {next}"
                         );
                         ExitCode::FAILURE
                     }
                     None => match enrollment_code(code_stdin) {
                         Err(exit) => exit,
-                        Ok(code) => {
-                            let mut params = json!({ "org_domain": domain });
-                            if let Some(code) = code {
-                                params["code"] = json!(code.expose_secret());
-                            }
-                            // Asked last, so the two-minute confirmation is spent
-                            // by the call it was typed for rather than by however
-                            // long the code took to find.
-                            if !rustix::process::geteuid().is_root() {
-                                match admin_ticket(&format!(
-                                    "allow enrolling this device with {domain}"
-                                )) {
-                                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-                                    Ok(None) => {}
-                                    Err(exit) => return exit,
-                                }
-                            }
-                            // 90 s client budget for this one verb (contract
-                            // section 2): the pipeline runs a full reconcile pass
-                            // server-side.
-                            match client.call_with_timeout(
-                                "enroll.start",
-                                Some(params),
-                                crate::ipc::ENROLL_START_TIMEOUT,
-                            ) {
-                                Ok(result) => render_or_json(json, &result, |v| {
-                                    views::enroll_start(&style, v, &hostname)
-                                }),
-                                Err(error) => fail(&error),
-                            }
-                        }
+                        Ok(code) => run_enroll_start(
+                            &client,
+                            json,
+                            &domain,
+                            code.as_ref(),
+                            accept_non_removable,
+                            |v| views::enroll_start(&style, v, &hostname),
+                        ),
                     },
                 },
                 EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
@@ -3819,17 +3946,27 @@ fn main() -> ExitCode {
                 EnrollCommand::Stop { yes } => {
                     // Nothing to remove: say so before asking for a yes or a
                     // password. A failed read falls through to punard's answer.
-                    let unenrolled = matches!(
-                        client.call("enroll.status", None),
-                        Ok(ref status)
-                            if status.get("enrolled").and_then(Value::as_bool) == Some(false)
-                    );
-                    if unenrolled {
+                    let status = client.call("enroll.status", None).ok();
+                    let flag = |key: &str| {
+                        status
+                            .as_ref()
+                            .and_then(|s| s.get(key))
+                            .and_then(Value::as_bool)
+                    };
+                    if flag("enrolled") == Some(false) {
                         eprintln!(
                             "This device is not enrolled, so there is nothing to remove.\n\
                              Next step: `punarctl enroll status` shows the current state."
                         );
                         return ExitCode::FAILURE;
+                    }
+                    // Enrolled as not removable: nobody may unenroll it, so
+                    // ask for neither a yes nor a password. punard refuses a
+                    // bare request with the reason, and that is what prints.
+                    if flag("removable") == Some(false) {
+                        return rpc(&client, json, "enroll.stop", None, |v| {
+                            views::enroll_stop(&style, v, &hostname)
+                        });
                     }
                     // Interactive confirmation (D-014: destructive verbs
                     // confirm): prompted only on a TTY without --yes;
@@ -4652,29 +4789,43 @@ fn main() -> ExitCode {
                 UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
                     views::update_status(&style, v)
                 }),
-                UpdateCommand::Check { force } => rpc(
-                    &client,
-                    json,
-                    "update.check",
-                    Some(json!({ "force": force })),
-                    |v| views::update_check(&style, v),
-                ),
+                UpdateCommand::Check { force } => {
+                    let params = match with_person_ticket(
+                        json!({ "force": force }),
+                        "allow checking this device's update channel",
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    rpc(&client, json, "update.check", Some(params), |v| {
+                        views::update_check(&style, v)
+                    })
+                }
                 UpdateCommand::Apply {
                     version,
                     allow_downgrade,
                     reboot,
-                } => update_mutation(
-                    &client,
-                    &style,
-                    json,
-                    "update.apply",
-                    json!({
-                        "version": version,
-                        "allow_downgrade": allow_downgrade,
-                    }),
-                    reboot,
-                    UpdateRestart::Apply,
-                ),
+                } => {
+                    let params = match with_person_ticket(
+                        json!({
+                            "version": version,
+                            "allow_downgrade": allow_downgrade,
+                        }),
+                        &format!("allow installing Punar {version}"),
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    update_mutation(
+                        &client,
+                        &style,
+                        json,
+                        "update.apply",
+                        params,
+                        reboot,
+                        UpdateRestart::Apply,
+                    )
+                }
                 UpdateCommand::ReconcileCandidate => {
                     // The daemon re-reads the exact signed root and boot extents
                     // with O_DIRECT before it answers, which on SD-class storage
@@ -4712,15 +4863,24 @@ fn main() -> ExitCode {
                         Err(error) => fail(&error),
                     }
                 }
-                UpdateCommand::Rollback { to_version, reboot } => update_mutation(
-                    &client,
-                    &style,
-                    json,
-                    "update.rollback",
-                    json!({ "to_version": to_version }),
-                    reboot,
-                    UpdateRestart::Rollback,
-                ),
+                UpdateCommand::Rollback { to_version, reboot } => {
+                    let params = match with_person_ticket(
+                        json!({ "to_version": to_version }),
+                        "allow rolling this device back to its previous release",
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    update_mutation(
+                        &client,
+                        &style,
+                        json,
+                        "update.rollback",
+                        params,
+                        reboot,
+                        UpdateRestart::Rollback,
+                    )
+                }
             }
         }
     }

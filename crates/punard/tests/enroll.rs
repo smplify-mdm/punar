@@ -75,6 +75,10 @@ struct ControlPlaneState {
     methods: Mutex<Vec<String>>,
     /// Every request line exactly as it arrived, to prove what never did.
     lines: Mutex<Vec<String>>,
+    /// Serve this as the organization document's `enrollment.removable`
+    /// (docs/development/smplify-enrollment.md section 3.1); absent when
+    /// `None`, as in the Acme fixture.
+    org_removable: Mutex<Option<Value>>,
 }
 
 impl ControlPlaneState {
@@ -82,7 +86,10 @@ impl ControlPlaneState {
         match method {
             "org.discover" => {
                 let domain = params["domain"].as_str().unwrap_or_default();
-                let org: Value = serde_json::from_str(ACME_ORG).unwrap();
+                let mut org: Value = serde_json::from_str(ACME_ORG).unwrap();
+                if let Some(removable) = self.org_removable.lock().unwrap().clone() {
+                    org["enrollment"]["removable"] = removable;
+                }
                 if domain == org["discovery"]["domain"].as_str().unwrap() {
                     Ok(json!({ "organization": org }))
                 } else {
@@ -1090,6 +1097,10 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     assert_eq!(result["org"]["display_name"], "Acme Engineering");
     assert!(!ticket.exists(), "the ticket was spent, not merely checked");
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
+    // An organization document that states no removal term leaves the
+    // device removable, and says so.
+    assert_eq!(result["removable"], true);
+    assert_eq!(daemon.result("enroll.status", None)["removable"], true);
     let allowed = |daemon: &TestDaemon| {
         daemon
             .audit_events()
@@ -1154,37 +1165,128 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     }
 }
 
-/// An organization may keep its device: where it has turned local
-/// administration off, a person cannot unenroll it, even with a valid
-/// confirmation, and the refusal costs them nothing. Root still can.
+/// Every refusal a person meets on the way through enrollment must point
+/// somewhere they can go: no account on a Punar device is root.
+fn assert_no_root_advice(message: &str) {
+    assert!(!message.contains("sudo"), "{message}");
+    assert!(!message.contains("as root"), "{message}");
+}
+
+/// An organization can keep its device — but only by saying so in its
+/// organization document, and only with the enrolling person's explicit yes,
+/// asked for before the organization ever hears of the device. Once given,
+/// the term binds every local caller, root included, survives a restart, and
+/// never costs a password to be told.
 #[test]
-fn an_organization_that_disables_local_administration_keeps_its_device() {
-    let dir = test_dir("keep");
+fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
+    let dir = test_dir("nonremovable");
     let state = Arc::new(ControlPlaneState::default());
-    state.deny_local_admin.store(true, Ordering::SeqCst);
+    *state.org_removable.lock().unwrap() = Some(json!(false));
     let control_plane = ControlPlane::start_with(&dir, state.clone());
     let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
-    mint_ticket(&dir, 1000, TICKET);
-    daemon.result(
+
+    // Not accepted: refused after discovery and before register, so the
+    // organization never learns of a device that did not enroll.
+    let ticket = mint_ticket(&dir, 1000, TICKET);
+    let error = daemon.error(
         "enroll.start",
-        Some(json!({"org_domain": "acme.com", "code": "lex_keep", "ticket": TICKET})),
+        Some(json!({"org_domain": "acme.com", "code": "lex_terms", "ticket": TICKET})),
     );
+    assert_eq!(error["code"], "denied", "{error}");
+    assert_eq!(error["details"]["reason"], "non_removable_not_accepted");
+    assert_eq!(error["details"]["organization_name"], "Acme Engineering");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("--accept-non-removable"), "{message}");
+    assert_no_root_advice(message);
+    assert!(!ticket.exists(), "the confirmation paid for discovery");
+    assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+    assert!(
+        state
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|l| !l.contains("lex_terms")),
+        "the code never left the device"
+    );
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    assert!(!daemon.state_path("enrollment.json").exists());
+
+    // Accepted.
+    mint_ticket(&dir, 1000, TICKET);
+    let enrolled = daemon.result(
+        "enroll.start",
+        Some(json!({
+            "org_domain": "acme.com",
+            "ticket": TICKET,
+            "accept_non_removable": true
+        })),
+    );
+    assert_eq!(enrolled["removable"], false);
+    assert_eq!(daemon.result("enroll.status", None)["removable"], false);
+
+    // Now nobody on the device can unenroll it, and a person is told so
+    // before a password could matter: with or without one, their ticket
+    // stays unspent.
     const SECOND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
     let second = mint_ticket(&dir, 1000, SECOND);
-    let error = daemon.error("enroll.stop", Some(json!({"ticket": SECOND})));
-    assert_eq!(error["code"], "denied");
-    assert_eq!(error["details"]["reason"], "local_admin_disabled");
+    for params in [None, Some(json!({"ticket": SECOND}))] {
+        let error = daemon.error("enroll.stop", params);
+        assert_eq!(error["code"], "denied");
+        assert_eq!(error["details"]["reason"], "enrollment_not_removable");
+        assert_eq!(error["details"]["organization"], "acme");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("erasing and reinstalling"), "{message}");
+        assert_no_root_advice(message);
+    }
     assert!(
-        error["message"].as_str().unwrap().contains("Acme"),
-        "the refusal names the organization: {error}"
+        second.exists(),
+        "a refused unenroll must not cost the password"
     );
-    assert!(second.exists(), "a refusal must not cost the password");
+    // Asking to enroll again says who can end this one.
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "ticket": SECOND})),
+    );
+    assert_eq!(error["code"], "conflict");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("not removable"), "{message}");
+    assert_no_root_advice(message);
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
     daemon.stop();
 
+    // Root is refused too, and the term survived the restart.
     let root = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
-    assert_eq!(root.result("enroll.stop", None)["enrolled"], false);
+    let error = root.error("enroll.stop", None);
+    assert_eq!(error["details"]["reason"], "enrollment_not_removable");
+    assert_eq!(root.result("enroll.status", None)["enrolled"], true);
+    assert!(root.state_path("enrollment.json").exists());
+    assert!(root.state_path("device-token").exists());
+    let denials = root
+        .audit_events()
+        .into_iter()
+        .filter(|e| e["action"] == "enroll.stop" && e["decision"] == "deny")
+        .count();
+    assert_eq!(denials, 3, "every refused unenroll is audited");
     root.stop();
+}
+
+/// An organization that tried to state a removal term this device cannot
+/// read gets a refusal, never the permissive reading of its document.
+#[test]
+fn an_unreadable_removal_term_refuses_enrollment_before_register() {
+    let dir = test_dir("removable-bad");
+    let state = Arc::new(ControlPlaneState::default());
+    *state.org_removable.lock().unwrap() = Some(json!("no"));
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(error["code"], "invalid_params", "{error}");
+    assert_eq!(error["details"]["reason"], "enrollment.removable");
+    assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    assert!(!daemon.state_path("enrollment.json").exists());
+    daemon.stop();
 }
 
 /// A confirmation is good once, for the account that made it. A cheap
