@@ -1325,7 +1325,8 @@ uncommitted selector is finalized that way even when the staged candidate was
 never rebooted into (`update.apply` without `--reboot`, then a shutdown),
 and the device then needs a fresh `update.apply`. It is never recorded in the
 boot that staged the candidate: staging leaves `/run/punard/pi-update-staged`
-beside the armed tryboot request. While that marker exists, the same three
+beside the armed tryboot request, written before it, so a crash between the
+two leaves the marker and no request. While that marker exists, the same three
 facts mean "not restarted into yet", and the method refuses as `conflict`
 (`update-health.sh` exits early). Whenever a pending record is finalized, or
 withdrawn without a reboot, the engine clears its own tryboot request and
@@ -1364,7 +1365,14 @@ accepted only when this device knows its slot holds it:
 Otherwise the rollback is refused as `conflict` rather than boot one
 release's kernel on another's root. A plain rollback takes the newest valid
 target and skips ambiguous ones, so a device an older build left in that
-state can always return to the release it is running. On
+state can always return to the release it is running.
+
+A device started from recovery by hand runs from the factory recovery entry,
+not a `punar_` one. When no `punar_` target is valid, that entry is the
+running release's own target, provided it is bound to the running slot and
+names the running release. Selecting it (`preferred
+punar-recovery_<version>*.efi`) cancels an update staged from recovery, or
+leaves one that failed its tries, and clears the pending record. On
 Raspberry Pi, the current and previous selectors are validated before a
 durable selector swap. A pending Pi trial must first resolve rather than being
 silently overwritten.

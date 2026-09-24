@@ -555,6 +555,12 @@ impl UpdateTransactionEngine {
     /// cannot tell which release it holds, so it selects none of them rather
     /// than boot one release's kernel on another's root. A plain rollback
     /// takes the newest valid target, skipping ambiguous ones.
+    ///
+    /// A device started from recovery by hand runs from the factory recovery
+    /// entry, not a `punar_` one. That entry, bound to the running slot and
+    /// naming the running release, is the running release's own target: an
+    /// update staged from recovery can be cancelled, and a failed one left
+    /// behind, only by selecting it.
     #[cfg(target_os = "linux")]
     pub fn rollback(
         &self,
@@ -593,38 +599,48 @@ impl UpdateTransactionEngine {
         };
         let mut blessed = bound.iter().filter(|uki| !uki.counted).collect::<Vec<_>>();
         blessed.sort_by_key(|uki| std::cmp::Reverse(uki.version));
-        let target = match requested {
-            Some(version) => {
-                let uki = blessed
-                    .iter()
-                    .find(|uki| uki.version == version)
-                    .ok_or_else(|| UpdateTransactionError::NotFound(version.to_string()))?;
-                if let Some(reason) = invalid(uki) {
-                    return Err(UpdateTransactionError::Conflict(reason));
+        // The recovery entry is a target only when it is the running
+        // release's: bound to the running slot, naming what that root runs,
+        // and not already selected.
+        let recovery_selector = format!("punar-recovery_{running}*.efi");
+        let recovery_target = (current_selector != recovery_selector
+            && recovery_entry_runs(&uki_dir, running_slot, running)?)
+        .then_some(recovery_selector);
+        let new_selector = match requested {
+            Some(version) => match blessed.iter().find(|uki| uki.version == version) {
+                Some(uki) => {
+                    if let Some(reason) = invalid(uki) {
+                        return Err(UpdateTransactionError::Conflict(reason));
+                    }
+                    format!("punar_{}*.efi", uki.version)
                 }
-                (uki.version, uki.path.clone())
-            }
+                None => recovery_target
+                    .filter(|_| version == running)
+                    .ok_or_else(|| UpdateTransactionError::NotFound(version.to_string()))?,
+            },
             None => {
                 let others = blessed
                     .iter()
                     .filter(|uki| Some(uki.version) != current_version)
                     .collect::<Vec<_>>();
-                let Some(first) = others.first() else {
-                    return Err(UpdateTransactionError::Conflict(
-                        "no previous blessed UEFI release is present".into(),
-                    ));
-                };
                 match others.iter().find(|uki| invalid(uki).is_none()) {
-                    Some(uki) => (uki.version, uki.path.clone()),
-                    None => {
-                        return Err(UpdateTransactionError::Conflict(
-                            invalid(first).unwrap_or_default(),
-                        ));
-                    }
+                    Some(uki) => format!("punar_{}*.efi", uki.version),
+                    None => match (recovery_target, others.first()) {
+                        (Some(recovery), _) => recovery,
+                        (None, Some(first)) => {
+                            return Err(UpdateTransactionError::Conflict(
+                                invalid(first).unwrap_or_default(),
+                            ));
+                        }
+                        (None, None) => {
+                            return Err(UpdateTransactionError::Conflict(
+                                "no previous blessed UEFI release is present".into(),
+                            ));
+                        }
+                    },
                 }
             }
         };
-        let new_selector = format!("punar_{}*.efi", target.0);
         let contents = format!("preferred {new_selector}\ntimeout 0\neditor no\n");
         write_atomic_synced(&loader, contents.as_bytes(), 0o600)?;
         sync_filesystem(&mounted.path)?;
@@ -1000,6 +1016,27 @@ fn has_last_known_good(
     Ok(recovery_uki_paths(uki_dir)?
         .iter()
         .any(|path| validate_uki_binding(path, running).is_ok()))
+}
+
+/// Whether the factory recovery entry is the one the running slot boots, for
+/// the release the running root reports.
+fn recovery_entry_runs(
+    uki_dir: &Path,
+    running_slot: UpdateSlot,
+    running: ReleaseVersion,
+) -> Result<bool, UpdateTransactionError> {
+    if !uki_dir.is_dir() {
+        return Ok(false);
+    }
+    Ok(recovery_uki_paths(uki_dir)?.iter().any(|path| {
+        let version = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("punar-recovery_"))
+            .and_then(|name| name.strip_suffix(".efi"))
+            .and_then(|value| value.parse::<ReleaseVersion>().ok());
+        version == Some(running) && validate_uki_binding(path, running_slot).is_ok()
+    }))
 }
 
 fn slot_name(slot: UpdateSlot) -> &'static str {

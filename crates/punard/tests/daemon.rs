@@ -2018,6 +2018,91 @@ fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
     );
 }
 
+/// A device started from recovery by hand, on the real install layout:
+/// `punar_2026.08.20.1.efi` bound to A (damaged) and preferred, the factory
+/// recovery entry bound to B and running.
+fn start_from_recovery() -> TestDaemon {
+    TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            &cfg.update_transaction_sources.cmdline,
+            format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+        add_factory_recovery_uki(dir);
+    })
+}
+
+/// An update staged from recovery can be cancelled: the running release's own
+/// entry is the recovery one, and a rollback selects it and clears the
+/// record. The repair can then be applied again.
+#[test]
+fn an_update_applied_from_recovery_can_be_cancelled() {
+    let td = start_from_recovery();
+    let pending = td.state_path("update/pending-uefi.json");
+    let staged = apply_version(&td, "2026.08.27.1");
+    assert_eq!(staged["result"]["staged_slot"], "a", "{staged}");
+    assert!(pending.exists());
+
+    let cancelled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        cancelled["result"]["new_default"], "punar-recovery_2026.08.20.1*.efi",
+        "{cancelled}"
+    );
+    assert!(!pending.exists());
+    assert!(
+        fs::read_to_string(td.dir.join("esp/loader/loader.conf"))
+            .unwrap()
+            .contains("preferred punar-recovery_2026.08.20.1*.efi")
+    );
+
+    let again = apply_version(&td, "2026.08.27.1");
+    assert_eq!(again["result"]["staged_slot"], "a", "{again}");
+}
+
+/// An update staged from recovery that then fails its tries leaves the device
+/// in recovery with the failed record. Applying is refused while the record
+/// stands, and a rollback — here named by version — returns to the running
+/// release's recovery entry and clears it, so the device can take updates
+/// again instead of being stuck.
+#[test]
+fn a_failed_update_from_recovery_never_traps_the_device() {
+    let td = start_from_recovery();
+    let staged = apply_version(&td, "2026.08.27.1");
+    assert_eq!(staged["result"]["staged_slot"], "a", "{staged}");
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join("punar_2026.08.27.1+3-0.efi"),
+        uki_dir.join("punar_2026.08.27.1+0-3.efi"),
+    )
+    .unwrap();
+
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let blocked = apply_version(&td, "2026.09.03.1");
+    assert_eq!(blocked["error"]["code"], "conflict", "{blocked}");
+
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar-recovery_2026.08.20.1*.efi",
+        "{back}"
+    );
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+
+    let next = apply_version(&td, "2026.09.03.1");
+    assert_eq!(next["result"]["staged_slot"], "a", "{next}");
+    assert!(
+        !uki_dir.join("punar_2026.08.27.1+0-3.efi").exists(),
+        "the failed entry for slot A is retired with the rest"
+    );
+    assert!(
+        uki_dir.join("punar-recovery_2026.08.20.1.efi").is_file(),
+        "recovery stays while the device runs from it"
+    );
+}
+
 #[test]
 fn update_apply_from_slot_b_uses_the_independently_bound_slot_a_pair() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
