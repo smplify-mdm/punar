@@ -308,7 +308,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// The request line and headers, exactly as sent.
-fn request_head(request: &Request<'_>) -> String {
+pub(crate) fn request_head(request: &Request<'_>) -> String {
     let mut head = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: punar-smplifyd/{}\r\nAccept: {}\r\nConnection: close\r\n",
         request.method,

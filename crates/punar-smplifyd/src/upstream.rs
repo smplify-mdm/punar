@@ -14,6 +14,18 @@ pub const API_PREFIX: &str = "/api/v1/linux/mdm";
 
 /// What the bundle endpoint produces, then JSON for its error bodies.
 const BUNDLE_ACCEPT: &str = "application/gzip, application/json;q=0.5";
+
+/// The bundle request, built apart from the send so a test can read exactly
+/// what it asks for.
+fn bundle_request(url: &Url) -> Request<'_> {
+    Request {
+        method: "GET",
+        url,
+        accept: BUNDLE_ACCEPT,
+        bearer: None,
+        body: None,
+    }
+}
 /// Inside punard's 5 s per-call budget with room for the socket round trip.
 pub const CALL_BUDGET: Duration = Duration::from_millis(4000);
 
@@ -168,13 +180,7 @@ impl Api {
     /// 406; JSON stays acceptable, at lower weight, for error bodies.
     pub fn bundle(&self, device_id: &str) -> Result<Option<Bundle>, UpstreamError> {
         let url = self.url(&format!("/devices/{device_id}/bundle"));
-        let response = self.client.send(&Request {
-            method: "GET",
-            url: &url,
-            accept: BUNDLE_ACCEPT,
-            bearer: None,
-            body: None,
-        })?;
+        let response = self.client.send(&bundle_request(&url))?;
         match response.status {
             204 => Ok(None),
             200 => Ok(Some(Bundle {
@@ -336,6 +342,21 @@ fn fact_key(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bundle endpoint produces application/gzip and answers 406 to a
+    /// request that accepts only JSON — the failure a real enrollment hit.
+    #[test]
+    fn the_bundle_is_asked_for_as_gzip() {
+        let url = crate::http::parse_https_url(
+            "https://api.smplify.test/api/v1/linux/mdm/devices/d/bundle",
+        )
+        .unwrap();
+        let head = crate::http::request_head(&bundle_request(&url));
+        assert!(
+            head.contains("\r\nAccept: application/gzip, application/json;q=0.5\r\n"),
+            "{head}"
+        );
+    }
 
     #[test]
     fn compliance_flattens_to_facts_and_nothing_else() {
