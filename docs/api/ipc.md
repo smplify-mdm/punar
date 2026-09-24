@@ -638,6 +638,16 @@ depend on *who is asking* is settled before a password is requested:
 `policy.set` is deliberately **not** root-only. There is no sudo on a Punar
 desktop, so "root only" would mean "nobody can do this at the keyboard".
 
+From a terminal, `punarctl policy set <path> <value> --reason "…"` and
+`punarctl policy clear <path> --reason "…"` ask for the person's password on
+the controlling terminal and relay it to `punar-authd`, exactly as `enroll`
+and `update` do. Scripts, and System Control's helper, pipe
+`punar-auth --admin`'s answer into `--ticket-stdin` instead: `ok <ticket>` as
+it prints it, or the bare 64-character ticket. A `denied` or malformed line is
+refused by punarctl before anything is sent. With neither a terminal nor the
+flag, the request goes without a ticket and the refusal
+(`reauthentication_required`) names the terminal command.
+
 Result — a pin:
 
 ```json

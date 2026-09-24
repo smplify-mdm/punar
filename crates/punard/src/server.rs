@@ -4469,20 +4469,26 @@ impl Inner {
                     "policy.set",
                     id,
                 ));
+                let command = if params.value.is_some() {
+                    format!("punarctl policy set {id} <value> --reason \"<why>\"")
+                } else {
+                    format!("punarctl policy clear {id} --reason \"<why>\"")
+                };
                 return Err(deny(
                     json!({
                         "decision": "deny",
                         "capability": id,
                         "reason": "reauthentication_required",
                     }),
-                    "Changing device policy needs your password again, and this \
-                     request did not carry a confirmation.\n\
-                     Policy: personal defaults — an administrative change is \
-                     confirmed at the moment it is made, not by having been \
-                     signed in for a while.\n\
-                     Next step: make the change from System Control · Policy, \
-                     which asks for your password first."
-                        .to_string(),
+                    format!(
+                        "Changing device policy needs your password again, and this \
+                         request did not carry a confirmation.\n\
+                         Policy: personal defaults — an administrative change is \
+                         confirmed at the moment it is made, not by having been \
+                         signed in for a while.\n\
+                         Next step: run `{command}` in a terminal, which asks for your \
+                         password, or make the change from System Control · Policy."
+                    ),
                 ));
             };
             if let Err(why) = crate::reauth::consume(

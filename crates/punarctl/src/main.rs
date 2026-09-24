@@ -363,9 +363,10 @@ enum PolicyCommand {
     /// Pin a value for everyone on this device, as its administrator
     /// (device_specific_override, rank 4).
     ///
-    /// Needs your password again unless you are root. The confirmation is
-    /// read from standard input as a single line, so it is never an argument
-    /// and never reaches /proc — the same discipline the lock screen uses.
+    /// Asks for your password on the terminal unless you are root. Scripts
+    /// pass a confirmation on standard input instead (--ticket-stdin), so it
+    /// is never an argument and never reaches /proc — the same discipline the
+    /// lock screen uses.
     Set {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
@@ -376,12 +377,13 @@ enum PolicyCommand {
         #[arg(long)]
         reason: String,
         /// Read a re-authentication ticket from the first line of standard
-        /// input (as printed by `punar-auth --admin`).
+        /// input instead of asking for the password: `punar-auth --admin`'s
+        /// answer as it prints it (`ok <ticket>`), or the bare ticket.
         #[arg(long)]
         ticket_stdin: bool,
     },
     /// Withdraw the administrator's entry for a path, handing it back to the
-    /// layers underneath.
+    /// layers underneath. Asks for your password, as `set` does.
     Clear {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
@@ -389,7 +391,8 @@ enum PolicyCommand {
         #[arg(long)]
         reason: String,
         /// Read a re-authentication ticket from the first line of standard
-        /// input.
+        /// input instead of asking for the password (`ok <ticket>` or the bare
+        /// ticket).
         #[arg(long)]
         ticket_stdin: bool,
     },
@@ -778,21 +781,65 @@ fn local_hostname() -> String {
 /// `/proc/<pid>/cmdline` for as long as the process runs, which is exactly long
 /// enough for another local process to take it and spend it first. The lock
 /// screen passes a password the same way, for the same reason.
-fn read_ticket(enabled: bool) -> Result<Option<String>, String> {
+///
+/// Accepts what `punar-auth --admin` prints (`ok <ticket>`) as well as the bare
+/// ticket, so its answer can be piped straight in. Anything else — `denied`,
+/// `unavailable`, a truncated line — is refused here with what it means,
+/// rather than sent to punard as if it were a ticket.
+fn read_ticket(enabled: bool) -> Result<Option<Zeroizing<String>>, String> {
     if !enabled {
         return Ok(None);
     }
-    let mut line = String::new();
+    let mut line = Zeroizing::new(String::new());
     std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
         .map_err(|e| format!("The confirmation could not be read from standard input: {e}"))?;
-    let ticket = line.trim().to_string();
-    if ticket.is_empty() {
-        return Err("No confirmation arrived on standard input.\n\
-                    Next step: run `punar-auth --admin` first and pipe its ticket in, or make \
-                    the change from System Control · Policy, which does this for you."
-            .to_string());
+    parse_stdin_ticket(line.trim())
+}
+
+/// The ticket in one line of `--ticket-stdin` input, or why there is none.
+fn parse_stdin_ticket(line: &str) -> Result<Option<Zeroizing<String>>, String> {
+    let next = "Next step: run the command without --ticket-stdin in a terminal, which asks \
+                for your password; or pipe `punar-auth --admin`'s answer into it; or make the \
+                change from System Control · Policy.";
+    if line.is_empty() {
+        return Err(format!(
+            "No confirmation arrived on standard input.\n{next}"
+        ));
     }
-    Ok(Some(ticket))
+    match parse_auth_answer(&format!("{line}\n")) {
+        AuthAnswer::Ticket(ticket) => return Ok(Some(ticket)),
+        AuthAnswer::Denied => {
+            return Err(format!(
+                "The confirmation on standard input says the password was not accepted, so \
+                 nothing was changed.\n{next}"
+            ));
+        }
+        AuthAnswer::Unavailable => {}
+    }
+    if line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(Some(Zeroizing::new(line.to_string())));
+    }
+    Err(format!(
+        "What arrived on standard input is not a confirmation ticket: expected `ok <ticket>` \
+         or the 64-character ticket itself.\n{next}"
+    ))
+}
+
+/// The confirmation for a policy change: the one on standard input when asked
+/// for, otherwise the person's password, asked on the terminal (root needs
+/// none). With no terminal the request goes without one, and punard's refusal
+/// says what to run — the client never decides.
+fn policy_ticket(ticket_stdin: bool, purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
+    if ticket_stdin {
+        return read_ticket(true).map_err(|why| {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        });
+    }
+    if rustix::process::geteuid().is_root() {
+        return Ok(None);
+    }
+    admin_ticket(purpose)
 }
 
 fn fail(error: &CallError) -> ExitCode {
@@ -4271,13 +4318,12 @@ fn main() -> ExitCode {
                     "value": parsed,
                     "reason": reason,
                 });
-                match read_ticket(ticket_stdin) {
-                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                let purpose =
+                    format!("allow pinning {path} to {value} for everyone on this device");
+                match policy_ticket(ticket_stdin, &purpose) {
+                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
-                    Err(why) => {
-                        eprintln!("{why}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(exit) => return exit,
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -4293,13 +4339,11 @@ fn main() -> ExitCode {
                     "value": Value::Null,
                     "reason": reason,
                 });
-                match read_ticket(ticket_stdin) {
-                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                let purpose = format!("allow withdrawing the pin on {path} for everyone");
+                match policy_ticket(ticket_stdin, &purpose) {
+                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
-                    Err(why) => {
-                        eprintln!("{why}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(exit) => return exit,
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -4981,7 +5025,7 @@ mod tests {
     use super::{
         AuthAnswer, Cli, EnrollmentTerm, append_filtered_session_bus_mount, append_resolver_mount,
         append_vendor_open_bridge, enrollment_terms_prompt, filtered_bus_proxy_command,
-        parse_auth_answer, password_refused_message, read_secret_line,
+        parse_auth_answer, parse_stdin_ticket, password_refused_message, read_secret_line,
         read_vendor_callback_payload, unaccepted_terms, validated_vendor_callback_uris,
         vendor_runtime_tmp, vendor_supervisor_command,
     };
@@ -4999,6 +5043,25 @@ mod tests {
     /// shaped exactly as punar-authd mints one is ever forwarded to punard;
     /// everything else is the device failing to answer, never a statement
     /// about the password.
+    /// `--ticket-stdin` takes `punar-auth --admin`'s answer as it prints it,
+    /// or the bare ticket. A refusal or a malformed line never reaches punard
+    /// dressed as a ticket.
+    #[test]
+    fn a_piped_confirmation_is_the_ticket_or_a_reason_why_not() {
+        let token = "0123456789abcdef".repeat(4);
+        for line in [format!("ok {token}"), token.clone()] {
+            let ticket = parse_stdin_ticket(&line).unwrap().unwrap();
+            assert_eq!(ticket.as_str(), token);
+        }
+        let denied = parse_stdin_ticket("denied").unwrap_err();
+        assert!(denied.contains("not accepted"), "{denied}");
+        for bad in ["", "unavailable", "ok ../1001/aaaa", "0123"] {
+            let why = parse_stdin_ticket(bad).unwrap_err();
+            assert!(why.contains("Next step"), "{bad:?}: {why}");
+            assert!(!why.contains("sudo"), "{why}");
+        }
+    }
+
     #[test]
     fn punar_auth_answers_parse_to_exactly_three_outcomes() {
         let token = "0123456789abcdef".repeat(4);

@@ -3055,6 +3055,128 @@ fn run_m9(punard: &PathBuf, secrets: &PathBuf, args: &[&str], stdin_text: Option
     child.wait_with_output().expect("run punarctl")
 }
 
+/// punard's side of `policy.set` for the tests below: it accepts exactly the
+/// bare 64-hex ticket punar-authd mints, and refuses a request that carries no
+/// confirmation the way punard does.
+const POLICY_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn policy_set_respond(request: &Value) -> Result<Value, Value> {
+    if request["method"] != "policy.set" {
+        return respond(request);
+    }
+    let params = &request["params"];
+    match params.get("ticket").and_then(Value::as_str) {
+        Some(POLICY_TICKET) => Ok(json!({
+            "capability": params["capability"],
+            "pinned_value": params["value"],
+            "effective_value": params["value"],
+            "source": {"kind": "device_specific_override", "rank": 4,
+                       "policy_id": "device-admin/owner",
+                       "name": "Device administrator"},
+            "changed": true
+        })),
+        Some(other) => Err(json!({
+            "code": "invalid_params",
+            "message": format!("WRONG TICKET REACHED PUNARD: {other:?}"),
+            "details": {}
+        })),
+        None => Err(json!({
+            "code": "denied",
+            "message": "Changing device policy needs your password again, and this request \
+                        did not carry a confirmation.\nPolicy: personal defaults — an \
+                        administrative change is confirmed at the moment it is made.\n\
+                        Next step: run `punarctl policy set security.firewall <value> \
+                        --reason \"<why>\"` in a terminal; it asks for your password.",
+            "details": {"decision": "deny", "reason": "reauthentication_required"}
+        })),
+    }
+}
+
+/// `--ticket-stdin` takes `punar-auth --admin`'s answer exactly as it prints
+/// it, or the bare ticket, and punard receives the bare ticket either way.
+/// Without a terminal and without the flag, nothing is invented: the request
+/// goes without a confirmation and punard's refusal is what prints.
+#[test]
+fn policy_set_takes_the_confirmation_as_punar_auth_prints_it() {
+    let socket = start_mock_with(policy_set_respond);
+    let unused = std::env::temp_dir().join("punarctl-no-secrets.sock");
+    for piped in [
+        format!("ok {POLICY_TICKET}\n"),
+        format!("{POLICY_TICKET}\n"),
+    ] {
+        let output = run_m9(
+            &socket,
+            &unused,
+            &[
+                "policy",
+                "set",
+                "security.firewall",
+                "disabled",
+                "--reason",
+                "lab bench",
+                "--ticket-stdin",
+            ],
+            Some(&piped),
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    }
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "clear",
+            "security.firewall",
+            "--reason",
+            "back to the org",
+            "--ticket-stdin",
+        ],
+        Some(&format!("ok {POLICY_TICKET}\n")),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // punar-auth's refusal is not a ticket, and says so without a round trip.
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "x",
+            "--ticket-stdin",
+        ],
+        Some("denied\n"),
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not accepted"),
+        "{}",
+        stderr(&output)
+    );
+
+    // No terminal, no flag: the refusal names a command that asks.
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "x",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("it asks for your password"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+}
+
 /// **Exit 4 is real.** An agent-originated mutation the AI policy gates
 /// returns `approval_required`, executes nothing, and says so in the
 /// section 73 voice — and stdout stays empty, because there is no result
