@@ -154,6 +154,10 @@ pub struct PiUpdateSources {
     /// reboot call. A staged candidate arms the firmware's one-shot tryboot
     /// here, as root, inside the audited apply.
     pub reboot_parameter: PathBuf,
+    /// On tmpfs beside the reboot parameter, so it lives exactly as long as
+    /// the tryboot request does: present, the candidate was staged in this
+    /// boot and no firmware boot has happened since.
+    pub staged_marker: PathBuf,
     #[cfg(test)]
     pub allow_regular_targets: bool,
     #[cfg(test)]
@@ -176,6 +180,10 @@ pub const SYSTEMD_REBOOT_PARAMETER: &str = "/run/systemd/reboot-param";
 /// The argument that makes the next restart a one-shot tryboot.
 pub const TRYBOOT_REBOOT_ARGUMENT: &[u8] = b"0 tryboot";
 
+/// Written when a candidate is staged; gone after any real boot (tmpfs).
+/// `update-health.sh` reads the same path.
+pub const PI_STAGED_MARKER: &str = "/run/punard/pi-update-staged";
+
 impl Default for PiUpdateSources {
     fn default() -> Self {
         let by_partuuid = Path::new("/dev/disk/by-partuuid");
@@ -194,6 +202,7 @@ impl Default for PiUpdateSources {
             pending_state: PathBuf::from("/var/lib/punar/update/pending-pi.json"),
             zstd_path: PathBuf::from("/usr/bin/zstd"),
             reboot_parameter: PathBuf::from(SYSTEMD_REBOOT_PARAMETER),
+            staged_marker: PathBuf::from(PI_STAGED_MARKER),
             #[cfg(test)]
             allow_regular_targets: false,
             #[cfg(test)]
@@ -420,12 +429,29 @@ impl PiUpdateEngine {
         // switching off instead still discards it, and every surface says so.
         // If it cannot be armed, the pending record goes too: a staged
         // candidate nothing will boot is not reported as staged.
-        if let Err(error) = write_atomic_synced(
+        //
+        // The marker beside it says "staged in this boot". Until a real boot
+        // clears /run, the pending record looks exactly like a firmware
+        // fallback (not tryboot, previous slot, uncommitted selector), and
+        // `reconcile_candidate` must not settle it as one.
+        let armed = write_atomic_synced(
             &self.sources.reboot_parameter,
             TRYBOOT_REBOOT_ARGUMENT,
             0o644,
-        ) {
+        )
+        .and_then(|()| {
+            if let Some(parent) = self.sources.staged_marker.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_atomic_synced(
+                &self.sources.staged_marker,
+                pending.release_id.as_bytes(),
+                0o600,
+            )
+        });
+        if let Err(error) = armed {
             let _ = fs::remove_file(&self.sources.pending_state);
+            self.disarm_tryboot();
             return Err(PiUpdateError::Io(std::io::Error::new(
                 error.kind(),
                 format!(
@@ -516,6 +542,18 @@ impl PiUpdateEngine {
             && observation.slot == pending.previous_slot
             && selector_is_uncommitted
         {
+            // ...unless no firmware boot has happened at all: staged in this
+            // boot, the same three facts hold, and settling it now would
+            // audit a fallback that never happened and leave the tryboot
+            // armed with no pending record to gate it.
+            if self.sources.staged_marker.exists() {
+                mounted.finish()?;
+                return Err(PiUpdateError::Conflict(
+                    "the pending update was staged in this boot and has not been restarted \
+                     into yet, so there is nothing to settle"
+                        .into(),
+                ));
+            }
             mounted.finish()?;
             return Ok(PiReconcileResult {
                 release_id: pending.release_id,
@@ -654,7 +692,21 @@ impl PiUpdateEngine {
         if let Some(parent) = self.sources.pending_state.parent() {
             File::open(parent)?.sync_all()?;
         }
+        // Normally a real boot has already cleared both. Whenever a pending
+        // record goes without one, a tryboot request must not outlive it.
+        self.disarm_tryboot();
         Ok(())
+    }
+
+    /// Withdraw this engine's own tryboot request and its staged marker. A
+    /// reboot parameter anything else wrote is left alone.
+    fn disarm_tryboot(&self) {
+        if fs::read(&self.sources.reboot_parameter)
+            .is_ok_and(|bytes| bytes == TRYBOOT_REBOOT_ARGUMENT)
+        {
+            let _ = fs::remove_file(&self.sources.reboot_parameter);
+        }
+        let _ = fs::remove_file(&self.sources.staged_marker);
     }
 
     /// Atomically exchange the ordinary and tryboot selectors after proving
@@ -1587,6 +1639,7 @@ mod tests {
             pending_state: pending.clone(),
             zstd_path: zstd,
             reboot_parameter: root.join("reboot-param"),
+            staged_marker: root.join("pi-update-staged"),
             allow_regular_targets: true,
             selector_mount_override: Some(selector.clone()),
             boot_a_mount_override: Some(boot_a_mount),
@@ -1630,6 +1683,27 @@ mod tests {
             .unwrap_err();
         assert!(conflict.to_string().contains("already pending"));
 
+        // In the boot that staged it, the pending record looks exactly like a
+        // firmware fallback. It is not one — no firmware boot has happened —
+        // and settling it would leave the tryboot armed with nothing to gate
+        // it. Refused while the staged marker says so.
+        assert!(root.join("pi-update-staged").is_file());
+        let same_boot = engine.reconcile_candidate().unwrap_err();
+        assert!(
+            same_boot.to_string().contains("staged in this boot"),
+            "{same_boot}"
+        );
+        assert!(pending.exists());
+        assert_eq!(
+            fs::read(root.join("reboot-param")).unwrap(),
+            TRYBOOT_REBOOT_ARGUMENT,
+            "the staged update is still armed for the next restart"
+        );
+
+        // A real boot clears /run: the marker and the request are gone.
+        fs::remove_file(root.join("pi-update-staged")).unwrap();
+        fs::remove_file(root.join("reboot-param")).unwrap();
+
         // A boot-time observation of the ordinary previous slot with the
         // still-uncommitted selector is firmware fallback. Reconciliation
         // records that explicit outcome, never changes the selector, and
@@ -1648,6 +1722,20 @@ mod tests {
             .finalize_pending(&fallback.pending_state_sha256)
             .unwrap();
         assert!(!pending.exists());
+        assert!(!root.join("reboot-param").exists());
+        assert!(!root.join("pi-update-staged").exists());
+
+        // A pending record settled without a reboot (the daemon's own
+        // finalize) never leaves a tryboot armed behind it.
+        fs::write(root.join("reboot-param"), TRYBOOT_REBOOT_ARGUMENT).unwrap();
+        fs::write(root.join("pi-update-staged"), b"x").unwrap();
+        engine.disarm_tryboot();
+        assert!(!root.join("reboot-param").exists());
+        assert!(!root.join("pi-update-staged").exists());
+        // Someone else's reboot parameter is not this engine's to remove.
+        fs::write(root.join("reboot-param"), b"other").unwrap();
+        engine.disarm_tryboot();
+        assert_eq!(fs::read(root.join("reboot-param")).unwrap(), b"other");
 
         // A candidate nothing would boot is not reported as staged: when the
         // tryboot request cannot be written, the pending record goes too.

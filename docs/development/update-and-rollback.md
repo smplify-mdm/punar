@@ -1002,7 +1002,12 @@ tries the candidate: `--reboot`, the power menu, or `systemctl reboot`,
 which leaves an existing parameter alone. `/run` does not survive a
 shutdown, so switching off instead discards the staged update (the next
 ordinary boot finalizes it as `firmware_fallback`, §5.17b). The apply
-result carries `one_shot_trial: true` so every surface says so.
+result carries `one_shot_trial: true` so every surface says so. A
+`/run/punard/pi-update-staged` marker, written with the tryboot request and
+cleared by the same boot, stops a candidate staged in this boot from being
+settled as a fallback before any firmware boot has happened (say, when the
+health unit is restarted with a daemon it requires). A finalized or
+withdrawn pending record takes its tryboot request with it.
 `system.exec`, `shell.run`, `update.exec` and every other generic-execution
 probe continue to return `unknown_method` (§12.1 C8).
 

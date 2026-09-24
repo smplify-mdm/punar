@@ -1244,15 +1244,32 @@ old UKI, installs the new boot-counted UKI last, and durably selects it. On a
 freshly installed device the first apply also retires the factory B-bound
 `punar-recovery_<version>.efi` before it opens root B, proving the retirement
 across an ESP read-only re-open; while slot A is still boot-counted that
-retirement, and therefore the apply, is refused as `conflict`. Before the
-inactive slot is opened for writing, every Punar UKI bound to it, counted or
-not, is removed and the removal proven across a read-only re-open. After
-that, a UKI on the ESP names the release its slot holds, and the ESP keeps
-exactly the running release plus the candidate. An apply is refused as
-`conflict` when the next boot is already aimed at the inactive slot (a
-`rollback` to it without a restart). A staged update that has since booted
-and been blessed (running from its slot, with its uncounted UKI present) is
-settled rather than treated as still staged. On Raspberry Pi, the equivalent
+retirement, and therefore the apply, is refused as `conflict`.
+
+Every refusal that needs no write comes first, read-only, before any boot
+entry is retired: a refused apply never costs the device its recovery floor
+or its rollback target. In order:
+
+- **Last-known-good.** The running slot must keep an entry to come back to:
+  its blessed Punar UKI, or the factory recovery entry when the device was
+  started from recovery by hand.
+- **No reinstall of the running release.** Reinstalling the version the
+  running slot holds is refused. Its entry could never be blessed under a
+  name the running entry already has.
+- **Not the next boot's slot.** An apply is refused when the next boot is
+  aimed at the inactive slot (a `rollback` to it without a restart). This
+  applies only while the running slot has a blessed release to go back to,
+  and entries with no tries left do not count. A device running from
+  recovery is repairing the slot its preferred entry points at.
+- **Room.** ESP room, the destination's presence as a block device, and its
+  size.
+
+Only then is every Punar UKI bound to the inactive slot, counted or not,
+removed, and the removal proven across a read-only re-open. After that, a
+UKI on the ESP names the release its slot holds, and the ESP keeps exactly
+the running release plus the candidate. A staged update that has since
+booted and been blessed (running from its slot, with its uncounted UKI
+present) is settled rather than treated as still staged. On Raspberry Pi, the equivalent
 signed A/B transaction stages the inactive root and firmware set for one-shot
 `tryboot`.
 
@@ -1299,8 +1316,14 @@ a still-running one-shot candidate, so firmware fallback and an ordinary
 post-commit recovery do not bounce the device unnecessarily. `firmware_fallback`
 is a boot observation: an ordinary boot of the previous slot with an
 uncommitted selector is finalized that way even when the staged candidate was
-never rebooted into (`update.apply` without `--reboot`, then a plain reboot),
-and the device then needs a fresh `update.apply`.
+never rebooted into (`update.apply` without `--reboot`, then a shutdown),
+and the device then needs a fresh `update.apply`. It is never recorded in the
+boot that staged the candidate: staging leaves `/run/punard/pi-update-staged`
+beside the armed tryboot request. While that marker exists, the same three
+facts mean "not restarted into yet", and the method refuses as `conflict`
+(`update-health.sh` exits early). Whenever a pending record is finalized, or
+withdrawn without a reboot, the engine clears its own tryboot request and
+the marker, so an armed tryboot never outlives its record.
 
 ```json
 {"release_id":"punar-desktop-stable-aarch64-raspberry_pi-2026.09.04.1",
@@ -1324,11 +1347,18 @@ canonical version selects that exact retained release; a person adds
 `update.apply`. No repository is contacted and
 no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
 are rollback candidates; counted, unblessed attempts are excluded. A target is
-accepted only when it is the one uncounted UKI the ESP names for its slot. A
-device updated by an older build can carry a stale entry bound to a rewritten
-slot, and this device cannot tell which release that slot holds, so it
-refuses the rollback as `conflict` rather than boot one release's kernel on
-another's root. On
+accepted only when this device knows its slot holds it:
+
+- **On the running slot**, only the entry for the release the running root
+  reports (`IMAGE_VERSION`), however many stale entries an older build left
+  there.
+- **On the other slot**, only when it is the one entry, counted or not, the
+  ESP names for that slot.
+
+Otherwise the rollback is refused as `conflict` rather than boot one
+release's kernel on another's root. A plain rollback takes the newest valid
+target and skips ambiguous ones, so a device an older build left in that
+state can always return to the release it is running. On
 Raspberry Pi, the current and previous selectors are validated before a
 durable selector swap. A pending Pi trial must first resolve rather than being
 silently overwritten.

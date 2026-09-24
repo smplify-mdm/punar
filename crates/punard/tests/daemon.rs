@@ -1721,6 +1721,205 @@ fn an_update_never_overwrites_the_slot_the_next_boot_is_aimed_at() {
     );
 }
 
+/// Put the device in the state an older build could leave: running
+/// `running` on slot B, with the given extra entries on the ESP and the next
+/// boot aimed at `preferred`.
+fn legacy_esp(td: &TestDaemon, running: &str, entries: &[(&str, &str)], preferred: &str) {
+    fs::write(
+        td.dir.join("update-cmdline"),
+        format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("os-release"),
+        format!("IMAGE_ID=punar-desktop\nIMAGE_VERSION={running}\n"),
+    )
+    .unwrap();
+    for (name, partuuid) in entries {
+        fs::write(
+            td.dir.join(format!("esp/EFI/Linux/{name}")),
+            test_uki(partuuid),
+        )
+        .unwrap();
+    }
+    fs::write(
+        td.dir.join("esp/loader/loader.conf"),
+        format!("preferred punar_{preferred}*.efi\ntimeout 0\neditor no\n"),
+    )
+    .unwrap();
+}
+
+/// Review finding #1. An older build left a blessed 2026.08.27.1 entry bound
+/// to B, then staged 2026.09.03.1 into B; that release is running there in
+/// its trial, still counted. A plain rollback must not select the leftover:
+/// it would boot 2026.08.27.1's kernel on B's 2026.09.03.1 root, uncounted,
+/// on every boot. It takes A's release instead.
+#[test]
+fn a_plain_rollback_never_selects_a_leftover_bound_to_the_running_slot() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let b = punard::install::ROOT_B_PARTUUID;
+    legacy_esp(
+        &td,
+        "2026.09.03.1",
+        &[
+            ("punar_2026.08.27.1.efi", b),
+            ("punar_2026.09.03.1+2-1.efi", b),
+        ],
+        "2026.09.03.1",
+    );
+    let rolled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        rolled["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{rolled}"
+    );
+}
+
+/// Review finding #3. The same leftover, plus an update to A that then failed
+/// its tries. The running release is B's 2026.09.03.1, which this device
+/// knows because it is running it. A plain rollback selects it and clears
+/// the failed update's record, so the device can take updates again.
+#[test]
+fn a_leftover_and_a_failed_update_never_trap_the_device() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let (a, b) = (
+        punard::install::ROOT_A_PARTUUID,
+        punard::install::ROOT_B_PARTUUID,
+    );
+    fs::remove_file(td.dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi")).unwrap();
+    legacy_esp(
+        &td,
+        "2026.09.03.1",
+        &[
+            ("punar_2026.08.27.1.efi", b),
+            ("punar_2026.09.03.1.efi", b),
+            ("punar_2026.09.10.1+0-3.efi", a),
+        ],
+        "2026.09.10.1",
+    );
+    let pending = td.state_path("update/pending-uefi.json");
+    fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    fs::write(
+        &pending,
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "release_id": "punar-desktop-stable-aarch64-uefi-2026.09.10.1",
+            "version": "2026.09.10.1",
+            "previous_slot": "b",
+            "candidate_slot": "a",
+            "previous_default": "punar_2026.09.03.1*.efi",
+            "new_default": "punar_2026.09.10.1*.efi",
+            "manifest_sha256": "0".repeat(64),
+            "payload_sha256": "1".repeat(64),
+            "uki_sha256": "2".repeat(64),
+            "staged_at": "2026-09-10T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let rolled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        rolled["result"]["new_default"], "punar_2026.09.03.1*.efi",
+        "{rolled}"
+    );
+    assert!(!pending.exists(), "the failed update's record is cleared");
+    // The leftover stays unselectable.
+    let leftover = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.27.1" })),
+    );
+    assert_eq!(leftover["error"]["code"], "conflict", "{leftover}");
+}
+
+/// Review finding #4. An apply refused before its first write — here a slot
+/// too small for the release — must not have cost the device its rollback
+/// target: the entry for the release slot A still holds is kept.
+#[test]
+fn a_refused_apply_keeps_the_rollback_target() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    fs::File::options()
+        .write(true)
+        .open(td.dir.join("root-a"))
+        .unwrap()
+        .set_len(1024)
+        .unwrap();
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let refused = apply_version(&td, "2026.09.03.1");
+    assert_eq!(refused["error"]["code"], "insufficient_space", "{refused}");
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file(),
+        "a refused apply retires nothing"
+    );
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{back}"
+    );
+}
+
+/// Review finding #5. Reinstalling the running release into the other slot
+/// is refused before anything is retired: its boot entry could never be
+/// blessed under a name the running entry already has, and the next-boot
+/// check would then block every later apply. Separately, an exhausted entry
+/// is not where the next boot goes, and does not block an update.
+#[test]
+fn the_running_release_is_not_reinstalled_and_exhausted_entries_aim_nothing() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    let again = td.call(
+        "update.apply",
+        Some(json!({ "version": "2026.08.27.1", "allow_downgrade": true })),
+    );
+    assert_eq!(again["error"]["code"], "conflict", "{again}");
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file()
+    );
+
+    // A's release failed its tries after an earlier stage, and the selector
+    // still names it. That entry aims no boot, so an update may rewrite A.
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join("punar_2026.08.20.1.efi"),
+        uki_dir.join("punar_2026.08.20.1+0-3.efi"),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("esp/loader/loader.conf"),
+        "preferred punar_2026.08.20.1*.efi\ntimeout 0\neditor no\n",
+    )
+    .unwrap();
+    let _ = fs::remove_file(td.state_path("update/pending-uefi.json"));
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let next = apply_version(&td, "2026.09.03.1");
+    assert_eq!(next["result"]["staged_slot"], "a", "{next}");
+}
+
 /// A device updated by an older build can still carry two uncounted entries
 /// for one slot. It cannot tell which release that slot holds, so rollback
 /// selects neither.
@@ -1735,6 +1934,7 @@ fn rollback_refuses_a_slot_the_esp_names_twice() {
         .unwrap();
     });
     let before = fs::read(td.dir.join("esp/loader/loader.conf")).unwrap();
+    // The running slot A holds 2026.08.20.1, whatever else is bound to it.
     let response = td.call(
         "update.rollback",
         Some(json!({ "to_version": "2026.08.10.1" })),
@@ -1744,7 +1944,28 @@ fn rollback_refuses_a_slot_the_esp_names_twice() {
         response["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("names 2 releases for slot A"),
+            .contains("boots slot A, which is running 2026.08.20.1"),
+        "{response}"
+    );
+    // The other slot, named twice, holds one of them — which, this device
+    // cannot tell.
+    for version in ["2026.08.01.1", "2026.08.02.1"] {
+        fs::write(
+            td.dir.join(format!("esp/EFI/Linux/punar_{version}.efi")),
+            test_uki(punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+    }
+    let response = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.02.1" })),
+    );
+    assert_eq!(response["error"]["code"], "conflict", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("names 2 releases for slot B"),
         "{response}"
     );
     assert_eq!(
@@ -1753,6 +1974,12 @@ fn rollback_refuses_a_slot_the_esp_names_twice() {
     );
 }
 
+/// The documented repair path, on the layout a real install leaves: the
+/// blessed `punar_<v>.efi` bound to A and preferred, the factory recovery
+/// entry bound to B. Root A is damaged, so the person started recovery B by
+/// hand. The preferred entry points at A, the slot this apply rewrites; that
+/// is the repair, not a reason to refuse. The recovery entry is the running
+/// slot's last-known-good, and the damaged A entry is retired first.
 #[test]
 fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
@@ -1760,11 +1987,6 @@ fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
         fs::write(
             &cfg.update_transaction_sources.cmdline,
             format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi"),
-            test_uki(punard::install::ROOT_B_PARTUUID),
         )
         .unwrap();
         add_factory_recovery_uki(dir);
@@ -1784,6 +2006,10 @@ fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
     assert!(
         recovery.is_file(),
         "a candidate that rewrites only root A must keep the B-bound recovery entry"
+    );
+    assert!(
+        !td.dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi").exists(),
+        "the entry for the damaged slot A is retired before A is rewritten"
     );
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
     assert_eq!(
