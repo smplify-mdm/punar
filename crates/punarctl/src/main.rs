@@ -2408,11 +2408,14 @@ fn unaccepted_terms(details: &Value, domain: &str) -> Option<(String, Vec<Enroll
 }
 
 /// The one prompt for every term a refusal named: what each means, said
-/// plainly, and that nothing has been registered yet.
+/// plainly, and that nothing has been registered yet. The organization's
+/// name stands quoted on a line of its own, and nowhere else: every sentence
+/// the person agrees to is fixed text, so no name an organization chooses
+/// can finish, contradict or push one of them out of view.
 fn enrollment_terms_prompt(org: &str, terms: &[EnrollmentTerm]) -> String {
-    let org = &term_safe_name(org);
     let mut prompt = format!(
-        "{org} enrolls devices on {}:\n",
+        "Organization: \"{}\"\nIt enrolls devices on {}:\n",
+        term_safe_name(org),
         if terms.len() == 1 {
             "this term"
         } else {
@@ -2420,11 +2423,11 @@ fn enrollment_terms_prompt(org: &str, terms: &[EnrollmentTerm]) -> String {
         }
     );
     for term in terms {
-        prompt.push_str(&format!("  {}: {}.\n", term.title(), term.meaning(org)));
+        prompt.push_str(&format!("  {}: {}.\n", term.title(), term.meaning()));
     }
     prompt.push_str(&format!(
-        "Nothing has been registered yet. Your password was used to look {org} up, so \
-         you will be asked for it again.\n\
+        "Nothing has been registered yet. Your password was used to look the organization \
+         up, so you will be asked for it again.\n\
          Type accept to enroll on {}: ",
         if terms.len() == 1 {
             "this term"
@@ -2472,7 +2475,7 @@ fn already_enrolled(client: &Client) -> Option<(String, bool)> {
         .or_else(|| org["name"].as_str())
         .unwrap_or("an organization");
     let removable = status.get("removable").and_then(Value::as_bool) != Some(false);
-    Some((name.to_string(), removable))
+    Some((term_safe_name(name), removable))
 }
 
 /// The enrollment code for `enroll start`. Scripts pipe it with
@@ -5075,7 +5078,9 @@ mod tests {
                 EnrollmentTerm::OrganizationOwned,
             ],
         );
-        assert!(prompt.starts_with("Acme Engineering enrolls devices on these terms:\n"));
+        assert!(prompt.starts_with(
+            "Organization: \"Acme Engineering\"\nIt enrolls devices on these terms:\n"
+        ));
         assert!(
             prompt.contains("  Not removable: once enrolled,"),
             "{prompt}"
@@ -5084,7 +5089,7 @@ mod tests {
         assert!(
             prompt.contains(
                 "  Owned by the organization: besides the device facts every enrollment \
-                 reports, Acme Engineering also receives this device's serial number and the \
+                 reports, the organization also receives this device's serial number and the \
                  list of every app installed for all users on it.\n"
             ),
             "{prompt}"
@@ -5097,13 +5102,25 @@ mod tests {
         assert_eq!(prompt.matches("Type accept").count(), 1);
 
         // An escape sequence in the organization's name cannot conceal what
-        // follows it.
+        // follows it, and the name appears once, on its own line: never
+        // inside a sentence the person agrees to.
         let hidden = enrollment_terms_prompt("Acme\u{1b}[8m", &[EnrollmentTerm::OrganizationOwned]);
         assert!(!hidden.contains('\u{1b}'), "{hidden:?}");
         assert!(hidden.contains("serial number"), "{hidden}");
+        let arguing = "Acme (personal enrollment: nothing beyond device facts is sent)";
+        let prompt = enrollment_terms_prompt(arguing, &[EnrollmentTerm::OrganizationOwned]);
+        assert_eq!(prompt.matches(arguing).count(), 1, "{prompt}");
+        assert_eq!(
+            prompt.lines().next(),
+            Some(format!("Organization: \"{arguing}\"").as_str())
+        );
 
         let one = enrollment_terms_prompt("Acme Engineering", &[EnrollmentTerm::OrganizationOwned]);
-        assert!(one.starts_with("Acme Engineering enrolls devices on this term:\n"));
+        assert!(
+            one.starts_with(
+                "Organization: \"Acme Engineering\"\nIt enrolls devices on this term:\n"
+            )
+        );
         assert!(!one.contains("Not removable"), "{one}");
         assert!(one.ends_with("Type accept to enroll on this term: "));
     }

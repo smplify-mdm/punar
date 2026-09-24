@@ -598,7 +598,7 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
             "Organization",
             "",
             Slot::Neutral,
-            &format!("{} · {detail}", org.display_name),
+            &format!("{} · {}", printable(&org.display_name), printable(&detail)),
         ));
     }
     rows.extend([
@@ -1141,7 +1141,11 @@ fn enrollment_rows(
             "Organization",
             "",
             Slot::Neutral,
-            &format!("{} · {}", org.display_name, org.domain),
+            &format!(
+                "{} · {}",
+                printable(&org.display_name),
+                printable(&org.domain)
+            ),
         ),
         Row::new("Policy", "", Slot::Neutral, &policy_summary(policy_ids)),
         attestation_row(attestation),
@@ -1188,7 +1192,9 @@ fn attestation_row(attestation: &str) -> Row {
 
 /// Who can end the enrollment (docs/development/smplify-enrollment.md section
 /// 3.1). `None` for a daemon that predates the field, rather than a guess.
-fn removability_row(org: &model::Org, removable: Option<bool>) -> Option<Row> {
+/// Fixed text: the Organization row names the organization, and no name it
+/// chooses is part of the term stated here.
+fn removability_row(removable: Option<bool>) -> Option<Row> {
     Some(match removable? {
         true => Row::new(
             "Unenroll",
@@ -1200,18 +1206,17 @@ fn removability_row(org: &model::Org, removable: Option<bool>) -> Option<Row> {
             "Unenroll",
             "Not allowed",
             Slot::Warn,
-            &format!(
-                "{} enrolled this device as not removable · only erasing it ends the enrollment",
-                org.display_name
-            ),
+            "the organization enrolled this device as not removable · only erasing it ends \
+             the enrollment",
         ),
     })
 }
 
 /// Who owns the device, and so what the organization's inventory of it
 /// carries (docs/development/smplify-enrollment.md section 3.2). `None` for a
-/// daemon that predates the field, rather than a guess.
-fn ownership_row(org: &model::Org, organization_owned: Option<bool>) -> Option<Row> {
+/// daemon that predates the field, rather than a guess. Fixed text, like the
+/// term the person accepted: a name inside it could hide what it says.
+fn ownership_row(organization_owned: Option<bool>) -> Option<Row> {
     Some(match organization_owned? {
         false => Row::new(
             "Ownership",
@@ -1223,10 +1228,8 @@ fn ownership_row(org: &model::Org, organization_owned: Option<bool>) -> Option<R
             "Ownership",
             "Organization",
             Slot::Warn,
-            &format!(
-                "{} also receives the serial number and every app installed for all users",
-                org.display_name
-            ),
+            "the organization also receives the serial number and every app installed for \
+             all users",
         ),
     })
 }
@@ -1241,10 +1244,10 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         &outcome.attestation,
         outcome.enrolled_at.as_deref(),
     );
-    if let Some(row) = removability_row(&outcome.org, outcome.removable) {
+    if let Some(row) = removability_row(outcome.removable) {
         rows.push(row);
     }
-    if let Some(row) = ownership_row(&outcome.org, outcome.organization_owned) {
+    if let Some(row) = ownership_row(outcome.organization_owned) {
         rows.push(row);
     }
     if let Some(sync) = &outcome.first_sync {
@@ -1259,7 +1262,7 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         ));
     }
     out.push_str(&fmt::rows(style, &rows));
-    let mut verdict = format!("✓ Enrolled · {}", outcome.org.display_name);
+    let mut verdict = format!("✓ Enrolled · {}", printable(&outcome.org.display_name));
     if !outcome.policy_ids.is_empty() {
         verdict.push_str(" · ");
         verdict.push_str(&outcome.policy_ids.join(" · "));
@@ -1314,10 +1317,10 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let policy_ids = status.policy_ids.clone().unwrap_or_default();
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
-    if let Some(row) = removability_row(org, status.removable) {
+    if let Some(row) = removability_row(status.removable) {
         rows.push(row);
     }
-    if let Some(row) = ownership_row(org, status.organization_owned) {
+    if let Some(row) = ownership_row(status.organization_owned) {
         rows.push(row);
     }
     if let Some(sync) = &status.last_sync {
@@ -5355,6 +5358,65 @@ mod tests {
         assert!(!text.to_lowercase().contains("tok_"), "{text}");
     }
 
+    /// The organization chooses its display name, and a terminal obeys what
+    /// is in it. No view of the enrollment passes an escape sequence, a
+    /// direction override or a line separator from it to the terminal, and
+    /// the rows stating the terms — what the organization receives, who can
+    /// unenroll — are fixed text, so the name cannot conceal them.
+    #[test]
+    fn no_enrollment_view_lets_the_organizations_name_steer_the_terminal() {
+        let style = Style::plain();
+        let hostile = json!({
+            "id": "acme", "name": "Acme",
+            "display_name": "Acme\u{1b}[8m\u{202e}\u{2028}\u{200b}",
+            "domain": "acme.com\u{1b}[2K"
+        });
+        let enrolled = json!({
+            "enrolled": true,
+            "org": hostile,
+            "policy_ids": [],
+            "attestation": "none",
+            "enrolled_at": "2026-09-24T19:30:47Z",
+            "removable": false,
+            "organization_owned": true
+        });
+        let status_result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "managed",
+            "enrolled": true,
+            "hostname": "punar-m5",
+            "capabilities_total": 3,
+            "org": hostile
+        });
+        for text in [
+            enroll_start(&style, &enrolled, "mac-punar").unwrap(),
+            enroll_status(&style, &enrolled, "mac-punar").unwrap(),
+            status(&style, &status_result, &[]).unwrap(),
+        ] {
+            for steer in ['\u{1b}', '\u{202e}', '\u{2028}', '\u{200b}'] {
+                assert!(
+                    !text.contains(steer),
+                    "{steer:?} reached the terminal: {text:?}"
+                );
+            }
+            assert!(text.contains("Acme"), "{text}");
+        }
+        let receipt = enroll_start(&style, &enrolled, "mac-punar").unwrap();
+        assert!(
+            receipt.contains(
+                "the organization also receives the serial number and every app installed for \
+                 all users"
+            ),
+            "{receipt}"
+        );
+        assert!(
+            receipt.contains("the organization enrolled this device as not removable"),
+            "{receipt}"
+        );
+    }
+
     /// Both views say who owns the device, and what that sends: a personal
     /// enrollment never the serial or the apps installed here, an
     /// organization-owned one both. A daemon that predates the field gets no
@@ -5410,7 +5472,7 @@ mod tests {
             assert!(row.contains("ORGANIZATION"), "{row}");
             assert!(
                 row.contains(
-                    "Acme Engineering also receives the serial number and every app installed \
+                    "the organization also receives the serial number and every app installed \
                      for all users"
                 ),
                 "{row}"

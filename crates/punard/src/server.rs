@@ -48,7 +48,8 @@ use punar_common::ipc::{
     PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
     ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
     StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams,
-    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, term_safe_name,
+    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, organization_name,
+    term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -1110,14 +1111,17 @@ fn unaccepted_terms_refusal(
     domain: &str,
     unaccepted: &[EnrollmentTerm],
 ) -> IpcError {
-    let name = &term_safe_name(&org.display_name);
+    // The name is the organization's, quoted so it reads as a name, and it
+    // stays out of the sentences a person agrees to: each term's meaning is
+    // fixed text (EnrollmentTerm::meaning).
+    let name = &format!("\"{}\"", term_safe_name(&org.display_name));
     let (statement, meaning, reason) = match unaccepted {
         [term] => (
             format!(
                 "{name} {}, and this request did not accept that",
                 term_statement(*term)
             ),
-            term.meaning(name),
+            term.meaning().to_string(),
             term.refusal_reason(),
         ),
         _ => (
@@ -1131,7 +1135,7 @@ fn unaccepted_terms_refusal(
             ),
             unaccepted
                 .iter()
-                .map(|term| format!("{}: {}", term.title(), term.meaning(name)))
+                .map(|term| format!("{}: {}", term.title(), term.meaning()))
                 .collect::<Vec<_>>()
                 .join(". "),
             ENROLLMENT_TERMS_NOT_ACCEPTED,
@@ -1146,7 +1150,7 @@ fn unaccepted_terms_refusal(
         ErrorCode::Denied,
         format!(
             "{statement}. Nothing was changed: this device was not registered with {name}.\n\
-             Policy: {name}'s enrollment terms — {meaning}.\n\
+             Policy: the organization's enrollment terms — {meaning}.\n\
              Next step: if that is what you want, run `punarctl enroll start {domain} {flags}`."
         ),
         json!({
@@ -4969,12 +4973,26 @@ impl Inner {
                     .collect()
             })
             .unwrap_or_default();
+        // Every string here is the organization's choice, and punard shows
+        // the names to a person: beside the terms they are asked to accept,
+        // in every view of the enrollment, in the shell's bar. They are
+        // cleaned once, here, before anything stores or prints them —
+        // invisible and control characters dropped, whitespace collapsed,
+        // at most 64 characters (punar_common::ipc::organization_name) — and
+        // a domain that is not a domain name is the one the person typed.
+        let name = organization_name(&org_name);
+        let display_name = field(&org_doc, &["enrollment", "display_name"])
+            .as_deref()
+            .and_then(organization_name)
+            .or_else(|| name.clone())
+            .unwrap_or_else(|| domain.to_string());
         let org = OrgRecord {
-            display_name: field(&org_doc, &["enrollment", "display_name"])
-                .unwrap_or_else(|| org_name.clone()),
-            domain: field(&org_doc, &["discovery", "domain"]).unwrap_or_else(|| domain.to_string()),
+            name: name.unwrap_or_else(|| display_name.clone()),
+            display_name,
+            domain: field(&org_doc, &["discovery", "domain"])
+                .filter(|shown| domain_syntax_ok(shown))
+                .unwrap_or_else(|| domain.to_string()),
             id: org_id,
-            name: org_name,
         };
         // Removability is the organization's decision, read from its document
         // once, here, and fixed in enrollment.json — like the remote-query

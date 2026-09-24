@@ -90,6 +90,11 @@ struct ControlPlaneState {
     /// (docs/development/smplify-enrollment.md section 3.2); absent when
     /// `None`, as in the Acme fixture.
     org_ownership: Mutex<Option<Value>>,
+    /// Serve these as the organization document's `enrollment.display_name`,
+    /// `name` and `discovery.domain`: strings the organization chooses.
+    org_display_name: Mutex<Option<Value>>,
+    org_name: Mutex<Option<Value>>,
+    org_shown_domain: Mutex<Option<Value>>,
     /// Answer `inventory.report` as `punar-smplifyd` does: put the inventory
     /// through the agent's own translation and answer `{sent}` with the
     /// result. Off, it answers as the development mock does.
@@ -115,11 +120,19 @@ impl ControlPlaneState {
                 if let Some(ownership) = self.org_ownership.lock().unwrap().clone() {
                     org["enrollment"]["ownership"] = ownership;
                 }
-                if domain == org["discovery"]["domain"].as_str().unwrap() {
-                    Ok(json!({ "organization": org }))
-                } else {
-                    Err(("not_found", format!("no organization at {domain:?}")))
+                if domain != org["discovery"]["domain"].as_str().unwrap() {
+                    return Err(("not_found", format!("no organization at {domain:?}")));
                 }
+                if let Some(name) = self.org_display_name.lock().unwrap().clone() {
+                    org["enrollment"]["display_name"] = name;
+                }
+                if let Some(name) = self.org_name.lock().unwrap().clone() {
+                    org["name"] = name;
+                }
+                if let Some(shown) = self.org_shown_domain.lock().unwrap().clone() {
+                    org["discovery"]["domain"] = shown;
+                }
+                Ok(json!({ "organization": org }))
             }
             "enroll.register" => {
                 let device_id = params["device_id"].as_str().unwrap_or_default();
@@ -1861,6 +1874,53 @@ fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clo
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
 }
 
+/// The organization chooses its display name, and punard shows it beside the
+/// terms a person accepts, in every view of the enrollment, in the shell's
+/// bar. It is cleaned once, where punard reads the document, so the refusal,
+/// the enrollment record, `enroll.status` and the status file all carry the
+/// same safe, bounded text: no control or invisible character, no line
+/// separator, one space for any run of whitespace, at most 64 characters.
+#[test]
+fn the_organizations_name_is_cleaned_once_where_punard_reads_it() {
+    let dir = test_dir("org-name");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, Arc::clone(&state));
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    *state.org_display_name.lock().unwrap() = Some(json!(format!(
+        "Acme\u{1b}[8m\u{202e} (personal\u{2028}enrollment:\u{200b} nothing{}is sent) {}",
+        " ".repeat(5000),
+        "x".repeat(300)
+    )));
+    *state.org_name.lock().unwrap() = Some(json!("\u{1b}]0;Acme\u{7}\u{2066}"));
+    *state.org_shown_domain.lock().unwrap() = Some(json!("acme.com\u{1b}[2K"));
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    let expected = format!(
+        "Acme[8m (personal enrollment: nothing is sent) {}\u{2026}",
+        "x".repeat(16)
+    );
+    assert_eq!(expected.chars().count(), 64);
+
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(error["details"]["organization_name"], expected.as_str());
+    let message = error["message"].as_str().unwrap();
+    for steer in ['\u{1b}', '\u{202e}', '\u{2028}', '\u{200b}', '\u{7}'] {
+        assert!(!message.contains(steer), "{steer:?} in {message:?}");
+    }
+    assert!(message.contains(&format!("\"{expected}\"")), "{message}");
+    assert!(message.len() < 1024, "{message}");
+
+    daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+    );
+    let org = daemon.result("enroll.status", None)["org"].clone();
+    assert_eq!(org["display_name"], expected.as_str());
+    assert_eq!(org["name"], "]0;Acme");
+    assert_eq!(org["domain"], "acme.com", "the domain the person typed");
+    assert_eq!(read_json(&daemon.state_path("enrollment.json"))["org"], org);
+    assert_eq!(daemon.status_summary()["org_name"], expected.as_str());
+}
+
 fn wait_until(what: &str, done: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !done() {
@@ -2390,7 +2450,7 @@ fn both_enrollment_terms_are_named_in_one_refusal_and_accepted_together() {
     assert_eq!(error["details"]["terms"], json!(["non_removable"]));
     assert!(
         error["message"].as_str().unwrap().starts_with(
-            "Acme Engineering enrolls devices so that nobody on them can unenroll them"
+            "\"Acme Engineering\" enrolls devices so that nobody on them can unenroll them"
         ),
         "{error}"
     );

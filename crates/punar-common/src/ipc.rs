@@ -689,16 +689,20 @@ impl EnrollmentTerm {
     }
 
     /// What accepting the term means for the person enrolling, said plainly
-    /// in one sentence without a final full stop.
-    pub fn meaning(self, org: &str) -> String {
+    /// in one sentence without a final full stop. Fixed text: the
+    /// organization's name is never part of the sentence a person agrees
+    /// to, so no name it chooses can make that sentence say something else.
+    pub fn meaning(self) -> &'static str {
         match self {
-            EnrollmentTerm::NonRemovable => "once enrolled, only erasing and reinstalling this \
-                 device ends the enrollment; nobody on it, you included, can unenroll it"
-                .to_string(),
-            EnrollmentTerm::OrganizationOwned => format!(
-                "besides the device facts every enrollment reports, {org} also receives this \
-                 device's serial number and the list of every app installed for all users on it"
-            ),
+            EnrollmentTerm::NonRemovable => {
+                "once enrolled, only erasing and reinstalling this device ends the \
+                 enrollment; nobody on it, you included, can unenroll it"
+            }
+            EnrollmentTerm::OrganizationOwned => {
+                "besides the device facts every enrollment reports, the organization also \
+                 receives this device's serial number and the list of every app installed for \
+                 all users on it"
+            }
         }
     }
 }
@@ -710,23 +714,104 @@ pub const ENROLLMENT_TERMS_NOT_ACCEPTED: &str = "enrollment_terms_not_accepted";
 /// An organization's name as it may appear beside an [`EnrollmentTerm`] a
 /// person is agreeing to. The organization chooses its display name, and a
 /// terminal obeys what is in it: an escape sequence could conceal the text
-/// after it, and a bidirectional override could reorder it. Either would let
-/// the organization hide the very term it asks the person to accept. Each
-/// such character becomes U+FFFD, so the attempt stays visible.
+/// after it, a bidirectional override could reorder it, and a line or
+/// paragraph separator could start what looks like a line of Punar's own.
+/// Any of them would let the organization hide the very term it asks the
+/// person to accept. Each such character, and every other invisible format
+/// character, becomes U+FFFD, so the attempt stays visible.
+///
+/// punard already cleans the name once, where it reads the organization
+/// document ([`organization_name`]); this is the terminal's own defence, for
+/// every name it prints, whatever produced it.
 pub fn term_safe_name(name: &str) -> String {
     name.chars()
         .map(|c| {
-            let bidi = matches!(
-                c,
-                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-            );
-            if c.is_control() || bidi {
+            if c.is_control() || is_invisible_format(c) || matches!(c, '\u{2028}' | '\u{2029}') {
                 '\u{FFFD}'
             } else {
                 c
             }
         })
         .collect()
+}
+
+/// The longest organization name punard keeps, in characters: enough for
+/// any real one, and too short to fill a screen or to hold a paragraph that
+/// argues with the term beside it.
+pub const MAX_ORGANIZATION_NAME_CHARS: usize = 64;
+
+/// An organization's own name, as punard keeps and shows it. The
+/// organization chooses it, and punard prints it to a person beside the
+/// terms they accept, in every view of the enrollment, in the shell's bar
+/// and as a browser context's name, so it is cleaned once, where punard
+/// reads the organization document, and every surface shows the same text:
+///
+/// - whitespace of every kind, line and paragraph separators included,
+///   becomes one space, and runs of it collapse;
+/// - control characters and invisible format characters (bidirectional
+///   overrides and isolates, zero-width characters, the byte-order mark,
+///   tag characters) are dropped;
+/// - more than [`MAX_ORGANIZATION_NAME_CHARS`] characters are cut to that
+///   many, the last an ellipsis, so the cut shows.
+///
+/// `None` when nothing printable is left.
+pub fn organization_name(raw: &str) -> Option<String> {
+    let mut kept: Vec<char> = Vec::with_capacity(MAX_ORGANIZATION_NAME_CHARS + 1);
+    let mut space = false;
+    for c in raw.chars() {
+        if c.is_whitespace() {
+            space = !kept.is_empty();
+            continue;
+        }
+        if c.is_control() || is_invisible_format(c) {
+            continue;
+        }
+        if space {
+            kept.push(' ');
+            space = false;
+        }
+        kept.push(c);
+        if kept.len() > MAX_ORGANIZATION_NAME_CHARS {
+            kept.truncate(MAX_ORGANIZATION_NAME_CHARS - 1);
+            while kept.last() == Some(&' ') {
+                kept.pop();
+            }
+            kept.push('\u{2026}');
+            break;
+        }
+    }
+    (!kept.is_empty()).then(|| kept.into_iter().collect())
+}
+
+/// Unicode's format characters (general category Cf) and the Hangul fillers:
+/// characters that draw nothing yet change what is drawn around them.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// Params for `enroll.stop` (M5, contract section 5.11). Optional on the wire:
@@ -3539,14 +3624,61 @@ mod tests {
             term_safe_name("Acme\u{1b}[8m Engineering\u{202e}\u{2066}\n"),
             "Acme\u{fffd}[8m Engineering\u{fffd}\u{fffd}\u{fffd}"
         );
+        assert_eq!(
+            term_safe_name("Acme\u{2028}Personal\u{200b}\u{feff}"),
+            "Acme\u{fffd}Personal\u{fffd}\u{fffd}"
+        );
         assert_eq!(term_safe_name("Acmé Engineering"), "Acmé Engineering");
-        // The ownership term says what it adds, in the words the owner chose.
-        let owned = EnrollmentTerm::OrganizationOwned.meaning("Acme");
+        // The ownership term says what it adds, in the words the owner chose,
+        // and no organization's name is part of them.
+        let owned = EnrollmentTerm::OrganizationOwned.meaning();
         assert!(owned.contains("serial number"), "{owned}");
+        assert!(owned.contains("the organization also receives"), "{owned}");
         assert!(
             owned.contains("every app installed for all users"),
             "{owned}"
         );
+    }
+
+    /// The name an organization chooses is cleaned once, where punard reads
+    /// it: invisible and control characters dropped, every kind of
+    /// whitespace one space, and at most 64 characters, the cut shown.
+    #[test]
+    fn an_organization_name_is_cleaned_and_bounded() {
+        assert_eq!(
+            organization_name("  Acme\tEngineering \n").as_deref(),
+            Some("Acme Engineering")
+        );
+        assert_eq!(
+            organization_name("Acme\u{1b}[8m\u{202e}\u{2066} Eng\u{200b}ineering\u{feff}")
+                .as_deref(),
+            Some("Acme[8m Engineering")
+        );
+        // A line separator cannot start a line of its own.
+        assert_eq!(
+            organization_name("Acme\u{2028}\u{2029}Personal enrollment").as_deref(),
+            Some("Acme Personal enrollment")
+        );
+        assert_eq!(
+            organization_name("Acmé 株式会社").as_deref(),
+            Some("Acmé 株式会社")
+        );
+        let long = format!("Acme{} Engineering {}", " ".repeat(5000), "x".repeat(300));
+        let bounded = organization_name(&long).unwrap();
+        assert_eq!(bounded.chars().count(), MAX_ORGANIZATION_NAME_CHARS);
+        assert!(bounded.starts_with("Acme Engineering xxx"), "{bounded}");
+        assert!(bounded.ends_with('\u{2026}'), "{bounded}");
+        // Exactly the limit is kept whole; a cut never ends in a space.
+        let exact = "y".repeat(MAX_ORGANIZATION_NAME_CHARS);
+        assert_eq!(organization_name(&exact).as_deref(), Some(exact.as_str()));
+        let spaced = format!("{} {}", "z".repeat(62), "w".repeat(10));
+        assert_eq!(
+            organization_name(&spaced).unwrap(),
+            format!("{}\u{2026}", "z".repeat(62))
+        );
+        for nothing in ["", "   ", "\u{200b}\u{202e}\u{1b}", "\u{2028}"] {
+            assert_eq!(organization_name(nothing), None, "{nothing:?}");
+        }
     }
 
     #[test]

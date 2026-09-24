@@ -762,9 +762,15 @@ checks run in this order:
      more; and `details.organization` and `details.organization_name`. The
      message says what each term means and names `punarctl enroll start
      <domain>` with every flag still needed (`--accept-non-removable`,
-     `--accept-organization-owned`); the organization's name in it, and in
-     punarctl's prompt, has every control character and direction override
-     replaced with U+FFFD, so it cannot conceal the term beside it. Accepting
+     `--accept-organization-owned`). The organization's names are cleaned
+     once, where punard reads its document, and every field carrying one
+     (`org.name`, `org.display_name`, `details.organization_name`, the
+     status file's `org_name`) holds the cleaned text: control and
+     invisible format characters dropped, whitespace collapsed to one space,
+     at most 64 characters. In the message the name is quoted and each
+     term's meaning is fixed text without it; a terminal replaces anything
+     that could still steer it with U+FFFD, so it cannot conceal the term
+     beside it. Accepting
      a term the organization did not set accepts nothing. On a terminal
      punarctl shows every named term in one prompt, asks for one `accept`,
      and sends the request again with exactly those flags and a fresh

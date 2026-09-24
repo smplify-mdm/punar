@@ -300,9 +300,15 @@ receives per tier are §3.3.
    in a script, or `accept` typed at punarctl's prompt. The prompt says
    plainly that the organization will also receive the device's serial
    number and the list of every app installed for all users. The
-   organization's name appears there with every control character and
-   direction override replaced, so the name it chose cannot conceal or
-   reorder the term beside it. The check
+   organization chooses its own name, so punard cleans it once, where it
+   reads the document: control and invisible format characters (direction
+   overrides, zero-width characters) dropped, every kind of whitespace,
+   line separators included, one space, and at most 64 characters, the cut
+   shown. The prompt shows it quoted on a line of its own; each term's
+   meaning, and every row that states a term, is fixed text that never
+   contains it; and a terminal replaces anything that could still steer it
+   with U+FFFD. The name it chose cannot conceal, reorder or argue with the
+   term beside it. The check
    comes before register, so the organization never hears of a device whose
    user said no, and nothing about it is sent.
 4. **Both terms, one question.** When an organization sets both terms, one
