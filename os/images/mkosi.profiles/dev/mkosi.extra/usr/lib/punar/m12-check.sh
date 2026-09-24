@@ -400,7 +400,13 @@ jq_check "ledger detail identifies the netd aggregate evidence" "${RUN_DIR}/m12-
 DENY_EVENT="$(jq -r '.event_id // empty' "${RUN_DIR}/m12-audit-deny.json" 2>/dev/null)"
 jq_check "production event joins the immutable audit event id" "${RUN_DIR}/m12-access.json" \
     "[.summary.security_events[] | select(.event_type == \"production_access\" and .event_id == \"${DENY_EVENT}\")] | length >= 1"
-if grep -R -q '9418\|"payload"\|"sni"\|"dns_query"\|"cmdline"' \
+# A port is looked for where one would be recorded — host:port, a "port"
+# field, or the value "9418" — never as four bare digits: event ids,
+# timestamps and sizes in these files are random or monotonic numbers that
+# contain 9418 by coincidence, the same false positive the audit check above
+# already excludes (debian-amd64, run 35944916704, where the identical check
+# passed on the other three lanes of the same commits).
+if grep -R -q -E ':9418([^0-9]|$)|"port"[[:space:]]*:[[:space:]]*"?9418([^0-9]|$)|"9418"|"payload"|"sni"|"dns_query"|"cmdline"' \
         /var/lib/punar/agents/ledger /run/punar-agentd/ledger.json \
         /run/punar-netd/connections.json 2>/dev/null; then
     note "FAIL a privacy-owned file contains a port or forbidden content key"
