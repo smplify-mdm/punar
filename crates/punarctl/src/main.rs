@@ -4870,13 +4870,23 @@ fn main() -> ExitCode {
                     }
                 }
                 UpdateCommand::Rollback { to_version, reboot } => {
-                    let params = match with_person_ticket(
-                        json!({ "to_version": to_version }),
-                        "allow rolling this device back to its previous release",
-                    ) {
-                        Ok(params) => params,
-                        Err(exit) => return exit,
+                    // Name what the password authorizes. Without --to the
+                    // daemon picks the other retained release, which after an
+                    // earlier rollback can be the newer one, so "previous"
+                    // would not be true either.
+                    let purpose = match to_version {
+                        Some(version) => {
+                            format!("allow switching this device's next boot to Punar {version}")
+                        }
+                        None => "allow switching this device's next boot to its other retained \
+                                 release"
+                            .to_string(),
                     };
+                    let params =
+                        match with_person_ticket(json!({ "to_version": to_version }), &purpose) {
+                            Ok(params) => params,
+                            Err(exit) => return exit,
+                        };
                     update_mutation(
                         &client,
                         &style,

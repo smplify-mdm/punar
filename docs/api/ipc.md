@@ -248,16 +248,16 @@ gives no person root: root is locked, nobody is in `wheel`, and Punar
 authors no sudoers rule (docs/design/onboarding.md §1.6). So a denial's
 next step is one a person can take — the grant for exactly that capability
 (`capabilities.set`), the password confirmation (`policy.set`,
-`enroll.start`, `enroll.stop`), what the device already does on its own
+`enroll.start`, `enroll.stop`, `update.check`, `update.apply`,
+`update.rollback` — §5.17), what the device already does on its own
 (`reconcile`, `network.apply`), or, where no person's path exists, a plain
 statement of that and of who can act. A root-only method whose resource is
-not a registered capability (`reconcile`, `update.*`, `install.*`,
-`approvals.create`/`consume`) is refused with `details.resource`, never
-`details.capability`, and never offers `privilege request`, which would
-answer `not_found`. `update.check`, `update.apply` and `update.rollback` take
-the same password confirmation as enrollment (§5.17);
-`update.reconcile_candidate` stays the boot service's, and its refusal says
-so.
+not a registered capability (`reconcile`, `update.reconcile_candidate`,
+`install.*`, `approvals.create`/`consume`) is refused with
+`details.resource`, never `details.capability`, and never offers `privilege
+request`, which would answer `not_found`. A password-confirmed method's
+refusal instead carries `details.reason` (`reauthentication_required`, or a
+`reauthentication_*` reason for a ticket that was not accepted).
 
 ### 5.1 `status`
 
@@ -1558,7 +1558,7 @@ or path other than the confirmed target device. An installed system returns
   authorization point. No person on a Punar device is root, so a person's
   mutating verbs carry a grant (`punarctl privilege request`) or a password
   confirmation relayed to `punar-authd` (`policy set`, `enroll start`,
-  `enroll stop`).
+  `enroll stop`, `update check`, `update apply`, `update rollback`).
 - Human output follows Plate D-014 (`docs/design/mockups/cli-grammar.html`):
   tracked-uppercase masthead + U+2500 rule, middle-dot separators, aligned
   columns, ANSI color only on status words; personal mode shows no org rows.
@@ -1575,11 +1575,16 @@ or path other than the confirmed target device. An installed system returns
   shows no org rows — personal compliance (device vs. its own effective
   document) is not an org row. Rendering contract:
   docs/development/milestone-4.md section 7.
-- **M5 verbs:** `punarctl enroll start <domain>` (over 5.9; renders org,
-  policy ids, and `Attestation  SIMULATED` — the honesty label is loud by
-  design; 90 s client timeout per section 2), `punarctl enroll status`
-  (over 5.10), `punarctl enroll stop` (over 5.11; "Personal state restored
-  · org layers removed"). `punarctl status` adds an
+- **M5 verbs:** `punarctl enroll start <domain> [--code-stdin]
+  [--accept-non-removable]` (over 5.9; asks for the code, then the person's
+  password; for an organization that enrolls devices as not removable it
+  shows the term and asks for `accept` on the terminal, then the password
+  again, and without a terminal the refusal names the flag; renders org,
+  policy ids, who can unenroll, and `Attestation  SIMULATED` — the honesty
+  label is loud by design; 90 s client timeout per section 2), `punarctl
+  enroll status` (over 5.10), `punarctl enroll stop` (over 5.11; asks for
+  the password only for a removable enrollment; "Personal state restored ·
+  org layers removed"). `punarctl status` adds an
   `Organization  <display name> · <policy id>` row while enrolled (absent
   otherwise — org rows never render on a personal device). The 5.4 M5
   amendments: the overridden-set verdict line and the org-citing denial.
