@@ -1703,6 +1703,18 @@ or path other than the confirmed target device. An installed system returns
   otherwise — org rows never render on a personal device). The 5.4 M5
   amendments: the overridden-set verdict line and the org-citing denial.
   Rendering contract: docs/development/milestone-5.md section 8.3.
+- **Status live rows:** the human `punarctl status` adds a `RIGHT NOW`
+  stanza: `Firewall` (`capabilities.get` security.firewall), `AI sessions`
+  (`agents.list`), `Unknown AI` (`alerts.list`, live cards only),
+  `Approvals` (`approvals.list`, pending only), `Privilege`
+  (`privilege.status`) and `Updates` (`update.status`). Each row is its own
+  call. A daemon that does not answer turns only its rows to `UNKNOWN`,
+  with the first line of its error. `punarctl status --all --json` prints
+  one document, `{status, firewall, agents, alerts, approvals, privilege,
+  update, errors}`, where each key holds that method's result verbatim, or
+  null with `{code, message}` under `errors` (`code` is the daemon's error
+  code, or `unreachable` / `protocol` for a failure on this side). Plain
+  `status --json` is still the `status` result alone.
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The

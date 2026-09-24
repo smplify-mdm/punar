@@ -131,7 +131,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Show daemon and device status.
-    Status,
+    Status {
+        /// With --json, print every daemon's answer in one document:
+        /// `{status, firewall, agents, alerts, approvals, privilege,
+        /// update, errors}`. Each is that method's result verbatim, or
+        /// null with its error under `errors`. The human view always
+        /// shows every row.
+        #[arg(long)]
+        all: bool,
+    },
     /// Enroll this device with an organization, or inspect/stop the
     /// enrollment (Milestone 5 — against the dev/CI mock control plane).
     Enroll {
@@ -849,6 +857,52 @@ fn fail(error: &CallError) -> ExitCode {
 
 /// Print a result object as one JSON line (the `--json` contract: the IPC
 /// `result` verbatim).
+/// The reads `punarctl status` makes beyond punard's `status`. Each is its
+/// own call, so a daemon that does not answer costs only its own row.
+fn read_status_live(punard: &Client, agentd: &Client) -> views::StatusLive {
+    views::StatusLive {
+        firewall: punard.call(
+            "capabilities.get",
+            Some(json!({ "capability": "security.firewall" })),
+        ),
+        agents: agentd.call("agents.list", None),
+        alerts: agentd.call("alerts.list", Some(json!({ "include_dismissed": false }))),
+        approvals: punard.call("approvals.list", None),
+        privilege: punard.call("privilege.status", None),
+        update: punard.call("update.status", None),
+    }
+}
+
+/// `status --all --json`: punard's `status` result and each live read,
+/// verbatim. A read that failed is null, and `errors` says why in the
+/// daemon's own words.
+fn status_all_json(status: Value, live: &views::StatusLive) -> Value {
+    let mut document = serde_json::Map::new();
+    let mut errors = serde_json::Map::new();
+    document.insert("status".to_string(), status);
+    for (key, read) in live.named() {
+        match read {
+            Ok(result) => {
+                document.insert(key.to_string(), result.clone());
+            }
+            Err(error) => {
+                document.insert(key.to_string(), Value::Null);
+                let code = match error {
+                    CallError::Unreachable { .. } => "unreachable",
+                    CallError::Server(wire) => wire.code.as_str(),
+                    CallError::Protocol { .. } => "protocol",
+                };
+                errors.insert(
+                    key.to_string(),
+                    json!({ "code": code, "message": error.message() }),
+                );
+            }
+        }
+    }
+    document.insert("errors".to_string(), Value::Object(errors));
+    Value::Object(document)
+}
+
 fn print_json(result: &Value) -> ExitCode {
     match serde_json::to_string(result) {
         Ok(line) => {
@@ -3998,7 +4052,16 @@ fn main() -> ExitCode {
     let json = cli.json;
 
     match cli.command {
-        Command::Status => match client.call("status", None) {
+        Command::Status { all } => match client.call("status", None) {
+            // `--all --json`: one document with every daemon's answer, so a
+            // script sees what the human view sees.
+            Ok(result) if json && all => {
+                let agents = Client::for_target(Target::Agentd, socket.as_deref());
+                print_json(&status_all_json(
+                    result,
+                    &read_status_live(&client, &agents),
+                ))
+            }
             // The human view's org row cites the policy ids, which live in
             // `enroll.status` (contract section 7) — a second read, fetched
             // only when the device is enrolled; the row degrades to the
@@ -4016,7 +4079,8 @@ fn main() -> ExitCode {
                     } else {
                         Vec::new()
                     };
-                views::status(&style, v, &policy_ids)
+                let agents = Client::for_target(Target::Agentd, socket.as_deref());
+                views::status(&style, v, &policy_ids, &read_status_live(&client, &agents))
             }),
             Err(error) => fail(&error),
         },

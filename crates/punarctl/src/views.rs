@@ -542,7 +542,213 @@ pub fn compliance(style: &Style, result: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Result<String, String> {
+/// What `punarctl status` reads beyond punard's `status`, one call per row
+/// (the D-014 status plate's firewall, AI, approval, grant and update rows).
+/// Each keeps its own error, so a daemon that is down degrades only the row
+/// it answers for.
+pub struct StatusLive {
+    pub firewall: Result<Value, crate::ipc::CallError>,
+    pub agents: Result<Value, crate::ipc::CallError>,
+    pub alerts: Result<Value, crate::ipc::CallError>,
+    pub approvals: Result<Value, crate::ipc::CallError>,
+    pub privilege: Result<Value, crate::ipc::CallError>,
+    pub update: Result<Value, crate::ipc::CallError>,
+}
+
+impl StatusLive {
+    /// The reads by the key `status --all --json` prints them under.
+    pub fn named(&self) -> [(&'static str, &Result<Value, crate::ipc::CallError>); 6] {
+        [
+            ("firewall", &self.firewall),
+            ("agents", &self.agents),
+            ("alerts", &self.alerts),
+            ("approvals", &self.approvals),
+            ("privilege", &self.privilege),
+            ("update", &self.update),
+        ]
+    }
+}
+
+/// Up to three names, then how many more.
+fn first_few(names: &[String]) -> String {
+    let mut shown = names.iter().take(3).cloned().collect::<Vec<_>>();
+    if names.len() > 3 {
+        shown.push(format!("+{} more", names.len() - 3));
+    }
+    shown.join(" · ")
+}
+
+/// One live row, or the row saying its daemon did not answer. A read that
+/// fails never takes the rest of the view with it.
+fn live_row<T: DeserializeOwned>(
+    label: &str,
+    read: &Result<Value, crate::ipc::CallError>,
+    render: impl FnOnce(T) -> Row,
+) -> Row {
+    let why = match read {
+        Ok(value) => match parse::<T>(value) {
+            Ok(parsed) => return render(parsed),
+            Err(why) => why,
+        },
+        Err(error) => error
+            .message()
+            .lines()
+            .next()
+            .unwrap_or("no answer")
+            .to_string(),
+    };
+    Row::new(label, "Unknown", Slot::Bad, &printable(&why))
+}
+
+fn status_live_rows(live: &StatusLive) -> Vec<Row> {
+    vec![
+        live_row("Firewall", &live.firewall, |get: model::CapabilityGet| {
+            let d = get.descriptor;
+            Row::new(
+                "Firewall",
+                &state_str(&d.current_state),
+                state_slot(&d),
+                &format!(
+                    "desired {} · verify {}",
+                    state_str(&d.desired_state),
+                    d.verification
+                ),
+            )
+        }),
+        live_row("AI sessions", &live.agents, |list: model::AgentsList| {
+            let active: Vec<String> = list
+                .sessions
+                .iter()
+                .filter(|session| session.status == "active")
+                .map(|session| session.session_id.clone())
+                .collect();
+            let mut detail = if active.is_empty() {
+                "no agent session".to_string()
+            } else {
+                first_few(&active)
+            };
+            if !list.detections.is_empty() {
+                detail.push_str(&format!(
+                    " · {} unknown — punarctl agents list",
+                    list.detections.len()
+                ));
+            }
+            Row::new(
+                "AI sessions",
+                &format!("{} active", active.len()),
+                Slot::Neutral,
+                &detail,
+            )
+        }),
+        live_row("Unknown AI", &live.alerts, |list: model::AlertsList| {
+            let live: Vec<String> = list
+                .alerts
+                .iter()
+                .filter(|alert| alert.state == "live")
+                .map(|alert| printable(&alert.agent))
+                .collect();
+            if live.is_empty() {
+                Row::new("Unknown AI", "None", Slot::Ok, "no live alert")
+            } else {
+                Row::new(
+                    "Unknown AI",
+                    &format!(
+                        "{} alert{}",
+                        live.len(),
+                        if live.len() == 1 { "" } else { "s" }
+                    ),
+                    Slot::Bad,
+                    &format!("{} · punarctl agents alerts", first_few(&live)),
+                )
+            }
+        }),
+        live_row(
+            "Approvals",
+            &live.approvals,
+            |list: model::ApprovalsList| {
+                let pending: Vec<String> = list
+                    .approvals
+                    .iter()
+                    .filter(|envelope| envelope.approval.status == "pending")
+                    .map(|envelope| envelope.approval.approval_id.clone())
+                    .collect();
+                if pending.is_empty() {
+                    Row::new("Approvals", "None", Slot::Ok, "nothing is waiting on you")
+                } else {
+                    Row::new(
+                        "Approvals",
+                        &format!("{} pending", pending.len()),
+                        Slot::Warn,
+                        &format!("{} · punarctl approvals list", first_few(&pending)),
+                    )
+                }
+            },
+        ),
+        live_row(
+            "Privilege",
+            &live.privilege,
+            |status: model::PrivilegeStatus| match status.grants.as_slice() {
+                [] => Row::new("Privilege", "None", Slot::Ok, "no grant held"),
+                [grant, rest @ ..] => {
+                    let more = if rest.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · +{} more", rest.len())
+                    };
+                    Row::new(
+                        "Privilege",
+                        &format!("{} live", status.grants.len()),
+                        Slot::Warn,
+                        &format!(
+                            "{} · {} · until {}{more} · punarctl privilege revoke",
+                            grant.grant_id,
+                            grant.capability,
+                            fmt::timestamp(&grant.expires_at)
+                        ),
+                    )
+                }
+            },
+        ),
+        live_row("Updates", &live.update, |status: UpdateStatusResult| {
+            let running = status.current.version.as_deref().unwrap_or("unknown");
+            let next = status.desired.version.as_deref().unwrap_or("unknown");
+            match status.desired.state {
+                DesiredReleaseState::Staged => Row::new(
+                    "Updates",
+                    "Staged",
+                    Slot::Warn,
+                    &format!("{next} · running {running} · a restart boots it"),
+                ),
+                DesiredReleaseState::Available => Row::new(
+                    "Updates",
+                    "Available",
+                    Slot::Warn,
+                    &format!("{next} · running {running} · punarctl update apply"),
+                ),
+                DesiredReleaseState::Unknown => Row::new(
+                    "Updates",
+                    "Unknown",
+                    Slot::Neutral,
+                    &format!(
+                        "running {running} · {}",
+                        status
+                            .desired
+                            .reason
+                            .as_deref()
+                            .unwrap_or("no verified update decision")
+                    ),
+                ),
+            }
+        }),
+    ]
+}
+
+pub fn status(
+    style: &Style,
+    result: &Value,
+    org_policy_ids: &[String],
+    live: &StatusLive,
+) -> Result<String, String> {
     let s: model::Status = parse(result)?;
     let mut out = fmt::masthead(style, "Status", &device_context(&s.hostname, s.enrolled));
 
@@ -633,6 +839,13 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
         out.push('\n');
         out.push_str(&fmt::rows(style, &compliance_rows(compliance, s.enrolled)));
     }
+    out.push('\n');
+    out.push_str(&fmt::section(
+        style,
+        "Right now",
+        "each row asks its own daemon",
+    ));
+    out.push_str(&fmt::rows(style, &status_live_rows(live)));
     if !s.enrolled {
         out.push_str(&fmt::note(
             style,
@@ -4897,6 +5110,54 @@ pub fn app_updates(style: &Style, result: &Value, hostname: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An alert names a process, and a process names itself: a hostile
+    /// executable name must not steer the terminal from the status view.
+    #[test]
+    fn status_live_rows_print_alert_names_plainly() {
+        let mut live = no_live();
+        live.alerts = Ok(json!({
+            "alerts": [{"alert_id": "alr_1", "agent": "evil\u{1b}[2J\u{202e}agent",
+                        "state": "live"}],
+            "quiet_window_secs": 86400
+        }));
+        let text = fmt::rows(&Style::plain(), &status_live_rows(&live));
+        let row = text
+            .lines()
+            .find(|line| line.starts_with("UNKNOWN AI"))
+            .unwrap();
+        assert!(row.contains("1 ALERT"), "{row}");
+        for steer in ['\u{1b}', '\u{202e}'] {
+            assert!(
+                !text.contains(steer),
+                "{steer:?} reached the terminal: {text:?}"
+            );
+        }
+        // Every other row carries its own failure, and the view still renders.
+        assert_eq!(
+            text.matches("UNKNOWN    The Punar daemon answered").count(),
+            5,
+            "{text}"
+        );
+    }
+
+    /// No live read was made: every row of the status view's live stanza
+    /// says so, and nothing else in the view depends on it.
+    fn no_live() -> StatusLive {
+        let unasked = || {
+            Err(crate::ipc::CallError::Protocol {
+                why: "not asked in this test".to_string(),
+            })
+        };
+        StatusLive {
+            firewall: unasked(),
+            agents: unasked(),
+            alerts: unasked(),
+            approvals: unasked(),
+            privilege: unasked(),
+            update: unasked(),
+        }
+    }
     use serde_json::json;
 
     #[test]
@@ -5028,7 +5289,7 @@ mod tests {
     #[test]
     fn views_reject_shapeless_results_with_a_reason() {
         let style = Style::plain();
-        let err = status(&style, &json!({"not": "a status"}), &[]).unwrap_err();
+        let err = status(&style, &json!({"not": "a status"}), &[], &no_live()).unwrap_err();
         assert!(err.contains("unexpected result shape"));
     }
 
@@ -5065,7 +5326,7 @@ mod tests {
                 "last_remediation_at": null
             }
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("OVERALL"), "{text}");
         // DESIGN_LANGUAGE section 8.1: this fixture is NOT enrolled, so the
         // words may not presuppose an authority. The wire value is unchanged
@@ -5113,7 +5374,7 @@ mod tests {
                 }
             }
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("DEVICE CLASS"), "{text}");
         assert!(text.contains("APPLIANCE"), "{text}");
         assert!(
@@ -5134,7 +5395,7 @@ mod tests {
             "hostname": "punar-m3",
             "capabilities_total": 3
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(!text.contains("OVERALL"), "{text}");
         assert!(text.contains("PERSONAL DEVICE"), "{text}");
         assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
@@ -5280,7 +5541,7 @@ mod tests {
             "org": acme_org()
         });
         let ids = vec!["eng-baseline-v12".to_string()];
-        let text = status(&style, &result, &ids).unwrap();
+        let text = status(&style, &result, &ids, &no_live()).unwrap();
         assert!(text.contains("ORGANIZATION"), "{text}");
         assert!(
             text.contains("Acme Engineering · eng-baseline-v12"),
@@ -5291,14 +5552,14 @@ mod tests {
 
         // Without the enroll.status follow-up, the row degrades to the
         // domain instead of inventing a policy id.
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("Acme Engineering · acme.com"), "{text}");
 
         // Personal device: byte-for-byte no org row (design section 8).
         result["enrolled"] = json!(false);
         result["mode"] = json!("personal");
         result.as_object_mut().unwrap().remove("org");
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(!text.contains("ORGANIZATION  "), "{text}");
         assert!(text.contains("PERSONAL DEVICE"), "{text}");
         assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
@@ -5487,7 +5748,7 @@ mod tests {
         for text in [
             enroll_start(&style, &enrolled, "mac-punar").unwrap(),
             enroll_status(&style, &enrolled, "mac-punar").unwrap(),
-            status(&style, &status_result, &[]).unwrap(),
+            status(&style, &status_result, &[], &no_live()).unwrap(),
         ] {
             for steer in ['\u{1b}', '\u{202e}', '\u{2028}', '\u{200b}'] {
                 assert!(

@@ -356,7 +356,8 @@ fn respond(request: &Value) -> Result<Value, Value> {
     let params = request.get("params");
 
     match method {
-        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status" => {
+        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status"
+        | "approvals.list" | "privilege.status" => {
             assert!(params.is_none(), "{method} takes no params");
         }
         _ => {}
@@ -365,6 +366,9 @@ fn respond(request: &Value) -> Result<Value, Value> {
     match method {
         "status" => Ok(fixture_status()),
         "update.status" => Ok(fixture_update_status()),
+        // A calm device: nothing waits on the person and no grant is held.
+        "approvals.list" => Ok(json!({"approvals": [], "checked_at": "2026-08-25T09:30:00Z"})),
+        "privilege.status" => Ok(json!({"grants": [], "checked_at": "2026-08-25T09:30:00Z"})),
         "update.check" => {
             assert_eq!(params.unwrap(), &json!({ "force": false }));
             Ok(fixture_update_check())
@@ -516,10 +520,17 @@ fn start_mock() -> PathBuf {
     start_mock_with(respond)
 }
 
+/// Where no agent registry listens: `run` points punarctl here so a test never
+/// reaches the host's own punar-agentd.
+fn no_agentd() -> PathBuf {
+    std::env::temp_dir().join("punarctl-no-agentd-here.sock")
+}
+
 fn run(socket: &PathBuf, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_punarctl"))
         .args(args)
         .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
         .env("NO_COLOR", "1")
         .output()
         .expect("run punarctl")
@@ -568,8 +579,8 @@ const RULE: &str = "────────────────────
 
 #[test]
 fn status_human_output_matches_the_d014_snapshot() {
-    let socket = start_mock();
-    let output = run(&socket, &["status"]);
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["status"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
     let expected = format!(
@@ -584,6 +595,14 @@ fn status_human_output_matches_the_d014_snapshot() {
          FIREWALL      MATCHES\n\
          HOSTNAME      MATCHES\n\
          TIMEZONE      MATCHES\n\
+         \n\
+         RIGHT NOW                                   EACH ROW ASKS ITS OWN DAEMON\n\
+         FIREWALL      ENABLED    desired enabled · verify nftables\n\
+         AI SESSIONS   1 ACTIVE   agt_4f21c09ab3e1 · 1 unknown — punarctl agents list\n\
+         UNKNOWN AI    1 ALERT    foo-agent · punarctl agents alerts\n\
+         APPROVALS     NONE       nothing is waiting on you\n\
+         PRIVILEGE     NONE       no grant held\n\
+         UPDATES       STAGED     2026.09.01.1 · running 2026.08.30.1 · a restart boots it\n\
          PERSONAL DEVICE · ENROLLMENT LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
@@ -3758,4 +3777,110 @@ fn context_status_prints_the_workspace_bindings() {
         stdout(&output)
     );
     let _ = fs::remove_dir_all(&state);
+}
+
+// ---------------------------------------------------------------------------
+// `status`: the live rows (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+/// A daemon that is down costs only its own rows: with punar-agentd gone the
+/// two AI rows say so, and every punard row still answers.
+#[test]
+fn status_degrades_only_the_rows_whose_daemon_is_down() {
+    let socket = start_mock();
+    let output = run(&socket, &["status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let line = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row in:\n{text}"))
+            .to_string()
+    };
+    for label in ["AI SESSIONS", "UNKNOWN AI"] {
+        let row = line(label);
+        assert!(row.contains("UNKNOWN"), "{row}");
+        assert!(row.contains("not reachable"), "{row}");
+    }
+    assert!(
+        line("FIREWALL      ENABLED").contains("verify nftables"),
+        "{text}"
+    );
+    assert!(line("APPROVALS").contains("NONE"), "{text}");
+    assert!(line("PRIVILEGE").contains("NONE"), "{text}");
+    assert!(line("UPDATES").contains("STAGED"), "{text}");
+}
+
+/// What waits on the person and what they hold: a pending approval and a
+/// live grant each name themselves and the verb that acts on them.
+#[test]
+fn status_names_pending_approvals_and_the_live_grant() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["status"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let approvals = text
+        .lines()
+        .find(|line| line.starts_with("APPROVALS"))
+        .expect(&text);
+    assert!(approvals.contains("1 PENDING"), "{approvals}");
+    assert!(
+        approvals.contains("apr_7c1d9a4e · punarctl approvals list"),
+        "{approvals}"
+    );
+    let privilege = text
+        .lines()
+        .find(|line| line.starts_with("PRIVILEGE"))
+        .expect(&text);
+    assert!(privilege.contains("1 LIVE"), "{privilege}");
+    assert!(
+        privilege.contains("gnt_2b8e11c4 · time.timezone · until"),
+        "{privilege}"
+    );
+    assert!(
+        privilege.contains("punarctl privilege revoke"),
+        "{privilege}"
+    );
+}
+
+/// `status --all --json` is every daemon's answer verbatim, keyed; a daemon
+/// that did not answer is null with its reason under `errors`. Plain
+/// `status --json` is still the status result alone.
+#[test]
+fn status_all_json_keys_every_answer_and_names_what_failed() {
+    let socket = start_mock();
+    let output = run(&socket, &["--json", "status", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["status"], fixture_status());
+    assert_eq!(
+        document["firewall"],
+        json!({"descriptor": firewall_descriptor()})
+    );
+    assert_eq!(document["update"], fixture_update_status());
+    assert_eq!(document["approvals"]["approvals"], json!([]));
+    assert_eq!(document["privilege"]["grants"], json!([]));
+    for key in ["agents", "alerts"] {
+        assert_eq!(document[key], Value::Null, "{document}");
+        assert_eq!(document["errors"][key]["code"], "unreachable", "{document}");
+        assert!(
+            document["errors"][key]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not reachable")),
+            "{document}"
+        );
+    }
+    assert_eq!(
+        document["errors"].as_object().map(|errors| errors.len()),
+        Some(2),
+        "{document}"
+    );
+
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["--json", "status", "--all"]);
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["agents"], fixture_agents_list());
+    assert_eq!(document["alerts"], fixture_alerts_list(false));
+    assert_eq!(document["errors"], json!({}));
 }
