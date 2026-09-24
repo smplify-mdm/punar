@@ -1188,9 +1188,17 @@ old UKI, installs the new boot-counted UKI last, and durably selects it. On a
 freshly installed device the first apply also retires the factory B-bound
 `punar-recovery_<version>.efi` before it opens root B, proving the retirement
 across an ESP read-only re-open; while slot A is still boot-counted that
-retirement, and therefore the apply, is refused as `conflict`. On
-Raspberry Pi, the equivalent signed A/B transaction stages the inactive root
-and firmware set for one-shot `tryboot`.
+retirement, and therefore the apply, is refused as `conflict`. Before the
+inactive slot is opened for writing, every Punar UKI bound to it, counted or
+not, is removed and the removal proven across a read-only re-open. After
+that, a UKI on the ESP names the release its slot holds, and the ESP keeps
+exactly the running release plus the candidate. An apply is refused as
+`conflict` when the next boot is already aimed at the inactive slot (a
+`rollback` to it without a restart). A staged update that has since booted
+and been blessed (running from its slot, with its uncounted UKI present) is
+settled rather than treated as still staged. On Raspberry Pi, the equivalent
+signed A/B transaction stages the inactive root and firmware set for one-shot
+`tryboot`.
 
 ```json
 {"v":1,"staged_version":"2026.08.27.1","staged_slot":"b",
@@ -1259,7 +1267,12 @@ canonical version selects that exact retained release; a person adds
 `"ticket"`. The authorization and audit boundary is identical to
 `update.apply`. No repository is contacted and
 no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
-are rollback candidates; counted, unblessed attempts are excluded. On
+are rollback candidates; counted, unblessed attempts are excluded. A target is
+accepted only when it is the one uncounted UKI the ESP names for its slot. A
+device updated by an older build can carry a stale entry bound to a rewritten
+slot, and this device cannot tell which release that slot holds, so it
+refuses the rollback as `conflict` rather than boot one release's kernel on
+another's root. On
 Raspberry Pi, the current and previous selectors are validated before a
 durable selector swap. A pending Pi trial must first resolve rather than being
 silently overwritten.

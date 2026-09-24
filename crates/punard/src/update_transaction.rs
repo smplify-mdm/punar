@@ -169,9 +169,11 @@ impl UpdateTransactionEngine {
     ) -> Result<UpdateApplyResult, UpdateTransactionError> {
         let current = self.active_slot()?;
         let candidate = self.inactive_slot()?;
-        if self.sources.pending_uefi.exists() {
+        if self.sources.pending_uefi.exists() && !self.settle_blessed_pending(current)? {
             return Err(UpdateTransactionError::Conflict(
-                "another UEFI update is already staged".into(),
+                "another UEFI update is already staged; restart to try it, or roll back to \
+                 cancel it"
+                    .into(),
             ));
         }
         let (payload, boot) = release
@@ -225,7 +227,32 @@ impl UpdateTransactionEngine {
                     "the ESP contains no last-known-good Punar UKI".into(),
                 ));
             }
-            require_esp_stage_capacity(&esp.path, boot.size_bytes)?;
+            let bound = punar_ukis(&uki_dir)?;
+            // The next boot must not be aimed at the slot this apply is about
+            // to overwrite (after `rollback` to the other slot without a
+            // restart): a failure part-way would leave that boot pointing at
+            // a half-written root.
+            let preferred = read_preferred(&esp.path.join("loader/loader.conf"))
+                .as_deref()
+                .and_then(selector_version);
+            if bound
+                .iter()
+                .any(|uki| uki.slot == candidate && Some(uki.version) == preferred)
+            {
+                return Err(UpdateTransactionError::Conflict(format!(
+                    "the next boot is set to slot {}, which this update would overwrite; \
+                     restart into it first, or roll back to the running release",
+                    slot_name(candidate)
+                )));
+            }
+            // What the retirement below will free counts toward the room the
+            // candidate needs.
+            let reclaimable: u64 = bound
+                .iter()
+                .filter(|uki| uki.slot == candidate)
+                .map(|uki| uki.size_bytes)
+                .sum();
+            require_esp_stage_capacity(&esp.path, boot.size_bytes.saturating_sub(reclaimable))?;
             esp.finish()?;
         }
 
@@ -236,6 +263,13 @@ impl UpdateTransactionEngine {
         // bootable fallback; it can never leave a stale UKI aimed at a
         // partially overwritten recovery root.
         self.retire_initial_recovery_before_overwrite(current, candidate)?;
+        // Every Punar UKI that boots the slot about to be overwritten goes
+        // first, counted or not, durably: a kept `punar_<v>.efi` bound to a
+        // rewritten slot would boot v's kernel on another release's root,
+        // uncounted, on every boot. After this, a UKI on the ESP names the
+        // release its slot holds, which is what `rollback` relies on — and the
+        // ESP keeps exactly the running release plus the candidate (§6.5).
+        self.retire_ukis_bound_to(candidate)?;
 
         let target = self.root_target(candidate);
         let mut destination = open_partition_for_write(
@@ -409,6 +443,71 @@ impl UpdateTransactionEngine {
         reread.finish()
     }
 
+    /// Remove every Punar UKI bound to `slot`, then prove, across a
+    /// read-only re-open, that none is left.
+    #[cfg(target_os = "linux")]
+    fn retire_ukis_bound_to(&self, slot: UpdateSlot) -> Result<(), UpdateTransactionError> {
+        let mounted = self.mount_esp(false)?;
+        let uki_dir = mounted.path.join("EFI/Linux");
+        let stale = punar_ukis(&uki_dir)?
+            .into_iter()
+            .filter(|uki| uki.slot == slot)
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return mounted.finish();
+        }
+        for uki in &stale {
+            fs::remove_file(&uki.path)?;
+        }
+        sync_filesystem(&mounted.path)?;
+        mounted.finish()?;
+
+        let reread = self.mount_esp(true)?;
+        if punar_ukis(&reread.path.join("EFI/Linux"))?
+            .iter()
+            .any(|uki| uki.slot == slot)
+        {
+            return Err(UpdateTransactionError::Verify(format!(
+                "a UKI bound to slot {} survived retirement across an ESP read-only re-open",
+                slot_name(slot)
+            )));
+        }
+        reread.finish()
+    }
+
+    /// A staged update that is now the running, blessed release is not
+    /// pending any more. Nothing else settles that record — only `rollback`
+    /// removes it — so without this the device could install one update and
+    /// then refuse every later one as "already staged". Settled only when all
+    /// three facts hold: the running slot is the candidate, and the ESP holds
+    /// the candidate's *uncounted* UKI (boot counting has blessed it), bound to
+    /// that slot. Anything else is still pending.
+    #[cfg(target_os = "linux")]
+    fn settle_blessed_pending(&self, running: UpdateSlot) -> Result<bool, UpdateTransactionError> {
+        let bytes = read_bounded(&self.sources.pending_uefi, SMALL_FILE_MAX, "pending update")?;
+        let pending: PendingUefiUpdate =
+            serde_json::from_slice(&bytes).map_err(|error| UpdateTransactionError::Trust {
+                stage: "local_evidence",
+                reason: format!("the pending update record is not readable: {error}"),
+            })?;
+        if pending.candidate_slot != running {
+            return Ok(false);
+        }
+        let esp = self.mount_esp(true)?;
+        let blessed = punar_ukis(&esp.path.join("EFI/Linux"))?
+            .iter()
+            .any(|uki| !uki.counted && uki.version == pending.version && uki.slot == running);
+        esp.finish()?;
+        if !blessed {
+            return Ok(false);
+        }
+        fs::remove_file(&self.sources.pending_uefi)?;
+        if let Some(parent) = self.sources.pending_uefi.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(true)
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn stage(
         &self,
@@ -446,6 +545,35 @@ impl UpdateTransactionEngine {
                     )
                 })?,
         };
+        // The target must be the only release the ESP names for its slot.
+        // `stage` retires a slot's UKIs before rewriting it, so on this
+        // build that always holds; a device updated by an older build can
+        // still carry a stale entry bound to a rewritten slot, and then this
+        // device cannot tell which release the slot holds — so it selects
+        // none, rather than boot one release's kernel on another's root.
+        let bound = punar_ukis(&uki_dir)?;
+        let target_slot = bound
+            .iter()
+            .find(|uki| uki.path == target.1)
+            .map(|uki| uki.slot)
+            .ok_or_else(|| {
+                UpdateTransactionError::Conflict(format!(
+                    "the rollback target {} boots no Punar root slot",
+                    target.0
+                ))
+            })?;
+        let named = bound
+            .iter()
+            .filter(|uki| !uki.counted && uki.slot == target_slot)
+            .count();
+        if named != 1 {
+            return Err(UpdateTransactionError::Conflict(format!(
+                "the ESP names {named} releases for slot {}, which holds one, so this device \
+                 cannot tell which it holds and selects none of them; apply an update to \
+                 rewrite that slot",
+                slot_name(target_slot)
+            )));
+        }
         let new_selector = format!("punar_{}*.efi", target.0);
         let contents = format!("preferred {new_selector}\ntimeout 0\neditor no\n");
         write_atomic_synced(&loader, contents.as_bytes(), 0o600)?;
@@ -757,6 +885,78 @@ fn known_uki_versions(
         versions.push((version, entry.path()));
     }
     Ok(versions)
+}
+
+/// One `punar_<version>[+tries].efi` on the ESP and the root slot its own
+/// `.cmdline` boots. Factory recovery (`punar-recovery_…`) is not one of these.
+#[derive(Debug)]
+struct PunarUki {
+    path: PathBuf,
+    version: ReleaseVersion,
+    /// Still boot-counted (`+tries`): not yet blessed.
+    counted: bool,
+    slot: UpdateSlot,
+    size_bytes: u64,
+}
+
+/// Every Punar UKI on the ESP with the slot it boots. An absent directory is
+/// empty. A Punar-named UKI that boots neither slot is a conflict, never
+/// skipped: the ESP must not hold an entry this device cannot account for.
+fn punar_ukis(directory: &Path) -> Result<Vec<PunarUki>, UpdateTransactionError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut ukis = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(stem) = name
+            .strip_prefix("punar_")
+            .and_then(|name| name.strip_suffix(".efi"))
+        else {
+            continue;
+        };
+        let (version, counted) = match stem.split_once('+') {
+            Some((version, _tries)) => (version, true),
+            None => (stem, false),
+        };
+        let Ok(version) = version.parse::<ReleaseVersion>() else {
+            continue;
+        };
+        let metadata = entry.metadata()?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let slot = [UpdateSlot::A, UpdateSlot::B]
+            .into_iter()
+            .find(|slot| validate_uki_binding(&path, *slot).is_ok())
+            .ok_or_else(|| {
+                UpdateTransactionError::Conflict(format!(
+                    "the ESP holds {name}, which boots no Punar root slot"
+                ))
+            })?;
+        ukis.push(PunarUki {
+            path,
+            version,
+            counted,
+            slot,
+            size_bytes: metadata.len(),
+        });
+    }
+    Ok(ukis)
+}
+
+fn slot_name(slot: UpdateSlot) -> &'static str {
+    match slot {
+        UpdateSlot::A => "A",
+        UpdateSlot::B => "B",
+        UpdateSlot::Unknown => "unknown",
+    }
 }
 
 fn recovery_uki_paths(directory: &Path) -> Result<Vec<PathBuf>, UpdateTransactionError> {
