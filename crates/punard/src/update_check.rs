@@ -405,41 +405,6 @@ impl UpdateCheckEngine {
         })
     }
 
-    /// Whether the verified channel head is newer than the running release,
-    /// judged from the cached channel document alone — no fetch, no write.
-    ///
-    /// `None` unless the cache is younger than `max_age_seconds` and passes
-    /// the same signature and target binding [`Self::check`] applies to it. A
-    /// managed device tells its organization it is up to date only on this
-    /// evidence; a stale or unverifiable cache is "unknown", never "current".
-    pub(crate) fn verified_update_available(
-        &self,
-        channel: UpdateChannel,
-        max_age_seconds: u64,
-    ) -> Option<bool> {
-        if !self.sources.cached_signature.is_file()
-            || file_age_seconds(&self.sources.cached_channel)? > max_age_seconds
-        {
-            return None;
-        }
-        let current = self.current_version().ok()?;
-        let target = self.release_target(channel).ok()?;
-        let keys = ReleaseKeySet::load_dir(&self.sources.trusted_keys_dir).ok()?;
-        let document = read_cache(&self.sources.cached_channel, CHANNEL_DOCUMENT_MAX).ok()?;
-        let signature = read_cache(&self.sources.cached_signature, SIGNATURE_MAX).ok()?;
-        let metadata = verify_channel_metadata(&document, &signature, &keys).ok()?;
-        require_target(&metadata.image_id, &target.image_id, "image_id").ok()?;
-        require_equal(metadata.architecture, target.architecture, "architecture").ok()?;
-        require_equal(
-            metadata.boot_platform,
-            target.boot_platform,
-            "boot_platform",
-        )
-        .ok()?;
-        require_equal(metadata.channel, target.channel, "channel").ok()?;
-        Some(metadata.current > current)
-    }
-
     pub(crate) fn trusted_keys_dir(&self) -> &Path {
         &self.sources.trusted_keys_dir
     }
@@ -1066,67 +1031,6 @@ mod tests {
             .check(UpdateChannel::Stable, "dev_00123", false)
             .unwrap();
         assert!(cached.cached);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// The managed inventory's "up to date" rests on this: a verified,
-    /// target-bound, fresh cache. Nothing is fetched to answer it.
-    #[test]
-    fn the_cached_verdict_needs_a_fresh_verified_target_bound_document() {
-        let root = root("verdict");
-        let (engine, _) = fixture(&root);
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3600),
-            None,
-            "no check has run"
-        );
-        engine
-            .check(UpdateChannel::Stable, "dev_00123", false)
-            .unwrap();
-        fs::remove_file(engine.sources.repository_dir.join("channel.json")).unwrap();
-        // The fixture head (2026.08.27.1) is newer than the running release.
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3600),
-            Some(true)
-        );
-        fs::write(
-            &engine.sources.os_release,
-            "IMAGE_ID=punar-desktop\nIMAGE_VERSION=2026.08.27.1\n",
-        )
-        .unwrap();
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3600),
-            Some(false)
-        );
-        // Another channel's head says nothing about this one.
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Edge, 3600),
-            None
-        );
-        // A day-old verdict is not today's.
-        fs::File::options()
-            .write(true)
-            .open(&engine.sources.cached_channel)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
-            .unwrap();
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3600),
-            None,
-            "stale"
-        );
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3 * 3600),
-            Some(false)
-        );
-        // Neither does a tampered cache.
-        let mut document = fs::read(&engine.sources.cached_channel).unwrap();
-        document[20] ^= 1;
-        fs::write(&engine.sources.cached_channel, document).unwrap();
-        assert_eq!(
-            engine.verified_update_available(UpdateChannel::Stable, 3600),
-            None
-        );
         fs::remove_dir_all(root).unwrap();
     }
 

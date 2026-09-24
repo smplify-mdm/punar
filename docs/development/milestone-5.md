@@ -398,9 +398,13 @@ from injectable procfs/sysfs/image paths:
   from the system's mount table `/proc/1/mountinfo` because punard's
   `ProtectHome=yes` hides `/home`; `null` when that evidence cannot be seen),
   `firewall_enabled`, `firewall` (`"nftables"`), `os_patch_status`
-  (`up-to-date` only on a verified channel check under a day old, otherwise
-  `updates-available` or `unknown`) and `reboot_required`. States; `null`
-  where nothing could be established.
+  (`updates-available`, with `reboot_required`, while a staged release waits
+  for a restart; otherwise `unknown`) and `reboot_required`. States; `null`
+  where nothing could be established. `os_patch_status` never says
+  `up-to-date` and never reads the channel check: the only check is one a
+  person runs, so a verdict from it would tell the organization when they
+  looked for updates. A check the device schedules itself, independent of
+  any person's action, is what would let it say more.
 - `hardware` — `manufacturer`, `model_name`, `bios_version`, `cpu_model`,
   `cpu_vendor`, `cpu_cores`, `cpu_threads`, `memory_total_bytes`,
   `device_capacity_bytes` (whole GB), `root_filesystem_type`,

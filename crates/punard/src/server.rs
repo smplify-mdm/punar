@@ -81,8 +81,7 @@ use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
 };
 use crate::inventory::{
-    CollectorSources, ImageRelease, InventoryCollector, PATCH_EVIDENCE_MAX_AGE_SECONDS, PassInputs,
-    PatchPosture, Withheld, patch_posture,
+    CollectorSources, ImageRelease, InventoryCollector, PassInputs, Withheld, patch_posture,
 };
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
@@ -5482,23 +5481,6 @@ impl Inner {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    /// The inventory's patch posture: a staged release decides; otherwise a
-    /// verified channel check of the effective channel, no older than a day.
-    fn patch_posture(&self) -> PatchPosture {
-        let channel = self
-            .effective
-            .lock()
-            .unwrap()
-            .get("system.update_channel")
-            .and_then(|entry| effective_update_channel(&entry.value));
-        patch_posture(self.update_status.staged_release(), || {
-            channel.and_then(|channel| {
-                self.update_check
-                    .verified_update_available(channel, PATCH_EVIDENCE_MAX_AGE_SECONDS)
-            })
-        })
-    }
-
     /// Keep what the organization just received as the person's view of it
     /// (SPEC section 24.2). A failure to write it is logged and costs nothing
     /// else: the send happened, and `enroll.status` then says nothing was
@@ -5618,7 +5600,7 @@ impl Inner {
                 organization_owned: enrollment.organization_owned,
                 architecture: self.apps.architecture().to_string(),
                 firewall_state,
-                patch: self.patch_posture(),
+                patch: patch_posture(self.update_status.staged_release()),
             },
             || ImageRelease {
                 version: sources.image_version(),

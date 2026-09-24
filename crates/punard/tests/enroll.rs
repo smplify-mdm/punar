@@ -24,13 +24,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use ed25519_dalek::{Signer, SigningKey};
 use punar_common::storage::StorageSources;
+use punar_common::update::{Architecture, BootPlatform};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
 use punard::device::DeviceSources;
 use punard::inventory::CollectorSources;
 use punard::server::{Daemon, DaemonConfig, DaemonHandle};
+use punard::update_check::UpdateCheckSources;
 use punard::update_status::UpdateStatusSources;
 use serde_json::{Value, json};
 
@@ -481,15 +484,34 @@ impl TestDaemon {
     /// whose registry holds one `security.firewall` mock (the capability
     /// the Acme baseline pins).
     fn start(dir: &Path, peer: Peer, control_plane: &Path, firewall_state: &str) -> TestDaemon {
+        Self::start_with(dir, peer, control_plane, firewall_state, Vec::new(), |_| {})
+    }
+
+    /// [`TestDaemon::start`], with more mock capabilities registered after
+    /// the firewall and a last word on the configuration.
+    fn start_with(
+        dir: &Path,
+        peer: Peer,
+        control_plane: &Path,
+        firewall_state: &str,
+        more: Vec<MockCapability>,
+        configure: impl FnOnce(&mut DaemonConfig),
+    ) -> TestDaemon {
         let (group_file, passwd_file) = write_nss_files(dir);
         let (os_release_path, kernel_release_path) = write_inventory_sources(dir);
         let (inventory_sources, update_status_sources, flatpak_bin) = write_collector_sources(dir);
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir).unwrap();
         let mock = MockCapability::new("security.firewall", json!(firewall_state));
-        let registry = Registry::new(vec![Box::new(mock.clone())]);
+        let mut capabilities: Vec<Box<dyn punard::capability::Capability>> =
+            vec![Box::new(mock.clone())];
+        capabilities.extend(
+            more.into_iter()
+                .map(|cap| Box::new(cap) as Box<dyn punard::capability::Capability>),
+        );
+        let registry = Registry::new(capabilities);
         let seq = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
-        let cfg = DaemonConfig {
+        let mut cfg = DaemonConfig {
             group_file,
             passwd_file,
             peer_source: PeerSource::Fixed(peer),
@@ -508,6 +530,7 @@ impl TestDaemon {
                 dir.join("audit.jsonl"),
             )
         };
+        configure(&mut cfg);
         let daemon = Daemon::new(cfg, registry).unwrap();
         daemon.boot_reconcile();
         let handle = daemon.spawn().unwrap();
@@ -1824,6 +1847,93 @@ fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clo
     // Within the day the gate holds again.
     daemon.result("reconcile", None);
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
+}
+
+/// A local, signed stable channel whose head (2026.08.27.1) is newer than
+/// the running release (2026.08.20.1), so a person's `update check` finds an
+/// update and caches the verified document.
+fn configure_update_channel(cfg: &mut DaemonConfig, dir: &Path) {
+    let repository = dir.join("update-source");
+    let keys = dir.join("release-keys");
+    let os_release = dir.join("update-os-release");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(
+        &os_release,
+        "IMAGE_ID=punar-desktop\nIMAGE_VERSION=2026.08.20.1\n",
+    )
+    .unwrap();
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    fs::write(keys.join("fixture.pub"), signing.verifying_key().to_bytes()).unwrap();
+    let document = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "image_id": "punar-desktop",
+        "architecture": "aarch64",
+        "boot_platform": "uefi",
+        "channel": "stable",
+        "current": "2026.08.27.1",
+        "release_manifest": "releases/2026.08.27.1/release.json",
+        "rollout_bps": 10000,
+        "halted": false,
+        "published_at": "2026-08-27T22:00:00Z",
+        "min_supported_version": "2026.08.01.1"
+    }))
+    .unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&document).to_bytes(),
+    )
+    .unwrap();
+    fs::write(repository.join("channel.json"), document).unwrap();
+    cfg.update_check_sources = UpdateCheckSources {
+        repository_url_file: dir.join("update-repository.url"),
+        repository_url_owner_uid: rustix::process::geteuid().as_raw(),
+        repository_dir: repository,
+        curl_bin: dir.join("curl"),
+        trusted_keys_dir: keys,
+        cached_channel: cfg.state_dir.join("update/verified-channel.json"),
+        cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
+        os_release,
+        pi_boot_partition: dir.join("pi-partition"),
+        cache_max_age_seconds: 900,
+        architecture_override: Some(Architecture::Aarch64),
+        boot_platform_override: Some(BootPlatform::Uefi),
+    };
+}
+
+/// Looking for updates is something a person does, not something the device
+/// is. A verified check that finds a newer release changes what they know
+/// and leaves the device's patch state as it was, so it changes nothing the
+/// organization receives: no verdict appears, and no inventory is sent off
+/// its schedule to announce one. Otherwise the organization would learn the
+/// moment the person looked.
+#[test]
+fn a_persons_update_check_tells_the_organization_nothing() {
+    let dir = test_dir("update-check-quiet");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| configure_update_channel(cfg, &dir),
+    );
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 1);
+
+    let check = daemon.result("update.check", Some(json!({"force": true})));
+    assert_eq!(check["available"], "2026.08.27.1", "{check}");
+    assert!(daemon.state_path("update/verified-channel.json").is_file());
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+
+    let inventory = control_plane.state.inventory.lock().unwrap();
+    assert_eq!(inventory.len(), 1, "the check sent nothing: {inventory:?}");
+    assert_eq!(
+        inventory[0]["inventory"]["posture"]["os_patch_status"],
+        "unknown"
+    );
 }
 
 /// The organization-owned tier through the whole daemon: the same device

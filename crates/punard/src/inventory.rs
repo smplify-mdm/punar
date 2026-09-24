@@ -63,9 +63,6 @@ pub const MAX_INVENTORY_BYTES: usize = 512 * 1024;
 const MAX_NAME_CHARS: usize = 255;
 const MAX_VERSION_CHARS: usize = 100;
 
-/// A verified channel check older than this no longer says "up to date".
-pub const PATCH_EVIDENCE_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
-
 const SECURE_BOOT_VARIABLE: &str = "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const SMALL_FILE_MAX: u64 = 64 * 1024;
 const DETECT_VIRT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -484,15 +481,23 @@ impl InventoryCollector {
     }
 }
 
-/// Map the update engines' evidence to the console's vocabulary. A staged
-/// release waiting for a restart is an update available and a reboot
-/// required. Otherwise "up to date" needs a verified channel check
-/// ([`crate::update_check::UpdateCheckEngine::verified_update_available`]);
-/// without one the status is unknown, never assumed current.
-pub fn patch_posture(
-    staged: StagedRelease,
-    verified_update_available: impl FnOnce() -> Option<bool>,
-) -> PatchPosture {
+/// Map the update engines' evidence to the console's vocabulary. Only the
+/// device's own state counts: a staged release waiting for a restart is an
+/// update available and a reboot required, whoever staged it, and it changes
+/// when the device changes.
+///
+/// Nothing else says "up to date" or "updates available", and this is a
+/// privacy decision, not a missing feature. The one source that could, a
+/// verified channel check, runs only when a person asks for it (`punarctl
+/// update check`); nothing checks on the device's own schedule. A verdict
+/// from it would appear the moment they checked and lapse a day later, and
+/// each flip changes the inventory, which is then sent at once, off its
+/// daily schedule. The organization would learn when the person looked for
+/// updates: a sample of their use, not a posture of the device, whose patch
+/// state a check does not change. The status is therefore "unknown" until a
+/// release is staged. A verdict can return with a check the device runs on a
+/// schedule of its own, which no person's action moves.
+pub fn patch_posture(staged: StagedRelease) -> PatchPosture {
     match staged {
         StagedRelease::AwaitingRestart => PatchPosture {
             status: PatchStatus::UpdatesAvailable,
@@ -503,11 +508,7 @@ pub fn patch_posture(
             reboot_required: None,
         },
         StagedRelease::None | StagedRelease::Running => PatchPosture {
-            status: match verified_update_available() {
-                Some(true) => PatchStatus::UpdatesAvailable,
-                Some(false) => PatchStatus::UpToDate,
-                None => PatchStatus::Unknown,
-            },
+            status: PatchStatus::Unknown,
             reboot_required: Some(false),
         },
     }
@@ -1448,18 +1449,19 @@ mod tests {
         assert_eq!((posture.firewall_enabled, posture.firewall), (None, None));
     }
 
+    /// Only the device's staged state decides; nothing a person does to look
+    /// for updates can move it (see [`patch_posture`]).
     #[test]
-    fn patch_posture_needs_verified_evidence_to_say_up_to_date() {
-        let never = || -> Option<bool> { panic!("a staged release decides without the channel") };
+    fn patch_posture_is_the_devices_staged_state_only() {
         assert_eq!(
-            patch_posture(StagedRelease::AwaitingRestart, never),
+            patch_posture(StagedRelease::AwaitingRestart),
             PatchPosture {
                 status: PatchStatus::UpdatesAvailable,
                 reboot_required: Some(true)
             }
         );
         assert_eq!(
-            patch_posture(StagedRelease::Unknown, never),
+            patch_posture(StagedRelease::Unknown),
             PatchPosture {
                 status: PatchStatus::Unknown,
                 reboot_required: None
@@ -1467,15 +1469,7 @@ mod tests {
         );
         for staged in [StagedRelease::None, StagedRelease::Running] {
             assert_eq!(
-                patch_posture(staged, || Some(false)).status,
-                PatchStatus::UpToDate
-            );
-            assert_eq!(
-                patch_posture(staged, || Some(true)).status,
-                PatchStatus::UpdatesAvailable
-            );
-            assert_eq!(
-                patch_posture(staged, || None),
+                patch_posture(staged),
                 PatchPosture {
                     status: PatchStatus::Unknown,
                     reboot_required: Some(false)
