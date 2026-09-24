@@ -744,8 +744,11 @@ checks run in this order:
    and sends the request again with the flag and a fresh password (the
    first was spent on discovery — nothing is fetched for a caller who has
    not confirmed); without a terminal, or with `--json`, the refusal is the
-   answer. The term is written to `enrollment.json` and never re-read from
-   a policy fetch.
+   answer. The term is written to `enrollment.json`, and to
+   `enrollment-terms.json` beside it. An older punard booted from a retained
+   UKI never rewrites that second file, and this build folds it back in when
+   loading, so a rewrite that drops the field cannot make the device
+   removable. The term is never re-read from a policy fetch.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already

@@ -5018,6 +5018,7 @@ impl Inner {
         if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), &enrollment) {
             rollback_files(&policy_files);
             let _ = std::fs::remove_file(self.cfg.state_dir.join("device-token"));
+            let _ = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json"));
             let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
             return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
         }
@@ -5245,6 +5246,9 @@ impl Inner {
                      local unenrollment continues"
                 );
             }
+        }
+        if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
+            eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
         }
         for name in ["enrollment.json", "device-token"] {
             if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {

@@ -490,12 +490,37 @@ pub struct Enrollment {
     /// Defaults to `true` for a file written before the field existed, the
     /// same reading an organization document without the key gets. No
     /// production enrollment predates it: the Smplify path has not shipped.
+    ///
+    /// NOT THE ONLY RECORD. `/var` is shared across releases and never rolled
+    /// back, so an older punard booted from a retained UKI rewrites this file
+    /// without the field on its next sync, and the default above would read
+    /// the result as removable. The term is therefore also kept in
+    /// [`TERMS_FILE`], which no older build knows or rewrites, and
+    /// [`load_enrollment`] folds it back in. It can only take removability
+    /// away.
     #[serde(default = "removable_by_default")]
     pub removable: bool,
 }
 
 fn removable_by_default() -> bool {
     true
+}
+
+/// Beside `enrollment.json`: the organization's removal term for one
+/// enrollment, bound to it by organization and enrollment time.
+pub const TERMS_FILE: &str = "enrollment-terms.json";
+
+/// The contents of [`TERMS_FILE`]. Tolerant of fields a newer build adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentTerms {
+    pub version: u32,
+    pub org_id: String,
+    pub enrolled_at: String,
+    pub removable: bool,
+}
+
+fn terms_path(enrollment_path: &Path) -> PathBuf {
+    enrollment_path.with_file_name(TERMS_FILE)
 }
 
 /// The `enroll.status` view of the most recent remote query
@@ -539,12 +564,22 @@ impl Enrollment {
 pub fn load_enrollment(path: &Path) -> io::Result<Option<Enrollment>> {
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            let enrollment: Enrollment = serde_json::from_str(&content).map_err(|e| {
+            let mut enrollment: Enrollment = serde_json::from_str(&content).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{} is corrupt: {e}", path.display()),
                 )
             })?;
+            // The term kept apart from this file wins when it says "not
+            // removable" and belongs to this enrollment. One left over from an
+            // enrollment an older build ended is for another enrollment, and
+            // is ignored.
+            let terms = load_terms(&terms_path(path))?.filter(|terms| {
+                terms.org_id == enrollment.org.id && terms.enrolled_at == enrollment.enrolled_at
+            });
+            if let Some(terms) = terms {
+                enrollment.removable &= terms.removable;
+            }
             Ok(Some(enrollment))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -552,10 +587,43 @@ pub fn load_enrollment(path: &Path) -> io::Result<Option<Enrollment>> {
     }
 }
 
-/// Persist `enrollment.json` (0600, atomic).
+/// Read [`TERMS_FILE`]. Absent is `None`; corrupt is an error, the same
+/// posture as a corrupt `enrollment.json`: refusing to start beats silently
+/// forgetting that an organization may keep this device.
+fn load_terms(path: &Path) -> io::Result<Option<EnrollmentTerms>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map(Some).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is corrupt: {e}", path.display()),
+            )
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Persist `enrollment.json` (0600, atomic), and the removal term beside it
+/// first, so no crash leaves an enrollment without its term.
 pub fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
+    let terms = EnrollmentTerms {
+        version: 1,
+        org_id: enrollment.org.id.clone(),
+        enrolled_at: enrollment.enrolled_at.clone(),
+        removable: enrollment.removable,
+    };
+    let terms_bytes = serde_json::to_vec_pretty(&terms).expect("terms serialize");
+    write_atomic(&terms_path(path), &terms_bytes, 0o600)?;
     let bytes = serde_json::to_vec_pretty(enrollment).expect("enrollment serializes");
     write_atomic(path, &bytes, 0o600)
+}
+
+/// Remove `enrollment.json`'s removal term (on unenroll).
+pub fn remove_terms(enrollment_path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(terms_path(enrollment_path)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Load the device token file if present, wrapped [`Redacted`] before it
@@ -728,9 +796,9 @@ mod tests {
         }
     }
 
-    /// Removability is fixed at enrollment and survives a restart; a file
-    /// written before the field existed reads as removable, exactly as an
-    /// organization document without the key does.
+    /// Removability is fixed at enrollment and survives a restart. A file
+    /// written before the field existed, and with no term beside it, reads as
+    /// removable, exactly as an organization document without the key does.
     #[test]
     fn removability_persists_and_a_file_without_it_reads_as_removable() {
         let dir = tmp("removable");
@@ -740,11 +808,58 @@ mod tests {
         save_enrollment(&path, &fixed).unwrap();
         assert!(!load_enrollment(&path).unwrap().unwrap().removable);
 
+        remove_terms(&path).unwrap();
         let mut raw: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("removable");
         std::fs::write(&path, raw.to_string()).unwrap();
         assert!(load_enrollment(&path).unwrap().unwrap().removable);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older punard, booted from a retained UKI, rewrites enrollment.json
+    /// without the field. The term kept beside it, which that build never
+    /// touches, keeps the device non-removable. A term left from another
+    /// enrollment is ignored, and a term can only take removability away.
+    #[test]
+    fn the_removal_term_survives_an_older_build_rewriting_the_enrollment() {
+        let dir = tmp("terms");
+        let path = dir.join("enrollment.json");
+        let mut kept = sample_enrollment();
+        kept.removable = false;
+        save_enrollment(&path, &kept).unwrap();
+        assert!(dir.join(TERMS_FILE).is_file());
+
+        // What a pre-term build writes back on its next sync.
+        let mut raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("removable");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let reloaded = load_enrollment(&path).unwrap().unwrap();
+        assert!(!reloaded.removable, "the term outlived the rewrite");
+        // Saving it again restores the field in enrollment.json itself.
+        save_enrollment(&path, &reloaded).unwrap();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["removable"], false);
+
+        // A term for another enrollment (an older build ended that one and a
+        // removable one began) does not apply.
+        let mut other = sample_enrollment();
+        other.enrolled_at = "2026-09-30T00:00:00Z".into();
+        std::fs::write(&path, serde_json::to_vec(&other).unwrap()).unwrap();
+        assert!(load_enrollment(&path).unwrap().unwrap().removable);
+
+        // A term that says "removable" never loosens a file that says not.
+        save_enrollment(&path, &sample_enrollment()).unwrap();
+        let mut raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["removable"] = serde_json::json!(false);
+        std::fs::write(&path, raw.to_string()).unwrap();
+        assert!(!load_enrollment(&path).unwrap().unwrap().removable);
+
+        // A corrupt term refuses, like a corrupt enrollment.
+        std::fs::write(dir.join(TERMS_FILE), b"{not json").unwrap();
+        assert!(load_enrollment(&path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

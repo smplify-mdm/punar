@@ -1133,6 +1133,10 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     let stopped = daemon.result("enroll.stop", Some(json!({"ticket": SECOND})));
     assert_eq!(stopped["enrolled"], false);
     assert!(!second.exists());
+    assert!(
+        !daemon.state_path("enrollment-terms.json").exists(),
+        "unenrolling removes the removal term with the enrollment"
+    );
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
     daemon.stop();
 
@@ -1255,8 +1259,18 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
     daemon.stop();
 
-    // Root is refused too, and the term survived the restart.
+    // An older punard, booted from a retained UKI, writes enrollment.json back
+    // without the field it does not know. The term is kept apart from it too.
+    let enrollment_path = dir.join("state/enrollment.json");
+    let mut raw: Value = serde_json::from_slice(&fs::read(&enrollment_path).unwrap()).unwrap();
+    raw.as_object_mut().unwrap().remove("removable");
+    fs::write(&enrollment_path, raw.to_string()).unwrap();
+    assert!(dir.join("state/enrollment-terms.json").is_file());
+
+    // Root is refused too, and the term survived both the restart and the
+    // rewrite.
     let root = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    assert_eq!(root.result("enroll.status", None)["removable"], false);
     let error = root.error("enroll.stop", None);
     assert_eq!(error["details"]["reason"], "enrollment_not_removable");
     assert_eq!(root.result("enroll.status", None)["enrolled"], true);
