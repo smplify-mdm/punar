@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::discovery::{self, Organization};
 use crate::identity::{self, Record, Store};
 use crate::protocol::{CallError, ErrorCode, error_line, parse_request_line, result_line};
-use crate::upstream::{Api, UpstreamError};
+use crate::upstream::{Api, CALL_BUDGET, UpstreamError};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const LINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,6 +31,8 @@ pub struct Daemon {
     /// carries no domain, so it enrols into the organisation punard just
     /// asked about, exactly as the mock does.
     pending: Mutex<Option<Organization>>,
+    /// The whole of one of punard's calls, [`CALL_BUDGET`]; shorter in tests.
+    call_budget: Duration,
 }
 
 impl Daemon {
@@ -40,12 +42,19 @@ impl Daemon {
             discovery_dir: discovery_dir.into(),
             os_release_path: PathBuf::from("/etc/os-release"),
             pending: Mutex::new(None),
+            call_budget: CALL_BUDGET,
         }
     }
 
     #[cfg(test)]
     pub fn with_os_release(mut self, path: impl Into<PathBuf>) -> Daemon {
         self.os_release_path = path.into();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_call_budget(mut self, budget: Duration) -> Daemon {
+        self.call_budget = budget;
         self
     }
 
@@ -110,12 +119,18 @@ impl Daemon {
             "enroll.unregister" => self.enroll_unregister(params),
             "identity.status" => self.identity_status(),
             "policy.fetch" => self.policy_fetch(params),
-            "compliance.report" => {
-                self.report(params, "report", crate::status::compliance_status_body)
-            }
-            "inventory.report" => {
-                self.report(params, "inventory", crate::status::inventory_status_body)
-            }
+            "compliance.report" => self.report(
+                params,
+                "report",
+                crate::status::compliance_status_body,
+                PinTenantKey::First,
+            ),
+            "inventory.report" => self.report(
+                params,
+                "inventory",
+                crate::status::inventory_status_body,
+                PinTenantKey::Never,
+            ),
             "queries.pending" => {
                 self.authorized(params)?;
                 Ok(json!({ "queries": [] }))
@@ -219,7 +234,7 @@ impl Daemon {
         // First check-in over the new identity pins the tenant's signing
         // key. A failure here is reported but does not undo the enrollment:
         // the certificate is issued and the next sync retries.
-        match self.api().and_then(|api| {
+        match self.api(self.call_budget).and_then(|api| {
             api.checkin(&enrolled.device_id, &os_identifier, &os_release)
                 .map_err(internal)
         }) {
@@ -266,7 +281,7 @@ impl Daemon {
 
     fn policy_fetch(&self, params: Option<&Value>) -> Result<Value, CallError> {
         let record = self.authorized(params)?;
-        let api = self.api()?;
+        let api = self.api(self.call_budget)?;
         match api.bundle(&record.device_id).map_err(upstream_refusal)? {
             None => Ok(json!({ "policies": [] })),
             Some(bundle) => {
@@ -284,19 +299,31 @@ impl Daemon {
         }
     }
 
+    /// One report, answered within [`Daemon::call_budget`] in all. punard
+    /// reads the answer within its own per-call timeout, and a report that
+    /// Smplify kept but whose answer came later reads there as
+    /// "unreachable": the inventory's hash and send time are not saved,
+    /// the person's record of what left is not written, and the whole
+    /// inventory goes up again on every pass. So the tenant-key check-in
+    /// rides only the compliance report, which every sync pass sends first,
+    /// with a quarter of the budget, and the status POST gets what is left.
     fn report(
         &self,
         params: Option<&Value>,
         key: &str,
         compose: fn(&str, &Value) -> Value,
+        pin: PinTenantKey,
     ) -> Result<Value, CallError> {
+        let started = Instant::now();
         let record = self.authorized(params)?;
         let payload = params.and_then(|p| p.get(key)).ok_or_else(|| {
             CallError::new(ErrorCode::InvalidParams, format!("{key} is required"))
         })?;
-        self.pin_tenant_key_if_missing(&record);
+        if pin == PinTenantKey::First {
+            self.pin_tenant_key_if_missing(&record, self.call_budget / 4);
+        }
         let body = compose(&record.device_id, payload);
-        self.api()?
+        self.api(self.call_budget.saturating_sub(started.elapsed()))?
             .status(&record.device_id, &body)
             .map_err(upstream_refusal)?;
         // What left, exactly as it left. punard keeps it as the person's
@@ -309,15 +336,16 @@ impl Daemon {
     /// Pin the organization's signing key if the check-in at registration
     /// did not. That first check-in is allowed to fail without undoing the
     /// enrollment, so this is the "next sync retries" its comment promises:
-    /// one check-in per report until the key is held, then never again. It is
-    /// pinned once and never replaced here: a key that changes under a pinned
-    /// device is a question for re-enrollment, not for a sync.
-    fn pin_tenant_key_if_missing(&self, record: &Record) {
+    /// one check-in per compliance report, within `budget`, until the key is
+    /// held, then never again. It is pinned once and never replaced here: a
+    /// key that changes under a pinned device is a question for
+    /// re-enrollment, not for a sync.
+    fn pin_tenant_key_if_missing(&self, record: &Record, budget: Duration) {
         if record.tenant_public_key.is_some() {
             return;
         }
         let os_release = crate::device::os_release(&self.os_release_path);
-        let answer = self.api().and_then(|api| {
+        let answer = self.api(budget).and_then(|api| {
             api.checkin(&record.device_id, &record.os_identifier, &os_release)
                 .map_err(internal)
         });
@@ -359,7 +387,9 @@ impl Daemon {
         Ok(record)
     }
 
-    fn api(&self) -> Result<Api, CallError> {
+    /// A client for this device's identity whose every request must finish
+    /// within `budget`.
+    fn api(&self, budget: Duration) -> Result<Api, CallError> {
         let record = self.store.load().map_err(internal)?.ok_or_else(|| {
             CallError::new(
                 ErrorCode::Unauthorized,
@@ -370,8 +400,15 @@ impl Daemon {
             CallError::new(ErrorCode::Internal, "the stored server origin is invalid")
         })?;
         let identity = self.store.client_identity().map_err(internal)?;
-        Api::with_identity(&server, identity).map_err(internal)
+        Api::with_identity(&server, identity, budget).map_err(internal)
     }
+}
+
+/// Whether a report first tries to pin the tenant key ([`Daemon::report`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinTenantKey {
+    First,
+    Never,
 }
 
 fn param_str(params: Option<&Value>, key: &str) -> Result<String, CallError> {
@@ -464,6 +501,102 @@ mod tests {
         assert!(line.contains("enrollment code is required"), "{line}");
         let line = d.answer_line(r#"{"v":1,"id":"a","method":"enroll.register","params":{"device_id":"x","bootstrap":"b","code":"lex_1"}}"#);
         assert!(line.contains("no organization was discovered"), "{line}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// punard gives each call 5 s. A report that Smplify kept but whose
+    /// answer arrives later reads there as "unreachable", and the whole
+    /// inventory is then uploaded again on every pass. So one report never
+    /// takes longer than one call budget, even while the tenant key is still
+    /// unpinned and Smplify answers nothing at all: the inventory report
+    /// makes one request, and the compliance report's check-in shares its
+    /// budget with the status POST instead of adding a second one.
+    #[test]
+    fn a_report_answers_within_one_call_budget_while_the_key_is_unpinned() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const BUDGET: Duration = Duration::from_millis(1000);
+        let (d, root) = daemon();
+        let d = d.with_call_budget(BUDGET);
+        // A Smplify that accepts every connection and never answers: each
+        // request spends whatever budget it was given.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&connections);
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: format!("https://127.0.0.1:{port}"),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        let d = Arc::new(d);
+        // Each report runs apart, so one that never returns fails the test
+        // instead of hanging it.
+        let report = |method: &str, key: &str| {
+            let request = json!({
+                "v": 1, "id": "r", "method": method,
+                "params": {"device_token": &*token, key: {}},
+            })
+            .to_string();
+            let daemon = Arc::clone(&d);
+            let (sender, answer) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let line = daemon.answer_line(&request);
+                let _ = sender.send((started.elapsed(), line));
+            });
+            let (took, line) = answer
+                .recv_timeout(BUDGET * 10)
+                .expect("the report outlived ten budgets");
+            assert!(
+                line.contains(r#""error""#),
+                "Smplify never answered: {line}"
+            );
+            took
+        };
+        let within = BUDGET + BUDGET / 2;
+
+        let took = report("inventory.report", "inventory");
+        assert!(took < within, "{took:?}");
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "the inventory report asks Smplify one thing"
+        );
+        let took = report("compliance.report", "report");
+        assert!(took < within, "{took:?}");
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            3,
+            "the compliance report tries the pin first, inside the same budget"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

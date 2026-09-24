@@ -185,13 +185,16 @@ impl Client {
             ServerName::try_from(request.url.host.clone()).map_err(|_| HttpError::Url)?;
         let connection = ClientConnection::new(Arc::clone(&self.config), server_name)
             .map_err(|_| HttpError::Tls)?;
-        let mut stream = StreamOwned::new(connection, tcp);
+        let mut stream = StreamOwned::new(
+            connection,
+            Deadlined {
+                tcp,
+                deadline: started + self.budget,
+            },
+        );
 
         let head = request_head(request);
 
-        stream
-            .sock
-            .set_write_timeout(Some(self.remaining(started)?))?;
         stream.write_all(head.as_bytes())?;
         if let Some(body) = request.body {
             stream.write_all(body)?;
@@ -201,9 +204,6 @@ impl Client {
         let mut raw = Vec::new();
         let mut chunk = [0u8; 16 * 1024];
         loop {
-            stream
-                .sock
-                .set_read_timeout(Some(self.remaining(started)?))?;
             match stream.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -227,6 +227,47 @@ impl Client {
             return Err(HttpError::Timeout);
         }
         Ok(self.budget - elapsed)
+    }
+}
+
+/// The connection's socket, held to the request's deadline: every read and
+/// every write — the TLS handshake's included, which happens inside the
+/// first write — may wait only for the time left. A timeout set once, or
+/// only around the response, let a server that accepted the connection and
+/// never answered the handshake hold the agent, which serves one call at a
+/// time, for good.
+struct Deadlined {
+    tcp: TcpStream,
+    deadline: Instant,
+}
+
+impl Deadlined {
+    fn left(&self) -> io::Result<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::from(ErrorKind::TimedOut));
+        }
+        Ok(left)
+    }
+}
+
+impl Read for Deadlined {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.left()?;
+        self.tcp.set_read_timeout(Some(left))?;
+        self.tcp.read(buf)
+    }
+}
+
+impl Write for Deadlined {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let left = self.left()?;
+        self.tcp.set_write_timeout(Some(left))?;
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.tcp.flush()
     }
 }
 
@@ -353,6 +394,40 @@ mod tests {
         );
         assert_eq!(head.matches("Accept:").count(), 1, "{head}");
         assert!(head.ends_with("\r\n\r\n"));
+    }
+
+    /// A server that accepts the connection and never answers the TLS
+    /// handshake costs one budget, not the agent's every later call.
+    #[test]
+    fn a_silent_server_costs_one_budget_even_during_the_handshake() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let budget = Duration::from_millis(500);
+        let client = Client::new(None, budget).unwrap();
+        let url = parse_https_url(&format!("https://127.0.0.1:{port}/x")).unwrap();
+        let (sender, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = client.send(&Request {
+                method: "GET",
+                url: &url,
+                accept: ACCEPT_JSON,
+                bearer: None,
+                body: None,
+            });
+            let _ = sender.send((started.elapsed(), result.map(|r| r.status)));
+        });
+        let (took, result) = answer
+            .recv_timeout(budget * 10)
+            .expect("the request outlived ten budgets");
+        assert!(matches!(result, Err(HttpError::Timeout)), "{result:?}");
+        assert!(took < budget * 2, "{took:?}");
     }
 
     #[test]

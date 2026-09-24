@@ -90,8 +90,16 @@ identity; punard's `enroll.stop` calls it best-effort and continues offline.
 **Error mapping.** 401/403 on `/enroll` → `unauthorized` ("the enrollment
 code was not accepted"); 409 → `denied`; 404 on a device path →
 `not_found`; transport and 5xx → `internal` with the server's own message.
-The agent's HTTP budget is 4 s inside punard's 5 s per call; nothing
-long-polls inside a call.
+The agent's HTTP budget is 4 s inside punard's 5 s per call, and it is the
+budget of the whole call, however many requests it makes: an answer that
+reaches punard late reads as "unreachable" even when Smplify kept the
+report, and the inventory would be uploaded again on every pass. So
+`inventory.report` makes one request; the check-in that retries pinning the
+tenant key rides only `compliance.report` (sent first on every pass) with a
+quarter of the budget, and its status POST gets what is left. Every read and
+write, the TLS handshake's included, waits only for the time left, so a
+server that never answers costs one budget. Nothing long-polls inside a
+call.
 
 ## 3. Conditions that are not negotiable
 
