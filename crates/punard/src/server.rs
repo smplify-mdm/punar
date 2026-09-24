@@ -5937,6 +5937,7 @@ mod tests {
             boot_b_mount_override: Some(boot_b),
             root_b_mount_override: Some(root_b_mount),
             reboot_parameter: root.join("reboot-param"),
+            staged_marker: root.join("pi-update-staged"),
             ..PiUpdateSources::default()
         };
         let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();
