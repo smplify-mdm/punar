@@ -1197,9 +1197,14 @@ and firmware set for one-shot `tryboot`.
  "requires_reboot":true,"bytes_written":2147614720,"verified":true}
 ```
 
-The daemon never reboots. `punarctl update apply … --reboot` performs the fixed
-caller-side restart only after this successful result (Pi uses `reboot 0
-tryboot`; UEFI uses `systemctl reboot`).
+On Raspberry Pi the result adds `"one_shot_trial": true`: the staging has
+armed the firmware's one-shot `tryboot` by writing `0 tryboot` to
+`/run/systemd/reboot-param` as root, so the next *restart* tries the
+candidate, and a shutdown discards it (docs/development/update-and-rollback.md
+§7.1). If that write fails, the staging withdraws its pending record and
+fails. The daemon never reboots. `punarctl update apply … --reboot` performs
+a fixed caller-side `systemctl reboot` only after this successful result, on
+both platforms.
 
 ### 5.17b `update.reconcile_candidate`
 

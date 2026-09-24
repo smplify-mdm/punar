@@ -150,6 +150,10 @@ pub struct PiUpdateSources {
     pub mount_root: PathBuf,
     pub pending_state: PathBuf,
     pub zstd_path: PathBuf,
+    /// Where systemd-shutdown reads the argument it hands to the kernel's
+    /// reboot call. A staged candidate arms the firmware's one-shot tryboot
+    /// here, as root, inside the audited apply.
+    pub reboot_parameter: PathBuf,
     #[cfg(test)]
     pub allow_regular_targets: bool,
     #[cfg(test)]
@@ -163,6 +167,14 @@ pub struct PiUpdateSources {
     #[cfg(test)]
     pub root_b_mount_override: Option<PathBuf>,
 }
+
+/// systemd-shutdown passes this file's contents to `reboot(2)` as the
+/// `LINUX_REBOOT_CMD_RESTART2` argument; the Raspberry Pi firmware driver
+/// turns `0 tryboot` into a one-shot boot of the other slot.
+pub const SYSTEMD_REBOOT_PARAMETER: &str = "/run/systemd/reboot-param";
+
+/// The argument that makes the next restart a one-shot tryboot.
+pub const TRYBOOT_REBOOT_ARGUMENT: &[u8] = b"0 tryboot";
 
 impl Default for PiUpdateSources {
     fn default() -> Self {
@@ -181,6 +193,7 @@ impl Default for PiUpdateSources {
             mount_root: PathBuf::from("/run/punard/pi-update"),
             pending_state: PathBuf::from("/var/lib/punar/update/pending-pi.json"),
             zstd_path: PathBuf::from("/usr/bin/zstd"),
+            reboot_parameter: PathBuf::from(SYSTEMD_REBOOT_PARAMETER),
             #[cfg(test)]
             allow_regular_targets: false,
             #[cfg(test)]
@@ -396,6 +409,32 @@ impl PiUpdateEngine {
             fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         }
         write_atomic_synced(&self.sources.pending_state, &pending_bytes, 0o600)?;
+        // Arm the one-shot tryboot here, as root, rather than leave it to
+        // whoever restarts. Requesting it takes root (systemd writes this very
+        // file), and the person who staged the update is not root on a Punar
+        // device; without it, an ordinary restart boots the previous slot and
+        // the next boot finalizes the candidate as a firmware fallback,
+        // discarding a verified release. Armed, any restart the person may
+        // make — `punarctl update apply --reboot`, the power menu, `systemctl
+        // reboot` — tries the candidate. /run does not survive a shutdown, so
+        // switching off instead still discards it, and every surface says so.
+        // If it cannot be armed, the pending record goes too: a staged
+        // candidate nothing will boot is not reported as staged.
+        if let Err(error) = write_atomic_synced(
+            &self.sources.reboot_parameter,
+            TRYBOOT_REBOOT_ARGUMENT,
+            0o644,
+        ) {
+            let _ = fs::remove_file(&self.sources.pending_state);
+            return Err(PiUpdateError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "the candidate was written and verified, but the one-shot tryboot could \
+                     not be requested at {}: {error}",
+                    self.sources.reboot_parameter.display()
+                ),
+            )));
+        }
 
         Ok(PiStageResult {
             release_id: manifest.release_id,
@@ -1547,6 +1586,7 @@ mod tests {
             mount_root: root.join("mounts"),
             pending_state: pending.clone(),
             zstd_path: zstd,
+            reboot_parameter: root.join("reboot-param"),
             allow_regular_targets: true,
             selector_mount_override: Some(selector.clone()),
             boot_a_mount_override: Some(boot_a_mount),
@@ -1578,6 +1618,12 @@ mod tests {
         assert_eq!(stored.manifest_sha256, sha256_hex(&manifest_bytes));
         assert_eq!(stored.payload_size_bytes, root_payload.len() as u64);
         assert_eq!(stored.boot_size_bytes, boot_payload.len() as u64);
+        // The one-shot tryboot is armed by the staging itself, so a plain
+        // restart by anyone boots the candidate.
+        assert_eq!(
+            fs::read(root.join("reboot-param")).unwrap(),
+            TRYBOOT_REBOOT_ARGUMENT
+        );
 
         let conflict = engine
             .stage_bundle(&release, &keys, &target, "2026.08.30.5".parse().unwrap())
@@ -1602,6 +1648,20 @@ mod tests {
             .finalize_pending(&fallback.pending_state_sha256)
             .unwrap();
         assert!(!pending.exists());
+
+        // A candidate nothing would boot is not reported as staged: when the
+        // tryboot request cannot be written, the pending record goes too.
+        fs::remove_file(root.join("reboot-param")).unwrap();
+        fs::create_dir(root.join("reboot-param")).unwrap();
+        let unarmed = engine
+            .stage_bundle(&release, &keys, &target, "2026.08.30.5".parse().unwrap())
+            .unwrap_err();
+        assert!(unarmed.to_string().contains("tryboot"), "{unarmed}");
+        assert!(
+            !pending.exists(),
+            "an unarmed candidate is not left pending"
+        );
+        fs::remove_dir(root.join("reboot-param")).unwrap();
 
         // Stage again to exercise a real candidate and post-commit recovery.
         engine

@@ -1974,6 +1974,7 @@ impl Inner {
                     requires_reboot: true,
                     bytes_written: staged.bytes_written,
                     verified: staged.verified,
+                    one_shot_trial: staged.requires_tryboot_reboot,
                 })
             } else {
                 self.update_transaction
@@ -5918,6 +5919,7 @@ mod tests {
             selector_mount_override: Some(selector.clone()),
             boot_b_mount_override: Some(boot_b),
             root_b_mount_override: Some(root_b_mount),
+            reboot_parameter: root.join("reboot-param"),
             ..PiUpdateSources::default()
         };
         let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();

@@ -982,10 +982,27 @@ real and named.
 | `update.reconcile_candidate` | **root only**, same M9 rule; Raspberry Pi boot service in normal operation, no params | Pi selector finalization only | always, and the outcome audit is durable before pending state is removed |
 
 **There is no `update.reboot`, and that is deliberate.** `punarctl update
-apply --reboot` runs `systemctl reboot` *as the caller*, after punard
-returns `requires_reboot: true`. punard does not need a verb whose entire
-effect is a side effect it cannot audit the completion of, and spec 60's
-posture is that the method table stays as small as the job allows.
+apply --reboot` runs a plain `systemctl reboot` *as the caller*, after punard
+returns `requires_reboot: true`. polkit lets the active local person do that
+(`50-punar-power.rules`). punard does not need a verb whose entire effect is
+a side effect it cannot audit the completion of, and spec 60's posture is
+that the method table stays as small as the job allows.
+
+**On Raspberry Pi, punard arms the one-shot tryboot itself (2026-09-24).**
+Booting a Pi candidate needs the firmware's one-shot `tryboot`, requested by
+passing `0 tryboot` to the kernel's reboot call. systemd takes that argument
+from `/run/systemd/reboot-param`, which only root may write, so the old
+caller-side `reboot "0 tryboot"` could never work for a person. (It could
+not work for root either on Debian: `/usr/bin/reboot` does not exist there,
+and systemctl 261 rejects a positional reboot argument.) The Pi staging now
+writes that file as root, inside the audited apply, after the pending record
+and before the result. If it cannot, it withdraws the pending record and
+fails, rather than report a candidate nothing will boot. Any restart then
+tries the candidate: `--reboot`, the power menu, or `systemctl reboot`,
+which leaves an existing parameter alone. `/run` does not survive a
+shutdown, so switching off instead discards the staged update (the next
+ordinary boot finalizes it as `firmware_fallback`, §5.17b). The apply
+result carries `one_shot_trial: true` so every surface says so.
 `system.exec`, `shell.run`, `update.exec` and every other generic-execution
 probe continue to return `unknown_method` (§12.1 C8).
 

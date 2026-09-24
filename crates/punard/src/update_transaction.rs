@@ -334,6 +334,7 @@ impl UpdateTransactionEngine {
                     UpdateTransactionError::Apply("written byte count overflow".into())
                 })?,
             verified: true,
+            one_shot_trial: false,
         })
     }
 

@@ -846,31 +846,37 @@ enum UpdateRestart {
     Rollback,
 }
 
-/// Reboot is intentionally a fixed caller-side action, not a daemon RPC. On
-/// Raspberry Pi an apply must request the firmware's one-shot tryboot path;
-/// rollback and UEFI selector changes use a normal restart.
+/// Reboot is intentionally a fixed caller-side action, not a daemon RPC, and it
+/// is always a plain `systemctl reboot`, which polkit lets the active local
+/// person do. On Raspberry Pi the firmware's one-shot tryboot is already armed:
+/// punard requested it as root while staging (a person could not — systemd
+/// writes the reboot parameter only for root), so this restart, or any other,
+/// tries the candidate.
 fn restart_after_update(kind: UpdateRestart) -> ExitCode {
     let is_pi = Path::new("/proc/device-tree/chosen/bootloader/partition").exists();
-    let mut command = if is_pi && matches!(kind, UpdateRestart::Apply) {
-        let mut command = std::process::Command::new("/usr/bin/reboot");
-        command.arg("0 tryboot");
-        command
+    let next = if is_pi && matches!(kind, UpdateRestart::Apply) {
+        "Next step: restart this device when you are ready; the restart tries the \
+         staged release. Switching it off instead discards the staged update, and it \
+         must be applied again."
     } else {
-        let mut command = std::process::Command::new("/usr/bin/systemctl");
-        command.arg("reboot");
-        command
+        "Next step: restart this device when you are ready; the new boot selection is \
+         already durable."
     };
+    let mut command = std::process::Command::new("/usr/bin/systemctl");
+    command.arg("reboot");
     match command.status() {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => {
             eprintln!(
-                "The signed update transaction completed, but the restart command exited with {status}.\nNext step: restart this device manually; the verified boot selection is already durable."
+                "The signed update transaction completed, but the restart command exited \
+                 with {status}.\n{next}"
             );
             ExitCode::FAILURE
         }
         Err(error) => {
             eprintln!(
-                "The signed update transaction completed, but Punar could not start the fixed restart command ({error}).\nNext step: restart this device manually; the verified boot selection is already durable."
+                "The signed update transaction completed, but Punar could not start the \
+                 fixed restart command ({error}).\n{next}"
             );
             ExitCode::FAILURE
         }

@@ -334,7 +334,11 @@ pub fn update_apply(style: &Style, result: &Value) -> Result<String, String> {
                 } else {
                     Slot::Neutral
                 },
-                "use --reboot or restart when ready",
+                if applied.one_shot_trial {
+                    "use --reboot or restart when ready · switching off instead discards it"
+                } else {
+                    "use --reboot or restart when ready"
+                },
             ),
         ],
     ));
