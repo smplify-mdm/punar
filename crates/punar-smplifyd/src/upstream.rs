@@ -163,7 +163,10 @@ impl Api {
             None,
             body.to_string().as_bytes(),
         )?;
-        if response.status != 200 {
+        // Smplify acknowledges a check-in with 202 Accepted, the signing key
+        // in its body. Requiring exactly 200 refused every acknowledgement,
+        // so the key was never pinned.
+        if response.status / 100 != 2 {
             return Err(status_error(response.status, &response.body));
         }
         let value = data(&response.body).unwrap_or(Value::Null);

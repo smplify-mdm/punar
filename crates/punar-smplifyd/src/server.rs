@@ -294,11 +294,47 @@ impl Daemon {
         let payload = params.and_then(|p| p.get(key)).ok_or_else(|| {
             CallError::new(ErrorCode::InvalidParams, format!("{key} is required"))
         })?;
+        self.pin_tenant_key_if_missing(&record);
         let body = compose(&record.device_id, payload);
         self.api()?
             .status(&record.device_id, &body)
             .map_err(upstream_refusal)?;
         Ok(json!({}))
+    }
+
+    /// Pin the organization's signing key if the check-in at registration
+    /// did not. That first check-in is allowed to fail without undoing the
+    /// enrollment, so this is the "next sync retries" its comment promises:
+    /// one check-in per report until the key is held, then never again. It is
+    /// pinned once and never replaced here: a key that changes under a pinned
+    /// device is a question for re-enrollment, not for a sync.
+    fn pin_tenant_key_if_missing(&self, record: &Record) {
+        if record.tenant_public_key.is_some() {
+            return;
+        }
+        let os_release = crate::device::os_release(&self.os_release_path);
+        let answer = self.api().and_then(|api| {
+            api.checkin(&record.device_id, &record.os_identifier, &os_release)
+                .map_err(internal)
+        });
+        match answer {
+            Ok(Some(key)) => {
+                let mut pinned = record.clone();
+                pinned.tenant_public_key = Some(key);
+                if let Err(error) = self.store.update(&pinned) {
+                    eprintln!("punar-smplifyd: could not store the tenant key ({error:?})");
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "punar-smplifyd: check-in answered without a tenant key; retrying next sync"
+                )
+            }
+            Err(error) => eprintln!(
+                "punar-smplifyd: check-in deferred again ({}); retrying next sync",
+                error.message
+            ),
+        }
     }
 
     /// The identity punard's `device_token` names, or `unauthorized`.
