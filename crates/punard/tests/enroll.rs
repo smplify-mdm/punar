@@ -104,11 +104,11 @@ struct ControlPlaneState {
     /// Answer these methods only after the given delay: a control plane
     /// that is slow to reach the organization's server.
     answer_late: Mutex<HashMap<&'static str, Duration>>,
-    /// Hold the next `inventory.report`, once its token is resolved, until
-    /// `release_inventory`: a sync pass caught with its report in flight.
-    hold_next_inventory: AtomicBool,
-    inventory_held: AtomicBool,
-    release_inventory: AtomicBool,
+    /// Hold the next report of this method, once its token is resolved,
+    /// until `release_held`: a sync pass caught with its report in flight.
+    hold_next: Mutex<Option<&'static str>>,
+    held: AtomicBool,
+    release_held: AtomicBool,
 }
 
 impl ControlPlaneState {
@@ -186,6 +186,7 @@ impl ControlPlaneState {
             }
             "compliance.report" => {
                 let device_id = self.device_for(params)?;
+                self.hold_if_next(method);
                 self.compliance.lock().unwrap().push(json!({
                     "device_id": device_id,
                     "received_at": "now",
@@ -195,12 +196,7 @@ impl ControlPlaneState {
             }
             "inventory.report" => {
                 let device_id = self.device_for(params)?;
-                if self.hold_next_inventory.swap(false, Ordering::SeqCst) {
-                    self.inventory_held.store(true, Ordering::SeqCst);
-                    while !self.release_inventory.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                }
+                self.hold_if_next(method);
                 self.inventory.lock().unwrap().push(json!({
                     "device_id": device_id,
                     "received_at": "now",
@@ -223,6 +219,22 @@ impl ControlPlaneState {
                 Ok(json!({}))
             }
             other => Err(("unknown_method", format!("no method {other:?}"))),
+        }
+    }
+
+    /// Hold this report until `release_held` if it is the one `hold_next`
+    /// names.
+    fn hold_if_next(&self, method: &str) {
+        {
+            let mut next = self.hold_next.lock().unwrap();
+            if *next != Some(method) {
+                return;
+            }
+            *next = None;
+        }
+        self.held.store(true, Ordering::SeqCst);
+        while !self.release_held.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1965,6 +1977,26 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
+/// Run a sync pass whose `method` report is held in flight while `during`
+/// runs, then let it finish.
+fn pass_held_at(
+    daemon: &TestDaemon,
+    state: &ControlPlaneState,
+    method: &'static str,
+    during: &dyn Fn(),
+) {
+    state.release_held.store(false, Ordering::SeqCst);
+    state.held.store(false, Ordering::SeqCst);
+    *state.hold_next.lock().unwrap() = Some(method);
+    std::thread::scope(|scope| {
+        let pass = scope.spawn(|| daemon.result("reconcile", None));
+        wait_until("the held report", || state.held.load(Ordering::SeqCst));
+        during();
+        state.release_held.store(true, Ordering::SeqCst);
+        pass.join().unwrap();
+    });
+}
+
 /// A sync pass works from the enrollment it began with, and can outlive it:
 /// its inventory report may still be in flight while `enroll.stop` runs, and
 /// `enroll.start` after that. The reply must write nothing back — not the
@@ -1985,18 +2017,7 @@ fn a_pass_that_outlives_its_enrollment_writes_nothing_back() {
     // and that report is held in flight while `during` runs.
     let pass_in_flight = |secure_boot: u8, during: &dyn Fn()| {
         write_file(&dir.join(SECURE_BOOT), [6u8, 0, 0, 0, secure_boot]);
-        state.release_inventory.store(false, Ordering::SeqCst);
-        state.inventory_held.store(false, Ordering::SeqCst);
-        state.hold_next_inventory.store(true, Ordering::SeqCst);
-        std::thread::scope(|scope| {
-            let pass = scope.spawn(|| daemon.result("reconcile", None));
-            wait_until("the held inventory report", || {
-                state.inventory_held.load(Ordering::SeqCst)
-            });
-            during();
-            state.release_inventory.store(true, Ordering::SeqCst);
-            pass.join().unwrap();
-        });
+        pass_held_at(&daemon, &state, "inventory.report", during);
     };
 
     // Unenrolled while the report is in flight: nothing is recreated.
@@ -2043,6 +2064,87 @@ fn a_pass_that_outlives_its_enrollment_writes_nothing_back() {
     // device sends nothing on the next pass.
     daemon.result("reconcile", None);
     assert_eq!(state.inventory.lock().unwrap().len(), 5);
+}
+
+/// A pass that outlives its enrollment leaves the device's sync state alone
+/// too: whether a report is pending, and the sync and withheld-list
+/// transitions it audits. Its reports fail against a token that no longer
+/// exists, and otherwise the enrollment that replaced it would read as
+/// pending, the audit would record a failure and a withheld list that were
+/// not its own, and its unchanged inventory would be sent again.
+#[test]
+fn a_pass_that_outlives_its_enrollment_leaves_the_sync_state_alone() {
+    let dir = test_dir("stale-state");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    // The first enrollment is organization-owned, and its application list
+    // is withheld: the installation lists a row with no columns.
+    fs::write(
+        dir.join("machine/bin/flatpak"),
+        "#!/bin/sh\nprintf 'not-a-flatpak-row\\n'\n",
+    )
+    .unwrap();
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+    );
+    let events = |action: &str, result: &str| {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == action && e["result"] == result)
+            .count()
+    };
+    assert_eq!(events("enroll.inventory", "applications_withheld"), 1);
+    let first_token = state
+        .devices
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .cloned()
+        .unwrap();
+
+    // Something the inventory carries changes, so the next pass sends one.
+    // That pass is caught with its compliance report in flight while the
+    // device is unenrolled and enrolled again, personally.
+    write_file(
+        &dir.join(
+            "machine/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        ),
+        [6u8, 0, 0, 0, 1],
+    );
+    pass_held_at(&daemon, &state, "compliance.report", &|| {
+        daemon.result("enroll.stop", None);
+        *state.org_ownership.lock().unwrap() = None;
+        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    });
+    let last_inventory = state
+        .lines
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|line| line.contains(r#""inventory.report""#))
+        .cloned()
+        .unwrap();
+    assert!(
+        last_inventory.contains(&first_token),
+        "the stale pass went on to report its inventory, and was refused"
+    );
+    assert_eq!(events("enroll.inventory", "applications_withheld"), 1);
+    assert_eq!(events("enroll.sync", "unreachable"), 0);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["result"], "success", "{status}");
+    assert_eq!(status["last_sync"]["pending"], false, "{status}");
+
+    // The new enrollment's own next pass finds nothing to resend.
+    let sent = state.inventory.lock().unwrap().len();
+    daemon.result("reconcile", None);
+    assert_eq!(state.inventory.lock().unwrap().len(), sent);
+    assert_eq!(events("enroll.inventory", "success"), 0);
 }
 
 /// The resend gate hashes what can leave the device and nothing else. The

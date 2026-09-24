@@ -457,7 +457,11 @@ and removed by `enroll.stop` under the enrollment lock. A sync pass writes it,
 and the inventory hash, only while the enrollment it began with is still the
 current one (an epoch bumped at every enroll and unenroll), so a reply that
 arrives after unenrolling never recreates it and never lands in a later
-enrollment. `enroll.status.organization_view` summarizes it
+enrollment. The same holds for the rest of what a pass learns: the pending
+flags (§7), the outcome `enroll.start` reports, and the `enroll.sync` and
+`enroll.inventory` transitions it audits. A pass that outlived its
+enrollment fails against a token that no longer exists, and that failure is
+not the later enrollment's. `enroll.status.organization_view` summarizes it
 as categories and field names; `punarctl enroll status` shows them under
 "Your organization can see".
 

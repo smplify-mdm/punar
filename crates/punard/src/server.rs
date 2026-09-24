@@ -5613,8 +5613,6 @@ impl Inner {
             Some(token) => client.compliance_report(token, &report).is_ok(),
             None => false,
         };
-        self.pending_compliance
-            .store(!compliance_ok, Ordering::SeqCst);
 
         // Inventory: device facts, which capabilities are supported, posture
         // states, and the tier's applications. Sent when its hash changed,
@@ -5653,7 +5651,6 @@ impl Inner {
             &collected,
             enrollment.organization_owned,
         );
-        self.audit_applications_withheld(actor, withheld, &enrollment);
         // The gate hashes exactly the body the control plane is handed,
         // which carries nothing that may not leave the device: a value that
         // is never sent must never be able to trigger a send.
@@ -5687,8 +5684,6 @@ impl Inner {
                 None => "unreachable",
             }
         };
-        self.pending_inventory
-            .store(inventory_outcome == "unreachable", Ordering::SeqCst);
 
         // M10: the query pull, on the same hook and the same cadence. It is
         // deliberately last: compliance and inventory are this device's
@@ -5699,34 +5694,27 @@ impl Inner {
             None => None,
         };
 
-        // Transition-only audit (milestone-5.md section 7): once on
-        // reachable→unreachable, once on recovery — never one event per
-        // 120 s retry.
-        let overall = if compliance_ok && inventory_outcome != "unreachable" {
-            "success"
-        } else {
-            "unreachable"
+        // Everything this pass learned is written back only while the
+        // enrollment it began with is still the one in the slot: the pending
+        // flags, the outcome `enroll.start` reports, the transitions it
+        // audits, last_sync, the inventory hash, and what the organization
+        // received as the person's view of it. A pass can outlive its
+        // enrollment (a report may still be in flight while enroll.stop runs,
+        // and enroll.start after it), and then it writes nothing: not into the
+        // ended enrollment, whose view enroll.stop removed under this lock,
+        // and not over the state of one started since, whose own passes keep
+        // it. Its failure, against a token that no longer exists, would
+        // otherwise show the new enrollment as pending, audit a sync failure
+        // that was not its own, and send its unchanged inventory again.
+        let mut slot = self.enrollment.lock().unwrap();
+        let still_current = self.enrollment_epoch.load(Ordering::SeqCst) == epoch;
+        let Some(current) = slot.as_mut().filter(|_| still_current) else {
+            return;
         };
-        let previous = enrollment.last_sync.result.clone();
-        if overall == "unreachable" && previous.as_deref() != Some("unreachable") {
-            self.log_audit(self.enroll_event(
-                actor,
-                "enroll.sync",
-                RESOURCE_CONTROL_PLANE,
-                "unreachable",
-                enrollment.policy_ids(),
-            ));
-        }
-        if overall == "success" && previous.as_deref() == Some("unreachable") {
-            self.log_audit(self.enroll_event(
-                actor,
-                "enroll.sync",
-                RESOURCE_CONTROL_PLANE,
-                AuditOutcome::Success.as_str(),
-                enrollment.policy_ids(),
-            ));
-        }
-
+        self.pending_compliance
+            .store(!compliance_ok, Ordering::SeqCst);
+        self.pending_inventory
+            .store(inventory_outcome == "unreachable", Ordering::SeqCst);
         *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
             compliance: if compliance_ok {
                 "success".to_string()
@@ -5735,31 +5723,50 @@ impl Inner {
             },
             inventory: inventory_outcome.to_string(),
         });
+        self.audit_applications_withheld(actor, withheld, current);
 
-        // Persist last_sync / the inventory hash, and keep what the
-        // organization received as the person's view of it — only while the
-        // enrollment this pass began with is still the one in the slot. A
-        // concurrent enroll.stop wins: it removed the view under this lock,
-        // and a pass that outlived it writes nothing back, not even into an
-        // enrollment started since.
-        let mut slot = self.enrollment.lock().unwrap();
-        let still_current = self.enrollment_epoch.load(Ordering::SeqCst) == epoch;
-        if let Some(current) = slot.as_mut().filter(|_| still_current) {
-            if let (Some(sent), Some(at)) = (received, sent_at.as_deref()) {
-                self.record_organization_view(current, at, sent);
-            }
-            current.last_sync = LastSyncRecord {
-                at: Some(utc_now_rfc3339()),
-                result: Some(overall.to_string()),
-            };
-            current.last_inventory_hash = new_hash;
-            current.last_inventory_sent_at = sent_at;
-            if last_query.is_some() {
-                current.last_query = last_query;
-            }
-            if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
-                eprintln!("punard: could not persist enrollment sync state: {e}");
-            }
+        // Transition-only audit (milestone-5.md section 7): once on
+        // reachable→unreachable, once on recovery — never one event per
+        // 120 s retry.
+        let overall = if compliance_ok && inventory_outcome != "unreachable" {
+            "success"
+        } else {
+            "unreachable"
+        };
+        let previous = current.last_sync.result.clone();
+        if overall == "unreachable" && previous.as_deref() != Some("unreachable") {
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.sync",
+                RESOURCE_CONTROL_PLANE,
+                "unreachable",
+                current.policy_ids(),
+            ));
+        }
+        if overall == "success" && previous.as_deref() == Some("unreachable") {
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.sync",
+                RESOURCE_CONTROL_PLANE,
+                AuditOutcome::Success.as_str(),
+                current.policy_ids(),
+            ));
+        }
+
+        if let (Some(sent), Some(at)) = (received, sent_at.as_deref()) {
+            self.record_organization_view(current, at, sent);
+        }
+        current.last_sync = LastSyncRecord {
+            at: Some(utc_now_rfc3339()),
+            result: Some(overall.to_string()),
+        };
+        current.last_inventory_hash = new_hash;
+        current.last_inventory_sent_at = sent_at;
+        if last_query.is_some() {
+            current.last_query = last_query;
+        }
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not persist enrollment sync state: {e}");
         }
     }
 
