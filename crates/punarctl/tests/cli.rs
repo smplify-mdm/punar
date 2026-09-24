@@ -276,7 +276,8 @@ fn fixture_enroll_start() -> Value {
         "policy_ids": ["eng-baseline-v12"],
         "attestation": "simulated",
         "enrolled_at": "2026-08-26T09:00:00Z",
-        "first_sync": {"compliance": "success", "inventory": "success"}
+        "first_sync": {"compliance": "success", "inventory": "success"},
+        "removable": true
     })
 }
 
@@ -288,7 +289,8 @@ fn fixture_enroll_status() -> Value {
         "enrolled_at": "2026-08-26T09:00:00Z",
         "attestation": "simulated",
         "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
-                       "pending": false}
+                       "pending": false},
+        "removable": true
     })
 }
 
@@ -1002,6 +1004,130 @@ fn enroll_stop_on_a_personal_device_asks_for_nothing() {
     assert!(stdout(&output).is_empty());
 }
 
+/// An organization that enrolls devices as not removable (punard refuses
+/// until the person accepts), on a device not enrolled yet. `enroll.start`
+/// calls are counted so a test can prove nothing was retried behind the
+/// person's back.
+static NON_REMOVABLE_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+fn non_removable_org_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => Ok(json!({ "enrolled": false })),
+        Some("enroll.start") => {
+            NON_REMOVABLE_STARTS.fetch_add(1, Ordering::SeqCst);
+            if request["params"]["accept_non_removable"] == json!(true) {
+                let mut result = fixture_enroll_start();
+                result["removable"] = json!(false);
+                return Ok(result);
+            }
+            Err(json!({
+                "code": "denied",
+                "message": "Acme Engineering enrolls devices so that nobody on them can \
+                            unenroll them, and this request did not accept that. Nothing \
+                            was changed: this device was not registered with Acme \
+                            Engineering.\nPolicy: Acme Engineering's enrollment terms — \
+                            once enrolled, only erasing and reinstalling this device ends \
+                            the enrollment; nobody on it, you included, can unenroll it.\n\
+                            Next step: if that is what you want, run `punarctl enroll start \
+                            acme.com --accept-non-removable`.",
+                "details": {"decision": "deny", "reason": "non_removable_not_accepted",
+                            "organization": "acme",
+                            "organization_name": "Acme Engineering"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// A device already enrolled as not removable.
+fn non_removable_enrolled_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => {
+            let mut status = fixture_enroll_status();
+            status["removable"] = json!(false);
+            Ok(status)
+        }
+        Some("enroll.stop") => {
+            assert!(
+                request.get("params").is_none(),
+                "nobody may unenroll this device, so no password is asked for or sent"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "This device's enrollment with Acme Engineering cannot be undone \
+                            from the device.\nPolicy: Acme Engineering's enrollment terms — \
+                            it enrolls devices as not removable, and that was accepted when \
+                            this device enrolled.\nNext step: only erasing and reinstalling \
+                            the device ends the enrollment.",
+                "details": {"decision": "deny", "reason": "enrollment_not_removable",
+                            "organization": "acme"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Without a terminal there is nobody to ask, so a non-removable
+/// organization's refusal is the answer: it names the flag, exits 3, and is
+/// never retried. With the flag the enrollment goes through and says who can
+/// end it.
+#[test]
+fn a_non_removable_enrollment_is_refused_without_consent_and_shown_with_it() {
+    let socket = start_mock_with(non_removable_org_respond);
+    let before = NON_REMOVABLE_STARTS.load(Ordering::SeqCst);
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--accept-non-removable"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+    assert_eq!(
+        NON_REMOVABLE_STARTS.load(Ordering::SeqCst),
+        before + 1,
+        "no second request without the person's yes"
+    );
+
+    let output = run(
+        &socket,
+        &["enroll", "start", "acme.com", "--accept-non-removable"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NOT ALLOWED"), "{text}");
+    assert!(
+        text.contains("only erasing it ends the enrollment"),
+        "{text}"
+    );
+}
+
+/// A device enrolled as not removable: `enroll stop` asks for neither a yes
+/// nor a password, and prints punard's refusal; `enroll start` says nothing
+/// on the device can end the enrollment; `enroll status` shows the term.
+#[test]
+fn a_non_removable_enrollment_asks_for_nothing_it_cannot_use() {
+    let socket = start_mock_with(non_removable_enrolled_respond);
+    let output = run(&socket, &["enroll", "stop"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("erasing and reinstalling"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("not removable"), "{text}");
+    assert!(!text.contains("enroll stop"), "{text}");
+
+    let output = run(&socket, &["enroll", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("NOT ALLOWED"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 #[test]
 fn enroll_status_and_stop_render_and_round_trip() {
     let socket = start_mock();
@@ -1012,6 +1138,11 @@ fn enroll_status_and_stop_render_and_round_trip() {
     assert!(text.contains("SIMULATED"), "{text}");
     assert!(text.contains("LAST SYNC"), "{text}");
     assert!(text.contains("SUCCESS"), "{text}");
+    // Who can end the enrollment is part of the state, and the way to do it
+    // is one a person can actually follow.
+    assert!(text.contains("UNENROLL"), "{text}");
+    assert!(text.contains("punarctl enroll stop"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
 
     let output = run(&socket, &["--json", "enroll", "status"]);
     let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();

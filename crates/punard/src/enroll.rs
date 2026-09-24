@@ -481,6 +481,21 @@ pub struct Enrollment {
     /// `enroll.status`. Metadata only — never a payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_query: Option<LastQueryRecord>,
+    /// Whether a person on this device may unenroll it: the organization's
+    /// `enrollment.removable`, read from its document at enrollment and fixed
+    /// here (docs/development/smplify-enrollment.md section 3.1). Never
+    /// re-read from a policy fetch, so an organization cannot make an
+    /// enrollment non-removable after its user agreed to a removable one.
+    ///
+    /// Defaults to `true` for a file written before the field existed, the
+    /// same reading an organization document without the key gets. No
+    /// production enrollment predates it: the Smplify path has not shipped.
+    #[serde(default = "removable_by_default")]
+    pub removable: bool,
+}
+
+fn removable_by_default() -> bool {
+    true
 }
 
 /// The `enroll.status` view of the most recent remote query
@@ -709,7 +724,28 @@ mod tests {
             last_inventory_hash: None,
             remote_query_scopes: vec!["inventory".into(), "authority".into()],
             last_query: None,
+            removable: true,
         }
+    }
+
+    /// Removability is fixed at enrollment and survives a restart; a file
+    /// written before the field existed reads as removable, exactly as an
+    /// organization document without the key does.
+    #[test]
+    fn removability_persists_and_a_file_without_it_reads_as_removable() {
+        let dir = tmp("removable");
+        let path = dir.join("enrollment.json");
+        let mut fixed = sample_enrollment();
+        fixed.removable = false;
+        save_enrollment(&path, &fixed).unwrap();
+        assert!(!load_enrollment(&path).unwrap().unwrap().removable);
+
+        let mut raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("removable");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        assert!(load_enrollment(&path).unwrap().unwrap().removable);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -202,7 +202,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) |
 | `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  |
 | `enroll.status` (M5)    | any connected peer | no      | no      |
-| `enroll.stop` (M5)      | root, or a person with a fresh `punar-authd` ticket where the organization allows local administration; agents never (section 5.11) | yes  | always  |
+| `enroll.stop` (M5)      | nobody, where the organization enrolled the device as not removable; otherwise root, or a person with a fresh `punar-authd` ticket; agents never (section 5.11) | yes  | always  |
 | `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no |
 | `approvals.create` (M9) | **root only (uid 0)** | yes | always |
 | `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always |
@@ -694,7 +694,7 @@ authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
-Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…"}` — `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
+Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…", "accept_non_removable": true}` — `accept_non_removable` optional, default `false` (step 6 below); `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
 the fetched policy ids in `policy_ids`). Processed under the 60 s bound
 (section 2).
@@ -726,6 +726,24 @@ checks run in this order:
    from here on names a caller who proved who they are. punarctl reads
    `enroll.status` first and does not ask for a code or a password on a
    device that is already enrolled.
+6. **The organization's removal term**, read from the document
+   `org.discover` returned and before `enroll.register`, so an organization
+   never learns of a device that did not enroll
+   (docs/development/smplify-enrollment.md §3.1). `enrollment.removable` is
+   a boolean; absent means `true`, and an ordinary enrollment asks nothing
+   more. A value that is present but not a boolean is `invalid_params`
+   (`details: {"stage": "discover", "reason": "enrollment.removable"}`),
+   never the permissive reading. `false` without `accept_non_removable:
+   true` is `denied` with `details.reason: "non_removable_not_accepted"`,
+   `details.organization` and `details.organization_name`, and a message
+   naming `punarctl enroll start <domain> --accept-non-removable`: an
+   organization cannot make a device non-removable without its user's
+   explicit yes. On a terminal punarctl shows the term, asks for `accept`,
+   and sends the request again with the flag and a fresh password (the
+   first was spent on discovery — nothing is fetched for a caller who has
+   not confirmed); without a terminal, or with `--json`, the refusal is the
+   answer. The term is written to `enrollment.json` and never re-read from
+   a policy fetch.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
@@ -750,7 +768,8 @@ that point removes everything this call created and returns
   "policy_ids": ["eng-baseline-v12"],
   "attestation": "simulated",
   "enrolled_at": "2026-08-26T09:00:00Z",
-  "first_sync": {"compliance": "success", "inventory": "success"}
+  "first_sync": {"compliance": "success", "inventory": "success"},
+  "removable": true
 }}
 ```
 
@@ -772,11 +791,14 @@ Params: none. Read-only, any connected peer, not audited.
   "enrolled_at": "2026-08-26T09:00:00Z",
   "attestation": "simulated",
   "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
-                 "pending": false}
+                 "pending": false},
+  "removable": true
 }}
 ```
 
 Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
+`removable` is the organization's removal term fixed at enrollment
+(§5.9 step 6): whether `enroll.stop` can succeed on this device at all.
 `last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
 while a report is queued (bounded latest-wins queue, spec section 55;
 milestone-5.md section 7). The device token appears in no field.
@@ -786,12 +808,17 @@ milestone-5.md section 7). The device token appears in no field.
 Params: `{}` or none from root; `{"ticket": "…"}` from a person. Mutating,
 always audited (`action: "enroll.stop"`, `resource: "enrollment"`). The gate
 is section 5.9's — agents refused at any uid, a person without a ticket
-refused, the ticket spent before anything changes — with one addition before
-the ticket is spent: **an organization may keep its device.** Where its
-policy has turned local administration off (section 5.7 `local_admin`), a
-person is refused with `details.reason: "local_admin_disabled"` and the
-organization's policy id in `policy_ids`; the ticket is left unspent. Root is
-not subject to it. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
+refused, the ticket spent before anything changes — with one refusal between
+the agent check and the ticket check: **an organization may keep its
+device.** Where it enrolled the device as not removable (§5.9 step 6, with
+the person's explicit yes), every local caller — root included — is refused
+with `details.reason: "enrollment_not_removable"` and
+`details.organization`; a ticket is neither required nor spent, because the
+answer does not depend on who is asking and `enroll.status.removable`
+already says it to anyone. Only erasing and reinstalling the device ends
+such an enrollment; a signed release from the organization is not built.
+punarctl reads `enroll.status` first and asks for neither a yes nor a
+password in that case. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
 deletes `enrollment.json` and the device token, recomputes the merge, runs
 one reconcile pass (recorded user preferences resurface as the winning
 layer per spec section 39), rewrites the section 9 status file. Result:

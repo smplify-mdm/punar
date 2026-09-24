@@ -584,6 +584,15 @@ pub struct EnrollStartParams {
     /// uid 0. punard spends it and never forwards, audits or returns it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// The person has been told, and accepts, that this organization enrolls
+    /// devices so that nobody on the device can unenroll them
+    /// (`enrollment.removable: false` in its organization document —
+    /// docs/development/smplify-enrollment.md section 3.1). Without it punard
+    /// refuses such an enrollment before registering, so an organization can
+    /// never make a device non-removable without its user's explicit yes.
+    /// Meaningless, and ignored, for a removable enrollment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_non_removable: bool,
 }
 
 /// Params for `enroll.stop` (M5, contract section 5.11). Optional on the wire:
@@ -1830,6 +1839,12 @@ pub struct EnrollStartResult {
     pub attestation: String,
     pub enrolled_at: String,
     pub first_sync: FirstSync,
+    /// Whether this enrollment can be undone from the device: the
+    /// organization's `enrollment.removable`, fixed at enrollment
+    /// (docs/development/smplify-enrollment.md section 3.1). Optional only so
+    /// a result from a daemon that predates it still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removable: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStartResult`]: per-report outcome of
@@ -1868,6 +1883,11 @@ pub struct EnrollStatusResult {
     /// Metadata only — the full record is `punarctl privacy queries`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_query: Option<LastQuery>,
+    /// Whether a person on this device may unenroll it — the organization's
+    /// `enrollment.removable`, fixed when the device enrolled. Present exactly
+    /// when enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removable: Option<bool>,
 }
 
 /// The `enroll.status` view of the most recent remote query (M10).
@@ -2385,6 +2405,7 @@ mod tests {
                 org_domain: "acme.com".to_string(),
                 code: None,
                 ticket: None,
+                accept_non_removable: false,
             }),
             Method::EnrollStatus,
             Method::EnrollStop(EnrollStopParams::default()),
@@ -3265,6 +3286,22 @@ mod tests {
     }
 
     #[test]
+    fn accepting_a_non_removable_enrollment_is_explicit_and_absent_by_default() {
+        let plain: EnrollStartParams =
+            serde_json::from_value(json!({"org_domain": "acme.com"})).unwrap();
+        assert!(!plain.accept_non_removable);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"org_domain": "acme.com"}),
+            "a request that accepts nothing says nothing"
+        );
+        let accepting: EnrollStartParams =
+            serde_json::from_value(json!({"org_domain": "acme.com", "accept_non_removable": true}))
+                .unwrap();
+        assert!(accepting.accept_non_removable);
+    }
+
+    #[test]
     fn enroll_status_takes_no_params_and_stop_takes_only_a_ticket() {
         for method in ["enroll.status", "enroll.stop"] {
             let reject = Request::parse_json_line(&format!(
@@ -3319,6 +3356,7 @@ mod tests {
             last_sync: None,
             remote_query_scopes: None,
             last_query: None,
+            removable: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),

@@ -1154,6 +1154,28 @@ fn enrollment_rows(
     rows
 }
 
+/// Who can end the enrollment (docs/development/smplify-enrollment.md section
+/// 3.1). `None` for a daemon that predates the field, rather than a guess.
+fn removability_row(org: &model::Org, removable: Option<bool>) -> Option<Row> {
+    Some(match removable? {
+        true => Row::new(
+            "Unenroll",
+            "Allowed",
+            Slot::Neutral,
+            "punarctl enroll stop · asks for your password",
+        ),
+        false => Row::new(
+            "Unenroll",
+            "Not allowed",
+            Slot::Warn,
+            &format!(
+                "{} enrolled this device as not removable · only erasing it ends the enrollment",
+                org.display_name
+            ),
+        ),
+    })
+}
+
 /// `punarctl enroll start <domain>`.
 pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let outcome: model::EnrollStart = parse(result)?;
@@ -1164,6 +1186,9 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         &outcome.attestation,
         outcome.enrolled_at.as_deref(),
     );
+    if let Some(row) = removability_row(&outcome.org, outcome.removable) {
+        rows.push(row);
+    }
     if let Some(sync) = &outcome.first_sync {
         rows.push(Row::new(
             "First sync",
@@ -1234,6 +1259,9 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let policy_ids = status.policy_ids.clone().unwrap_or_default();
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
+    if let Some(row) = removability_row(org, status.removable) {
+        rows.push(row);
+    }
     if let Some(sync) = &status.last_sync {
         let (value, slot) = match sync.result.as_deref() {
             Some("success") => ("Success", Slot::Ok),

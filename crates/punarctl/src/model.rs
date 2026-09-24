@@ -158,6 +158,9 @@ pub struct EnrollStart {
     pub enrolled_at: Option<String>,
     #[serde(default)]
     pub first_sync: Option<FirstSync>,
+    /// Whether a person on this device may unenroll it later.
+    #[serde(default)]
+    pub removable: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStart`].
@@ -182,6 +185,9 @@ pub struct EnrollStatus {
     pub attestation: Option<String>,
     #[serde(default)]
     pub last_sync: Option<LastSync>,
+    /// Whether a person on this device may unenroll it.
+    #[serde(default)]
+    pub removable: Option<bool>,
 }
 
 /// The `last_sync` object of [`EnrollStatus`].
