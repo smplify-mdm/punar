@@ -63,6 +63,9 @@ struct ControlPlaneState {
     /// Fault injection: serve a corrupt policy envelope (contradicted
     /// fixed rank) so the all-or-nothing abort path can be exercised.
     serve_bad_policy: AtomicBool,
+    /// Serve no policy at all — a fresh Smplify tenant that has not assigned
+    /// anything to this device yet (`policy.fetch` answers `{policies: []}`).
+    serve_no_policy: AtomicBool,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -106,6 +109,9 @@ impl ControlPlaneState {
             }
             "policy.fetch" => {
                 self.device_for(params)?;
+                if self.serve_no_policy.load(Ordering::SeqCst) {
+                    return Ok(json!({ "policies": [] }));
+                }
                 let mut envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
                 if self.serve_bad_policy.load(Ordering::SeqCst) {
                     envelope["precedence_rank"] = json!(5); // fixed rank is 2
@@ -1003,4 +1009,32 @@ fn the_enrollment_code_reaches_the_control_plane_and_nowhere_else() {
     let mut hits = Vec::new();
     walk(&dir, code, &mut hits);
     assert!(hits.is_empty(), "the code leaked to disk: {hits:?}");
+}
+
+/// A real Smplify tenant can enroll a device before assigning it any policy:
+/// the built-in agent answers `policy.fetch` with an empty list. Enrollment
+/// must still complete — managed, no organization layers, compliance and
+/// inventory reported — and unenroll cleanly.
+#[test]
+fn enrolling_before_the_organization_assigns_any_policy_succeeds() {
+    let dir = test_dir("no-policy");
+    let state = Arc::new(ControlPlaneState::default());
+    state.serve_no_policy.store(true, Ordering::SeqCst);
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    let result = daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "lex_empty-tenant"})),
+    );
+    assert_eq!(result["org"]["display_name"], "Acme Engineering");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], true);
+    assert_eq!(daemon.result("status", None)["mode"], "managed");
+    assert!(
+        !state.compliance.lock().unwrap().is_empty(),
+        "the first compliance report is sent even with no organization policy"
+    );
+    daemon.result("enroll.stop", None);
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    daemon.stop();
 }
