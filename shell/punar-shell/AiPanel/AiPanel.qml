@@ -69,6 +69,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import "../Theme"
 import "../Services"
@@ -99,12 +100,88 @@ DeferredSurfaceBase {
     // Meta rows / labels: Geist Mono, tracked, uppercase. Mockup
     // fractional sizes round to whole px (8.5 → 9, 9.5 → 10).
     component Meta: Text {
+        // Plain, always: rows quote agent names and ids a process chose for
+        // itself, and none of it may be read as markup.
+        textFormat: Text.PlainText
         font.family: Theme.fontMono
         font.pixelSize: 9
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
         color: Theme.shellInk3
+    }
+
+    // The two refresh calls below are asked for their effect, not their
+    // output: `agents list` makes agentd rescan when its view is stale, and
+    // `agents access` makes it drain the audit tail into the ledger, and the
+    // results reach this panel through the files it already watches. What
+    // the panel still needs from them is whether agentd ANSWERED — run
+    // detached, a dead or refusing agentd looked like a quiet machine.
+    // "" when the last refresh was answered.
+    property string agentdError: ""
+    // A purge agentd refused, and the session it was for.
+    property string purgeError: ""
+    property string purgeErrorId: ""
+
+    component Kick: Process {
+        id: kick
+
+        stdout: StdioCollector {
+            waitForEnd: true
+        }
+        stderr: StdioCollector {
+            id: kickErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: kick.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.agentdError = "";
+                return;
+            }
+            var said = String(kickErr.text).trim().split("\n")[0];
+            root.agentdError = said !== "" ? said : "punarctl exited with " + exitCode;
+        })
+
+        function ask(argv: list<string>): void {
+            if (kick.running)
+                return;
+            kick.command = argv;
+            try {
+                kick.running = true;
+            } catch (e) {
+                root.agentdError = "punarctl could not be started";
+            }
+        }
+    }
+
+    Kick {
+        id: listKick
+    }
+    Kick {
+        id: accessKick
+    }
+
+    Process {
+        id: purgeProc
+
+        stderr: StdioCollector {
+            id: purgeErr
+            waitForEnd: true
+        }
+
+        Component.onCompleted: purgeProc.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.purgeError = "";
+                return;
+            }
+            // Refused: nothing was deleted, so nothing is "requested" any
+            // more, and the privacy card says why.
+            var said = String(purgeErr.text).trim();
+            root.purgeRequestedId = "";
+            root.purgeError = said !== "" ? said : "punarctl exited with " + exitCode;
+        })
     }
 
     // Section header + right-hand tagline (mockup .sect): the question
@@ -994,13 +1071,7 @@ DeferredSurfaceBase {
         // scan. Fixed argv — the shell never composes a shell string.
         Agents.refresh();
         Ledger.refresh();
-        try {
-            Quickshell.execDetached(["punarctl", "agents", "list", "--json"]);
-        } catch (e) {
-            // No punarctl on a dev machine: the panel still renders
-            // whatever agents.json holds (or the calm empty state).
-            console.warn("punar-shell: agents refresh unavailable:", e);
-        }
+        listKick.ask(["punarctl", "agents", "list", "--json"]);
         root.refreshLedger(root.selectedId);
     }
 
@@ -1040,19 +1111,17 @@ DeferredSurfaceBase {
     function refreshLedger(sessionId: string): void {
         if (sessionId === "" || Ledger.has(sessionId))
             return;
-        try {
-            Quickshell.execDetached(["punarctl", "agents", "access", sessionId, "--json"]);
-        } catch (e) {
-            console.warn("punar-shell: ledger refresh unavailable:", e);
-        }
+        accessKick.ask(["punarctl", "agents", "access", sessionId, "--json"]);
     }
 
     // SHIFT+DEL on the focused session (spec §24.2 + §1.17: deleting your
     // own data cannot be terminal-only). Two-step by design — the first
     // press arms and the privacy card asks, the second press acts — and
     // the ghost-red destructive voice keeps it from being an accident.
-    // The purge itself is punarctl's job, run detached with fixed argv;
-    // the daemon is the authorization point, exactly as everywhere else.
+    // The purge itself is punarctl's job, with fixed argv; the daemon is the
+    // authorization point, exactly as everywhere else. A purge that worked
+    // shows up as the ledger's purged time; one that was refused is read
+    // from punarctl's answer and said on the privacy card.
     function purgeKey(sessionId: string): void {
         if (sessionId === "")
             return;
@@ -1061,12 +1130,17 @@ DeferredSurfaceBase {
             return;
         }
         root.purgeArmedId = "";
+        if (purgeProc.running)
+            return;
         root.purgeRequestedId = sessionId;
+        root.purgeError = "";
+        root.purgeErrorId = sessionId;
+        purgeProc.command = ["punarctl", "privacy", "purge", "--session", sessionId, "--yes"];
         try {
-            Quickshell.execDetached(["punarctl", "privacy", "purge", "--session", sessionId, "--yes"]);
+            purgeProc.running = true;
         } catch (e) {
-            console.warn("punar-shell: purge unavailable:", e);
             root.purgeRequestedId = "";
+            root.purgeError = "punarctl could not be started, so nothing was deleted.";
         }
     }
 
@@ -1922,6 +1996,17 @@ DeferredSurfaceBase {
                                 }
                                 Meta {
                                     width: parent.width
+                                    visible: root.purgeError !== ""
+                                             && root.purgeErrorId === win.currentId
+                                    font.pixelSize: 9
+                                    font.weight: 600
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    color: Theme.shellStatusBad
+                                    text: "Not purged — " + root.purgeError
+                                    wrapMode: Text.WordWrap
+                                }
+                                Meta {
+                                    width: parent.width
                                     visible: root.purgeArmedId !== win.currentId
                                              && root.purgeRequestedId === win.currentId
                                              && win.ledgerPurgedAt === ""
@@ -2162,8 +2247,11 @@ DeferredSurfaceBase {
                     font.pixelSize: 8
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(8, 0.14)
-                    text: "Last scan · " + (Agents.scannedAt === ""
-                        ? "never" : root.shortTime(Agents.scannedAt))
+                    color: root.agentdError === "" ? Theme.shellInk3 : Theme.shellStatusBad
+                    text: root.agentdError !== ""
+                        ? "Agentd did not answer · " + root.agentdError
+                        : "Last scan · " + (Agents.scannedAt === ""
+                            ? "never" : root.shortTime(Agents.scannedAt))
                 }
             }
         }

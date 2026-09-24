@@ -12,8 +12,9 @@
 #   * The battery was read from BAT0 only, while punard counts any BAT* entry
 #     or any power_supply whose `type` is Battery.
 #   * capabilityLabel had no name for two of punard's five capabilities.
-#   * The bar's revoke and the approval card's decision ran detached, so a
-#     refusal from punard was thrown away and the person saw nothing.
+#   * The bar's revoke, the approval card's decision, the alert card's
+#     dismissal and the AI panel's purge ran detached, so a refusal was thrown
+#     away and the person saw nothing.
 #   * Views rendered organization-supplied names as AutoText, where anything
 #     that looks like markup is read as markup.
 #   * The policy command printed for a person to copy left out --reason.
@@ -74,11 +75,23 @@ labelled = set(re.findall(r'case "([a-z_.]+)":', labels.group(0) if labels else 
 for missing in sorted(ids - labelled):
     fail("labels", f"capabilityLabel has no name for {missing}")
 
-# 5. A decision or a revoke reads its own exit: never detached.
-for rel in ("Bar/Bar.qml", "Approval/ApprovalOverlay.qml"):
-    text = (shell / rel).read_text()
-    if re.search(r'execDetached\(\s*\[\s*"punarctl"', text):
-        fail("refusals", f"{rel} runs punarctl detached, so a refusal is thrown away")
+# 5. Anything the shell asks punarctl to DO reads its own exit: run detached,
+#    a refusal is thrown away and the person sees nothing. The only detached
+#    punarctl calls allowed are launchers, which hand over to a long-running
+#    program and have no refusal to show. Each exemption carries its reason.
+DETACHED_OK = {
+    ("web-apps", "browse"): "opens the browser; the window is the answer",
+    ("web-apps", "launch"): "opens a web app; the window is the answer",
+}
+for qml in sorted(shell.rglob("*.qml")):
+    text = qml.read_text()
+    for match in re.finditer(r'execDetached\(\s*\[\s*"punarctl"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"', text):
+        verb = (match.group(1), match.group(2))
+        if verb in DETACHED_OK:
+            continue
+        line = text[: match.start()].count("\n") + 1
+        fail("refusals", f"{qml.relative_to(root)}:{line} runs `punarctl {' '.join(verb)}` "
+             "detached, so a refusal is thrown away")
 
 # 6. System Control renders text plainly. The shared Meta component and every
 #    direct Text element carry textFormat: Text.PlainText.
