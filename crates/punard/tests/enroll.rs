@@ -1646,14 +1646,16 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
     root.stop();
 }
 
-/// A registration is waited for past the generic per-call timeout. The
-/// built-in agent may spend up to its whole register budget reaching Smplify,
-/// and once Smplify has recorded the device it refuses a second active record
-/// for the same machine: an answer punard gave up on would leave the person
-/// unable to enroll until an administrator removed the stale record.
+/// The calls the built-in agent may spend longest on are waited for past
+/// the generic per-call timeout. A registration: the agent may spend its
+/// whole register budget reaching Smplify, and once Smplify has recorded the
+/// device it refuses a second active record for the same machine, so an
+/// answer punard gave up on would leave the person unable to enroll until an
+/// administrator removed the stale record. And a compliance report, which
+/// carries the check-in that pins the organization's key until it is pinned.
 #[test]
-fn a_registration_slower_than_one_call_still_enrolls() {
-    let dir = test_dir("slow-register");
+fn a_registration_and_a_report_slower_than_one_call_still_succeed() {
+    let dir = test_dir("slow-calls");
     let control_plane = ControlPlane::start(&dir);
     let late = punard::enroll::CONTROL_PLANE_CALL_TIMEOUT + Duration::from_millis(500);
     control_plane
@@ -1661,11 +1663,13 @@ fn a_registration_slower_than_one_call_still_enrolls() {
         .answer_late
         .lock()
         .unwrap()
-        .insert("enroll.register", late);
+        .extend([("enroll.register", late), ("compliance.report", late)]);
     let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
     let result = daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
     assert_eq!(result["enrolled"], true, "{result}");
-    assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
+    assert_eq!(result["first_sync"]["compliance"], "success", "{result}");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["pending"], false, "{status}");
 }
 
 /// An organization that tried to state a removal term this device cannot

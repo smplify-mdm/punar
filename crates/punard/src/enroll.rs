@@ -68,6 +68,11 @@ pub const CONTROL_PLANE_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// it, rather than the generic [`CONTROL_PLANE_CALL_TIMEOUT`].
 pub const REGISTER_CALL_TIMEOUT: Duration = Duration::from_secs(14);
 
+/// `compliance.report`'s timeout. Until the organization's signing key is
+/// pinned, the built-in agent's compliance report first makes the check-in
+/// that pins it, with a budget of its own, and then posts the report.
+pub const COMPLIANCE_REPORT_CALL_TIMEOUT: Duration = Duration::from_secs(9);
+
 /// How long punard waits for the answer to one call of `method`: at least a
 /// second longer than the built-in agent may spend on the organization's
 /// server for it (`punar_smplifyd::budget`), so an answer that exists
@@ -76,6 +81,7 @@ pub const REGISTER_CALL_TIMEOUT: Duration = Duration::from_secs(14);
 pub fn call_timeout(method: &str) -> Duration {
     match method {
         "enroll.register" => REGISTER_CALL_TIMEOUT,
+        "compliance.report" => COMPLIANCE_REPORT_CALL_TIMEOUT,
         _ => CONTROL_PLANE_CALL_TIMEOUT,
     }
 }

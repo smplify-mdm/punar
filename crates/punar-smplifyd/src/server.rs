@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use punar_smplifyd::budget::{CALL_BUDGET, REGISTER_BUDGET};
+use punar_smplifyd::budget::{CALL_BUDGET, PIN_BUDGET, REGISTER_BUDGET};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -23,6 +23,12 @@ use crate::upstream::{Api, Enrolled, UpstreamError};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const LINE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a failed tenant-key check-in waits before the next, doubled after
+/// each further failure up to [`PIN_RETRY_CAP`]. One sync pass comes every two
+/// minutes, so the first retry is the next pass's.
+const PIN_RETRY_BASE: Duration = Duration::from_secs(60);
+const PIN_RETRY_CAP: Duration = Duration::from_secs(30 * 60);
 
 pub struct Daemon {
     store: Store,
@@ -37,6 +43,21 @@ pub struct Daemon {
     /// The whole of one `enroll.register`, [`REGISTER_BUDGET`]; shorter in
     /// tests.
     register_budget: Duration,
+    /// The tenant-key check-in's own budget, [`PIN_BUDGET`]; shorter in tests.
+    pin_budget: Duration,
+    /// [`PIN_RETRY_BASE`]; shorter in tests.
+    pin_retry_base: Duration,
+    /// When the tenant-key check-in may next be tried after failing. Kept in
+    /// memory only: a restart costs one early check-in, not a stale schedule
+    /// on disk.
+    pin_retry: Mutex<Option<PinRetry>>,
+}
+
+/// A tenant-key check-in that failed, for the identity it was made for.
+struct PinRetry {
+    device_id: String,
+    failures: u32,
+    not_before: Instant,
 }
 
 impl Daemon {
@@ -48,6 +69,9 @@ impl Daemon {
             pending: Mutex::new(None),
             call_budget: CALL_BUDGET,
             register_budget: REGISTER_BUDGET,
+            pin_budget: PIN_BUDGET,
+            pin_retry_base: PIN_RETRY_BASE,
+            pin_retry: Mutex::new(None),
         }
     }
 
@@ -66,6 +90,13 @@ impl Daemon {
     #[cfg(test)]
     fn with_register_budget(mut self, budget: Duration) -> Daemon {
         self.register_budget = budget;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_pin_budget(mut self, budget: Duration, retry_base: Duration) -> Daemon {
+        self.pin_budget = budget;
+        self.pin_retry_base = retry_base;
         self
     }
 
@@ -274,6 +305,9 @@ impl Daemon {
         self.store
             .save(&record, &csr.key_pem, &enrolled.cert_pem, &enrolled.ca_pem)
             .map_err(internal)?;
+        // A new identity pins at its first report, whatever an earlier one's
+        // check-ins did, even should Smplify issue it the same device id.
+        *self.pin_retry.lock().unwrap() = None;
 
         *self.pending.lock().unwrap() = None;
         Ok(json!({
@@ -326,14 +360,16 @@ impl Daemon {
         }
     }
 
-    /// One report, answered within [`Daemon::call_budget`] in all. punard
-    /// reads the answer within its own per-call timeout, and a report that
-    /// Smplify kept but whose answer came later reads there as
-    /// "unreachable": the inventory's hash and send time are not saved,
-    /// the person's record of what left is not written, and the whole
-    /// inventory goes up again on every pass. So the tenant-key check-in
-    /// rides only the compliance report, which every sync pass sends first,
-    /// with a quarter of the budget, and the status POST gets what is left.
+    /// One report. punard reads the answer within its own timeout for the
+    /// method, and a report that Smplify kept but whose answer came later
+    /// reads there as "unreachable": the inventory's hash and send time are
+    /// not saved, the person's record of what left is not written, and the
+    /// whole inventory goes up again on every pass. So the status POST has
+    /// [`Daemon::call_budget`], and the tenant-key check-in rides only the
+    /// compliance report, which every sync pass sends first, with
+    /// [`Daemon::pin_budget`] of its own: `compliance.report` answers within
+    /// their sum (`punar_smplifyd::budget::call_budget`), which punard waits
+    /// out.
     fn report(
         &self,
         params: Option<&Value>,
@@ -341,16 +377,15 @@ impl Daemon {
         compose: fn(&str, &Value) -> Value,
         pin: PinTenantKey,
     ) -> Result<Value, CallError> {
-        let started = Instant::now();
         let record = self.authorized(params)?;
         let payload = params.and_then(|p| p.get(key)).ok_or_else(|| {
             CallError::new(ErrorCode::InvalidParams, format!("{key} is required"))
         })?;
         if pin == PinTenantKey::First {
-            self.pin_tenant_key_if_missing(&record, self.call_budget / 4);
+            self.pin_tenant_key_if_missing(&record);
         }
         let body = compose(&record.device_id, payload);
-        self.api(self.call_budget.saturating_sub(started.elapsed()))?
+        self.api(self.call_budget)?
             .status(&record.device_id, &body)
             .map_err(upstream_refusal)?;
         // What left, exactly as it left. punard keeps it as the person's
@@ -362,37 +397,58 @@ impl Daemon {
 
     /// Pin the organization's signing key. Registration leaves it to the
     /// first compliance report, and a check-in that fails undoes nothing, so
-    /// this is one check-in per compliance report, within `budget`, until the
-    /// key is held, then never again. It is pinned once and never replaced
-    /// here: a key that changes under a pinned device is a question for
-    /// re-enrollment, not for a sync.
-    fn pin_tenant_key_if_missing(&self, record: &Record, budget: Duration) {
+    /// this is one check-in within [`Daemon::pin_budget`] per compliance
+    /// report until the key is held, then never again. After a failure the
+    /// next try waits, doubling up to [`PIN_RETRY_CAP`]: a link that cannot
+    /// carry the check-in, or a Smplify that holds no key, would otherwise
+    /// cost every pass a check-in that cannot succeed. It is pinned once and
+    /// never replaced here: a key that changes under a pinned device is a
+    /// question for re-enrollment, not for a sync.
+    fn pin_tenant_key_if_missing(&self, record: &Record) {
         if record.tenant_public_key.is_some() {
             return;
         }
+        let started = Instant::now();
+        let failures = match &*self.pin_retry.lock().unwrap() {
+            Some(retry) if retry.device_id == record.device_id => {
+                if started < retry.not_before {
+                    return;
+                }
+                retry.failures
+            }
+            _ => 0,
+        };
         let os_release = crate::device::os_release(&self.os_release_path);
-        let answer = self.api(budget).and_then(|api| {
+        let answer = self.api(self.pin_budget).and_then(|api| {
             api.checkin(&record.device_id, &record.os_identifier, &os_release)
                 .map_err(internal)
         });
-        match answer {
+        let why = match answer {
             Ok(Some(key)) => {
                 let mut pinned = record.clone();
                 pinned.tenant_public_key = Some(key);
-                if let Err(error) = self.store.update(&pinned) {
-                    eprintln!("punar-smplifyd: could not store the tenant key ({error:?})");
+                match self.store.update(&pinned) {
+                    Ok(()) => {
+                        *self.pin_retry.lock().unwrap() = None;
+                        return;
+                    }
+                    Err(error) => format!("the tenant key could not be stored ({error:?})"),
                 }
             }
-            Ok(None) => {
-                eprintln!(
-                    "punar-smplifyd: check-in answered without a tenant key; retrying next sync"
-                )
-            }
-            Err(error) => eprintln!(
-                "punar-smplifyd: check-in deferred again ({}); retrying next sync",
-                error.message
-            ),
-        }
+            Ok(None) => "check-in answered without a tenant key".to_string(),
+            Err(error) => format!("check-in failed ({})", error.message),
+        };
+        let failures = failures.saturating_add(1);
+        let wait = retry_delay(self.pin_retry_base, failures);
+        eprintln!(
+            "punar-smplifyd: the tenant key is not pinned: {why}; retrying in {} s",
+            wait.as_secs()
+        );
+        *self.pin_retry.lock().unwrap() = Some(PinRetry {
+            device_id: record.device_id.clone(),
+            failures,
+            not_before: started + wait,
+        });
     }
 
     /// The identity punard's `device_token` names, or `unauthorized`.
@@ -428,6 +484,13 @@ impl Daemon {
         let identity = self.store.client_identity().map_err(internal)?;
         Api::with_identity(&server, identity, budget).map_err(internal)
     }
+}
+
+/// `base` after the first failure, doubled after each further one, never
+/// more than [`PIN_RETRY_CAP`].
+fn retry_delay(base: Duration, failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    base.saturating_mul(1 << doublings).min(PIN_RETRY_CAP)
 }
 
 /// Whether a report first tries to pin the tenant key ([`Daemon::report`]).
@@ -662,33 +725,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// punard gives each call 5 s. A report that Smplify kept but whose
-    /// answer arrives later reads there as "unreachable", and the whole
-    /// inventory is then uploaded again on every pass. So one report never
-    /// takes longer than one call budget, even while the tenant key is still
-    /// unpinned and Smplify answers nothing at all: the inventory report
-    /// makes one request, and the compliance report's check-in shares its
-    /// budget with the status POST instead of adding a second one.
+    /// A report that Smplify kept but whose answer reaches punard late reads
+    /// there as "unreachable", and the whole inventory is then uploaded again
+    /// on every pass. So even while the tenant key is unpinned and Smplify
+    /// answers nothing at all, each report answers within the agent's budget
+    /// for it, which punard waits out: the inventory report makes one
+    /// request, and the compliance report's check-in has a budget of its own
+    /// beside its status POST's. A check-in that failed is not tried again
+    /// until its retry time, which doubles, so a Smplify that never answers it
+    /// does not cost every pass a second request.
     #[test]
-    fn a_report_answers_within_one_call_budget_while_the_key_is_unpinned() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
+    fn a_report_answers_within_its_budget_and_a_failing_pin_backs_off() {
         const BUDGET: Duration = Duration::from_millis(1000);
+        const PIN: Duration = Duration::from_millis(1000);
+        // Longer than a whole compliance report, so the next one comes
+        // inside it.
+        const RETRY: Duration = Duration::from_millis(4000);
         let (d, root) = daemon();
-        let d = d.with_call_budget(BUDGET);
-        // A Smplify that accepts every connection and never answers: each
-        // request spends whatever budget it was given.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let connections = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&connections);
-        std::thread::spawn(move || {
-            let mut held = Vec::new();
-            for stream in listener.incoming() {
-                counted.fetch_add(1, Ordering::SeqCst);
-                held.push(stream);
-            }
-        });
+        let d = d.with_call_budget(BUDGET).with_pin_budget(PIN, RETRY);
+        let (port, arrivals) = silent_smplify();
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
             .unwrap()
@@ -714,46 +769,59 @@ mod tests {
             )
             .unwrap();
         let d = Arc::new(d);
-        // Each report runs apart, so one that never returns fails the test
-        // instead of hanging it.
         let report = |method: &str, key: &str| {
-            let request = json!({
-                "v": 1, "id": "r", "method": method,
-                "params": {"device_token": &*token, key: {}},
-            })
-            .to_string();
-            let daemon = Arc::clone(&d);
-            let (sender, answer) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let started = std::time::Instant::now();
-                let line = daemon.answer_line(&request);
-                let _ = sender.send((started.elapsed(), line));
-            });
-            let (took, line) = answer
-                .recv_timeout(BUDGET * 10)
-                .expect("the report outlived ten budgets");
+            let (took, line) = answer_apart(
+                &d,
+                json!({"v": 1, "id": "r", "method": method,
+                       "params": {"device_token": &*token, key: {}}}),
+                (PIN + BUDGET) * 10,
+            );
             assert!(
                 line.contains(r#""error""#),
                 "Smplify never answered: {line}"
             );
             took
         };
-        let within = BUDGET + BUDGET / 2;
+        let arrived = || arrivals.lock().unwrap().clone();
+        let slack = BUDGET / 2;
 
         let took = report("inventory.report", "inventory");
-        assert!(took < within, "{took:?}");
+        assert!(took < BUDGET + slack, "{took:?}");
         assert_eq!(
-            connections.load(Ordering::SeqCst),
+            arrived().len(),
             1,
             "the inventory report asks Smplify one thing"
         );
+
+        // The check-in, then the status POST, each with its own budget.
         let took = report("compliance.report", "report");
-        assert!(took < within, "{took:?}");
+        assert!(took < PIN + BUDGET + slack, "{took:?}");
+        let first_pin = arrived();
         assert_eq!(
-            connections.load(Ordering::SeqCst),
+            first_pin.len(),
             3,
-            "the compliance report tries the pin first, inside the same budget"
+            "the compliance report tries the pin first"
         );
+        let pin_waited = first_pin[2].duration_since(first_pin[1]);
+        assert!(
+            pin_waited >= PIN - PIN / 10,
+            "the check-in was given {pin_waited:?}, not its own budget"
+        );
+
+        // Until its retry time, a failed check-in is not tried again.
+        let took = report("compliance.report", "report");
+        assert!(took < BUDGET + slack, "{took:?}");
+        assert_eq!(arrived().len(), 4, "only the status POST");
+
+        // Then it is, once, and the next wait is longer.
+        std::thread::sleep(
+            (first_pin[1] + RETRY + Duration::from_millis(50))
+                .saturating_duration_since(Instant::now()),
+        );
+        report("compliance.report", "report");
+        assert_eq!(arrived().len(), 6, "the check-in is retried after its wait");
+        report("compliance.report", "report");
+        assert_eq!(arrived().len(), 7, "and waits longer after failing again");
         let _ = std::fs::remove_dir_all(root);
     }
 

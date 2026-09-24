@@ -13,6 +13,13 @@ use std::time::Duration;
 /// One request to Smplify: a status POST, the bundle fetch.
 pub const CALL_BUDGET: Duration = Duration::from_millis(4000);
 
+/// The check-in that pins the tenant's signing key, before a compliance
+/// report's status POST and apart from its [`CALL_BUDGET`]: a TCP connect, a
+/// TLS 1.3 handshake with the client certificate and the request are three
+/// round trips, which a satellite or poor cellular link, at around a second
+/// each, could never fit into the quarter second of a shared budget.
+pub const PIN_BUDGET: Duration = Duration::from_millis(4000);
+
 /// `org.discover`'s fetch of the organization's well-known document.
 pub const DISCOVERY_BUDGET: Duration = Duration::from_millis(3500);
 
@@ -32,6 +39,7 @@ pub fn call_budget(method: &str) -> Duration {
     match method {
         "org.discover" => DISCOVERY_BUDGET,
         "enroll.register" => REGISTER_BUDGET,
+        "compliance.report" => PIN_BUDGET + CALL_BUDGET,
         _ => CALL_BUDGET,
     }
 }

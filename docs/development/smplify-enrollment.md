@@ -103,9 +103,13 @@ record for the same machine, so the device could not enroll again until an
 administrator removed the stale one. The budgets are
 `crates/punar-smplifyd/src/budget.rs`, and punard's tests hold each of its
 timeouts (`call_timeout`) a second above them. So
-`inventory.report` makes one request; the check-in that retries pinning the
-tenant key rides only `compliance.report` (sent first on every pass) with a
-quarter of the budget, and its status POST gets what is left. Every read and
+`inventory.report` makes one request. The check-in that pins the tenant
+key rides only `compliance.report` (sent first on every pass), with a 4 s
+budget of its own, since three round trips over a satellite or poor
+cellular link need that much, and the status POST keeps its 4 s; punard
+waits 9 s for a compliance report. A check-in that fails is not tried again
+for a minute, then two, doubling to 30 minutes, so one that cannot succeed
+does not cost every pass. Every read and
 write, the TLS handshake's included, waits only for the time left, so a
 server that never answers costs one budget. Nothing long-polls inside a
 call.
