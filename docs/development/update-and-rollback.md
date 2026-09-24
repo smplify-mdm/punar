@@ -163,7 +163,7 @@ operating systems under the same release name.
 | 19 | **Boot counting is systemd-boot's own (`name+tries-left-tries-done.efi` + `systemd-bless-boot`), not a punar-owned counter.** A punar counter cannot be decremented by a kernel that panics before userspace; the bootloader's can. §6.3. |
 | 20 | **The exact automatic-rollback rule: blessing is gated on health.** `punar-update-health.service` is ordered before `systemd-bless-boot.service` in the `boot-complete.target` chain. Health fails ⇒ no blessing ⇒ tries-left stays decremented ⇒ after three unblessed boots systemd-boot selects the previous slot's permanently-blessed UKI. §6.4. |
 | 21 | **The last-known-good UKI is never removed by an update, and the ESP is sized for three.** The "both slots bad" case is therefore reachable only by ESP corruption or deletion. Bootable installer media now exists, but its authenticated ESP inspection/repair workflow does not and remains named as unowned work. §6.5. |
-| 22 | **Five typed methods, one new capability, no reboot method.** `update.status` (read, any peer), `update.check` / `update.apply` / `update.rollback` (root-only, audited), and the parameterless `update.reconcile_candidate` that only the native Raspberry Pi boot service calls (root-only, agent-denied, audited before pending state is removed). Rebooting is the *caller's* act (`punarctl update apply --reboot` runs `systemctl reboot` itself); punard does not grow a side-effect verb it does not need. §7.1. |
+| 22 | **Five typed methods, one new capability, no reboot method.** `update.status` (read, any peer), `update.check` / `update.apply` / `update.rollback` (root, or a person with a fresh `punar-authd` ticket; agents denied at any uid; audited — amended 2026-09-24, §7.3), and the parameterless `update.reconcile_candidate` that only the native Raspberry Pi boot service calls (root-only, agent-denied, audited before pending state is removed). Rebooting is the *caller's* act (`punarctl update apply --reboot` runs `systemctl reboot` itself); punard does not grow a side-effect verb it does not need. §7.1. |
 | 23 | **`update.apply` is NOT approval-gated for a human at the keyboard, and IS denied for agent-attributed peers by M9's AI authority path.** Gating your own laptop behind an approval you also grant is theatre; an agent updating or rolling back the OS unattended is exactly what M9 exists to stop. The denial cites a *named* rule (`host.system_update: deny`), not the generic no-rule text. §7.3. |
 | 24 | **Rollback is never blocked on a managed device in this slice.** It is audited, and reported on the next sync. A device that cannot be recovered is worse than a device that reports a recovery. An org-side `rollbackPermitted` field is *proposed*, not implemented. §7.3. |
 | 25 | **The browser fast lane is a build input, not a second transport.** M11's `punar-security` overlay produces an ordinary signed release delivered by the ordinary mechanism — same manifest, same key, same slot, same health gate, same rollback. There is no second unsigned path because there is no second path. §9.1. |
@@ -976,16 +976,33 @@ real and named.
 | Method | AuthZ | Mutating | Audited |
 |---|---|---|---|
 | `update.status` | any connected peer | no | no |
-| `update.check` | **root only** | yes (writes cached metadata) | always |
-| `update.apply` | **root only**, and agent-attributed peers take the M9 AI path first | yes | always |
-| `update.rollback` | **root only**, same M9 rule | yes | always |
+| `update.check` | **root, or a person with a fresh `punar-authd` ticket**; agents denied at any uid (§7.3) | yes (writes cached metadata) | always |
+| `update.apply` | **root, or a person with a fresh `punar-authd` ticket**; agent-attributed peers take the M9 AI path first | yes | always |
+| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket**, same M9 rule | yes | always |
 | `update.reconcile_candidate` | **root only**, same M9 rule; Raspberry Pi boot service in normal operation, no params | Pi selector finalization only | always, and the outcome audit is durable before pending state is removed |
 
 **There is no `update.reboot`, and that is deliberate.** `punarctl update
-apply --reboot` runs `systemctl reboot` *as the caller*, after punard
-returns `requires_reboot: true`. punard does not need a verb whose entire
-effect is a side effect it cannot audit the completion of, and spec 60's
-posture is that the method table stays as small as the job allows.
+apply --reboot` runs a plain `systemctl reboot` *as the caller*, after punard
+returns `requires_reboot: true`. polkit lets the active local person do that
+(`50-punar-power.rules`). punard does not need a verb whose entire effect is
+a side effect it cannot audit the completion of, and spec 60's posture is
+that the method table stays as small as the job allows.
+
+**On Raspberry Pi, punard arms the one-shot tryboot itself (2026-09-24).**
+Booting a Pi candidate needs the firmware's one-shot `tryboot`, requested by
+passing `0 tryboot` to the kernel's reboot call. systemd takes that argument
+from `/run/systemd/reboot-param`, which only root may write, so the old
+caller-side `reboot "0 tryboot"` could never work for a person. (It could
+not work for root either on Debian: `/usr/bin/reboot` does not exist there,
+and systemctl 261 rejects a positional reboot argument.) The Pi staging now
+writes that file as root, inside the audited apply, after the pending record
+and before the result. If it cannot, it withdraws the pending record and
+fails, rather than report a candidate nothing will boot. Any restart then
+tries the candidate: `--reboot`, the power menu, or `systemctl reboot`,
+which leaves an existing parameter alone. `/run` does not survive a
+shutdown, so switching off instead discards the staged update (the next
+ordinary boot finalizes it as `firmware_fallback`, §5.17b). The apply
+result carries `one_shot_trial: true` so every surface says so.
 `system.exec`, `shell.run`, `update.exec` and every other generic-execution
 probe continue to return `unknown_method` (§12.1 C8).
 
@@ -1073,14 +1090,21 @@ the user can change it, what the next step is. No `EPERM`.
 
   **Does `update.check` need the ticket? Yes**, decided by whether it
   mutates cached state, and it does. It writes the root-owned verified
-  channel cache under `/var/lib/punar/update/` that `update status`
-  reports. It makes the device contact its update source. It is audited as
-  a mutation (§7.1). Without a password, a stolen shell could drive that
-  traffic and rewrite root-owned state whenever it liked. The cost is kept
-  small instead: `update status` asks for nothing. And `update apply`
-  refreshes and re-verifies the signed head itself, trusting no earlier
-  check's cache, so a person who wants to install needs one password, not
-  two.
+  channel cache under `/var/lib/punar/update/`. It makes the device contact
+  its update source. It is audited as a mutation (§7.1). Without a
+  password, a stolen shell could drive that traffic and rewrite root-owned
+  state whenever it liked.
+
+  The cost is two confirmations to install, and that should be said
+  plainly. `update apply` needs the exact version, and today only
+  `update check` shows it. `update status` does not yet surface the
+  verified cache: it reports no check at all. So a person runs `update
+  check` (one password) and then `update apply <version>` (another). What
+  is true is narrower: apply refreshes and re-verifies the signed head
+  itself and trusts no earlier check's cache. So the first confirmation
+  buys information, not authority. Letting `update status` show the
+  verified head, or letting `update apply` take the channel head without a
+  version, would make installing one password. Neither is built.
 - **Agent-attributed peer: denied, fail closed, by the existing M9 path.**
   M9 §5.1 step 2 runs the AI authority path *before* the uid check
   precisely so root-ness cannot bypass AI policy (spec 60). Today no
@@ -1152,9 +1176,9 @@ such.
 
 ```text
 update.status              any connected peer   no   no
-update.check               root only            yes  always
-update.apply               root only (+M9)      yes  always
-update.rollback            root only (+M9)      yes  always
+update.check               root or ticket (+M9) yes  always
+update.apply               root or ticket (+M9) yes  always
+update.rollback            root or ticket (+M9) yes  always
 update.reconcile_candidate root only (+M9)      Pi   always  (params none; Pi boot service)
 ```
 
@@ -1468,7 +1492,7 @@ boot 6  N+1 running again. update.auto_rollback in the audit log. Failed slot
 | C1 | `update status` on a fresh device: `current = N`, `rollback.state = "none"`, `rollback_unavailable_reason` **non-empty** |
 | C2 | `update check` returns N+1, records `metadata_age_seconds = 0`, emits an `update.check` audit event with 12 keys |
 | C3 | `update apply` writes slot B, re-reads and re-hashes it, installs `punar_<N+1>+3-0.efi`, **leaves N's UKI present**, sets the new default, returns `requires_reboot: true`; `update.apply` audited `result: "success"` |
-| C4 | `update apply` from a non-root peer → `denied`, `punarctl` exit **3**, section-73 text |
+| C4 | `update apply` from a non-root peer without a password confirmation → `denied` (`details.reason: "reauthentication_required"`), `punarctl` exit **3**, section-73 text naming the command that asks; with a fresh ticket it is admitted to the same admission as root |
 | C5 | `update apply` from an **agent-attributed** peer → denied by the M9 AI authority path, citing the named `host.system_update` rule, **regardless of uid** |
 | C6 | A tampered payload → `untrusted_artifact` with `stage: "payload_digest"`; slot B is **byte-identical to before** the attempt; audited `result: "failure"` |
 | C7 | A truncated payload → staging discarded, no UKI installed, slot B not bootable |
@@ -1495,7 +1519,7 @@ boot 6  N+1 running again. update.auto_rollback in the audit log. Failed slot
 | E4 | `update status` reports `rollback.state = "auto_rolled_back"` and names the version it came from |
 | E5 | Audit contains `update.auto_rollback`, `source: "service"`, `user_id: "punard"`, `resource: "system_image"`, 12 keys |
 | E6 | The failed release is marked bad and is **not re-offered** by `update check` until the channel publishes a different version |
-| E7 | `update rollback` (the explicit method) from root on a healthy device re-points the default, returns `requires_reboot: true`, and is audited; from a non-root peer it is `denied` with exit 3 |
+| E7 | `update rollback` (the explicit method) from root on a healthy device re-points the default, returns `requires_reboot: true`, and is audited; from a non-root peer without a fresh ticket it is `denied` (`reauthentication_required`) with exit 3, and with one it behaves as for root |
 
 **Group F — offline and channel failure (boot 6, fixture disk detached)**
 

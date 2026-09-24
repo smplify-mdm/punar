@@ -190,6 +190,21 @@ the term only in the refusal that asks for it.
   route.** Such a caller can delete `enrollment.json`. Punar gives no person
   root, so the term binds every account on the device, but it is not
   tamper-proofing.
+- **A release that predates the term cannot enforce it.** `/var` is shared
+  across releases and never rolled back, and a person can boot the one
+  release retained on the ESP (`update rollback`, decision 24, or the boot
+  menu). If that release predates the term, it applies its own unenroll rule.
+  Every released Punar before this one lets only root unenroll, and no person
+  is root, so no released build ends a non-removable enrollment either. The
+  term also survives such a boot. An older punard rewrites `enrollment.json`
+  without the field on its next sync, but the term is kept in
+  `enrollment-terms.json` as well, bound to the enrollment by organization
+  and enrollment time. Older builds never rewrite that file, and this build
+  folds it back in on load; it can only take removability away. The
+  organization's control over which releases a device runs is the channel's
+  minimum-version admission. That keeps a pre-term release from being
+  *installed*, but cannot stop the single retained previous release from
+  booting.
 - **Erasing and reinstalling ends any enrollment.** Nothing binds the
   hardware to the organization across a disk wipe; there is no Activation
   Lock equivalent. An organization that needs that needs firmware-level

@@ -248,16 +248,16 @@ gives no person root: root is locked, nobody is in `wheel`, and Punar
 authors no sudoers rule (docs/design/onboarding.md §1.6). So a denial's
 next step is one a person can take — the grant for exactly that capability
 (`capabilities.set`), the password confirmation (`policy.set`,
-`enroll.start`, `enroll.stop`), what the device already does on its own
+`enroll.start`, `enroll.stop`, `update.check`, `update.apply`,
+`update.rollback` — §5.17), what the device already does on its own
 (`reconcile`, `network.apply`), or, where no person's path exists, a plain
 statement of that and of who can act. A root-only method whose resource is
-not a registered capability (`reconcile`, `update.*`, `install.*`,
-`approvals.create`/`consume`) is refused with `details.resource`, never
-`details.capability`, and never offers `privilege request`, which would
-answer `not_found`. `update.check`, `update.apply` and `update.rollback` take
-the same password confirmation as enrollment (§5.17);
-`update.reconcile_candidate` stays the boot service's, and its refusal says
-so.
+not a registered capability (`reconcile`, `update.reconcile_candidate`,
+`install.*`, `approvals.create`/`consume`) is refused with
+`details.resource`, never `details.capability`, and never offers `privilege
+request`, which would answer `not_found`. A password-confirmed method's
+refusal instead carries `details.reason` (`reauthentication_required`, or a
+`reauthentication_*` reason for a ticket that was not accepted).
 
 ### 5.1 `status`
 
@@ -744,8 +744,11 @@ checks run in this order:
    and sends the request again with the flag and a fresh password (the
    first was spent on discovery — nothing is fetched for a caller who has
    not confirmed); without a terminal, or with `--json`, the refusal is the
-   answer. The term is written to `enrollment.json` and never re-read from
-   a policy fetch.
+   answer. The term is written to `enrollment.json`, and to
+   `enrollment-terms.json` beside it. An older punard booted from a retained
+   UKI never rewrites that second file, and this build folds it back in when
+   loading, so a rewrite that drops the field cannot make the device
+   removable. The term is never re-read from a policy fetch.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
@@ -1188,18 +1191,31 @@ old UKI, installs the new boot-counted UKI last, and durably selects it. On a
 freshly installed device the first apply also retires the factory B-bound
 `punar-recovery_<version>.efi` before it opens root B, proving the retirement
 across an ESP read-only re-open; while slot A is still boot-counted that
-retirement, and therefore the apply, is refused as `conflict`. On
-Raspberry Pi, the equivalent signed A/B transaction stages the inactive root
-and firmware set for one-shot `tryboot`.
+retirement, and therefore the apply, is refused as `conflict`. Before the
+inactive slot is opened for writing, every Punar UKI bound to it, counted or
+not, is removed and the removal proven across a read-only re-open. After
+that, a UKI on the ESP names the release its slot holds, and the ESP keeps
+exactly the running release plus the candidate. An apply is refused as
+`conflict` when the next boot is already aimed at the inactive slot (a
+`rollback` to it without a restart). A staged update that has since booted
+and been blessed (running from its slot, with its uncounted UKI present) is
+settled rather than treated as still staged. On Raspberry Pi, the equivalent
+signed A/B transaction stages the inactive root and firmware set for one-shot
+`tryboot`.
 
 ```json
 {"v":1,"staged_version":"2026.08.27.1","staged_slot":"b",
  "requires_reboot":true,"bytes_written":2147614720,"verified":true}
 ```
 
-The daemon never reboots. `punarctl update apply … --reboot` performs the fixed
-caller-side restart only after this successful result (Pi uses `reboot 0
-tryboot`; UEFI uses `systemctl reboot`).
+On Raspberry Pi the result adds `"one_shot_trial": true`: the staging has
+armed the firmware's one-shot `tryboot` by writing `0 tryboot` to
+`/run/systemd/reboot-param` as root, so the next *restart* tries the
+candidate, and a shutdown discards it (docs/development/update-and-rollback.md
+§7.1). If that write fails, the staging withdraws its pending record and
+fails. The daemon never reboots. `punarctl update apply … --reboot` performs
+a fixed caller-side `systemctl reboot` only after this successful result, on
+both platforms.
 
 ### 5.17b `update.reconcile_candidate`
 
@@ -1254,7 +1270,12 @@ canonical version selects that exact retained release; a person adds
 `"ticket"`. The authorization and audit boundary is identical to
 `update.apply`. No repository is contacted and
 no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
-are rollback candidates; counted, unblessed attempts are excluded. On
+are rollback candidates; counted, unblessed attempts are excluded. A target is
+accepted only when it is the one uncounted UKI the ESP names for its slot. A
+device updated by an older build can carry a stale entry bound to a rewritten
+slot, and this device cannot tell which release that slot holds, so it
+refuses the rollback as `conflict` rather than boot one release's kernel on
+another's root. On
 Raspberry Pi, the current and previous selectors are validated before a
 durable selector swap. A pending Pi trial must first resolve rather than being
 silently overwritten.
@@ -1537,7 +1558,7 @@ or path other than the confirmed target device. An installed system returns
   authorization point. No person on a Punar device is root, so a person's
   mutating verbs carry a grant (`punarctl privilege request`) or a password
   confirmation relayed to `punar-authd` (`policy set`, `enroll start`,
-  `enroll stop`).
+  `enroll stop`, `update check`, `update apply`, `update rollback`).
 - Human output follows Plate D-014 (`docs/design/mockups/cli-grammar.html`):
   tracked-uppercase masthead + U+2500 rule, middle-dot separators, aligned
   columns, ANSI color only on status words; personal mode shows no org rows.
@@ -1554,11 +1575,16 @@ or path other than the confirmed target device. An installed system returns
   shows no org rows — personal compliance (device vs. its own effective
   document) is not an org row. Rendering contract:
   docs/development/milestone-4.md section 7.
-- **M5 verbs:** `punarctl enroll start <domain>` (over 5.9; renders org,
-  policy ids, and `Attestation  SIMULATED` — the honesty label is loud by
-  design; 90 s client timeout per section 2), `punarctl enroll status`
-  (over 5.10), `punarctl enroll stop` (over 5.11; "Personal state restored
-  · org layers removed"). `punarctl status` adds an
+- **M5 verbs:** `punarctl enroll start <domain> [--code-stdin]
+  [--accept-non-removable]` (over 5.9; asks for the code, then the person's
+  password; for an organization that enrolls devices as not removable it
+  shows the term and asks for `accept` on the terminal, then the password
+  again, and without a terminal the refusal names the flag; renders org,
+  policy ids, who can unenroll, and `Attestation  SIMULATED` — the honesty
+  label is loud by design; 90 s client timeout per section 2), `punarctl
+  enroll status` (over 5.10), `punarctl enroll stop` (over 5.11; asks for
+  the password only for a removable enrollment; "Personal state restored ·
+  org layers removed"). `punarctl status` adds an
   `Organization  <display name> · <policy id>` row while enrolled (absent
   otherwise — org rows never render on a personal device). The 5.4 M5
   amendments: the overridden-set verdict line and the org-citing denial.

@@ -536,6 +536,12 @@ pub struct UpdateApplyResult {
     pub requires_reboot: bool,
     pub bytes_written: u64,
     pub verified: bool,
+    /// Raspberry Pi: the candidate boots once, on the next *restart* (punard
+    /// has armed the firmware's one-shot tryboot). Switching off instead
+    /// discards it, and it must be applied again. Absent on UEFI, where the
+    /// new selector is durable across any boot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_shot_trial: bool,
 }
 
 /// Strict request payload for `update.rollback`. `None` means the most recent

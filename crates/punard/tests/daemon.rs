@@ -1494,6 +1494,265 @@ fn first_update_preserves_recovery_and_root_b_until_a_is_blessed() {
     assert!(!td.state_path("update/pending-uefi.json").exists());
 }
 
+/// Publish another signed UEFI release at `version` and make it the channel
+/// head, with root images filled with `fill_a` / `fill_b` so a test can tell
+/// which release a slot holds.
+fn publish_uefi_release(dir: &Path, version: &str, fill_a: u8, fill_b: u8) {
+    let repository = dir.join("update-source");
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    let release = repository.join(format!("releases/{version}"));
+    fs::create_dir_all(&release).unwrap();
+    let root_a = vec![fill_a; 4096];
+    let root_b = vec![fill_b; 4096];
+    let uki_a = test_uki(punard::install::ROOT_A_PARTUUID);
+    let uki_b = test_uki(punard::install::ROOT_B_PARTUUID);
+    for (name, bytes) in [
+        ("slot-a.raw.zst", root_a.as_slice()),
+        ("slot-b.raw.zst", root_b.as_slice()),
+        ("slot-a.efi", uki_a.as_slice()),
+        ("slot-b.efi", uki_b.as_slice()),
+    ] {
+        fs::write(release.join(name), bytes).unwrap();
+    }
+    let payload = |filename: &str, bytes: &[u8]| {
+        json!({
+            "filename": filename,
+            "digest_sha256": punard::util::sha256_hex(bytes),
+            "size_bytes": bytes.len(),
+            "uncompressed_digest_sha256": punard::util::sha256_hex(bytes),
+            "uncompressed_size_bytes": bytes.len(),
+            "compression": "zstd"
+        })
+    };
+    let boot = |filename: &str, bytes: &[u8]| {
+        json!({
+            "kind": "uki",
+            "filename": filename,
+            "digest_sha256": punard::util::sha256_hex(bytes),
+            "size_bytes": bytes.len()
+        })
+    };
+    let manifest = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "release_id": format!("punar-desktop-stable-aarch64-uefi-{version}"),
+        "image_id": "punar-desktop",
+        "architecture": "aarch64",
+        "boot_platform": "uefi",
+        "version": version,
+        "channel": "stable",
+        "snapshot_pin": "20260820T000000Z",
+        "overlay_pin": null,
+        "payload": payload("slot-a.raw.zst", &root_a),
+        "boot_artifact": boot("slot-a.efi", &uki_a),
+        "uefi_slots": {
+            "a": {
+                "payload": payload("slot-a.raw.zst", &root_a),
+                "boot_artifact": boot("slot-a.efi", &uki_a)
+            },
+            "b": {
+                "payload": payload("slot-b.raw.zst", &root_b),
+                "boot_artifact": boot("slot-b.efi", &uki_b)
+            }
+        },
+        "min_from": null,
+        "security": {"severity": "none", "advisory_ids": []},
+        "provenance": {
+            "git_commit": "0123456789abcdef0123456789abcdef01234567",
+            "ci_run_id": "daemon-integration",
+            "builder_base_digest": format!("sha256:{}", "3".repeat(64)),
+            "source_date_epoch": 1787184000,
+            "built_at": "2026-09-03T22:00:00Z"
+        },
+        "sbom": null
+    }))
+    .unwrap();
+    fs::write(release.join("release.json"), &manifest).unwrap();
+    fs::write(
+        release.join("release.json.sig"),
+        signing.sign(&manifest).to_bytes(),
+    )
+    .unwrap();
+    let channel = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "image_id": "punar-desktop",
+        "architecture": "aarch64",
+        "boot_platform": "uefi",
+        "channel": "stable",
+        "current": version,
+        "release_manifest": format!("releases/{version}/release.json"),
+        "rollout_bps": 10000,
+        "halted": false,
+        "published_at": "2026-09-03T22:00:00Z",
+        "min_supported_version": "2026.08.01.1"
+    }))
+    .unwrap();
+    fs::write(repository.join("channel.json"), &channel).unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&channel).to_bytes(),
+    )
+    .unwrap();
+}
+
+/// Boot into the staged candidate on `slot`, and let boot counting bless it:
+/// the running kernel names the slot, the counted UKI loses its counter, and
+/// the running system reports its release.
+fn boot_and_bless(td: &TestDaemon, version: &str, partuuid: &str) {
+    fs::write(
+        td.dir.join("update-cmdline"),
+        format!("root=PARTUUID={partuuid} ro\n"),
+    )
+    .unwrap();
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join(format!("punar_{version}+3-0.efi")),
+        uki_dir.join(format!("punar_{version}.efi")),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("os-release"),
+        format!("IMAGE_ID=punar-desktop\nIMAGE_VERSION={version}\n"),
+    )
+    .unwrap();
+}
+
+fn apply_version(td: &TestDaemon, version: &str) -> Value {
+    td.call(
+        "update.apply",
+        Some(json!({ "version": version, "allow_downgrade": false })),
+    )
+}
+
+/// Two updates, then a rollback to the oldest release. The first release's
+/// UKI boots the slot the second update rewrites, so it is retired before
+/// that slot is written, and the rollback finds nothing to select. The old
+/// kernel never boots the newer root, uncounted, on every boot. On the way,
+/// the first update, now running and blessed, stops blocking the second.
+#[test]
+fn a_rewritten_slot_keeps_no_boot_entry_for_the_release_it_no_longer_holds() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    let loader = td.dir.join("esp/loader/loader.conf");
+
+    // 2026.08.20.1 runs on A. Update 1 writes 2026.08.27.1 into B, which then
+    // boots and is blessed.
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    // Update 2 writes 2026.09.03.1 into A. The first update's pending record
+    // is settled, not treated as still staged.
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let second = apply_version(&td, "2026.09.03.1");
+    assert_eq!(second["result"]["staged_slot"], "a", "{second}");
+    assert_eq!(
+        &fs::read(td.dir.join("root-a")).unwrap()[..4096],
+        &vec![0xa3_u8; 4096]
+    );
+    assert!(
+        !uki_dir.join("punar_2026.08.20.1.efi").exists(),
+        "the entry for the release slot A no longer holds was retired first"
+    );
+    assert!(
+        uki_dir.join("punar_2026.08.27.1.efi").is_file(),
+        "the running release stays"
+    );
+    assert!(uki_dir.join("punar_2026.09.03.1+3-0.efi").is_file());
+
+    // Rollback to the oldest release: there is nothing left to select.
+    let oldest = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(oldest["error"]["code"], "not_found", "{oldest}");
+    assert!(
+        fs::read_to_string(&loader)
+            .unwrap()
+            .contains("preferred punar_2026.09.03.1*.efi")
+    );
+    // A plain rollback cancels to the running release, which is intact.
+    let cancel = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        cancel["result"]["new_default"], "punar_2026.08.27.1*.efi",
+        "{cancel}"
+    );
+}
+
+/// Rolling back to the other slot and then applying before restarting would
+/// overwrite the slot the next boot is aimed at, and a failure part-way would
+/// leave that boot pointing at a half-written root. Refused, nothing written.
+#[test]
+fn an_update_never_overwrites_the_slot_the_next_boot_is_aimed_at() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{back}"
+    );
+
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let root_a_before = fs::read(td.dir.join("root-a")).unwrap();
+    let aimed = apply_version(&td, "2026.09.03.1");
+    assert_eq!(aimed["error"]["code"], "conflict", "{aimed}");
+    assert!(
+        aimed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("next boot is set to slot A"),
+        "{aimed}"
+    );
+    assert_eq!(fs::read(td.dir.join("root-a")).unwrap(), root_a_before);
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file()
+    );
+}
+
+/// A device updated by an older build can still carry two uncounted entries
+/// for one slot. It cannot tell which release that slot holds, so rollback
+/// selects neither.
+#[test]
+fn rollback_refuses_a_slot_the_esp_names_twice() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            dir.join("esp/EFI/Linux/punar_2026.08.10.1.efi"),
+            test_uki(punard::install::ROOT_A_PARTUUID),
+        )
+        .unwrap();
+    });
+    let before = fs::read(td.dir.join("esp/loader/loader.conf")).unwrap();
+    let response = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.10.1" })),
+    );
+    assert_eq!(response["error"]["code"], "conflict", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("names 2 releases for slot A"),
+        "{response}"
+    );
+    assert_eq!(
+        fs::read(td.dir.join("esp/loader/loader.conf")).unwrap(),
+        before
+    );
+}
+
 #[test]
 fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
