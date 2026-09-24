@@ -716,17 +716,30 @@ pub struct InventorySources {
 }
 
 impl InventorySources {
-    fn os_release(&self) -> (String, String, String) {
+    /// The os-release facts the inventory carries. The substrate's triple
+    /// keeps its "unknown" placeholder (the M5 contract); Punar's own image
+    /// identity is `null` when absent, because it is what a control plane
+    /// shows as the version and a placeholder there would overwrite a real
+    /// value. The image lines matter because Debian unstable, Punar's
+    /// substrate, ships no VERSION_ID at all: the release a person and their
+    /// organization know this device by is IMAGE_VERSION.
+    fn os_release(&self) -> OsRelease {
         let content = std::fs::read_to_string(&self.os_release_path).unwrap_or_default();
-        let field = |key: &str| -> String {
+        let field = |key: &str| -> Option<String> {
             content
                 .lines()
                 .find_map(|line| line.strip_prefix(&format!("{key}=")))
                 .map(|v| v.trim().trim_matches('"').to_string())
                 .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "unknown".to_string())
         };
-        (field("ID"), field("VERSION_ID"), field("PRETTY_NAME"))
+        let placeholder = |key: &str| field(key).unwrap_or_else(|| "unknown".to_string());
+        OsRelease {
+            id: placeholder("ID"),
+            version_id: placeholder("VERSION_ID"),
+            pretty_name: placeholder("PRETTY_NAME"),
+            image_id: field("IMAGE_ID"),
+            image_version: field("IMAGE_VERSION"),
+        }
     }
 
     fn kernel(&self) -> String {
@@ -741,14 +754,29 @@ impl InventorySources {
 /// The inventory body (milestone-5.md section 6): device info + capability
 /// states, nothing behavioral. `capabilities` carries
 /// `{capability, supported, current_state}` per registered capability.
+/// See [`InventorySources::os_release`].
+struct OsRelease {
+    id: String,
+    version_id: String,
+    pretty_name: String,
+    image_id: Option<String>,
+    image_version: Option<String>,
+}
+
 pub fn inventory_body(
     sources: &InventorySources,
     hostname: &str,
     capabilities: impl IntoIterator<Item = (String, bool, Value)>,
 ) -> Value {
-    let (id, version_id, pretty_name) = sources.os_release();
+    let os = sources.os_release();
     json!({
-        "os": { "id": id, "version_id": version_id, "pretty_name": pretty_name },
+        "os": {
+            "id": os.id,
+            "version_id": os.version_id,
+            "pretty_name": os.pretty_name,
+            "image_id": os.image_id,
+            "image_version": os.image_version,
+        },
         "kernel": sources.kernel(),
         "hostname": hostname,
         "capabilities": capabilities
@@ -1040,6 +1068,8 @@ mod tests {
         assert_eq!(inventory["os"]["id"], "punar");
         assert_eq!(inventory["os"]["version_id"], "0.5");
         assert_eq!(inventory["os"]["pretty_name"], "Punar OS 0.5 (M5)");
+        assert_eq!(inventory["os"]["image_id"], Value::Null);
+        assert_eq!(inventory["os"]["image_version"], Value::Null);
         assert_eq!(inventory["kernel"], "6.12.0-punar");
         assert_eq!(inventory["hostname"], "punar-desktop");
         assert_eq!(
@@ -1056,6 +1086,24 @@ mod tests {
         let degraded = inventory_body(&absent, "h", []);
         assert_eq!(degraded["os"]["id"], "unknown");
         assert_eq!(degraded["kernel"], "unknown");
+
+        // Debian unstable, Punar's substrate, has no VERSION_ID; Punar's own
+        // release is IMAGE_VERSION, and it is what the inventory carries.
+        let punar = dir.join("os-release-punar");
+        std::fs::write(
+            &punar,
+            "PRETTY_NAME=\"Debian GNU/Linux forky/sid\"\nID=debian\n\
+             IMAGE_ID=punar-desktop\nIMAGE_VERSION=2026.09.01.1\n",
+        )
+        .unwrap();
+        let sid = InventorySources {
+            os_release_path: punar,
+            kernel_release_path: dir.join("osrelease"),
+        };
+        let inventory = inventory_body(&sid, "h", []);
+        assert_eq!(inventory["os"]["version_id"], "unknown");
+        assert_eq!(inventory["os"]["image_id"], "punar-desktop");
+        assert_eq!(inventory["os"]["image_version"], "2026.09.01.1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

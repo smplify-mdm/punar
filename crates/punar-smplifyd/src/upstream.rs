@@ -293,37 +293,50 @@ pub fn compliance_status_body(device_id: &str, report: &Value) -> Value {
     })
 }
 
-/// The inventory body: the OS triple Smplify already displays for every
-/// Linux device, plus capability states as facts. No hostname, no network,
-/// no software list — those are not in punard's inventory and are not added
-/// here.
+/// The inventory body: the operating system Smplify displays for every
+/// Linux device, and nothing else. No hostname, no network, no software list,
+/// and no capability VALUES: punard's inventory carries each capability's
+/// observed value (`current_state` — the hostname string, the timezone), which
+/// is exactly what "category states only" keeps on the device. Per-capability
+/// compliance states already travel as `punar_compliance_<capability>` facts
+/// in the compliance report.
+///
+/// On a Punar image the organization manages Punar, not its substrate, so the
+/// name is Punar's and the version is the image release (Debian unstable has
+/// no VERSION_ID). A value that is absent or the substrate's "unknown"
+/// placeholder is sent as `null`: Smplify keeps what it already has for a
+/// null, while a placeholder would overwrite a real version.
 pub fn inventory_status_body(device_id: &str, inventory: &Value) -> Value {
     let os = inventory.get("os").cloned().unwrap_or(Value::Null);
-    let mut facts = serde_json::Map::new();
-    if let Some(capabilities) = inventory.get("capabilities").and_then(Value::as_array) {
-        for capability in capabilities {
-            if let (Some(name), Some(state)) = (
-                capability.get("capability").and_then(Value::as_str),
-                capability.get("state").and_then(Value::as_str),
-            ) {
-                facts.insert(
-                    format!("punar_capability_{}", fact_key(name)),
-                    Value::String(state.into()),
-                );
-            }
-        }
-    }
+    let known = |key: &str| -> Option<String> {
+        os.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "unknown")
+            .map(str::to_string)
+    };
+    let punar = known("image_id").is_some_and(|id| id.starts_with("punar"));
+    let name = if punar {
+        Some("Punar OS".to_string())
+    } else {
+        known("pretty_name")
+    };
+    let version = known("image_version").or_else(|| known("version_id"));
+    let kernel = inventory
+        .get("kernel")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty() && *v != "unknown");
     json!({
         "deviceId": device_id,
         "heartbeat": crate::clock::now_rfc3339(),
         "systemInfo": {
             "os": {
-                "name": os.get("pretty_name").cloned().unwrap_or(Value::Null),
-                "version": os.get("version_id").cloned().unwrap_or(Value::Null),
-                "kernelRelease": inventory.get("kernel").cloned().unwrap_or(Value::Null),
+                "name": name,
+                "version": version,
+                "kernelRelease": kernel,
             }
         },
-        "facts": facts,
+        "facts": {},
     })
 }
 
@@ -373,24 +386,58 @@ mod tests {
         assert_eq!(keys, vec!["deviceId", "facts", "heartbeat"]);
     }
 
+    /// The shape punard really sends: a Punar image on Debian unstable, with
+    /// capability values that must stay on the device.
     #[test]
-    fn inventory_maps_the_os_triple_and_capability_states() {
+    fn inventory_sends_punar_and_its_release_and_no_capability_values() {
         let body = inventory_status_body(
             "dev-1",
             &json!({
-                "os": {"id": "arch", "version_id": "rolling", "pretty_name": "Punar OS"},
-                "kernel": "7.1.12",
+                "os": {
+                    "id": "debian",
+                    "version_id": "unknown",
+                    "pretty_name": "Debian GNU/Linux forky/sid",
+                    "image_id": "punar-desktop",
+                    "image_version": "2026.09.01.1"
+                },
+                "kernel": "6.12.48-punar",
                 "hostname": "atlas",
-                "capabilities": [{"capability": "browser.policy", "state": "managed"}]
+                "capabilities": [
+                    {"capability": "system.hostname", "supported": true, "current_state": "atlas"},
+                    {"capability": "time.timezone", "supported": true, "current_state": "Europe/Berlin"}
+                ]
             }),
         );
         assert_eq!(body["systemInfo"]["os"]["name"], "Punar OS");
-        assert_eq!(body["systemInfo"]["os"]["kernelRelease"], "7.1.12");
-        assert_eq!(body["facts"]["punar_capability_browser_policy"], "managed");
+        assert_eq!(body["systemInfo"]["os"]["version"], "2026.09.01.1");
+        assert_eq!(body["systemInfo"]["os"]["kernelRelease"], "6.12.48-punar");
+        assert_eq!(body["facts"], json!({}));
+        let text = body.to_string();
         assert!(
-            !body.to_string().contains("atlas"),
+            !text.contains("atlas"),
             "hostname must not travel in status"
         );
+        assert!(
+            !text.contains("Berlin"),
+            "capability values stay on the device"
+        );
+    }
+
+    /// A value the device does not know is sent as null, never as a
+    /// placeholder that would overwrite what Smplify already stores.
+    #[test]
+    fn an_unknown_version_is_sent_as_null() {
+        let body = inventory_status_body(
+            "dev-1",
+            &json!({
+                "os": {"id": "debian", "version_id": "unknown", "pretty_name": "unknown"},
+                "kernel": "unknown",
+                "capabilities": []
+            }),
+        );
+        assert_eq!(body["systemInfo"]["os"]["name"], Value::Null);
+        assert_eq!(body["systemInfo"]["os"]["version"], Value::Null);
+        assert_eq!(body["systemInfo"]["os"]["kernelRelease"], Value::Null);
     }
 
     #[test]

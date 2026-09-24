@@ -330,7 +330,7 @@ jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key 
     "(keys | sort) == [\"device_id\", \"inventory\", \"received_at\"]
      and .device_id == \"${DEVICE_ID}\"
      and (.inventory | keys | sort) == [\"capabilities\", \"hostname\", \"kernel\", \"os\"]
-     and (.inventory.os | keys | sort) == [\"id\", \"pretty_name\", \"version_id\"]
+     and (.inventory.os | keys | sort) == [\"id\", \"image_id\", \"image_version\", \"pretty_name\", \"version_id\"]
      and (.inventory.os.id | length) > 0
      and (.inventory.kernel | length) > 0
      and (.inventory.capabilities | length) == 6
