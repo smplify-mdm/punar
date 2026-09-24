@@ -73,6 +73,7 @@ pub fn discover(override_dir: &Path, domain: &str) -> Result<Organization, CallE
         .send(&Request {
             method: "GET",
             url: &url,
+            accept: crate::http::ACCEPT_JSON,
             bearer: None,
             body: None,
         })

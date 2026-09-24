@@ -151,6 +151,11 @@ impl ControlPlaneState {
                 Ok(json!({ "accepted": true }))
             }
             // admin.* stays reserved for M10 — like every unknown name.
+            "enroll.unregister" => {
+                let token = params["device_token"].as_str().unwrap_or_default();
+                self.devices.lock().unwrap().remove(token);
+                Ok(json!({}))
+            }
             other => Err(("unknown_method", format!("no method {other:?}"))),
         }
     }
@@ -922,6 +927,19 @@ fn invalid_policy_envelope_aborts_enrollment_atomically() {
             .iter()
             .any(|e| e["action"] == "enroll.start" && e["result"] == "failure")
     );
+    // And the identity the control plane issued at register was released,
+    // so neither side is left holding a device the other has forgotten.
+    let methods = control_plane.state.methods.lock().unwrap().clone();
+    assert_eq!(
+        methods,
+        vec![
+            "org.discover",
+            "enroll.register",
+            "policy.fetch",
+            "enroll.unregister"
+        ]
+    );
+    assert!(control_plane.state.devices.lock().unwrap().is_empty());
 
     // The same daemon can enroll once the control plane behaves.
     control_plane

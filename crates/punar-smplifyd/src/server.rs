@@ -151,12 +151,6 @@ impl Daemon {
                 "an enrollment code is required: punarctl enroll start <domain> reads it from stdin",
             )
         })?);
-        if self.store.exists() {
-            return Err(CallError::new(
-                ErrorCode::Denied,
-                "this device already holds a Smplify identity; unenroll first",
-            ));
-        }
         let organization = self.pending.lock().unwrap().clone().ok_or_else(|| {
             CallError::new(
                 ErrorCode::InvalidParams,
@@ -188,6 +182,23 @@ impl Daemon {
             )
             .map_err(enrollment_refusal)?;
         drop(code);
+        // punard asks for a registration only while it holds no enrollment,
+        // so an identity still here is one it never committed: left by an
+        // enrollment that failed after register on a build that did not
+        // release it, or by state punard lost. Keeping it would strand the
+        // device (punard says unenrolled, so `enroll stop` has nothing to
+        // stop). It is replaced only now, after Smplify has accepted the new
+        // code, so a mistyped code never costs a working identity; the old
+        // files go first so no half-old, half-new identity is ever on disk.
+        if let Ok(Some(stale)) = self.store.load() {
+            eprintln!(
+                "punar-smplifyd: replacing an identity punard never committed (device {})",
+                stale.device_id
+            );
+        }
+        if self.store.exists() {
+            self.store.wipe().map_err(internal)?;
+        }
 
         let (token, token_sha256) = identity::new_device_token().map_err(internal)?;
         let mut record = Record {

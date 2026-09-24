@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 use crate::http::{Client, ClientIdentity, HttpError, Request, Url};
 
 pub const API_PREFIX: &str = "/api/v1/linux/mdm";
+
+/// What the bundle endpoint produces, then JSON for its error bodies.
+const BUNDLE_ACCEPT: &str = "application/gzip, application/json;q=0.5";
 /// Inside punard's 5 s per-call budget with room for the socket round trip.
 pub const CALL_BUDGET: Duration = Duration::from_millis(4000);
 
@@ -159,12 +162,16 @@ impl Api {
             .map(str::to_string))
     }
 
-    /// `GET /devices/{id}/bundle`: `None` on 204 (nothing assigned).
+    /// `GET /devices/{id}/bundle`: `None` on 204 (nothing assigned). The
+    /// bundle is a gzip archive (`LinuxDeviceController` declares
+    /// `produces = "application/gzip"`), so asking only for JSON is answered
+    /// 406; JSON stays acceptable, at lower weight, for error bodies.
     pub fn bundle(&self, device_id: &str) -> Result<Option<Bundle>, UpstreamError> {
         let url = self.url(&format!("/devices/{device_id}/bundle"));
         let response = self.client.send(&Request {
             method: "GET",
             url: &url,
+            accept: BUNDLE_ACCEPT,
             bearer: None,
             body: None,
         })?;
@@ -207,6 +214,7 @@ impl Api {
         Ok(self.client.send(&Request {
             method: "POST",
             url: &url,
+            accept: crate::http::ACCEPT_JSON,
             bearer,
             body: Some(body),
         })?)

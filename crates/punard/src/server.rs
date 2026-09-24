@@ -103,6 +103,38 @@ use m9::MutationAuthority;
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
 
+/// A registration enroll.start has not committed yet. The control plane
+/// issues a device identity at `register`; a refusal after that (a policy
+/// fetch the server answers badly, an envelope the loader rejects, a store
+/// that will not write) used to leave the agent holding that identity while
+/// punard reported the device unenrolled — so the next attempt met a stale
+/// one. Dropping this releases it, best effort and exactly like
+/// `enroll.stop`'s release: the local rollback never waits on the network.
+struct UncommittedRegistration<'a> {
+    client: &'a ControlPlaneClient,
+    token: Option<Redacted<String>>,
+}
+
+impl UncommittedRegistration<'_> {
+    /// The enrollment is committed: keep the identity.
+    fn commit(mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for UncommittedRegistration<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            if let Err(e) = self.client.unregister(&token) {
+                eprintln!(
+                    "punard: enroll.start could not release the uncommitted registration \
+                     ({e:?}); the agent may still hold it"
+                );
+            }
+        }
+    }
+}
+
 /// How the enrollment gate names the change it is guarding, in its messages.
 struct EnrollmentWords {
     /// Sentence-initial gerund: "Enrolling this device in an organization".
@@ -4605,6 +4637,12 @@ impl Inner {
         let (token, attestation) = client
             .register(&self.device_id, &bootstrap, code.as_ref())
             .map_err(|e| fail_audit(self.upstream_error("register", e)))?;
+        // From here to the commit point every refusal releases the identity
+        // the control plane just issued; see [`UncommittedRegistration`].
+        let registration = UncommittedRegistration {
+            client: &client,
+            token: Some(token.clone()),
+        };
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
 
@@ -4754,6 +4792,7 @@ impl Inner {
         let org_result = org_info(&enrollment.org);
         let enrolled_at = enrollment.enrolled_at.clone();
         let attestation_label = enrollment.attestation.clone();
+        registration.commit();
         *self.device_token.lock().unwrap() = Some(token);
         *self.enrollment.lock().unwrap() = Some(enrollment);
         *self.org_layers.lock().unwrap() = loaded.layers;

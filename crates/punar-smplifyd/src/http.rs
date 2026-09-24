@@ -115,9 +115,15 @@ pub struct ClientIdentity {
 pub struct Request<'a> {
     pub method: &'a str,
     pub url: &'a Url,
+    /// The media types this call can use. Spring answers 406 when none of
+    /// them is what the endpoint produces, so each call names its own.
+    pub accept: &'a str,
     pub bearer: Option<&'a str>,
     pub body: Option<&'a [u8]>,
 }
+
+/// What every JSON endpoint of the device API produces.
+pub const ACCEPT_JSON: &str = "application/json";
 
 #[derive(Debug)]
 pub struct Response {
@@ -181,25 +187,7 @@ impl Client {
             .map_err(|_| HttpError::Tls)?;
         let mut stream = StreamOwned::new(connection, tcp);
 
-        let mut head = format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: punar-smplifyd/{}\r\nAccept: application/json\r\nConnection: close\r\n",
-            request.method,
-            request.url.path,
-            host_header(request.url),
-            env!("CARGO_PKG_VERSION"),
-        );
-        if let Some(token) = request.bearer {
-            head.push_str("Authorization: Bearer ");
-            head.push_str(token);
-            head.push_str("\r\n");
-        }
-        if let Some(body) = request.body {
-            head.push_str(&format!(
-                "Content-Type: application/json\r\nContent-Length: {}\r\n",
-                body.len()
-            ));
-        }
-        head.push_str("\r\n");
+        let head = request_head(request);
 
         stream
             .sock
@@ -319,9 +307,53 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// The request line and headers, exactly as sent.
+fn request_head(request: &Request<'_>) -> String {
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: punar-smplifyd/{}\r\nAccept: {}\r\nConnection: close\r\n",
+        request.method,
+        request.url.path,
+        host_header(request.url),
+        env!("CARGO_PKG_VERSION"),
+        request.accept,
+    );
+    if let Some(token) = request.bearer {
+        head.push_str("Authorization: Bearer ");
+        head.push_str(token);
+        head.push_str("\r\n");
+    }
+    if let Some(body) = request.body {
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    head.push_str("\r\n");
+    head
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_request_names_the_media_types_it_accepts() {
+        let url =
+            parse_https_url("https://api.smplify.test/api/v1/linux/mdm/devices/d/bundle").unwrap();
+        let head = request_head(&Request {
+            method: "GET",
+            url: &url,
+            accept: "application/gzip, application/json;q=0.5",
+            bearer: None,
+            body: None,
+        });
+        assert!(
+            head.contains("\r\nAccept: application/gzip, application/json;q=0.5\r\n"),
+            "{head}"
+        );
+        assert_eq!(head.matches("Accept:").count(), 1, "{head}");
+        assert!(head.ends_with("\r\n\r\n"));
+    }
 
     #[test]
     fn parses_urls_and_refuses_plaintext() {

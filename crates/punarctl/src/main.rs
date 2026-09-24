@@ -2388,6 +2388,10 @@ const PUNAR_AUTH: &str = "/usr/bin/punar-auth";
 /// refusal, how many wrong passwords pause checking and for how long.
 const FAILLOCK_CONF: &str = "/etc/security/faillock.conf";
 
+/// Empty lines tolerated at the password prompt before giving up. They cost
+/// nothing (none is sent), so this only bounds a stuck key.
+const EMPTY_PASSWORD_LINES: u32 = 3;
+
 /// What `punar-auth --admin` said, read from its one line of output.
 #[derive(Debug, PartialEq, Eq)]
 enum AuthAnswer {
@@ -2465,22 +2469,32 @@ fn ask_punar_auth(password: &str) -> AuthAnswer {
 /// it with a message that says what to do. The client gathers a credential
 /// when it can; it never makes the authorization decision itself.
 fn admin_ticket(purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
-    let Some(read) = read_hidden_line(&format!("Enter your password to {purpose}.\nPassword: "))
-    else {
-        return Ok(None);
+    let mut prompt = format!("Enter your password to {purpose}.\nPassword: ");
+    let mut empty_lines = 0;
+    let password = loop {
+        let Some(read) = read_hidden_line(&prompt) else {
+            return Ok(None);
+        };
+        let Ok(password) = read else {
+            eprintln!(
+                "punarctl: the password could not be read from the terminal, so nothing was changed."
+            );
+            return Err(ExitCode::from(2));
+        };
+        if !password.is_empty() {
+            break password;
+        }
+        // An empty line is not an attempt and is never sent: punar-authd
+        // would count it against the account for nothing. It is usually a
+        // stray Enter (a repeated key, or the one that ended the code), so
+        // ask again rather than throwing the whole change away.
+        empty_lines += 1;
+        if empty_lines == EMPTY_PASSWORD_LINES {
+            eprintln!("No password was entered, so nothing was changed.");
+            return Err(ExitCode::from(3));
+        }
+        prompt = "Password (Ctrl-C cancels): ".to_string();
     };
-    let Ok(password) = read else {
-        eprintln!(
-            "punarctl: the password could not be read from the terminal, so nothing was changed."
-        );
-        return Err(ExitCode::from(2));
-    };
-    if password.is_empty() {
-        // Enter on an empty line is not an attempt, and is not sent:
-        // punar-authd would count it against the account for nothing.
-        eprintln!("No password was entered, so nothing was changed.");
-        return Err(ExitCode::from(3));
-    }
     match ask_punar_auth(&password) {
         AuthAnswer::Ticket(ticket) => Ok(Some(ticket)),
         AuthAnswer::Denied => {
