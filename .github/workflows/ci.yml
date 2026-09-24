@@ -627,10 +627,14 @@ jobs:
             os/images/cache/cargo-target-amd64-debian
           # Do not hash the staged desktop tree directly: it deliberately
           # contains absolute systemd enablement symlinks, which GitHub's
-          # hashFiles walker rejects before the build can start. The commit
-          # SHA invalidates changed shared desktop inputs; the restore prefix
-          # still reuses the latest snapshot-bounded package/Cargo cache.
-          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'Cargo.lock') }}-${{ github.sha }}
+          # hashFiles walker rejects before the build can start, and the
+          # build stages root-owned 0750 product binaries (punar-pim-launch)
+          # into mkosi.extra that the runner cannot read when the post step
+          # re-evaluates this key. So hash the lane's tracked inputs by name,
+          # as the arm64 lane does. The commit SHA invalidates changed shared
+          # desktop inputs; the restore prefix still reuses the latest
+          # snapshot-bounded package/Cargo cache.
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/snapshot.env', 'os/images/amd64-debian/container-build.sh', 'os/images/amd64-debian/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.postinst.chroot', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: punar-debian-amd64-
 
       - name: Build pinned Debian amd64 minimal + desktop candidates
