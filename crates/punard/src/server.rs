@@ -40,9 +40,9 @@ use punar_common::ipc::{
     ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
     AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
-    FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method,
-    Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
+    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopParams, EnrollStopResult,
+    ErrorCode, FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES,
+    Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
     PolicyExplainParams, PolicyExplainResult, PolicySetParams, PolicySetResult, PolicySourceRef,
     PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
     ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
@@ -102,6 +102,28 @@ use m9::MutationAuthority;
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
+
+/// How the enrollment gate names the change it is guarding, in its messages.
+struct EnrollmentWords {
+    /// Sentence-initial gerund: "Enrolling this device in an organization".
+    doing: &'static str,
+    /// Infinitive: "enroll this device in an organization".
+    verb: &'static str,
+    /// What the retry command asks the person for.
+    asks: &'static str,
+}
+
+const ENROLL_START_WORDS: EnrollmentWords = EnrollmentWords {
+    doing: "Enrolling this device in an organization",
+    verb: "enroll this device in an organization",
+    asks: "the enrollment code and then your password",
+};
+
+const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
+    doing: "Unenrolling this device",
+    verb: "unenroll this device",
+    asks: "your password",
+};
 /// M10 `--trigger` value punard sends to the data owner on an enrollment
 /// transition (milestone-10.md sections 3.3, 13.1).
 pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
@@ -1527,7 +1549,7 @@ impl Inner {
             Method::PolicySet(params) => self.handle_policy_set(peer, params),
             Method::EnrollStart(params) => self.handle_enroll_start(peer, params),
             Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
-            Method::EnrollStop => self.handle_enroll_stop(peer),
+            Method::EnrollStop(params) => self.handle_enroll_stop(peer, params),
             // M9 (contract section 14.2).
             Method::ApprovalsList => self.handle_approvals_list(),
             Method::ApprovalsGet(params) => self.handle_approvals_get(params),
@@ -4307,6 +4329,118 @@ impl Inner {
         IpcError::with_details(ErrorCode::Conflict, message, json!({ "state": state }))
     }
 
+    /// Who may change this device's enrollment (contract sections 5.9, 5.11).
+    ///
+    /// Root has no account for Punar's lock screen to re-authenticate against,
+    /// so it needs no ticket, exactly as for `policy.set`. A person is never
+    /// root on a Punar device: root is locked and no account holds sudo
+    /// (onboarding.md section 1.6). A person therefore proves their password
+    /// to punar-authd, which mints a single-use ticket for their uid, and
+    /// [`Inner::spend_enrollment_ticket`] spends it. Reaching punar-authd at
+    /// all takes membership of the `punar` group, so a ticket also says "this
+    /// is the device's administrator".
+    ///
+    /// This half runs first and costs the caller nothing: an agent-shaped
+    /// peer is refused at any uid (enrollment decides who manages the device,
+    /// and SPEC section 60 gives an agent no say in that), and a person who
+    /// brought no confirmation is refused before anything is parsed or sent.
+    fn admit_enrollment_change(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        if let Some(who) = self.agent_shaped_peer(peer, actor) {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                action,
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "An AI agent may not {}.\n\
+                     Requested by: {who}\n\
+                     Policy: personal defaults — enrollment decides who manages this \
+                     device, and only a person who has just proved their password may \
+                     change it (SPEC section 60).\n\
+                     Next step: run `{retry}` yourself.",
+                    words.verb
+                ),
+                json!({ "decision": "deny", "reason": "agent_scope" }),
+            ));
+        }
+        if peer.uid != 0 && ticket.is_none() {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                action,
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — who manages a device is an \
+                     administrative change, confirmed at the moment it is made.\n\
+                     Next step: run `{retry}` in a terminal; it asks for {}.",
+                    words.doing, words.asks
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Spend a person's confirmation (root has none to spend). The unlink is
+    /// the commit, so a replayed ticket finds nothing; a ticket is never
+    /// forwarded, audited, stored or returned.
+    fn spend_enrollment_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        if peer.uid == 0 {
+            return Ok(());
+        }
+        let Err(why) = crate::reauth::consume(
+            &self.cfg.reauth_ticket_dir,
+            peer.uid,
+            ticket.unwrap_or_default(),
+            SystemTime::now(),
+        ) else {
+            return Ok(());
+        };
+        self.log_audit(AuditEvent::denial(
+            &self.device_id,
+            actor,
+            action,
+            RESOURCE_ENROLLMENT,
+        ));
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "Your password confirmation was not accepted: {}.\n\
+                 Policy: personal defaults — a confirmation is good once, for two \
+                 minutes, for the account that made it.\n\
+                 Next step: run `{retry}` again and enter your password when asked.",
+                why.as_message()
+            ),
+            json!({
+                "decision": "deny",
+                "reason": format!("reauthentication_{}", why.as_str()),
+            }),
+        ))
+    }
+
     /// `enroll.start` (contract section 5.9): guard → discover → register
     /// (fresh in-memory bootstrap secret; **attestation simulated and
     /// labeled**) → policy.fetch → strict-parse validation (the M4
@@ -4321,19 +4455,20 @@ impl Inner {
         params: &EnrollStartParams,
     ) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "enroll.start",
-                RESOURCE_ENROLLMENT,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "device enrollment",
-                None,
-                &format!("sudo punarctl enroll start {}", params.org_domain),
-            ));
-        }
+        let shown = if domain_syntax_ok(params.org_domain.trim()) {
+            params.org_domain.trim()
+        } else {
+            "<domain>"
+        };
+        let retry = format!("punarctl enroll start {shown}");
+        self.admit_enrollment_change(
+            peer,
+            &actor,
+            "enroll.start",
+            params.ticket.as_deref(),
+            &ENROLL_START_WORDS,
+            &retry,
+        )?;
         let domain = params.org_domain.trim();
         if !domain_syntax_ok(domain) {
             return Err(IpcError::with_details(
@@ -4348,6 +4483,20 @@ impl Inner {
                 json!({ "param": "org_domain", "reason": "not a domain name" }),
             ));
         }
+        // The confirmation is spent here: after the one refusal that costs
+        // nothing to check (a malformed domain, which a person fixes by
+        // retyping), and before anything else, so every later outcome — the
+        // conflict below included — is audited against a caller who proved
+        // who they are, and nothing leaves the device for one who did not.
+        // punarctl reads `enroll.status` first, so a person is not asked for
+        // a password on a device that is already enrolled.
+        self.spend_enrollment_ticket(
+            peer,
+            &actor,
+            "enroll.start",
+            params.ticket.as_deref(),
+            &retry,
+        )?;
         // Serialize enrollment transitions without holding the state lock
         // across the network/reconcile pipeline.
         let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
@@ -4376,11 +4525,10 @@ impl Inner {
                  Policy: os default — one organization at a time (docs/api/ipc.md \
                  section 5.9).\n\
                  Next step: `punarctl enroll status` shows the current organization; \
-                 `sudo punarctl enroll stop` unenrolls."
+                 `punarctl enroll stop` unenrolls."
                     .to_string(),
             ));
         }
-
         let fail_audit = |stage_error: IpcError| {
             self.log_audit(self.enroll_event(
                 &actor,
@@ -4704,21 +4852,56 @@ impl Inner {
     /// by design: M5 has no unregister RPC — the control plane keeps its
     /// device record and received history (unenrollment stops future flow;
     /// it cannot retract the past). Works with the control plane down.
-    fn handle_enroll_stop(&self, peer: &Peer) -> Result<Value, IpcError> {
+    fn handle_enroll_stop(
+        &self,
+        peer: &Peer,
+        params: &EnrollStopParams,
+    ) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "enroll.stop",
-                RESOURCE_ENROLLMENT,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "device enrollment",
-                None,
-                "sudo punarctl enroll stop",
-            ));
+        let retry = "punarctl enroll stop";
+        self.admit_enrollment_change(
+            peer,
+            &actor,
+            "enroll.stop",
+            params.ticket.as_deref(),
+            &ENROLL_STOP_WORDS,
+            retry,
+        )?;
+        // An organization may keep its device. Unenrolling removes every
+        // organization layer at once, so wherever the organization has turned
+        // local administration off, a person may not do it here. Checked
+        // before the ticket is spent: the answer does not depend on who is
+        // asking, and a refusal should not cost a password.
+        if peer.uid != 0 {
+            let local_admin = self.local_admin_status();
+            if !local_admin.allowed {
+                let (name, policy_id) = local_admin
+                    .source
+                    .as_ref()
+                    .map(|src| (src.name.clone(), src.policy_id.clone()))
+                    .unwrap_or_else(|| ("your organization".into(), "unknown".into()));
+                let mut event =
+                    AuditEvent::denial(&self.device_id, &actor, "enroll.stop", RESOURCE_ENROLLMENT);
+                event.policy_ids = vec![policy_id.clone()];
+                self.log_audit(event);
+                return Err(IpcError::with_details(
+                    ErrorCode::Denied,
+                    format!(
+                        "{name} manages this device and has turned local administration \
+                         off ({policy_id}), so it cannot be unenrolled here.\n\
+                         User override: not permitted.\n\
+                         Next step: ask {name} to allow local administration on this \
+                         device, then run `punarctl enroll stop` again."
+                    ),
+                    json!({
+                        "decision": "deny",
+                        "policy_ids": [policy_id],
+                        "reason": "local_admin_disabled",
+                    }),
+                ));
+            }
         }
+        self.spend_enrollment_ticket(peer, &actor, "enroll.stop", params.ticket.as_deref(), retry)?;
         let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
             Some(guard) => guard,
             None => {

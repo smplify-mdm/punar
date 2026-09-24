@@ -200,9 +200,9 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `policy.effective` (M4) | any connected peer | no      | no      |
 | `policy.explain` (M4)   | any connected peer | no      | no      |
 | `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) |
-| `enroll.start` (M5)     | **root only (uid 0)** | yes  | always  |
+| `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  |
 | `enroll.status` (M5)    | any connected peer | no      | no      |
-| `enroll.stop` (M5)      | **root only (uid 0)** | yes  | always  |
+| `enroll.stop` (M5)      | root, or a person with a fresh `punar-authd` ticket where the organization allows local administration; agents never (section 5.11) | yes  | always  |
 | `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no |
 | `approvals.create` (M9) | **root only (uid 0)** | yes | always |
 | `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always |
@@ -680,10 +680,38 @@ authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
-Params: `{"org_domain": "acme.com", "code": "…"}` — `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. **Root only**, mutating, always
+Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…"}` — `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
 the fetched policy ids in `policy_ids`). Processed under the 60 s bound
 (section 2).
+
+**Who may enroll: root, or a person who has just confirmed their password.**
+No account on a Punar device holds sudo and root is locked (onboarding.md
+section 1.6), so a person enrolls the way `policy.set` is confirmed: punarctl
+asks for their password, relays it to `punar-authd` (whose socket only the
+`punar` group can reach), and passes the single-use `ticket` it mints. The
+checks run in this order:
+
+1. **No agent, at any uid** — the wide M9 test (section 14.5); root inside an
+   agent scope buys no bypass. Audited as a denial,
+   `details.reason: "agent_scope"`. A ticket the agent carried is left
+   unspent.
+2. **A non-root peer must carry a ticket** — audited as a denial,
+   `details.reason: "reauthentication_required"`, before anything is parsed
+   or sent.
+3. **A malformed domain** → `invalid_params`, not audited (as before this
+   gate existed), so a typo does not cost the person their password.
+4. **The ticket is spent** — audited as a denial on failure:
+   `details.reason: "reauthentication_missing"` (absent from the caller's own
+   uid directory: never minted, already spent, or minted for someone else),
+   `"reauthentication_expired"` (older than 120 s) or
+   `"reauthentication_malformed"` (not 64 hexadecimal characters). The
+   unlink is the commit, so a replay finds nothing. A ticket is never
+   forwarded, audited, stored or returned.
+5. Only then the guard and the already-enrolled `conflict`, so every event
+   from here on names a caller who proved who they are. punarctl reads
+   `enroll.status` first and does not ask for a code or a password on a
+   device that is already enrolled.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
@@ -741,9 +769,15 @@ milestone-5.md section 7). The device token appears in no field.
 
 ### 5.11 `enroll.stop` (M5)
 
-Params: none. **Root only**, mutating, always audited
-(`action: "enroll.stop"`, `resource: "enrollment"`). Guard: not enrolled →
-`conflict`. Removes exactly the policy.d files recorded at enrollment,
+Params: `{}` or none from root; `{"ticket": "…"}` from a person. Mutating,
+always audited (`action: "enroll.stop"`, `resource: "enrollment"`). The gate
+is section 5.9's — agents refused at any uid, a person without a ticket
+refused, the ticket spent before anything changes — with one addition before
+the ticket is spent: **an organization may keep its device.** Where its
+policy has turned local administration off (section 5.7 `local_admin`), a
+person is refused with `details.reason: "local_admin_disabled"` and the
+organization's policy id in `policy_ids`; the ticket is left unspent. Root is
+not subject to it. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
 deletes `enrollment.json` and the device token, recomputes the merge, runs
 one reconcile pass (recorded user preferences resurface as the winning
 layer per spec section 39), rewrites the section 9 status file. Result:

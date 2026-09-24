@@ -270,6 +270,21 @@ journalctl -b --no-pager -o cat 2>/dev/null \
     | grep -E 'ordering cycle|Found dependency on|break cycle|deleted to break' \
     | while IFS= read -r line; do say "cycle ${line}"; done
 say "active $(for u in punard punar-smplifyd punar-identity-materialize systemd-userdbd greetd; do printf '%s=%s ' "${u}" "$(systemctl is-active "${u}" 2>/dev/null)"; done)"
+# The person's path to enrollment: membership of `punar` reaches punar-authd,
+# whose ticket punard spends. Without a terminal punarctl sends no ticket, so
+# the first administrator is refused before anything leaves the device.
+# `getent group punar` shows only /etc/group's member list; a userdb account's
+# membership arrives through nss-systemd's initgroups, which `id -nG` asks.
+admin=''
+for account in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }'); do
+    groups="$(id -nG "${account}" 2>&1)"
+    say "account ${account} groups=$(printf '%s' "${groups}" | tr ' ' ',')"
+    case " ${groups} " in *' punar '*) [ -n "${admin}" ] || admin="${account}" ;; esac
+done
+say "authd $(systemctl is-active punar-authd.socket 2>/dev/null)"
+if [ -n "${admin}" ]; then
+    say "unconfirmed-enroll ${admin}: $(setpriv --reuid="${admin}" --regid="$(id -g "${admin}")" --init-groups punarctl enroll start @DOMAIN@ </dev/null 2>&1 | head -n 2 | tr '\n' ' ')"
+fi
 say "done"
 PROBE
 sed -i "s/@DOMAIN@/${PUNAR_LAB_DOMAIN}/" "${root_mount}/usr/local/lib/punar-lab/smplify-probe.sh"
@@ -328,6 +343,6 @@ echo "==> Smplify lab ready"
 echo "    1. start the edge:      ${LAB_DIR}/start-edge.sh"
 echo "    2. boot the VM:         PUNAR_VM_PERSIST=1 ${REPO_ROOT}/tools/demo-arm64-vm.sh ${OUTPUT_IMAGE}"
 echo "    3. issue a code:        smplify linux enrollment-token issue --file token.json --yes"
-echo "    4. in the VM:           sudo punarctl enroll start ${LAB_DOMAIN}   (paste the code at the prompt)"
+echo "    4. in the VM:           punarctl enroll start ${LAB_DOMAIN}   (the code, then your password)"
 echo "    organisation document: /etc/punar/smplify/${LAB_DOMAIN}.json in the image"
 echo "    CA and keys stay in mode-0600 files under ${LAB_DIR}; nothing here is a production artifact"

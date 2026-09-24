@@ -63,7 +63,7 @@ performs the same `/os-identifiers/resolve` → `/enroll` (token + CSR) →
 |---|---|---|---|---|---|
 | **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, build the category-states-only compliance and inventory bodies, write audit and `status.json` | Hold the device key; speak TCP | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `After=punar-smplifyd.service`, never `Requires` (SPEC §55: cached policy enforces with the agent down) |
 | **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, forward exactly the bodies punard hands it | Mutate the OS; call any punard method; act on a server command; gather anything | Serves NDJSON on `/run/punar-smplifyd/api.sock` 0600, `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service` |
-| **punarctl** | root | `enroll start <domain> [--code-stdin]`, `enroll status`, `enroll stop` | Put the code on argv | punard socket | fixed argv |
+| **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket), `enroll status`, `enroll stop` (the same password confirmation; refused where the organization has turned local administration off) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
 | **System Control › Organization** (slice 2) | session | Domain, visibility panel, code entry, re-auth, then fixed-argv `punarctl … --code-stdin` | Be a second control plane | `status.json` over inotify | ticket path, like `policy.set` |
 
 **Method mapping.** `org.discover {domain}` → root-owned pin
@@ -98,6 +98,12 @@ long-polls inside a call.
   sockets are UDS; the agent's HTTP is outbound only.
 - **Explicit, audited enrollment**: nothing at first boot; `enroll.start`
   stays root-or-ticket, all-or-nothing, audited; no automatic `enroll.stop`.
+  A person is never root on a Punar device, so the ticket is the path: the
+  code, then the person's own password, as a Mac asks for an administrator's
+  (ipc.md §5.9). AI agents are refused at any uid, before the ticket is spent.
+  Unenrolling takes the same confirmation, so a person who enrolled can also
+  leave; an organization that turns local administration off keeps the
+  device (ipc.md §5.11), the Punar analogue of a non-removable MDM profile.
 - **The code never touches argv, audit, logs or a result**: punarctl reads
   it from stdin or a terminal with echo off; punard carries it as `Redacted`
   for the one register call.

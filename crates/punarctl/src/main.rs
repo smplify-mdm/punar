@@ -705,8 +705,9 @@ enum InstallCommand {
 
 #[derive(Subcommand)]
 enum EnrollCommand {
-    /// Enroll with the organization at <domain> (root only; explicit by
-    /// design — enrollment is never automatic, SPEC section 24).
+    /// Enroll with the organization at <domain>. Asks for the enrollment
+    /// code, then for your password to confirm (explicit by design —
+    /// enrollment is never automatic, SPEC section 24).
     Start {
         /// Organization domain, like `acme.com`.
         domain: String,
@@ -719,8 +720,10 @@ enum EnrollCommand {
     },
     /// Show enrollment state (never the device token).
     Status,
-    /// Unenroll: remove the org policy layers and restore personal state
-    /// (root only; local — the org keeps what it already received).
+    /// Unenroll: remove the org policy layers and restore personal state.
+    /// Asks for your password to confirm; refused where your organization has
+    /// turned local administration off (local — the org keeps what it already
+    /// received).
     Stop {
         /// Skip the interactive confirmation.
         #[arg(long)]
@@ -2257,6 +2260,23 @@ fn approvals_wait(
 /// off, exactly like a passphrase. Blank means "no code" — the dev/CI mock
 /// needs none, and the real control plane says so itself if one is
 /// required. There is deliberately no `--code` flag.
+/// The organization this device is already enrolled with, if it is — so a
+/// person is not asked for a code and a password only to be told the device
+/// already belongs to someone. `None` when unenrolled or when the status read
+/// fails; either way `enroll.start` then gives punard's own answer.
+fn already_enrolled(client: &Client) -> Option<String> {
+    let status = client.call("enroll.status", None).ok()?;
+    if status.get("enrolled").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let org = &status["org"];
+    let name = org["display_name"]
+        .as_str()
+        .or_else(|| org["name"].as_str())
+        .unwrap_or("an organization");
+    Some(name.to_string())
+}
+
 fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCode> {
     if code_stdin {
         let mut raw = String::new();
@@ -2266,7 +2286,7 @@ fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCod
                  standard input.\n\
                  Why: with --code-stdin the code arrives on stdin — Punar never accepts \
                  a secret on argv, because /proc/<pid>/cmdline is world-readable.\n\
-                 Next step: printf %s \"$CODE\" | sudo punarctl enroll start <domain> --code-stdin"
+                 Next step: printf %s \"$CODE\" | punarctl enroll start <domain> --code-stdin"
             );
             return Err(ExitCode::from(2));
         }
@@ -2275,44 +2295,242 @@ fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCod
             eprintln!(
                 "punarctl enroll start: no enrollment code arrived on standard input.\n\
                  Why: --code-stdin means the code is read from stdin.\n\
-                 Next step: printf %s \"$CODE\" | sudo punarctl enroll start <domain> --code-stdin"
+                 Next step: printf %s \"$CODE\" | punarctl enroll start <domain> --code-stdin"
             );
             return Err(ExitCode::from(2));
         }
         return Ok(Some(Redacted::new(value)));
     }
-    let Ok(mut tty) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-    else {
+    let Some(read) = read_hidden_line("Enrollment code (leave blank if none): ") else {
         // No terminal and no --code-stdin: proceed without a code. The
         // control plane that needs one refuses with a message that says so.
         return Ok(None);
     };
-    use std::io::{BufRead, Write};
-    let _ = write!(tty, "Enrollment code (leave blank if none): ");
-    let _ = tty.flush();
-    let saved = rustix::termios::tcgetattr(&tty).ok();
-    if let Some(saved) = &saved {
-        let mut quiet = saved.clone();
-        quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
-        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Flush, &quiet);
-    }
-    let mut line = String::new();
-    let read = std::io::BufReader::new(&tty).read_line(&mut line);
-    if let Some(saved) = &saved {
-        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Flush, saved);
-    }
-    let _ = writeln!(tty);
-    if read.is_err() {
+    let Ok(line) = read else {
         eprintln!(
             "punarctl enroll start: the enrollment code could not be read from the terminal."
         );
         return Err(ExitCode::from(2));
-    }
+    };
     let value = line.trim().to_string();
     Ok((!value.is_empty()).then(|| Redacted::new(value)))
+}
+
+/// Ask on the controlling terminal with echo off and read one line. `None`
+/// when there is no terminal to ask on.
+///
+/// Whatever state the terminal was left in, it is put in canonical mode with
+/// echo off, and suspend (Ctrl-Z) is disabled for the duration: bash resumes
+/// a stopped job with echo back on, so the rest of a secret typed after `fg`
+/// would be shown. Interrupt (Ctrl-C) still works.
+fn read_hidden_line(prompt: &str) -> Option<std::io::Result<Zeroizing<String>>> {
+    use rustix::termios::{LocalModes, OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr};
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let _ = write!(tty, "{prompt}");
+    let _ = tty.flush();
+    let saved = tcgetattr(&tty).ok();
+    if let Some(saved) = &saved {
+        let mut quiet = saved.clone();
+        quiet.local_modes.remove(LocalModes::ECHO);
+        quiet.local_modes.insert(LocalModes::ICANON);
+        // _POSIX_VDISABLE is 0 on Linux: no key suspends the prompt.
+        quiet.special_codes[SpecialCodeIndex::VSUSP] = 0;
+        let _ = tcsetattr(&tty, OptionalActions::Flush, &quiet);
+    }
+    let read = read_secret_line(&mut tty);
+    if let Some(saved) = &saved {
+        let _ = tcsetattr(&tty, OptionalActions::Flush, saved);
+    }
+    let _ = writeln!(tty);
+    Some(read)
+}
+
+/// The longest secret line accepted; punar-authd's whole request is bounded
+/// at 4096 bytes.
+const MAX_SECRET_LINE: usize = 4096;
+
+/// Read up to the first newline straight into a buffer that is wiped on drop
+/// and never grows, so no reallocation or buffered reader leaves a copy
+/// behind. Loops until the newline rather than trusting one `read` to be one
+/// line. A trailing CR is dropped; end of input ends the line.
+fn read_secret_line(input: &mut impl Read) -> std::io::Result<Zeroizing<String>> {
+    let mut buffer = Zeroizing::new(vec![0u8; MAX_SECRET_LINE + 1]);
+    let mut len = 0;
+    while !buffer[..len].contains(&b'\n') {
+        if len == buffer.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the line is longer than any password this device accepts",
+            ));
+        }
+        match input.read(&mut buffer[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let line = &buffer[..len];
+    let line = &line[..line.iter().position(|&b| b == b'\n').unwrap_or(len)];
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    Ok(Zeroizing::new(String::from_utf8_lossy(line).into_owned()))
+}
+
+/// The unprivileged half of punar-auth: the lock screen and
+/// punar-policy-set.sh spawn this same fixed path.
+const PUNAR_AUTH: &str = "/usr/bin/punar-auth";
+
+/// Where the lock screen's faillock policy lives. Read only to say, in a
+/// refusal, how many wrong passwords pause checking and for how long.
+const FAILLOCK_CONF: &str = "/etc/security/faillock.conf";
+
+/// What `punar-auth --admin` said, read from its one line of output.
+#[derive(Debug, PartialEq, Eq)]
+enum AuthAnswer {
+    /// The password was accepted and punar-authd minted this ticket.
+    Ticket(Zeroizing<String>),
+    /// The password was refused.
+    Denied,
+    /// The device could not ask. Never a statement about the password.
+    Unavailable,
+}
+
+/// Parse punar-auth's output: `ok <ticket>`, `denied`, or anything else,
+/// which is `unavailable`. A ticket that is not 64 hex characters is not one
+/// punar-authd minted, so it is treated as the device failing to answer
+/// rather than passed on.
+fn parse_auth_answer(output: &str) -> AuthAnswer {
+    let line = output.strip_suffix('\n').unwrap_or(output);
+    if line == "denied" {
+        return AuthAnswer::Denied;
+    }
+    match line.strip_prefix("ok ") {
+        Some(ticket) if ticket.len() == 64 && ticket.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            AuthAnswer::Ticket(Zeroizing::new(ticket.to_string()))
+        }
+        _ => AuthAnswer::Unavailable,
+    }
+}
+
+/// Relay one password to punar-authd through punar-auth and read the answer.
+/// The password goes down an anonymous pipe: never argv, never the
+/// environment, never disk.
+fn ask_punar_auth(password: &str) -> AuthAnswer {
+    let Ok(mut child) = std::process::Command::new(PUNAR_AUTH)
+        .arg("--admin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return AuthAnswer::Unavailable;
+    };
+    let wrote = child.stdin.take().is_some_and(|mut stdin| {
+        stdin.write_all(password.as_bytes()).is_ok() && stdin.write_all(b"\n").is_ok()
+    });
+    let mut output = Zeroizing::new(String::new());
+    let read = child
+        .stdout
+        .take()
+        .is_some_and(|stdout| stdout.take(256).read_to_string(&mut output).is_ok());
+    let _ = child.wait();
+    if !wrote || !read {
+        return AuthAnswer::Unavailable;
+    }
+    parse_auth_answer(&output)
+}
+
+/// Confirm a change to this device's enrollment with the person's own
+/// password, and return the single-use ticket punard will spend.
+///
+/// WHY A PASSWORD AND NOT SUDO. No account on a Punar device holds sudo and
+/// root is locked (onboarding.md section 1.6), so "re-run as root" is advice a
+/// person can never follow. Enrollment decides who manages the device; a
+/// stolen shell must not be able to change that, so the person at the
+/// keyboard proves their password at the moment they do it, exactly as
+/// System Control does for a device policy change.
+///
+/// ONE ATTEMPT PER RUN. punar-authd checks the password through the lock
+/// screen's PAM stack, whose faillock tally every surface on the device
+/// shares. A retry loop here would spend most of it in one command, and once
+/// it is spent even the right password is refused, which is why a refusal
+/// names the pause instead of calling the password wrong.
+///
+/// `Ok(None)` when there is no terminal to ask on: the request then goes
+/// without a confirmation and punard, which is the one that decides, refuses
+/// it with a message that says what to do. The client gathers a credential
+/// when it can; it never makes the authorization decision itself.
+fn admin_ticket(purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
+    let Some(read) = read_hidden_line(&format!("Enter your password to {purpose}.\nPassword: "))
+    else {
+        return Ok(None);
+    };
+    let Ok(password) = read else {
+        eprintln!(
+            "punarctl: the password could not be read from the terminal, so nothing was changed."
+        );
+        return Err(ExitCode::from(2));
+    };
+    if password.is_empty() {
+        // Enter on an empty line is not an attempt, and is not sent:
+        // punar-authd would count it against the account for nothing.
+        eprintln!("No password was entered, so nothing was changed.");
+        return Err(ExitCode::from(3));
+    }
+    match ask_punar_auth(&password) {
+        AuthAnswer::Ticket(ticket) => Ok(Some(ticket)),
+        AuthAnswer::Denied => {
+            let conf = std::fs::read_to_string(FAILLOCK_CONF).unwrap_or_default();
+            eprintln!("{}", password_refused_message(&conf));
+            Err(ExitCode::from(3))
+        }
+        AuthAnswer::Unavailable => {
+            eprintln!(
+                "This device could not check your password just now, so nothing was \
+                 changed.\n\
+                 Next step: try again in a moment; `systemctl status punar-authd.socket` \
+                 shows why if it keeps happening."
+            );
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// What to say when punar-authd refuses a password. Never "wrong password":
+/// while faillock has paused the account, the right one is refused too, and
+/// telling an owner their correct password is wrong is how a wait turns into
+/// a lockout they cannot diagnose.
+fn password_refused_message(faillock_conf: &str) -> String {
+    let setting = |key: &str| {
+        faillock_conf
+            .lines()
+            .filter_map(|line| {
+                let line = line.split('#').next()?.trim();
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key)
+                    .then(|| value.trim().parse::<u64>().ok())
+                    .flatten()
+            })
+            .next_back()
+    };
+    let pause = match (setting("deny"), setting("unlock_time")) {
+        (Some(deny), Some(seconds)) if deny > 0 && seconds > 0 => format!(
+            "After {deny} wrong passwords this device refuses every password, even the \
+             right one, for {} minutes.",
+            seconds.div_ceil(60)
+        ),
+        _ => "After several wrong passwords this device refuses every password, even \
+              the right one, for a while."
+            .to_string(),
+    };
+    format!(
+        "That password was not accepted, so nothing was changed.\n\
+         {pause} If you are sure of your password, wait and try again."
+    )
 }
 
 fn token_from_stdin(verb: &str) -> Result<Redacted<String>, ExitCode> {
@@ -3538,32 +3756,67 @@ fn main() -> ExitCode {
         Command::Enroll { command } => {
             let hostname = local_hostname();
             match command {
-                EnrollCommand::Start { domain, code_stdin } => match enrollment_code(code_stdin) {
-                    Err(exit) => exit,
-                    Ok(code) => {
-                        let mut params = json!({ "org_domain": domain });
-                        if let Some(code) = code {
-                            params["code"] = json!(code.expose_secret());
-                        }
-                        // 90 s client budget for this one verb (contract
-                        // section 2): the pipeline runs a full reconcile pass
-                        // server-side.
-                        match client.call_with_timeout(
-                            "enroll.start",
-                            Some(params),
-                            crate::ipc::ENROLL_START_TIMEOUT,
-                        ) {
-                            Ok(result) => render_or_json(json, &result, |v| {
-                                views::enroll_start(&style, v, &hostname)
-                            }),
-                            Err(error) => fail(&error),
-                        }
+                EnrollCommand::Start { domain, code_stdin } => match already_enrolled(&client) {
+                    Some(org) => {
+                        eprintln!(
+                            "This device is already enrolled with {org}, so nothing was changed.\n\
+                             Next step: `punarctl enroll stop` unenrolls it first."
+                        );
+                        ExitCode::FAILURE
                     }
+                    None => match enrollment_code(code_stdin) {
+                        Err(exit) => exit,
+                        Ok(code) => {
+                            let mut params = json!({ "org_domain": domain });
+                            if let Some(code) = code {
+                                params["code"] = json!(code.expose_secret());
+                            }
+                            // Asked last, so the two-minute confirmation is spent
+                            // by the call it was typed for rather than by however
+                            // long the code took to find.
+                            if !rustix::process::geteuid().is_root() {
+                                match admin_ticket(&format!(
+                                    "allow enrolling this device with {domain}"
+                                )) {
+                                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+                                    Ok(None) => {}
+                                    Err(exit) => return exit,
+                                }
+                            }
+                            // 90 s client budget for this one verb (contract
+                            // section 2): the pipeline runs a full reconcile pass
+                            // server-side.
+                            match client.call_with_timeout(
+                                "enroll.start",
+                                Some(params),
+                                crate::ipc::ENROLL_START_TIMEOUT,
+                            ) {
+                                Ok(result) => render_or_json(json, &result, |v| {
+                                    views::enroll_start(&style, v, &hostname)
+                                }),
+                                Err(error) => fail(&error),
+                            }
+                        }
+                    },
                 },
                 EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
                     views::enroll_status(&style, v, &hostname)
                 }),
                 EnrollCommand::Stop { yes } => {
+                    // Nothing to remove: say so before asking for a yes or a
+                    // password. A failed read falls through to punard's answer.
+                    let unenrolled = matches!(
+                        client.call("enroll.status", None),
+                        Ok(ref status)
+                            if status.get("enrolled").and_then(Value::as_bool) == Some(false)
+                    );
+                    if unenrolled {
+                        eprintln!(
+                            "This device is not enrolled, so there is nothing to remove.\n\
+                             Next step: `punarctl enroll status` shows the current state."
+                        );
+                        return ExitCode::FAILURE;
+                    }
                     // Interactive confirmation (D-014: destructive verbs
                     // confirm): prompted only on a TTY without --yes;
                     // scripts and --json calls are deliberate already.
@@ -3579,7 +3832,18 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     }
-                    rpc(&client, json, "enroll.stop", None, |v| {
+                    // A person confirms with their password, as for enrolling.
+                    // Asked after the yes, so the two-minute confirmation is
+                    // spent by the call it was typed for.
+                    let mut params = None;
+                    if !rustix::process::geteuid().is_root() {
+                        match admin_ticket("allow unenrolling this device") {
+                            Ok(Some(ticket)) => params = Some(json!({ "ticket": ticket.as_str() })),
+                            Ok(None) => {}
+                            Err(exit) => return exit,
+                        }
+                    }
+                    rpc(&client, json, "enroll.stop", params, |v| {
                         views::enroll_stop(&style, v, &hostname)
                     })
                 }
@@ -4456,9 +4720,10 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        Cli, append_filtered_session_bus_mount, append_resolver_mount, append_vendor_open_bridge,
-        filtered_bus_proxy_command, read_vendor_callback_payload, validated_vendor_callback_uris,
-        vendor_runtime_tmp, vendor_supervisor_command,
+        AuthAnswer, Cli, append_filtered_session_bus_mount, append_resolver_mount,
+        append_vendor_open_bridge, filtered_bus_proxy_command, parse_auth_answer,
+        password_refused_message, read_secret_line, read_vendor_callback_payload,
+        validated_vendor_callback_uris, vendor_runtime_tmp, vendor_supervisor_command,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -4468,6 +4733,71 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::ipc::{CallError, Client, Target, WireError};
     use serde_json::json;
+    use zeroize::Zeroizing;
+
+    /// punar-auth answers with one word, or `ok <ticket>`. Only a ticket
+    /// shaped exactly as punar-authd mints one is ever forwarded to punard;
+    /// everything else is the device failing to answer, never a statement
+    /// about the password.
+    #[test]
+    fn punar_auth_answers_parse_to_exactly_three_outcomes() {
+        let token = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            parse_auth_answer(&format!("ok {token}\n")),
+            AuthAnswer::Ticket(Zeroizing::new(token.clone()))
+        );
+        assert_eq!(parse_auth_answer("denied\n"), AuthAnswer::Denied);
+        assert_eq!(parse_auth_answer("unavailable\n"), AuthAnswer::Unavailable);
+        // An unlock-shaped `ok` carries nothing punard could spend.
+        assert_eq!(parse_auth_answer("ok\n"), AuthAnswer::Unavailable);
+        assert_eq!(
+            parse_auth_answer("ok ../../1001/aaaa\n"),
+            AuthAnswer::Unavailable
+        );
+        assert_eq!(
+            parse_auth_answer(&format!("ok {token}\nextra\n")),
+            AuthAnswer::Unavailable
+        );
+        assert_eq!(parse_auth_answer(""), AuthAnswer::Unavailable);
+    }
+
+    /// A secret line is read to its newline however the bytes arrive, loses
+    /// a trailing CR, and a line longer than any password is refused rather
+    /// than cut short and sent.
+    #[test]
+    fn a_secret_line_is_read_whole_and_bounded() {
+        use std::io::Read;
+        struct Trickle<'a>(&'a [u8]);
+        impl Read for Trickle<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let Some((&first, rest)) = self.0.split_first() else {
+                    return Ok(0);
+                };
+                out[0] = first;
+                self.0 = rest;
+                Ok(1)
+            }
+        }
+        let read = |bytes: &[u8]| read_secret_line(&mut Trickle(bytes)).map(|s| s.to_string());
+        assert_eq!(read(b"correct horse\n").unwrap(), "correct horse");
+        assert_eq!(read(b"windows\r\n").unwrap(), "windows");
+        assert_eq!(read(b"no newline").unwrap(), "no newline");
+        assert_eq!(read(b"").unwrap(), "");
+        assert_eq!(read(b"first\nsecond\n").unwrap(), "first");
+        assert!(read(&vec![b'x'; 5000]).is_err());
+    }
+
+    /// A refused password is never called wrong: the shipped faillock policy
+    /// is named, so an owner who is sure of their password knows to wait.
+    #[test]
+    fn a_refused_password_names_the_pause_not_a_typo() {
+        let shipped = "# comment\ndeny = 5\nunlock_time = 300\nfail_interval = 900\n";
+        let message = password_refused_message(shipped);
+        assert!(message.contains("After 5 wrong passwords"), "{message}");
+        assert!(message.contains("for 5 minutes"), "{message}");
+        let unknown = password_refused_message("");
+        assert!(unknown.contains("for a while"), "{unknown}");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

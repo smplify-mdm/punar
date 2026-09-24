@@ -1213,12 +1213,12 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         // instead of interrupting. It appears on no other view, and there is
         // deliberately no banner, no badge and no prompt anywhere else.
         //
-        // SIMULATED, and labelled (spec 1.22): the endpoint this talks to is
-        // punar-mock-smplify. The real control plane does not exist yet —
-        // docs/development/user-blocked.md item 4.
+        // No sudo: nobody at the keyboard is ever root on a Punar device, so
+        // the command a person can actually run is the one named, and it asks
+        // them for what it needs (docs/api/ipc.md section 5.9).
         out.push_str(&fmt::note(
             style,
-            "To enroll: sudo punarctl enroll start <domain> · SIMULATED — the endpoint is a local mock, not a Smplify instance",
+            "To enroll: punarctl enroll start <domain> · it asks for your organization's enrollment code, then your password",
         ));
         return Ok(out);
     }

@@ -560,6 +560,23 @@ pub struct EnrollStartParams {
     /// never audits or returns it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// A single-use re-authentication ticket minted by `punar-authd` for this
+    /// caller, exactly as for [`PolicySetParams::ticket`]. Enrollment hands the
+    /// device's management to an organization, so a person confirms it with
+    /// their password at the moment they do it. Absent is legitimate only for
+    /// uid 0. punard spends it and never forwards, audits or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Params for `enroll.stop` (M5, contract section 5.11). Optional on the wire:
+/// root sends none, and a person sends the single-use re-authentication
+/// ticket `punar-authd` minted for them, exactly as for `enroll.start`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollStopParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Local catalog lookup. `id` asks for one app plus a live source
@@ -867,7 +884,7 @@ pub enum Method {
     EnrollStatus,
     /// `enroll.stop` (M5, contract section 5.11) — local unenroll: remove
     /// the org layers, restore personal state. Root-only; always audited.
-    EnrollStop,
+    EnrollStop(EnrollStopParams),
     /// `approvals.list` (M9, contract section 14.2) — pending first, then
     /// recently resolved. Read; any connected peer; sweeps expiry lazily.
     ApprovalsList,
@@ -1036,7 +1053,7 @@ impl Method {
             Method::PolicySet(_) => "policy.set",
             Method::EnrollStart(_) => "enroll.start",
             Method::EnrollStatus => "enroll.status",
-            Method::EnrollStop => "enroll.stop",
+            Method::EnrollStop(_) => "enroll.stop",
             Method::ApprovalsList => "approvals.list",
             Method::ApprovalsGet(_) => "approvals.get",
             Method::ApprovalsCreate(_) => "approvals.create",
@@ -1093,9 +1110,12 @@ impl Method {
             // by a ticket punar-authd minted for this very caller; the daemon
             // enforces that, this flag only says it is not uid-0-only.
             Method::PolicySet(_) => false,
-            // M5 (contract section 5): enrollment mutations are root-only,
-            // exactly like `capabilities.set`.
-            Method::EnrollStart(_) | Method::EnrollStop => true,
+            // Enrollment is NOT root-only, for the same reason as
+            // `policy.set`: nobody at the keyboard is ever root on a Punar
+            // device. The daemon admits root, or a person carrying a ticket
+            // punar-authd minted for them, and refuses agents at any uid
+            // (contract sections 5.9, 5.11).
+            Method::EnrollStart(_) | Method::EnrollStop(_) => false,
             // M9 (contract section 14.2). Reads stay open. `create` and
             // `consume` are root-only: minting approvals and spending them
             // are privileged operations whose only callers are punard
@@ -1158,7 +1178,6 @@ impl Method {
             | Method::Reconcile
             | Method::PolicyEffective
             | Method::EnrollStatus
-            | Method::EnrollStop
             | Method::ApprovalsList
             | Method::PrivilegeStatus
             | Method::AppsList
@@ -1190,6 +1209,7 @@ impl Method {
             Method::WebAppsUninstall(p) => serde_json::to_value(p),
             Method::WebAppsContextCreate(p) => serde_json::to_value(p),
             Method::WebAppsContextDelete(p) => serde_json::to_value(p),
+            Method::EnrollStop(p) => serde_json::to_value(p),
             Method::UpdateCheck(p) => serde_json::to_value(p),
             Method::UpdateApply(p) => serde_json::to_value(p),
             Method::UpdateRollback(p) => serde_json::to_value(p),
@@ -1234,7 +1254,10 @@ impl Method {
             "enroll.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::EnrollStatus)
             }
-            "enroll.stop" => Self::expect_no_params(method, params).map(|()| Method::EnrollStop),
+            "enroll.stop" => match params {
+                None => Ok(Method::EnrollStop(EnrollStopParams::default())),
+                Some(value) => Self::parse_params(method, value).map(Method::EnrollStop),
+            },
             "approvals.list" => {
                 Self::expect_no_params(method, params).map(|()| Method::ApprovalsList)
             }
@@ -2321,9 +2344,10 @@ mod tests {
             Method::EnrollStart(EnrollStartParams {
                 org_domain: "acme.com".to_string(),
                 code: None,
+                ticket: None,
             }),
             Method::EnrollStatus,
-            Method::EnrollStop,
+            Method::EnrollStop(EnrollStopParams::default()),
             Method::ApprovalsList,
             Method::ApprovalsGet(ApprovalIdParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
@@ -2487,8 +2511,6 @@ mod tests {
                 method.name(),
                 "capabilities.set"
                     | "reconcile"
-                    | "enroll.start"
-                    | "enroll.stop"
                     // M9: minting and spending approvals are privileged.
                     // `approvals.resolve` is human-only, which is a
                     // stronger rule this flag cannot express (see
@@ -3203,7 +3225,7 @@ mod tests {
     }
 
     #[test]
-    fn enroll_status_and_stop_take_no_params() {
+    fn enroll_status_takes_no_params_and_stop_takes_only_a_ticket() {
         for method in ["enroll.status", "enroll.stop"] {
             let reject = Request::parse_json_line(&format!(
                 r#"{{"v":1,"id":"e","method":"{method}","params":{{"x":1}}}}"#
@@ -3211,6 +3233,17 @@ mod tests {
             .unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{method}");
         }
+        // Root sends nothing; a person sends the ticket.
+        assert_eq!(
+            Method::from_wire("enroll.stop", None).unwrap(),
+            Method::EnrollStop(EnrollStopParams::default())
+        );
+        assert_eq!(
+            Method::from_wire("enroll.stop", Some(json!({"ticket": "t"}))).unwrap(),
+            Method::EnrollStop(EnrollStopParams {
+                ticket: Some("t".to_string())
+            })
+        );
     }
 
     #[test]

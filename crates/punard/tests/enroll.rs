@@ -70,6 +70,11 @@ struct ControlPlaneState {
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
     token_seq: AtomicUsize,
+    /// Every method punard called, in order: proves whether anything left
+    /// the device on behalf of a caller.
+    methods: Mutex<Vec<String>>,
+    /// Every request line exactly as it arrived, to prove what never did.
+    lines: Mutex<Vec<String>>,
 }
 
 impl ControlPlaneState {
@@ -239,6 +244,8 @@ fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
         let id = request["id"].clone();
         let method = request["method"].as_str().unwrap_or_default();
         let params = request.get("params").cloned().unwrap_or(json!({}));
+        state.methods.lock().unwrap().push(method.to_string());
+        state.lines.lock().unwrap().push(line.clone());
         let response = match state.handle(method, &params) {
             Ok(result) => json!({"v": 1, "id": id, "result": result}),
             Err((code, message)) => {
@@ -307,6 +314,8 @@ impl TestDaemon {
             control_plane_socket: control_plane.to_path_buf(),
             os_release_path,
             kernel_release_path,
+            reauth_ticket_dir: dir.join("tickets"),
+            proc_root: dir.join("proc"),
             ..DaemonConfig::new(
                 dir.join(format!("punard-{seq}.sock")),
                 state_dir,
@@ -684,24 +693,55 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     }
 }
 
+/// A ticket exactly as punar-authd mints one: an empty 0600 file named by the
+/// token, in a 0700 directory named by the uid that proved its password.
+fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let per_uid = dir.join("tickets").join(uid.to_string());
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&per_uid)
+        .unwrap();
+    let path = per_uid.join(token);
+    fs::File::create(&path).unwrap();
+    path
+}
+
+const TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn person() -> Peer {
+    Peer {
+        uid: 1000,
+        gid: 1000,
+        pid: None,
+    }
+}
+
+/// No account on a Punar device holds sudo and root is locked, so a person
+/// enrolls by confirming their password. A request without that confirmation
+/// is refused before anything leaves the device, and unenrolling stays
+/// root-only.
 #[test]
-fn enroll_mutations_are_root_only_and_audited() {
+fn a_person_without_a_password_confirmation_cannot_enroll() {
     let dir = test_dir("authz");
-    let control_plane = ControlPlane::start(&dir);
-    let daemon = TestDaemon::start(
-        &dir,
-        Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        },
-        &control_plane.socket,
-        "enabled",
-    );
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "enabled");
 
     let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
     assert_eq!(error["code"], "denied");
-    assert!(error["message"].as_str().unwrap().contains("administrator"));
+    assert_eq!(error["details"]["reason"], "reauthentication_required");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("needs your password"), "{message}");
+    assert!(
+        !message.contains("sudo"),
+        "no account on a Punar device can use sudo, so the refusal must not suggest it"
+    );
+    assert!(
+        state.methods.lock().unwrap().is_empty(),
+        "nothing may leave the device for an unconfirmed caller"
+    );
     let error = daemon.error("enroll.stop", None);
     assert_eq!(error["code"], "denied");
     // Both denials audited; the read stays open.
@@ -1009,6 +1049,243 @@ fn the_enrollment_code_reaches_the_control_plane_and_nowhere_else() {
     let mut hits = Vec::new();
     walk(&dir, code, &mut hits);
     assert!(hits.is_empty(), "the code leaked to disk: {hits:?}");
+}
+
+/// The first account on a Punar device enrolls it the way a Mac administrator
+/// does: the code, then their own password. The ticket punar-authd minted for
+/// that password is spent by the call, and stored or forwarded nowhere. A
+/// spent ticket on an enrolled device is refused as a spent ticket, never
+/// recorded as an allowed attempt. The same person unenrolls with a fresh
+/// confirmation.
+#[test]
+fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
+    let dir = test_dir("person");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
+    let ticket = mint_ticket(&dir, 1000, TICKET);
+
+    let result = daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "lex_person", "ticket": TICKET})),
+    );
+    assert_eq!(result["org"]["display_name"], "Acme Engineering");
+    assert!(!ticket.exists(), "the ticket was spent, not merely checked");
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
+    let allowed = |daemon: &TestDaemon| {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| {
+                e["action"] == "enroll.start" && e["user_id"] == "punar" && e["decision"] != "deny"
+            })
+            .count()
+    };
+    assert!(
+        allowed(&daemon) >= 1,
+        "the enrollment is attributed to the person who confirmed it"
+    );
+
+    // Replaying the spent ticket on the enrolled device: refused for the
+    // ticket, before the conflict, and never audited as allowed.
+    let before = allowed(&daemon);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "ticket": TICKET})),
+    );
+    assert_eq!(error["details"]["reason"], "reauthentication_missing");
+    assert_eq!(allowed(&daemon), before);
+
+    // Unenrolling takes a fresh confirmation, and spends it.
+    let error = daemon.error("enroll.stop", None);
+    assert_eq!(error["details"]["reason"], "reauthentication_required");
+    const SECOND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let second = mint_ticket(&dir, 1000, SECOND);
+    let stopped = daemon.result("enroll.stop", Some(json!({"ticket": SECOND})));
+    assert_eq!(stopped["enrolled"], false);
+    assert!(!second.exists());
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    daemon.stop();
+
+    // Neither ticket reached anything but punard: not the control plane,
+    // not the audit trail, not the state directory.
+    for token in [TICKET, SECOND] {
+        assert!(
+            state
+                .lines
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|l| !l.contains(token)),
+            "a ticket reached the control plane"
+        );
+        let mut hits = Vec::new();
+        for place in [dir.clone(), dir.join("state")] {
+            for entry in fs::read_dir(&place).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && fs::read(&path)
+                        .map(|b| b.windows(token.len()).any(|w| w == token.as_bytes()))
+                        .unwrap_or(false)
+                {
+                    hits.push(path);
+                }
+            }
+        }
+        assert!(hits.is_empty(), "a ticket leaked to disk: {hits:?}");
+    }
+}
+
+/// An organization may keep its device: where it has turned local
+/// administration off, a person cannot unenroll it, even with a valid
+/// confirmation, and the refusal costs them nothing. Root still can.
+#[test]
+fn an_organization_that_disables_local_administration_keeps_its_device() {
+    let dir = test_dir("keep");
+    let state = Arc::new(ControlPlaneState::default());
+    state.deny_local_admin.store(true, Ordering::SeqCst);
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
+    mint_ticket(&dir, 1000, TICKET);
+    daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "lex_keep", "ticket": TICKET})),
+    );
+    const SECOND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let second = mint_ticket(&dir, 1000, SECOND);
+    let error = daemon.error("enroll.stop", Some(json!({"ticket": SECOND})));
+    assert_eq!(error["code"], "denied");
+    assert_eq!(error["details"]["reason"], "local_admin_disabled");
+    assert!(
+        error["message"].as_str().unwrap().contains("Acme"),
+        "the refusal names the organization: {error}"
+    );
+    assert!(second.exists(), "a refusal must not cost the password");
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
+    daemon.stop();
+
+    let root = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    assert_eq!(root.result("enroll.stop", None)["enrolled"], false);
+    root.stop();
+}
+
+/// A confirmation is good once, for the account that made it. A cheap
+/// refusal (a malformed domain) does not cost the person their password; a
+/// ticket another account minted, or one already spent, enrolls nothing and
+/// sends nothing.
+#[test]
+fn a_confirmation_is_good_once_and_only_for_the_account_that_made_it() {
+    let dir = test_dir("ticket");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
+
+    // Someone else's confirmation is not yours.
+    let foreign = mint_ticket(&dir, 1001, TICKET);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "ticket": TICKET})),
+    );
+    assert_eq!(error["code"], "denied");
+    assert_eq!(error["details"]["reason"], "reauthentication_missing");
+    assert!(foreign.exists(), "another account's ticket is left alone");
+
+    // A malformed token never reaches the filesystem.
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "ticket": "../1001/whatever"})),
+    );
+    assert_eq!(error["details"]["reason"], "reauthentication_malformed");
+    assert!(
+        state.methods.lock().unwrap().is_empty(),
+        "nothing may leave the device for an unconfirmed caller"
+    );
+
+    // A typo in the domain is refused before the ticket is spent.
+    let mine = mint_ticket(&dir, 1000, TICKET);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "not a domain", "ticket": TICKET})),
+    );
+    assert_eq!(error["code"], "invalid_params");
+    assert!(mine.exists(), "a cheap refusal must not cost the password");
+
+    // An organization that is not there spends it: the network was used.
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "nobody.example", "ticket": TICKET})),
+    );
+    assert_ne!(error["code"], "denied", "{error}");
+    assert!(!mine.exists());
+    assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+
+    // And a spent ticket authorizes nothing.
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "ticket": TICKET})),
+    );
+    assert_eq!(error["details"]["reason"], "reauthentication_missing");
+    assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    daemon.stop();
+}
+
+/// An AI agent may never choose an organization for the device: not with a
+/// valid confirmation, and not as root (SPEC section 60 — root-ness inside an
+/// agent scope buys no bypass). The person's ticket is left unspent, and each
+/// pass runs in its own directory so its evidence is its own.
+#[test]
+fn an_agent_cannot_enroll_even_with_a_valid_confirmation() {
+    const AGENT_PID: i32 = 4242;
+    for uid in [1000, 0] {
+        let dir = test_dir(&format!("agent-{uid}"));
+        let cgroup = dir.join("proc").join(AGENT_PID.to_string());
+        fs::create_dir_all(&cgroup).unwrap();
+        fs::write(
+            cgroup.join("cgroup"),
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+punar-agent-agt_4f21c09ab3e1.scope\n",
+        )
+        .unwrap();
+        let state = Arc::new(ControlPlaneState::default());
+        let control_plane = ControlPlane::start_with(&dir, state.clone());
+        let daemon = TestDaemon::start(
+            &dir,
+            Peer {
+                uid,
+                gid: uid,
+                pid: Some(AGENT_PID),
+            },
+            &control_plane.socket,
+            "disabled",
+        );
+        let ticket = mint_ticket(&dir, uid, TICKET);
+        for (method, params) in [
+            (
+                "enroll.start",
+                json!({"org_domain": "acme.com", "code": "lex_agent", "ticket": TICKET}),
+            ),
+            ("enroll.stop", json!({"ticket": TICKET})),
+        ] {
+            let error = daemon.error(method, Some(params));
+            assert_eq!(error["code"], "denied", "uid {uid} {method}: {error}");
+            assert_eq!(error["details"]["reason"], "agent_scope");
+            assert!(
+                daemon
+                    .audit_events()
+                    .iter()
+                    .any(|e| e["action"] == method && e["decision"] == "deny"),
+                "uid {uid} {method}: the refusal is audited"
+            );
+        }
+        assert!(
+            ticket.exists(),
+            "an agent's attempt must not burn the ticket"
+        );
+        assert!(state.methods.lock().unwrap().is_empty());
+        assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+        daemon.stop();
+    }
 }
 
 /// A real Smplify tenant can enroll a device before assigning it any policy:

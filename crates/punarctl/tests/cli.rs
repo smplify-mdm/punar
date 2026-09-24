@@ -475,6 +475,15 @@ fn handle_connection(stream: UnixStream, responder: fn(&Value) -> Result<Value, 
 
 /// Start a mock daemon with a custom responder on a fresh tempdir socket;
 /// returns the socket path.
+/// The default fixtures, on a device that is not enrolled yet: what
+/// `enroll start` checks before it asks anyone for a code or a password.
+fn unenrolled_respond(request: &Value) -> Result<Value, Value> {
+    if request["method"] == "enroll.status" {
+        return Ok(json!({ "enrolled": false }));
+    }
+    respond(request)
+}
+
 fn start_mock_with(responder: fn(&Value) -> Result<Value, Value>) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -939,7 +948,7 @@ fn update_check_sends_only_force_and_renders_the_signed_decision() {
 
 #[test]
 fn enroll_start_renders_the_loud_simulated_label_and_json_round_trips() {
-    let socket = start_mock();
+    let socket = start_mock_with(unenrolled_respond);
 
     let output = run(&socket, &["enroll", "start", "acme.com"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -958,6 +967,39 @@ fn enroll_start_renders_the_loud_simulated_label_and_json_round_trips() {
     assert_eq!(value, fixture_enroll_start());
     // No device token anywhere in any enrollment output, ever.
     assert!(!stdout(&output).contains("tok_"));
+}
+
+/// On a device that is already enrolled, `enroll start` says so and stops:
+/// nobody is asked for an enrollment code or a password only to be told the
+/// device already belongs to an organization.
+#[test]
+fn enroll_start_on_an_enrolled_device_asks_for_nothing() {
+    let socket = start_mock();
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("already enrolled with Acme Engineering"),
+        "{text}"
+    );
+    assert!(text.contains("punarctl enroll stop"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+    assert!(stdout(&output).is_empty());
+}
+
+/// Unenrolling a device that is not enrolled asks for nothing: no yes, no
+/// password, just what is true.
+#[test]
+fn enroll_stop_on_a_personal_device_asks_for_nothing() {
+    let socket = start_mock_with(unenrolled_respond);
+    let output = run(&socket, &["enroll", "stop"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not enrolled"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stdout(&output).is_empty());
 }
 
 #[test]
