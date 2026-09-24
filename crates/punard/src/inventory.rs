@@ -35,7 +35,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use punar_common::storage::{self, StorageSources};
 use serde::Serialize;
@@ -43,7 +43,7 @@ use serde_json::Value;
 
 use crate::device::{DeviceSources, directory_has_battery, logical_cores, memory_kib};
 use crate::update_status::StagedRelease;
-use crate::util::run_with_timeout;
+use crate::util::{run_bounded, run_with_timeout};
 
 /// `source` of an application built into the signed image.
 pub const SOURCE_IMAGE: &str = "punar-image";
@@ -70,6 +70,9 @@ const SECURE_BOOT_VARIABLE: &str = "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032
 const SMALL_FILE_MAX: u64 = 64 * 1024;
 const DETECT_VIRT_TIMEOUT: Duration = Duration::from_secs(2);
 const FLATPAK_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A failed `flatpak list` on an unchanged installation is tried again after
+/// this long, not on every pass.
+const FLATPAK_RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 const BYTES_PER_GB: u64 = 1_000_000_000;
 
 /// Where every fact is read from. Production uses [`Default`]; tests point
@@ -309,7 +312,24 @@ struct BootFacts {
 type InstallationStamp = (Option<FileStamp>, Option<FileStamp>);
 
 /// The last system Flatpak list, and the installation state it was read at.
-type FlatpakSnapshot = (InstallationStamp, Result<Vec<Application>, Withheld>);
+struct FlatpakSnapshot {
+    stamp: InstallationStamp,
+    rows: Result<Vec<Application>, Withheld>,
+    read_at: Instant,
+}
+
+impl FlatpakSnapshot {
+    /// Whether this read still answers for the installation at `stamp`. A
+    /// list, or a verdict about one (too large, malformed), holds until the
+    /// installation changes. A failure to read holds too, for
+    /// [`FLATPAK_RETRY_AFTER`]: retrying it every pass re-spawned flatpak,
+    /// and stalled the pass for up to [`FLATPAK_LIST_TIMEOUT`], every 120 s.
+    fn answers(&self, stamp: &InstallationStamp) -> bool {
+        self.stamp == *stamp
+            && (!matches!(self.rows, Err(Withheld::Unreadable))
+                || self.read_at.elapsed() < FLATPAK_RETRY_AFTER)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
@@ -417,7 +437,13 @@ impl InventoryCollector {
     /// Every system-wide Flatpak application. The list is re-read only when
     /// Flatpak marked its installation changed (it rewrites `.changed` on
     /// every deploy and removal) or its `app/` directory changed; a pass on
-    /// an unchanged installation spawns nothing.
+    /// an unchanged installation spawns nothing. A read that failed is
+    /// remembered the same way, and retried sooner only after
+    /// [`FLATPAK_RETRY_AFTER`].
+    ///
+    /// The output is capped at [`MAX_INVENTORY_BYTES`]: a list longer than
+    /// that could never fit the inventory, so it is `TooLarge` at once,
+    /// instead of a child blocked on a full pipe and killed as a timeout.
     fn system_flatpaks(&self) -> Result<Vec<Application>, Withheld> {
         let root = &self.sources.flatpak_installation;
         if !root.is_dir() {
@@ -428,12 +454,12 @@ impl InventoryCollector {
             file_stamp(&root.join("app")),
         );
         let mut cache = self.system_flatpaks.lock().unwrap();
-        if let Some((cached, rows)) = cache.as_ref() {
-            if *cached == stamp {
-                return rows.clone();
+        if let Some(snapshot) = cache.as_ref() {
+            if snapshot.answers(&stamp) {
+                return snapshot.rows.clone();
             }
         }
-        let result = run_with_timeout(
+        let result = run_bounded(
             &self.flatpak_bin,
             &[
                 "list",
@@ -442,13 +468,18 @@ impl InventoryCollector {
                 "--columns=application,name,version,active",
             ],
             FLATPAK_LIST_TIMEOUT,
+            MAX_INVENTORY_BYTES,
         );
         let rows = match result {
             Ok(result) if result.success => parse_flatpak_list(&result.stdout),
-            // A failed read is retried next pass, not remembered.
-            _ => return Err(Withheld::Unreadable),
+            Err(error) if error.kind() == io::ErrorKind::FileTooLarge => Err(Withheld::TooLarge),
+            _ => Err(Withheld::Unreadable),
         };
-        *cache = Some((stamp, rows.clone()));
+        *cache = Some(FlatpakSnapshot {
+            stamp,
+            rows: rows.clone(),
+            read_at: Instant::now(),
+        });
         rows
     }
 }
@@ -1633,15 +1664,46 @@ mod tests {
         assert!(parse_flatpak_list("\n").unwrap().is_empty());
 
         let fixture = Fixture::uefi_vm("flatpak-fails");
-        let flatpak = fixture.script("bin/flatpak", "exit 1");
+        let log = fixture.root.join("flatpak.log");
+        let flatpak = fixture.script(
+            "bin/flatpak",
+            &format!("echo called >> '{}'; exit 1", log.display()),
+        );
         fixture.write("var/lib/flatpak/.changed", "");
         let collector = InventoryCollector::new(fixture.sources(), flatpak);
+        let calls = || fs::read_to_string(&log).unwrap_or_default().lines().count();
         assert_eq!(
             collector
                 .collect(&pass(true), release, Vec::new)
                 .applications,
             Err(Withheld::Unreadable)
         );
+        // The failure is remembered: the next pass on the same installation
+        // spawns nothing and stalls on nothing.
+        assert_eq!(
+            collector
+                .collect(&pass(true), release, Vec::new)
+                .applications,
+            Err(Withheld::Unreadable)
+        );
+        assert_eq!(calls(), 1, "a failed read is not retried every pass");
+        // A changed installation is read again at once; an unchanged one
+        // only once the backoff has passed.
+        std::thread::sleep(Duration::from_millis(20));
+        fixture.write("var/lib/flatpak/.changed", "x");
+        collector.collect(&pass(true), release, Vec::new);
+        assert_eq!(calls(), 2);
+        if let Some(long_ago) = Instant::now().checked_sub(FLATPAK_RETRY_AFTER) {
+            collector
+                .system_flatpaks
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .read_at = long_ago;
+            collector.collect(&pass(true), release, Vec::new);
+            assert_eq!(calls(), 3, "retried after the backoff");
+        }
         // No system installation at all: nothing to list, nothing spawned.
         fs::remove_dir_all(fixture.root.join("var/lib/flatpak")).unwrap();
         assert!(
@@ -1650,6 +1712,36 @@ mod tests {
                 .applications
                 .is_ok()
         );
+    }
+
+    /// More system Flatpaks than a pipe holds, and more than the inventory
+    /// could carry: withheld as too large, promptly, and not asked again
+    /// while the installation is unchanged — never a 30-second stall that
+    /// ends in "unreadable".
+    #[test]
+    fn a_flatpak_list_past_the_inventory_cap_is_too_large_not_a_timeout() {
+        let fixture = Fixture::uefi_vm("flatpak-large");
+        let log = fixture.root.join("flatpak.log");
+        let flatpak = fixture.script(
+            "bin/flatpak",
+            &format!(
+                "echo called >> '{}'\n\
+                 yes \"$(printf 'org.example.App\\tApp\\t1.0\\tabc')\" | head -n 40000",
+                log.display()
+            ),
+        );
+        fixture.write("var/lib/flatpak/.changed", "");
+        let collector = InventoryCollector::new(fixture.sources(), flatpak);
+        let started = Instant::now();
+        assert_eq!(
+            collector
+                .collect(&pass(true), release, Vec::new)
+                .applications,
+            Err(Withheld::TooLarge)
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        collector.collect(&pass(true), release, Vec::new);
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
     }
 
     #[test]

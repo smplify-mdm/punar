@@ -414,7 +414,8 @@ from injectable procfs/sysfs/image paths:
   `enroll.start` — docs/api/ipc.md section 5.9 step 6,
   docs/development/smplify-enrollment.md section 3.2) also every
   system Flatpak (`flatpak list --system --app`, re-run only when the
-  installation changed) and installed catalog vendor apps — and a fourth
+  installation changed, or 30 minutes after a failed read; output past
+  512 KiB withholds the list as too large) and installed catalog vendor apps — and a fourth
   section, `identifiers: {serial_number}`. A personal enrollment never reads
   them. The list is a complete snapshot to its receiver and is never
   truncated: over 2,000 rows, over 512 KiB of inventory, or with a row that

@@ -6,6 +6,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Atomically write `bytes` to `path` with `mode`: temp file in the same
@@ -176,11 +179,39 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Each stream of a [`run_with_timeout`] child is kept up to this many bytes.
+/// No caller expects anything near it; past it the output is not one a caller
+/// can use whole, and holding more would let a runaway child grow punard.
+pub const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// How long a child's pipes may stay open after it exited, for a reader that
+/// has not handed its bytes over yet, when the deadline has already passed.
+const OUTPUT_GRACE: Duration = Duration::from_millis(200);
+
 /// Run `bin` with a **fixed argv** (never a shell — SPEC section 10) and a
 /// wall-clock deadline; on expiry the child is killed and an error returned.
-/// Output is read after exit — fine for the small outputs of `nft` (well
-/// under the 64 KiB pipe buffer, so the child never blocks on write).
+/// Output is capped at [`MAX_COMMAND_OUTPUT_BYTES`] per stream
+/// ([`run_bounded`]).
 pub fn run_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> io::Result<CommandResult> {
+    run_bounded(bin, args, timeout, MAX_COMMAND_OUTPUT_BYTES)
+}
+
+/// [`run_with_timeout`] with the caller's own cap on each stream.
+///
+/// Both pipes are drained WHILE the child runs, each by its own thread. A
+/// pipe holds 64 KiB on Linux, and a child that fills one blocks on its next
+/// write until someone reads: reading only after exit turned any output past
+/// that into a hang, killed at the deadline and reported as a timeout.
+///
+/// Past `max_output_bytes` on either stream the child is killed and the run
+/// fails with [`io::ErrorKind::FileTooLarge`] — never a timeout, and never a
+/// truncated `stdout` a caller would parse as if it were whole.
+pub fn run_bounded(
+    bin: &Path,
+    args: &[&str],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> io::Result<CommandResult> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -188,33 +219,105 @@ pub fn run_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> io::Res
         .stderr(Stdio::piped())
         .spawn_busy_retry()?;
     let start = Instant::now();
+    let deadline = start + timeout;
+    let overflow = Arc::new(AtomicBool::new(false));
+    let (sender, received) = mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        drain_in_background(stdout, Stream::Out, max_output_bytes, &overflow, &sender);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        drain_in_background(stderr, Stream::Err, max_output_bytes, &overflow, &sender);
+    }
+    drop(sender);
+
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("{} wrote more than {max_output_bytes} bytes", bin.display()),
+        )
+    };
+    let timed_out = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{} timed out after {timeout:?}", bin.display()),
+        )
+    };
     let status = loop {
+        if overflow.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(too_large());
+        }
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if start.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("{} timed out after {timeout:?}", bin.display()),
-            ));
+            return Err(timed_out());
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_string(&mut stdout);
+
+    // The pipes close when the child exits, unless something it started
+    // still holds them; that waits no longer than the deadline allows. A
+    // reader left behind ends when the last holder exits.
+    let (mut stdout, mut stderr) = (None, None);
+    while stdout.is_none() || stderr.is_none() {
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(OUTPUT_GRACE);
+        match received.recv_timeout(wait) {
+            Ok((Stream::Out, bytes)) => stdout = Some(bytes),
+            Ok((Stream::Err, bytes)) => stderr = Some(bytes),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(timed_out()),
+        }
     }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut stderr);
+    if overflow.load(Ordering::SeqCst) {
+        return Err(too_large());
     }
+    let text =
+        |bytes: Option<Vec<u8>>| String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned();
     Ok(CommandResult {
         success: status.success(),
-        stdout,
-        stderr,
+        stdout: text(stdout),
+        stderr: text(stderr),
     })
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// Read `pipe` to its end on a thread of its own, keeping at most `cap`
+/// bytes. Past the cap it flags `overflow` and goes on reading, discarding,
+/// so the child is never left blocked on a full pipe while it is stopped.
+fn drain_in_background(
+    mut pipe: impl Read + Send + 'static,
+    stream: Stream,
+    cap: usize,
+    overflow: &Arc<AtomicBool>,
+    sender: &mpsc::Sender<(Stream, Vec<u8>)>,
+) {
+    let overflow = Arc::clone(overflow);
+    let sender = sender.clone();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) if kept.len() + read <= cap => kept.extend_from_slice(&chunk[..read]),
+                Ok(_) => overflow.store(true, Ordering::SeqCst),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send((stream, kept));
+    });
 }
 
 /// Look up a group's gid by name in an `/etc/group`-format file.
@@ -463,5 +566,51 @@ mod tests {
             run_with_timeout(Path::new("/bin/echo"), &["hi"], Duration::from_secs(5)).unwrap();
         assert!(res.success);
         assert_eq!(res.stdout.trim(), "hi");
+    }
+
+    /// More output than a pipe holds, on both streams at once: read only
+    /// after exit, the child blocks on its write and is killed as "hung".
+    #[test]
+    fn run_with_timeout_drains_output_larger_than_a_pipe() {
+        let started = Instant::now();
+        let res = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "head -c 300000 /dev/zero | tr '\\0' o; head -c 200000 /dev/zero | tr '\\0' e >&2",
+            ],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(res.success);
+        assert_eq!(res.stdout.len(), 300_000);
+        assert!(res.stdout.bytes().all(|b| b == b'o'));
+        assert_eq!(res.stderr.len(), 200_000);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Past the cap the run fails as too large, promptly — not as a
+    /// timeout, and never with a shortened stdout.
+    #[test]
+    fn output_past_the_cap_is_too_large_never_truncated() {
+        let started = Instant::now();
+        let error = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "while :; do echo row; done"],
+            Duration::from_secs(20),
+            64 * 1024,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Exactly at the cap is whole output.
+        let res = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "head -c 65536 /dev/zero"],
+            Duration::from_secs(10),
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(res.stdout.len(), 65_536);
     }
 }
