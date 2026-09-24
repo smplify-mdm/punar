@@ -16,6 +16,15 @@
 # the host's loopback as 10.0.2.2, so nothing is exposed on another
 # interface.
 #
+# PUNAR_SMPLIFY_LAB_OVERLAY=1 builds punard, punarctl and punar-smplifyd from
+# this workspace in the ARM64 builder and installs them (with their units and
+# service user) into the derived image — for testing the current branch
+# against an older base image without waiting for a CI artifact. The lab also
+# ships a one-shot boot probe that prints `PUNAR_SMPLIFY_LAB_PROBE` lines on
+# the serial console: discovery, then a registration with a deliberately
+# invalid code, which proves TLS, the host alias, the edge, the registry and
+# the /enroll endpoint end to end without redeeming anything.
+#
 # Honest limits: the local edge does not request the device certificate, so
 # the device presents none — server-side device identity (backend B1/B2 in
 # docs/development/smplify-enrollment.md) is what makes that real.
@@ -155,11 +164,12 @@ docker run --rm --interactive --privileged \
     --env "PUNAR_LAB_CA=${CA_CONTAINER}" \
     --env "PUNAR_LAB_ORG=${ORG_CONTAINER}" \
     --env "PUNAR_LAB_DOMAIN=${LAB_DOMAIN}" \
+    --env "PUNAR_LAB_OVERLAY=${PUNAR_SMPLIFY_LAB_OVERLAY:-0}" \
     --env "PUNAR_HOST_UID=${HOST_UID}" \
     --env "PUNAR_HOST_GID=${HOST_GID}" \
     "${BUILDER_TAG}" bash -s <<'CONTAINER'
 set -euo pipefail
-for command in qemu-img sfdisk jq losetup mount umount; do
+for command in qemu-img sfdisk jq losetup mount umount openssl; do
     command -v "${command}" >/dev/null 2>&1 || {
         echo "error: builder is missing ${command}" >&2
         exit 1
@@ -201,10 +211,84 @@ bundle="${root_mount}/etc/ssl/certs/ca-certificates.crt"
     echo 'error: image has no platform CA bundle' >&2
     exit 1
 }
+if [ "${PUNAR_LAB_OVERLAY}" = 1 ]; then
+    echo "==> Overlaying workspace binaries ($(rustc --version))"
+    (
+        cd /work
+        CARGO_HOME=/work/os/images/cache/cargo-arm64 \
+            CARGO_TARGET_DIR=/work/os/images/cache/cargo-target-arm64 \
+            cargo build --release --locked -p punard -p punarctl -p punar-smplifyd
+    )
+    target=/work/os/images/cache/cargo-target-arm64/release
+    units=/work/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system
+    install -m 0755 "${target}/punard" "${target}/punarctl" "${target}/punar-smplifyd" \
+        "${root_mount}/usr/bin/"
+    install -m 0644 "${units}/punar-smplifyd.service" "${units}/punard.service" \
+        "${root_mount}/usr/lib/systemd/system/"
+    ln -sfn ../punar-smplifyd.service \
+        "${root_mount}/usr/lib/systemd/system/multi-user.target.wants/punar-smplifyd.service"
+    install -d -m 0755 "${root_mount}/usr/share/doc/punar"
+    install -m 0644 /work/docs/development/smplify-enrollment.md \
+        "${root_mount}/usr/share/doc/punar/smplify-enrollment.md"
+    if ! grep -q '^punar-smplifyd:' "${root_mount}/etc/group"; then
+        groupadd --root "${root_mount}" --system punar-smplifyd
+    fi
+    if ! grep -q '^punar-smplifyd:' "${root_mount}/etc/passwd"; then
+        useradd --root "${root_mount}" --system --gid punar-smplifyd \
+            --home-dir /var/lib/punar-smplifyd --no-create-home \
+            --shell /usr/sbin/nologin punar-smplifyd
+    fi
+fi
 [ -x "${root_mount}/usr/bin/punar-smplifyd" ] || {
-    echo 'error: this image has no punar-smplifyd; build from a branch that ships it' >&2
+    echo 'error: this image has no punar-smplifyd; build from a branch that ships it, or set PUNAR_SMPLIFY_LAB_OVERLAY=1' >&2
     exit 1
 }
+# The boot probe: lab-only, non-mutating, reports on the serial console.
+install -d -m 0755 "${root_mount}/usr/local/lib/punar-lab"
+cat > "${root_mount}/usr/local/lib/punar-lab/smplify-probe.sh" <<'PROBE'
+#!/bin/sh
+# Lab-only boot probe (tools/prepare-smplify-lab.sh). Non-mutating: the code
+# below is deliberately invalid, so Smplify refuses it and nothing is issued.
+set -u
+sock=/run/punar-smplifyd/api.sock
+# A release image's kernel console is tty0 only, so write to the serial port
+# directly as well: that is what the host-side launcher captures.
+say() {
+    echo "PUNAR_SMPLIFY_LAB_PROBE $*"
+    if [ -w /dev/ttyAMA0 ]; then echo "PUNAR_SMPLIFY_LAB_PROBE $*" > /dev/ttyAMA0; fi
+}
+i=0
+while [ ! -S "${sock}" ] && [ "${i}" -lt 30 ]; do i=$((i + 1)); sleep 1; done
+if [ ! -S "${sock}" ]; then say "FAIL agent socket absent"; exit 0; fi
+say "os-release $(grep -E '^(ID|VERSION_ID|IMAGE_ID)=' /etc/os-release | tr '\n' ' ')"
+say "discover $(punarctl --socket "${sock}" debug rpc org.discover --params '{"domain":"@DOMAIN@"}' 2>&1 | tr '\n' ' ')"
+say "register-invalid-code $(punarctl --socket "${sock}" debug rpc enroll.register --params '{"device_id":"lab-probe","bootstrap":"00000000000000000000000000000000","code":"lex_lab-probe-deliberately-invalid"}' 2>&1 | tr '\n' ' ')"
+say "identity $(punarctl --socket "${sock}" debug rpc identity.status 2>&1 | tr '\n' ' ')"
+say "agent-log $(journalctl -u punar-smplifyd -b --no-pager -o cat 2>&1 | tail -n 4 | tr '\n' '|')"
+# Ordering cycles are resolved by systemd deleting a job; name every one.
+journalctl -b --no-pager -o cat 2>/dev/null \
+    | grep -E 'ordering cycle|Found dependency on|break cycle|deleted to break' \
+    | while IFS= read -r line; do say "cycle ${line}"; done
+say "active $(for u in punard punar-smplifyd punar-identity-materialize systemd-userdbd greetd; do printf '%s=%s ' "${u}" "$(systemctl is-active "${u}" 2>/dev/null)"; done)"
+say "done"
+PROBE
+sed -i "s/@DOMAIN@/${PUNAR_LAB_DOMAIN}/" "${root_mount}/usr/local/lib/punar-lab/smplify-probe.sh"
+chmod 0755 "${root_mount}/usr/local/lib/punar-lab/smplify-probe.sh"
+cat > "${root_mount}/etc/systemd/system/punar-smplify-lab-probe.service" <<'UNIT'
+[Unit]
+Description=Punar Smplify lab probe (disposable lab image only)
+After=punar-smplifyd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/punar-lab/smplify-probe.sh
+StandardOutput=journal+console
+StandardError=journal+console
+UNIT
+install -d -m 0755 "${root_mount}/etc/systemd/system/multi-user.target.wants"
+ln -sfn /etc/systemd/system/punar-smplify-lab-probe.service \
+    "${root_mount}/etc/systemd/system/multi-user.target.wants/punar-smplify-lab-probe.service"
 mkdir -p "${root_mount}/usr/local/share/ca-certificates"
 install -m 0644 "${PUNAR_LAB_CA}" \
     "${root_mount}/usr/local/share/ca-certificates/punar-smplify-lab.crt"
