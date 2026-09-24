@@ -3601,3 +3601,161 @@ fn privilege_status_and_revoke_render_the_live_grant() {
         stdout(&output)
     );
 }
+
+// ---------------------------------------------------------------------------
+// App list and browser-context status (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+fn fixture_apps_list() -> Value {
+    json!({
+        "architecture": "aarch64",
+        "updates_available": 1,
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "flathub",
+             "installed": true, "installed_commit": "aaa", "target_commit": "bbb",
+             "update_available": true},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "flathub",
+             "installed": false, "installed_commit": null, "target_commit": "ccc",
+             "update_available": false}
+        ]
+    })
+}
+
+fn fixture_apps_catalog() -> Value {
+    json!({
+        "catalog_version": "2026.09.1",
+        "generated_at": "2026-09-01T00:00:00Z",
+        "architecture": "aarch64",
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "category": "utilities",
+             "trust_tier": "verified", "summary": "Sums"},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "category": "internet",
+             "trust_tier": "community", "summary": "Browser"}
+        ]
+    })
+}
+
+fn apps_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => {
+            // The whole catalog, unfiltered: an empty params object.
+            assert_eq!(request["params"], json!({}), "{request}");
+            Ok(fixture_apps_catalog())
+        }
+        _ => respond(request),
+    }
+}
+
+fn apps_without_catalog_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => Err(json!({
+            "code": "unavailable",
+            "message": "The app catalog is not readable.\nPolicy: none\nNext step: none",
+            "details": {}
+        })),
+        _ => respond(request),
+    }
+}
+
+/// `app list` answers what is installed and what the catalog says about it:
+/// category, trust tier and the catalog version it came from. `--json` is
+/// still apps.list verbatim.
+#[test]
+fn app_list_joins_category_trust_tier_and_catalog_version() {
+    let socket = start_mock_with(apps_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator · utilities · verified"), "{text}");
+    assert!(text.contains("Firefox · internet · community"), "{text}");
+    assert!(text.contains("UPDATE AVAILABLE"), "{text}");
+    assert!(text.contains("CATALOG 2026.09.1"), "{text}");
+    assert!(text.contains("1 UPDATE AVAILABLE"), "{text}");
+
+    let output = run(&socket, &["--json", "app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let parsed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(parsed, fixture_apps_list());
+}
+
+/// A catalog that cannot be read drops only its own columns, and says so.
+#[test]
+fn app_list_without_the_catalog_says_what_is_missing() {
+    let socket = start_mock_with(apps_without_catalog_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator"), "{text}");
+    assert!(!text.contains("verified"), "{text}");
+    assert!(
+        text.contains("CATEGORY AND TRUST TIER UNAVAILABLE: THE APP CATALOG IS NOT READABLE."),
+        "{text}"
+    );
+}
+
+/// `web-apps context status` names the workspace bindings System Control
+/// keeps, not only the active context.
+#[test]
+fn context_status_prints_the_workspace_bindings() {
+    let state = std::env::temp_dir().join(format!("punarctl-context-{}", std::process::id()));
+    fs::create_dir_all(state.join("punar")).expect("state dir");
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({
+            "version": 1,
+            "updated": "2026-09-24T00:00:00Z",
+            "active": "atlas",
+            "active_cause": "workspace:Atlas",
+            "bindings": [
+                {"workspace": "Atlas", "context": "atlas"},
+                {"workspace": "Home", "context": "personal"}
+            ]
+        })
+        .to_string(),
+    )
+    .expect("state file");
+    let socket = start_mock();
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("WORKSPACE BINDINGS"), "{text}");
+    let atlas = text
+        .lines()
+        .find(|line| line.ends_with("workspace Atlas"))
+        .expect(&text);
+    assert!(atlas.starts_with("ATLAS"), "{text}");
+    let home = text
+        .lines()
+        .find(|line| line.ends_with("workspace Home"))
+        .expect(&text);
+    assert!(home.starts_with("PERSONAL"), "{text}");
+
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({"version": 1, "updated": "x", "active": "personal",
+               "active_cause": "default", "bindings": []})
+        .to_string(),
+    )
+    .expect("state file");
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert!(
+        stdout(&output).contains("NO WORKSPACE IS BOUND"),
+        "{}",
+        stdout(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}

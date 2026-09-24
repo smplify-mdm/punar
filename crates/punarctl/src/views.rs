@@ -4590,6 +4590,100 @@ pub fn apps(style: &Style, result: &Value, hostname: &str) -> Result<String, Str
     Ok(out)
 }
 
+/// `punarctl app list`: the installed state from `apps.list`, with each
+/// app's category and trust tier and the catalog version joined from
+/// `apps.catalog`. Without the catalog the rows say only what apps.list says,
+/// and a note says why.
+pub fn app_list(
+    style: &Style,
+    result: &Value,
+    catalog: Option<&Result<Value, crate::ipc::CallError>>,
+    hostname: &str,
+) -> Result<String, String> {
+    let apps = result
+        .get("apps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "apps result has no apps array".to_string())?;
+    let mut out = fmt::masthead(style, "Applications", hostname);
+    if apps.is_empty() {
+        out.push_str(&fmt::note(style, "The catalog offers no applications"));
+        return Ok(out);
+    }
+    let known = match catalog {
+        Some(Ok(value)) => value.get("apps").and_then(Value::as_array),
+        _ => None,
+    };
+    let facts = |id: &str| {
+        known.and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+        })
+    };
+    let rows: Vec<Row> = apps
+        .iter()
+        .map(|app| {
+            let text = |key: &str| app.get(key).and_then(Value::as_str).unwrap_or("");
+            let id = app.get("id").and_then(Value::as_str).unwrap_or("unknown");
+            let (state, slot) = match (
+                text("source"),
+                app.get("installed").and_then(Value::as_bool),
+                app.get("update_available").and_then(Value::as_bool),
+            ) {
+                (_, Some(true), Some(true)) => ("update available", Slot::Warn),
+                (_, Some(true), _) => ("installed", Slot::Ok),
+                ("web", _, _) => ("web app", Slot::Neutral),
+                (_, Some(false), _) => ("available", Slot::Neutral),
+                (source, _, _) => (source, Slot::Neutral),
+            };
+            let name = if text("name").is_empty() {
+                id
+            } else {
+                text("name")
+            };
+            let mut description = vec![name.to_string()];
+            if let Some(row) = facts(id) {
+                for key in ["category", "trust_tier"] {
+                    if let Some(value) = row.get(key).and_then(Value::as_str) {
+                        description.push(value.to_string());
+                    }
+                }
+            }
+            Row::new(id, state, slot, &description.join(" · "))
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let updates = result
+        .get("updates_available")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let catalog_line = match catalog {
+        Some(Ok(value)) => format!(
+            "Catalog {}",
+            value
+                .get("catalog_version")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        Some(Err(error)) => format!(
+            "Category and trust tier unavailable: {}",
+            error
+                .message()
+                .lines()
+                .next()
+                .unwrap_or("the catalog did not answer")
+        ),
+        None => "Catalog not read".to_string(),
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "{catalog_line} · {updates} update{} available · punarctl app show <id>",
+            if updates == 1 { "" } else { "s" }
+        ),
+    ));
+    Ok(out)
+}
+
 pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let app = result
         .get("app")

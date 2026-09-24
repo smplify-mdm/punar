@@ -476,11 +476,44 @@ fn context_command(
                         ),
                     ],
                 ));
+                out.push_str(&render_bindings(style, &state.bindings));
                 print!("{out}");
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The workspace bindings: which named workspace switches new windows to
+/// which context. The same list System Control keeps.
+fn render_bindings(style: &Style, bindings: &[ContextBinding]) -> String {
+    let mut out = fmt::section(
+        style,
+        "Workspace bindings",
+        "entering one switches new windows",
+    );
+    if bindings.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No workspace is bound · punarctl web-apps context bind <context> --workspace <name>",
+        ));
+        return out;
+    }
+    // Workspace names are case-sensitive and row labels are upper-cased, so
+    // the name is printed verbatim in the description.
+    let rows: Vec<Row> = bindings
+        .iter()
+        .map(|binding| {
+            Row::new(
+                &binding.context,
+                "bound",
+                Slot::Neutral,
+                &format!("workspace {}", binding.workspace),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    out
 }
 
 fn call(client: &Client, method: &str, params: Option<Value>) -> WebResult<Value> {

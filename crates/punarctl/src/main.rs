@@ -4208,9 +4208,24 @@ fn main() -> ExitCode {
             }
             AppCommand::List => {
                 let hostname = local_hostname();
-                rpc(&client, json, "apps.list", None, |v| {
-                    views::apps(&style, v, &hostname)
-                })
+                match client.call("apps.list", None) {
+                    Ok(result) => {
+                        // `--json` stays the verbatim apps.list result. The
+                        // human view joins the catalog's own facts — category,
+                        // trust tier, catalog version — which apps.catalog
+                        // already answers; a catalog that cannot be read only
+                        // drops those columns.
+                        let catalog = if json {
+                            None
+                        } else {
+                            Some(client.call("apps.catalog", Some(json!({}))))
+                        };
+                        render_or_json(json, &result, |v| {
+                            views::app_list(&style, v, catalog.as_ref(), &hostname)
+                        })
+                    }
+                    Err(error) => fail(&error),
+                }
             }
             AppCommand::Install {
                 id,
