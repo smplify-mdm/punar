@@ -394,7 +394,9 @@ from injectable procfs/sysfs/image paths:
 
 - `posture` — `secure_boot`, `uefi`, `tpm_present`, `tpm_version`,
   `is_virtual`, `virtualization`, `disk_encryption_enabled` (every member
-  under `/var` and `/home` proven LUKS2, `punar_common::storage`),
+  under `/var` and `/home` proven LUKS2, `punar_common::storage`, judged
+  from the system's mount table `/proc/1/mountinfo` because punard's
+  `ProtectHome=yes` hides `/home`; `null` when that evidence cannot be seen),
   `firewall_enabled`, `firewall` (`"nftables"`), `os_patch_status`
   (`up-to-date` only on a verified channel check under a day old, otherwise
   `updates-available` or `unknown`) and `reboot_required`. States; `null`

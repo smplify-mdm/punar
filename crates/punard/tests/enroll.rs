@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -342,8 +342,9 @@ fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
 
 /// A fixture machine for the managed inventory's collectors — a QEMU x86_64
 /// guest with SMBIOS, UEFI (Secure Boot off), a TPM 2.0, LUKS2 under /var and
-/// /home, a system Flatpak installation and Punar's desktop entries — so
-/// nothing the daemon reports depends on the host running the test.
+/// /home (hidden from punard's own namespace, as ProtectHome=yes hides it),
+/// a system Flatpak installation and Punar's desktop entries — so nothing the
+/// daemon reports depends on the host running the test.
 fn write_collector_sources(dir: &Path) -> (CollectorSources, UpdateStatusSources, PathBuf) {
     let root = dir.join("machine");
     let at = |relative: &str| root.join(relative);
@@ -378,21 +379,33 @@ fn write_collector_sources(dir: &Path) -> (CollectorSources, UpdateStatusSources
     );
     write_file(&at("sys/class/tpm/tpm0/tpm_version_major"), "2\n");
     write_file(&at("sys/class/power_supply/AC/type"), "Mains\n");
-    write_file(
-        &at("proc/self/mountinfo"),
-        "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n",
-    );
+    // /var and /home are subvolumes of one btrfs on the LUKS2 mapping
+    // punar-data. The system's mount table says so; punard's own ends with
+    // the empty tmpfs ProtectHome=yes stacks on /home, as in production.
     fs::create_dir_all(at("var")).unwrap();
     fs::create_dir_all(at("home")).unwrap();
-    let dev = fs::metadata(at("var")).unwrap().dev();
+    let system_mounts = format!(
+        "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n\
+         40 22 0:44 /@var {} rw - btrfs /dev/mapper/punar-data rw,subvol=/@var\n\
+         41 22 0:44 /@home {} rw - btrfs /dev/mapper/punar-data rw,subvol=/@home\n",
+        at("var").display(),
+        at("home").display()
+    );
+    write_file(&at("proc/1/mountinfo"), &system_mounts);
     write_file(
-        &at(&format!(
-            "sys/dev/block/{}:{}/dm/uuid",
-            rustix::fs::major(dev),
-            rustix::fs::minor(dev)
-        )),
+        &at("proc/self/mountinfo"),
+        format!(
+            "{system_mounts}90 41 0:25 /systemd/inaccessible/dir {} ro - tmpfs tmpfs rw\n",
+            at("home").display()
+        ),
+    );
+    write_file(&at("sys/class/block/dm-0/dm/name"), "punar-data\n");
+    write_file(&at("sys/class/block/dm-0/dev"), "253:0\n");
+    write_file(
+        &at("sys/class/block/dm-0/dm/uuid"),
         "CRYPT-LUKS2-0123456789abcdef-punar-data\n",
     );
+    fs::create_dir_all(at("sys/fs/btrfs/9f1c/devices/dm-0")).unwrap();
     write_file(
         &at("usr/local/share/applications/org.punar.Mail.desktop"),
         "[Desktop Entry]\nType=Application\nName=Mail\nX-Punar-FirstParty=true\n",
@@ -438,6 +451,7 @@ fn write_collector_sources(dir: &Path) -> (CollectorSources, UpdateStatusSources
             sys_fs_btrfs: at("sys/fs/btrfs"),
             mountinfo: at("proc/self/mountinfo"),
         },
+        system_mountinfo: at("proc/1/mountinfo"),
         encrypted_paths: vec![at("var"), at("home")],
         capacity_path: root.clone(),
         desktop_entry_dirs: vec![

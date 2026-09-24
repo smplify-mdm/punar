@@ -27,6 +27,13 @@
 //! The btrfs path never opens anything under `/dev`: the PIM service runs
 //! with a private `/dev`, so the member is named from the mount table and
 //! sysfs alone.
+//!
+//! A caller may also be unable to see the path it asks about. punard runs
+//! with `ProtectHome=yes`, so its own `/home` is an empty directory systemd
+//! mounted over the real one, and asking the path would judge the mask.
+//! [`luks2_backing_of_mount`] judges the mount another namespace made (PID
+//! 1's, the system's) from that namespace's mount table and sysfs, without
+//! opening the path at all.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -76,9 +83,12 @@ pub struct Luks2Backing {
     pub devices: Vec<String>,
 }
 
-/// One `/proc/self/mountinfo` line, the three fields anything here needs.
+/// One `/proc/self/mountinfo` line, the fields anything here needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountEntry {
+    /// `major:minor` of the filesystem: its block device when it sits on
+    /// one, an anonymous `0:N` otherwise (btrfs, tmpfs, overlay).
+    pub device: String,
     pub mount_point: PathBuf,
     pub fstype: String,
     pub source: String,
@@ -127,25 +137,89 @@ pub fn luks2_backing(path: &Path, sources: &StorageSources) -> io::Result<Option
     if mount.fstype != "btrfs" {
         return Ok(None);
     }
-    let Some(name) = block_device_name(&mount.source, &sources.sys_class_block)? else {
+    Ok(match btrfs_members_luks2(&mount.source, sources)? {
+        Members::Luks2(devices) => Some(Luks2Backing { dev, devices }),
+        Members::NotLuks2 | Members::Unseen => None,
+    })
+}
+
+/// Prove that the filesystem mounted where `path` lives, as the mount table
+/// at `sources.mountinfo` records it, is backed only by LUKS2 mappings —
+/// without opening `path`. This is for a caller whose own view of the path is
+/// not the system's: punard runs with `ProtectHome=yes`, so its `/home` is an
+/// empty mask, and reading PID 1's table (`/proc/1/mountinfo`) judges the
+/// mount the system actually made. `path` is taken as the table names it:
+/// absolute, with no symbolic link to resolve.
+///
+/// Three answers, because only one of them may be reported as "not
+/// encrypted":
+///
+/// - `Ok(Some(devices))`: proven, the `major:minor` of every backing device.
+/// - `Ok(None)`: the evidence says otherwise. The filesystem sits on a block
+///   device that is not a LUKS2 mapping, is btrfs with a member that is not
+///   one, or has no backing device at all.
+/// - `Err`: the evidence cannot be seen. The table is unreadable or names no
+///   mount for the path, or it names a btrfs device that sysfs does not
+///   publish as a member of a mounted btrfs.
+pub fn luks2_backing_of_mount(
+    path: &Path,
+    sources: &StorageSources,
+) -> io::Result<Option<Vec<String>>> {
+    let Some(mount) = mount_containing(path, &sources.mountinfo)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the mount table names no mount for the path",
+        ));
+    };
+    let direct = sources.sys_dev_block.join(&mount.device);
+    if direct.exists() {
+        return Ok(dm_uuid_is_luks2(&direct.join("dm/uuid"))?.then(|| vec![mount.device]));
+    }
+    if mount.fstype != "btrfs" {
         return Ok(None);
+    }
+    match btrfs_members_luks2(&mount.source, sources)? {
+        Members::Luks2(devices) => Ok(Some(devices)),
+        Members::NotLuks2 => Ok(None),
+        Members::Unseen => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "sysfs publishes no mounted btrfs with this member",
+        )),
+    }
+}
+
+/// What sysfs says about the members of the btrfs a mount source names.
+enum Members {
+    /// Every member is a LUKS2 mapping: their `major:minor`, sorted.
+    Luks2(Vec<String>),
+    /// At least one member is not.
+    NotLuks2,
+    /// The source names no device sysfs knows as a mounted btrfs member.
+    Unseen,
+}
+
+/// For btrfs, EVERY member device of the filesystem must carry the prefix: a
+/// plaintext device added to the pool would receive data too.
+fn btrfs_members_luks2(source: &str, sources: &StorageSources) -> io::Result<Members> {
+    let Some(name) = block_device_name(source, &sources.sys_class_block)? else {
+        return Ok(Members::Unseen);
     };
     let Some(members) = btrfs_members(&name, &sources.sys_fs_btrfs)? else {
-        return Ok(None);
+        return Ok(Members::Unseen);
     };
     let mut devices = Vec::with_capacity(members.len());
     for member in members {
         let block = sources.sys_class_block.join(&member);
         if !dm_uuid_is_luks2(&block.join("dm/uuid"))? {
-            return Ok(None);
+            return Ok(Members::NotLuks2);
         }
         let Some(number) = read_sysfs_text(&block.join("dev"))? else {
-            return Ok(None);
+            return Ok(Members::NotLuks2);
         };
         devices.push(number);
     }
     devices.sort();
-    Ok(Some(Luks2Backing { dev, devices }))
+    Ok(Members::Luks2(devices))
 }
 
 /// The mount `path` lives on: the longest mount point that contains it, and
@@ -184,15 +258,18 @@ fn nearest_existing(path: &Path) -> Option<&Path> {
 }
 
 /// `36 35 98:0 /root /mnt rw,noatime master:1 - ext3 /dev/root rw` → the
-/// mount point, type and source. The optional fields end at a lone `-`.
+/// device, mount point, type and source. The optional fields end at a lone
+/// `-`.
 fn parse_mountinfo_line(line: &str) -> Option<MountEntry> {
     let mut fields = line.split(' ');
-    let mount_point = fields.nth(4)?;
+    let device = fields.nth(2)?;
+    let mount_point = fields.nth(1)?;
     let mut rest = fields.skip_while(|field| *field != "-");
     rest.next()?;
     let fstype = rest.next()?;
     let source = rest.next()?;
     Some(MountEntry {
+        device: device.to_string(),
         mount_point: PathBuf::from(unescape_mount_field(mount_point)),
         fstype: unescape_mount_field(fstype),
         source: unescape_mount_field(source),
@@ -518,9 +595,86 @@ mod tests {
         assert_eq!(at("/").fstype, "erofs");
         assert_eq!(at("/usr/bin").mount_point, PathBuf::from("/"));
         assert_eq!(at("/var/lib").fstype, "tmpfs", "the later mount shadows");
+        assert_eq!(at("/var/lib").device, "0:42");
         assert_eq!(at("/variable/x").source, "/dev/sdb1");
         assert_eq!(at("/mnt/a b/c").source, "/dev/sdc1");
         assert_eq!(at("/mnt/ab").fstype, "erofs");
         assert!(mount_containing(Path::new("/"), &tree.0.join("absent")).is_err());
+    }
+
+    /// punard's own `/home` is systemd's `ProtectHome=yes` mask: an empty
+    /// tmpfs directory. The system's table (PID 1's) still records the btrfs
+    /// subvolume the person's files live on, and that is what is proven —
+    /// without opening the path, which the caller could not see.
+    #[test]
+    fn a_hidden_path_is_proven_from_the_systems_mount_table() {
+        let tree = Tree::new("hidden");
+        tree.btrfs(true);
+        // One table per case: each is a different system.
+        let system = |name: &str, lines: &str| {
+            tree.write(name, lines);
+            StorageSources {
+                mountinfo: tree.0.join(name),
+                ..tree.sources()
+            }
+        };
+        let punar = "22 1 253:1 / / ro - erofs /dev/mapper/root ro\n\
+                     40 22 0:44 /@var /var rw - btrfs /dev/mapper/punar-data rw,subvol=/@var\n\
+                     41 22 0:44 /@home /home rw - btrfs /dev/mapper/punar-data rw,subvol=/@home\n";
+        let sources = system("punar", punar);
+        for path in ["/home", "/home/ada/notes", "/var"] {
+            assert_eq!(
+                luks2_backing_of_mount(Path::new(path), &sources).unwrap(),
+                Some(vec!["253:0".to_string()]),
+                "{path}"
+            );
+        }
+        // A mask stacked in the SAME table would win, as it does for the
+        // path itself: the table is trusted only as the namespace it names.
+        let masked = system(
+            "masked",
+            &format!("{punar}90 41 0:25 /systemd/inaccessible/dir /home ro - tmpfs tmpfs rw\n"),
+        );
+        assert_eq!(
+            luks2_backing_of_mount(Path::new("/home"), &masked).unwrap(),
+            None
+        );
+
+        // Evidence of plaintext: a block device that is not a LUKS2 mapping,
+        // or a btrfs member that is not one.
+        tree.write("sys/dev/block/8:2/dev", "8:2\n");
+        let plain = system(
+            "plain",
+            &format!("{punar}50 22 8:2 / /home rw - ext4 /dev/sda2 rw\n"),
+        );
+        assert_eq!(
+            luks2_backing_of_mount(Path::new("/home"), &plain).unwrap(),
+            None
+        );
+        tree.write("sys/dev/block/8:2/dm/uuid", "CRYPT-LUKS2-00ff-home\n");
+        assert_eq!(
+            luks2_backing_of_mount(Path::new("/home"), &plain).unwrap(),
+            Some(vec!["8:2".to_string()])
+        );
+        tree.write("sys/class/block/sda1/dev", "8:1\n");
+        fs::create_dir_all(tree.0.join("sys/fs/btrfs/9f1c/devices/sda1")).unwrap();
+        assert_eq!(
+            luks2_backing_of_mount(Path::new("/home"), &sources).unwrap(),
+            None
+        );
+
+        // No evidence at all is not evidence of plaintext.
+        let unseen = system(
+            "unseen",
+            "41 1 0:44 /@home /home rw - btrfs /dev/mapper/other rw\n",
+        );
+        assert!(luks2_backing_of_mount(Path::new("/home"), &unseen).is_err());
+        let empty = system("empty", "");
+        assert!(luks2_backing_of_mount(Path::new("/home"), &empty).is_err());
+        let absent = StorageSources {
+            mountinfo: tree.0.join("absent"),
+            ..tree.sources()
+        };
+        assert!(luks2_backing_of_mount(Path::new("/home"), &absent).is_err());
     }
 }

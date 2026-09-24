@@ -349,6 +349,29 @@ jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key 
      and (.inventory.applications | type) == \"array\"
      and (.inventory.applications | all((keys | sort) == [\"display_name\", \"managed\", \"name\", \"source\", \"version\"]))
      and (.inventory.applications | all(.source == \"punar-image\" and .managed == false))"
+# Disk encryption is a value, not only a key. punard runs with
+# ProtectHome=yes, so its own /home is an empty tmpfs; the posture must come
+# from the system's mounts (this script's, as root in the init namespace).
+# Both /var and /home on a LUKS2 mapping must read true. Otherwise punard may
+# say false (the evidence shows plaintext) or null (it could not see any),
+# but never true.
+m5_on_luks2() {
+    m5_source="$(findmnt -n -o SOURCE --target "$1" 2>/dev/null | sed 's/\[.*//')"
+    m5_block="$(readlink -f "${m5_source}" 2>/dev/null)"
+    case "$(cat "/sys/class/block/${m5_block##*/}/dm/uuid" 2>/dev/null)" in
+        CRYPT-LUKS2-?*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if m5_on_luks2 /var && m5_on_luks2 /home; then
+    jq_check "received inventory: /var and /home are on LUKS2, and the posture says so" \
+        "${RUN_DIR}/m5-received-inventory-last.json" \
+        '.inventory.posture.disk_encryption_enabled == true'
+else
+    jq_check "received inventory: /var or /home is not on LUKS2, and the posture never says encrypted" \
+        "${RUN_DIR}/m5-received-inventory-last.json" \
+        '.inventory.posture.disk_encryption_enabled != true'
+fi
 # The serial number belongs to the organization-owned tier only. A blank or
 # one-character firmware value proves nothing either way, so it is skipped.
 m5_serial="$(tr -d '[:space:]' < /sys/class/dmi/id/product_serial 2>/dev/null)"

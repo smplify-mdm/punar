@@ -90,8 +90,14 @@ pub struct CollectorSources {
     pub efi_dir: PathBuf,
     /// `/sys/class/tpm`.
     pub tpm_dir: PathBuf,
-    /// sysfs and the mount table, for encryption and the root filesystem.
+    /// sysfs and punard's own mount table, for encryption and the root
+    /// filesystem.
     pub storage: StorageSources,
+    /// The system's mount table (`/proc/1/mountinfo`), where the data paths
+    /// are judged. punard runs with `ProtectHome=yes`: in its own namespace
+    /// `/home` is an empty directory systemd mounted over the real one, so
+    /// only the system's table says what the person's files live on.
+    pub system_mountinfo: PathBuf,
     /// Every path whose filesystem must be LUKS2 for the disk to count as
     /// encrypted: `/var` and `/home`, the data partition's two subvolumes.
     pub encrypted_paths: Vec<PathBuf>,
@@ -116,6 +122,7 @@ impl Default for CollectorSources {
             efi_dir: PathBuf::from("/sys/firmware/efi"),
             tpm_dir: PathBuf::from("/sys/class/tpm"),
             storage: StorageSources::default(),
+            system_mountinfo: PathBuf::from("/proc/1/mountinfo"),
             encrypted_paths: vec![PathBuf::from("/var"), PathBuf::from("/home")],
             capacity_path: PathBuf::from("/var"),
             desktop_entry_dirs: vec![
@@ -515,16 +522,27 @@ fn tpm(tpm_dir: &Path) -> (Option<bool>, Option<String>) {
 }
 
 /// Encrypted only when every data path is proven LUKS2
-/// ([`punar_common::storage`], the check the PIM vault also relies on). One
-/// unproven path is `false`; an unreadable one, with none disproven, is
-/// unknown.
+/// ([`punar_common::storage`], the proof the PIM vault also relies on). One
+/// path the evidence shows is not LUKS2 is `false`; a path whose evidence
+/// cannot be seen, with none disproven, is unknown. Nothing here reports
+/// "not encrypted" for want of looking.
+///
+/// Each path is judged from the system's mount table, never from punard's
+/// own view of it: `ProtectHome=yes` gives punard an empty tmpfs at `/home`,
+/// and judging that mask reported every Punar device's LUKS2 `/home` as
+/// plaintext. The table, sysfs and `/var` are all visible to punard; `/home`
+/// is never opened.
 fn disk_encryption(sources: &CollectorSources) -> Option<bool> {
     if sources.encrypted_paths.is_empty() {
         return None;
     }
+    let system = StorageSources {
+        mountinfo: sources.system_mountinfo.clone(),
+        ..sources.storage.clone()
+    };
     let mut unknown = false;
     for path in &sources.encrypted_paths {
-        match storage::luks2_backing(path, &sources.storage) {
+        match storage::luks2_backing_of_mount(path, &system) {
             Ok(Some(_)) => {}
             Ok(None) => return Some(false),
             Err(_) => unknown = true,
@@ -945,6 +963,7 @@ mod tests {
                     sys_fs_btrfs: at("sys/fs/btrfs"),
                     mountinfo: at("proc/self/mountinfo"),
                 },
+                system_mountinfo: at("proc/1/mountinfo"),
                 encrypted_paths: vec![at("var"), at("home")],
                 capacity_path: self.root.clone(),
                 desktop_entry_dirs: vec![
@@ -1012,18 +1031,44 @@ mod tests {
             fixture
         }
 
+        /// Punar's data layout as punard sees it: `/var` and `/home` are
+        /// subvolumes of one btrfs on the LUKS2 mapping `punar-data`
+        /// (docs/design/installer.md section 4.3) in the system's mount
+        /// table, while punard's own table ends with the tmpfs mask
+        /// `ProtectHome=yes` stacks on `/home`.
         fn luks(&self) {
-            fs::create_dir_all(self.root.join("var")).unwrap();
-            fs::create_dir_all(self.root.join("home")).unwrap();
-            let dev = fs::metadata(self.root.join("var")).unwrap().dev();
+            let var = self.root.join("var");
+            let home = self.root.join("home");
+            fs::create_dir_all(&var).unwrap();
+            fs::create_dir_all(&home).unwrap();
+            let data = |id: u32, subvolume: &str, path: &Path| {
+                format!(
+                    "{id} 22 0:44 /{subvolume} {} rw,noatime - btrfs /dev/mapper/punar-data \
+                     rw,subvol=/{subvolume}\n",
+                    path.display()
+                )
+            };
+            let system = format!(
+                "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n{}{}",
+                data(40, "@var", &var),
+                data(41, "@home", &home)
+            );
+            self.write("proc/1/mountinfo", &system);
             self.write(
-                &format!(
-                    "sys/dev/block/{}:{}/dm/uuid",
-                    rustix::fs::major(dev),
-                    rustix::fs::minor(dev)
+                "proc/self/mountinfo",
+                format!(
+                    "{system}90 41 0:25 /systemd/inaccessible/dir {} ro,nosuid,nodev - \
+                     tmpfs tmpfs rw,mode=755\n",
+                    home.display()
                 ),
+            );
+            self.write("sys/class/block/dm-0/dm/name", "punar-data\n");
+            self.write("sys/class/block/dm-0/dev", "253:0\n");
+            self.write(
+                "sys/class/block/dm-0/dm/uuid",
                 "CRYPT-LUKS2-0123456789abcdef-punar-data\n",
             );
+            fs::create_dir_all(self.root.join("sys/fs/btrfs/9f1c/devices/dm-0")).unwrap();
         }
 
         fn script(&self, relative: &str, body: &str) -> PathBuf {
@@ -1229,6 +1274,39 @@ mod tests {
         );
     }
 
+    /// The production shape: punard's own `/home` is the `ProtectHome=yes`
+    /// mask, and the system's table says where the person's files live. A
+    /// data path is judged from the system's table only, and a path whose
+    /// evidence cannot be seen is unknown, never "not encrypted".
+    #[test]
+    fn disk_encryption_is_judged_from_the_systems_mounts_not_punards_mask() {
+        let fixture = Fixture::uefi_vm("luks-masked");
+        fixture.luks();
+        let sources = fixture.sources();
+        assert_eq!(disk_encryption(&sources), Some(true));
+
+        // punard's own table still shows only the mask at /home; it is
+        // never consulted for a data path.
+        let own = fs::read_to_string(&sources.storage.mountinfo).unwrap();
+        assert!(own.lines().last().unwrap().contains(" - tmpfs "), "{own}");
+
+        // The system's table unreadable, or naming a btrfs device sysfs
+        // does not publish: nothing is known, so nothing is claimed.
+        let hidden = CollectorSources {
+            system_mountinfo: fixture.root.join("proc/1/absent"),
+            ..sources.clone()
+        };
+        assert_eq!(disk_encryption(&hidden), None);
+        fs::remove_dir_all(fixture.root.join("sys/fs/btrfs")).unwrap();
+        assert_eq!(disk_encryption(&sources), None);
+
+        // A plaintext device added to the pool is evidence against.
+        fs::create_dir_all(fixture.root.join("sys/fs/btrfs/9f1c/devices/dm-0")).unwrap();
+        fs::create_dir_all(fixture.root.join("sys/fs/btrfs/9f1c/devices/sda1")).unwrap();
+        fixture.write("sys/class/block/sda1/dev", "8:1\n");
+        assert_eq!(disk_encryption(&sources), Some(false));
+    }
+
     #[test]
     fn posture_says_false_only_on_evidence_and_unknown_otherwise() {
         let fixture = Fixture::uefi_vm("posture-off");
@@ -1251,9 +1329,19 @@ mod tests {
         fs::remove_dir_all(&sources.tpm_dir).unwrap();
         assert_eq!(tpm(&sources.tpm_dir), (Some(false), None));
 
-        // /var and /home exist but nothing proves them encrypted.
-        fs::create_dir_all(fixture.root.join("var")).unwrap();
-        fs::create_dir_all(fixture.root.join("home")).unwrap();
+        // The system mounted /var and /home from a disk that is not a LUKS2
+        // mapping: evidence, so false. Without the system's table there is
+        // no evidence either way.
+        assert_eq!(disk_encryption(&sources), None, "no system mount table");
+        fixture.write(
+            "proc/1/mountinfo",
+            format!(
+                "30 1 8:2 / {} rw - ext4 /dev/sda2 rw\n31 1 8:2 /home {} rw - ext4 /dev/sda2 rw\n",
+                fixture.root.join("var").display(),
+                fixture.root.join("home").display()
+            ),
+        );
+        fixture.write("sys/dev/block/8:2/dev", "8:2\n");
         assert_eq!(disk_encryption(&sources), Some(false));
         let none = CollectorSources {
             encrypted_paths: Vec::new(),
