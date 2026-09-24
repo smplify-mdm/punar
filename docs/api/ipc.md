@@ -222,10 +222,10 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `pim.mail.account_add` | **human with a verified live desktop session; own uid only** | verified account transaction | agent denials |
 | `pim.mail.account_manage` | **human with a verified live desktop session; own uid only** | account removal only after explicit in-window confirmation | agent denials |
 | `update.status` | any connected peer | no | no |
-| `update.check` | **root only (uid 0)** | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
-| `update.apply` | **root human only; agent attribution is a hard denial before uid** | yes, inactive slot only | always |
+| `update.check` | **root, or a person with a fresh `punar-authd` ticket; agents never, at any uid** (§5.17) | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
+| `update.apply` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17a) | yes, inactive slot only | always |
 | `update.reconcile_candidate` | **root boot service only in normal operation; agent attribution is a hard denial before uid** | Pi selector/finalization only | required durable outcome audit before pending removal |
-| `update.rollback` | **root human only; agent attribution is a hard denial before uid** | yes, local selector only | always |
+| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17c) | yes, local selector only | always |
 | `install.targets` | any connected peer, **live environment only** | no | no |
 | `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
 | `install.apply` | **root attended installer or independently signed unattended provisioner; live environment only** | yes | always (`success`, `denied`, `failure`) |
@@ -254,8 +254,10 @@ statement of that and of who can act. A root-only method whose resource is
 not a registered capability (`reconcile`, `update.*`, `install.*`,
 `approvals.create`/`consume`) is refused with `details.resource`, never
 `details.capability`, and never offers `privilege request`, which would
-answer `not_found`. The `update.*` refusals say plainly that a person's path
-to installing updates is not built yet.
+answer `not_found`. `update.check`, `update.apply` and `update.rollback` take
+the same password confirmation as enrollment (§5.17);
+`update.reconcile_candidate` stays the boot service's, and its refusal says
+so.
 
 ### 5.1 `status`
 
@@ -1080,7 +1082,31 @@ Strict params:
 {"force":false}
 ```
 
-Root-only and audited. The request may select only whether to bypass the
+or, from a person, `{"force":false,"ticket":"…"}`.
+
+**Who may check, install or roll back** (this section, §5.17a and §5.17c;
+decision: docs/development/update-and-rollback.md §7.3): root, or a person
+who has just confirmed their password — the `enroll.start` shape. In order:
+
+1. **No agent, at any uid** — the `host.system_update` boundary below,
+   widened to any peer whose cgroup names an agent scope; a ticket the agent
+   carried is left unspent. `details.rule: "host.system_update"`.
+2. **A non-root peer must carry a ticket** — `denied`,
+   `details.reason: "reauthentication_required"`, before anything is read or
+   fetched; the message names the `punarctl update …` command that asks.
+3. **The ticket is spent** before any update-source request and before any
+   allow-shaped audit event — `details.reason: "reauthentication_missing"` /
+   `"…_expired"` / `"…_malformed"` as in §5.9. Never forwarded, audited,
+   stored or returned.
+
+A person gets root's authority over updates and no more: the channel is still
+the precedence-resolved `system.update_channel` an organization pins, and the
+same halt, rollout, minimum-version and downgrade admission run after the
+gate. `update.check` needs the ticket because it writes the root-owned
+verified channel cache and contacts the update source; `update.status` needs
+none.
+
+Audited. The request may select only whether to bypass the
 15-minute verified cache. A caller cannot provide a URL, path, channel, key,
 target identity, mirror, artifact, digest, executable, or option. The daemon
 resolves the precedence-winning `system.update_channel`, running image id and
@@ -1143,7 +1169,8 @@ Strict params:
 {"version":"2026.08.27.1","allow_downgrade":false}
 ```
 
-Root-human-only and audited. Agent attribution is evaluated before uid, so a
+plus `"ticket"` from a person. Root, or a person with a fresh confirmation
+(§5.17), and audited. Agent attribution is evaluated before uid, so a
 process inside a `punar-agent-*.scope` is denied even when its peer uid is 0.
 That denial names `host.system_update`; this is a non-overridable OS hard-safety
 boundary. The caller cannot supply a channel, URL, path, key, slot, artifact,
@@ -1177,7 +1204,8 @@ tryboot`; UEFI uses `systemctl reboot`).
 ### 5.17b `update.reconcile_candidate`
 
 Params: none. This internal native-Pi boot-service method accepts no slot,
-path, digest, version or health value. It is root-only and an agent-attributed
+path, digest, version or health value. It is root-only — not a person's verb;
+`punar-update-health.service` calls it at boot — and an agent-attributed
 peer is denied even when uid 0. The daemon binds the durable pending record to
 firmware's read-only boot observation and the fixed selector layout, then
 returns one of three explicit outcomes:
@@ -1222,8 +1250,9 @@ Strict params:
 ```
 
 `null` selects the newest previous locally retained blessed release; a
-canonical version selects that exact retained release. The authorization and
-audit boundary is identical to `update.apply`. No repository is contacted and
+canonical version selects that exact retained release; a person adds
+`"ticket"`. The authorization and audit boundary is identical to
+`update.apply`. No repository is contacted and
 no caller-controlled selector is accepted. On UEFI, only uncounted Punar UKIs
 are rollback candidates; counted, unblessed attempts are excluded. On
 Raspberry Pi, the current and previous selectors are validated before a

@@ -944,6 +944,49 @@ fn update_check_sends_only_force_and_renders_the_signed_decision() {
     );
 }
 
+/// punard's answer to a person's update request that carried no password
+/// confirmation (there is no terminal to ask on under `run()`).
+fn update_needs_a_password_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some(method @ ("update.apply" | "update.rollback")) => {
+            assert!(
+                request["params"].get("ticket").is_none(),
+                "{method}: no terminal, so no password was asked for or sent"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "Installing an update needs your password, and this request \
+                            did not carry a confirmation.\nPolicy: personal defaults — \
+                            what the operating system runs is an administrative change, \
+                            confirmed at the moment it is made.\nNext step: run \
+                            `punarctl update apply 2026.09.01.1` in a terminal; it asks \
+                            for your password.",
+                "details": {"decision": "deny", "reason": "reauthentication_required"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Without a terminal punarctl cannot ask for the password, so it sends the
+/// request as it is and prints punard's refusal: exit 3, and the next step is
+/// a command a person can run — never `sudo`.
+#[test]
+fn an_update_without_a_terminal_prints_the_password_refusal() {
+    let socket = start_mock_with(update_needs_a_password_respond);
+    for args in [
+        ["update", "apply", "2026.09.01.1"].as_slice(),
+        ["update", "rollback"].as_slice(),
+    ] {
+        let output = run(&socket, args);
+        assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("needs your password"), "{text}");
+        assert!(!text.contains("sudo"), "{text}");
+        assert!(stdout(&output).is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // M5 enrollment verbs (contract sections 5.9–5.11, 7)
 // ---------------------------------------------------------------------------

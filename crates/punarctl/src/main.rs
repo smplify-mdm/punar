@@ -638,12 +638,14 @@ enum UpdateCommand {
     /// Show current/desired version, channel, health, and rollback state.
     Status,
     /// Authenticate the configured channel head and record verified metadata.
+    /// Asks for your password: it writes the device's verified update state.
     Check {
         /// Bypass a recent verified cache and require the configured source.
         #[arg(long)]
         force: bool,
     },
     /// Stage one exact signed channel-head release into the inactive slot.
+    /// Asks for your password.
     Apply {
         /// Exact release version reported by `punarctl update check`.
         version: ReleaseVersion,
@@ -659,6 +661,7 @@ enum UpdateCommand {
     #[command(name = "reconcile-candidate", hide = true)]
     ReconcileCandidate,
     /// Select a locally retained last-known-good release for the next boot.
+    /// Asks for your password.
     Rollback {
         /// Exact retained release; omitted selects the newest previous one.
         #[arg(long = "to")]
@@ -872,6 +875,20 @@ fn restart_after_update(kind: UpdateRestart) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Add a person's password confirmation to `params` (root has none to add).
+/// No account on a Punar device is root, so checking, installing and rolling
+/// back take the same confirmation as enrolling. Without a terminal the
+/// request goes without one, and punard's refusal says what to run.
+fn with_person_ticket(mut params: Value, purpose: &str) -> Result<Value, ExitCode> {
+    if rustix::process::geteuid().is_root() {
+        return Ok(params);
+    }
+    if let Some(ticket) = admin_ticket(purpose)? {
+        params["ticket"] = json!(ticket.as_str());
+    }
+    Ok(params)
 }
 
 fn update_mutation(
@@ -4758,29 +4775,43 @@ fn main() -> ExitCode {
                 UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
                     views::update_status(&style, v)
                 }),
-                UpdateCommand::Check { force } => rpc(
-                    &client,
-                    json,
-                    "update.check",
-                    Some(json!({ "force": force })),
-                    |v| views::update_check(&style, v),
-                ),
+                UpdateCommand::Check { force } => {
+                    let params = match with_person_ticket(
+                        json!({ "force": force }),
+                        "allow checking this device's update channel",
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    rpc(&client, json, "update.check", Some(params), |v| {
+                        views::update_check(&style, v)
+                    })
+                }
                 UpdateCommand::Apply {
                     version,
                     allow_downgrade,
                     reboot,
-                } => update_mutation(
-                    &client,
-                    &style,
-                    json,
-                    "update.apply",
-                    json!({
-                        "version": version,
-                        "allow_downgrade": allow_downgrade,
-                    }),
-                    reboot,
-                    UpdateRestart::Apply,
-                ),
+                } => {
+                    let params = match with_person_ticket(
+                        json!({
+                            "version": version,
+                            "allow_downgrade": allow_downgrade,
+                        }),
+                        &format!("allow installing Punar {version}"),
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    update_mutation(
+                        &client,
+                        &style,
+                        json,
+                        "update.apply",
+                        params,
+                        reboot,
+                        UpdateRestart::Apply,
+                    )
+                }
                 UpdateCommand::ReconcileCandidate => {
                     // The daemon re-reads the exact signed root and boot extents
                     // with O_DIRECT before it answers, which on SD-class storage
@@ -4818,15 +4849,24 @@ fn main() -> ExitCode {
                         Err(error) => fail(&error),
                     }
                 }
-                UpdateCommand::Rollback { to_version, reboot } => update_mutation(
-                    &client,
-                    &style,
-                    json,
-                    "update.rollback",
-                    json!({ "to_version": to_version }),
-                    reboot,
-                    UpdateRestart::Rollback,
-                ),
+                UpdateCommand::Rollback { to_version, reboot } => {
+                    let params = match with_person_ticket(
+                        json!({ "to_version": to_version }),
+                        "allow rolling this device back to its previous release",
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
+                    update_mutation(
+                        &client,
+                        &style,
+                        json,
+                        "update.rollback",
+                        params,
+                        reboot,
+                        UpdateRestart::Rollback,
+                    )
+                }
             }
         }
     }

@@ -191,13 +191,12 @@ while you could still act."
 
 `punarctl app doctor` already diffs the running slot against the image manifest
 (app-catalog §1.4). This document makes that diff a **precondition of the OS
-apply path**, not a separate command a user has to know about. (Shown as
-root runs it. A person is never root on a Punar device, and a person's
-password-confirmed path to `update apply` is not built yet —
+apply path**, not a separate command a user has to know about. (A person is
+never root on a Punar device; `update apply` asks for their password —
 update-and-rollback.md §7.3.)
 
 ```text
-# punarctl update apply --reboot
+$ punarctl update apply --reboot
 
 PUNAR · UPDATE · APPLY                                        punar-desktop
 

@@ -1050,7 +1050,7 @@ fn mail_open_refuses_an_unverifiable_session_before_spawning() {
 }
 
 #[test]
-fn update_check_is_root_only_authenticated_cached_and_audited() {
+fn update_check_by_root_is_authenticated_cached_and_audited() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
         configure_update_fixture(cfg, dir, true, false)
     });
@@ -1088,18 +1088,237 @@ fn update_check_is_root_only_authenticated_cached_and_audited() {
     assert_eq!(cached["result"]["cached"], true);
 }
 
-/// No person on a Punar device is root, no grant covers the update channel or
-/// the boot slots, and no update method takes a password confirmation yet.
-/// The refusal must say exactly that — never `sudo`, and never a
-/// `privilege request` for a resource that is not a capability.
-fn assert_says_no_person_can_update_yet(error: &Value, resource: &str) {
+/// No person on a Punar device is root, so a person reaches the update verbs
+/// the way they reach enrollment: with a password confirmation. A request
+/// without one is refused before anything is read or fetched, and the refusal
+/// names the command that asks for it — never `sudo`, and never a grant for a
+/// resource that is not a capability.
+fn assert_asks_for_the_persons_password(error: &Value, retry: &str) {
+    assert_eq!(error["code"], "denied", "{error}");
+    assert_eq!(error["details"]["reason"], "reauthentication_required");
     let message = error["message"].as_str().unwrap();
-    assert!(message.contains("not built yet"), "{message}");
-    assert!(message.contains("punarctl update status"), "{message}");
-    assert!(!message.contains("sudo punarctl"), "{message}");
+    assert!(message.contains("needs your password"), "{message}");
+    assert!(message.contains(retry), "{message}");
+    assert!(!message.contains("sudo"), "{message}");
     assert!(!message.contains("privilege request"), "{message}");
-    assert_eq!(error["details"]["resource"], resource);
-    assert!(error["details"].get("capability").is_none(), "{error}");
+}
+
+/// A ticket exactly as punar-authd mints one: an empty file named by the
+/// token, in a 0700 directory named by the uid that proved its password.
+fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let per_uid = dir.join("tickets").join(uid.to_string());
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&per_uid)
+        .unwrap();
+    let path = per_uid.join(token);
+    fs::File::create(&path).unwrap();
+    path
+}
+
+const FIRST_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SECOND_TICKET: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const THIRD_TICKET: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+fn person_peer() -> PeerSource {
+    PeerSource::Fixed(Peer {
+        uid: 1000,
+        gid: 1000,
+        pid: None,
+    })
+}
+
+fn person_update_daemon() -> TestDaemon {
+    TestDaemon::start_update(person_peer(), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        cfg.reauth_ticket_dir = dir.join("tickets");
+    })
+}
+
+/// The person who owns a device checks for, installs and rolls back updates
+/// with their own password, one confirmation per change, spent by the call
+/// it was typed for and attributed to them. Nobody else's ticket and no
+/// replayed one does anything.
+#[test]
+fn a_person_checks_installs_and_rolls_back_with_their_password() {
+    let td = person_update_daemon();
+
+    let check = mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    let checked = td.call(
+        "update.check",
+        Some(json!({ "force": true, "ticket": FIRST_TICKET })),
+    );
+    assert_eq!(checked["result"]["admissible"], true, "{checked}");
+    assert!(!check.exists(), "the ticket was spent, not merely checked");
+    assert!(td.state_path("update/verified-channel.json").is_file());
+
+    // Someone else's confirmation is not theirs.
+    let foreign = mint_ticket(&td.dir, 1001, SECOND_TICKET);
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let refused = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false,
+            "ticket": SECOND_TICKET
+        })),
+    );
+    assert_eq!(
+        refused["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
+    assert!(foreign.exists());
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+
+    let apply = mint_ticket(&td.dir, 1000, SECOND_TICKET);
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false,
+            "ticket": SECOND_TICKET
+        })),
+    );
+    assert_eq!(applied["result"]["staged_slot"], "b", "{applied}");
+    assert!(!apply.exists());
+    assert!(td.state_path("update/pending-uefi.json").is_file());
+
+    // A spent ticket rolls nothing back.
+    let replayed = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": null, "ticket": SECOND_TICKET })),
+    );
+    assert_eq!(
+        replayed["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
+    assert!(td.state_path("update/pending-uefi.json").is_file());
+
+    mint_ticket(&td.dir, 1000, THIRD_TICKET);
+    let rolled_back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": null, "ticket": THIRD_TICKET })),
+    );
+    assert_eq!(
+        rolled_back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{rolled_back}"
+    );
+
+    let events = td.audit_lines();
+    for action in ["update.check", "update.apply", "update.rollback"] {
+        assert!(
+            events.iter().any(|e| e["action"] == action
+                && e["decision"] == "allow"
+                && e["user_id"] == "punar"),
+            "{action} is attributed to the person who confirmed it: {events:?}"
+        );
+    }
+    let audit = fs::read_to_string(td.dir.join("audit.jsonl")).unwrap();
+    for token in [FIRST_TICKET, SECOND_TICKET, THIRD_TICKET] {
+        assert!(!audit.contains(token), "a ticket is never audited");
+    }
+}
+
+/// A password buys a person root's authority over updates and nothing more:
+/// the same signed-head refresh and admission refuse a halted channel, and
+/// settling a Raspberry Pi candidate stays the boot service's alone.
+#[test]
+fn a_persons_update_gets_the_same_admission_as_roots_and_nothing_more() {
+    let td = person_update_daemon();
+    let repository = td.dir.join("update-source");
+    let channel_path = repository.join("channel.json");
+    let mut channel: Value = serde_json::from_slice(&fs::read(&channel_path).unwrap()).unwrap();
+    channel["halted"] = json!(true);
+    let document = serde_json::to_vec_pretty(&channel).unwrap();
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    fs::write(&channel_path, &document).unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&document).to_bytes(),
+    )
+    .unwrap();
+
+    mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": true,
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert_eq!(
+        response["error"]["code"], "untrusted_artifact",
+        "{response}"
+    );
+    assert_eq!(response["error"]["details"]["stage"], "channel_admission");
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+
+    let response = td.call("update.reconcile_candidate", None);
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(response["error"]["details"]["resource"], "system_image");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("punar-update-health.service"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+}
+
+/// An AI agent may not check, install or roll back the operating system as a
+/// person either, even carrying that person's valid confirmation, which is
+/// left unspent.
+#[test]
+fn an_agent_cannot_use_a_persons_confirmation_for_an_update() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4244),
+        }),
+        |cfg, dir| {
+            configure_update_apply_fixture(cfg, dir);
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            let proc_root = dir.join("proc");
+            fs::create_dir_all(proc_root.join("4244")).unwrap();
+            fs::write(
+                proc_root.join("4244/cgroup"),
+                "0::/user.slice/punar-agent-agt_updateperson.scope\n",
+            )
+            .unwrap();
+            cfg.proc_root = proc_root;
+        },
+    );
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    for (method, params) in [
+        (
+            "update.check",
+            json!({ "force": true, "ticket": FIRST_TICKET }),
+        ),
+        (
+            "update.apply",
+            json!({
+                "version": "2026.08.27.1",
+                "allow_downgrade": false,
+                "ticket": FIRST_TICKET
+            }),
+        ),
+        (
+            "update.rollback",
+            json!({ "to_version": null, "ticket": FIRST_TICKET }),
+        ),
+    ] {
+        let response = td.call(method, Some(params));
+        assert_eq!(response["error"]["code"], "denied", "{method}: {response}");
+        assert_eq!(response["error"]["details"]["rule"], "host.system_update");
+    }
+    assert!(
+        ticket.exists(),
+        "an agent's attempt must not burn the ticket"
+    );
+    assert!(!td.state_path("update/verified-channel.json").exists());
+    assert!(!td.state_path("update/pending-uefi.json").exists());
 }
 
 #[test]
@@ -1113,8 +1332,7 @@ fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
         |cfg, dir| configure_update_fixture(cfg, dir, true, false),
     );
     let response = td.call("update.check", Some(json!({ "force": true })));
-    assert_eq!(response["error"]["code"], "denied");
-    assert_says_no_person_can_update_yet(&response["error"], "update_channel");
+    assert_asks_for_the_persons_password(&response["error"], "punarctl update check");
     assert!(!td.state_path("update/verified-channel.json").exists());
     let event = td.audit_lines().pop().unwrap();
     assert_eq!(event["action"], "update.check");
@@ -1408,8 +1626,7 @@ fn update_apply_denies_non_root_before_release_or_slot_access() {
             "allow_downgrade": false
         })),
     );
-    assert_eq!(response["error"]["code"], "denied");
-    assert_says_no_person_can_update_yet(&response["error"], "system_image");
+    assert_asks_for_the_persons_password(&response["error"], "punarctl update apply 2026.08.27.1");
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
     assert!(!td.state_path("update/pending-uefi.json").exists());
 }

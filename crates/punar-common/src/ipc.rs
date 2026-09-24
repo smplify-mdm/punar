@@ -1184,10 +1184,12 @@ impl Method {
             // from a live desktop process. It is not root-only.
             Method::PimMailOpen | Method::PimMailAccountAdd | Method::PimMailAccountManage => false,
             Method::UpdateStatus => false,
-            Method::UpdateCheck(_)
-            | Method::UpdateApply(_)
-            | Method::UpdateReconcileCandidate
-            | Method::UpdateRollback(_) => true,
+            // A person checks, installs and rolls back with a password
+            // confirmation, as for enrollment: no account on a Punar device is
+            // root. The daemon enforces the ticket; this flag only says "not
+            // uid-0-only". Candidate reconcile stays the boot service's.
+            Method::UpdateCheck(_) | Method::UpdateApply(_) | Method::UpdateRollback(_) => false,
+            Method::UpdateReconcileCandidate => true,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
@@ -2498,13 +2500,20 @@ mod tests {
             Method::PimMailAccountAdd,
             Method::PimMailAccountManage,
             Method::UpdateStatus,
-            Method::UpdateCheck(UpdateCheckParams { force: false }),
+            Method::UpdateCheck(UpdateCheckParams {
+                force: false,
+                ticket: None,
+            }),
             Method::UpdateApply(UpdateApplyParams {
                 version: "2026.08.31.1".parse().unwrap(),
                 allow_downgrade: false,
+                ticket: None,
             }),
             Method::UpdateReconcileCandidate,
-            Method::UpdateRollback(UpdateRollbackParams { to_version: None }),
+            Method::UpdateRollback(UpdateRollbackParams {
+                to_version: None,
+                ticket: None,
+            }),
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
                 disk: "/dev/vda".to_string(),
@@ -2578,10 +2587,7 @@ mod tests {
                     // `Method::requires_root`).
                     | "approvals.create"
                     | "approvals.consume"
-                    | "update.check"
-                    | "update.apply"
                     | "update.reconcile_candidate"
-                    | "update.rollback"
                     | "install.plan"
                     | "install.apply"
                     | "install.recovery_ack"
@@ -2808,7 +2814,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             request.method,
-            Method::UpdateCheck(UpdateCheckParams { force: true })
+            Method::UpdateCheck(UpdateCheckParams {
+                force: true,
+                ticket: None
+            })
         ));
         for forbidden in ["origin", "url", "path", "key"] {
             let line = format!(
@@ -2817,6 +2826,21 @@ mod tests {
             let reject = Request::parse_json_line(&line).unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
         }
+        // A person's confirmation is the one other thing it may carry, and it
+        // is never echoed back into the request a client sends without one.
+        let ticket = "0123456789abcdef".repeat(4);
+        let with = Request::parse_json_line(&format!(
+            r#"{{"v":1,"id":"1","method":"update.check","params":{{"force":false,"ticket":"{ticket}"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            with.method.params_value(),
+            Some(json!({ "force": false, "ticket": ticket }))
+        );
+        assert_eq!(
+            request.method.params_value(),
+            Some(json!({ "force": true }))
+        );
     }
 
     #[test]
@@ -2839,7 +2863,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             rollback.method,
-            Method::UpdateRollback(UpdateRollbackParams { to_version: None })
+            Method::UpdateRollback(UpdateRollbackParams {
+                to_version: None,
+                ticket: None
+            })
         ));
 
         let commit =

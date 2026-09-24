@@ -119,22 +119,21 @@ const ENROLL_START_WORDS: EnrollmentWords = EnrollmentWords {
     asks: "the enrollment code and then your password",
 };
 
+/// How an update verb names itself in its refusals.
+struct UpdateWords {
+    /// Sentence-initial gerund: "Installing an update".
+    doing: &'static str,
+    /// What an agent is refused: "replace or roll back the operating system".
+    agent_may_not: &'static str,
+    /// The command a person runs to do it themselves.
+    retry: String,
+}
+
 const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
     doing: "Unenrolling this device",
     verb: "unenroll this device",
     asks: "your password",
 };
-/// The next step on a refused update verb, said plainly because it is a gap
-/// and not a design. update-and-rollback.md section 7.3 was written for a
-/// device where the owner could `sudo`; a Punar device has no such account
-/// (onboarding.md section 1.6), no grant covers the boot slots, and none of
-/// the update methods accepts a re-authentication ticket yet. Promising a
-/// path that does not exist is the one thing this message must not do.
-const NO_PERSON_UPDATE_PATH: &str = "`punarctl update status` shows the running release, \
-     what the channel offers and what a rollback would return to. Checking, installing and \
-     rolling back from a person's account is not built yet: it needs the password \
-     confirmation `punarctl enroll start` uses, and no update method accepts one today.";
-
 /// M10 `--trigger` value punard sends to the data owner on an enrollment
 /// transition (milestone-10.md sections 3.3, 13.1).
 pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
@@ -1664,20 +1663,17 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.check";
         const RESOURCE: &str = "update_channel";
-        let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                ACTION,
-                RESOURCE,
-            ));
-            return Err(IpcError::denied_root_only(
-                "Checking the governed update channel",
-                RESOURCE,
-                NO_PERSON_UPDATE_PATH,
-            ));
-        }
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            RESOURCE,
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Checking for updates",
+                agent_may_not: "check this device's update channel",
+                retry: "punarctl update check".to_string(),
+            },
+        )?;
 
         let channel = self
             .effective
@@ -1744,64 +1740,111 @@ impl Inner {
         }
     }
 
-    fn authorize_system_update(&self, peer: &Peer, action: &str) -> Result<AuditActor, IpcError> {
+    /// Who may change what the operating system runs (docs/development/
+    /// update-and-rollback.md section 7.3): root, or a person who has just
+    /// confirmed their password — the `enroll.start` shape. Order:
+    ///
+    /// 1. **No agent, at any uid** — the M9 `host.system_update` boundary,
+    ///    widened to any peer whose cgroup names an agent scope. A ticket the
+    ///    agent carried is left unspent.
+    /// 2. **A non-root peer must carry a ticket**, refused before anything is
+    ///    read or fetched.
+    /// 3. **The ticket is spent** before any update-source request and before
+    ///    any allow-shaped audit event, so every later outcome names a caller
+    ///    who proved who they are.
+    ///
+    /// A person gets exactly root's authority and no more: the same channel,
+    /// halt, rollout, minimum-version and downgrade admission run after this,
+    /// and the channel is still the precedence-resolved
+    /// `system.update_channel`, which an organization pins.
+    fn admit_update_change(
+        &self,
+        peer: &Peer,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        words: &UpdateWords,
+    ) -> Result<AuditActor, IpcError> {
         let actor = self.actor_of(peer);
-        if actor.source == PrincipalKind::AiAgent {
-            let ruling = self.ai.lock().unwrap().host_ruling("system_update");
-            // An update/rollback is an OS hard-safety boundary for agents,
-            // not an authority an organization can grant back. Cite a loaded
-            // policy only when it actually denies the named rule; otherwise
-            // cite the non-overridable boundary instead of falsely claiming
-            // that an `allow` ruling caused this denial.
-            let denying_ruling = ruling
-                .as_ref()
-                .filter(|value| value.decision == Decision::Deny);
-            let policy_id = denying_ruling
-                .map(|value| value.policy_id.as_str())
-                .unwrap_or("os-hard-safety");
-            let source_name = denying_ruling
-                .map(|value| value.source_name.as_str())
-                .unwrap_or("Punar OS hard safety constraint");
-            let mut event = AuditEvent::action(
-                &self.device_id,
-                &actor,
-                action,
-                "system_image",
-                Decision::Deny,
-                AuditOutcome::Denied,
-            );
-            event.policy_ids = vec![policy_id.to_string()];
-            self.log_audit(event);
-            return Err(IpcError::with_details(
-                ErrorCode::Denied,
-                format!(
-                    "An AI agent may not replace or roll back the operating system.\n\
-                     Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
-                     Next step: leave it to a person; `punarctl update status` shows what is available."
-                ),
-                json!({
-                    "decision": "deny",
-                    "resource": "system_image",
-                    "rule": "host.system_update",
-                    "agent_session_id": actor.agent_session_id,
-                    "policy_ids": [policy_id],
-                }),
-            ));
-        }
-        if authorize_mutation(peer) != Decision::Allow {
+        self.refuse_agent_system_update(peer, &actor, action, resource, words.agent_may_not)?;
+        if peer.uid != 0 && ticket.is_none() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
                 action,
-                "system_image",
+                resource,
             ));
-            return Err(IpcError::denied_root_only(
-                "Changing the operating-system boot slots",
-                "system_image",
-                NO_PERSON_UPDATE_PATH,
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — what the operating system runs is an \
+                     administrative change, confirmed at the moment it is made.\n\
+                     Next step: run `{}` in a terminal; it asks for your password.",
+                    words.doing, words.retry
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
             ));
         }
+        self.spend_reauth_ticket(peer, &actor, action, resource, ticket, &words.retry)?;
         Ok(actor)
+    }
+
+    /// The M9 boundary for every update verb: an AI agent never replaces,
+    /// rolls back or checks the operating system, at any uid, whatever a
+    /// policy says.
+    fn refuse_agent_system_update(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        agent_may_not: &str,
+    ) -> Result<(), IpcError> {
+        if actor.source != PrincipalKind::AiAgent && self.agent_shaped_peer(peer, actor).is_none() {
+            return Ok(());
+        }
+        let ruling = self.ai.lock().unwrap().host_ruling("system_update");
+        // An update/rollback is an OS hard-safety boundary for agents,
+        // not an authority an organization can grant back. Cite a loaded
+        // policy only when it actually denies the named rule; otherwise
+        // cite the non-overridable boundary instead of falsely claiming
+        // that an `allow` ruling caused this denial.
+        let denying_ruling = ruling
+            .as_ref()
+            .filter(|value| value.decision == Decision::Deny);
+        let policy_id = denying_ruling
+            .map(|value| value.policy_id.as_str())
+            .unwrap_or("os-hard-safety");
+        let source_name = denying_ruling
+            .map(|value| value.source_name.as_str())
+            .unwrap_or("Punar OS hard safety constraint");
+        let mut event = AuditEvent::action(
+            &self.device_id,
+            actor,
+            action,
+            resource,
+            Decision::Deny,
+            AuditOutcome::Denied,
+        );
+        event.policy_ids = vec![policy_id.to_string()];
+        self.log_audit(event);
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "An AI agent may not {agent_may_not}.\n\
+                 Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
+                 Next step: leave it to a person; `punarctl update status` shows what is available."
+            ),
+            json!({
+                "decision": "deny",
+                "resource": resource,
+                "rule": "host.system_update",
+                "agent_session_id": actor.agent_session_id,
+                "policy_ids": [policy_id],
+            }),
+        ))
     }
 
     fn effective_update_channel(&self) -> Result<UpdateChannel, IpcError> {
@@ -1825,7 +1868,17 @@ impl Inner {
         params: &UpdateApplyParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.apply";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Installing an update",
+                agent_may_not: "replace or roll back the operating system",
+                retry: format!("punarctl update apply {}", params.version),
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = (|| -> Result<UpdateApplyResult, IpcError> {
             // Keep even a corrupt/missing effective channel inside the audited
@@ -1929,7 +1982,30 @@ impl Inner {
     /// then exact pending-record removal.
     fn handle_update_reconcile_candidate(&self, peer: &Peer) -> Result<Value, IpcError> {
         const ACTION: &str = "update.reconcile_candidate";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.actor_of(peer);
+        self.refuse_agent_system_update(
+            peer,
+            &actor,
+            ACTION,
+            "system_image",
+            "replace or roll back the operating system",
+        )?;
+        // Not a person's verb: it blesses or reverts a Raspberry Pi candidate
+        // from firmware observation, and the boot health service calls it.
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                "system_image",
+            ));
+            return Err(IpcError::denied_root_only(
+                "Settling a Raspberry Pi update candidate",
+                "system_image",
+                "none needed — punar-update-health.service settles it at boot, after \
+                 the health checks it depends on have run.",
+            ));
+        }
         let _guard = self.update_lock.lock().unwrap();
         let result = if !self.cfg.pi_update_sources.boot_partition_property.exists() {
             Err(PiUpdateError::Conflict(
@@ -1989,7 +2065,17 @@ impl Inner {
         params: &UpdateRollbackParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.rollback";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Rolling back the operating system",
+                agent_may_not: "replace or roll back the operating system",
+                retry: "punarctl update rollback".to_string(),
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = if self.cfg.pi_update_sources.boot_partition_property.exists() {
             self.pi_update
@@ -4483,6 +4569,22 @@ impl Inner {
         ticket: Option<&str>,
         retry: &str,
     ) -> Result<(), IpcError> {
+        self.spend_reauth_ticket(peer, actor, action, RESOURCE_ENROLLMENT, ticket, retry)
+    }
+
+    /// Spend a person's `punar-authd` confirmation for `action` on `resource`
+    /// (root has none to spend). Shared by every method a person reaches with
+    /// their password: the rule — good once, for two minutes, for the account
+    /// that made it — is one rule, not one per method.
+    fn spend_reauth_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        retry: &str,
+    ) -> Result<(), IpcError> {
         if peer.uid == 0 {
             return Ok(());
         }
@@ -4494,12 +4596,7 @@ impl Inner {
         ) else {
             return Ok(());
         };
-        self.log_audit(AuditEvent::denial(
-            &self.device_id,
-            actor,
-            action,
-            RESOURCE_ENROLLMENT,
-        ));
+        self.log_audit(AuditEvent::denial(&self.device_id, actor, action, resource));
         Err(IpcError::with_details(
             ErrorCode::Denied,
             format!(
