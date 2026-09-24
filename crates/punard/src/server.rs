@@ -2116,10 +2116,26 @@ impl Inner {
                 .map(to_value)
                 .map_err(pi_update_ipc_error)
         } else {
-            self.update_transaction
-                .rollback(params.to_version)
-                .map(to_value)
-                .map_err(update_transaction_ipc_error)
+            // The running root's own release: the one fact that settles which
+            // release its slot holds when an older build left more than one
+            // entry bound to it.
+            match self.update_check.current_version() {
+                Ok(running) => self
+                    .update_transaction
+                    .rollback(params.to_version, running)
+                    .map(to_value)
+                    .map_err(update_transaction_ipc_error),
+                Err(error) => Err(IpcError::with_details(
+                    ErrorCode::Internal,
+                    format!(
+                        "Punar could not read the running release's version ({error}), so it \
+                         cannot tell which boot entry is safe to select. No selector was \
+                         changed.\n\
+                         Next step: inspect `punarctl update status`."
+                    ),
+                    json!({ "stage": "local_identity" }),
+                )),
+            }
         };
         match result {
             Ok(value) => {

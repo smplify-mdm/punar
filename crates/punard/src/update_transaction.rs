@@ -168,6 +168,7 @@ impl UpdateTransactionEngine {
         release: &PreparedRelease,
     ) -> Result<UpdateApplyResult, UpdateTransactionError> {
         let current = self.active_slot()?;
+        let version = release.manifest.version;
         let candidate = self.inactive_slot()?;
         if self.sources.pending_uefi.exists() && !self.settle_blessed_pending(current)? {
             return Err(UpdateTransactionError::Conflict(
@@ -205,39 +206,56 @@ impl UpdateTransactionEngine {
         )?;
         validate_uki_binding(&boot_path, candidate)?;
 
-        // Admission facts that need no write: the ESP must already hold a
-        // last-known-good UKI and room for the candidate. Checking them here,
-        // read-only, keeps the factory-recovery retirement below from ever
-        // running for an apply the later stage would refuse anyway, so a
-        // refused apply can never cost the device its recovery floor.
+        // Admission facts that need no write. Every refusal an apply can meet
+        // before its first write is decided here or just below, read-only,
+        // before any boot entry is retired: a refused apply must never cost
+        // the device its recovery floor or its rollback target.
         {
             let esp = self.mount_esp(true)?;
             let uki_dir = esp.path.join("EFI/Linux");
-            let known = match known_uki_versions(&uki_dir) {
-                Ok(known) => known,
-                Err(UpdateTransactionError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    Vec::new()
-                }
-                Err(error) => return Err(error),
-            };
-            if known.is_empty() {
-                return Err(UpdateTransactionError::Conflict(
-                    "the ESP contains no last-known-good Punar UKI".into(),
-                ));
-            }
             let bound = punar_ukis(&uki_dir)?;
+            // The running slot must keep an entry to come back to: its
+            // blessed Punar UKI, or the factory recovery entry when the device
+            // was started from recovery by hand. Entries bound to the slot
+            // about to be overwritten are no floor at all — they are removed
+            // below.
+            if !has_last_known_good(&uki_dir, &bound, current)? {
+                return Err(UpdateTransactionError::Conflict(format!(
+                    "the ESP holds no last-known-good boot entry for the running slot {}",
+                    slot_name(current)
+                )));
+            }
+            // A second copy of the running release could never be blessed:
+            // boot counting would rename it to the name the running release's
+            // entry already has.
+            if bound
+                .iter()
+                .any(|uki| uki.slot == current && uki.version == version)
+            {
+                return Err(UpdateTransactionError::Conflict(format!(
+                    "Punar {version} is the release slot {} already holds, and its boot \
+                     entry could not be told apart from a second copy in slot {}; nothing \
+                     was changed",
+                    slot_name(current),
+                    slot_name(candidate)
+                )));
+            }
             // The next boot must not be aimed at the slot this apply is about
             // to overwrite (after `rollback` to the other slot without a
             // restart): a failure part-way would leave that boot pointing at
-            // a half-written root.
+            // a half-written root. Only where the running slot has a blessed
+            // release to go back to — the remedy the refusal names. A device
+            // started from recovery by hand has none, and its preferred entry
+            // points at the damaged slot this apply exists to repair.
+            // Exhausted entries are not booted, so they aim nothing.
             let preferred = read_preferred(&esp.path.join("loader/loader.conf"))
                 .as_deref()
                 .and_then(selector_version);
-            if bound
-                .iter()
-                .any(|uki| uki.slot == candidate && Some(uki.version) == preferred)
+            let running_has_blessed = bound.iter().any(|uki| uki.slot == current && !uki.counted);
+            if running_has_blessed
+                && bound.iter().any(|uki| {
+                    uki.slot == candidate && !uki.exhausted && Some(uki.version) == preferred
+                })
             {
                 return Err(UpdateTransactionError::Conflict(format!(
                     "the next boot is set to slot {}, which this update would overwrite; \
@@ -256,6 +274,26 @@ impl UpdateTransactionEngine {
             esp.finish()?;
         }
 
+        // The destination is opened, and its size checked, before any entry
+        // is retired: opening writes nothing, and a slot too small for the
+        // release (or a missing or non-block target) must be refused while
+        // the slot's boot entry — possibly the device's only rollback
+        // target — still exists.
+        let target = self.root_target(candidate);
+        let mut destination = open_partition_for_write(
+            target,
+            self.sources.allow_regular_targets,
+            "inactive root slot",
+        )?;
+        let capacity = destination.seek(SeekFrom::End(0))?;
+        destination.seek(SeekFrom::Start(0))?;
+        if capacity < payload.uncompressed_size_bytes {
+            return Err(UpdateTransactionError::InsufficientSpace {
+                required_bytes: payload.uncompressed_size_bytes,
+                available_bytes: capacity,
+            });
+        }
+
         // The factory recovery UKI points at slot B. It must be durably
         // retired before the first update can overwrite any B byte, and only
         // after an uncounted, preferred A entry proves first-boot blessing.
@@ -271,20 +309,6 @@ impl UpdateTransactionEngine {
         // ESP keeps exactly the running release plus the candidate (§6.5).
         self.retire_ukis_bound_to(candidate)?;
 
-        let target = self.root_target(candidate);
-        let mut destination = open_partition_for_write(
-            target,
-            self.sources.allow_regular_targets,
-            "inactive root slot",
-        )?;
-        let capacity = destination.seek(SeekFrom::End(0))?;
-        destination.seek(SeekFrom::Start(0))?;
-        if capacity < payload.uncompressed_size_bytes {
-            return Err(UpdateTransactionError::InsufficientSpace {
-                required_bytes: payload.uncompressed_size_bytes,
-                available_bytes: capacity,
-            });
-        }
         write_root_payload(
             &self.sources.zstd_path,
             &payload_path,
@@ -310,11 +334,11 @@ impl UpdateTransactionEngine {
         fs::create_dir_all(&uki_dir)?;
         fs::create_dir_all(&loader_dir)?;
         require_esp_stage_capacity(&mounted.path, boot.size_bytes)?;
-        let old_ukis = known_uki_versions(&uki_dir)?;
-        if old_ukis.is_empty() {
-            return Err(UpdateTransactionError::Conflict(
-                "the ESP contains no last-known-good Punar UKI".into(),
-            ));
+        if !has_last_known_good(&uki_dir, &punar_ukis(&uki_dir)?, current)? {
+            return Err(UpdateTransactionError::Conflict(format!(
+                "the ESP no longer holds a last-known-good boot entry for the running slot {}",
+                slot_name(current)
+            )));
         }
         let previous_default =
             read_preferred(&loader_dir.join("loader.conf")).unwrap_or_else(|| "unknown".into());
@@ -518,62 +542,88 @@ impl UpdateTransactionEngine {
         ))
     }
 
+    /// Point the next boot at a retained release. `running` is the release
+    /// the running root reports (its `IMAGE_VERSION`).
+    ///
+    /// A target is valid only when this device knows its slot holds it. For
+    /// the running slot that is a fact: the running root *is* `running`, so
+    /// only its entry is valid there, however many stale entries an older
+    /// build left bound to it. For the other slot it is the retirement
+    /// invariant: `stage` removes a slot's entries before rewriting it, so a
+    /// slot this build wrote carries exactly one — counted or not. A slot the
+    /// ESP names more than once was left by an older build, and this device
+    /// cannot tell which release it holds, so it selects none of them rather
+    /// than boot one release's kernel on another's root. A plain rollback
+    /// takes the newest valid target, skipping ambiguous ones.
     #[cfg(target_os = "linux")]
     pub fn rollback(
         &self,
         requested: Option<ReleaseVersion>,
+        running: ReleaseVersion,
     ) -> Result<UpdateRollbackResult, UpdateTransactionError> {
+        let running_slot = self.active_slot()?;
         let mounted = self.mount_esp(false)?;
         let loader = mounted.path.join("loader/loader.conf");
         let uki_dir = mounted.path.join("EFI/Linux");
         let current_selector = read_preferred(&loader).unwrap_or_else(|| "unknown".into());
         let current_version = selector_version(&current_selector);
-        let versions = known_uki_versions(&uki_dir)?;
-        let target = match requested {
-            Some(version) => versions
-                .iter()
-                .find(|(candidate, _)| *candidate == version)
-                .cloned()
-                .ok_or_else(|| UpdateTransactionError::NotFound(version.to_string()))?,
-            None => versions
-                .into_iter()
-                .filter(|(version, _)| Some(*version) != current_version)
-                .max_by_key(|(version, _)| *version)
-                .ok_or_else(|| {
-                    UpdateTransactionError::Conflict(
-                        "no previous blessed UEFI release is present".into(),
-                    )
-                })?,
-        };
-        // The target must be the only release the ESP names for its slot.
-        // `stage` retires a slot's UKIs before rewriting it, so on this
-        // build that always holds; a device updated by an older build can
-        // still carry a stale entry bound to a rewritten slot, and then this
-        // device cannot tell which release the slot holds — so it selects
-        // none, rather than boot one release's kernel on another's root.
         let bound = punar_ukis(&uki_dir)?;
-        let target_slot = bound
-            .iter()
-            .find(|uki| uki.path == target.1)
-            .map(|uki| uki.slot)
-            .ok_or_else(|| {
-                UpdateTransactionError::Conflict(format!(
-                    "the rollback target {} boots no Punar root slot",
-                    target.0
-                ))
-            })?;
-        let named = bound
-            .iter()
-            .filter(|uki| !uki.counted && uki.slot == target_slot)
-            .count();
-        if named != 1 {
-            return Err(UpdateTransactionError::Conflict(format!(
-                "the ESP names {named} releases for slot {}, which holds one, so this device \
-                 cannot tell which it holds and selects none of them; apply an update to \
-                 rewrite that slot",
-                slot_name(target_slot)
-            )));
-        }
+        // Why a blessed entry cannot be selected, or `None` when it can.
+        let invalid = |uki: &PunarUki| -> Option<String> {
+            if uki.slot == running_slot {
+                return (uki.version != running).then(|| {
+                    format!(
+                        "the ESP's entry for {} boots slot {}, which is running {running}; \
+                         selecting it would boot {}'s kernel on {running}'s root",
+                        uki.version,
+                        slot_name(uki.slot),
+                        uki.version
+                    )
+                });
+            }
+            let named = bound.iter().filter(|other| other.slot == uki.slot).count();
+            (named != 1).then(|| {
+                format!(
+                    "the ESP names {named} releases for slot {}, which holds one, so this \
+                     device cannot tell which it holds and selects none of them; an update, \
+                     which rewrites that slot, clears it",
+                    slot_name(uki.slot)
+                )
+            })
+        };
+        let mut blessed = bound.iter().filter(|uki| !uki.counted).collect::<Vec<_>>();
+        blessed.sort_by_key(|uki| std::cmp::Reverse(uki.version));
+        let target = match requested {
+            Some(version) => {
+                let uki = blessed
+                    .iter()
+                    .find(|uki| uki.version == version)
+                    .ok_or_else(|| UpdateTransactionError::NotFound(version.to_string()))?;
+                if let Some(reason) = invalid(uki) {
+                    return Err(UpdateTransactionError::Conflict(reason));
+                }
+                (uki.version, uki.path.clone())
+            }
+            None => {
+                let others = blessed
+                    .iter()
+                    .filter(|uki| Some(uki.version) != current_version)
+                    .collect::<Vec<_>>();
+                let Some(first) = others.first() else {
+                    return Err(UpdateTransactionError::Conflict(
+                        "no previous blessed UEFI release is present".into(),
+                    ));
+                };
+                match others.iter().find(|uki| invalid(uki).is_none()) {
+                    Some(uki) => (uki.version, uki.path.clone()),
+                    None => {
+                        return Err(UpdateTransactionError::Conflict(
+                            invalid(first).unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+        };
         let new_selector = format!("punar_{}*.efi", target.0);
         let contents = format!("preferred {new_selector}\ntimeout 0\neditor no\n");
         write_atomic_synced(&loader, contents.as_bytes(), 0o600)?;
@@ -605,6 +655,7 @@ impl UpdateTransactionEngine {
     pub fn rollback(
         &self,
         _requested: Option<ReleaseVersion>,
+        _running: ReleaseVersion,
     ) -> Result<UpdateRollbackResult, UpdateTransactionError> {
         Err(UpdateTransactionError::Conflict(
             "system-image rollback is available only on Linux".into(),
@@ -861,32 +912,6 @@ fn copy_verified_atomic(
     Ok(())
 }
 
-fn known_uki_versions(
-    directory: &Path,
-) -> Result<Vec<(ReleaseVersion, PathBuf)>, UpdateTransactionError> {
-    let mut versions = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        // Only uncounted entries are blessed last-known-good candidates.
-        let Some(version) = name
-            .strip_prefix("punar_")
-            .and_then(|name| name.strip_suffix(".efi"))
-            .filter(|value| !value.contains('+'))
-            .and_then(|value| value.parse::<ReleaseVersion>().ok())
-        else {
-            continue;
-        };
-        versions.push((version, entry.path()));
-    }
-    Ok(versions)
-}
-
 /// One `punar_<version>[+tries].efi` on the ESP and the root slot its own
 /// `.cmdline` boots. Factory recovery (`punar-recovery_…`) is not one of these.
 #[derive(Debug)]
@@ -895,6 +920,9 @@ struct PunarUki {
     version: ReleaseVersion,
     /// Still boot-counted (`+tries`): not yet blessed.
     counted: bool,
+    /// Boot-counted with no tries left (`+0…`): systemd-boot will not choose
+    /// it, so it aims no boot.
+    exhausted: bool,
     slot: UpdateSlot,
     size_bytes: u64,
 }
@@ -920,9 +948,12 @@ fn punar_ukis(directory: &Path) -> Result<Vec<PunarUki>, UpdateTransactionError>
         else {
             continue;
         };
-        let (version, counted) = match stem.split_once('+') {
-            Some((version, _tries)) => (version, true),
-            None => (stem, false),
+        let (version, counted, exhausted) = match stem.split_once('+') {
+            Some((version, tries)) => {
+                let left = tries.split_once('-').map_or(tries, |(left, _done)| left);
+                (version, true, left == "0")
+            }
+            None => (stem, false, false),
         };
         let Ok(version) = version.parse::<ReleaseVersion>() else {
             continue;
@@ -944,11 +975,31 @@ fn punar_ukis(directory: &Path) -> Result<Vec<PunarUki>, UpdateTransactionError>
             path,
             version,
             counted,
+            exhausted,
             slot,
             size_bytes: metadata.len(),
         });
     }
     Ok(ukis)
+}
+
+/// Whether the running slot keeps an entry to fall back to: its own blessed
+/// Punar UKI, or the factory recovery entry bound to it (a device started from
+/// recovery by hand).
+fn has_last_known_good(
+    uki_dir: &Path,
+    bound: &[PunarUki],
+    running: UpdateSlot,
+) -> Result<bool, UpdateTransactionError> {
+    if bound.iter().any(|uki| uki.slot == running && !uki.counted) {
+        return Ok(true);
+    }
+    if !uki_dir.is_dir() {
+        return Ok(false);
+    }
+    Ok(recovery_uki_paths(uki_dir)?
+        .iter()
+        .any(|path| validate_uki_binding(path, running).is_ok()))
 }
 
 fn slot_name(slot: UpdateSlot) -> &'static str {
