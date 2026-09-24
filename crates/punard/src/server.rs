@@ -4591,6 +4591,44 @@ impl Inner {
         Ok(())
     }
 
+    /// Refuse to end an enrollment its organization made non-removable, for
+    /// every caller. Audited as a denial.
+    fn refuse_kept_enrollment(&self, actor: &AuditActor) -> Result<(), IpcError> {
+        let terms = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|e| !e.removable)
+            .map(|e| (e.org.id.clone(), e.org.display_name.clone()));
+        let Some((org_id, org_name)) = terms else {
+            return Ok(());
+        };
+        self.log_audit(AuditEvent::denial(
+            &self.device_id,
+            actor,
+            "enroll.stop",
+            RESOURCE_ENROLLMENT,
+        ));
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "This device's enrollment with {org_name} cannot be undone from the \
+                 device.\n\
+                 Policy: {org_name}'s enrollment terms — it enrolls devices as not \
+                 removable, and that was accepted when this device enrolled \
+                 (docs/development/smplify-enrollment.md section 3.1).\n\
+                 Next step: only erasing and reinstalling the device ends the \
+                 enrollment. A release sent by {org_name} is not built yet."
+            ),
+            json!({
+                "decision": "deny",
+                "reason": "enrollment_not_removable",
+                "organization": org_id,
+            }),
+        ))
+    }
+
     /// Spend a person's confirmation (root has none to spend). The unlink is
     /// the commit, so a replayed ticket finds nothing; a ticket is never
     /// forwarded, audited, stored or returned.
@@ -5151,40 +5189,12 @@ impl Inner {
         // undone here by anyone — root included, because the term is enforced
         // by the one process that can end an enrollment, not merely implied by
         // nobody holding root (docs/development/smplify-enrollment.md section
-        // 3.1). Checked before a password is asked for or spent: the answer does
-        // not depend on who is asking, and `enroll.status` already tells anyone.
-        let terms = self
-            .enrollment
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|e| !e.removable)
-            .map(|e| (e.org.id.clone(), e.org.display_name.clone()));
-        if let Some((org_id, org_name)) = terms {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "enroll.stop",
-                RESOURCE_ENROLLMENT,
-            ));
-            return Err(IpcError::with_details(
-                ErrorCode::Denied,
-                format!(
-                    "This device's enrollment with {org_name} cannot be undone from the \
-                     device.\n\
-                     Policy: {org_name}'s enrollment terms — it enrolls devices as not \
-                     removable, and that was accepted when this device enrolled \
-                     (docs/development/smplify-enrollment.md section 3.1).\n\
-                     Next step: only erasing and reinstalling the device ends the \
-                     enrollment. A release sent by {org_name} is not built yet."
-                ),
-                json!({
-                    "decision": "deny",
-                    "reason": "enrollment_not_removable",
-                    "organization": org_id,
-                }),
-            ));
-        }
+        // 3.1). Checked here, before a password is asked for or spent: the
+        // answer does not depend on who is asking, and `enroll.status` already
+        // tells anyone. Checked again under the guard below, because this read
+        // holds no lock against an enroll.start that commits a non-removable
+        // enrollment in between.
+        self.refuse_kept_enrollment(&actor)?;
         self.require_enrollment_ticket(
             peer,
             &actor,
@@ -5206,6 +5216,9 @@ impl Inner {
                 ));
             }
         };
+        // The authoritative check: under the guard no enrollment can be
+        // committed or ended, so what is taken next is what was judged.
+        self.refuse_kept_enrollment(&actor)?;
         let Some(enrollment) = self.enrollment.lock().unwrap().take() else {
             self.log_audit(self.enroll_event(
                 &actor,
