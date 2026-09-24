@@ -195,6 +195,29 @@ pub struct EnrollStatus {
     /// Whether the organization owns this device.
     #[serde(default)]
     pub organization_owned: Option<bool>,
+    /// What the organization can see: the fields of the inventory it last
+    /// received. Absent from a daemon that predates it.
+    #[serde(default)]
+    pub organization_view: Option<OrganizationView>,
+}
+
+/// The `organization_view` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct OrganizationView {
+    #[serde(default)]
+    pub sent_at: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<OrganizationViewCategory>,
+}
+
+/// One category of [`OrganizationView`].
+#[derive(Deserialize)]
+pub struct OrganizationViewCategory {
+    pub category: String,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub counts: std::collections::BTreeMap<String, u64>,
 }
 
 /// The `last_sync` object of [`EnrollStatus`].

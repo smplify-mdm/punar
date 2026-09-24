@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use punar_common::Redacted;
+use punar_common::ipc::{OrganizationView, OrganizationViewCategory};
 use punar_common::query::{
     CP_METHOD_QUERIES_ANSWER, CP_METHOD_QUERIES_PENDING, PendingQuery, ScopeSet,
 };
@@ -274,17 +275,20 @@ impl ControlPlaneClient {
         .map(|_| ())
     }
 
-    /// `inventory.report {device_token, inventory}`.
+    /// `inventory.report {device_token, inventory}` → the body the control
+    /// plane says it sent on, when it says. `punar-smplifyd` answers
+    /// `{sent}` with its translation; the development mock answers without
+    /// it, because what it keeps is the inventory itself.
     pub fn inventory_report(
         &self,
         token: &Redacted<String>,
         inventory: &Value,
-    ) -> Result<(), UpstreamError> {
-        self.call(
+    ) -> Result<Option<Value>, UpstreamError> {
+        let result = self.call(
             "inventory.report",
             json!({ "device_token": token.expose_secret(), "inventory": inventory }),
-        )
-        .map(|_| ())
+        )?;
+        Ok(result.get("sent").filter(|sent| sent.is_object()).cloned())
     }
 
     /// Fetch tenant public material through the same authenticated endpoint
@@ -687,6 +691,177 @@ pub fn save_device_token(path: &Path, token: &Redacted<String>) -> io::Result<()
         format!("{}\n", token.expose_secret()).as_bytes(),
         0o600,
     )
+}
+
+// ---------------------------------------------------------------------------
+// organization-view.json — what the organization last received (SPEC § 24.2)
+// ---------------------------------------------------------------------------
+
+/// Beside `enrollment.json`: the inventory exactly as it last reached the
+/// organization, so a person can see what their organization can see
+/// (`enroll.status.organization_view`, SPEC section 24.2). Written only after
+/// a send succeeds, and removed with the enrollment.
+pub const ORGANIZATION_VIEW_FILE: &str = "organization-view.json";
+
+/// root:`punar` 0640, the mode of the other records an administrator's surface
+/// may show. `/var/lib/punar` itself is root-only, so today a person reads it
+/// through `enroll.status`. It holds nothing the organization did not already
+/// receive, and nothing secret.
+const ORGANIZATION_VIEW_MODE: u32 = 0o640;
+
+/// Larger than any inventory the caps allow ([`MAX_INVENTORY_BYTES`]) with
+/// the agent's translation around it; a file past it is not one punard wrote.
+const ORGANIZATION_VIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The contents of [`ORGANIZATION_VIEW_FILE`]. `sent` is the body as the
+/// control plane received it and nothing else: `punar-smplifyd`'s own account
+/// of what it posted to Smplify, or, from a control plane that does not give
+/// one (the development mock, which keeps the inventory itself), the
+/// inventory as handed over. The other fields are local bookkeeping and were
+/// never sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrganizationViewRecord {
+    pub version: u32,
+    /// The enrollment it describes. A view left by an earlier enrollment is
+    /// never shown for a later one.
+    pub org_id: String,
+    pub enrolled_at: String,
+    pub sent_at: String,
+    pub sent: Value,
+}
+
+/// Persist the view (0640 root:`punar`, atomic). The group is applied only
+/// when running as root; elsewhere the file stays the daemon user's.
+pub fn save_organization_view(
+    path: &Path,
+    record: &OrganizationViewRecord,
+    gid: Option<u32>,
+) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(record).expect("organization view serializes");
+    bytes.push(b'\n');
+    write_atomic(path, &bytes, ORGANIZATION_VIEW_MODE)?;
+    if let Some(gid) = gid {
+        let _ = std::os::unix::fs::chown(path, Some(0), Some(gid));
+    }
+    Ok(())
+}
+
+/// The view of this enrollment, if one was recorded. Absent, unreadable,
+/// oversized, or another enrollment's: `None` — the person is then told
+/// nothing has been sent yet rather than shown what may not be true.
+pub fn load_organization_view(
+    path: &Path,
+    enrollment: &Enrollment,
+) -> Option<OrganizationViewRecord> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(ORGANIZATION_VIEW_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > ORGANIZATION_VIEW_MAX_BYTES {
+        return None;
+    }
+    serde_json::from_slice::<OrganizationViewRecord>(&bytes)
+        .ok()
+        .filter(|record| {
+            record.org_id == enrollment.org.id && record.enrolled_at == enrollment.enrolled_at
+        })
+}
+
+/// The envelope of a status body: the organization's own id for the device,
+/// and the send time `sent_at` already states. Neither is a fact it learns.
+const ENVELOPE_KEYS: [&str; 2] = ["deviceId", "heartbeat"];
+/// Smplify's body nests its sections one level down.
+const SECTIONS_KEY: &str = "systemInfo";
+/// Where a value that belongs to no section is listed.
+const LOOSE_CATEGORY: &str = "device";
+
+/// What `enroll.status` says the organization can see: the categories and
+/// field names of the last inventory it received, and when. Names, not values
+/// — the values are in the file. A field sent as `null` or empty told the
+/// organization nothing and is not listed; a list names how many rows it
+/// carried.
+///
+/// It reads whatever was sent rather than a list of what should have been,
+/// so it cannot say less than left the device.
+pub fn organization_view_summary(record: Option<&OrganizationViewRecord>) -> OrganizationView {
+    let Some(record) = record else {
+        return OrganizationView {
+            sent_at: None,
+            categories: Vec::new(),
+        };
+    };
+    let mut categories: std::collections::BTreeMap<String, OrganizationViewCategory> =
+        std::collections::BTreeMap::new();
+    let mut loose = Vec::new();
+    for (key, value) in record.sent.as_object().into_iter().flatten() {
+        if ENVELOPE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let sections = match value.as_object() {
+            Some(sections) if key == SECTIONS_KEY => sections.iter().collect(),
+            _ => vec![(key, value)],
+        };
+        for (name, value) in sections {
+            match value.as_object() {
+                Some(fields) => {
+                    let category = categories.entry(name.clone()).or_insert_with(|| {
+                        OrganizationViewCategory {
+                            category: name.clone(),
+                            fields: Vec::new(),
+                            counts: Default::default(),
+                        }
+                    });
+                    for (field, value) in fields {
+                        note_field(category, field, value);
+                    }
+                }
+                None => loose.push((name.clone(), value)),
+            }
+        }
+    }
+    if !loose.is_empty() {
+        let category = categories
+            .entry(LOOSE_CATEGORY.to_string())
+            .or_insert_with(|| OrganizationViewCategory {
+                category: LOOSE_CATEGORY.to_string(),
+                fields: Vec::new(),
+                counts: Default::default(),
+            });
+        for (field, value) in loose {
+            note_field(category, &field, value);
+        }
+    }
+    OrganizationView {
+        sent_at: Some(record.sent_at.clone()),
+        categories: categories
+            .into_values()
+            .filter(|category| !category.fields.is_empty())
+            .map(|mut category| {
+                category.fields.sort();
+                category.fields.dedup();
+                category
+            })
+            .collect(),
+    }
+}
+
+fn note_field(category: &mut OrganizationViewCategory, field: &str, value: &Value) {
+    let carries = match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(rows) => !rows.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
+    };
+    if !carries {
+        return;
+    }
+    category.fields.push(field.to_string());
+    if let Value::Array(rows) = value {
+        category.counts.insert(field.to_string(), rows.len() as u64);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1327,249 @@ mod tests {
         assert_eq!(withheld, Some(Withheld::Unreadable));
         assert_eq!(body["applications"], Value::Null);
         assert_eq!(body["identifiers"]["serial_number"], "PNR-SERIAL-0042");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// punard's body through the agent's own translation, the composition a
+    /// real sync performs: each tier reaches Smplify as exactly its
+    /// allowlist, and a list over either cap arrives as `null`, never cut.
+    #[test]
+    fn each_tier_reaches_smplify_as_exactly_its_allowlist() {
+        use crate::inventory::{Application, MAX_APPLICATIONS, SOURCE_IMAGE};
+        let dir = tmp("composed");
+        let sources = fixture_sources(&dir);
+        let compose = |collected: &Collected, owned: bool| {
+            let (inventory, withheld) = inventory_body(
+                &sources,
+                "alices-laptop",
+                [(
+                    "time.timezone".to_string(),
+                    true,
+                    Value::String("Europe/Berlin".into()),
+                )],
+                collected,
+                owned,
+            );
+            (
+                punar_smplifyd::status::inventory_status_body("dev-1", &inventory),
+                withheld,
+            )
+        };
+        let names = |body: &Value| -> Vec<String> {
+            body["systemInfo"]["software"]["installedPackages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let (personal, withheld) = compose(&collected(), false);
+        assert_eq!(withheld, None);
+        let personal_hardware = sorted_keys(&personal["systemInfo"]["hardware"]);
+        assert_eq!(personal_hardware.len(), 17);
+        assert!(!personal_hardware.contains(&"serialNumber"));
+        assert_eq!(names(&personal), ["org.punar.Mail"]);
+        assert_eq!(personal["systemInfo"]["os"]["name"], "Punar OS");
+        assert_eq!(personal["systemInfo"]["os"]["arch"], "aarch64");
+        assert_eq!(personal["systemInfo"]["hardware"]["cpuModel"], Value::Null);
+
+        let (owned, _) = compose(&collected(), true);
+        let mut owned_hardware = personal_hardware.clone();
+        owned_hardware.push("serialNumber");
+        owned_hardware.sort_unstable();
+        assert_eq!(
+            sorted_keys(&owned["systemInfo"]["hardware"]),
+            owned_hardware
+        );
+        assert_eq!(
+            owned["systemInfo"]["hardware"]["serialNumber"],
+            "PNR-SERIAL-0042"
+        );
+        assert_eq!(names(&owned), ["org.punar.Mail", "org.mozilla.firefox"]);
+        for body in [&personal, &owned] {
+            assert_eq!(
+                sorted_keys(&body["systemInfo"]),
+                ["hardware", "os", "security", "software"]
+            );
+            let text = body.to_string();
+            for forbidden in [
+                "alices-laptop",
+                "Europe/Berlin",
+                "hostname",
+                "current_state",
+            ] {
+                assert!(!text.contains(forbidden), "{forbidden} reached Smplify");
+            }
+            assert!(!looks_like_mac_or_ipv4(&text), "{text}");
+        }
+        assert!(!personal.to_string().contains("PNR-SERIAL-0042"));
+
+        let row = |i: usize, filler: usize| Application {
+            name: format!("org.punar.App{i}{}", "x".repeat(filler)),
+            display_name: "y".repeat(filler.min(255)),
+            version: Some("z".repeat(filler.min(100))),
+            source: SOURCE_IMAGE,
+            managed: false,
+        };
+        let mut full = collected();
+        full.applications = Ok((0..MAX_APPLICATIONS).map(|i| row(i, 0)).collect());
+        let (body, withheld) = compose(&full, false);
+        assert_eq!(withheld, None);
+        assert_eq!(
+            body["systemInfo"]["software"]["installedPackagesCount"],
+            MAX_APPLICATIONS
+        );
+        let mut too_many = collected();
+        too_many.applications = Ok((0..=MAX_APPLICATIONS).map(|i| row(i, 0)).collect());
+        let mut too_large = collected();
+        too_large.applications = Ok((0..1900).map(|i| row(i, 200)).collect());
+        for (collected, reason) in [
+            (too_many, Withheld::TooMany),
+            (too_large, Withheld::TooLarge),
+        ] {
+            let (body, withheld) = compose(&collected, false);
+            assert_eq!(withheld, Some(reason));
+            let software = &body["systemInfo"]["software"];
+            assert_eq!(software["installedPackages"], Value::Null, "{reason:?}");
+            assert_eq!(software["installedPackagesCount"], Value::Null);
+            assert_eq!(software["installedPackagesHash"], Value::Null);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn view_record(enrollment: &Enrollment, sent: Value) -> OrganizationViewRecord {
+        OrganizationViewRecord {
+            version: 1,
+            org_id: enrollment.org.id.clone(),
+            enrolled_at: enrollment.enrolled_at.clone(),
+            sent_at: "2026-09-24T10:00:00Z".into(),
+            sent,
+        }
+    }
+
+    /// The person is told what their organization received, read from the
+    /// body that left: punard's inventory through the agent's own
+    /// translation, as Smplify has it. Field names that carried a value,
+    /// never the values, and never a field that did not travel.
+    #[test]
+    fn the_organization_view_names_exactly_what_was_sent() {
+        let dir = tmp("view-summary");
+        let sources = fixture_sources(&dir);
+        let (inventory, _) = inventory_body(
+            &sources,
+            "alices-laptop",
+            [(
+                "time.timezone".to_string(),
+                true,
+                Value::String("Europe/Berlin".into()),
+            )],
+            &collected(),
+            false,
+        );
+        let sent = punar_smplifyd::status::inventory_status_body("dev-1", &inventory);
+        let view = organization_view_summary(Some(&view_record(&sample_enrollment(), sent)));
+        assert_eq!(view.sent_at.as_deref(), Some("2026-09-24T10:00:00Z"));
+        let names: Vec<&str> = view
+            .categories
+            .iter()
+            .map(|category| category.category.as_str())
+            .collect();
+        assert_eq!(names, ["hardware", "os", "security", "software"]);
+        let hardware = &view.categories[0].fields;
+        assert!(hardware.contains(&"modelName".to_string()));
+        // Collected as unknown, sent as null: nothing the organization sees.
+        assert!(!hardware.contains(&"cpuModel".to_string()));
+        assert!(!hardware.contains(&"serialNumber".to_string()));
+        assert_eq!(
+            view.categories[1].fields,
+            ["arch", "kernelRelease", "name", "version"]
+        );
+        assert_eq!(view.categories[3].counts.get("installedPackages"), Some(&1));
+        let text = serde_json::to_string(&view).unwrap();
+        for value in [
+            "alices-laptop",
+            "Europe/Berlin",
+            "QEMU",
+            "PNR-SERIAL-0042",
+            "org.punar.Mail",
+            "hostname",
+        ] {
+            assert!(!text.contains(value), "the summary carries {value}");
+        }
+
+        let nothing = organization_view_summary(None);
+        assert_eq!(nothing.sent_at, None);
+        assert!(nothing.categories.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Null, empty strings, empty lists and empty sections told the
+    /// organization nothing; the envelope is not a fact about the device;
+    /// a value outside any section is listed under `device`.
+    #[test]
+    fn the_organization_view_skips_what_carried_nothing() {
+        let sent = json!({
+            "deviceId": "d-1",
+            "heartbeat": "2026-09-24T10:00:00Z",
+            "systemInfo": {"os": {"name": "Punar OS", "version": null}, "network": {}},
+            "supportedActions": [],
+            "facts": {},
+            "hostname": "",
+            "kernel": "6.12.0-punar",
+            "applications": [{"name": "a"}, {"name": "b"}],
+        });
+        let view = organization_view_summary(Some(&view_record(&sample_enrollment(), sent)));
+        assert_eq!(
+            view.categories,
+            vec![
+                OrganizationViewCategory {
+                    category: "device".into(),
+                    fields: vec!["applications".into(), "kernel".into()],
+                    counts: [("applications".to_string(), 2)].into(),
+                },
+                OrganizationViewCategory {
+                    category: "os".into(),
+                    fields: vec!["name".into()],
+                    counts: Default::default(),
+                },
+            ]
+        );
+    }
+
+    /// A view belongs to one enrollment and is group-readable, no wider.
+    /// Anything that is not a view punard wrote for this enrollment reads as
+    /// none, so a stale or damaged file is never shown as the truth.
+    #[test]
+    fn the_organization_view_is_bound_to_its_enrollment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmp("view-store");
+        let path = dir.join(ORGANIZATION_VIEW_FILE);
+        let enrollment = sample_enrollment();
+        let record = view_record(
+            &enrollment,
+            json!({"systemInfo": {"os": {"name": "Punar OS"}}}),
+        );
+        save_organization_view(&path, &record, None).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(load_organization_view(&path, &enrollment), Some(record));
+
+        let mut later = enrollment.clone();
+        later.enrolled_at = "2026-09-25T09:00:00Z".into();
+        assert_eq!(load_organization_view(&path, &later), None);
+        let mut other = enrollment.clone();
+        other.org.id = "globex".into();
+        assert_eq!(load_organization_view(&path, &other), None);
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(load_organization_view(&path, &enrollment), None);
+        std::fs::write(&path, vec![b' '; ORGANIZATION_VIEW_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(load_organization_view(&path, &enrollment), None);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(load_organization_view(&path, &enrollment), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

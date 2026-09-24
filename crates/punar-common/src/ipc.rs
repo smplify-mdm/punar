@@ -2038,6 +2038,35 @@ pub struct EnrollStatusResult {
     /// fixed when the device enrolled. Present exactly when enrolled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_owned: Option<bool>,
+    /// What the organization can see of this device (SPEC section 24.2): the
+    /// categories and field names of the inventory it last received, and
+    /// when. Present exactly when enrolled; `sent_at` is `null` and the list
+    /// empty until the first inventory is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_view: Option<OrganizationView>,
+}
+
+/// `enroll.status.organization_view`: read from the body that actually left
+/// the device, never from a list of what should have (docs/api/ipc.md
+/// section 5.10). Names only — the values stay on the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationView {
+    /// When the inventory last reached the organization.
+    pub sent_at: Option<String>,
+    /// Sorted by category. A field sent as `null` or empty is not listed.
+    pub categories: Vec<OrganizationViewCategory>,
+}
+
+/// One category of [`OrganizationView`], e.g. `hardware` with its field
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationViewCategory {
+    pub category: String,
+    /// Sorted field names, exactly as sent.
+    pub fields: Vec<String>,
+    /// For each field that carried a list, how many rows it had.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub counts: std::collections::BTreeMap<String, u64>,
 }
 
 /// The `enroll.status` view of the most recent remote query (M10).
@@ -3577,6 +3606,7 @@ mod tests {
             last_query: None,
             removable: None,
             organization_owned: None,
+            organization_view: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
@@ -3603,6 +3633,40 @@ mod tests {
         assert_eq!(sync.result.as_deref(), Some("success"));
         assert!(!sync.pending);
         assert_eq!(result.attestation.as_deref(), Some("simulated"));
+    }
+
+    /// Section 5.10's organization view: names and counts, never values;
+    /// `counts` absent when no field carried a list, and a view with nothing
+    /// sent yet says so with a `null` time rather than disappearing.
+    #[test]
+    fn the_organization_view_round_trips_names_and_counts_only() {
+        let result: EnrollStatusResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "organization_view": {
+                "sent_at": "2026-09-24T10:00:00Z",
+                "categories": [
+                    {"category": "os", "fields": ["arch", "name"]},
+                    {"category": "software", "fields": ["installedPackages"],
+                     "counts": {"installedPackages": 4}}
+                ]
+            }
+        }))
+        .unwrap();
+        let view = result.organization_view.as_ref().unwrap();
+        assert_eq!(view.categories[1].counts["installedPackages"], 4);
+        let back = serde_json::to_value(view).unwrap();
+        assert_eq!(
+            back["categories"][0],
+            json!({"category": "os", "fields": ["arch", "name"]})
+        );
+        let nothing_yet = OrganizationView {
+            sent_at: None,
+            categories: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(&nothing_yet).unwrap(),
+            json!({"sent_at": null, "categories": []})
+        );
     }
 
     #[test]

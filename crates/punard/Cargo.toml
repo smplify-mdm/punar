@@ -42,3 +42,7 @@ ed25519-dalek = { workspace = true }
 # instance on a tempdir socket — the same binary the image ships, not a
 # second in-test copy of the control-plane protocol.
 punar-mock-smplify = { workspace = true }
+# The built-in Smplify agent's report bodies: the enrollment suite checks
+# what Smplify itself receives from punard's inventory, not only what punard
+# hands over.
+punar-smplifyd = { workspace = true }

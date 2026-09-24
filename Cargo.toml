@@ -39,6 +39,10 @@ punar-common = { path = "crates/punar-common" }
 # against the binary the image ships rather than a second in-test
 # reimplementation of the same protocol (milestone-10.md section 7).
 punar-mock-smplify = { path = "crates/punar-mock-smplify" }
+# dev-only in punard: its enrollment suite puts punard's real inventory
+# through the agent's real translation (punar_smplifyd::status), so the
+# key sets an organization receives are asserted end to end.
+punar-smplifyd = { path = "crates/punar-smplifyd" }
 punar-policy = { path = "crates/punar-policy" }
 punar-recovery = { path = "crates/punar-recovery" }
 

@@ -1337,11 +1337,106 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         rows.push(Row::new("Last sync", value, slot, &desc));
     }
     out.push_str(&fmt::rows(style, &rows));
+    if let Some(view) = &status.organization_view {
+        out.push_str(&organization_view(style, view));
+    }
     out.push_str(&fmt::note(
         style,
-        "Category-level sync only · states, never values or activity",
+        "Compliance sends states, never values · the inventory sends only the fields above",
     ));
     Ok(out)
+}
+
+/// What the organization can see (SPEC section 24.2): the categories and
+/// field names of the inventory it last received, read by punard from the
+/// body that left. Field names are spelled as words; a list says how many
+/// rows it carried. No section at all from a daemon that predates the field,
+/// rather than an empty one that would read as "nothing".
+fn organization_view(style: &Style, view: &model::OrganizationView) -> String {
+    let when = match view.sent_at.as_deref() {
+        Some(at) => format!("last sent {}", fmt::timestamp(&printable(at))),
+        None => "nothing sent yet".to_string(),
+    };
+    let mut out = fmt::section(style, "Your organization can see", &when);
+    // Descriptions wrap under their category so a long one stays inside the
+    // masthead's width.
+    let label_width = view
+        .categories
+        .iter()
+        .map(|category| category.category.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(12)
+        + 2;
+    let width = fmt::WIDTH.saturating_sub(label_width).max(24);
+    let mut rows = Vec::new();
+    for category in &view.categories {
+        let label = printable(&category.category);
+        let mut first = true;
+        let mut line = String::new();
+        let words = category.fields.iter().map(|field| {
+            let words = field_words(field);
+            match category.counts.get(field) {
+                Some(rows) => format!("{words} ({rows})"),
+                None => words,
+            }
+        });
+        for word in words {
+            let longer = line.chars().count() + 3 + word.chars().count();
+            if !line.is_empty() && longer > width {
+                rows.push(Row::new(
+                    if first { label.as_str() } else { "" },
+                    "",
+                    Slot::Neutral,
+                    &line,
+                ));
+                first = false;
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(&word);
+        }
+        if !line.is_empty() {
+            rows.push(Row::new(
+                if first { label.as_str() } else { "" },
+                "",
+                Slot::Neutral,
+                &line,
+            ));
+        }
+    }
+    if !rows.is_empty() {
+        out.push_str(&fmt::rows(style, &rows));
+    }
+    out
+}
+
+/// `kernelRelease` and `memory_total_bytes` as a person reads them:
+/// `kernel release`, `memory total bytes`.
+fn field_words(field: &str) -> String {
+    let mut words = String::new();
+    let mut after_lower = false;
+    for c in printable(field).chars() {
+        if c == '_' || c == '-' {
+            words.push(' ');
+            after_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && after_lower {
+            words.push(' ');
+        }
+        words.push(c.to_ascii_lowercase());
+        after_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+    }
+    words
+}
+
+/// The daemon's words, with anything that could steer a terminal (an escape
+/// sequence, a direction override) made a visible U+FFFD.
+fn printable(text: &str) -> String {
+    punar_common::ipc::term_safe_name(text)
 }
 
 /// `punarctl enroll stop`.
@@ -5322,6 +5417,90 @@ mod tests {
             );
         }
         assert_eq!(ownership(&receipt(None)), None);
+    }
+
+    /// The person sees what their organization can see: each category, its
+    /// fields as words, how many rows a list carried, and when it was sent.
+    /// Before the first send it says so; a daemon without the field gets no
+    /// section at all.
+    #[test]
+    fn enroll_status_says_what_the_organization_can_see() {
+        let style = Style::plain();
+        let status = |view: Option<Value>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": [],
+                "enrolled_at": "2026-09-24T19:30:47Z",
+                "attestation": "none",
+                "removable": true,
+                "organization_owned": false
+            });
+            if let Some(view) = view {
+                result["organization_view"] = view;
+            }
+            enroll_status(&style, &result, "mac-punar").unwrap()
+        };
+        let text = status(Some(json!({
+            "sent_at": "2026-09-24T19:31:02Z",
+            "categories": [
+                {"category": "hardware", "fields": [
+                    "batteryPresent", "biosVersion", "cpuCores", "cpuModel", "cpuThreads",
+                    "cpuVendor", "deviceCapacityBytes", "isVirtual", "manufacturer",
+                    "memoryTotalBytes", "modelName", "rootFilesystemType", "secureBoot",
+                    "tpmPresent", "tpmVersion", "uefi"]},
+                {"category": "os", "fields": ["arch", "kernelRelease", "name", "version"]},
+                {"category": "software", "fields": ["installedPackages", "smplifydVersion"],
+                 "counts": {"installedPackages": 2}}
+            ]
+        })));
+        let section = text
+            .lines()
+            .find(|line| line.starts_with("YOUR ORGANIZATION CAN SEE"))
+            .expect("the section");
+        assert!(
+            section.ends_with("LAST SENT 2026-09-24 19:31:02"),
+            "{section}"
+        );
+        assert!(
+            text.lines().any(|line| line.starts_with("OS")
+                && line.ends_with("arch · kernel release · name · version")),
+            "{text}"
+        );
+        assert!(
+            text.contains("installed packages (2) · smplifyd version"),
+            "{text}"
+        );
+        assert!(text.contains("memory total bytes"), "{text}");
+        let section: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("YOUR ORGANIZATION CAN SEE"))
+            .take_while(|line| !line.starts_with("COMPLIANCE SENDS"))
+            .collect();
+        assert!(section.len() > 3, "{text}");
+        for line in section {
+            assert!(line.chars().count() <= fmt::WIDTH, "too wide: {line}");
+        }
+        // The hardware fields wrap under one label.
+        let hardware: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("HARDWARE"))
+            .take_while(|line| !line.starts_with("OS"))
+            .collect();
+        assert!(hardware.len() > 1, "{text}");
+        assert!(hardware[1].starts_with(' '), "{text}");
+
+        let text = status(Some(json!({"sent_at": null, "categories": []})));
+        assert!(text.contains("NOTHING SENT YET"), "{text}");
+        let text = status(None);
+        assert!(!text.contains("YOUR ORGANIZATION CAN SEE"), "{text}");
+
+        // A field name cannot steer the terminal.
+        let text = status(Some(json!({
+            "sent_at": "2026-09-24T19:31:02Z",
+            "categories": [{"category": "os\u{1b}[2J", "fields": ["name\u{1b}[31m"]}]
+        })));
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 
     #[test]

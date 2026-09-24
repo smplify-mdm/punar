@@ -116,6 +116,7 @@ token_grep_zero() {
     tg_found=0
     for f in "${AUDIT_LOG}" "${STATUS_JSON}" "${STATE_DIR}/preferences.json" \
              "${STATE_DIR}/os-defaults.json" "${STATE_DIR}/enrollment.json" \
+             "${STATE_DIR}/organization-view.json" \
              "${RUN_DIR}"/m5-*.json "${RUN_DIR}"/m5-*.txt \
              "${RUN_DIR}"/m5-*.jsonl; do
         [ -f "${f}" ] || continue
@@ -358,6 +359,30 @@ if [ "${#m5_serial}" -ge 4 ] \
 else
     note "ok   received inventory carries no firmware serial number"
 fi
+# The person's record of what left (SPEC 24.2): exactly the body the mock
+# received (the mock answers without `sent`, so punard records the inventory
+# it handed over), root:punar 0640, and enroll status names its sections.
+check_eq "organization-view.json owner mode" "root:punar 640" \
+    "$(stat -c '%U:%G %a' "${STATE_DIR}/organization-view.json" 2>/dev/null)"
+if jq -s '{view: .[0], received: .[1]}' "${STATE_DIR}/organization-view.json" \
+        "${RUN_DIR}/m5-received-inventory-last.json" \
+        > "${RUN_DIR}/m5-organization-view.json" 2>/dev/null; then
+    jq_check "organization view: exactly the inventory the control plane received, bound to this enrollment" \
+        "${RUN_DIR}/m5-organization-view.json" \
+        "(.view | keys | sort) == [\"enrolled_at\", \"org_id\", \"sent\", \"sent_at\", \"version\"]
+         and .view.org_id == \"acme\"
+         and .view.sent == .received.inventory"
+else
+    note "FAIL organization-view.json unreadable or absent"
+    FAILED=1
+fi
+"${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-view.json" 2>&1
+jq_check "enroll status: organization view names the sent sections, never values" \
+    "${RUN_DIR}/m5-enroll-status-view.json" \
+    "(.organization_view.sent_at | type) == \"string\"
+     and ([.organization_view.categories[].category] == [\"device\", \"hardware\", \"os\", \"posture\"])
+     and (.organization_view.categories | all((keys - [\"counts\"] | sort) == [\"category\", \"fields\"]))
+     and (.organization_view.categories[0].fields | index(\"hostname\")) != null"
 "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-b.json" 2>&1
 rc_count_b="$(line_count "${RC_FILE}")"
 if [ "${rc_count_b}" -gt "${rc_count_a}" ]; then
@@ -452,10 +477,11 @@ else
     note "FAIL policy.d not empty after unenroll: $(find "${POLICY_D}" -mindepth 1 2>/dev/null | tr '\n' ' ')"
     FAILED=1
 fi
-if [ ! -e "${STATE_DIR}/enrollment.json" ] && [ ! -e "${STATE_DIR}/device-token" ]; then
-    note "ok   enrollment.json and device-token removed"
+if [ ! -e "${STATE_DIR}/enrollment.json" ] && [ ! -e "${STATE_DIR}/device-token" ] \
+        && [ ! -e "${STATE_DIR}/organization-view.json" ]; then
+    note "ok   enrollment.json, device-token and organization-view.json removed"
 else
-    note "FAIL enrollment.json or device-token survived unenroll"
+    note "FAIL enrollment.json, device-token or organization-view.json survived unenroll"
     FAILED=1
 fi
 

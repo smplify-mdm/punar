@@ -87,6 +87,12 @@ struct ControlPlaneState {
     /// (docs/development/smplify-enrollment.md section 3.2); absent when
     /// `None`, as in the Acme fixture.
     org_ownership: Mutex<Option<Value>>,
+    /// Answer `inventory.report` as `punar-smplifyd` does: put the inventory
+    /// through the agent's own translation and answer `{sent}` with the
+    /// result. Off, it answers as the development mock does.
+    translate_like_smplifyd: AtomicBool,
+    /// Every body that translation produced: what Smplify itself received.
+    status_bodies: Mutex<Vec<Value>>,
 }
 
 impl ControlPlaneState {
@@ -166,6 +172,14 @@ impl ControlPlaneState {
                     "received_at": "now",
                     "inventory": params["inventory"],
                 }));
+                if self.translate_like_smplifyd.load(Ordering::SeqCst) {
+                    let body = punar_smplifyd::status::inventory_status_body(
+                        &device_id,
+                        &params["inventory"],
+                    );
+                    self.status_bodies.lock().unwrap().push(body.clone());
+                    return Ok(json!({ "sent": body }));
+                }
                 Ok(json!({ "accepted": true }))
             }
             // admin.* stays reserved for M10 — like every unknown name.
@@ -824,6 +838,19 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
         !dir.join("machine/flatpak-argv").exists(),
         "flatpak never ran"
     );
+    // The person's record of what left: exactly what the control plane
+    // received (this one keeps the inventory itself), and no secret.
+    let view_path = daemon.state_path("organization-view.json");
+    assert_eq!(mode_of(&view_path), 0o640);
+    let view = read_json(&view_path);
+    assert_eq!(
+        view["sent"],
+        control_plane.state.inventory.lock().unwrap()[0]["inventory"]
+    );
+    assert!(
+        !view.to_string().contains(&token),
+        "the view leaked the token"
+    );
 
     // Recorded-but-overridden (the verified M4 semantics, now reachable):
     // a root set of `disabled` on the pinned path records the preference,
@@ -908,6 +935,10 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     assert!(policy_d_files(&daemon).is_empty());
     assert!(!daemon.state_path("enrollment.json").exists());
     assert!(!daemon.state_path("device-token").exists());
+    assert!(
+        !view_path.exists(),
+        "the view describes an enrollment that has ended"
+    );
 
     // Personal state restored — and the preference recorded while
     // overridden is the winner again (SPEC section 39).
@@ -2157,4 +2188,373 @@ fn a_withheld_application_list_is_null_and_audited_on_transitions_only() {
     }
     assert_eq!(events(&daemon, "applications_withheld"), 1);
     assert_eq!(events(&daemon, "success"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// What Smplify receives, and what the person is shown of it
+// ---------------------------------------------------------------------------
+
+/// The non-null keys of one section: what a field-name summary must list.
+fn carried_keys(section: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = section
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, value)| match value {
+            Value::Null => false,
+            Value::Array(rows) => !rows.is_empty(),
+            Value::String(text) => !text.is_empty(),
+            _ => true,
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// `aa:bb:cc:dd:ee:ff`, or four dot-separated numbers of at most three
+/// digits: the shape an address would have if one leaked.
+fn carries_an_address(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_hexdigit() || c == ':' || c == '.'))
+        .any(|token| {
+            let mac: Vec<&str> = token.split(':').collect();
+            let ip: Vec<&str> = token.split('.').collect();
+            (mac.len() == 6 && mac.iter().all(|part| part.len() == 2))
+                || (ip.len() == 4
+                    && ip.iter().all(|part| {
+                        (1..=3).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit())
+                    }))
+        })
+}
+
+const SMPLIFY_HARDWARE_KEYS: [&str; 17] = [
+    "batteryPresent",
+    "biosVersion",
+    "cpuCores",
+    "cpuModel",
+    "cpuThreads",
+    "cpuVendor",
+    "deviceCapacityBytes",
+    "isVirtual",
+    "manufacturer",
+    "memoryTotalBytes",
+    "modelName",
+    "rootFilesystemType",
+    "secureBoot",
+    "tpmPresent",
+    "tpmVersion",
+    "uefi",
+    "virtualization",
+];
+
+/// The whole path, punard to Smplify: punard's real inventory through the
+/// agent's real translation (`punar_smplifyd::status`), checked as exact
+/// key sets per tier where Smplify would receive it. Then the person's side
+/// of the same send: `organization-view.json` holds exactly the body that
+/// left, and `enroll.status` names exactly its non-null fields.
+#[test]
+fn smplify_receives_exactly_the_allowlist_per_tier_and_the_person_is_shown_it() {
+    let dir = test_dir("smplify-path");
+    let state = Arc::new(ControlPlaneState::default());
+    state.translate_like_smplifyd.store(true, Ordering::SeqCst);
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+
+    let personal = state.status_bodies.lock().unwrap()[0].clone();
+    assert_eq!(
+        sorted_keys(&personal),
+        [
+            "deviceId",
+            "facts",
+            "heartbeat",
+            "supportedActions",
+            "systemInfo"
+        ]
+    );
+    let info = &personal["systemInfo"];
+    assert_eq!(
+        sorted_keys(info),
+        ["hardware", "os", "security", "software"],
+        "never network, never identity"
+    );
+    assert_eq!(
+        sorted_keys(&info["os"]),
+        ["arch", "kernelRelease", "name", "version"]
+    );
+    assert_eq!(
+        sorted_keys(&info["hardware"]),
+        SMPLIFY_HARDWARE_KEYS,
+        "no serial number on a personal enrollment"
+    );
+    assert_eq!(
+        sorted_keys(&info["security"]),
+        [
+            "diskEncryptionEnabled",
+            "firewall",
+            "firewallEnabled",
+            "osPatchStatus",
+            "rebootRequired"
+        ]
+    );
+    assert_eq!(
+        sorted_keys(&info["software"]),
+        [
+            "installedPackages",
+            "installedPackagesCount",
+            "installedPackagesHash",
+            "smplifydBuildDate",
+            "smplifydRevision",
+            "smplifydVersion"
+        ]
+    );
+    assert_eq!(personal["supportedActions"], json!([]));
+    assert_eq!(personal["facts"], json!({}));
+
+    // The fixture machine, typed as Smplify reads it.
+    assert_eq!(info["os"]["name"], "Punar OS 0.5 (M5)");
+    assert_eq!(info["os"]["version"], "0.5");
+    assert_eq!(info["os"]["kernelRelease"], "6.12.0-punar");
+    assert!(matches!(
+        info["os"]["arch"].as_str(),
+        Some("x86_64" | "aarch64")
+    ));
+    let hardware = &info["hardware"];
+    assert_eq!(hardware["manufacturer"], "QEMU");
+    assert_eq!(hardware["modelName"], "Standard PC (Q35 + ICH9, 2009)");
+    assert_eq!(hardware["cpuCores"], json!(4));
+    assert_eq!(hardware["memoryTotalBytes"], json!(8_192_000u64 * 1024));
+    assert_eq!(hardware["secureBoot"], json!(false));
+    assert_eq!(hardware["uefi"], json!(true));
+    assert_eq!(hardware["tpmPresent"], json!(true));
+    assert_eq!(hardware["tpmVersion"], "2.0");
+    assert_eq!(hardware["isVirtual"], json!(true));
+    assert_eq!(hardware["batteryPresent"], json!(false));
+    let security = &info["security"];
+    assert_eq!(security["diskEncryptionEnabled"], json!(true));
+    assert_eq!(security["firewallEnabled"], json!(true));
+    assert_eq!(security["firewall"], "nftables");
+    assert_eq!(security["osPatchStatus"], "unknown");
+    assert_eq!(security["rebootRequired"], json!(false));
+    assert_eq!(
+        info["software"]["installedPackages"],
+        json!([
+            {"name": "chromium", "displayName": "Chromium",
+             "version": "151.0.7922.173-1", "source": "punar-image", "managed": false},
+            {"name": "org.punar.Mail", "displayName": "Mail", "version": null,
+             "source": "punar-image", "managed": false},
+        ])
+    );
+    assert_eq!(info["software"]["installedPackagesCount"], 2);
+    let text = personal.to_string();
+    for forbidden in [
+        FIXTURE_SERIAL,
+        "firefox",
+        "Thunar",
+        "/home",
+        "hostname",
+        "current_state",
+        "capabilities",
+        "timezone",
+        "machineId",
+    ] {
+        assert!(!text.contains(forbidden), "Smplify received {forbidden}");
+    }
+    assert!(!carries_an_address(&text), "{text}");
+
+    // The person's record is the body that left, byte for byte, and the
+    // summary names exactly its non-null fields — never a field that did not
+    // travel.
+    let view_path = daemon.state_path("organization-view.json");
+    assert_eq!(mode_of(&view_path), 0o640);
+    let record = read_json(&view_path);
+    assert_eq!(
+        sorted_keys(&record),
+        ["enrolled_at", "org_id", "sent", "sent_at", "version"],
+        "bookkeeping around the body, nothing else"
+    );
+    assert_eq!(record["sent"], personal);
+    let status = daemon.result("enroll.status", None);
+    let view = &status["organization_view"];
+    assert_eq!(view["sent_at"], record["sent_at"]);
+    let categories: Vec<&str> = view["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|category| category["category"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        categories,
+        ["hardware", "os", "security", "software"],
+        "the empty supportedActions and facts told the organization nothing"
+    );
+    for category in view["categories"].as_array().unwrap() {
+        let name = category["category"].as_str().unwrap();
+        let fields: Vec<String> = serde_json::from_value(category["fields"].clone()).unwrap();
+        assert_eq!(fields, carried_keys(&info[name]), "{name}");
+    }
+    assert_eq!(
+        view["categories"][3]["counts"],
+        json!({"installedPackages": 2})
+    );
+    assert!(!view.to_string().contains("serialNumber"));
+
+    // The same device, enrolled again by an organization that owns it: the
+    // serial number and the system-wide applications, and nothing else.
+    daemon.result("enroll.stop", None);
+    assert!(!view_path.exists());
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+    );
+    let owned = state.status_bodies.lock().unwrap()[1].clone();
+    assert_eq!(sorted_keys(&owned), sorted_keys(&personal));
+    assert_eq!(sorted_keys(&owned["systemInfo"]), sorted_keys(info));
+    let mut owned_hardware = SMPLIFY_HARDWARE_KEYS.to_vec();
+    owned_hardware.push("serialNumber");
+    owned_hardware.sort_unstable();
+    assert_eq!(
+        sorted_keys(&owned["systemInfo"]["hardware"]),
+        owned_hardware
+    );
+    assert_eq!(
+        owned["systemInfo"]["hardware"]["serialNumber"],
+        FIXTURE_SERIAL
+    );
+    for section in ["os", "security"] {
+        assert_eq!(owned["systemInfo"][section], info[section], "{section}");
+    }
+    let rows: Vec<(&str, &str)> = owned["systemInfo"]["software"]["installedPackages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["name"].as_str().unwrap(),
+                row["source"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("chromium", "punar-image"),
+            ("org.mozilla.firefox", "flatpak"),
+            ("org.punar.Mail", "punar-image"),
+        ]
+    );
+    let record = read_json(&view_path);
+    assert_eq!(record["sent"], owned);
+    let status = daemon.result("enroll.status", None);
+    let hardware_fields = status["organization_view"]["categories"][0].clone();
+    assert_eq!(hardware_fields["category"], "hardware");
+    assert!(
+        hardware_fields["fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("serialNumber")),
+        "{hardware_fields}"
+    );
+    let text = owned.to_string();
+    for forbidden in ["hostname", "current_state", "/home", "Thunar"] {
+        assert!(!text.contains(forbidden), "Smplify received {forbidden}");
+    }
+    assert!(!carries_an_address(&text), "{text}");
+}
+
+/// From a control plane that does not say what it sent on (the development
+/// mock), the record is the inventory it received. It moves only when a send
+/// succeeds, and a record that is missing or belongs to another enrollment
+/// is reported as nothing sent rather than shown.
+#[test]
+fn the_organization_view_changes_only_when_a_send_succeeds() {
+    const LONG_AGO: &str = "2026-01-01T00:00:00Z";
+    let dir = test_dir("org-view");
+    let enrollment_file = dir.join("state/enrollment.json");
+    let view_path = dir.join("state/organization-view.json");
+    let control_plane = ControlPlane::start(&dir);
+    {
+        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        let received = control_plane.state.inventory.lock().unwrap()[0]["inventory"].clone();
+        assert_eq!(read_json(&view_path)["sent"], received);
+        let view = daemon.result("enroll.status", None)["organization_view"].clone();
+        let categories: Vec<(String, Vec<String>)> = view["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|category| {
+                (
+                    category["category"].as_str().unwrap().to_string(),
+                    serde_json::from_value(category["fields"].clone()).unwrap(),
+                )
+            })
+            .collect();
+        // The mock keeps punard's own inventory, hostname and capability
+        // states included, and the person is told so.
+        assert_eq!(categories[0].0, "device");
+        assert_eq!(
+            categories[0].1,
+            ["applications", "capabilities", "hostname", "kernel"]
+        );
+        assert_eq!(
+            view["categories"][0]["counts"],
+            json!({"applications": 2, "capabilities": 1})
+        );
+        let names: Vec<&str> = categories.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["device", "hardware", "os", "posture"]);
+        daemon.stop();
+    }
+    let recorded = fs::read(&view_path).unwrap();
+
+    // Due again, with the control plane down: the send fails, and the record
+    // of what the organization has is untouched.
+    let mut enrollment = read_json(&enrollment_file);
+    enrollment["last_inventory_sent_at"] = json!(LONG_AGO);
+    fs::write(&enrollment_file, enrollment.to_string()).unwrap();
+    let state = control_plane.stop();
+    {
+        let daemon = TestDaemon::start(
+            &dir,
+            Peer::root(),
+            &dir.join("control-plane.sock"),
+            "enabled",
+        );
+        daemon.stop();
+    }
+    assert_eq!(fs::read(&view_path).unwrap(), recorded);
+
+    // Back online, the resend succeeds and the record moves with it. (Dated
+    // back first, so the move shows even within the same second.)
+    let mut dated = read_json(&view_path);
+    dated["sent_at"] = json!(LONG_AGO);
+    fs::write(&view_path, dated.to_string()).unwrap();
+    let control_plane = ControlPlane::start_with(&dir, state);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
+    let record = read_json(&view_path);
+    assert_ne!(record["sent_at"], LONG_AGO);
+    assert_eq!(
+        record["sent_at"],
+        read_json(&enrollment_file)["last_inventory_sent_at"]
+    );
+    assert_eq!(
+        record["sent"],
+        control_plane.state.inventory.lock().unwrap()[1]["inventory"]
+    );
+
+    // A record of another enrollment is not this one's.
+    let mut stale = record.clone();
+    stale["enrolled_at"] = json!("2020-01-01T00:00:00Z");
+    fs::write(&view_path, stale.to_string()).unwrap();
+    assert_eq!(
+        daemon.result("enroll.status", None)["organization_view"],
+        json!({"sent_at": null, "categories": []})
+    );
+    fs::remove_file(&view_path).unwrap();
+    assert_eq!(
+        daemon.result("enroll.status", None)["organization_view"],
+        json!({"sent_at": null, "categories": []})
+    );
 }

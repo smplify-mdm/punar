@@ -10,7 +10,6 @@
 //! surface a person sees.
 //!
 //! Decision record: docs/development/smplify-enrollment.md.
-mod clock;
 mod device;
 mod discovery;
 mod http;
@@ -21,6 +20,10 @@ mod upstream;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+// The report bodies and their clock live in the library half of this crate,
+// so punard's tests can compose the real translation (src/lib.rs).
+use punar_smplifyd::{clock, status};
 
 const DEFAULT_SOCKET: &str = "/run/punar-smplifyd/api.sock";
 const DEFAULT_STATE_DIR: &str = "/var/lib/punar-smplifyd";

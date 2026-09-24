@@ -72,9 +72,10 @@ use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
     ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
-    LastQueryRecord, LastSyncRecord, OrgRecord, StatusSummary, UpstreamError,
-    compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
-    load_enrollment, save_device_token, save_enrollment, write_status_summary,
+    LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord, OrganizationViewRecord,
+    StatusSummary, UpstreamError, compliance_report_body, inventory_body, inventory_resend_due,
+    load_device_token, load_enrollment, load_organization_view, organization_view_summary,
+    save_device_token, save_enrollment, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -5244,7 +5245,10 @@ impl Inner {
     /// `enroll.status` (contract section 5.10): read-only, any connected
     /// peer, not audited. Never the token.
     fn handle_enroll_status(&self) -> EnrollStatusResult {
-        match &*self.enrollment.lock().unwrap() {
+        // Cloned so the view file below is read without holding the lock a
+        // sync pass needs.
+        let enrollment = self.enrollment.lock().unwrap().clone();
+        match &enrollment {
             // Personal device: no organization, therefore no grant and no
             // query history — not an empty grant that could be widened, but
             // the absence of the concept (milestone-10.md section 11).
@@ -5259,6 +5263,7 @@ impl Inner {
                 last_query: None,
                 removable: None,
                 organization_owned: None,
+                organization_view: None,
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -5283,6 +5288,13 @@ impl Inner {
                 }),
                 removable: Some(e.removable),
                 organization_owned: Some(e.organization_owned),
+                // What the organization can see, read from what actually
+                // left (SPEC section 24.2), not from what the tier says
+                // should have.
+                organization_view: Some(organization_view_summary(
+                    load_organization_view(&self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE), e)
+                        .as_ref(),
+                )),
             },
         }
     }
@@ -5390,7 +5402,10 @@ impl Inner {
         if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
             eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
         }
-        for name in ["enrollment.json", "device-token"] {
+        // The organization view describes this enrollment only. What the
+        // organization received is not retracted by removing it; enroll.status
+        // simply has no enrollment to describe any more.
+        for name in ["enrollment.json", "device-token", ORGANIZATION_VIEW_FILE] {
             if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {
                 if e.kind() != io::ErrorKind::NotFound {
                     eprintln!("punard: enroll.stop could not remove {name}: {e}");
@@ -5466,6 +5481,27 @@ impl Inner {
                     .verified_update_available(channel, PATCH_EVIDENCE_MAX_AGE_SECONDS)
             })
         })
+    }
+
+    /// Keep what the organization just received as the person's view of it
+    /// (SPEC section 24.2). A failure to write it is logged and costs nothing
+    /// else: the send happened, and `enroll.status` then says nothing was
+    /// recorded rather than something untrue.
+    fn record_organization_view(&self, enrollment: &Enrollment, sent_at: &str, sent: Value) {
+        let record = OrganizationViewRecord {
+            version: 1,
+            org_id: enrollment.org.id.clone(),
+            enrolled_at: enrollment.enrolled_at.clone(),
+            sent_at: sent_at.to_string(),
+            sent,
+        };
+        if let Err(e) = save_organization_view(
+            &self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE),
+            &record,
+            lookup_gid(&self.cfg.group_file, &self.cfg.group),
+        ) {
+            eprintln!("punard: could not record what the organization received: {e}");
+        }
     }
 
     /// An application list sent as `null` is a fact the device's owner can
@@ -5592,16 +5628,21 @@ impl Inner {
         let inventory_outcome = if !must_send {
             "unchanged"
         } else {
-            let sent = match &token {
-                Some(token) => client.inventory_report(token, &inventory).is_ok(),
-                None => false,
+            let answer = match &token {
+                Some(token) => client.inventory_report(token, &inventory).ok(),
+                None => None,
             };
-            if sent {
-                new_hash = Some(hash);
-                sent_at = Some(now);
-                "success"
-            } else {
-                "unreachable"
+            match answer {
+                Some(sent) => {
+                    // The agent's account of what it posted, or, from a
+                    // control plane that gives none (the development mock,
+                    // which keeps the inventory itself), what it was handed.
+                    self.record_organization_view(&enrollment, &now, sent.unwrap_or(inventory));
+                    new_hash = Some(hash);
+                    sent_at = Some(now);
+                    "success"
+                }
+                None => "unreachable",
             }
         };
         self.pending_inventory

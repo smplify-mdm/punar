@@ -111,10 +111,10 @@ impl Daemon {
             "identity.status" => self.identity_status(),
             "policy.fetch" => self.policy_fetch(params),
             "compliance.report" => {
-                self.report(params, "report", crate::upstream::compliance_status_body)
+                self.report(params, "report", crate::status::compliance_status_body)
             }
             "inventory.report" => {
-                self.report(params, "inventory", crate::upstream::inventory_status_body)
+                self.report(params, "inventory", crate::status::inventory_status_body)
             }
             "queries.pending" => {
                 self.authorized(params)?;
@@ -299,7 +299,11 @@ impl Daemon {
         self.api()?
             .status(&record.device_id, &body)
             .map_err(upstream_refusal)?;
-        Ok(json!({}))
+        // What left, exactly as it left. punard keeps it as the person's
+        // record of what their organization received (SPEC section 24.2), so
+        // that record is the translation's output, never punard's guess at
+        // it from the inventory it handed over.
+        Ok(json!({ "sent": body }))
     }
 
     /// Pin the organization's signing key if the check-in at registration

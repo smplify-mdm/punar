@@ -1319,6 +1319,7 @@ dependencies = [
  "punar-mock-smplify",
  "punar-policy",
  "punar-recovery",
+ "punar-smplifyd",
  "rustix",
  "serde",
  "serde_json",

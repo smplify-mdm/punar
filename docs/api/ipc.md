@@ -821,11 +821,37 @@ Params: none. Read-only, any connected peer, not audited.
   "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
                  "pending": false},
   "removable": true,
-  "organization_owned": false
+  "organization_owned": false,
+  "organization_view": {
+    "sent_at": "2026-08-26T09:00:04Z",
+    "categories": [
+      {"category": "hardware", "fields": ["batteryPresent", "biosVersion", "…"]},
+      {"category": "os", "fields": ["arch", "kernelRelease", "name", "version"]},
+      {"category": "security", "fields": ["diskEncryptionEnabled", "firewall", "…"]},
+      {"category": "software", "fields": ["installedPackages", "installedPackagesCount",
+                                          "installedPackagesHash", "smplifydVersion"],
+       "counts": {"installedPackages": 2}}
+    ]
+  }
 }}
 ```
 
 Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
+`organization_view` is what the organization can see of this device (SPEC
+section 24.2), read from the inventory body that last left it
+(`/var/lib/punar/organization-view.json`, root:`punar` 0640) — never from a
+list of what should have been sent, so it cannot show less than left.
+`sent_at` is when that send succeeded. `categories` is sorted by name; each
+names the fields that carried a value (a field sent as `null` or empty told
+the organization nothing and is not listed), and `counts`, present only when
+a field carried a list, how many rows it had. Names only, never values.
+Against Smplify the categories are the `systemInfo` sections the built-in
+agent posted (docs/development/smplify-enrollment.md §3.3); against the
+development mock they are punard's own inventory sections, with values that
+belong to no section (`hostname`, `kernel`, `capabilities`, `applications`)
+listed under `device`. Present exactly when enrolled; before the first
+successful send, or when the record belongs to another enrollment, it is
+`{"sent_at": null, "categories": []}`.
 `removable` is the organization's removal term fixed at enrollment
 (§5.9 step 6): whether `enroll.stop` can succeed on this device at all.
 `organization_owned` is its ownership term, fixed the same way: whether the

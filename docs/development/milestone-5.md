@@ -132,7 +132,7 @@ Requests `{"v":1,"id":"…","method":"…","params":{…}}`, responses
 | `enroll.register` | `{device_id, bootstrap}` | `{"device_token": "tok_<32 hex>", "attestation": "simulated", "organization": {…}}` | bootstrap must be ≥32 hex chars ("simulated-accept" logged); device recorded in `devices.json`; re-register of a known `device_id` rotates the token (idempotent re-enroll) |
 | `policy.fetch` | `{device_token}` | `{"policies": [ <envelope> ]}` | see 4.4; bad token → `unauthorized` |
 | `compliance.report` | `{device_token, report}` | `{"accepted": true}` | appended verbatim + `received_at`/`device_id` to `received-compliance.jsonl` |
-| `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` | appended likewise to `received-inventory.jsonl` |
+| `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` | appended likewise to `received-inventory.jsonl`. The built-in agent answers `{"sent": <the Smplify body>}` instead (smplify-enrollment.md §3.3); without `sent`, punard records the inventory itself as what the control plane received (§6) |
 | `admin.devices`, `admin.device` | — | `unknown_method` | **names reserved for M10** (spec 51 remote queries); documented so nobody invents a different admin surface later |
 
 ### 4.4 Fixtures served verbatim; the one mechanical composition
@@ -275,7 +275,8 @@ about being fake* — grep for `simulated` finds every place it surfaces
 
 `{"enrolled", "org"|null, "policy_ids", "enrolled_at"|null,
 "attestation"|null, "last_sync": {"at", "result": "success"|"unreachable"|null,
-"pending": bool}}`. Never the token. `status` (5.1) additionally flips
+"pending": bool}}`, and later additions (removal and ownership terms, the
+organization view: docs/api/ipc.md §5.10). Never the token. `status` (5.1) additionally flips
 `enrolled: true`, `mode: "managed"` (the M3 contract said "personal until
 M5"), and gains the optional `org` object — additive fields, never a
 redraw (design §8).
@@ -421,6 +422,24 @@ from injectable procfs/sysfs/image paths:
 Never in any tier: anything under `/home` or per user, addresses, network
 names, location or timezone (beyond the capability states above), users or
 sessions, usage samples, `/etc/machine-id`, base OS packages.
+
+**What reaches Smplify is narrower than this body.** The built-in agent
+translates it key by key into Smplify's `systemInfo` sections through a
+fixed allowlist and gathers nothing (smplify-enrollment.md §3.3, the
+visibility manifest): `hostname` and every capability's `current_state` stay
+on the device, and so does anything the allowlist does not name. The
+development mock, which keeps what punard hands it, receives this body as
+shown.
+
+**The person's record of what left** (SPEC section 24.2). After a successful
+send punard writes `/var/lib/punar/organization-view.json` (0640
+root:`punar`): `{version, org_id, enrolled_at, sent_at, sent}`, where `sent`
+is the body the control plane received — the agent's `{sent}` answer, or the
+inventory itself from a control plane that gives none. It is bound to the
+enrollment (organization and enrollment time), untouched by a failed send,
+and removed by `enroll.stop`. `enroll.status.organization_view` summarizes it
+as categories and field names; `punarctl enroll status` shows them under
+"Your organization can see".
 
 **Resend floor.** A 2xx proves the request arrived, not that it was kept, so
 an unchanged inventory is still sent once `last_inventory_sent_at` is a day
@@ -640,7 +659,9 @@ Sync (received side):
     `inventory.os.id` and `inventory.kernel` non-empty;
     `inventory.capabilities | length == 3`; key-set allowlist holds.
     Second `reconcile` → compliance file grew, inventory file **still 1
-    line** (hash gate).
+    line** (hash gate). `organization-view.json` is `root:punar 0640` and
+    its `sent` equals the received line's `inventory` exactly; `enroll
+    status` names the sections `device`, `hardware`, `os`, `posture` (§6).
 11. `status.json`: `enrolled == true`, `org_name == "Acme Engineering"`,
     `compliance_overall == "compliant"`, mode `0644`;
     `punarctl status --json` → `mode == "managed"`, `org.id == "acme"`.
@@ -665,7 +686,8 @@ Unenroll (offline, deliberately):
 
 15. `systemctl stop punar-mock-smplify`; `punarctl --json enroll stop` →
     exit 0 with the mock **down** (local restore needs no counterparty);
-    `policy.d` empty; `enrollment.json` and `device-token` absent.
+    `policy.d` empty; `enrollment.json`, `device-token` and
+    `organization-view.json` absent.
 16. Back to personal: `punarctl --json policy explain security.firewall`
     → `source.kind == "local_user_preference"`, `source.rank == 5`,
     `user_override_permitted == true`; human greps `Personal preference`,

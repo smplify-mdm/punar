@@ -61,8 +61,8 @@ performs the same `/os-identifiers/resolve` → `/enroll` (token + CSR) →
 
 | Process | Runs as | May do | May not do | Transport | Hardening |
 |---|---|---|---|---|---|
-| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, build the category-states-only compliance and inventory bodies, write audit and `status.json` | Hold the device key; speak TCP | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `After=punar-smplifyd.service`, never `Requires` (SPEC §55: cached policy enforces with the agent down) |
-| **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, forward exactly the bodies punard hands it | Mutate the OS; call any punard method; act on a server command; gather anything | Serves NDJSON on `/run/punar-smplifyd/api.sock` 0600, `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service` |
+| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, collect and build the compliance body (category states only) and the inventory body (the tier's device facts, §3.2), keep the record of what was sent (§3.3), write audit and `status.json` | Hold the device key; speak TCP | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `After=punar-smplifyd.service`, never `Requires` (SPEC §55: cached policy enforces with the agent down) |
+| **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, translate the bodies punard hands it through a fixed allowlist (§3.3) and answer with exactly what it sent | Mutate the OS; call any punard method; act on a server command; gather anything | Serves NDJSON on `/run/punar-smplifyd/api.sock` 0600, `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service` |
 | **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin] [--accept-non-removable] [--accept-organization-owned]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket; the organization's terms — not removable, §3.1; owned by the organization, §3.2 — are shown together in one prompt and must be accepted), `enroll status`, `enroll stop` (the same password confirmation; refused for a non-removable enrollment, §3.1) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
 | **System Control › Organization** (slice 2) | session | Domain, visibility panel, code entry, re-auth, then fixed-argv `punarctl … --code-stdin` | Be a second control plane | `status.json` over inotify | ticket path, like `policy.set` |
 
@@ -81,8 +81,9 @@ organization}`; the device token is random, and only its SHA-256 is kept.
 `policy.fetch` → `GET /devices/{id}/bundle`: 204 and any bundle without a
 Punar payload both answer `{policies: []}` (slice 2 adds the signed
 `punar-policy` payload). `compliance.report` / `inventory.report` → `POST
-/devices/{id}/status` carrying the states as `facts` and the OS triple as
-`systemInfo.os` — nothing else. `queries.*` → empty until the backend has
+/devices/{id}/status`: the compliance states as `facts`, and the inventory
+translated key by key into `systemInfo` (§3.3) — nothing else. Both answer
+punard `{sent: <the body posted>}`. `queries.*` → empty until the backend has
 `punar-query`. `recovery.*` → `out_of_scope`. `enroll.unregister` → wipes the
 identity; punard's `enroll.stop` calls it best-effort and continues offline.
 
@@ -94,9 +95,13 @@ long-polls inside a call.
 
 ## 3. Conditions that are not negotiable
 
-- **Category states only** (SPEC §24/§54): the bodies are built only by
-  punard's `compliance_report_body` / `inventory_body`; the agent adds the
-  OS triple already in the inventory and a heartbeat, nothing more.
+- **What leaves is decided on the device, and fixed** (SPEC §24/§54). punard
+  builds both bodies (`compliance_report_body`, `inventory_body`): the
+  compliance report carries category states only, the inventory the device
+  facts its tier allows (§3.2). The agent gathers nothing. It translates
+  the inventory through a fixed allowlist (§3.3), adding only a heartbeat,
+  `supportedActions: []` and its own build constants, and punard keeps the
+  body that left so the person can see it.
 - **No localhost TCP control surface** (SPEC §61, milestone-5 §4.2): both
   sockets are UDS; the agent's HTTP is outbound only.
 - **Explicit, audited enrollment**: nothing at first boot; `enroll.start`
@@ -271,8 +276,8 @@ The milestone-5 keys stay in punard's body beside these: the hostname,
 and each capability's current state. Smplify does not receive them from
 it. punar-smplifyd translates the body through a fixed allowlist and
 gathers nothing itself (§2): it sends the hostname once, at `/enroll`, and
-no capability value at all. Until its mapping of the sections above lands,
-it forwards only the OS triple from them.
+no capability value at all. The exact keys Smplify receives per tier are
+§3.3.
 
 **Decision.**
 
@@ -338,6 +343,95 @@ it forwards only the OS triple from them.
   - Both terms are named in one refusal, and each flag accepts only its own
     term.
 
+### 3.3 The visibility manifest — what Smplify receives, decided 2026-09-24
+
+Everything below is `POST /api/v1/linux/mdm/devices/{id}/status`. It is
+composed in one place, `crates/punar-smplifyd/src/status.rs`, from punard's
+inventory and compliance report; a key not named there never leaves.
+
+**Compliance** (every sync pass): `facts.punar_compliance_overall` and one
+`facts.punar_compliance_<capability>` per registered capability, each a
+state word. Never a value.
+
+**Inventory** (at enrollment, when it changes, and at least once a day):
+
+| Smplify key | From punard | Tier |
+|---|---|---|
+| `systemInfo.os.name` | "Punar OS" on a Punar image, else `PRETTY_NAME` | every |
+| `systemInfo.os.version` | `IMAGE_VERSION`, else `VERSION_ID` | every |
+| `systemInfo.os.kernelRelease` | the kernel release | every |
+| `systemInfo.os.arch` | the package architecture | every |
+| `systemInfo.hardware.secureBoot`, `uefi`, `tpmPresent`, `tpmVersion`, `isVirtual`, `virtualization` | posture | every |
+| `systemInfo.hardware.manufacturer`, `modelName`, `biosVersion`, `cpuModel`, `cpuVendor`, `cpuCores`, `cpuThreads`, `memoryTotalBytes`, `deviceCapacityBytes` (whole GB), `rootFilesystemType`, `batteryPresent` | hardware | every |
+| `systemInfo.security.diskEncryptionEnabled`, `firewallEnabled`, `firewall` (`"nftables"`), `osPatchStatus`, `rebootRequired` | posture | every |
+| `systemInfo.software.smplifydVersion`, `smplifydRevision`, `smplifydBuildDate` | the agent's own build, not the device | every |
+| `systemInfo.software.installedPackages` (`{name, displayName, version, source, managed}` rows), `installedPackagesHash`, `installedPackagesCount` | applications: the image's own (`source: "punar-image"`) | every |
+| the same list, adding `source: "flatpak"` and `"punar-vendor"` rows | every system-wide application | organization-owned |
+| `systemInfo.hardware.serialNumber` | `identifiers.serial_number` | organization-owned |
+| `supportedActions: []` | slice 1 honours no remote command | every |
+
+**Never, in any tier:** a `network` or `identity` section; the hostname
+(sent once, at `/enroll`); any capability's value (the hostname string, the
+timezone); timezone, uptime, boot time or `machineId`; addresses of any
+kind, network names, Bluetooth or USB history; user names, UIDs, logins and
+sessions; anything under `/home` or belonging to one person, per-user and
+browser data, the AI registry, ledger and detections; battery level and
+usage samples; base OS packages; audit contents, processes and command
+lines; secrets. On a personal enrollment, an application the person chose.
+
+**How the translation holds that line:**
+
+- **Types.** Smplify reads a typed column only from a JSON boolean or
+  number; `"true"` is dropped. Booleans and counts are coerced (the exact
+  strings `"true"`/`"false"` and digit strings), and anything else is
+  `null`. Counts past the receiving column (`int` for cores and threads,
+  `bigint` for bytes) are `null`.
+- **Every value fits its column.** Smplify writes the typed columns inside
+  the transaction that stores the whole report, so one value too long fails
+  the entire write. `modelName`, `os.version` and `kernelRelease` are cut to
+  100 characters, `os.name` to 128, other text to 255.
+- **Unknown is `null`.** `null` keeps what Smplify stored; a placeholder
+  would overwrite it. The substrate's `"unknown"` is therefore `null`,
+  except for `osPatchStatus`, where `"unknown"` is the console's own word
+  and replaces a verdict whose evidence expired. `firewall`, `tpmVersion`
+  and `osPatchStatus` are closed vocabularies; architecture, filesystem and
+  hypervisor names must be plain tokens; a serial number must be printable
+  ASCII and is never repaired into a different one.
+- **The application list is a complete snapshot.** Smplify deletes every
+  row it does not see, and one malformed row discards the whole list. So
+  every row is checked (a name, a text version, a known source, a boolean
+  `managed`), names and display names are cut to 255 characters and
+  versions to 100, and any bad row, more than 2,000 rows, or a body over
+  512 KiB sends the list, its hash and its count as `null` ("no change").
+  The list is never cut. punard applies the same caps first and audits the
+  withholding (`enroll.inventory`); the agent does not rely on it.
+- **Only the allowlist.** A key punard's inventory carries that this file
+  does not name is not copied, including an unknown key inside a row.
+
+**What the person sees.** The agent answers `inventory.report` with
+`{sent: <the body posted>}`, and punard stores that body in
+`/var/lib/punar/organization-view.json` (0640 root:`punar`, bound to the
+enrollment, written only after a send succeeds, removed on unenroll).
+`enroll.status.organization_view` lists its categories and the field names
+that carried a value, and when it was sent (docs/api/ipc.md §5.10);
+`punarctl enroll status` renders them under "Your organization can see". It
+is read from what left, not from this table, so it cannot show less than
+was sent. Against the development mock, which returns no `sent`, the record
+is the inventory the mock received, hostname and capability states
+included, and the person is shown exactly that.
+
+**What an enterprise reviewer can verify.**
+
+- `enroll.status.organization_view` and `organization-view.json` on the
+  device.
+- The tests in `crates/punar-smplifyd/src/status.rs`: exact key sets per
+  section, nothing outside the allowlist, the serial only with
+  `identifiers`, coercion, clamping, and a withheld (never shorter) list.
+- `crates/punard/src/enroll.rs` and `crates/punard/tests/enroll.rs`:
+  punard's real inventory through the agent's real translation, per tier,
+  as exact key sets; the caps; the record of what was sent holds exactly
+  the body Smplify received, and the summary exactly its non-null fields.
+
 ## 4. Smplify backend — Phase 0 (gating) and later
 
 Verified by reading `manager-smp-1214/multi-module-mdm-project`. B0 and B3
@@ -358,6 +452,20 @@ remain the shipping gates.
 | B10 | Short human code (`smp_<code>`, ≤ 24 h, single use, per-IP limited) | ease of use | 3 d |
 | B11 | RFC 8628 device-authorization endpoints; `/enroll` accepts a user assertion; `enrolled_by` | credentials | 8 d |
 
+**Inventory gaps (open, found 2026-09-24).** Found reading the backend
+while mapping §3.3; none blocks Punar sending the manifest, but each limits
+what the organization sees or can clear. Nothing here is verified against a
+running backend except where it says so.
+
+| # | Change | Why |
+|---|---|---|
+| B-A1 | An empty `installedPackages` must clear the device's Linux applications (`LinuxDeviceIndexerImpl` returns early on an empty list, contradicting the ingest's "an explicitly empty array replaces the prior inventory") | a device with nothing listed keeps its old rows |
+| B-A2 | Honour `displayName` and `managed`: display name from `displayName`, key still from `name`; `managed` read instead of hardcoded `false` | the console shows ids, never a managed flag |
+| B-A3 | Make `GET /devices/{id}/applications` (and so `smplify device apps`) see Linux applications, by indexing them into Elasticsearch as the Apple path does or reading the installed-apps table | the CLI stays empty however complete the list is; the console tab reads Postgres and fills |
+| B-A4 | Isolate the application reconcile from the status write (its own transaction, or clamp lengths server-side) | a column overflow inside the `@Transactional` ingest plausibly aborts the whole status write (not verified) |
+| B-P1 | A way to clear withdrawn data: typed columns use `COALESCE` and the JSON merge strips nulls, so a value is never cleared by a later report | a category a device stops sending, or an unenrollment, leaves the old values forever |
+| B-U1 | Console: add `Manufacturer` and `ModelName` to `NAMED_KEYS` (they render twice today); show the `punar_compliance_*` facts, which are stored but have no reader (overlaps B9) | presentation |
+
 ## 5. Phases
 
 - **Slice 1 (this branch):** `punar-smplifyd` crate, unit, service user,
@@ -371,7 +479,8 @@ remain the shipping gates.
   device row appears in the manager with OS, kernel, last-seen and
   `punar_compliance_overall`; the bar shows the organisation.
 - **Slice 2:** System Control › Organization page with the "what your
-  organisation can see" panel generated from the transport manifest; the
+  organisation can see" panel, rendered from `enroll.status.organization_view`
+  (the body that left, §3.3); the
   signed `punar-policy` payload end to end; certificate expiry in
   `enroll status`; in-VM CI stub (TLS over a Unix socket) and `m14-check`.
 - **Slice 3:** short code; credentials (device-authorization); `punar-query`
