@@ -364,7 +364,7 @@ impl InventoryCollector {
         let uefi = self.sources.efi_dir.is_dir();
         let (tpm_present, tpm_version) = tpm(&self.sources.tpm_dir);
         let posture = Posture {
-            secure_boot: secure_boot(&self.sources.efi_dir),
+            secure_boot: secure_boot(&self.sources.efi_dir, &self.sources.storage.mountinfo),
             uefi: Some(uefi),
             tpm_present,
             tpm_version,
@@ -489,7 +489,13 @@ pub fn patch_posture(
 /// The EFI `SecureBoot` variable: four attribute bytes, then one value byte.
 /// A machine that did not boot through UEFI did not boot with UEFI Secure
 /// Boot; firmware that does not implement it publishes no variable at all.
-fn secure_boot(efi_dir: &Path) -> Option<bool> {
+///
+/// A missing variable is evidence only where efivarfs is mounted. The kernel
+/// creates `/sys/firmware/efi/efivars` on every UEFI boot as an empty sysfs
+/// directory, whether or not efivarfs is mounted on it, so a readable, empty
+/// directory proves nothing: the mount table decides, and without an
+/// efivarfs line for that exact directory Secure Boot is unknown.
+fn secure_boot(efi_dir: &Path, mountinfo: &Path) -> Option<bool> {
     if !efi_dir.is_dir() {
         return Some(false);
     }
@@ -497,13 +503,23 @@ fn secure_boot(efi_dir: &Path) -> Option<bool> {
     match read_small(&efivars.join(SECURE_BOOT_VARIABLE)) {
         Ok(bytes) if bytes.len() >= 5 => Some(bytes[4] == 1),
         Ok(_) => None,
-        // Absent from a readable efivarfs: the firmware has no Secure Boot.
-        // Absent because efivarfs is not mounted: nothing is known.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::read_dir(&efivars).ok().map(|_| false)
+            efivarfs_mounted(&efivars, mountinfo).then_some(false)
         }
         Err(_) => None,
     }
+}
+
+/// Whether efivarfs itself is mounted at `efivars`, by the mount table: the
+/// mount that directory lives on must be an efivarfs mounted exactly there.
+fn efivarfs_mounted(efivars: &Path, mountinfo: &Path) -> bool {
+    let Ok(canonical) = fs::canonicalize(efivars) else {
+        return false;
+    };
+    matches!(
+        storage::mount_containing(&canonical, mountinfo),
+        Ok(Some(mount)) if mount.fstype == "efivarfs" && mount.mount_point == canonical
+    )
 }
 
 /// `tpm0` and its interface version. The kernel's TPM drivers speak the 1.2
@@ -1006,9 +1022,14 @@ mod tests {
             );
             fixture.write("sys/class/tpm/tpm0/tpm_version_major", "2\n");
             fixture.write("sys/class/power_supply/AC/type", "Mains\n");
+            let efivars = fixture.root.join("sys/firmware/efi/efivars");
             fixture.write(
                 "proc/self/mountinfo",
-                "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n",
+                format!(
+                    "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n\
+                     27 22 0:26 / {} rw,nosuid,nodev,noexec - efivarfs efivarfs rw\n",
+                    fs::canonicalize(efivars).unwrap().display()
+                ),
             );
             fixture.write(
                 "usr/local/share/applications/org.punar.Mail.desktop",
@@ -1054,11 +1075,14 @@ mod tests {
                 data(41, "@home", &home)
             );
             self.write("proc/1/mountinfo", &system);
+            let own = fs::read_to_string(self.root.join("proc/self/mountinfo")).unwrap_or_default();
             self.write(
                 "proc/self/mountinfo",
                 format!(
-                    "{system}90 41 0:25 /systemd/inaccessible/dir {} ro,nosuid,nodev - \
+                    "{own}{}{}90 41 0:25 /systemd/inaccessible/dir {} ro,nosuid,nodev - \
                      tmpfs tmpfs rw,mode=755\n",
+                    data(40, "@var", &var),
+                    data(41, "@home", &home),
                     home.display()
                 ),
             );
@@ -1311,20 +1335,41 @@ mod tests {
     fn posture_says_false_only_on_evidence_and_unknown_otherwise() {
         let fixture = Fixture::uefi_vm("posture-off");
         let sources = fixture.sources();
+        let secure_boot_state = || secure_boot(&sources.efi_dir, &sources.storage.mountinfo);
         // Secure Boot variable says off; then absent from a mounted efivarfs
-        // (no Secure Boot in firmware); then efivarfs not mounted at all.
+        // (no Secure Boot in firmware).
         fixture.write(
             format!("sys/firmware/efi/efivars/{SECURE_BOOT_VARIABLE}").as_str(),
             [0x06, 0x00, 0x00, 0x00, 0x00],
         );
-        assert_eq!(secure_boot(&sources.efi_dir), Some(false));
+        assert_eq!(secure_boot_state(), Some(false));
         fs::remove_file(sources.efi_dir.join("efivars").join(SECURE_BOOT_VARIABLE)).unwrap();
-        assert_eq!(secure_boot(&sources.efi_dir), Some(false));
+        assert_eq!(secure_boot_state(), Some(false));
+        // efivarfs not mounted: the kernel still leaves its empty, readable
+        // sysfs directory, which proves nothing. Nor does a directory that is
+        // not there, or another filesystem mounted in its place.
+        fixture.write(
+            "proc/self/mountinfo",
+            "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n",
+        );
+        assert!(sources.efi_dir.join("efivars").is_dir());
+        assert_eq!(secure_boot_state(), None);
+        fixture.write(
+            "proc/self/mountinfo",
+            format!(
+                "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n\
+                 27 22 0:26 / {} rw - tmpfs tmpfs rw\n",
+                fs::canonicalize(sources.efi_dir.join("efivars"))
+                    .unwrap()
+                    .display()
+            ),
+        );
+        assert_eq!(secure_boot_state(), None);
         fs::remove_dir(sources.efi_dir.join("efivars")).unwrap();
-        assert_eq!(secure_boot(&sources.efi_dir), None);
+        assert_eq!(secure_boot_state(), None);
         // No UEFI boot: no UEFI Secure Boot.
         fs::remove_dir_all(&sources.efi_dir).unwrap();
-        assert_eq!(secure_boot(&sources.efi_dir), Some(false));
+        assert_eq!(secure_boot_state(), Some(false));
 
         fs::remove_dir_all(&sources.tpm_dir).unwrap();
         assert_eq!(tpm(&sources.tpm_dir), (Some(false), None));
