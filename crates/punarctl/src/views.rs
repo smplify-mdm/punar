@@ -1125,8 +1125,7 @@ pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// Rows shared by `enroll start` and `enroll status`: org identity, policy
-/// ids, and the loudly-labeled SIMULATED attestation (the honesty label —
-/// the mock control plane measures nothing, and the output says so).
+/// ids, and what the attestation label honestly means.
 fn enrollment_rows(
     org: &model::Org,
     policy_ids: &[String],
@@ -1140,18 +1139,47 @@ fn enrollment_rows(
             Slot::Neutral,
             &format!("{} · {}", org.display_name, org.domain),
         ),
-        Row::new("Policy", "", Slot::Neutral, &policy_ids.join(" · ")),
-        Row::new(
-            "Attestation",
-            attestation,
-            Slot::Warn,
-            "no real measurement — the mock control plane accepts every device",
-        ),
+        Row::new("Policy", "", Slot::Neutral, &policy_summary(policy_ids)),
+        attestation_row(attestation),
     ];
     if let Some(ts) = enrolled_at {
         rows.push(Row::new("Enrolled", "", Slot::Neutral, &fmt::timestamp(ts)));
     }
     rows
+}
+
+/// The policy ids, or what their absence means: a Smplify tenant can enroll
+/// a device before assigning it anything, and an empty row reads as broken.
+fn policy_summary(policy_ids: &[String]) -> String {
+    if policy_ids.is_empty() {
+        "none assigned yet · the organization's policy arrives on a later sync".to_string()
+    } else {
+        policy_ids.join(" · ")
+    }
+}
+
+/// What the attestation label means, said plainly for each value the
+/// control planes send. Two of them mean nothing was measured, and each says
+/// why the device was admitted anyway: the development mock admits every
+/// device (SIMULATED, the milestone-5 honesty label), while Smplify admitted
+/// this one on the organization's enrollment code (NONE: no hardware
+/// attestation yet). Neither is dressed up as proof of the hardware.
+fn attestation_row(attestation: &str) -> Row {
+    match attestation {
+        "simulated" => Row::new(
+            "Attestation",
+            attestation,
+            Slot::Warn,
+            "no real measurement — the development control plane accepts every device",
+        ),
+        "none" => Row::new(
+            "Attestation",
+            attestation,
+            Slot::Warn,
+            "hardware not measured · admitted on the organization's enrollment code",
+        ),
+        other => Row::new("Attestation", other, Slot::Neutral, ""),
+    }
 }
 
 /// Who can end the enrollment (docs/development/smplify-enrollment.md section
@@ -1201,15 +1229,12 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         ));
     }
     out.push_str(&fmt::rows(style, &rows));
-    out.push_str(&fmt::verdict(
-        style,
-        Slot::Ok,
-        &format!(
-            "✓ Enrolled · {} · {}",
-            outcome.org.display_name,
-            outcome.policy_ids.join(" · ")
-        ),
-    ));
+    let mut verdict = format!("✓ Enrolled · {}", outcome.org.display_name);
+    if !outcome.policy_ids.is_empty() {
+        verdict.push_str(" · ");
+        verdict.push_str(&outcome.policy_ids.join(" · "));
+    }
+    out.push_str(&fmt::verdict(style, Slot::Ok, &verdict));
     out.push_str(&fmt::note(
         style,
         "Org policy applies from now on · compliance sync sends category states only",
@@ -5150,6 +5175,32 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("✓ ENROLLED · ACME ENGINEERING"), "{text}");
+    }
+
+    /// A real Smplify enrollment: no policy assigned yet and no hardware
+    /// attestation. Nothing blames a mock, the policy row says what an empty
+    /// list means, and the verdict carries no dangling separator.
+    #[test]
+    fn enroll_start_against_smplify_says_what_admitted_the_device() {
+        let style = Style::plain();
+        let result = json!({
+            "enrolled": true,
+            "org": acme_org(),
+            "policy_ids": [],
+            "attestation": "none",
+            "enrolled_at": "2026-09-24T19:30:47Z",
+            "first_sync": {"compliance": "success", "inventory": "success"}
+        });
+        let text = enroll_start(&style, &result, "mac-punar").unwrap();
+        assert!(!text.to_lowercase().contains("mock"), "{text}");
+        assert!(text.contains("hardware not measured"), "{text}");
+        assert!(text.contains("enrollment code"), "{text}");
+        assert!(text.contains("none assigned yet"), "{text}");
+        let verdict = text
+            .lines()
+            .find(|line| line.contains("✓ ENROLLED"))
+            .expect("a verdict line");
+        assert!(!verdict.trim_end().ends_with('·'), "{verdict}");
     }
 
     #[test]
