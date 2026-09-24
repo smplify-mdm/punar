@@ -696,7 +696,7 @@ authenticated, bounded, explained and recorded.
 
 ### 5.9 `enroll.start` (M5)
 
-Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…", "accept_non_removable": true}` — `accept_non_removable` optional, default `false` (step 6 below); `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
+Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…", "accept_non_removable": true, "accept_organization_owned": true}` — `accept_non_removable` and `accept_organization_owned` optional, default `false` (step 6 below); `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
 the fetched policy ids in `policy_ids`). Processed under the 60 s bound
 (section 2).
@@ -728,27 +728,49 @@ checks run in this order:
    from here on names a caller who proved who they are. punarctl reads
    `enroll.status` first and does not ask for a code or a password on a
    device that is already enrolled.
-6. **The organization's removal term**, read from the document
+6. **The organization's enrollment terms**, read from the document
    `org.discover` returned and before `enroll.register`, so an organization
    never learns of a device that did not enroll
-   (docs/development/smplify-enrollment.md §3.1). `enrollment.removable` is
-   a boolean; absent means `true`, and an ordinary enrollment asks nothing
-   more. A value that is present but not a boolean is `invalid_params`
-   (`details: {"stage": "discover", "reason": "enrollment.removable"}`),
-   never the permissive reading. `false` without `accept_non_removable:
-   true` is `denied` with `details.reason: "non_removable_not_accepted"`,
-   `details.organization` and `details.organization_name`, and a message
-   naming `punarctl enroll start <domain> --accept-non-removable`: an
-   organization cannot make a device non-removable without its user's
-   explicit yes. On a terminal punarctl shows the term, asks for `accept`,
-   and sends the request again with the flag and a fresh password (the
-   first was spent on discovery — nothing is fetched for a caller who has
-   not confirmed); without a terminal, or with `--json`, the refusal is the
-   answer. The term is written to `enrollment.json`, and to
-   `enrollment-terms.json` beside it. An older punard booted from a retained
-   UKI never rewrites that second file, and this build folds it back in when
-   loading, so a rewrite that drops the field cannot make the device
-   removable. The term is never re-read from a policy fetch.
+   (docs/development/smplify-enrollment.md §3.1, §3.2). Both are fixed in
+   `enrollment.json` and never re-read from a policy fetch. An ordinary
+   organization states neither, and its enrollment asks nothing more.
+   - **Removal.** `enrollment.removable` is a boolean; absent means `true`. A
+     value that is present but not a boolean is `invalid_params`
+     (`details: {"stage": "discover", "reason": "enrollment.removable"}`),
+     never the permissive reading. `false` needs `accept_non_removable:
+     true`: an organization cannot make a device non-removable without its
+     user's explicit yes. The term is written to `enrollment.json`, and to
+     `enrollment-terms.json` beside it. An older punard booted from a
+     retained UKI never rewrites that second file, and this build folds it
+     back in when loading, so a rewrite that drops the field cannot make the
+     device removable.
+   - **Ownership.** `enrollment.ownership` is `"personal"` or
+     `"organization"`, exactly; absent means `"personal"`. Anything else —
+     another string, another spelling, or not a string — is `invalid_params`
+     (`details: {"stage": "discover", "reason": "enrollment.ownership"}`),
+     never either reading. `"organization"` needs `accept_organization_owned:
+     true`: nothing proves an organization owns the hardware, so only the
+     person's yes lets the inventory also carry the device's serial number
+     and every application installed for all users (milestone-5.md §6). The
+     term is written to `enrollment.json` only: an older punard that rewrites
+     the file without the field can only narrow what is sent.
+   - **One refusal names every unaccepted term.** `denied`, with
+     `details.terms` listing each term the request did not accept, in the
+     order `["non_removable", "organization_owned"]`; `details.reason`
+     `"non_removable_not_accepted"` or `"organization_owned_not_accepted"`
+     when it names one term, `"enrollment_terms_not_accepted"` when it names
+     more; and `details.organization` and `details.organization_name`. The
+     message says what each term means and names `punarctl enroll start
+     <domain>` with every flag still needed (`--accept-non-removable`,
+     `--accept-organization-owned`); the organization's name in it, and in
+     punarctl's prompt, has every control character and direction override
+     replaced with U+FFFD, so it cannot conceal the term beside it. Accepting
+     a term the organization did not set accepts nothing. On a terminal
+     punarctl shows every named term in one prompt, asks for one `accept`,
+     and sends the request again with exactly those flags and a fresh
+     password (the first was spent on discovery — nothing is fetched for a
+     caller who has not confirmed); without a terminal, or with `--json`,
+     the refusal is the answer.
 
 Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
@@ -774,7 +796,8 @@ that point removes everything this call created and returns
   "attestation": "simulated",
   "enrolled_at": "2026-08-26T09:00:00Z",
   "first_sync": {"compliance": "success", "inventory": "success"},
-  "removable": true
+  "removable": true,
+  "organization_owned": false
 }}
 ```
 
@@ -797,13 +820,17 @@ Params: none. Read-only, any connected peer, not audited.
   "attestation": "simulated",
   "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
                  "pending": false},
-  "removable": true
+  "removable": true,
+  "organization_owned": false
 }}
 ```
 
 Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
 `removable` is the organization's removal term fixed at enrollment
 (§5.9 step 6): whether `enroll.stop` can succeed on this device at all.
+`organization_owned` is its ownership term, fixed the same way: whether the
+inventory also carries the serial number and every application installed
+for all users. `enroll.start`'s result carries both.
 `last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
 while a report is queued (bounded latest-wins queue, spec section 55;
 milestone-5.md section 7). The device token appears in no field.
@@ -1580,15 +1607,18 @@ or path other than the confirmed target device. An installed system returns
   document) is not an org row. Rendering contract:
   docs/development/milestone-4.md section 7.
 - **M5 verbs:** `punarctl enroll start <domain> [--code-stdin]
-  [--accept-non-removable]` (over 5.9; asks for the code, then the person's
-  password; for an organization that enrolls devices as not removable it
-  shows the term and asks for `accept` on the terminal, then the password
-  again, and without a terminal the refusal names the flag; renders org,
-  policy ids, who can unenroll, and `Attestation  SIMULATED` — the honesty
-  label is loud by design; 90 s client timeout per section 2), `punarctl
-  enroll status` (over 5.10), `punarctl enroll stop` (over 5.11; asks for
-  the password only for a removable enrollment; "Personal state restored ·
-  org layers removed"). `punarctl status` adds an
+  [--accept-non-removable] [--accept-organization-owned]` (over 5.9; asks
+  for the code, then the person's password; for an organization that sets
+  enrollment terms — not removable, owned by the organization — it shows
+  every term the refusal named, with what each means, in one prompt and
+  asks for one `accept` on the terminal, then the password again, and
+  without a terminal the refusal names the flags; renders org, policy ids,
+  who can unenroll, who owns the device, and `Attestation  SIMULATED` — the
+  honesty label is loud by design; 90 s client timeout per section 2),
+  `punarctl enroll status` (over 5.10; the same who-can-unenroll and
+  ownership rows), `punarctl enroll stop` (over 5.11; asks for the password
+  only for a removable enrollment; "Personal state restored · org layers
+  removed"). `punarctl status` adds an
   `Organization  <display name> · <policy id>` row while enrolled (absent
   otherwise — org rows never render on a personal device). The 5.4 M5
   amendments: the overridden-set verdict line and the org-citing denial.

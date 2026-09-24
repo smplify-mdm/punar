@@ -40,14 +40,15 @@ use punar_common::ipc::{
     ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
     AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopParams, EnrollStopResult,
-    ErrorCode, FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES,
-    Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
-    PolicyExplainParams, PolicyExplainResult, PolicySetParams, PolicySetResult, PolicySourceRef,
-    PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
-    ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
-    SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
-    WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
+    ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollStartParams, EnrollStartResult, EnrollStatusResult,
+    EnrollStopParams, EnrollStopResult, EnrollmentTerm, ErrorCode, FirstSync, IpcError, LastQuery,
+    LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
+    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
+    PolicySetParams, PolicySetResult, PolicySourceRef, PrivilegeRequestParams,
+    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
+    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
+    StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams,
+    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -1059,6 +1060,93 @@ fn org_document_removable(org_doc: &Value) -> Result<bool, String> {
         Some(Value::Bool(removable)) => Ok(*removable),
         Some(other) => Err(other.to_string()),
     }
+}
+
+/// `enrollment.ownership` from an organization document: whether the
+/// organization owns this device, so that its inventory also carries the
+/// serial number and every application installed for all users
+/// (docs/development/smplify-enrollment.md section 3.2). Absent or
+/// `"personal"` is personal; `"organization"` claims the device, which the
+/// person must then accept. Anything else is an error, never either reading:
+/// guessing personal would enroll a device its organization cannot manage as
+/// it said, and guessing organization would report more than anyone agreed
+/// to.
+fn org_document_organization_owned(org_doc: &Value) -> Result<bool, String> {
+    match org_doc.get("enrollment").and_then(|e| e.get("ownership")) {
+        None => Ok(false),
+        Some(Value::String(ownership)) if ownership == "personal" => Ok(false),
+        Some(Value::String(ownership)) if ownership == "organization" => Ok(true),
+        Some(other) => Err(other.to_string()),
+    }
+}
+
+/// How an organization states a term, as the first sentence of the refusal
+/// that names it alone.
+fn term_statement(term: EnrollmentTerm) -> &'static str {
+    match term {
+        EnrollmentTerm::NonRemovable => "enrolls devices so that nobody on them can unenroll them",
+        EnrollmentTerm::OrganizationOwned => "enrolls devices as owned by the organization",
+    }
+}
+
+/// The one `denied` refusal for every enrollment term the request did not
+/// accept (docs/api/ipc.md section 5.9 step 6). Every term is named at once,
+/// with what it means and the flag that accepts it, so a person is asked
+/// once for everything rather than refused again after each yes.
+/// `details.terms` lists them for a client to send back; `details.reason`
+/// keeps the single term's own reason when there is one.
+fn unaccepted_terms_refusal(
+    org: &OrgRecord,
+    domain: &str,
+    unaccepted: &[EnrollmentTerm],
+) -> IpcError {
+    let name = &term_safe_name(&org.display_name);
+    let (statement, meaning, reason) = match unaccepted {
+        [term] => (
+            format!(
+                "{name} {}, and this request did not accept that",
+                term_statement(*term)
+            ),
+            term.meaning(name),
+            term.refusal_reason(),
+        ),
+        _ => (
+            format!(
+                "{name} enrolls devices on terms this request did not accept: {}",
+                unaccepted
+                    .iter()
+                    .map(|term| term.title().to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            unaccepted
+                .iter()
+                .map(|term| format!("{}: {}", term.title(), term.meaning(name)))
+                .collect::<Vec<_>>()
+                .join(". "),
+            ENROLLMENT_TERMS_NOT_ACCEPTED,
+        ),
+    };
+    let flags = unaccepted
+        .iter()
+        .map(|term| term.flag())
+        .collect::<Vec<_>>()
+        .join(" ");
+    IpcError::with_details(
+        ErrorCode::Denied,
+        format!(
+            "{statement}. Nothing was changed: this device was not registered with {name}.\n\
+             Policy: {name}'s enrollment terms — {meaning}.\n\
+             Next step: if that is what you want, run `punarctl enroll start {domain} {flags}`."
+        ),
+        json!({
+            "decision": "deny",
+            "reason": reason,
+            "terms": unaccepted.iter().map(|term| term.as_str()).collect::<Vec<_>>(),
+            "organization": org.id,
+            "organization_name": org.display_name,
+        }),
+    )
 }
 
 /// The wire `org` object for a persisted [`OrgRecord`].
@@ -4887,33 +4975,49 @@ impl Inner {
                 )));
             }
         };
-        if !removable && !params.accept_non_removable {
+        // Ownership is read the same way, once and here. Punar has no
+        // Automated Device Enrollment, so nothing proves an organization owns
+        // the hardware: its document can claim the device, and only the
+        // person's acceptance makes the claim widen what the inventory
+        // carries (docs/development/smplify-enrollment.md section 3.2).
+        let organization_owned = match org_document_organization_owned(&org_doc) {
+            Ok(owned) => owned,
+            Err(found) => {
+                return Err(fail_audit(IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "{}'s organization document says enrollment.ownership is {found}, \
+                         which is neither \"personal\" nor \"organization\", so this device \
+                         cannot tell what the organization would receive from it. Nothing was \
+                         changed.\n\
+                         Policy: os default — an unreadable enrollment term refuses \
+                         enrollment rather than guessing (docs/development/\
+                         smplify-enrollment.md section 3.2).\n\
+                         Next step: ask {} to correct its organization document.",
+                        org.display_name, org.display_name
+                    ),
+                    json!({ "stage": "discover", "reason": "enrollment.ownership" }),
+                )));
+            }
+        };
+        // Every term the request left unaccepted is named in one refusal, so
+        // a person who says yes once is not refused again for the next one.
+        let unaccepted: Vec<EnrollmentTerm> = EnrollmentTerm::ALL
+            .into_iter()
+            .filter(|term| match term {
+                EnrollmentTerm::NonRemovable => !removable,
+                EnrollmentTerm::OrganizationOwned => organization_owned,
+            })
+            .filter(|term| !params.accepts(*term))
+            .collect();
+        if !unaccepted.is_empty() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
                 "enroll.start",
                 RESOURCE_ENROLLMENT,
             ));
-            return Err(IpcError::with_details(
-                ErrorCode::Denied,
-                format!(
-                    "{org} enrolls devices so that nobody on them can unenroll them, and \
-                     this request did not accept that. Nothing was changed: this device \
-                     was not registered with {org}.\n\
-                     Policy: {org}'s enrollment terms — once enrolled, only erasing and \
-                     reinstalling this device ends the enrollment; nobody on it, you \
-                     included, can unenroll it.\n\
-                     Next step: if that is what you want, run `punarctl enroll start \
-                     {domain} --accept-non-removable`.",
-                    org = org.display_name
-                ),
-                json!({
-                    "decision": "deny",
-                    "reason": "non_removable_not_accepted",
-                    "organization": org.id,
-                    "organization_name": org.display_name,
-                }),
-            ));
+            return Err(unaccepted_terms_refusal(&org, domain, &unaccepted));
         }
 
         // Register. The bootstrap secret exists only in memory, only for
@@ -5063,10 +5167,7 @@ impl Inner {
             remote_query_scopes,
             last_query: None,
             removable,
-            // No organization document can declare ownership yet; until the
-            // term and the person's acceptance exist, every enrollment gets
-            // the personal inventory.
-            organization_owned: false,
+            organization_owned,
             last_inventory_sent_at: None,
         };
         if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
@@ -5136,6 +5237,7 @@ impl Inner {
             enrolled_at,
             first_sync,
             removable: Some(removable),
+            organization_owned: Some(organization_owned),
         }))
     }
 
@@ -5156,6 +5258,7 @@ impl Inner {
                 remote_query_scopes: None,
                 last_query: None,
                 removable: None,
+                organization_owned: None,
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -5179,6 +5282,7 @@ impl Inner {
                     decision: q.decision.clone(),
                 }),
                 removable: Some(e.removable),
+                organization_owned: Some(e.organization_owned),
             },
         }
     }
@@ -5753,6 +5857,34 @@ fn to_value<T: serde::Serialize>(value: T) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// The refusal that asks for the organization's terms states every one of
+    /// them in words the organization cannot tamper with: its display name is
+    /// its own choice, and an escape sequence in it must not be able to
+    /// conceal the term after it on the person's terminal.
+    #[test]
+    fn a_terms_refusal_cannot_be_rewritten_by_the_organizations_name() {
+        use punar_common::ipc::EnrollmentTerm;
+
+        let org = crate::enroll::OrgRecord {
+            id: "acme".into(),
+            name: "Acme".into(),
+            display_name: "Acme\u{1b}[8m\u{202e}".into(),
+            domain: "acme.com".into(),
+        };
+        let error = super::unaccepted_terms_refusal(&org, "acme.com", &EnrollmentTerm::ALL);
+        assert!(
+            !error.message.contains('\u{1b}') && !error.message.contains('\u{202e}'),
+            "{:?}",
+            error.message
+        );
+        assert!(error.message.contains("serial number"), "{}", error.message);
+        assert!(
+            error.message.contains("you included, can unenroll it"),
+            "{}",
+            error.message
+        );
+    }
+
     /// `device_specific_override` is not exclusively the local administrator's
     /// kind — its rank is stored data, so an organization may publish one. At
     /// rank 1-3 that layer outranks this device exactly as a baseline does, and

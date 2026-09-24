@@ -277,7 +277,8 @@ fn fixture_enroll_start() -> Value {
         "attestation": "simulated",
         "enrolled_at": "2026-08-26T09:00:00Z",
         "first_sync": {"compliance": "success", "inventory": "success"},
-        "removable": true
+        "removable": true,
+        "organization_owned": false
     })
 }
 
@@ -290,7 +291,8 @@ fn fixture_enroll_status() -> Value {
         "attestation": "simulated",
         "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
                        "pending": false},
-        "removable": true
+        "removable": true,
+        "organization_owned": false
     })
 }
 
@@ -1142,6 +1144,132 @@ fn a_non_removable_enrollment_is_refused_without_consent_and_shown_with_it() {
     );
 }
 
+/// An organization that enrolls devices as not removable AND as its own. The
+/// params of every `enroll.start` are kept, so a test can prove what each
+/// request accepted and that nothing was retried behind the person's back.
+static TERMS_STARTS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+fn two_terms_org_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => Ok(json!({ "enrolled": false })),
+        Some("enroll.start") => {
+            let params = request["params"].clone();
+            TERMS_STARTS.lock().unwrap().push(params.clone());
+            let unaccepted: Vec<&str> = [
+                ("non_removable", "accept_non_removable"),
+                ("organization_owned", "accept_organization_owned"),
+            ]
+            .into_iter()
+            .filter(|(_, param)| params[param] != json!(true))
+            .map(|(term, _)| term)
+            .collect();
+            if unaccepted.is_empty() {
+                let mut result = fixture_enroll_start();
+                result["removable"] = json!(false);
+                result["organization_owned"] = json!(true);
+                return Ok(result);
+            }
+            let flags: Vec<String> = unaccepted
+                .iter()
+                .map(|term| format!("--accept-{}", term.replace('_', "-")))
+                .collect();
+            Err(json!({
+                "code": "denied",
+                "message": format!(
+                    "Acme Engineering enrolls devices on terms this request did not \
+                     accept.\nNext step: if that is what you want, run `punarctl enroll \
+                     start acme.com {}`.",
+                    flags.join(" ")
+                ),
+                "details": {
+                    "decision": "deny",
+                    "reason": if unaccepted.len() == 1 {
+                        format!("{}_not_accepted", unaccepted[0])
+                    } else {
+                        "enrollment_terms_not_accepted".to_string()
+                    },
+                    "terms": unaccepted,
+                    "organization": "acme",
+                    "organization_name": "Acme Engineering"
+                }
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Every term the organization sets is refused in one answer that names all
+/// of them, and without a terminal that answer stands: one request, exit 3.
+/// Each flag accepts its own term and nothing else, and with both the
+/// receipt says who can unenroll and who owns the device.
+#[test]
+fn every_enrollment_term_is_named_at_once_and_accepted_by_its_own_flag() {
+    let socket = start_mock_with(two_terms_org_respond);
+    let starts = |from: usize| TERMS_STARTS.lock().unwrap()[from..].to_vec();
+    let before = TERMS_STARTS.lock().unwrap().len();
+
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("--accept-non-removable --accept-organization-owned"),
+        "{text}"
+    );
+    assert_eq!(
+        starts(before),
+        [json!({"org_domain": "acme.com"})],
+        "no second request without the person's yes"
+    );
+
+    let before = TERMS_STARTS.lock().unwrap().len();
+    let output = run(
+        &socket,
+        &["enroll", "start", "acme.com", "--accept-organization-owned"],
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("acme.com --accept-non-removable`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        starts(before),
+        [json!({"org_domain": "acme.com", "accept_organization_owned": true})]
+    );
+
+    let before = TERMS_STARTS.lock().unwrap().len();
+    let output = run(
+        &socket,
+        &[
+            "enroll",
+            "start",
+            "acme.com",
+            "--accept-non-removable",
+            "--accept-organization-owned",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        starts(before),
+        [json!({
+            "org_domain": "acme.com",
+            "accept_non_removable": true,
+            "accept_organization_owned": true
+        })]
+    );
+    let text = stdout(&output);
+    assert!(text.contains("NOT ALLOWED"), "{text}");
+    let ownership = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("OWNERSHIP"))
+        .expect("an ownership row");
+    assert!(ownership.contains("ORGANIZATION"), "{ownership}");
+    assert!(
+        ownership.contains("serial number and every app installed for all users"),
+        "{ownership}"
+    );
+}
+
 /// A device enrolled as not removable: `enroll stop` asks for neither a yes
 /// nor a password, and prints punard's refusal; `enroll start` says nothing
 /// on the device can end the enrollment; `enroll status` shows the term.
@@ -1186,6 +1314,12 @@ fn enroll_status_and_stop_render_and_round_trip() {
     assert!(text.contains("UNENROLL"), "{text}");
     assert!(text.contains("punarctl enroll stop"), "{text}");
     assert!(!text.contains("sudo"), "{text}");
+    // So is what the organization receives because of who owns the device.
+    assert!(text.contains("OWNERSHIP"), "{text}");
+    assert!(
+        text.contains("never the serial number or the apps installed here"),
+        "{text}"
+    );
 
     let output = run(&socket, &["--json", "enroll", "status"]);
     let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();

@@ -1208,6 +1208,29 @@ fn removability_row(org: &model::Org, removable: Option<bool>) -> Option<Row> {
     })
 }
 
+/// Who owns the device, and so what the organization's inventory of it
+/// carries (docs/development/smplify-enrollment.md section 3.2). `None` for a
+/// daemon that predates the field, rather than a guess.
+fn ownership_row(org: &model::Org, organization_owned: Option<bool>) -> Option<Row> {
+    Some(match organization_owned? {
+        false => Row::new(
+            "Ownership",
+            "Personal",
+            Slot::Neutral,
+            "never the serial number or the apps installed here · only those built into Punar",
+        ),
+        true => Row::new(
+            "Ownership",
+            "Organization",
+            Slot::Warn,
+            &format!(
+                "{} also receives the serial number and every app installed for all users",
+                org.display_name
+            ),
+        ),
+    })
+}
+
 /// `punarctl enroll start <domain>`.
 pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let outcome: model::EnrollStart = parse(result)?;
@@ -1219,6 +1242,9 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         outcome.enrolled_at.as_deref(),
     );
     if let Some(row) = removability_row(&outcome.org, outcome.removable) {
+        rows.push(row);
+    }
+    if let Some(row) = ownership_row(&outcome.org, outcome.organization_owned) {
         rows.push(row);
     }
     if let Some(sync) = &outcome.first_sync {
@@ -1289,6 +1315,9 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
     if let Some(row) = removability_row(org, status.removable) {
+        rows.push(row);
+    }
+    if let Some(row) = ownership_row(org, status.organization_owned) {
         rows.push(row);
     }
     if let Some(sync) = &status.last_sync {
@@ -5229,6 +5258,70 @@ mod tests {
         assert!(text.contains("UNREACHABLE"), "{text}");
         assert!(text.contains("report queued"), "{text}");
         assert!(!text.to_lowercase().contains("tok_"), "{text}");
+    }
+
+    /// Both views say who owns the device, and what that sends: a personal
+    /// enrollment never the serial or the apps installed here, an
+    /// organization-owned one both. A daemon that predates the field gets no
+    /// row rather than a guess.
+    #[test]
+    fn enroll_views_show_who_owns_the_device() {
+        let style = Style::plain();
+        let receipt = |owned: Option<bool>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": [],
+                "attestation": "none",
+                "enrolled_at": "2026-09-24T19:30:47Z",
+                "removable": true
+            });
+            if let Some(owned) = owned {
+                result["organization_owned"] = json!(owned);
+            }
+            enroll_start(&style, &result, "mac-punar").unwrap()
+        };
+        let status = |owned: bool| {
+            enroll_status(
+                &style,
+                &json!({
+                    "enrolled": true,
+                    "org": acme_org(),
+                    "policy_ids": [],
+                    "enrolled_at": "2026-09-24T19:30:47Z",
+                    "attestation": "none",
+                    "removable": true,
+                    "organization_owned": owned
+                }),
+                "mac-punar",
+            )
+            .unwrap()
+        };
+        let ownership = |text: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with("OWNERSHIP"))
+                .map(str::to_string)
+        };
+        for text in [receipt(Some(false)), status(false)] {
+            let row = ownership(&text).expect("an ownership row");
+            assert!(row.contains("PERSONAL"), "{row}");
+            assert!(
+                row.contains("never the serial number or the apps installed here"),
+                "{row}"
+            );
+        }
+        for text in [receipt(Some(true)), status(true)] {
+            let row = ownership(&text).expect("an ownership row");
+            assert!(row.contains("ORGANIZATION"), "{row}");
+            assert!(
+                row.contains(
+                    "Acme Engineering also receives the serial number and every app installed \
+                     for all users"
+                ),
+                "{row}"
+            );
+        }
+        assert_eq!(ownership(&receipt(None)), None);
     }
 
     #[test]

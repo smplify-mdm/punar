@@ -406,8 +406,10 @@ from injectable procfs/sysfs/image paths:
   Every managed device: the image's first-party desktop entries
   (`X-Punar-FirstParty=true`, shown in the launcher) at `IMAGE_VERSION`, and
   the image browser at its package version (`source: "punar-image"`).
-  Only when `enrollment.json` says `organization_owned` (declared by the
-  organization and accepted by the person; nothing sets it yet) also every
+  Only when `enrollment.json` says `organization_owned` (the organization's
+  `enrollment.ownership: "organization"`, accepted by the person at
+  `enroll.start` — docs/api/ipc.md section 5.9 step 6,
+  docs/development/smplify-enrollment.md section 3.2) also every
   system Flatpak (`flatpak list --system --app`, re-run only when the
   installation changed) and installed catalog vendor apps — and a fourth
   section, `identifiers: {serial_number}`. A personal enrollment never reads

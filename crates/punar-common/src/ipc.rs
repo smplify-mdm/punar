@@ -593,6 +593,140 @@ pub struct EnrollStartParams {
     /// Meaningless, and ignored, for a removable enrollment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accept_non_removable: bool,
+    /// The person has been told, and accepts, that this organization enrolls
+    /// devices as its own (`enrollment.ownership: "organization"` in its
+    /// organization document — docs/development/smplify-enrollment.md section
+    /// 3.2): the device's inventory then also carries its serial number and
+    /// every application installed for all users. Nothing proves that an
+    /// organization owns the hardware, so without this punard refuses such an
+    /// enrollment before registering, and an organization's word alone never
+    /// widens what a device reports. Meaningless, and ignored, for a personal
+    /// enrollment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_organization_owned: bool,
+}
+
+impl EnrollStartParams {
+    /// Whether this request accepts `term`.
+    pub fn accepts(&self, term: EnrollmentTerm) -> bool {
+        match term {
+            EnrollmentTerm::NonRemovable => self.accept_non_removable,
+            EnrollmentTerm::OrganizationOwned => self.accept_organization_owned,
+        }
+    }
+}
+
+/// A term an organization's document sets on its enrollment, which the
+/// enrolling person must accept before punard registers the device
+/// (docs/development/smplify-enrollment.md sections 3.1 and 3.2).
+///
+/// One refusal names every term a request left unaccepted, in
+/// `details.terms` by [`EnrollmentTerm::as_str`], so a client asks about all
+/// of them at once and sends back exactly the flags it was asked for. The
+/// meaning is here, not in each client, so the refusal and the prompt a
+/// person answers cannot describe a term differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollmentTerm {
+    /// `enrollment.removable: false`: nobody on the device can unenroll it.
+    NonRemovable,
+    /// `enrollment.ownership: "organization"`: the organization owns the
+    /// device, and its inventory says more.
+    OrganizationOwned,
+}
+
+impl EnrollmentTerm {
+    /// Every term, in the order refusals and prompts list them.
+    pub const ALL: [EnrollmentTerm; 2] = [
+        EnrollmentTerm::NonRemovable,
+        EnrollmentTerm::OrganizationOwned,
+    ];
+
+    /// The wire name, as `details.terms` lists it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "non_removable",
+            EnrollmentTerm::OrganizationOwned => "organization_owned",
+        }
+    }
+
+    pub fn from_wire(name: &str) -> Option<EnrollmentTerm> {
+        EnrollmentTerm::ALL
+            .into_iter()
+            .find(|term| term.as_str() == name)
+    }
+
+    /// The [`EnrollStartParams`] field that accepts it.
+    pub fn param(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "accept_non_removable",
+            EnrollmentTerm::OrganizationOwned => "accept_organization_owned",
+        }
+    }
+
+    /// The `punarctl enroll start` flag that accepts it.
+    pub fn flag(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "--accept-non-removable",
+            EnrollmentTerm::OrganizationOwned => "--accept-organization-owned",
+        }
+    }
+
+    /// `details.reason` of a refusal that names this term alone. A refusal
+    /// that names more than one says [`ENROLLMENT_TERMS_NOT_ACCEPTED`].
+    pub fn refusal_reason(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "non_removable_not_accepted",
+            EnrollmentTerm::OrganizationOwned => "organization_owned_not_accepted",
+        }
+    }
+
+    /// A short name for the term, as a prompt lists it.
+    pub fn title(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "Not removable",
+            EnrollmentTerm::OrganizationOwned => "Owned by the organization",
+        }
+    }
+
+    /// What accepting the term means for the person enrolling, said plainly
+    /// in one sentence without a final full stop.
+    pub fn meaning(self, org: &str) -> String {
+        match self {
+            EnrollmentTerm::NonRemovable => "once enrolled, only erasing and reinstalling this \
+                 device ends the enrollment; nobody on it, you included, can unenroll it"
+                .to_string(),
+            EnrollmentTerm::OrganizationOwned => format!(
+                "besides the device facts every enrollment reports, {org} also receives this \
+                 device's serial number and the list of every app installed for all users on it"
+            ),
+        }
+    }
+}
+
+/// `details.reason` of an `enroll.start` refusal that names more than one
+/// unaccepted [`EnrollmentTerm`].
+pub const ENROLLMENT_TERMS_NOT_ACCEPTED: &str = "enrollment_terms_not_accepted";
+
+/// An organization's name as it may appear beside an [`EnrollmentTerm`] a
+/// person is agreeing to. The organization chooses its display name, and a
+/// terminal obeys what is in it: an escape sequence could conceal the text
+/// after it, and a bidirectional override could reorder it. Either would let
+/// the organization hide the very term it asks the person to accept. Each
+/// such character becomes U+FFFD, so the attempt stays visible.
+pub fn term_safe_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            let bidi = matches!(
+                c,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            );
+            if c.is_control() || bidi {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Params for `enroll.stop` (M5, contract section 5.11). Optional on the wire:
@@ -1847,6 +1981,14 @@ pub struct EnrollStartResult {
     /// a result from a daemon that predates it still parses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removable: Option<bool>,
+    /// Whether the organization owns this device: its
+    /// `enrollment.ownership`, accepted by the person and fixed at enrollment
+    /// (docs/development/smplify-enrollment.md section 3.2). Only then does
+    /// the inventory carry the serial number and every application installed
+    /// for all users. Optional only so a result from a daemon that predates
+    /// it still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStartResult`]: per-report outcome of
@@ -1890,6 +2032,12 @@ pub struct EnrollStatusResult {
     /// when enrolled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removable: Option<bool>,
+    /// Whether the organization owns this device, and so receives its serial
+    /// number and every application installed for all users — the
+    /// organization's `enrollment.ownership`, accepted by the person and
+    /// fixed when the device enrolled. Present exactly when enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `enroll.status` view of the most recent remote query (M10).
@@ -2408,6 +2556,7 @@ mod tests {
                 code: None,
                 ticket: None,
                 accept_non_removable: false,
+                accept_organization_owned: false,
             }),
             Method::EnrollStatus,
             Method::EnrollStop(EnrollStopParams::default()),
@@ -3326,6 +3475,49 @@ mod tests {
             serde_json::from_value(json!({"org_domain": "acme.com", "accept_non_removable": true}))
                 .unwrap();
         assert!(accepting.accept_non_removable);
+        assert!(!accepting.accept_organization_owned);
+    }
+
+    /// Each term a refusal can name maps to exactly one parameter that
+    /// accepts it and one punarctl flag, so a client that sends back what it
+    /// was asked for accepts that term and nothing else.
+    #[test]
+    fn every_enrollment_term_is_accepted_by_its_own_parameter_and_flag() {
+        for term in EnrollmentTerm::ALL {
+            assert_eq!(EnrollmentTerm::from_wire(term.as_str()), Some(term));
+            let params: EnrollStartParams = serde_json::from_value(json!({
+                "org_domain": "acme.com",
+                term.param(): true,
+            }))
+            .unwrap();
+            for other in EnrollmentTerm::ALL {
+                assert_eq!(params.accepts(other), other == term, "{term:?}");
+            }
+            assert_eq!(
+                serde_json::to_value(&params).unwrap(),
+                json!({"org_domain": "acme.com", term.param(): true})
+            );
+            assert_eq!(
+                term.flag(),
+                format!("--{}", term.param().replace('_', "-")),
+                "punarctl's flag is the parameter's name"
+            );
+            assert_ne!(term.refusal_reason(), ENROLLMENT_TERMS_NOT_ACCEPTED);
+        }
+        assert_eq!(EnrollmentTerm::from_wire("removable"), None);
+        // The name shown beside a term cannot hide or reorder it.
+        assert_eq!(
+            term_safe_name("Acme\u{1b}[8m Engineering\u{202e}\u{2066}\n"),
+            "Acme\u{fffd}[8m Engineering\u{fffd}\u{fffd}\u{fffd}"
+        );
+        assert_eq!(term_safe_name("Acmé Engineering"), "Acmé Engineering");
+        // The ownership term says what it adds, in the words the owner chose.
+        let owned = EnrollmentTerm::OrganizationOwned.meaning("Acme");
+        assert!(owned.contains("serial number"), "{owned}");
+        assert!(
+            owned.contains("every app installed for all users"),
+            "{owned}"
+        );
     }
 
     #[test]
@@ -3384,6 +3576,7 @@ mod tests {
             remote_query_scopes: None,
             last_query: None,
             removable: None,
+            organization_owned: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),

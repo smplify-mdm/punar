@@ -95,6 +95,7 @@ use punar_common::install_answers::{
     INSTALL_ANSWERS_MAX_BYTES, INSTALL_ANSWERS_SIGNATURE_BYTES, InstallAnswersKeySet,
     UnattendedInstallAnswers, verify_unattended_install_answers,
 };
+use punar_common::ipc::{ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollmentTerm, term_safe_name};
 use punar_common::update::ReleaseVersion;
 use punar_common::{CapabilityId, Redacted};
 use serde_json::{Value, json};
@@ -729,6 +730,14 @@ enum EnrollCommand {
         /// and refuses when there is no terminal to ask on.
         #[arg(long)]
         accept_non_removable: bool,
+        /// Accept, in advance, that this organization enrolls devices as its
+        /// own: besides the device facts every enrollment reports, it then
+        /// also receives this device's serial number and the list of every
+        /// app installed for all users on it. Without it, punarctl asks on the
+        /// terminal when the organization requires it, and refuses when there
+        /// is no terminal to ask on.
+        #[arg(long)]
+        accept_organization_owned: bool,
     },
     /// Show enrollment state (never the device token).
     Status,
@@ -2288,34 +2297,35 @@ fn approvals_wait(
 /// [`Redacted`] the moment it exists, so no stray `{:?}` anywhere
 /// downstream can print it.
 /// `punarctl enroll start`, once the code is in hand. A person confirms with
-/// their password, as always. When the organization enrolls devices as not
-/// removable and the person has not accepted that yet, punard refuses before
-/// registering and names the organization; on a terminal punarctl then shows
-/// the term and asks, and only an explicit `accept` sends the request again,
-/// with a fresh password — the first one was spent looking the organization
-/// up. Without a terminal, or with --json, punard's refusal is the answer.
+/// their password, as always. When the organization sets enrollment terms
+/// the person has not accepted yet — not removable, owned by the
+/// organization — punard refuses before registering and names every one of
+/// them; on a terminal punarctl then shows them all in one prompt, and only
+/// an explicit `accept` sends the request again, accepting exactly those
+/// terms, with a fresh password — the first one was spent looking the
+/// organization up. Without a terminal, or with --json, punard's refusal is
+/// the answer.
 ///
-/// Why not ask before the first password: the term lives in the
+/// Why not ask before the first password: the terms live in the
 /// organization's document, and punard fetches nothing for a caller who has
-/// not yet proved who they are. Learning it earlier would mean a network call
-/// on behalf of an unconfirmed caller, which is the one thing the enrollment
-/// gate exists to prevent.
+/// not yet proved who they are. Learning them earlier would mean a network
+/// call on behalf of an unconfirmed caller, which is the one thing the
+/// enrollment gate exists to prevent.
 fn run_enroll_start(
     client: &Client,
     json: bool,
     domain: &str,
     code: Option<&Redacted<String>>,
-    accept_non_removable: bool,
+    mut accepted: Vec<EnrollmentTerm>,
     render: impl Fn(&Value) -> Result<String, String>,
 ) -> ExitCode {
-    let mut accept = accept_non_removable;
     loop {
         let mut params = json!({ "org_domain": domain });
         if let Some(code) = code {
             params["code"] = json!(code.expose_secret());
         }
-        if accept {
-            params["accept_non_removable"] = json!(true);
+        for term in &accepted {
+            params[term.param()] = json!(true);
         }
         // Asked last, so the two-minute confirmation is spent by the call it
         // was typed for rather than by however long the code took to find.
@@ -2336,21 +2346,18 @@ fn run_enroll_start(
             Ok(result) => return render_or_json(json, &result, &render),
             Err(error) => error,
         };
-        let terms = error
+        let refused = error
             .server()
             .and_then(|e| e.details.as_ref())
-            .filter(|d| d["reason"] == "non_removable_not_accepted")
-            .map(|d| {
-                d["organization_name"]
-                    .as_str()
-                    .unwrap_or(domain)
-                    .to_string()
-            });
-        if let (Some(org), false, false) = (terms, accept, json) {
-            match accept_non_removable_on_terminal(&org) {
-                // Accepted: once more, with the flag and a new password.
+            .and_then(|details| unaccepted_terms(details, domain))
+            // Only terms not already accepted are worth asking about: a
+            // refusal of one this request accepted is punard's final answer.
+            .filter(|(_, terms)| terms.iter().all(|term| !accepted.contains(term)));
+        if let (Some((org, terms)), false) = (refused, json) {
+            match accept_terms_on_terminal(&org, &terms) {
+                // Accepted: once more, with the flags and a new password.
                 Some(Ok(true)) => {
-                    accept = true;
+                    accepted.extend(terms);
                     continue;
                 }
                 Some(Ok(false)) => {
@@ -2369,24 +2376,76 @@ fn run_enroll_start(
     }
 }
 
-/// Show an organization's non-removable term on the controlling terminal and
-/// ask for an explicit `accept`. `None` when there is no terminal, exactly
-/// like the code prompt; `Err` when the answer could not be read.
-fn accept_non_removable_on_terminal(org: &str) -> Option<Result<bool, ()>> {
+/// The organization and the terms an `enroll.start` refusal says the request
+/// did not accept (docs/api/ipc.md section 5.9 step 6), or `None` when the
+/// refusal is about something else. A term this build does not know is not
+/// something a person could be asked about, so such a refusal is shown as it
+/// stands rather than half-answered.
+fn unaccepted_terms(details: &Value, domain: &str) -> Option<(String, Vec<EnrollmentTerm>)> {
+    let reason = details["reason"].as_str()?;
+    let single = EnrollmentTerm::ALL
+        .into_iter()
+        .find(|term| term.refusal_reason() == reason);
+    if single.is_none() && reason != ENROLLMENT_TERMS_NOT_ACCEPTED {
+        return None;
+    }
+    let terms: Vec<EnrollmentTerm> = match details.get("terms").and_then(Value::as_array) {
+        Some(names) => names
+            .iter()
+            .map(|name| name.as_str().and_then(EnrollmentTerm::from_wire))
+            .collect::<Option<_>>()?,
+        // A punard from before `terms` named its one term by the reason.
+        None => single.into_iter().collect(),
+    };
+    if terms.is_empty() {
+        return None;
+    }
+    let org = details["organization_name"]
+        .as_str()
+        .unwrap_or(domain)
+        .to_string();
+    Some((org, terms))
+}
+
+/// The one prompt for every term a refusal named: what each means, said
+/// plainly, and that nothing has been registered yet.
+fn enrollment_terms_prompt(org: &str, terms: &[EnrollmentTerm]) -> String {
+    let org = &term_safe_name(org);
+    let mut prompt = format!(
+        "{org} enrolls devices on {}:\n",
+        if terms.len() == 1 {
+            "this term"
+        } else {
+            "these terms"
+        }
+    );
+    for term in terms {
+        prompt.push_str(&format!("  {}: {}.\n", term.title(), term.meaning(org)));
+    }
+    prompt.push_str(&format!(
+        "Nothing has been registered yet. Your password was used to look {org} up, so \
+         you will be asked for it again.\n\
+         Type accept to enroll on {}: ",
+        if terms.len() == 1 {
+            "this term"
+        } else {
+            "all of these terms"
+        }
+    ));
+    prompt
+}
+
+/// Show an organization's enrollment terms on the controlling terminal and
+/// ask for one explicit `accept` covering all of them. `None` when there is
+/// no terminal, exactly like the code prompt; `Err` when the answer could not
+/// be read.
+fn accept_terms_on_terminal(org: &str, terms: &[EnrollmentTerm]) -> Option<Result<bool, ()>> {
     let mut tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
         .ok()?;
-    let _ = write!(
-        tty,
-        "{org} enrolls devices so that they cannot be unenrolled from the device.\n\
-         Once enrolled, nobody on this device, you included, can unenroll it; only \
-         erasing and reinstalling it ends the enrollment.\n\
-         Nothing has been registered yet. Your password was used to look {org} up, so \
-         you will be asked for it again.\n\
-         Type accept to enroll on these terms: "
-    );
+    let _ = write!(tty, "{}", enrollment_terms_prompt(org, terms));
     let _ = tty.flush();
     Some(match read_secret_line(&mut tty) {
         Ok(answer) => Ok(answer.trim() == "accept"),
@@ -3918,6 +3977,7 @@ fn main() -> ExitCode {
                     domain,
                     code_stdin,
                     accept_non_removable,
+                    accept_organization_owned,
                 } => match already_enrolled(&client) {
                     Some((org, removable)) => {
                         let next = if removable {
@@ -3941,7 +4001,13 @@ fn main() -> ExitCode {
                             json,
                             &domain,
                             code.as_ref(),
-                            accept_non_removable,
+                            EnrollmentTerm::ALL
+                                .into_iter()
+                                .filter(|term| match term {
+                                    EnrollmentTerm::NonRemovable => accept_non_removable,
+                                    EnrollmentTerm::OrganizationOwned => accept_organization_owned,
+                                })
+                                .collect(),
                             |v| views::enroll_start(&style, v, &hostname),
                         ),
                     },
@@ -4910,10 +4976,11 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        AuthAnswer, Cli, append_filtered_session_bus_mount, append_resolver_mount,
-        append_vendor_open_bridge, filtered_bus_proxy_command, parse_auth_answer,
-        password_refused_message, read_secret_line, read_vendor_callback_payload,
-        validated_vendor_callback_uris, vendor_runtime_tmp, vendor_supervisor_command,
+        AuthAnswer, Cli, EnrollmentTerm, append_filtered_session_bus_mount, append_resolver_mount,
+        append_vendor_open_bridge, enrollment_terms_prompt, filtered_bus_proxy_command,
+        parse_auth_answer, password_refused_message, read_secret_line,
+        read_vendor_callback_payload, unaccepted_terms, validated_vendor_callback_uris,
+        vendor_runtime_tmp, vendor_supervisor_command,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -4949,6 +5016,96 @@ mod tests {
             AuthAnswer::Unavailable
         );
         assert_eq!(parse_auth_answer(""), AuthAnswer::Unavailable);
+    }
+
+    /// A refusal names the terms the request left unaccepted; punarctl asks
+    /// about exactly those. A refusal for any other reason, or naming a term
+    /// this build could not explain, is never turned into a prompt.
+    #[test]
+    fn an_enrollment_refusal_yields_exactly_the_terms_to_ask_about() {
+        use EnrollmentTerm::{NonRemovable, OrganizationOwned};
+        let both = json!({
+            "decision": "deny", "reason": "enrollment_terms_not_accepted",
+            "terms": ["non_removable", "organization_owned"],
+            "organization": "acme", "organization_name": "Acme Engineering"
+        });
+        assert_eq!(
+            unaccepted_terms(&both, "acme.com"),
+            Some((
+                "Acme Engineering".to_string(),
+                vec![NonRemovable, OrganizationOwned]
+            ))
+        );
+        let owned = json!({
+            "reason": "organization_owned_not_accepted", "terms": ["organization_owned"]
+        });
+        assert_eq!(
+            unaccepted_terms(&owned, "acme.com"),
+            Some(("acme.com".to_string(), vec![OrganizationOwned])),
+            "without a name the domain stands in"
+        );
+        // A punard from before `terms` named the one term by its reason.
+        let older = json!({
+            "reason": "non_removable_not_accepted", "organization_name": "Acme Engineering"
+        });
+        assert_eq!(
+            unaccepted_terms(&older, "acme.com").map(|(_, terms)| terms),
+            Some(vec![NonRemovable])
+        );
+        for refusal in [
+            json!({"reason": "enrollment_terms_not_accepted", "terms": ["organization_owned", "gps"]}),
+            json!({"reason": "enrollment_terms_not_accepted", "terms": []}),
+            json!({"reason": "enrollment_terms_not_accepted"}),
+            json!({"reason": "reauthentication_missing", "terms": ["organization_owned"]}),
+            json!({"terms": ["organization_owned"]}),
+        ] {
+            assert_eq!(unaccepted_terms(&refusal, "acme.com"), None, "{refusal}");
+        }
+    }
+
+    /// One prompt states what every term means, plainly — for ownership,
+    /// that the organization also receives the serial number and every app
+    /// installed for all users — and asks once.
+    #[test]
+    fn one_prompt_states_every_term_and_asks_once() {
+        let prompt = enrollment_terms_prompt(
+            "Acme Engineering",
+            &[
+                EnrollmentTerm::NonRemovable,
+                EnrollmentTerm::OrganizationOwned,
+            ],
+        );
+        assert!(prompt.starts_with("Acme Engineering enrolls devices on these terms:\n"));
+        assert!(
+            prompt.contains("  Not removable: once enrolled,"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("nobody on it, you included, can unenroll it"));
+        assert!(
+            prompt.contains(
+                "  Owned by the organization: besides the device facts every enrollment \
+                 reports, Acme Engineering also receives this device's serial number and the \
+                 list of every app installed for all users on it.\n"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Nothing has been registered yet."),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with("Type accept to enroll on all of these terms: "));
+        assert_eq!(prompt.matches("Type accept").count(), 1);
+
+        // An escape sequence in the organization's name cannot conceal what
+        // follows it.
+        let hidden = enrollment_terms_prompt("Acme\u{1b}[8m", &[EnrollmentTerm::OrganizationOwned]);
+        assert!(!hidden.contains('\u{1b}'), "{hidden:?}");
+        assert!(hidden.contains("serial number"), "{hidden}");
+
+        let one = enrollment_terms_prompt("Acme Engineering", &[EnrollmentTerm::OrganizationOwned]);
+        assert!(one.starts_with("Acme Engineering enrolls devices on this term:\n"));
+        assert!(!one.contains("Not removable"), "{one}");
+        assert!(one.ends_with("Type accept to enroll on this term: "));
     }
 
     /// A secret line is read to its newline however the bytes arrive, loses

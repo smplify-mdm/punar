@@ -161,6 +161,10 @@ pub struct EnrollStart {
     /// Whether a person on this device may unenroll it later.
     #[serde(default)]
     pub removable: Option<bool>,
+    /// Whether the organization owns this device, and so also receives its
+    /// serial number and every app installed for all users.
+    #[serde(default)]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStart`].
@@ -188,6 +192,9 @@ pub struct EnrollStatus {
     /// Whether a person on this device may unenroll it.
     #[serde(default)]
     pub removable: Option<bool>,
+    /// Whether the organization owns this device.
+    #[serde(default)]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `last_sync` object of [`EnrollStatus`].

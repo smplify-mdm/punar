@@ -503,11 +503,13 @@ pub struct Enrollment {
     #[serde(default = "removable_by_default")]
     pub removable: bool,
     /// Whether the organization owns this device: declared in its document
-    /// at enrollment AND accepted by the enrolling person, the way a
-    /// non-removable term is. Only then does the inventory carry the serial
-    /// number and every system-wide application ([`crate::inventory`]); a
-    /// personal enrollment's inventory never names an application the person
-    /// chose.
+    /// at enrollment (`enrollment.ownership: "organization"`) AND accepted by
+    /// the enrolling person, the way a non-removable term is
+    /// (docs/development/smplify-enrollment.md section 3.2). Fixed here and
+    /// never re-read from a policy fetch. Only then does the inventory carry
+    /// the serial number and every system-wide application
+    /// ([`crate::inventory`]); a personal enrollment's inventory never names
+    /// an application the person chose.
     ///
     /// Defaults to `false`, and no terms file backs it: an older punard that
     /// rewrites this file without the field can only narrow what is sent.

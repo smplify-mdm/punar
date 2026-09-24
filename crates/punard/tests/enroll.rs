@@ -83,6 +83,10 @@ struct ControlPlaneState {
     /// (docs/development/smplify-enrollment.md section 3.1); absent when
     /// `None`, as in the Acme fixture.
     org_removable: Mutex<Option<Value>>,
+    /// Serve this as the organization document's `enrollment.ownership`
+    /// (docs/development/smplify-enrollment.md section 3.2); absent when
+    /// `None`, as in the Acme fixture.
+    org_ownership: Mutex<Option<Value>>,
 }
 
 impl ControlPlaneState {
@@ -93,6 +97,9 @@ impl ControlPlaneState {
                 let mut org: Value = serde_json::from_str(ACME_ORG).unwrap();
                 if let Some(removable) = self.org_removable.lock().unwrap().clone() {
                     org["enrollment"]["removable"] = removable;
+                }
+                if let Some(ownership) = self.org_ownership.lock().unwrap().clone() {
+                    org["enrollment"]["ownership"] = ownership;
                 }
                 if domain == org["discovery"]["domain"].as_str().unwrap() {
                     Ok(json!({ "organization": org }))
@@ -1346,9 +1353,15 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     assert!(!ticket.exists(), "the ticket was spent, not merely checked");
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
     // An organization document that states no removal term leaves the
-    // device removable, and says so.
+    // device removable, and says so; one that states no ownership leaves it
+    // personal.
     assert_eq!(result["removable"], true);
     assert_eq!(daemon.result("enroll.status", None)["removable"], true);
+    assert_eq!(result["organization_owned"], false);
+    assert_eq!(
+        daemon.result("enroll.status", None)["organization_owned"],
+        false
+    );
     let allowed = |daemon: &TestDaemon| {
         daemon
             .audit_events()
@@ -1768,36 +1781,43 @@ fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clo
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
 }
 
-/// The organization-owned tier through the whole daemon: the serial number
-/// and the system-wide applications, and nothing else added. No organization
-/// document can declare ownership yet, so the record is edited the way the
-/// enrollment flow will write it once one can.
+/// The organization-owned tier through the whole daemon: the same device
+/// enrolled personally, then by an organization that claims it and a person
+/// who accepted that. Ownership adds the serial number and the system-wide
+/// applications, and nothing else.
 #[test]
 fn an_organization_owned_enrollment_adds_the_serial_and_system_apps() {
     let dir = test_dir("org-owned");
-    let state_file = dir.join("state/enrollment.json");
     let control_plane = ControlPlane::start(&dir);
-    {
-        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
-        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
-        daemon.stop();
-    }
-    let mut record = read_json(&state_file);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
     assert_eq!(
-        record["organization_owned"], false,
-        "every enrollment is personal until ownership can be declared"
+        read_json(&daemon.state_path("enrollment.json"))["organization_owned"],
+        false
     );
-    assert!(!dir.join("machine/flatpak-argv").exists());
-    record["organization_owned"] = json!(true);
-    fs::write(&state_file, record.to_string()).unwrap();
+    assert!(
+        !dir.join("machine/flatpak-argv").exists(),
+        "a personal enrollment never lists the installation"
+    );
+    daemon.result("enroll.stop", None);
 
-    let _daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
-    let inventory = control_plane.state.inventory.lock().unwrap();
-    assert_eq!(
-        inventory.len(),
-        2,
-        "the tier changed what the inventory says"
+    *control_plane.state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    let enrolled = daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
     );
+    assert_eq!(enrolled["organization_owned"], true);
+    assert_eq!(enrolled["removable"], true, "the terms are independent");
+    assert_eq!(
+        daemon.result("enroll.status", None)["organization_owned"],
+        true
+    );
+    assert_eq!(
+        read_json(&daemon.state_path("enrollment.json"))["organization_owned"],
+        true
+    );
+    let inventory = control_plane.state.inventory.lock().unwrap();
+    assert_eq!(inventory.len(), 2);
     let personal = &inventory[0]["inventory"];
     let owned = &inventory[1]["inventory"];
     assert_personal_inventory(personal);
@@ -1847,6 +1867,240 @@ fn an_organization_owned_enrollment_adds_the_serial_and_system_apps() {
     );
 }
 
+/// An organization can claim the device as its own, but only its user can
+/// make that claim count: without the person's yes the enrollment is refused
+/// after discovery and before register, so the organization never hears of
+/// the device and nothing about it is sent. The refusal says what the
+/// organization would receive, and which flag accepts it.
+#[test]
+fn an_organization_owned_enrollment_needs_the_persons_yes_before_register() {
+    let dir = test_dir("owned-consent");
+    let state = Arc::new(ControlPlaneState::default());
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
+
+    let ticket = mint_ticket(&dir, 1000, TICKET);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({
+            "org_domain": "acme.com",
+            "code": "lex_owned",
+            "ticket": TICKET,
+            // Accepting a term the organization did not set accepts nothing.
+            "accept_non_removable": true
+        })),
+    );
+    assert_eq!(error["code"], "denied", "{error}");
+    assert_eq!(
+        error["details"]["reason"],
+        "organization_owned_not_accepted"
+    );
+    assert_eq!(error["details"]["terms"], json!(["organization_owned"]));
+    assert_eq!(error["details"]["organization_name"], "Acme Engineering");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("--accept-organization-owned`"),
+        "{message}"
+    );
+    assert!(!message.contains("--accept-non-removable"), "{message}");
+    assert!(message.contains("serial number"), "{message}");
+    assert!(
+        message.contains("every app installed for all users"),
+        "{message}"
+    );
+    assert_no_root_advice(message);
+    assert!(!ticket.exists(), "the confirmation paid for discovery");
+    assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+    assert!(
+        state
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|l| !l.contains("lex_owned")),
+        "the code never left the device"
+    );
+    assert!(state.inventory.lock().unwrap().is_empty());
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    assert!(!daemon.state_path("enrollment.json").exists());
+    assert!(!dir.join("machine/flatpak-argv").exists());
+    assert_eq!(
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.start" && e["decision"] == "deny")
+            .count(),
+        1,
+        "the refusal is audited"
+    );
+
+    mint_ticket(&dir, 1000, TICKET);
+    let enrolled = daemon.result(
+        "enroll.start",
+        Some(json!({
+            "org_domain": "acme.com",
+            "ticket": TICKET,
+            "accept_organization_owned": true
+        })),
+    );
+    assert_eq!(enrolled["organization_owned"], true);
+    assert_eq!(enrolled["removable"], true);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["organization_owned"], true);
+    // Owned, but still the person's to unenroll: the terms are separate.
+    assert_eq!(status["removable"], true);
+    let inventory = state.inventory.lock().unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(
+        inventory[0]["inventory"]["identifiers"]["serial_number"],
+        FIXTURE_SERIAL
+    );
+}
+
+/// `personal`, or no ownership at all, asks nothing more and sends the
+/// personal tier: no identifiers, only the image's own applications.
+#[test]
+fn a_personal_ownership_term_asks_nothing_and_sends_no_identifiers() {
+    let dir = test_dir("owned-personal");
+    let state = Arc::new(ControlPlaneState::default());
+    *state.org_ownership.lock().unwrap() = Some(json!("personal"));
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let enrolled = daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(enrolled["organization_owned"], false);
+    assert_eq!(
+        daemon.result("enroll.status", None)["organization_owned"],
+        false
+    );
+    let inventory = state.inventory.lock().unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert_personal_inventory(&inventory[0]["inventory"]);
+    assert!(!dir.join("machine/flatpak-argv").exists());
+}
+
+/// An organization that tried to state an ownership this device cannot read
+/// gets a refusal before register, never either reading of its document.
+#[test]
+fn an_unreadable_ownership_term_refuses_enrollment_before_register() {
+    let dir = test_dir("owned-bad");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    for ownership in [
+        json!("Organization"),
+        json!("corporate"),
+        json!(""),
+        json!(true),
+        json!(null),
+        json!({"type": "organization"}),
+    ] {
+        state.methods.lock().unwrap().clear();
+        *state.org_ownership.lock().unwrap() = Some(ownership.clone());
+        let error = daemon.error(
+            "enroll.start",
+            Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+        );
+        assert_eq!(error["code"], "invalid_params", "{ownership}: {error}");
+        assert_eq!(error["details"]["reason"], "enrollment.ownership");
+        assert_no_root_advice(error["message"].as_str().unwrap());
+        assert_eq!(*state.methods.lock().unwrap(), vec!["org.discover"]);
+    }
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+    assert!(!daemon.state_path("enrollment.json").exists());
+    assert!(state.inventory.lock().unwrap().is_empty());
+}
+
+/// An organization that sets both terms is refused once, naming both, with
+/// both meanings and both flags, so a person is asked once rather than once
+/// per term. Each flag accepts only its own term: a request that accepts one
+/// is refused for the other, the non-removable refusal exactly as it reads
+/// when it is the only term. Nothing reaches the control plane until both
+/// are accepted.
+#[test]
+fn both_enrollment_terms_are_named_in_one_refusal_and_accepted_together() {
+    let dir = test_dir("two-terms");
+    let state = Arc::new(ControlPlaneState::default());
+    *state.org_removable.lock().unwrap() = Some(json!(false));
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(error["code"], "denied", "{error}");
+    assert_eq!(error["details"]["reason"], "enrollment_terms_not_accepted");
+    assert_eq!(
+        error["details"]["terms"],
+        json!(["non_removable", "organization_owned"])
+    );
+    assert_eq!(error["details"]["organization"], "acme");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains(
+            "`punarctl enroll start acme.com --accept-non-removable --accept-organization-owned`"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains("nobody on it, you included, can unenroll it"),
+        "{message}"
+    );
+    assert!(message.contains("serial number"), "{message}");
+    assert!(
+        message.contains("every app installed for all users"),
+        "{message}"
+    );
+    assert_no_root_advice(message);
+
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_non_removable": true})),
+    );
+    assert_eq!(
+        error["details"]["reason"],
+        "organization_owned_not_accepted"
+    );
+    assert_eq!(error["details"]["terms"], json!(["organization_owned"]));
+
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+    );
+    assert_eq!(error["details"]["reason"], "non_removable_not_accepted");
+    assert_eq!(error["details"]["terms"], json!(["non_removable"]));
+    assert!(
+        error["message"].as_str().unwrap().starts_with(
+            "Acme Engineering enrolls devices so that nobody on them can unenroll them"
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        *state.methods.lock().unwrap(),
+        vec!["org.discover", "org.discover", "org.discover"],
+        "nothing but discovery until every term is accepted"
+    );
+    assert!(!daemon.state_path("enrollment.json").exists());
+
+    let enrolled = daemon.result(
+        "enroll.start",
+        Some(json!({
+            "org_domain": "acme.com",
+            "accept_non_removable": true,
+            "accept_organization_owned": true
+        })),
+    );
+    assert_eq!(enrolled["removable"], false);
+    assert_eq!(enrolled["organization_owned"], true);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["removable"], false);
+    assert_eq!(status["organization_owned"], true);
+    let inventory = state.inventory.lock().unwrap();
+    assert_eq!(
+        inventory[0]["inventory"]["identifiers"]["serial_number"],
+        FIXTURE_SERIAL
+    );
+}
+
 /// A row the receiver could not store would discard its whole snapshot, so
 /// the list goes out as `null` instead of without the row — and the audit
 /// says so once when that starts and once when a full list is back, never
@@ -1854,17 +2108,13 @@ fn an_organization_owned_enrollment_adds_the_serial_and_system_apps() {
 #[test]
 fn a_withheld_application_list_is_null_and_audited_on_transitions_only() {
     let dir = test_dir("withheld");
-    let state_file = dir.join("state/enrollment.json");
     let control_plane = ControlPlane::start(&dir);
-    {
-        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
-        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
-        daemon.stop();
-    }
-    let mut record = read_json(&state_file);
-    record["organization_owned"] = json!(true);
-    fs::write(&state_file, record.to_string()).unwrap();
+    *control_plane.state.org_ownership.lock().unwrap() = Some(json!("organization"));
     let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+    );
     let events = |daemon: &TestDaemon, result: &str| {
         daemon
             .audit_events()

@@ -63,15 +63,16 @@ performs the same `/os-identifiers/resolve` → `/enroll` (token + CSR) →
 |---|---|---|---|---|---|
 | **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, build the category-states-only compliance and inventory bodies, write audit and `status.json` | Hold the device key; speak TCP | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `After=punar-smplifyd.service`, never `Requires` (SPEC §55: cached policy enforces with the agent down) |
 | **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, forward exactly the bodies punard hands it | Mutate the OS; call any punard method; act on a server command; gather anything | Serves NDJSON on `/run/punar-smplifyd/api.sock` 0600, `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service` |
-| **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin] [--accept-non-removable]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket; a non-removable organization's term is shown and must be accepted, §3.1), `enroll status`, `enroll stop` (the same password confirmation; refused for a non-removable enrollment, §3.1) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
+| **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin] [--accept-non-removable] [--accept-organization-owned]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket; the organization's terms — not removable, §3.1; owned by the organization, §3.2 — are shown together in one prompt and must be accepted), `enroll status`, `enroll stop` (the same password confirmation; refused for a non-removable enrollment, §3.1) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
 | **System Control › Organization** (slice 2) | session | Domain, visibility panel, code entry, re-auth, then fixed-argv `punarctl … --code-stdin` | Be a second control plane | `status.json` over inotify | ticket path, like `policy.set` |
 
 **Method mapping.** `org.discover {domain}` → root-owned pin
 `/etc/punar/smplify/<domain>.json`, else
 `https://<domain>/.well-known/smplify-management.json`; the document keeps
 the mock's `org.json` shape and adds `enrollment.server`, and may carry the
-organization's removal term `enrollment.removable` (§3.1), which the agent
-passes to punard untouched.
+organization's removal term `enrollment.removable` (§3.1) and its ownership
+term `enrollment.ownership` (§3.2), which the agent passes to punard
+untouched.
 `enroll.register {device_id, bootstrap, code}` → resolve (five keys) →
 `POST /enroll` (`Bearer <code>`, CSR `CN=device-pending`, no SAN,
 `machineId` = Punar `device-id`) → identity stored 0600 → first check-in pins
@@ -216,10 +217,10 @@ the term only in the refusal that asks for it.
 - **A local unenroll is local.** Offline, the organization sees the device
   go silent rather than a release. What it already received is not
   retracted.
-- **System Control › Organization (slice 2) must show the term before the
-  password.** It shows the "what your organisation can see" panel, and it can
-  pay for one lookup with the confirmation it already asks for. That is a
-  condition of shipping slice 2.
+- **System Control › Organization (slice 2) must show the terms before the
+  password** — this one and ownership (§3.2), together. It shows the "what
+  your organisation can see" panel, and it can pay for one lookup with the
+  confirmation it already asks for. That is a condition of shipping slice 2.
 
 **What an enterprise reviewer can verify.**
 
@@ -234,6 +235,108 @@ the term only in the refusal that asks for it.
     refuses person and root alike, across a restart.
   - An unreadable term refuses enrollment before register.
   - An agent is refused at any uid without burning the ticket.
+
+### 3.2 Who owns the device, and what the organization receives — decided 2026-09-24
+
+Nothing proves that an organization owns the hardware it enrolls (§3.1
+item 4). So how much a device reports is a second enrollment term, and the
+enrolling person accepts it the way they accept the removal term.
+
+**What punard's inventory carries** (exact keys: milestone-5.md §6):
+
+- **Every managed device**, with no further consent. The release (`os`:
+  id, name, version, `IMAGE_ID`, `IMAGE_VERSION`, architecture; the kernel
+  release). Security posture as states: Secure Boot, UEFI, TPM presence and
+  version, whether it is virtual, disk encryption, firewall, patch status,
+  reboot required. Hardware facts: manufacturer, model, BIOS version, CPU
+  model, vendor, cores and threads, memory, capacity rounded to whole GB,
+  root filesystem type, whether a battery is present. And the applications
+  built into the image: Punar's first-party apps at `IMAGE_VERSION` and the
+  image's browser at its package version. Those are identical on every
+  device of a release, so they say nothing about the person.
+- **An organization-owned device**, additionally. Its serial number (SMBIOS
+  `product_serial`, or the device tree's `serial-number`), and every
+  application installed for all users: the system Flatpaks and the catalog
+  vendor apps.
+- **Never, in any tier.** Anything under `/home` or belonging to one
+  person: files, per-user apps, browser data. The AI registry, access
+  ledger and detections. Addresses of any kind (IP, MAC, gateway, DNS),
+  network names, Bluetooth, USB history, timezone or location. User names,
+  UIDs, logins and sessions. Uptime, boot time, battery level and usage
+  samples. `/etc/machine-id`, the base OS packages, audit contents,
+  processes and command lines, and secrets. On a personal enrollment, the
+  applications the person chose are never sent.
+
+The milestone-5 keys stay in punard's body beside these: the hostname,
+and each capability's current state. Smplify does not receive them from
+it. punar-smplifyd translates the body through a fixed allowlist and
+gathers nothing itself (§2): it sends the hostname once, at `/enroll`, and
+no capability value at all. Until its mapping of the sections above lands,
+it forwards only the OS triple from them.
+
+**Decision.**
+
+1. **The term.** The organization document carries `enrollment.ownership`:
+   `"personal"` or `"organization"`. punard reads it once, with the removal
+   term, after `org.discover` and before `enroll.register`, and fixes it in
+   `enrollment.json` as `organization_owned`. It is never re-read from a
+   policy fetch, so an organization cannot claim a device after its user
+   agreed to a personal enrollment.
+2. **Absent means personal.** An organization that states no term gets the
+   narrower tier, and an ordinary enrollment asks nothing more. The value
+   must be exactly `"personal"` or `"organization"`; anything else refuses
+   enrollment (`invalid_params`). Guessing personal would enroll a device
+   its organization cannot manage as it said. Guessing organization would
+   report more than anyone agreed to.
+3. **Organization: the person's explicit yes.** The person accepts with
+   `accept_organization_owned` on the wire, `--accept-organization-owned`
+   in a script, or `accept` typed at punarctl's prompt. The prompt says
+   plainly that the organization will also receive the device's serial
+   number and the list of every app installed for all users. The
+   organization's name appears there with every control character and
+   direction override replaced, so the name it chose cannot conceal or
+   reorder the term beside it. The check
+   comes before register, so the organization never hears of a device whose
+   user said no, and nothing about it is sent.
+4. **Both terms, one question.** When an organization sets both terms, one
+   refusal names both (`details.terms`, docs/api/ipc.md §5.9 step 6), and
+   punarctl asks about both in one prompt that says what each means. A
+   person answers once and types their password once more; a script passes
+   both flags. The removal term alone is refused exactly as before.
+5. **No second record.** The removal term is also kept in
+   `enrollment-terms.json`, because an older punard that dropped it would
+   read the device as removable. Ownership fails the other way: an older
+   punard that rewrites `enrollment.json` without `organization_owned`
+   reads it as `false`, the narrower tier. A lost record can only send
+   less, so the field alone is enough.
+
+**What this does not hold:**
+
+- **It is a claim the person accepted, not proof.** A person who accepts on
+  a device they bought themselves gives the organization its serial number
+  and app list. The prompt says so; it cannot know who paid for the
+  hardware.
+- **The organization keeps what it received.** Unenrolling stops future
+  reports. It does not retract a serial number or an app list already sent,
+  and Smplify keeps the last values it stored.
+- **Ownership is fixed for the life of the enrollment.** Neither side can
+  change it later. Changing it means unenrolling and enrolling again, and a
+  non-removable enrollment cannot be unenrolled from the device (§3.1).
+
+**What an enterprise reviewer can verify.**
+
+- On the device: `enroll.status.organization_owned`, and the Ownership row
+  of `punarctl enroll status` and of the enrollment receipt.
+- The tests in `crates/punard/tests/enroll.rs`:
+  - An organization's claim without the person's yes is refused after
+    discovery and before register, and nothing is sent.
+  - With it, the inventory adds `identifiers.serial_number` and the
+    system-wide applications, and nothing else.
+  - `"personal"`, or no term, sends no identifiers and only the image's own
+    applications.
+  - An unreadable term refuses enrollment before register.
+  - Both terms are named in one refusal, and each flag accepts only its own
+    term.
 
 ## 4. Smplify backend — Phase 0 (gating) and later
 
