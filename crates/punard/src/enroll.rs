@@ -13,9 +13,10 @@
 //!
 //! Privacy (SPEC sections 24, 54): the compliance report carries category
 //! **states only** — never values, hostnames, timezone strings, audit
-//! events, or anything behavioral; the inventory carries device info +
-//! capability states, nothing behavioral. Enrollment is explicit
-//! (`punarctl enroll start`), never automatic.
+//! events, or anything behavioral; the inventory carries device facts,
+//! capability and posture states and, as far as the enrollment's tier allows,
+//! applications ([`crate::inventory`]) — nothing behavioral. Enrollment is
+//! explicit (`punarctl enroll start`), never automatic.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -33,6 +34,7 @@ use punar_recovery::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::inventory::{Collected, MAX_INVENTORY_BYTES, Withheld};
 use crate::util::write_atomic;
 
 /// Compiled-in default control-plane endpoint: `punar-smplifyd`, the
@@ -500,10 +502,43 @@ pub struct Enrollment {
     /// away.
     #[serde(default = "removable_by_default")]
     pub removable: bool,
+    /// Whether the organization owns this device: declared in its document
+    /// at enrollment AND accepted by the enrolling person, the way a
+    /// non-removable term is. Only then does the inventory carry the serial
+    /// number and every system-wide application ([`crate::inventory`]); a
+    /// personal enrollment's inventory never names an application the person
+    /// chose.
+    ///
+    /// Defaults to `false`, and no terms file backs it: an older punard that
+    /// rewrites this file without the field can only narrow what is sent.
+    #[serde(default)]
+    pub organization_owned: bool,
+    /// When the inventory last reached the control plane. The hash gate skips
+    /// an unchanged inventory, but a 2xx proves only that the request
+    /// arrived, not that the receiver kept it, so an unchanged inventory is
+    /// still resent once [`INVENTORY_RESEND_FLOOR_SECONDS`] have passed.
+    /// Written only after a send succeeds.
+    #[serde(default)]
+    pub last_inventory_sent_at: Option<String>,
 }
 
 fn removable_by_default() -> bool {
     true
+}
+
+/// The inventory's resend floor: at least once a day, changed or not.
+pub const INVENTORY_RESEND_FLOOR_SECONDS: u64 = 24 * 60 * 60;
+
+/// Whether an unchanged inventory is due again. Never sent, an unreadable
+/// record, or a clock that moved backwards all resend: a spare report costs a
+/// request, a missed one leaves the organization with a stale device.
+pub fn inventory_resend_due(last_sent_at: Option<&str>, now: &str) -> bool {
+    let last = last_sent_at.and_then(punar_common::time::unix_seconds_from_rfc3339);
+    let now = punar_common::time::unix_seconds_from_rfc3339(now);
+    match (last, now) {
+        (Some(last), Some(now)) => now < last || now - last >= INVENTORY_RESEND_FLOOR_SECONDS,
+        _ => true,
+    }
 }
 
 /// Beside `enrollment.json`: the organization's removal term for one
@@ -742,6 +777,11 @@ impl InventorySources {
         }
     }
 
+    /// `IMAGE_VERSION`: the release every built-in application ships in.
+    pub fn image_version(&self) -> Option<String> {
+        self.os_release().image_version
+    }
+
     fn kernel(&self) -> String {
         std::fs::read_to_string(&self.kernel_release_path)
             .map(|s| s.trim().to_string())
@@ -751,9 +791,6 @@ impl InventorySources {
     }
 }
 
-/// The inventory body (milestone-5.md section 6): device info + capability
-/// states, nothing behavioral. `capabilities` carries
-/// `{capability, supported, current_state}` per registered capability.
 /// See [`InventorySources::os_release`].
 struct OsRelease {
     id: String,
@@ -763,19 +800,38 @@ struct OsRelease {
     image_version: Option<String>,
 }
 
+/// The inventory body (milestone-5.md section 6): device info, capability
+/// states, and what [`crate::inventory`] collected for this tier —
+/// `posture` and `hardware` for every managed device, `applications` limited
+/// to the image's own unless `organization_owned`, and `identifiers` only
+/// when it is. `capabilities` carries `{capability, supported,
+/// current_state}` per registered capability.
+///
+/// The tier is applied here as well as in the collector, independently: this
+/// is the last place the body exists before it leaves, so a system-wide
+/// application or a serial number handed to it for a personal enrollment is
+/// dropped, not sent.
+///
+/// Returns the body and, when the application list went out as `null`, why.
+/// The list is never truncated: its receiver deletes every row it does not
+/// see ([`crate::inventory::MAX_APPLICATIONS`]).
 pub fn inventory_body(
     sources: &InventorySources,
     hostname: &str,
     capabilities: impl IntoIterator<Item = (String, bool, Value)>,
-) -> Value {
+    collected: &Collected,
+    organization_owned: bool,
+) -> (Value, Option<Withheld>) {
     let os = sources.os_release();
-    json!({
+    let applications = collected.applications_for(organization_owned);
+    let mut body = json!({
         "os": {
             "id": os.id,
             "version_id": os.version_id,
             "pretty_name": os.pretty_name,
             "image_id": os.image_id,
             "image_version": os.image_version,
+            "architecture": collected.architecture,
         },
         "kernel": sources.kernel(),
         "hostname": hostname,
@@ -787,7 +843,23 @@ pub fn inventory_body(
                 "current_state": current_state,
             }))
             .collect::<Vec<Value>>(),
-    })
+        "posture": collected.posture,
+        "hardware": collected.hardware,
+        "applications": applications.as_ref().ok(),
+    });
+    if organization_owned {
+        body["identifiers"] = json!({ "serial_number": collected.serial_number });
+    }
+    let mut withheld = applications.err();
+    if withheld.is_none() && serialized_len(&body) > MAX_INVENTORY_BYTES {
+        body["applications"] = Value::Null;
+        withheld = Some(Withheld::TooLarge);
+    }
+    (body, withheld)
+}
+
+fn serialized_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 #[cfg(test)]
@@ -821,7 +893,303 @@ mod tests {
             remote_query_scopes: vec!["inventory".into(), "authority".into()],
             last_query: None,
             removable: true,
+            organization_owned: false,
+            last_inventory_sent_at: None,
         }
+    }
+
+    /// What `crate::inventory` hands the builder: a device with a serial, one
+    /// image application and one system-wide Flatpak, so a test can see
+    /// which of them each tier lets through.
+    fn collected() -> Collected {
+        use crate::inventory::{
+            Application, Hardware, PatchStatus, Posture, SOURCE_FLATPAK, SOURCE_IMAGE,
+        };
+        let row = |name: &str, source: &'static str| Application {
+            name: name.into(),
+            display_name: name.into(),
+            version: Some("1.0".into()),
+            source,
+            managed: false,
+        };
+        Collected {
+            architecture: "aarch64".into(),
+            posture: Posture {
+                secure_boot: Some(false),
+                uefi: Some(true),
+                tpm_present: Some(true),
+                tpm_version: Some("2.0".into()),
+                is_virtual: Some(true),
+                virtualization: Some("qemu".into()),
+                disk_encryption_enabled: Some(true),
+                firewall_enabled: Some(true),
+                firewall: Some("nftables".into()),
+                os_patch_status: PatchStatus::Unknown,
+                reboot_required: Some(false),
+            },
+            hardware: Hardware {
+                manufacturer: Some("QEMU".into()),
+                model_name: Some("QEMU Virtual Machine".into()),
+                bios_version: Some("edk2-stable202408".into()),
+                cpu_model: None,
+                cpu_vendor: None,
+                cpu_cores: Some(4),
+                cpu_threads: Some(4),
+                memory_total_bytes: Some(8 * 1024 * 1024 * 1024),
+                device_capacity_bytes: Some(64_000_000_000),
+                root_filesystem_type: Some("erofs".into()),
+                battery_present: Some(false),
+            },
+            applications: Ok(vec![
+                row("org.punar.Mail", SOURCE_IMAGE),
+                row("org.mozilla.firefox", SOURCE_FLATPAK),
+            ]),
+            serial_number: Some("PNR-SERIAL-0042".into()),
+        }
+    }
+
+    fn sorted_keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    fn fixture_sources(dir: &Path) -> InventorySources {
+        let os_release = dir.join("os-release");
+        std::fs::write(
+            &os_release,
+            "ID=debian\nIMAGE_ID=punar-desktop\nIMAGE_VERSION=2026.09.01.1\n",
+        )
+        .unwrap();
+        let kernel = dir.join("osrelease");
+        std::fs::write(&kernel, "6.12.0-punar\n").unwrap();
+        InventorySources {
+            os_release_path: os_release,
+            kernel_release_path: kernel,
+        }
+    }
+
+    const PERSONAL_KEYS: [&str; 7] = [
+        "applications",
+        "capabilities",
+        "hardware",
+        "hostname",
+        "kernel",
+        "os",
+        "posture",
+    ];
+
+    /// The privacy boundary per tier, as exact key sets: a personal
+    /// enrollment gets no `identifiers` and only the image's applications,
+    /// even when the collector hands the builder more.
+    #[test]
+    fn each_tier_sends_exactly_its_key_set() {
+        let dir = tmp("tiers");
+        let sources = fixture_sources(&dir);
+        let collected = collected();
+
+        let (personal, withheld) = inventory_body(&sources, "h", [], &collected, false);
+        assert_eq!(withheld, None);
+        assert_eq!(sorted_keys(&personal), PERSONAL_KEYS);
+        assert_eq!(
+            sorted_keys(&personal["os"]),
+            [
+                "architecture",
+                "id",
+                "image_id",
+                "image_version",
+                "pretty_name",
+                "version_id"
+            ]
+        );
+        assert_eq!(personal["os"]["architecture"], "aarch64");
+        assert_eq!(
+            sorted_keys(&personal["posture"]),
+            [
+                "disk_encryption_enabled",
+                "firewall",
+                "firewall_enabled",
+                "is_virtual",
+                "os_patch_status",
+                "reboot_required",
+                "secure_boot",
+                "tpm_present",
+                "tpm_version",
+                "uefi",
+                "virtualization"
+            ]
+        );
+        assert_eq!(
+            sorted_keys(&personal["hardware"]),
+            [
+                "battery_present",
+                "bios_version",
+                "cpu_cores",
+                "cpu_model",
+                "cpu_threads",
+                "cpu_vendor",
+                "device_capacity_bytes",
+                "manufacturer",
+                "memory_total_bytes",
+                "model_name",
+                "root_filesystem_type"
+            ]
+        );
+        assert_eq!(
+            personal["applications"],
+            json!([{
+                "name": "org.punar.Mail", "display_name": "org.punar.Mail",
+                "version": "1.0", "source": "punar-image", "managed": false,
+            }])
+        );
+        let text = personal.to_string();
+        assert!(
+            !text.contains("PNR-SERIAL-0042"),
+            "no serial on a personal device"
+        );
+        assert!(!text.contains("firefox"), "no app the person chose");
+
+        let (owned, withheld) = inventory_body(&sources, "h", [], &collected, true);
+        assert_eq!(withheld, None);
+        let mut keys = PERSONAL_KEYS.to_vec();
+        keys.push("identifiers");
+        keys.sort_unstable();
+        assert_eq!(sorted_keys(&owned), keys);
+        assert_eq!(
+            owned["identifiers"],
+            json!({ "serial_number": "PNR-SERIAL-0042" })
+        );
+        let names: Vec<&str> = owned["applications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|app| app["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["org.punar.Mail", "org.mozilla.firefox"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The new sections carry facts, never values that locate or identify a
+    /// person: no hostname, no timezone, no addresses, nothing from /home.
+    #[test]
+    fn the_collected_sections_carry_no_personal_values() {
+        let dir = tmp("no-values");
+        let sources = fixture_sources(&dir);
+        let (body, _) = inventory_body(
+            &sources,
+            "alices-laptop",
+            [(
+                "time.timezone".to_string(),
+                true,
+                Value::String("Europe/Berlin".into()),
+            )],
+            &collected(),
+            true,
+        );
+        for section in ["posture", "hardware", "applications", "identifiers"] {
+            let text = body[section].to_string();
+            for forbidden in ["alices-laptop", "Europe/Berlin", "/home", "machine-id"] {
+                assert!(!text.contains(forbidden), "{section} carries {forbidden}");
+            }
+            assert!(!looks_like_mac_or_ipv4(&text), "{section}: {text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `aa:bb:cc:dd:ee:ff`, or four dot-separated numbers of at most three
+    /// digits each — the shapes an address would have if one leaked.
+    fn looks_like_mac_or_ipv4(text: &str) -> bool {
+        let mut tokens = text.split(|c: char| !(c.is_ascii_hexdigit() || c == ':' || c == '.'));
+        tokens.any(|token| {
+            let mac = token.split(':').collect::<Vec<_>>();
+            let ip = token.split('.').collect::<Vec<_>>();
+            (mac.len() == 6 && mac.iter().all(|p| p.len() == 2))
+                || (ip.len() == 4
+                    && ip.iter().all(|p| {
+                        (1..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit())
+                    }))
+        })
+    }
+
+    #[test]
+    fn the_address_detector_itself_detects() {
+        assert!(looks_like_mac_or_ipv4("\"52:54:00:12:34:56\""));
+        assert!(looks_like_mac_or_ipv4("gw 10.0.2.2 x"));
+        assert!(!looks_like_mac_or_ipv4("2026.09.01.1 151.0.7922.173-1"));
+    }
+
+    /// Never truncated: over the size cap the list goes out as `null`, and
+    /// the caller is told why so it can audit it.
+    #[test]
+    fn an_oversized_inventory_withholds_its_application_list() {
+        use crate::inventory::{Application, SOURCE_IMAGE};
+        let dir = tmp("oversized");
+        let sources = fixture_sources(&dir);
+        let mut collected = collected();
+        collected.applications = Ok((0..1900)
+            .map(|i| Application {
+                name: format!("org.punar.{i}.{}", "x".repeat(200)),
+                display_name: "y".repeat(255),
+                version: Some("z".repeat(100)),
+                source: SOURCE_IMAGE,
+                managed: false,
+            })
+            .collect());
+        let (body, withheld) = inventory_body(&sources, "h", [], &collected, false);
+        assert_eq!(withheld, Some(Withheld::TooLarge));
+        assert_eq!(body["applications"], Value::Null);
+        assert!(serde_json::to_vec(&body).unwrap().len() <= MAX_INVENTORY_BYTES);
+
+        collected.applications = Err(Withheld::Unreadable);
+        let (body, withheld) = inventory_body(&sources, "h", [], &collected, true);
+        assert_eq!(withheld, Some(Withheld::Unreadable));
+        assert_eq!(body["applications"], Value::Null);
+        assert_eq!(body["identifiers"]["serial_number"], "PNR-SERIAL-0042");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unchanged_inventory_is_resent_after_a_day() {
+        let sent = "2026-09-24T10:00:00Z";
+        assert!(inventory_resend_due(None, sent));
+        assert!(!inventory_resend_due(Some(sent), "2026-09-24T10:00:01Z"));
+        assert!(!inventory_resend_due(Some(sent), "2026-09-25T09:59:59Z"));
+        assert!(inventory_resend_due(Some(sent), "2026-09-25T10:00:00Z"));
+        assert!(
+            inventory_resend_due(Some(sent), "2026-09-23T10:00:00Z"),
+            "clock moved back"
+        );
+        assert!(inventory_resend_due(Some("yesterday"), sent));
+    }
+
+    /// Both fields default for a file an older build wrote, and the default
+    /// tier is the narrow one.
+    #[test]
+    fn ownership_and_send_time_round_trip_and_default_narrow() {
+        let dir = tmp("owned");
+        let path = dir.join("enrollment.json");
+        let mut owned = sample_enrollment();
+        owned.organization_owned = true;
+        owned.last_inventory_sent_at = Some("2026-09-24T10:00:00Z".into());
+        save_enrollment(&path, &owned).unwrap();
+        assert_eq!(load_enrollment(&path).unwrap().unwrap(), owned);
+
+        let mut raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("organization_owned");
+        raw.as_object_mut()
+            .unwrap()
+            .remove("last_inventory_sent_at");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let older = load_enrollment(&path).unwrap().unwrap();
+        assert!(!older.organization_owned);
+        assert_eq!(older.last_inventory_sent_at, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Removability is fixed at enrollment and survives a restart. A file
@@ -1056,7 +1424,7 @@ mod tests {
             os_release_path: os_release,
             kernel_release_path: kernel,
         };
-        let inventory = inventory_body(
+        let (inventory, _) = inventory_body(
             &sources,
             "punar-desktop",
             [(
@@ -1064,6 +1432,8 @@ mod tests {
                 true,
                 Value::String("enabled".into()),
             )],
+            &collected(),
+            false,
         );
         assert_eq!(inventory["os"]["id"], "punar");
         assert_eq!(inventory["os"]["version_id"], "0.5");
@@ -1083,7 +1453,7 @@ mod tests {
             os_release_path: dir.join("missing"),
             kernel_release_path: dir.join("also-missing"),
         };
-        let degraded = inventory_body(&absent, "h", []);
+        let (degraded, _) = inventory_body(&absent, "h", [], &collected(), false);
         assert_eq!(degraded["os"]["id"], "unknown");
         assert_eq!(degraded["kernel"], "unknown");
 
@@ -1100,7 +1470,7 @@ mod tests {
             os_release_path: punar,
             kernel_release_path: dir.join("osrelease"),
         };
-        let inventory = inventory_body(&sid, "h", []);
+        let (inventory, _) = inventory_body(&sid, "h", [], &collected(), false);
         assert_eq!(inventory["os"]["version_id"], "unknown");
         assert_eq!(inventory["os"]["image_id"], "punar-desktop");
         assert_eq!(inventory["os"]["image_version"], "2026.09.01.1");

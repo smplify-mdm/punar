@@ -325,16 +325,39 @@ jq_check "last received compliance: device id matches, overall compliant, six na
 ri_count="$(line_count "${RI_FILE}")"
 check_eq "received-inventory.jsonl line count (sent at enroll only)" 1 "${ri_count}"
 tail -n 1 "${RI_FILE}" > "${RUN_DIR}/m5-received-inventory-last.json" 2>/dev/null
-jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key allowlists (device info + capability states, nothing behavioral)" \
+# The personal tier (no organization-owned term exists yet): device facts,
+# posture states and the image's own applications — no identifiers section,
+# and no application a person installed.
+jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key allowlists (device info + capability and posture states, image applications only, no identifiers)" \
     "${RUN_DIR}/m5-received-inventory-last.json" \
     "(keys | sort) == [\"device_id\", \"inventory\", \"received_at\"]
      and .device_id == \"${DEVICE_ID}\"
-     and (.inventory | keys | sort) == [\"capabilities\", \"hostname\", \"kernel\", \"os\"]
-     and (.inventory.os | keys | sort) == [\"id\", \"image_id\", \"image_version\", \"pretty_name\", \"version_id\"]
+     and (.inventory | keys | sort) == [\"applications\", \"capabilities\", \"hardware\", \"hostname\", \"kernel\", \"os\", \"posture\"]
+     and (.inventory.os | keys | sort) == [\"architecture\", \"id\", \"image_id\", \"image_version\", \"pretty_name\", \"version_id\"]
      and (.inventory.os.id | length) > 0
+     and (.inventory.os.architecture == \"x86_64\" or .inventory.os.architecture == \"aarch64\")
      and (.inventory.kernel | length) > 0
      and (.inventory.capabilities | length) == 6
-     and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"current_state\", \"supported\"]))"
+     and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"current_state\", \"supported\"]))
+     and (.inventory.posture | keys | sort) == [\"disk_encryption_enabled\", \"firewall\", \"firewall_enabled\", \"is_virtual\", \"os_patch_status\", \"reboot_required\", \"secure_boot\", \"tpm_present\", \"tpm_version\", \"uefi\", \"virtualization\"]
+     and (.inventory.posture.os_patch_status == \"up-to-date\" or .inventory.posture.os_patch_status == \"updates-available\" or .inventory.posture.os_patch_status == \"unknown\")
+     and .inventory.posture.firewall == \"nftables\"
+     and .inventory.posture.firewall_enabled == true
+     and (.inventory.hardware | keys | sort) == [\"battery_present\", \"bios_version\", \"cpu_cores\", \"cpu_model\", \"cpu_threads\", \"cpu_vendor\", \"device_capacity_bytes\", \"manufacturer\", \"memory_total_bytes\", \"model_name\", \"root_filesystem_type\"]
+     and (.inventory.hardware.memory_total_bytes | type) == \"number\"
+     and (.inventory.applications | type) == \"array\"
+     and (.inventory.applications | all((keys | sort) == [\"display_name\", \"managed\", \"name\", \"source\", \"version\"]))
+     and (.inventory.applications | all(.source == \"punar-image\" and .managed == false))"
+# The serial number belongs to the organization-owned tier only. A blank or
+# one-character firmware value proves nothing either way, so it is skipped.
+m5_serial="$(tr -d '[:space:]' < /sys/class/dmi/id/product_serial 2>/dev/null)"
+if [ "${#m5_serial}" -ge 4 ] \
+        && grep -Fq "${m5_serial}" "${RUN_DIR}/m5-received-inventory-last.json"; then
+    note "FAIL received inventory carries the firmware serial number on a personal enrollment"
+    FAILED=1
+else
+    note "ok   received inventory carries no firmware serial number"
+fi
 "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-b.json" 2>&1
 rc_count_b="$(line_count "${RC_FILE}")"
 if [ "${rc_count_b}" -gt "${rc_count_a}" ]; then

@@ -47,6 +47,9 @@
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
+//! - [`storage`] — kernel-observed storage encryption: whether a path's
+//!   filesystem is backed only by LUKS2 mappings, one implementation shared
+//!   by the PIM credential vault and punard's managed-device posture.
 //! - [`update`] — strict signed release/channel metadata, target admission,
 //!   deterministic privacy-preserving rollout cohorts, and bounded streaming
 //!   SHA-256 verification (update-and-rollback design sections 4–5).
@@ -79,6 +82,7 @@ pub mod network;
 pub mod principal;
 pub mod query;
 mod redacted;
+pub mod storage;
 pub mod time;
 pub mod update;
 pub mod webapp;

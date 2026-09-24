@@ -59,6 +59,19 @@ pub struct UpdateStatusEngine {
     sources: UpdateStatusSources,
 }
 
+/// [`UpdateStatusEngine::staged_release`]'s answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedRelease {
+    /// No release is staged.
+    None,
+    /// A verified release is staged and takes effect at the next restart.
+    AwaitingRestart,
+    /// The staged release is the one running, not yet blessed.
+    Running,
+    /// A pending record exists but cannot be read.
+    Unknown,
+}
+
 impl UpdateStatusEngine {
     pub fn new(sources: UpdateStatusSources) -> Self {
         Self { sources }
@@ -85,11 +98,7 @@ impl UpdateStatusEngine {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let pending = if self.sources.pi_boot_partition.exists() {
-            read_pending_pi(&self.sources.pending_pi)
-        } else {
-            read_pending_uefi(&self.sources.pending_uefi)
-        };
+        let pending = self.read_pending();
         let desired = match &pending {
             PendingRead::Valid {
                 version, candidate, ..
@@ -154,8 +163,7 @@ impl UpdateStatusEngine {
         };
 
         let (channel, channel_reason) = read_channel(&self.sources.channel_preference);
-        let browser_version =
-            chromium_version(&self.sources.dpkg_status, &self.sources.pacman_local);
+        let browser_version = self.browser_version();
         let browser_reason = browser_version
             .is_none()
             .then(|| "Chromium is not present in a supported local package database".to_string());
@@ -205,6 +213,39 @@ impl UpdateStatusEngine {
                 security_channel: None,
                 reason: browser_reason,
             },
+        }
+    }
+
+    /// Whether a verified release is waiting for a restart: the staged half
+    /// of [`Self::status`], without the package-database read the full status
+    /// makes. The managed inventory asks this on every sync pass.
+    pub fn staged_release(&self) -> StagedRelease {
+        match self.read_pending() {
+            PendingRead::Absent => StagedRelease::None,
+            PendingRead::Invalid(_) => StagedRelease::Unknown,
+            PendingRead::Valid { candidate, .. } => {
+                // The pending record outlives the restart until the candidate
+                // is blessed. Running the candidate is not waiting for it.
+                if self.observe_slot().0 == candidate {
+                    StagedRelease::Running
+                } else {
+                    StagedRelease::AwaitingRestart
+                }
+            }
+        }
+    }
+
+    /// The image browser's package version, or `None` when no supported
+    /// package database lists it. Identical on every device of a release.
+    pub fn browser_version(&self) -> Option<String> {
+        chromium_version(&self.sources.dpkg_status, &self.sources.pacman_local)
+    }
+
+    fn read_pending(&self) -> PendingRead {
+        if self.sources.pi_boot_partition.exists() {
+            read_pending_pi(&self.sources.pending_pi)
+        } else {
+            read_pending_uefi(&self.sources.pending_uefi)
         }
     }
 
@@ -579,6 +620,49 @@ mod tests {
         assert_eq!(status.desired.state, DesiredReleaseState::Unknown);
         assert!(!status.channel.reachable);
         assert_eq!(status.rollback.state, RollbackState::None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The inventory's reboot signal: a staged release waits for a restart
+    /// until the slot it was staged into is the one running.
+    #[test]
+    fn a_staged_release_awaits_a_restart_until_its_slot_is_running() {
+        let root = fixture_root("staged");
+        let paths = sources(&root);
+        fs::write(
+            &paths.cmdline,
+            format!("quiet root=PARTUUID={ROOT_A_PARTUUID} rw\n"),
+        )
+        .unwrap();
+        let engine = UpdateStatusEngine::new(paths.clone());
+        assert_eq!(engine.staged_release(), StagedRelease::None);
+
+        let pending = PendingUefiUpdate {
+            schema_version: 1,
+            release_id: "punar-desktop-2026.09.01.1".into(),
+            version: "2026.09.01.1".parse().unwrap(),
+            previous_slot: UpdateSlot::A,
+            candidate_slot: UpdateSlot::B,
+            previous_default: "punar-a.efi".into(),
+            new_default: "punar-b.efi".into(),
+            manifest_sha256: "0".repeat(64),
+            payload_sha256: "1".repeat(64),
+            uki_sha256: "2".repeat(64),
+            staged_at: "2026-09-01T00:00:00Z".into(),
+        };
+        fs::write(&paths.pending_uefi, serde_json::to_vec(&pending).unwrap()).unwrap();
+        assert_eq!(engine.status().desired.state, DesiredReleaseState::Staged);
+        assert_eq!(engine.staged_release(), StagedRelease::AwaitingRestart);
+
+        fs::write(
+            &paths.cmdline,
+            format!("quiet root=PARTUUID={ROOT_B_PARTUUID} rw\n"),
+        )
+        .unwrap();
+        assert_eq!(engine.staged_release(), StagedRelease::Running);
+
+        fs::write(&paths.pending_uefi, b"not-json").unwrap();
+        assert_eq!(engine.staged_release(), StagedRelease::Unknown);
         fs::remove_dir_all(root).unwrap();
     }
 

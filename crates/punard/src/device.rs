@@ -73,17 +73,21 @@ pub fn classify(facts: &DeviceFacts) -> DeviceClass {
 }
 
 fn memory_mib(path: &Path) -> io::Result<u64> {
+    Ok(memory_kib(path)? / MIB_IN_KIB)
+}
+
+/// `MemTotal`, in the KiB meminfo counts it in. The classifier wants MiB; the
+/// managed inventory ([`crate::inventory`]) reports bytes from the same read.
+pub(crate) fn memory_kib(path: &Path) -> io::Result<u64> {
     let text = fs::read_to_string(path)?;
-    let kib = text
-        .lines()
+    text.lines()
         .find_map(|line| line.strip_prefix("MemTotal:"))
         .and_then(|tail| tail.split_whitespace().next())
         .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MemTotal is absent"))?;
-    Ok(kib / MIB_IN_KIB)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MemTotal is absent"))
 }
 
-fn logical_cores(path: &Path) -> io::Result<u32> {
+pub(crate) fn logical_cores(path: &Path) -> io::Result<u32> {
     let text = fs::read_to_string(path)?;
     let mut count = 0u32;
     for segment in text.trim().split(',') {
@@ -117,7 +121,7 @@ fn logical_cores(path: &Path) -> io::Result<u32> {
     Ok(count)
 }
 
-fn directory_has_battery(path: &Path) -> io::Result<bool> {
+pub(crate) fn directory_has_battery(path: &Path) -> io::Result<bool> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_name().to_string_lossy().starts_with("BAT") {

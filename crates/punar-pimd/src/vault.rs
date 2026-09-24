@@ -20,6 +20,7 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use punar_common::storage::{self, StorageSources, luks2_backing};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
@@ -32,7 +33,6 @@ const NONCE_BYTES: usize = 24;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_VAULT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_KEY_FILE_BYTES: u64 = 512;
-const MAX_DM_UUID_BYTES: u64 = 256;
 const PRIVATE_DIR_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
@@ -87,10 +87,12 @@ pub struct EncryptedStorageProof {
 impl EncryptedStorageProof {
     /// Verify the nearest existing ancestor of `state_root` against Linux
     /// sysfs. The device mapper UUID must carry cryptsetup's `CRYPT-LUKS2-`
-    /// prefix. A missing path, indirection we cannot prove, or plaintext
-    /// filesystem fails closed.
+    /// prefix — on a btrfs subvolume, every member of the pool's must
+    /// ([`punar_common::storage`], shared with punard's managed posture). A
+    /// missing path, indirection we cannot prove, or plaintext filesystem
+    /// fails closed.
     pub fn verify(state_root: &Path) -> Result<Self, VaultError> {
-        verify_storage_with_sysfs(state_root, Path::new("/sys/dev/block"))
+        verify_storage_with_sysfs(state_root, &StorageSources::default())
     }
 
     #[must_use]
@@ -397,37 +399,18 @@ impl Drop for CredentialVault {
 
 fn verify_storage_with_sysfs(
     state_root: &Path,
-    sys_dev_block: &Path,
+    sources: &StorageSources,
 ) -> Result<EncryptedStorageProof, VaultError> {
-    let dev = nearest_existing_device(state_root)?;
-    let major = rustix::fs::major(dev);
-    let minor = rustix::fs::minor(dev);
-    let device = format!("{major}:{minor}");
-    let uuid_path = sys_dev_block.join(&device).join("dm/uuid");
-    let mut uuid = read_bounded(&uuid_path, MAX_DM_UUID_BYTES)?;
-    while uuid.last().is_some_and(u8::is_ascii_whitespace) {
-        uuid.pop();
-    }
-    let verified = uuid.starts_with(b"CRYPT-LUKS2-")
-        && uuid.len() > b"CRYPT-LUKS2-".len()
-        && uuid
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(byte));
-    uuid.zeroize();
-    if !verified {
-        return Err(VaultError::StorageEncryptionRequired);
-    }
-    Ok(EncryptedStorageProof { dev, device })
+    let backing =
+        luks2_backing(state_root, sources)?.ok_or(VaultError::StorageEncryptionRequired)?;
+    Ok(EncryptedStorageProof {
+        dev: backing.dev,
+        device: backing.devices.join(","),
+    })
 }
 
 fn nearest_existing_device(path: &Path) -> Result<u64, VaultError> {
-    let mut existing = path;
-    while !existing.exists() {
-        existing = existing
-            .parent()
-            .ok_or(VaultError::StorageEncryptionRequired)?;
-    }
-    Ok(fs::metadata(existing)?.dev())
+    storage::nearest_existing_device(path)?.ok_or(VaultError::StorageEncryptionRequired)
 }
 
 fn associated_data(profile_id: &str, account_id: &str, kind: CredentialKind) -> Vec<u8> {
@@ -678,17 +661,6 @@ fn write_atomic_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Err(io::Error::other("temporary vault file collision"))
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, VaultError> {
-    let input = File::open(path).map_err(|_| VaultError::StorageEncryptionRequired)?;
-    let mut bytes = Vec::new();
-    input.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        bytes.zeroize();
-        return Err(VaultError::StorageEncryptionRequired);
-    }
-    Ok(bytes)
-}
-
 fn sync_parent(path: &Path) {
     if let Some(parent) = path.parent()
         && let Ok(directory) = File::open(parent)
@@ -824,6 +796,12 @@ mod tests {
         let state_root = tree.state_root();
         fs::create_dir_all(&state_root).unwrap();
         let sysfs = tree.0.join("sys-dev-block");
+        let sources = StorageSources {
+            sys_dev_block: sysfs.clone(),
+            sys_class_block: tree.0.join("sys-class-block"),
+            sys_fs_btrfs: tree.0.join("sys-fs-btrfs"),
+            mountinfo: tree.0.join("mountinfo"),
+        };
         let metadata = fs::metadata(&state_root).unwrap();
         let device = format!(
             "{}:{}",
@@ -834,7 +812,7 @@ mod tests {
         fs::create_dir_all(&dm).unwrap();
         fs::write(dm.join("uuid"), b"not-encrypted\n").unwrap();
         assert!(matches!(
-            verify_storage_with_sysfs(&state_root, &sysfs),
+            verify_storage_with_sysfs(&state_root, &sources),
             Err(VaultError::StorageEncryptionRequired)
         ));
         fs::write(
@@ -843,7 +821,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            verify_storage_with_sysfs(&state_root, &sysfs)
+            verify_storage_with_sysfs(&state_root, &sources)
                 .unwrap()
                 .device(),
             device

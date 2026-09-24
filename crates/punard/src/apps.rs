@@ -1238,6 +1238,32 @@ impl AppManager {
             .map_err(backend_io)
     }
 
+    /// The catalog's vendor applications installed on this device: catalog
+    /// id, catalog name, and the version the installed manifest records.
+    ///
+    /// System-wide state an organization receives only for a device it owns
+    /// ([`crate::inventory`]). An installed application whose manifest cannot
+    /// be read is still listed, with its version unknown: leaving it out would
+    /// tell the organization it had been removed.
+    pub(crate) fn installed_vendor_apps(&self) -> Vec<(String, String, Option<String>)> {
+        let mut installed = Vec::new();
+        for app in &self.catalog.apps {
+            if !matches!(self.select_source(app), Ok(Source::VendorDeb { .. })) {
+                continue;
+            }
+            let manifest = self.vendor_root.join(&app.id).join("current/install.json");
+            let version = match fs::read(&manifest) {
+                Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .and_then(|value| value.get("version")?.as_str().map(str::to_string)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => None,
+            };
+            installed.push((app.id.clone(), app.name.clone(), version));
+        }
+        installed
+    }
+
     fn installed_vendor_digest(&self, id: &str) -> Result<Option<String>, AppError> {
         let manifest = self.vendor_root.join(id).join("current/install.json");
         let bytes = match fs::read(&manifest) {
@@ -3073,6 +3099,52 @@ mod tests {
             AppManager::load(Some(&catalog), PathBuf::from("/bin/false")),
             Err(AppError::InvalidCatalog(_))
         ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// What an organization-owned device's inventory lists for a vendor
+    /// app: installed means a manifest exists; the version is the manifest's.
+    #[test]
+    fn installed_vendor_apps_are_read_from_their_manifests() {
+        let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
+        let catalog = write_vendor_catalog(&dir, &digest, byte_size);
+        let vendor_root = dir.join("installed");
+        let manager = AppManager::load(Some(&catalog), PathBuf::from("/bin/false"))
+            .unwrap()
+            .with_arch("x86_64")
+            .with_vendor_paths(
+                curl,
+                bsdtar,
+                vendor_root.clone(),
+                dir.join("share/applications"),
+                dir.join("config"),
+            );
+        assert!(manager.installed_vendor_apps().is_empty());
+
+        let current = vendor_root.join("chatgpt-desktop/current");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(
+            current.join("install.json"),
+            r#"{"v":1,"id":"chatgpt-desktop","version":"26.825.32147"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manager.installed_vendor_apps(),
+            [(
+                "chatgpt-desktop".to_string(),
+                "ChatGPT Desktop (preview)".to_string(),
+                Some("26.825.32147".to_string())
+            )]
+        );
+        fs::write(current.join("install.json"), b"{corrupt").unwrap();
+        assert_eq!(manager.installed_vendor_apps()[0].2, None);
+        // An architecture the catalog has no vendor source for lists nothing.
+        assert!(
+            manager
+                .with_arch("aarch64")
+                .installed_vendor_apps()
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

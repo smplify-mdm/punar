@@ -387,6 +387,43 @@ changed**: SHA-256 of the canonically-serialized inventory is stored as
 skips (the hash gate). m5-check asserts the second reconcile grows the
 compliance file but not the inventory file.
 
+**Managed-device sections (SMP-1405).** `crates/punard/src/inventory.rs`
+adds, beside the keys above, `os.architecture` and three sections, collected
+from injectable procfs/sysfs/image paths:
+
+- `posture` — `secure_boot`, `uefi`, `tpm_present`, `tpm_version`,
+  `is_virtual`, `virtualization`, `disk_encryption_enabled` (every member
+  under `/var` and `/home` proven LUKS2, `punar_common::storage`),
+  `firewall_enabled`, `firewall` (`"nftables"`), `os_patch_status`
+  (`up-to-date` only on a verified channel check under a day old, otherwise
+  `updates-available` or `unknown`) and `reboot_required`. States; `null`
+  where nothing could be established.
+- `hardware` — `manufacturer`, `model_name`, `bios_version`, `cpu_model`,
+  `cpu_vendor`, `cpu_cores`, `cpu_threads`, `memory_total_bytes`,
+  `device_capacity_bytes` (whole GB), `root_filesystem_type`,
+  `battery_present`. Read once per boot.
+- `applications` — `{name, display_name, version, source, managed}` rows.
+  Every managed device: the image's first-party desktop entries
+  (`X-Punar-FirstParty=true`, shown in the launcher) at `IMAGE_VERSION`, and
+  the image browser at its package version (`source: "punar-image"`).
+  Only when `enrollment.json` says `organization_owned` (declared by the
+  organization and accepted by the person; nothing sets it yet) also every
+  system Flatpak (`flatpak list --system --app`, re-run only when the
+  installation changed) and installed catalog vendor apps — and a fourth
+  section, `identifiers: {serial_number}`. A personal enrollment never reads
+  them. The list is a complete snapshot to its receiver and is never
+  truncated: over 2,000 rows, over 512 KiB of inventory, or with a row that
+  cannot be represented, it is sent as `null` and `enroll.inventory` is
+  audited on the transition.
+
+Never in any tier: anything under `/home` or per user, addresses, network
+names, location or timezone (beyond the capability states above), users or
+sessions, usage samples, `/etc/machine-id`, base OS packages.
+
+**Resend floor.** A 2xx proves the request arrived, not that it was kept, so
+an unchanged inventory is still sent once `last_inventory_sent_at` is a day
+old. The time is written only after a send succeeds.
+
 Send order per pass: compliance, then inventory-if-changed; each is one
 RPC with the stored token; per-call failure marks that report pending (§7).
 

@@ -72,11 +72,15 @@ use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
     ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
     LastQueryRecord, LastSyncRecord, OrgRecord, StatusSummary, UpstreamError,
-    compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
-    save_enrollment, write_status_summary,
+    compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
+    load_enrollment, save_device_token, save_enrollment, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
+};
+use crate::inventory::{
+    CollectorSources, ImageRelease, InventoryCollector, PATCH_EVIDENCE_MAX_AGE_SECONDS, PassInputs,
+    PatchPosture, Withheld, patch_posture,
 };
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
@@ -261,6 +265,10 @@ pub struct DaemonConfig {
     pub os_release_path: PathBuf,
     /// M5 inventory source (injectable for tests).
     pub kernel_release_path: PathBuf,
+    /// Where the managed inventory's posture, hardware and application facts
+    /// are read ([`crate::inventory`]). Production paths by default; tests
+    /// inject a fixture tree so no assertion depends on the host.
+    pub inventory_sources: CollectorSources,
     /// M9: the approval summary the shell watches (docs/api/ipc.md section
     /// 15). `/run/punard/approvals.json` in production — deliberately
     /// inside the `0750 root:punar` runtime directory, not beside the
@@ -356,6 +364,7 @@ impl DaemonConfig {
             status_file,
             os_release_path: PathBuf::from("/etc/os-release"),
             kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
+            inventory_sources: CollectorSources::default(),
             approvals_file,
             reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
@@ -476,6 +485,11 @@ struct Inner {
     /// not supersede.
     pending_compliance: AtomicBool,
     pending_inventory: AtomicBool,
+    /// The managed inventory's collectors and their per-boot caches.
+    inventory: InventoryCollector,
+    /// Whether the last inventory went out with its application list
+    /// withheld; the audit records the transitions, not every pass.
+    applications_withheld: AtomicBool,
     /// Outcome of the most recent sync attempt, for `enroll.start`'s
     /// `first_sync` result field.
     last_sync_outcome: Mutex<Option<FirstSync>>,
@@ -560,6 +574,8 @@ impl Daemon {
         let installer = Installer::new(installer_sources);
         let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
         let update_check = UpdateCheckEngine::new(cfg.update_check_sources.clone());
+        let inventory =
+            InventoryCollector::new(cfg.inventory_sources.clone(), cfg.flatpak_bin.clone());
         let update_transaction =
             UpdateTransactionEngine::new(cfg.update_transaction_sources.clone());
         let pi_update = PiUpdateEngine::new(cfg.pi_update_sources.clone());
@@ -683,6 +699,8 @@ impl Daemon {
                 device_token: Mutex::new(device_token),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
+                inventory,
+                applications_withheld: AtomicBool::new(false),
                 last_sync_outcome: Mutex::new(None),
                 status_written: Mutex::new(None),
                 approvals: Mutex::new(approvals),
@@ -5045,6 +5063,11 @@ impl Inner {
             remote_query_scopes,
             last_query: None,
             removable,
+            // No organization document can declare ownership yet; until the
+            // term and the person's acceptance exist, every enrollment gets
+            // the personal inventory.
+            organization_owned: false,
+            last_inventory_sent_at: None,
         };
         if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
             rollback_files(&policy_files);
@@ -5324,14 +5347,67 @@ impl Inner {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    /// The inventory's patch posture: a staged release decides; otherwise a
+    /// verified channel check of the effective channel, no older than a day.
+    fn patch_posture(&self) -> PatchPosture {
+        let channel = self
+            .effective
+            .lock()
+            .unwrap()
+            .get("system.update_channel")
+            .and_then(|entry| effective_update_channel(&entry.value));
+        patch_posture(self.update_status.staged_release(), || {
+            channel.and_then(|channel| {
+                self.update_check
+                    .verified_update_available(channel, PATCH_EVIDENCE_MAX_AGE_SECONDS)
+            })
+        })
+    }
+
+    /// An application list sent as `null` is a fact the device's owner can
+    /// see in the audit: once when withholding starts, once when a full list
+    /// goes out again — never once per pass, which would encode nothing new
+    /// (the `enroll.sync` precedent).
+    fn audit_applications_withheld(
+        &self,
+        actor: &AuditActor,
+        withheld: Option<Withheld>,
+        enrollment: &Enrollment,
+    ) {
+        let was_withheld = self
+            .applications_withheld
+            .swap(withheld.is_some(), Ordering::SeqCst);
+        let result = match (withheld, was_withheld) {
+            (Some(reason), false) => {
+                eprintln!(
+                    "punard: the inventory's application list is withheld ({}); \
+                     it is sent as null, never truncated",
+                    reason.as_str()
+                );
+                "applications_withheld"
+            }
+            (None, true) => AuditOutcome::Success.as_str(),
+            _ => return,
+        };
+        self.log_audit(self.enroll_event(
+            actor,
+            "enroll.inventory",
+            RESOURCE_CONTROL_PLANE,
+            result,
+            enrollment.policy_ids(),
+        ));
+    }
+
     /// M5 sync hook (milestone-5.md sections 6, 7): runs at the end of
     /// every full reconcile pass **when enrolled** — compliance (category
     /// states only, SPEC sections 24/54), then inventory when its SHA-256
-    /// changed or a resend is pending. Failures queue (bounded latest-wins
-    /// booleans); `enroll.sync` is audited on **transitions only**.
+    /// changed, a resend is pending, or a day has passed since the last one
+    /// arrived. Failures queue (bounded latest-wins booleans); `enroll.sync`
+    /// is audited on **transitions only**.
     fn sync_if_enrolled(&self, actor: &AuditActor) {
         let Some(enrollment) = self.enrollment.lock().unwrap().clone() else {
             *self.last_sync_outcome.lock().unwrap() = None;
+            self.applications_withheld.store(false, Ordering::SeqCst);
             return;
         };
         let token = self.device_token.lock().unwrap().clone();
@@ -5356,7 +5432,9 @@ impl Inner {
         self.pending_compliance
             .store(!compliance_ok, Ordering::SeqCst);
 
-        // Inventory: device info + capability states, hash-gated.
+        // Inventory: device facts, capability and posture states, and the
+        // tier's applications. Sent when its hash changed, when a resend is
+        // pending, or when a day has passed without one.
         let sources = InventorySources {
             os_release_path: self.cfg.os_release_path.clone(),
             kernel_release_path: self.cfg.kernel_release_path.clone(),
@@ -5373,11 +5451,40 @@ impl Inner {
                 )
             })
             .collect();
-        let inventory = inventory_body(&sources, &self.observed_hostname(), capabilities);
+        // The firewall's posture is the observation this pass already made,
+        // not a second nft run.
+        let firewall_state = capabilities
+            .iter()
+            .find(|(id, ..)| id == crate::backends::firewall::CAPABILITY_ID)
+            .map(|(_, _, state)| state.clone());
+        let collected = self.inventory.collect(
+            &PassInputs {
+                organization_owned: enrollment.organization_owned,
+                architecture: self.apps.architecture().to_string(),
+                firewall_state,
+                patch: self.patch_posture(),
+            },
+            || ImageRelease {
+                version: sources.image_version(),
+                browser_version: self.update_status.browser_version(),
+            },
+            || self.apps.installed_vendor_apps(),
+        );
+        let (inventory, withheld) = inventory_body(
+            &sources,
+            &self.observed_hostname(),
+            capabilities,
+            &collected,
+            enrollment.organization_owned,
+        );
+        self.audit_applications_withheld(actor, withheld, &enrollment);
         let hash = sha256_hex(&serde_json::to_vec(&inventory).expect("inventory serializes"));
+        let now = utc_now_rfc3339();
         let must_send = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
-            || self.pending_inventory.load(Ordering::SeqCst);
+            || self.pending_inventory.load(Ordering::SeqCst)
+            || inventory_resend_due(enrollment.last_inventory_sent_at.as_deref(), &now);
         let mut new_hash = enrollment.last_inventory_hash.clone();
+        let mut sent_at = enrollment.last_inventory_sent_at.clone();
         let inventory_outcome = if !must_send {
             "unchanged"
         } else {
@@ -5387,6 +5494,7 @@ impl Inner {
             };
             if sent {
                 new_hash = Some(hash);
+                sent_at = Some(now);
                 "success"
             } else {
                 "unreachable"
@@ -5450,6 +5558,7 @@ impl Inner {
                 result: Some(overall.to_string()),
             };
             current.last_inventory_hash = new_hash;
+            current.last_inventory_sent_at = sent_at;
             if last_query.is_some() {
                 current.last_query = last_query;
             }

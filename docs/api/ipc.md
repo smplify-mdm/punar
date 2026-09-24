@@ -1523,7 +1523,11 @@ or path other than the confirmed target device. An installed system returns
   new fact; the steady state is readable in `enroll.status.last_sync`.
   `"unreachable"` joins the open `result` string set — no schema change.
   The device token is `Redacted` by type: no audit event can contain it.
-  Read methods (`enroll.status`) remain unaudited.
+  Read methods (`enroll.status`) remain unaudited. `enroll.inventory`
+  (resource `"control_plane"`) follows the same transition rule: `result:
+  "applications_withheld"` once when the inventory's application list starts
+  going out as `null` (over its row or size cap, or unreadable — never
+  truncated), `"success"` once when a full list goes out again.
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or

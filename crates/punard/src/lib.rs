@@ -59,6 +59,7 @@ pub mod device;
 pub mod enroll;
 pub mod hardware;
 pub mod install;
+pub mod inventory;
 pub mod pi_update;
 pub mod policy;
 pub mod reauth;

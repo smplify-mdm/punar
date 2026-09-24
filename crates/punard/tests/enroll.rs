@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -24,10 +24,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use punar_common::storage::StorageSources;
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
+use punard::device::DeviceSources;
+use punard::inventory::CollectorSources;
 use punard::server::{Daemon, DaemonConfig, DaemonHandle};
+use punard::update_status::UpdateStatusSources;
 use serde_json::{Value, json};
 
 const ACME_ORG: &str = include_str!("../../../fixtures/organizations/acme/org.json");
@@ -306,6 +310,137 @@ fn write_inventory_sources(dir: &Path) -> (PathBuf, PathBuf) {
     (os_release, kernel)
 }
 
+/// The serial number the fixture firmware reports. It must never reach a
+/// personal enrollment's inventory.
+const FIXTURE_SERIAL: &str = "PNR-FIXTURE-SERIAL-0042";
+
+fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+/// A fixture machine for the managed inventory's collectors — a QEMU x86_64
+/// guest with SMBIOS, UEFI (Secure Boot off), a TPM 2.0, LUKS2 under /var and
+/// /home, a system Flatpak installation and Punar's desktop entries — so
+/// nothing the daemon reports depends on the host running the test.
+fn write_collector_sources(dir: &Path) -> (CollectorSources, UpdateStatusSources, PathBuf) {
+    let root = dir.join("machine");
+    let at = |relative: &str| root.join(relative);
+    write_file(&at("proc/meminfo"), "MemTotal:        8192000 kB\n");
+    write_file(&at("sys/devices/system/cpu/online"), "0-3\n");
+    for cpu in 0..4 {
+        write_file(
+            &at(&format!(
+                "sys/devices/system/cpu/cpu{cpu}/topology/core_cpus_list"
+            )),
+            format!("{cpu}\n"),
+        );
+    }
+    write_file(
+        &at("proc/cpuinfo"),
+        "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: QEMU Virtual CPU\n\
+         flags\t\t: fpu hypervisor\n",
+    );
+    write_file(&at("sys/class/dmi/id/sys_vendor"), "QEMU\n");
+    write_file(
+        &at("sys/class/dmi/id/product_name"),
+        "Standard PC (Q35 + ICH9, 2009)\n",
+    );
+    write_file(&at("sys/class/dmi/id/bios_version"), "1.16.3\n");
+    write_file(
+        &at("sys/class/dmi/id/product_serial"),
+        format!("{FIXTURE_SERIAL}\n"),
+    );
+    write_file(
+        &at("sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"),
+        [6u8, 0, 0, 0, 0],
+    );
+    write_file(&at("sys/class/tpm/tpm0/tpm_version_major"), "2\n");
+    write_file(&at("sys/class/power_supply/AC/type"), "Mains\n");
+    write_file(
+        &at("proc/self/mountinfo"),
+        "22 1 253:1 / / ro,relatime - erofs /dev/mapper/usr ro\n",
+    );
+    fs::create_dir_all(at("var")).unwrap();
+    fs::create_dir_all(at("home")).unwrap();
+    let dev = fs::metadata(at("var")).unwrap().dev();
+    write_file(
+        &at(&format!(
+            "sys/dev/block/{}:{}/dm/uuid",
+            rustix::fs::major(dev),
+            rustix::fs::minor(dev)
+        )),
+        "CRYPT-LUKS2-0123456789abcdef-punar-data\n",
+    );
+    write_file(
+        &at("usr/local/share/applications/org.punar.Mail.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Mail\nX-Punar-FirstParty=true\n",
+    );
+    write_file(
+        &at("usr/share/applications/thunar.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Thunar File Manager\n",
+    );
+    // A system installation exists, so only the tier stops it being listed.
+    write_file(&at("var/lib/flatpak/.changed"), "");
+    let flatpak = at("bin/flatpak");
+    write_file(
+        &flatpak,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
+             printf 'org.mozilla.firefox\\tFirefox\\t131.0\\t0123456789ab\\n'\n",
+            at("flatpak-argv").display()
+        ),
+    );
+    fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+    write_file(
+        &at("var/lib/dpkg/status"),
+        "Package: chromium\nStatus: install ok installed\nVersion: 151.0.7922.173-1\n\n",
+    );
+    write_file(&at("proc/cmdline"), "quiet rw\n");
+
+    let collector = CollectorSources {
+        device: DeviceSources {
+            meminfo: at("proc/meminfo"),
+            cpu_online: at("sys/devices/system/cpu/online"),
+            power_supply_dir: at("sys/class/power_supply"),
+            drm_dir: at("sys/class/drm"),
+        },
+        cpuinfo: at("proc/cpuinfo"),
+        cpu_dir: at("sys/devices/system/cpu"),
+        dmi_dir: at("sys/class/dmi/id"),
+        device_tree_dir: at("proc/device-tree"),
+        efi_dir: at("sys/firmware/efi"),
+        tpm_dir: at("sys/class/tpm"),
+        storage: StorageSources {
+            sys_dev_block: at("sys/dev/block"),
+            sys_class_block: at("sys/class/block"),
+            sys_fs_btrfs: at("sys/fs/btrfs"),
+            mountinfo: at("proc/self/mountinfo"),
+        },
+        encrypted_paths: vec![at("var"), at("home")],
+        capacity_path: root.clone(),
+        desktop_entry_dirs: vec![
+            at("usr/local/share/applications"),
+            at("usr/share/applications"),
+        ],
+        flatpak_installation: at("var/lib/flatpak"),
+        detect_virt_bin: at("bin/systemd-detect-virt"),
+    };
+    let update_status = UpdateStatusSources {
+        os_release: dir.join("os-release"),
+        cmdline: at("proc/cmdline"),
+        pi_boot_partition: at("proc/device-tree/chosen/bootloader/partition"),
+        pi_tryboot: at("proc/device-tree/chosen/bootloader/tryboot"),
+        health_report: at("run/punar/update-health.json"),
+        pending_pi: at("var/lib/punar/update/pending-pi.json"),
+        pending_uefi: at("var/lib/punar/update/pending-uefi.json"),
+        channel_preference: at("var/lib/punar/update/channel"),
+        dpkg_status: at("var/lib/dpkg/status"),
+        pacman_local: at("var/lib/pacman/local"),
+    };
+    (collector, update_status, flatpak)
+}
+
 impl TestDaemon {
     /// Start a daemon whose control-plane endpoint is `control_plane` and
     /// whose registry holds one `security.firewall` mock (the capability
@@ -313,6 +448,7 @@ impl TestDaemon {
     fn start(dir: &Path, peer: Peer, control_plane: &Path, firewall_state: &str) -> TestDaemon {
         let (group_file, passwd_file) = write_nss_files(dir);
         let (os_release_path, kernel_release_path) = write_inventory_sources(dir);
+        let (inventory_sources, update_status_sources, flatpak_bin) = write_collector_sources(dir);
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir).unwrap();
         let mock = MockCapability::new("security.firewall", json!(firewall_state));
@@ -326,6 +462,9 @@ impl TestDaemon {
             control_plane_socket: control_plane.to_path_buf(),
             os_release_path,
             kernel_release_path,
+            inventory_sources,
+            update_status_sources,
+            flatpak_bin,
             reauth_ticket_dir: dir.join("tickets"),
             proc_root: dir.join("proc"),
             ..DaemonConfig::new(
@@ -447,6 +586,124 @@ fn assert_compliance_shape(line: &Value, device_id: &str) {
     }
 }
 
+fn sorted_keys(value: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// The received inventory of a personal (not organization-owned) enrollment,
+/// as exact key sets: device facts and posture states, the image's own
+/// applications, no identifiers — checked where it arrives, not where it was
+/// built.
+fn assert_personal_inventory(body: &Value) {
+    assert_eq!(
+        sorted_keys(body),
+        [
+            "applications",
+            "capabilities",
+            "hardware",
+            "hostname",
+            "kernel",
+            "os",
+            "posture"
+        ],
+        "no identifiers on a personal enrollment"
+    );
+    assert_eq!(
+        sorted_keys(&body["os"]),
+        [
+            "architecture",
+            "id",
+            "image_id",
+            "image_version",
+            "pretty_name",
+            "version_id"
+        ]
+    );
+    assert_eq!(body["os"]["id"], "punar");
+    assert!(matches!(
+        body["os"]["architecture"].as_str(),
+        Some("x86_64" | "aarch64")
+    ));
+    assert_eq!(body["kernel"], "6.12.0-punar");
+    assert_eq!(body["capabilities"].as_array().unwrap().len(), 1);
+    assert_eq!(body["capabilities"][0]["capability"], "security.firewall");
+    assert_eq!(body["capabilities"][0]["supported"], true);
+    assert_eq!(body["capabilities"][0]["current_state"], "enabled");
+
+    assert_eq!(
+        body["posture"],
+        json!({
+            "secure_boot": false,
+            "uefi": true,
+            "tpm_present": true,
+            "tpm_version": "2.0",
+            "is_virtual": true,
+            "virtualization": null,
+            "disk_encryption_enabled": true,
+            "firewall_enabled": true,
+            "firewall": "nftables",
+            // No verified channel check has run on this device.
+            "os_patch_status": "unknown",
+            "reboot_required": false,
+        })
+    );
+    let hardware = &body["hardware"];
+    assert_eq!(
+        sorted_keys(hardware),
+        [
+            "battery_present",
+            "bios_version",
+            "cpu_cores",
+            "cpu_model",
+            "cpu_threads",
+            "cpu_vendor",
+            "device_capacity_bytes",
+            "manufacturer",
+            "memory_total_bytes",
+            "model_name",
+            "root_filesystem_type"
+        ]
+    );
+    assert_eq!(hardware["manufacturer"], "QEMU");
+    assert_eq!(hardware["model_name"], "Standard PC (Q35 + ICH9, 2009)");
+    assert_eq!(hardware["cpu_vendor"], "AuthenticAMD");
+    assert_eq!(hardware["cpu_cores"], 4);
+    assert_eq!(hardware["cpu_threads"], 4);
+    assert_eq!(hardware["memory_total_bytes"], 8_192_000u64 * 1024);
+    assert_eq!(hardware["root_filesystem_type"], "erofs");
+    assert_eq!(hardware["battery_present"], false);
+    assert_eq!(
+        hardware["device_capacity_bytes"].as_u64().unwrap() % 1_000_000_000,
+        0
+    );
+
+    // The image's first-party entry and its browser — never Debian's own
+    // entries, never a Flatpak the person installed.
+    assert_eq!(
+        body["applications"],
+        json!([
+            {"name": "chromium", "display_name": "Chromium", "version": "151.0.7922.173-1",
+             "source": "punar-image", "managed": false},
+            {"name": "org.punar.Mail", "display_name": "Mail", "version": null,
+             "source": "punar-image", "managed": false},
+        ])
+    );
+    let text = body.to_string();
+    for forbidden in [FIXTURE_SERIAL, "firefox", "Thunar", "/home"] {
+        assert!(
+            !text.contains(forbidden),
+            "the inventory carries {forbidden}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The lifecycle
 // ---------------------------------------------------------------------------
@@ -553,22 +810,13 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     {
         let inventory = control_plane.state.inventory.lock().unwrap();
         assert_eq!(inventory.len(), 1);
-        let body = &inventory[0]["inventory"];
-        let mut keys: Vec<&str> = body
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["capabilities", "hostname", "kernel", "os"]);
-        assert_eq!(body["os"]["id"], "punar");
-        assert_eq!(body["kernel"], "6.12.0-punar");
-        assert_eq!(body["capabilities"].as_array().unwrap().len(), 1);
-        assert_eq!(body["capabilities"][0]["capability"], "security.firewall");
-        assert_eq!(body["capabilities"][0]["supported"], true);
-        assert_eq!(body["capabilities"][0]["current_state"], "enabled");
+        assert_personal_inventory(&inventory[0]["inventory"]);
     }
+    // A personal enrollment never lists the system installation.
+    assert!(
+        !dir.join("machine/flatpak-argv").exists(),
+        "flatpak never ran"
+    );
 
     // Recorded-but-overridden (the verified M4 semantics, now reachable):
     // a root set of `disabled` on the pinned path records the preference,
@@ -1448,4 +1696,215 @@ fn enrolling_before_the_organization_assigns_any_policy_succeeds() {
     daemon.result("enroll.stop", None);
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
     daemon.stop();
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The hash gate skips an unchanged inventory, but a 2xx proves only that the
+/// request arrived: once a day an unchanged inventory is sent again. The
+/// recorded send time moves only when a send succeeds.
+#[test]
+fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clock() {
+    const LONG_AGO: &str = "2026-01-01T00:00:00Z";
+    let dir = test_dir("resend-floor");
+    let state_file = dir.join("state/enrollment.json");
+    let control_plane = ControlPlane::start(&dir);
+    {
+        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        daemon.result("reconcile", None);
+        daemon.stop();
+    }
+    assert_eq!(
+        control_plane.state.inventory.lock().unwrap().len(),
+        1,
+        "hash-gated within the day"
+    );
+    let record = read_json(&state_file);
+    let hash = record["last_inventory_hash"].clone();
+    assert!(
+        record["last_inventory_sent_at"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z')),
+        "{record}"
+    );
+
+    // A day and more has passed, as far as the record says, and the control
+    // plane is down: the due send fails and the record keeps the old time.
+    let mut record = read_json(&state_file);
+    record["last_inventory_sent_at"] = json!(LONG_AGO);
+    fs::write(&state_file, record.to_string()).unwrap();
+    let state = control_plane.stop();
+    {
+        let daemon = TestDaemon::start(
+            &dir,
+            Peer::root(),
+            &dir.join("control-plane.sock"),
+            "enabled",
+        );
+        daemon.stop();
+    }
+    assert_eq!(read_json(&state_file)["last_inventory_sent_at"], LONG_AGO);
+    assert_eq!(state.inventory.lock().unwrap().len(), 1);
+
+    // Back online: the unchanged inventory goes out again and the time moves.
+    let control_plane = ControlPlane::start_with(&dir, state);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    {
+        let inventory = control_plane.state.inventory.lock().unwrap();
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(
+            inventory[0]["inventory"], inventory[1]["inventory"],
+            "the floor resent it, not a change"
+        );
+    }
+    let record = read_json(&state_file);
+    assert_eq!(record["last_inventory_hash"], hash);
+    assert_ne!(record["last_inventory_sent_at"], LONG_AGO);
+    // Within the day the gate holds again.
+    daemon.result("reconcile", None);
+    assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
+}
+
+/// The organization-owned tier through the whole daemon: the serial number
+/// and the system-wide applications, and nothing else added. No organization
+/// document can declare ownership yet, so the record is edited the way the
+/// enrollment flow will write it once one can.
+#[test]
+fn an_organization_owned_enrollment_adds_the_serial_and_system_apps() {
+    let dir = test_dir("org-owned");
+    let state_file = dir.join("state/enrollment.json");
+    let control_plane = ControlPlane::start(&dir);
+    {
+        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        daemon.stop();
+    }
+    let mut record = read_json(&state_file);
+    assert_eq!(
+        record["organization_owned"], false,
+        "every enrollment is personal until ownership can be declared"
+    );
+    assert!(!dir.join("machine/flatpak-argv").exists());
+    record["organization_owned"] = json!(true);
+    fs::write(&state_file, record.to_string()).unwrap();
+
+    let _daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let inventory = control_plane.state.inventory.lock().unwrap();
+    assert_eq!(
+        inventory.len(),
+        2,
+        "the tier changed what the inventory says"
+    );
+    let personal = &inventory[0]["inventory"];
+    let owned = &inventory[1]["inventory"];
+    assert_personal_inventory(personal);
+    assert_eq!(
+        sorted_keys(owned),
+        [
+            "applications",
+            "capabilities",
+            "hardware",
+            "hostname",
+            "identifiers",
+            "kernel",
+            "os",
+            "posture"
+        ]
+    );
+    assert_eq!(
+        owned["identifiers"],
+        json!({ "serial_number": FIXTURE_SERIAL })
+    );
+    for section in ["os", "posture", "hardware", "capabilities"] {
+        assert_eq!(owned[section], personal[section], "{section}");
+    }
+    let rows: Vec<(&str, &str)> = owned["applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|app| {
+            (
+                app["name"].as_str().unwrap(),
+                app["source"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("chromium", "punar-image"),
+            ("org.mozilla.firefox", "flatpak"),
+            ("org.punar.Mail", "punar-image"),
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("machine/flatpak-argv")).unwrap(),
+        "list --system --app --columns=application,name,version,active\n",
+        "the system installation only, fixed argv"
+    );
+}
+
+/// A row the receiver could not store would discard its whole snapshot, so
+/// the list goes out as `null` instead of without the row — and the audit
+/// says so once when that starts and once when a full list is back, never
+/// once per pass.
+#[test]
+fn a_withheld_application_list_is_null_and_audited_on_transitions_only() {
+    let dir = test_dir("withheld");
+    let state_file = dir.join("state/enrollment.json");
+    let control_plane = ControlPlane::start(&dir);
+    {
+        let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+        daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        daemon.stop();
+    }
+    let mut record = read_json(&state_file);
+    record["organization_owned"] = json!(true);
+    fs::write(&state_file, record.to_string()).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let events = |daemon: &TestDaemon, result: &str| {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.inventory" && e["result"] == result)
+            .count()
+    };
+    assert_eq!(events(&daemon, "applications_withheld"), 0);
+
+    // The installation changes and now lists a row with no columns.
+    let flatpak = dir.join("machine/bin/flatpak");
+    let changed = dir.join("machine/var/lib/flatpak/.changed");
+    let good_script = fs::read_to_string(&flatpak).unwrap();
+    fs::write(&flatpak, "#!/bin/sh\nprintf 'not-a-flatpak-row\\n'\n").unwrap();
+    fs::write(&changed, "1").unwrap();
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    {
+        let inventory = control_plane.state.inventory.lock().unwrap();
+        let last = &inventory.last().unwrap()["inventory"];
+        assert_eq!(last["applications"], Value::Null, "never a truncated list");
+        assert_eq!(last["identifiers"]["serial_number"], FIXTURE_SERIAL);
+    }
+    assert_eq!(
+        events(&daemon, "applications_withheld"),
+        1,
+        "once, not per pass"
+    );
+    assert_eq!(events(&daemon, "success"), 0);
+
+    // Repaired: the full list goes out again, and that is audited once.
+    fs::write(&flatpak, good_script).unwrap();
+    fs::write(&changed, "22").unwrap();
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    {
+        let inventory = control_plane.state.inventory.lock().unwrap();
+        let last = &inventory.last().unwrap()["inventory"];
+        assert_eq!(last["applications"].as_array().unwrap().len(), 3);
+    }
+    assert_eq!(events(&daemon, "applications_withheld"), 1);
+    assert_eq!(events(&daemon, "success"), 1);
 }
