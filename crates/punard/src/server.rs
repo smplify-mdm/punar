@@ -477,6 +477,15 @@ struct Inner {
     last_reconcile: Mutex<Option<String>>,
     /// M5 enrollment state (mirrors `enrollment.json`); `None` = personal.
     enrollment: Mutex<Option<Enrollment>>,
+    /// Which enrollment the slot holds: bumped, under the `enrollment` lock,
+    /// whenever one is committed or ended. A sync pass works from a copy
+    /// taken at its start and may outlive it (a report can be in flight for
+    /// seconds while `enroll.stop` runs, and `enroll.start` after it). It
+    /// writes back only while this is still the value it started with, so
+    /// an ended enrollment is never written again and never into another
+    /// one. Two enrollments of one organization in the same second carry the
+    /// same `org.id` and `enrolled_at`; they never carry the same epoch.
+    enrollment_epoch: AtomicU64,
     /// M5: the device token, [`Redacted`] the moment it exists in memory —
     /// no formatter or serializer can print it (SPEC section 53).
     device_token: Mutex<Option<Redacted<String>>>,
@@ -697,6 +706,7 @@ impl Daemon {
                 started_at: utc_now_rfc3339(),
                 last_reconcile: Mutex::new(None),
                 enrollment: Mutex::new(enrollment),
+                enrollment_epoch: AtomicU64::new(0),
                 device_token: Mutex::new(device_token),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
@@ -5207,7 +5217,11 @@ impl Inner {
         let attestation_label = enrollment.attestation.clone();
         registration.commit();
         *self.device_token.lock().unwrap() = Some(token);
-        *self.enrollment.lock().unwrap() = Some(enrollment);
+        {
+            let mut slot = self.enrollment.lock().unwrap();
+            *slot = Some(enrollment);
+            self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
+        }
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
         *self.application_policy.lock().unwrap() = loaded.applications;
@@ -5373,7 +5387,30 @@ impl Inner {
         // The authoritative check: under the guard no enrollment can be
         // committed or ended, so what is taken next is what was judged.
         self.refuse_kept_enrollment(&actor)?;
-        let Some(enrollment) = self.enrollment.lock().unwrap().take() else {
+        let taken = {
+            let mut slot = self.enrollment.lock().unwrap();
+            let taken = slot.take();
+            if taken.is_some() {
+                self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
+                // The organization view describes this enrollment only, and
+                // goes with it here, under the same lock a sync pass must
+                // hold to write it: a pass whose report is still in flight
+                // finds the slot changed and cannot write it back. What the
+                // organization received is not retracted by removing it;
+                // enroll.status simply has no enrollment to describe any more.
+                if let Err(e) =
+                    std::fs::remove_file(self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE))
+                {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        eprintln!(
+                            "punard: enroll.stop could not remove {ORGANIZATION_VIEW_FILE}: {e}"
+                        );
+                    }
+                }
+            }
+            taken
+        };
+        let Some(enrollment) = taken else {
             self.log_audit(self.enroll_event(
                 &actor,
                 "enroll.stop",
@@ -5417,10 +5454,7 @@ impl Inner {
         if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
             eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
         }
-        // The organization view describes this enrollment only. What the
-        // organization received is not retracted by removing it; enroll.status
-        // simply has no enrollment to describe any more.
-        for name in ["enrollment.json", "device-token", ORGANIZATION_VIEW_FILE] {
+        for name in ["enrollment.json", "device-token"] {
             if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {
                 if e.kind() != io::ErrorKind::NotFound {
                     eprintln!("punard: enroll.stop could not remove {name}: {e}");
@@ -5533,7 +5567,11 @@ impl Inner {
     /// arrived. Failures queue (bounded latest-wins booleans); `enroll.sync`
     /// is audited on **transitions only**.
     fn sync_if_enrolled(&self, actor: &AuditActor) {
-        let Some(enrollment) = self.enrollment.lock().unwrap().clone() else {
+        let (enrollment, epoch) = {
+            let slot = self.enrollment.lock().unwrap();
+            (slot.clone(), self.enrollment_epoch.load(Ordering::SeqCst))
+        };
+        let Some(enrollment) = enrollment else {
             *self.last_sync_outcome.lock().unwrap() = None;
             self.applications_withheld.store(false, Ordering::SeqCst);
             return;
@@ -5608,6 +5646,7 @@ impl Inner {
             || inventory_resend_due(enrollment.last_inventory_sent_at.as_deref(), &now);
         let mut new_hash = enrollment.last_inventory_hash.clone();
         let mut sent_at = enrollment.last_inventory_sent_at.clone();
+        let mut received = None;
         let inventory_outcome = if !must_send {
             "unchanged"
         } else {
@@ -5620,7 +5659,9 @@ impl Inner {
                     // The agent's account of what it posted, or, from a
                     // control plane that gives none (the development mock,
                     // which keeps the inventory itself), what it was handed.
-                    self.record_organization_view(&enrollment, &now, sent.unwrap_or(inventory));
+                    // Recorded below, only if this enrollment is still the
+                    // one in the slot.
+                    received = Some(sent.unwrap_or(inventory));
                     new_hash = Some(hash);
                     sent_at = Some(now);
                     "success"
@@ -5677,10 +5718,18 @@ impl Inner {
             inventory: inventory_outcome.to_string(),
         });
 
-        // Persist last_sync / the inventory hash — only if still enrolled
-        // (a concurrent enroll.stop wins).
+        // Persist last_sync / the inventory hash, and keep what the
+        // organization received as the person's view of it — only while the
+        // enrollment this pass began with is still the one in the slot. A
+        // concurrent enroll.stop wins: it removed the view under this lock,
+        // and a pass that outlived it writes nothing back, not even into an
+        // enrollment started since.
         let mut slot = self.enrollment.lock().unwrap();
-        if let Some(current) = slot.as_mut() {
+        let still_current = self.enrollment_epoch.load(Ordering::SeqCst) == epoch;
+        if let Some(current) = slot.as_mut().filter(|_| still_current) {
+            if let (Some(sent), Some(at)) = (received, sent_at.as_deref()) {
+                self.record_organization_view(current, at, sent);
+            }
             current.last_sync = LastSyncRecord {
                 at: Some(utc_now_rfc3339()),
                 result: Some(overall.to_string()),

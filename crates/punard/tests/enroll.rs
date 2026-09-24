@@ -96,6 +96,11 @@ struct ControlPlaneState {
     translate_like_smplifyd: AtomicBool,
     /// Every body that translation produced: what Smplify itself received.
     status_bodies: Mutex<Vec<Value>>,
+    /// Hold the next `inventory.report`, once its token is resolved, until
+    /// `release_inventory`: a sync pass caught with its report in flight.
+    hold_next_inventory: AtomicBool,
+    inventory_held: AtomicBool,
+    release_inventory: AtomicBool,
 }
 
 impl ControlPlaneState {
@@ -170,6 +175,12 @@ impl ControlPlaneState {
             }
             "inventory.report" => {
                 let device_id = self.device_for(params)?;
+                if self.hold_next_inventory.swap(false, Ordering::SeqCst) {
+                    self.inventory_held.store(true, Ordering::SeqCst);
+                    while !self.release_inventory.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 self.inventory.lock().unwrap().push(json!({
                     "device_id": device_id,
                     "received_at": "now",
@@ -1848,6 +1859,97 @@ fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clo
     // Within the day the gate holds again.
     daemon.result("reconcile", None);
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
+}
+
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A sync pass works from the enrollment it began with, and can outlive it:
+/// its inventory report may still be in flight while `enroll.stop` runs, and
+/// `enroll.start` after that. The reply must write nothing back — not the
+/// ended enrollment's view, which unenroll removed and promised stays
+/// removed, and not into the enrollment that replaced it, whose view and
+/// inventory hash are its own.
+#[test]
+fn a_pass_that_outlives_its_enrollment_writes_nothing_back() {
+    const SECURE_BOOT: &str =
+        "machine/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    let dir = test_dir("stale-pass");
+    let view_path = dir.join("state/organization-view.json");
+    let enrollment_path = dir.join("state/enrollment.json");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    // Something the inventory carries changes, so the next pass sends one,
+    // and that report is held in flight while `during` runs.
+    let pass_in_flight = |secure_boot: u8, during: &dyn Fn()| {
+        write_file(&dir.join(SECURE_BOOT), [6u8, 0, 0, 0, secure_boot]);
+        state.release_inventory.store(false, Ordering::SeqCst);
+        state.inventory_held.store(false, Ordering::SeqCst);
+        state.hold_next_inventory.store(true, Ordering::SeqCst);
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| daemon.result("reconcile", None));
+            wait_until("the held inventory report", || {
+                state.inventory_held.load(Ordering::SeqCst)
+            });
+            during();
+            state.release_inventory.store(true, Ordering::SeqCst);
+            pass.join().unwrap();
+        });
+    };
+
+    // Unenrolled while the report is in flight: nothing is recreated.
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(view_path.exists());
+    pass_in_flight(1, &|| {
+        daemon.result("enroll.stop", None);
+        assert!(!view_path.exists(), "unenroll removed the view");
+    });
+    assert_eq!(
+        state.inventory.lock().unwrap().len(),
+        2,
+        "the reply arrived"
+    );
+    assert!(!view_path.exists(), "a late reply recreated the view");
+    assert!(!enrollment_path.exists());
+
+    // Unenrolled and enrolled again, now as organization-owned, possibly
+    // within the same second: the late reply belongs to neither.
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    pass_in_flight(0, &|| {
+        daemon.result("enroll.stop", None);
+        *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+        daemon.result(
+            "enroll.start",
+            Some(json!({"org_domain": "acme.com", "accept_organization_owned": true})),
+        );
+    });
+    let inventory = state.inventory.lock().unwrap().clone();
+    assert_eq!(inventory.len(), 5);
+    let (owned, late) = (&inventory[3]["inventory"], &inventory[4]["inventory"]);
+    assert!(owned.get("identifiers").is_some(), "{owned}");
+    assert!(late.get("identifiers").is_none(), "the ended enrollment's");
+    let record = read_json(&view_path);
+    assert_eq!(
+        record["sent"], *owned,
+        "the view is the new enrollment's own"
+    );
+    assert_eq!(
+        record["enrolled_at"],
+        read_json(&enrollment_path)["enrolled_at"]
+    );
+    // Nor did the late reply move the new enrollment's hash: an unchanged
+    // device sends nothing on the next pass.
+    daemon.result("reconcile", None);
+    assert_eq!(state.inventory.lock().unwrap().len(), 5);
 }
 
 /// The resend gate hashes what can leave the device and nothing else. The

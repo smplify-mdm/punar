@@ -451,7 +451,11 @@ root:`punar`): `{version, org_id, enrolled_at, sent_at, sent}`, where `sent`
 is the body the control plane received — the agent's `{sent}` answer, or the
 inventory itself from a control plane that gives none. It is bound to the
 enrollment (organization and enrollment time), untouched by a failed send,
-and removed by `enroll.stop`. `enroll.status.organization_view` summarizes it
+and removed by `enroll.stop` under the enrollment lock. A sync pass writes it,
+and the inventory hash, only while the enrollment it began with is still the
+current one (an epoch bumped at every enroll and unenroll), so a reply that
+arrives after unenrolling never recreates it and never lands in a later
+enrollment. `enroll.status.organization_view` summarizes it
 as categories and field names; `punarctl enroll status` shows them under
 "Your organization can see".
 
