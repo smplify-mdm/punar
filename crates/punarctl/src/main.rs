@@ -33,10 +33,11 @@
 //! right no policy withholds for one's own sessions, because in Milestone
 //! 8 no organization can read the data either.
 //!
-//! The CLI never elevates itself; the daemon is the authorization point
-//! (`sudo punarctl …` is the M3 way to run mutating verbs), and a denial
-//! prints the server's SPEC section 73 message verbatim — who may act, why
-//! this was refused, which policy, and the next step. Never an errno.
+//! The CLI never elevates itself; the daemon is the authorization point (no
+//! person on a Punar device is root — a person's mutating verbs carry a grant
+//! or a password confirmation), and a denial prints the server's SPEC section
+//! 73 message verbatim — who may act, why this was refused, which policy, and
+//! the next step. Never an errno.
 //!
 //! Milestone 9 completes the exit-code table and adds the three verb
 //! families of the approval milestone. `approvals list/get/resolve/wait`
@@ -244,7 +245,8 @@ enum CapabilitiesCommand {
         /// Dotted capability path, like `security.firewall`.
         capability: CapabilityId,
     },
-    /// Set the desired state of one capability (root only in Milestone 3).
+    /// Set the desired state of one capability (root, or a person holding a
+    /// grant for it: `punarctl privilege request`).
     Set {
         /// Dotted capability path, like `security.firewall`.
         capability: CapabilityId,

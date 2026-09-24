@@ -124,6 +124,17 @@ const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
     verb: "unenroll this device",
     asks: "your password",
 };
+/// The next step on a refused update verb, said plainly because it is a gap
+/// and not a design. update-and-rollback.md section 7.3 was written for a
+/// device where the owner could `sudo`; a Punar device has no such account
+/// (onboarding.md section 1.6), no grant covers the boot slots, and none of
+/// the update methods accepts a re-authentication ticket yet. Promising a
+/// path that does not exist is the one thing this message must not do.
+const NO_PERSON_UPDATE_PATH: &str = "`punarctl update status` shows the running release, \
+     what the channel offers and what a rollback would return to. Checking, installing and \
+     rolling back from a person's account is not built yet: it needs the password \
+     confirmation `punarctl enroll start` uses, and no update method accepts one today.";
+
 /// M10 `--trigger` value punard sends to the data owner on an enrollment
 /// transition (milestone-10.md sections 3.3, 13.1).
 pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
@@ -1192,7 +1203,7 @@ fn update_check_ipc_error(error: UpdateCheckError) -> IpcError {
             format!(
                 "Punar could not reach its configured update source: {error}. The running release and verified cache were not changed.\n\
                  Policy: governed updates never fall through to another channel or an unverified mirror.\n\
-                 Next step: reconnect the configured update source and retry `sudo punarctl update check`."
+                 Next step: reconnect the configured update source and retry `punarctl update check`."
             ),
             json!({ "stage": stage }),
         );
@@ -1631,10 +1642,10 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "checking the governed update channel",
-                Some(RESOURCE),
-                "sudo punarctl update check",
+            return Err(IpcError::denied_root_only(
+                "Checking the governed update channel",
+                RESOURCE,
+                NO_PERSON_UPDATE_PATH,
             ));
         }
 
@@ -1736,7 +1747,7 @@ impl Inner {
                 format!(
                     "An AI agent may not replace or roll back the operating system.\n\
                      Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
-                     Next step: make the change yourself with `sudo punarctl update apply <version>` or `sudo punarctl update rollback`."
+                     Next step: leave it to a person; `punarctl update status` shows what is available."
                 ),
                 json!({
                     "decision": "deny",
@@ -1754,10 +1765,10 @@ impl Inner {
                 action,
                 "system_image",
             ));
-            return Err(IpcError::denied_needs_root(
-                "changing the operating-system boot slots",
-                Some("system_image"),
-                "sudo punarctl update apply <version>",
+            return Err(IpcError::denied_root_only(
+                "Changing the operating-system boot slots",
+                "system_image",
+                NO_PERSON_UPDATE_PATH,
             ));
         }
         Ok(actor)
@@ -2002,10 +2013,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation planning",
-                Some(RESOURCE),
-                "run the installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Planning an installation",
+                RESOURCE,
+                "use the installer on the Punar live medium, which runs as root there; \
+                 an installed device's accounts never plan a disk install.",
             ));
         }
         match self.installer.plan(params) {
@@ -2082,10 +2094,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation",
-                Some(RESOURCE),
-                "run the signed installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Installing Punar to a disk",
+                RESOURCE,
+                "use the signed installer on the Punar live medium, which runs as root \
+                 there; an installed device's accounts never write a disk install.",
             ));
         }
         let Some(_guard) = InstallGuard::acquire(&self.install_in_progress) else {
@@ -3660,10 +3673,12 @@ impl Inner {
                 "reconcile",
                 RESOURCE_CAPABILITY_REGISTRY,
             ));
-            return Err(IpcError::denied_needs_root(
-                "the capability registry (reconcile)",
-                Some(RESOURCE_CAPABILITY_REGISTRY),
-                "sudo punarctl reconcile",
+            return Err(IpcError::denied_root_only(
+                "Reconciling the capability registry",
+                RESOURCE_CAPABILITY_REGISTRY,
+                "none needed — punard reconciles on its own at boot and every two \
+                 minutes (punard-reconcile.timer). `punarctl status` shows when it \
+                 last ran; `punarctl policy explain <capability>` shows what it enforces.",
             ));
         }
 

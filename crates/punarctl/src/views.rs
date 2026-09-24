@@ -717,11 +717,16 @@ fn descriptor_rows(d: &model::Descriptor) -> Vec<Row> {
         ),
     ];
     if let Some(privilege) = &d.privilege_required {
+        // No person on a Punar device is root, so the way a person meets this
+        // requirement is a grant for exactly this capability.
         rows.push(Row::new(
             "Privilege",
             privilege,
             Slot::Neutral,
-            "run mutations as root · just-in-time elevation arrives in Milestone 9",
+            &format!(
+                "a person asks first · punarctl privilege request --capability {}",
+                d.capability
+            ),
         ));
     }
     if let Some(approval) = &d.approval_requirement {
@@ -2552,7 +2557,7 @@ pub fn network_policy(style: &Style, result: &Value, hostname: &str) -> Result<S
     ));
     out.push_str(&fmt::note(
         style,
-        "Strictest source wins · an absent rule denies · sudo punarctl network apply",
+        "Strictest source wins · an absent rule denies · punar-netd applies it as sessions start and end",
     ));
     Ok(out)
 }

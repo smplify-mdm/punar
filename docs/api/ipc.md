@@ -131,7 +131,7 @@ Success:
 Error (structured errors, spec section 61):
 
 ```json
-{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}
+{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}
 ```
 
 Exactly one of `result` / `error` is present. `error.message` is **human prose
@@ -242,6 +242,20 @@ gains two authorization rungs *around* the root-only rule — an AI
 authority path for agent-attributed peers (which is where
 `approval_required` is produced) and a time-boxed grant path for humans.
 Both are specified in §14.8; polkit itself is still not used.
+
+**No refusal tells a person to become root (2026-09).** A Punar device
+gives no person root: root is locked, nobody is in `wheel`, and Punar
+authors no sudoers rule (docs/design/onboarding.md §1.6). So a denial's
+next step is one a person can take — the grant for exactly that capability
+(`capabilities.set`), the password confirmation (`policy.set`,
+`enroll.start`, `enroll.stop`), what the device already does on its own
+(`reconcile`, `network.apply`), or, where no person's path exists, a plain
+statement of that and of who can act. A root-only method whose resource is
+not a registered capability (`reconcile`, `update.*`, `install.*`,
+`approvals.create`/`consume`) is refused with `details.resource`, never
+`details.capability`, and never offers `privilege request`, which would
+answer `not_found`. The `update.*` refusals say plainly that a person's path
+to installing updates is not built yet.
 
 ### 5.1 `status`
 
@@ -1464,7 +1478,10 @@ or path other than the confirmed target device. An installed system returns
 ## 7. Client behavior (`punarctl`)
 
 - Connects as the invoking user; never elevates itself; the *daemon* is the
-  authorization point. `sudo punarctl …` is the M3 way to run mutating verbs.
+  authorization point. No person on a Punar device is root, so a person's
+  mutating verbs carry a grant (`punarctl privilege request`) or a password
+  confirmation relayed to `punar-authd` (`policy set`, `enroll start`,
+  `enroll stop`).
 - Human output follows Plate D-014 (`docs/design/mockups/cli-grammar.html`):
   tracked-uppercase masthead + U+2500 rule, middle-dot separators, aligned
   columns, ANSI color only on status words; personal mode shows no org rows.

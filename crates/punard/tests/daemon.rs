@@ -1088,6 +1088,20 @@ fn update_check_is_root_only_authenticated_cached_and_audited() {
     assert_eq!(cached["result"]["cached"], true);
 }
 
+/// No person on a Punar device is root, no grant covers the update channel or
+/// the boot slots, and no update method takes a password confirmation yet.
+/// The refusal must say exactly that — never `sudo`, and never a
+/// `privilege request` for a resource that is not a capability.
+fn assert_says_no_person_can_update_yet(error: &Value, resource: &str) {
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("not built yet"), "{message}");
+    assert!(message.contains("punarctl update status"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+    assert!(!message.contains("privilege request"), "{message}");
+    assert_eq!(error["details"]["resource"], resource);
+    assert!(error["details"].get("capability").is_none(), "{error}");
+}
+
 #[test]
 fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
     let td = TestDaemon::start_update(
@@ -1100,6 +1114,7 @@ fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
     );
     let response = td.call("update.check", Some(json!({ "force": true })));
     assert_eq!(response["error"]["code"], "denied");
+    assert_says_no_person_can_update_yet(&response["error"], "update_channel");
     assert!(!td.state_path("update/verified-channel.json").exists());
     let event = td.audit_lines().pop().unwrap();
     assert_eq!(event["action"], "update.check");
@@ -1394,6 +1409,7 @@ fn update_apply_denies_non_root_before_release_or_slot_access() {
         })),
     );
     assert_eq!(response["error"]["code"], "denied");
+    assert_says_no_person_can_update_yet(&response["error"], "system_image");
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
     assert!(!td.state_path("update/pending-uefi.json").exists());
 }
@@ -1638,6 +1654,14 @@ fn reconcile_is_root_only_and_denials_are_audited() {
     let td = TestDaemon::start_as_uid(1000);
     let resp = td.call("reconcile", None);
     assert_eq!(resp["error"]["code"], "denied");
+    // Nobody on a Punar device is root, and nobody needs to be: the refusal
+    // says the device reconciles on its own, and offers no grant, because
+    // the registry as a whole is not a capability.
+    let message = resp["error"]["message"].as_str().unwrap();
+    assert!(message.contains("reconciles on its own"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+    assert!(!message.contains("privilege request"), "{message}");
+    assert_eq!(resp["error"]["details"]["resource"], "capability_registry");
     let ev = td.audit_lines().pop().unwrap();
     assert_schema_shaped(&ev);
     assert_eq!(ev["action"], "reconcile");

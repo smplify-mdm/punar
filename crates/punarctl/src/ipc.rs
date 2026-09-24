@@ -2,7 +2,8 @@
 //!
 //! The client sends exactly one request per connection and closes (contract
 //! section 2). It never elevates itself: the daemon is the authorization
-//! point, and `sudo punarctl …` is the M3 way to run mutating verbs.
+//! point. No person on a Punar device is root (onboarding.md section 1.6), so
+//! a person's mutating verbs carry a grant or a password confirmation instead.
 //!
 //! Failure surfaces in the SPEC section 73 voice — what happened, why, what
 //! the next step is; never a bare errno. Server-produced errors already
@@ -287,7 +288,9 @@ impl Client {
                 "permission denied — the control socket admits root and members of \
                  group punar only (personal defaults)"
                     .to_string(),
-                "re-run as root (sudo punarctl …) or from the punar session user".to_string(),
+                "run it from the account of this device's administrator, a member of \
+                 group punar"
+                    .to_string(),
             ),
             io::ErrorKind::ConnectionRefused => (
                 "nothing is listening on the control socket — the daemon is not running"

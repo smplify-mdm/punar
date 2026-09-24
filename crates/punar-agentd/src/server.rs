@@ -872,7 +872,7 @@ impl Inner {
                      Policy: os default — a ledger records what an agent did on one \
                      person's behalf, so it is read by that person, or by root (spec \
                      sections 21, 24.1).\n\
-                     Next step: ask that user, or run the command as root.",
+                     Next step: ask that user to do it.",
                     params.session_id
                 ),
                 json!({ "session_id": params.session_id }),
@@ -963,7 +963,7 @@ impl Inner {
                              it belongs to another user.\n\
                              Policy: os default — you may always delete your own ledger, \
                              and only your own (spec section 24.2).\n\
-                             Next step: ask that user, or run the command as root."
+                             Next step: ask that user to do it."
                         ),
                         json!({ "session_id": session_id }),
                     ));
@@ -1284,7 +1284,7 @@ impl Inner {
                     "Ending session {:?} was denied: it belongs to another user.\n\
                      Policy: os default — a session is ended by the user who started it, \
                      or by root.\n\
-                     Next step: ask that user, or run the command as root.",
+                     Next step: ask that user to do it.",
                     params.session_id
                 ),
                 json!({ "session_id": params.session_id }),
@@ -1412,7 +1412,7 @@ impl Inner {
                      another user.\n\
                      Policy: os default — an alert is put away by the person it is about, \
                      or by root (spec section 24.2).\n\
-                     Next step: ask that user, or run the command as root.",
+                     Next step: ask that user to do it.",
                     params.alert_id
                 ),
                 json!({ "alert_id": params.alert_id }),

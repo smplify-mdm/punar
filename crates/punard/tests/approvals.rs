@@ -943,6 +943,14 @@ fn an_unprivileged_peer_cannot_mint_approvals() {
         })),
     );
     assert_eq!(response["error"]["code"], "denied");
+    // Minting is for Punar's own services; the refusal says who raises
+    // approvals instead of telling a person to become root, and offers no
+    // grant, because `approvals` is not a capability.
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("by design"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+    assert!(!message.contains("privilege request"), "{message}");
+    assert_eq!(response["error"]["details"]["resource"], "approvals");
     assert!(
         daemon.call("approvals.list", None)["result"]["approvals"]
             .as_array()
@@ -1067,6 +1075,8 @@ fn an_approval_is_answered_only_by_the_user_it_is_routed_to() {
     let message = refused["error"]["message"].as_str().unwrap();
     assert!(message.contains("punar"), "{message}");
     assert!(message.contains("not other"), "{message}");
+    assert!(message.contains("expires at"), "{message}");
+    assert!(!message.contains("as root"), "{message}");
     // Reading it is still fine — a gate is not a secret.
     let got = daemon.call("approvals.get", Some(json!({ "approval_id": approval_id })));
     assert_eq!(got["result"]["approval"]["status"], "pending");
@@ -1093,6 +1103,9 @@ fn the_root_only_denial_points_at_a_command_that_exists() {
         "{message}"
     );
     assert!(!message.contains("Milestone 9"), "{message}");
+    // Nobody on a Punar device is root, so the grant is the only next step.
+    assert!(!message.contains("sudo"), "{message}");
+    assert!(!message.contains("as root"), "{message}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1279,7 @@ fn a_multi_line_reason_is_refused_at_creation() {
 /// may make exactly one kind of change. Then the window closes for real.
 #[test]
 fn a_grant_authorizes_one_capability_for_a_bounded_window() {
-    let user = TestDaemon::as_user(CONSOLE_UID);
+    let mut user = TestDaemon::as_user(CONSOLE_UID);
     // Without a grant: denied, in the unchanged M3 way.
     assert_eq!(user.set("disabled")["error"]["code"], "denied");
 
@@ -1341,10 +1354,25 @@ fn a_grant_authorizes_one_capability_for_a_bounded_window() {
         "the bar chip reads the same file the overlay does"
     );
 
+    // Someone else may not hand it back for them, and is told who can and
+    // when it ends anyway — never to become root, which nobody here is.
+    user.become_user(1001);
+    let foreign = user.call("privilege.revoke", Some(json!({ "grant_id": grant_id })));
+    assert_eq!(foreign["error"]["code"], "denied");
+    let message = foreign["error"]["message"].as_str().unwrap();
+    assert!(message.contains("belongs to punar"), "{message}");
+    assert!(message.contains("ends by itself at"), "{message}");
+    assert!(!message.contains("as root"), "{message}");
+    let refused = user.events("privilege.revoke");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0]["decision"], "deny");
+    user.become_user(CONSOLE_UID);
+
     // Handing it back early works, is audited, and ends the privilege.
     let revoked = user.call("privilege.revoke", Some(json!({ "grant_id": grant_id })));
     assert_eq!(revoked["result"]["revoked"], json!([grant_id]));
-    assert_eq!(user.events("privilege.revoke").len(), 1);
+    // The refused attempt above, then this one.
+    assert_eq!(user.events("privilege.revoke").len(), 2);
     assert!(
         user.summary()["grants"].as_array().unwrap().is_empty(),
         "a revoked grant leaves the bar chip immediately"

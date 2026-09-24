@@ -1011,7 +1011,7 @@ SYSTEM
   Channel         stable · metadata 2 h old · rollout 10% · this device is in
   Health          PASS · boot ok · services ok · session ok · capabilities verified
   Rollback        available → 2026.08.19.2 (slot B, blessed 2026-08-25)
-  Next step       Restart to apply, or: sudo punarctl update apply --reboot
+  Next step       Restart to apply
 
 BROWSER
   Engine          chromium 151.0.7922.169-1
@@ -1032,7 +1032,8 @@ Three states worth drawing, because they are where honesty lives:
                   capabilities: security.firewall did not verify
                   This release has not been marked good. It will be
                   reconsidered on the next restart.
-                  Next step: sudo punarctl reconcile
+                  Next step: none — punard re-verifies every two minutes;
+                  `punarctl policy explain security.firewall` shows why
 ```
 ```text
   Channel         stable · metadata 94 days old · this device has been offline
@@ -1051,7 +1052,15 @@ the user can change it, what the next step is. No `EPERM`.
   rule (§5.1) is that *the agent raises an approval, the human does not*.
   An approval gate on a personal device is a dialog the user grants to
   themselves — it teaches people to click through gates, which is the
-  opposite of what M9 is for. `sudo punarctl update apply` runs.
+  opposite of what M9 is for. `punarctl update apply` run as root runs.
+  **Amended 2026-09-24:** this bullet was written for a device whose owner
+  could `sudo`. A Punar device has no such account (onboarding.md §1.6),
+  no grant covers the boot slots, and no update method accepts a
+  re-authentication ticket yet, so today **no person can check, apply or
+  roll back from their own account**. The refusal says exactly that
+  rather than suggesting `sudo` (ipc.md §5, after the authorization
+  table). The fix is the `enroll.start` shape — a password confirmation
+  spent once — and it is open work, not a design choice.
 - **Agent-attributed peer: denied, fail closed, by the existing M9 path.**
   M9 §5.1 step 2 runs the AI authority path *before* the uid check
   precisely so root-ness cannot bypass AI policy (spec 60). Today no

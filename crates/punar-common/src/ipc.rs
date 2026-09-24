@@ -302,47 +302,64 @@ impl IpcError {
         }
     }
 
-    /// The canonical root-only denial (contract section 3.2 example; SPEC
-    /// section 73 voice). `target` names what was refused (usually a
-    /// capability id), `retry_command` is the full command to re-run as
-    /// root. When `capability` is given it is included in
-    /// `details.capability`.
+    /// The canonical denial of a non-root `capabilities.set` (contract section
+    /// 3.2 example; SPEC section 73 voice). `retry_command` is the command to
+    /// run again once the grant is live.
     ///
     /// The message deliberately contains both "administrator" and "personal
     /// defaults" — the section 74.4 in-VM check greps for exactly those.
     ///
-    /// **M9 amendment.** Since M3 this message has promised that
-    /// "just-in-time elevation arrives in Milestone 9". It has arrived, so
-    /// the message now names the command that exists — but only when the
-    /// refusal is about a **capability**, because a grant is per-capability
-    /// (SPEC section 48: no wildcard elevation). `reconcile` and the
-    /// enrollment mutations have no grant to ask for and keep pointing at
-    /// root, which is the honest answer for them.
-    pub fn denied_needs_root(target: &str, capability: Option<&str>, retry_command: &str) -> Self {
-        let mut details = json!({
-            "decision": "deny",
-            "policy_ids": [POLICY_PERSONAL_DEFAULTS],
-        });
-        if let (Some(map), Some(capability)) = (details.as_object_mut(), capability) {
-            map.insert("capability".to_string(), Value::String(capability.into()));
-        }
-        let next = match capability {
-            Some(capability) => format!(
-                "Next step: re-run as root: {retry_command}\n\
-                 Or ask for time-boxed privilege: \
-                 punarctl privilege request --capability {capability} --reason \"<why>\""
-            ),
-            None => format!("Next step: re-run as root: {retry_command}"),
-        };
+    /// THE NEXT STEP IS A GRANT, NEVER ROOT. Until 2026-09 this said "re-run as
+    /// root: sudo punarctl …", which no person on a Punar device can do: root
+    /// is locked, no account is in `wheel`, and Punar authors no sudoers rule
+    /// (docs/design/onboarding.md section 1.6). A grant is per capability (SPEC
+    /// section 48: no wildcard elevation), which is why this helper takes one
+    /// and why a refusal that is not about a registered capability uses
+    /// [`IpcError::denied_root_only`] instead.
+    pub fn denied_needs_grant(capability: &str, retry_command: &str) -> Self {
         IpcError::with_details(
             ErrorCode::Denied,
             format!(
-                "Changing {target} needs administrator privileges.\n\
+                "Changing {capability} needs administrator privileges.\n\
                  Policy: personal defaults — an ordinary user may hold privilege for a \
                  bounded window, never permanently (SPEC section 48).\n\
-                 {next}"
+                 Next step: ask for time-boxed privilege: punarctl privilege request \
+                 --capability {capability} --reason \"<why>\"; once you approve it, \
+                 run {retry_command} again."
             ),
-            details,
+            json!({
+                "decision": "deny",
+                "policy_ids": [POLICY_PERSONAL_DEFAULTS],
+                "capability": capability,
+            }),
+        )
+    }
+
+    /// The denial for a method only root may call, when there is no grant to
+    /// ask for: `resource` is not a registered capability, so offering
+    /// `privilege request` would send the person to a command that answers
+    /// `not_found`.
+    ///
+    /// No person on a Punar device is root (docs/design/onboarding.md section
+    /// 1.6), so the refusal must never tell them to become root. `next_step` is
+    /// the honest answer for this method: what the device already does on its
+    /// own, where to look, or, where nobody can do it by design, who does.
+    pub fn denied_root_only(target: &str, resource: &str, next_step: &str) -> Self {
+        IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "{target} needs administrator privileges that no account on this \
+                 device holds.\n\
+                 Policy: personal defaults — only root may do this, and Punar gives no \
+                 person root: root is locked and no account holds sudo \
+                 (docs/design/onboarding.md section 1.6).\n\
+                 Next step: {next_step}"
+            ),
+            json!({
+                "decision": "deny",
+                "policy_ids": [POLICY_PERSONAL_DEFAULTS],
+                "resource": resource,
+            }),
         )
     }
 
@@ -2284,35 +2301,58 @@ mod tests {
 
     #[test]
     fn denial_helper_matches_the_contract_voice() {
-        let err = IpcError::denied_needs_root(
+        let err = IpcError::denied_needs_grant(
             "system.hostname",
-            Some("system.hostname"),
-            "sudo punarctl capabilities set system.hostname <name>",
+            "punarctl capabilities set system.hostname <name>",
         );
         assert_eq!(err.code, ErrorCode::Denied);
         // The 74.4 in-VM check greps for these two strings.
         assert!(err.message.contains("administrator"));
         assert!(err.message.contains("personal defaults"));
         assert!(err.message.contains("Next step"));
-        // M9: the pointer that has said "Milestone 9" since M3 now names a
-        // command that exists.
+        // The grant is the next step, for exactly this capability.
         assert!(
             err.message
-                .contains("punarctl privilege request --capability")
+                .contains("punarctl privilege request --capability system.hostname --reason")
         );
         assert!(!err.message.contains("Milestone 9"));
-        // A refusal with no capability has no grant to offer, and says so
-        // by not offering one.
-        let no_cap = IpcError::denied_needs_root(
-            "the capability registry (reconcile)",
-            None,
-            "sudo punarctl reconcile",
-        );
-        assert!(!no_cap.message.contains("privilege request"));
         let details = err.details.unwrap();
         assert_eq!(details["capability"], "system.hostname");
         assert_eq!(details["decision"], "deny");
         assert_eq!(details["policy_ids"], json!(["personal-defaults"]));
+    }
+
+    /// No person on a Punar device is root: root is locked, nobody is in
+    /// `wheel`, and Punar authors no sudoers rule (onboarding.md section 1.6).
+    /// A refusal that told them to become root would send them nowhere.
+    #[test]
+    fn no_denial_tells_a_person_to_become_root() {
+        let grant = IpcError::denied_needs_grant(
+            "security.firewall",
+            "punarctl capabilities set security.firewall enabled",
+        );
+        let root_only = IpcError::denied_root_only(
+            "Reconciling the capability registry",
+            "capability_registry",
+            "none needed — punard reconciles on its own.",
+        );
+        for err in [&grant, &root_only] {
+            // Saying that nobody holds sudo is the point; advising it is not.
+            assert!(!err.message.contains("sudo punarctl"), "{}", err.message);
+            assert!(!err.message.contains("run as root"), "{}", err.message);
+            assert!(err.message.contains("personal defaults"), "{}", err.message);
+        }
+        // A refusal that is not about a registered capability offers no grant:
+        // `privilege request` for a resource name would answer not_found.
+        assert!(!root_only.message.contains("privilege request"));
+        let details = root_only.details.unwrap();
+        assert_eq!(details["resource"], "capability_registry");
+        assert!(details.get("capability").is_none());
+        assert!(
+            root_only
+                .message
+                .ends_with("Next step: none needed — punard reconciles on its own.")
+        );
     }
 
     // -- typed request round trips ------------------------------------------
@@ -3023,7 +3063,7 @@ mod tests {
     #[test]
     fn contract_error_example_parses() {
         // The docs/api/ipc.md section 3.2 error example, verbatim.
-        let line = r#"{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}"#;
+        let line = r#"{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}"#;
         let response = Response::parse_json_line(line).unwrap();
         match response.body {
             ResponseBody::Error(error) => {

@@ -334,7 +334,7 @@ fn managed_respond(request: &Value) -> Result<Value, Value> {
 
 /// The ipc.md section 3.2 denial example — the section 73 voice the real
 /// daemon sends a non-root `capabilities.set`.
-const DENIED_MESSAGE: &str = "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>";
+const DENIED_MESSAGE: &str = "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.";
 
 // ---------------------------------------------------------------------------
 // Mock daemon
@@ -1412,8 +1412,8 @@ fn agents_respond(request: &Value) -> Result<Value, Value> {
                     "code": "denied",
                     "message": "The access ledger for agt_someoneelse belongs to another \
                                 user.\nWhy: a ledger is personal data — only the session's \
-                                owner or root may read it.\nNext step: ask that user, or \
-                                re-run as root: sudo punarctl agents access agt_someoneelse",
+                                owner or root may read it.\nNext step: ask that user to do \
+                                it.",
                     "details": {"session_id": id}
                 })),
                 _ => Err(json!({

@@ -57,6 +57,17 @@ pub(super) fn contract_line(kind: ApprovalKind, capability: &str, resource: &str
     }
 }
 
+/// How a person makes a capability change an agent was refused: a grant for
+/// that one capability, then the typed call. Never `sudo` — no account on a
+/// Punar device holds it (docs/design/onboarding.md section 1.6) — and never
+/// from inside the agent's scope, where `privilege.request` is refused too.
+fn person_makes_the_change(id: &str, state_hint: &str) -> String {
+    format!(
+        "punarctl privilege request --capability {id} --reason \"<why>\", then \
+         punarctl capabilities set {id} {state_hint}"
+    )
+}
+
 /// Everything needed to raise one approval. Built by the caller that knows
 /// the domain; validated and bounded by [`Inner::create_approval`].
 pub(super) struct NewApproval {
@@ -386,10 +397,9 @@ impl Inner {
         if let Some((source_name, policy_id)) = pinning {
             return Err(IpcError::denied_org_pinned(id, &source_name, &policy_id));
         }
-        Err(IpcError::denied_needs_root(
+        Err(IpcError::denied_needs_grant(
             id,
-            Some(id),
-            &format!("sudo punarctl capabilities set {id} {state_hint}"),
+            &format!("punarctl capabilities set {id} {state_hint}"),
         ))
     }
 
@@ -422,8 +432,9 @@ impl Inner {
                      Policy: personal defaults — the AI authority document is \
                      {}.\n\
                      Next step: add a rule under ai.agents.default.host, or make the \
-                     change yourself: sudo punarctl capabilities set {id} {state_hint}",
-                    punar_common::aipolicy::AI_DEFAULTS_FILE
+                     change yourself, outside the agent: {}",
+                    punar_common::aipolicy::AI_DEFAULTS_FILE,
+                    person_makes_the_change(id, state_hint),
                 ),
                 json!({
                     "decision": "deny",
@@ -449,9 +460,10 @@ impl Inner {
                          Requested by: {session}\n\
                          Policy: {} ({}) — this capability is denied to agents, and \
                          approval is not available for it.\n\
-                         Next step: make the change yourself: \
-                         sudo punarctl capabilities set {id} {state_hint}",
-                        ruling.source_name, ruling.policy_id
+                         Next step: make the change yourself, outside the agent: {}",
+                        ruling.source_name,
+                        ruling.policy_id,
+                        person_makes_the_change(id, state_hint),
                     ),
                     json!({
                         "decision": "deny",
@@ -638,10 +650,13 @@ impl Inner {
                 "approval.create",
                 &params.capability,
             ));
-            return Err(IpcError::denied_needs_root(
+            return Err(IpcError::denied_root_only(
+                "Raising an approval directly",
                 "approvals",
-                None,
-                "sudo punarctl approvals ...",
+                "none from a person's account, by design — approvals are raised by \
+                 punard's own gate when a typed call needs one, and by the credential \
+                 broker; a person answers them. `punarctl approvals list` shows any \
+                 waiting for you.",
             ));
         }
         // The caller's citation when it has one (the broker evaluated the
@@ -755,9 +770,10 @@ impl Inner {
                 format!(
                     "{id} is waiting for {} to answer it, not {user}.\n\
                      Policy: personal defaults — an approval is routed to a person, and \
-                     only that person or an administrator may decide it.\n\
-                     Next step: ask {} to answer it, or re-run as root.",
-                    env.approval.user, env.approval.user
+                     only that person may decide it.\n\
+                     Next step: ask {} to answer it. Unanswered, it expires at {} and \
+                     changes nothing.",
+                    env.approval.user, env.approval.user, env.approval.expires_at
                 ),
                 json!({ "decision": "deny", "approval_id": id, "user": env.approval.user }),
             ));
@@ -970,10 +986,12 @@ impl Inner {
                 "approval.consume",
                 id,
             ));
-            return Err(IpcError::denied_needs_root(
-                "an approval",
-                None,
-                "sudo punarctl approvals ...",
+            return Err(IpcError::denied_root_only(
+                "Spending an approved credential request",
+                "approvals",
+                "none from a person's account, by design — only the credential broker \
+                 that raised the request spends it. `punarctl approvals get <id>` shows \
+                 where it stands.",
             ));
         }
         let mut store = self.approvals.lock().unwrap();
@@ -1222,10 +1240,12 @@ impl Inner {
                     return Err(IpcError::with_details(
                         ErrorCode::Denied,
                         format!(
-                            "{grant_id} belongs to another user.\n\
-                             Policy: personal defaults — a grant is revoked by its owner \
-                             or by an administrator.\n\
-                             Next step: re-run as root."
+                            "{grant_id} belongs to {}, not to you.\n\
+                             Policy: personal defaults — a grant is revoked by the person \
+                             who holds it.\n\
+                             Next step: ask {} to revoke it; otherwise it ends by itself \
+                             at {}.",
+                            grant.user, grant.user, grant.expires_at
                         ),
                         json!({ "decision": "deny", "grant_id": grant_id }),
                     ));
