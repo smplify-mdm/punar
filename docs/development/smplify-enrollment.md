@@ -272,12 +272,14 @@ enrolling person accepts it the way they accept the removal term.
   processes and command lines, and secrets. On a personal enrollment, the
   applications the person chose are never sent.
 
-The milestone-5 keys stay in punard's body beside these: the hostname,
-and each capability's current state. Smplify does not receive them from
-it. punar-smplifyd translates the body through a fixed allowlist and
-gathers nothing itself (§2): it sends the hostname once, at `/enroll`, and
-no capability value at all. The exact keys Smplify receives per tier are
-§3.3.
+punard's body carries neither the hostname nor any capability's value:
+the resend gate hashes the body, so a value that is never sent must not be
+in it, or changing it would send an inventory at the moment it changed. The
+milestone-5 `capabilities` list names each capability and whether it is
+supported, and nothing else. punar-smplifyd translates the body through a
+fixed allowlist and gathers nothing itself (§2): it sends the hostname
+once, at `/enroll`, and no capability value at all. The exact keys Smplify
+receives per tier are §3.3.
 
 **Decision.**
 
@@ -417,8 +419,8 @@ that carried a value, and when it was sent (docs/api/ipc.md §5.10);
 `punarctl enroll status` renders them under "Your organization can see". It
 is read from what left, not from this table, so it cannot show less than
 was sent. Against the development mock, which returns no `sent`, the record
-is the inventory the mock received, hostname and capability states
-included, and the person is shown exactly that.
+is the inventory the mock received (punard's body, which holds no hostname
+and no capability value), and the person is shown exactly that.
 
 **What an enterprise reviewer can verify.**
 

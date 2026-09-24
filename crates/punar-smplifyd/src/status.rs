@@ -100,9 +100,10 @@ pub fn compliance_status_body(device_id: &str, report: &Value) -> Value {
 
 /// The inventory body: punard's inventory, translated key by key into
 /// Smplify's `systemInfo` sections. What punard's inventory carries beyond
-/// the keys named below never leaves: the hostname (sent once, at `/enroll`),
-/// and each capability's observed value (`current_state`: the hostname
-/// string, the timezone), which is exactly what "category states only" keeps
+/// the keys named below never leaves. punard no longer hands over the
+/// hostname (sent once, at `/enroll`) or any capability's observed value
+/// (`current_state`: the hostname string, the timezone), and were either
+/// handed over, it would not be copied: "category states only" keeps them
 /// on the device. Per-capability states travel as `punar_compliance_*` facts
 /// in the compliance report.
 ///
@@ -416,9 +417,10 @@ mod tests {
         })
     }
 
-    /// punard's inventory in the shape it really sends, with everything the
-    /// organization must not receive: the hostname, capability values, and a
-    /// key this agent has never heard of.
+    /// punard's inventory in the shape it really sends, plus everything the
+    /// organization must not receive, as a punard that got it wrong would
+    /// send it: the hostname, capability values, and a key this agent has
+    /// never heard of.
     fn inventory() -> Value {
         json!({
             "os": {

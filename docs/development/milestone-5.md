@@ -367,17 +367,16 @@ timezone, nft contents, audit events, or anything behavioral. m5-check
 asserts the received line's key set **exactly** (jq allowlist) — absence of
 extra keys is a first-class privacy assertion, not a hope.
 
-**Inventory — device info + capability states, nothing behavioral**
+**Inventory — device info + which capabilities exist, nothing behavioral**
 (spec 50 "inventory"; spec 54 "software inventory" category):
 
 ```json
 {"os": {"id": "...", "version_id": "...", "pretty_name": "..."},
  "kernel": "...",
- "hostname": "...",
  "capabilities": [
-   {"capability": "security.firewall", "supported": true, "current_state": "enabled"},
-   {"capability": "system.hostname",   "supported": true, "current_state": "..."},
-   {"capability": "time.timezone",     "supported": true, "current_state": "UTC"}
+   {"capability": "security.firewall", "supported": true},
+   {"capability": "system.hostname",   "supported": true},
+   {"capability": "time.timezone",     "supported": true}
  ]}
 ```
 
@@ -387,6 +386,15 @@ changed**: SHA-256 of the canonically-serialized inventory is stored as
 `last_inventory_hash` in `enrollment.json`; the sync hook compares and
 skips (the hash gate). m5-check asserts the second reconcile grows the
 compliance file but not the inventory file.
+
+**The body holds only what may leave the device**, because the gate hashes
+it. It carries no hostname and no capability's observed value. Both were
+here once, and neither was ever sent to Smplify, but both moved the hash: a
+laptop that joined a network handing out another timezone sent a whole
+inventory at once, off its daily schedule, and so told the organization
+when its owner travelled. Capability states reach the organization only as
+the compliance report's category states; the hostname, once, at
+registration.
 
 **Managed-device sections (SMP-1405).** `crates/punard/src/inventory.rs`
 adds, beside the keys above, `os.architecture` and three sections, collected
@@ -427,16 +435,15 @@ from injectable procfs/sysfs/image paths:
   audited on the transition.
 
 Never in any tier: anything under `/home` or per user, addresses, network
-names, location or timezone (beyond the capability states above), users or
-sessions, usage samples, `/etc/machine-id`, base OS packages.
+names, location or timezone, the hostname, users or sessions, usage
+samples, `/etc/machine-id`, base OS packages.
 
 **What reaches Smplify is narrower than this body.** The built-in agent
 translates it key by key into Smplify's `systemInfo` sections through a
 fixed allowlist and gathers nothing (smplify-enrollment.md §3.3, the
-visibility manifest): `hostname` and every capability's `current_state` stay
-on the device, and so does anything the allowlist does not name. The
-development mock, which keeps what punard hands it, receives this body as
-shown.
+visibility manifest): `os.id`, `capabilities` and anything else the
+allowlist does not name stay on the device. The development mock, which
+keeps what punard hands it, receives this body as shown.
 
 **The person's record of what left** (SPEC section 24.2). After a successful
 send punard writes `/var/lib/punar/organization-view.json` (0640

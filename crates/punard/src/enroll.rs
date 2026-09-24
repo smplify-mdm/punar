@@ -977,12 +977,21 @@ struct OsRelease {
     image_version: Option<String>,
 }
 
-/// The inventory body (milestone-5.md section 6): device info, capability
-/// states, and what [`crate::inventory`] collected for this tier —
-/// `posture` and `hardware` for every managed device, `applications` limited
-/// to the image's own unless `organization_owned`, and `identifiers` only
-/// when it is. `capabilities` carries `{capability, supported,
-/// current_state}` per registered capability.
+/// The inventory body (milestone-5.md section 6): device info, which
+/// capabilities this device supports, and what [`crate::inventory`]
+/// collected for this tier — `posture` and `hardware` for every managed
+/// device, `applications` limited to the image's own unless
+/// `organization_owned`, and `identifiers` only when it is. `capabilities`
+/// carries `{capability, supported}` per registered capability.
+///
+/// It holds nothing that may not leave the device, because the resend gate
+/// hashes exactly this body. It once also carried the hostname and every
+/// capability's observed value (the hostname string, the timezone). Neither
+/// was ever sent to Smplify, but both moved the hash: a laptop that joined a
+/// network handing out another timezone sent a whole inventory at once, off
+/// its daily schedule, and so told the organization when its owner
+/// travelled. Capability states reach the organization only as the
+/// compliance report's category states; the hostname, once, at registration.
 ///
 /// The tier is applied here as well as in the collector, independently: this
 /// is the last place the body exists before it leaves, so a system-wide
@@ -994,8 +1003,7 @@ struct OsRelease {
 /// see ([`crate::inventory::MAX_APPLICATIONS`]).
 pub fn inventory_body(
     sources: &InventorySources,
-    hostname: &str,
-    capabilities: impl IntoIterator<Item = (String, bool, Value)>,
+    capabilities: impl IntoIterator<Item = (String, bool)>,
     collected: &Collected,
     organization_owned: bool,
 ) -> (Value, Option<Withheld>) {
@@ -1011,13 +1019,11 @@ pub fn inventory_body(
             "architecture": collected.architecture,
         },
         "kernel": sources.kernel(),
-        "hostname": hostname,
         "capabilities": capabilities
             .into_iter()
-            .map(|(capability, supported, current_state)| json!({
+            .map(|(capability, supported)| json!({
                 "capability": capability,
                 "supported": supported,
-                "current_state": current_state,
             }))
             .collect::<Vec<Value>>(),
         "posture": collected.posture,
@@ -1151,11 +1157,10 @@ mod tests {
         }
     }
 
-    const PERSONAL_KEYS: [&str; 7] = [
+    const PERSONAL_KEYS: [&str; 6] = [
         "applications",
         "capabilities",
         "hardware",
-        "hostname",
         "kernel",
         "os",
         "posture",
@@ -1170,7 +1175,7 @@ mod tests {
         let sources = fixture_sources(&dir);
         let collected = collected();
 
-        let (personal, withheld) = inventory_body(&sources, "h", [], &collected, false);
+        let (personal, withheld) = inventory_body(&sources, [], &collected, false);
         assert_eq!(withheld, None);
         assert_eq!(sorted_keys(&personal), PERSONAL_KEYS);
         assert_eq!(
@@ -1231,7 +1236,7 @@ mod tests {
         );
         assert!(!text.contains("firefox"), "no app the person chose");
 
-        let (owned, withheld) = inventory_body(&sources, "h", [], &collected, true);
+        let (owned, withheld) = inventory_body(&sources, [], &collected, true);
         assert_eq!(withheld, None);
         let mut keys = PERSONAL_KEYS.to_vec();
         keys.push("identifiers");
@@ -1251,30 +1256,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The new sections carry facts, never values that locate or identify a
-    /// person: no hostname, no timezone, no addresses, nothing from /home.
+    /// The body carries facts, never values that locate or identify a
+    /// person: no hostname and no capability value (there is no parameter
+    /// left to hand one over), no addresses, nothing from /home. A capability
+    /// is named with whether it is supported, and nothing else.
     #[test]
-    fn the_collected_sections_carry_no_personal_values() {
+    fn the_body_carries_no_personal_values() {
         let dir = tmp("no-values");
         let sources = fixture_sources(&dir);
         let (body, _) = inventory_body(
             &sources,
-            "alices-laptop",
-            [(
-                "time.timezone".to_string(),
-                true,
-                Value::String("Europe/Berlin".into()),
-            )],
+            [("time.timezone".to_string(), true)],
             &collected(),
             true,
         );
-        for section in ["posture", "hardware", "applications", "identifiers"] {
-            let text = body[section].to_string();
-            for forbidden in ["alices-laptop", "Europe/Berlin", "/home", "machine-id"] {
-                assert!(!text.contains(forbidden), "{section} carries {forbidden}");
-            }
-            assert!(!looks_like_mac_or_ipv4(&text), "{section}: {text}");
+        assert_eq!(
+            body["capabilities"],
+            json!([{"capability": "time.timezone", "supported": true}])
+        );
+        let text = body.to_string();
+        for forbidden in ["hostname", "current_state", "/home", "machine-id"] {
+            assert!(!text.contains(forbidden), "the body carries {forbidden}");
         }
+        assert!(!looks_like_mac_or_ipv4(&text), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1317,13 +1321,13 @@ mod tests {
                 managed: false,
             })
             .collect());
-        let (body, withheld) = inventory_body(&sources, "h", [], &collected, false);
+        let (body, withheld) = inventory_body(&sources, [], &collected, false);
         assert_eq!(withheld, Some(Withheld::TooLarge));
         assert_eq!(body["applications"], Value::Null);
         assert!(serde_json::to_vec(&body).unwrap().len() <= MAX_INVENTORY_BYTES);
 
         collected.applications = Err(Withheld::Unreadable);
-        let (body, withheld) = inventory_body(&sources, "h", [], &collected, true);
+        let (body, withheld) = inventory_body(&sources, [], &collected, true);
         assert_eq!(withheld, Some(Withheld::Unreadable));
         assert_eq!(body["applications"], Value::Null);
         assert_eq!(body["identifiers"]["serial_number"], "PNR-SERIAL-0042");
@@ -1341,12 +1345,7 @@ mod tests {
         let compose = |collected: &Collected, owned: bool| {
             let (inventory, withheld) = inventory_body(
                 &sources,
-                "alices-laptop",
-                [(
-                    "time.timezone".to_string(),
-                    true,
-                    Value::String("Europe/Berlin".into()),
-                )],
+                [("time.timezone".to_string(), true)],
                 collected,
                 owned,
             );
@@ -1393,12 +1392,7 @@ mod tests {
                 ["hardware", "os", "security", "software"]
             );
             let text = body.to_string();
-            for forbidden in [
-                "alices-laptop",
-                "Europe/Berlin",
-                "hostname",
-                "current_state",
-            ] {
+            for forbidden in ["hostname", "current_state", "capabilities"] {
                 assert!(!text.contains(forbidden), "{forbidden} reached Smplify");
             }
             assert!(!looks_like_mac_or_ipv4(&text), "{text}");
@@ -1458,12 +1452,7 @@ mod tests {
         let sources = fixture_sources(&dir);
         let (inventory, _) = inventory_body(
             &sources,
-            "alices-laptop",
-            [(
-                "time.timezone".to_string(),
-                true,
-                Value::String("Europe/Berlin".into()),
-            )],
+            [("time.timezone".to_string(), true)],
             &collected(),
             false,
         );
@@ -1487,14 +1476,7 @@ mod tests {
         );
         assert_eq!(view.categories[3].counts.get("installedPackages"), Some(&1));
         let text = serde_json::to_string(&view).unwrap();
-        for value in [
-            "alices-laptop",
-            "Europe/Berlin",
-            "QEMU",
-            "PNR-SERIAL-0042",
-            "org.punar.Mail",
-            "hostname",
-        ] {
+        for value in ["QEMU", "PNR-SERIAL-0042", "org.punar.Mail", "hostname"] {
             assert!(!text.contains(value), "the summary carries {value}");
         }
 
@@ -1846,12 +1828,7 @@ mod tests {
         };
         let (inventory, _) = inventory_body(
             &sources,
-            "punar-desktop",
-            [(
-                "security.firewall".to_string(),
-                true,
-                Value::String("enabled".into()),
-            )],
+            [("security.firewall".to_string(), true)],
             &collected(),
             false,
         );
@@ -1861,19 +1838,17 @@ mod tests {
         assert_eq!(inventory["os"]["image_id"], Value::Null);
         assert_eq!(inventory["os"]["image_version"], Value::Null);
         assert_eq!(inventory["kernel"], "6.12.0-punar");
-        assert_eq!(inventory["hostname"], "punar-desktop");
+        assert_eq!(inventory.get("hostname"), None);
         assert_eq!(
-            inventory["capabilities"][0]["capability"],
-            "security.firewall"
+            inventory["capabilities"],
+            json!([{"capability": "security.firewall", "supported": true}])
         );
-        assert_eq!(inventory["capabilities"][0]["supported"], true);
-        assert_eq!(inventory["capabilities"][0]["current_state"], "enabled");
 
         let absent = InventorySources {
             os_release_path: dir.join("missing"),
             kernel_release_path: dir.join("also-missing"),
         };
-        let (degraded, _) = inventory_body(&absent, "h", [], &collected(), false);
+        let (degraded, _) = inventory_body(&absent, [], &collected(), false);
         assert_eq!(degraded["os"]["id"], "unknown");
         assert_eq!(degraded["kernel"], "unknown");
 
@@ -1890,7 +1865,7 @@ mod tests {
             os_release_path: punar,
             kernel_release_path: dir.join("osrelease"),
         };
-        let (inventory, _) = inventory_body(&sid, "h", [], &collected(), false);
+        let (inventory, _) = inventory_body(&sid, [], &collected(), false);
         assert_eq!(inventory["os"]["version_id"], "unknown");
         assert_eq!(inventory["os"]["image_id"], "punar-desktop");
         assert_eq!(inventory["os"]["image_version"], "2026.09.01.1");

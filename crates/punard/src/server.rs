@@ -5471,16 +5471,6 @@ impl Inner {
         }))
     }
 
-    /// The hostname as observed by the registry (shared by `status` and
-    /// the inventory builder).
-    fn observed_hostname(&self) -> String {
-        self.registry
-            .get(crate::backends::hostname::CAPABILITY_ID)
-            .and_then(|cap| cap.observe().ok())
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
     /// Keep what the organization just received as the person's view of it
     /// (SPEC section 24.2). A failure to write it is logged and costs nothing
     /// else: the send happened, and `enroll.status` then says nothing was
@@ -5570,31 +5560,24 @@ impl Inner {
         self.pending_compliance
             .store(!compliance_ok, Ordering::SeqCst);
 
-        // Inventory: device facts, capability and posture states, and the
-        // tier's applications. Sent when its hash changed, when a resend is
-        // pending, or when a day has passed without one.
+        // Inventory: device facts, which capabilities are supported, posture
+        // states, and the tier's applications. Sent when its hash changed,
+        // when a resend is pending, or when a day has passed without one.
         let sources = InventorySources {
             os_release_path: self.cfg.os_release_path.clone(),
             kernel_release_path: self.cfg.kernel_release_path.clone(),
         };
-        let capabilities: Vec<(String, bool, Value)> = self
-            .registry
-            .iter()
-            .map(|cap| {
-                let descriptor = self.describe(cap);
-                (
-                    descriptor.capability.as_str().to_string(),
-                    descriptor.supported,
-                    descriptor.current_state,
-                )
-            })
-            .collect();
+        let descriptors: Vec<_> = self.registry.iter().map(|cap| self.describe(cap)).collect();
         // The firewall's posture is the observation this pass already made,
-        // not a second nft run.
-        let firewall_state = capabilities
+        // not a second nft run. It reaches the body only as a posture state:
+        // no capability's observed value is in the body (see inventory_body).
+        let firewall_state = descriptors
             .iter()
-            .find(|(id, ..)| id == crate::backends::firewall::CAPABILITY_ID)
-            .map(|(_, _, state)| state.clone());
+            .find(|d| d.capability.as_str() == crate::backends::firewall::CAPABILITY_ID)
+            .map(|d| d.current_state.clone());
+        let capabilities = descriptors
+            .iter()
+            .map(|d| (d.capability.as_str().to_string(), d.supported));
         let collected = self.inventory.collect(
             &PassInputs {
                 organization_owned: enrollment.organization_owned,
@@ -5610,12 +5593,14 @@ impl Inner {
         );
         let (inventory, withheld) = inventory_body(
             &sources,
-            &self.observed_hostname(),
             capabilities,
             &collected,
             enrollment.organization_owned,
         );
         self.audit_applications_withheld(actor, withheld, &enrollment);
+        // The gate hashes exactly the body the control plane is handed,
+        // which carries nothing that may not leave the device: a value that
+        // is never sent must never be able to trigger a send.
         let hash = sha256_hex(&serde_json::to_vec(&inventory).expect("inventory serializes"));
         let now = utc_now_rfc3339();
         let must_send = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())

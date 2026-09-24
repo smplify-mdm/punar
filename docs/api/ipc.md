@@ -848,7 +848,7 @@ a field carried a list, how many rows it had. Names only, never values.
 Against Smplify the categories are the `systemInfo` sections the built-in
 agent posted (docs/development/smplify-enrollment.md §3.3); against the
 development mock they are punard's own inventory sections, with values that
-belong to no section (`hostname`, `kernel`, `capabilities`, `applications`)
+belong to no section (`kernel`, `capabilities`, `applications`)
 listed under `device`. Present exactly when enrolled; before the first
 successful send, or when the record belongs to another enrollment, it is
 `{"sent_at": null, "categories": []}`.

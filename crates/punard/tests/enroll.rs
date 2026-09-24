@@ -666,12 +666,11 @@ fn assert_personal_inventory(body: &Value) {
             "applications",
             "capabilities",
             "hardware",
-            "hostname",
             "kernel",
             "os",
             "posture"
         ],
-        "no identifiers on a personal enrollment"
+        "no identifiers on a personal enrollment, and never the hostname"
     );
     assert_eq!(
         sorted_keys(&body["os"]),
@@ -690,10 +689,12 @@ fn assert_personal_inventory(body: &Value) {
         Some("x86_64" | "aarch64")
     ));
     assert_eq!(body["kernel"], "6.12.0-punar");
-    assert_eq!(body["capabilities"].as_array().unwrap().len(), 1);
-    assert_eq!(body["capabilities"][0]["capability"], "security.firewall");
-    assert_eq!(body["capabilities"][0]["supported"], true);
-    assert_eq!(body["capabilities"][0]["current_state"], "enabled");
+    // Which capabilities exist, never what they observe: a value is not a
+    // state, and it never leaves the device.
+    assert_eq!(
+        body["capabilities"],
+        json!([{"capability": "security.firewall", "supported": true}])
+    );
 
     assert_eq!(
         body["posture"],
@@ -1849,6 +1850,69 @@ fn an_unchanged_inventory_is_resent_after_a_day_and_only_a_success_moves_the_clo
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 2);
 }
 
+/// The resend gate hashes what can leave the device and nothing else. The
+/// hostname and a capability's value — the timezone a network hands out when
+/// its owner travels — are never sent, so changing them sends no inventory:
+/// one sent off its daily schedule would tell the organization when they
+/// changed. The compliance report of the same pass still goes out.
+#[test]
+fn a_changed_hostname_or_timezone_sends_no_inventory() {
+    let dir = test_dir("never-sent-values");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        vec![
+            MockCapability::new("system.hostname", json!("atlas")),
+            MockCapability::new("time.timezone", json!("America/New_York")),
+        ],
+        |_| {},
+    );
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    let first = control_plane.state.inventory.lock().unwrap()[0]["inventory"].clone();
+    assert_eq!(first.get("hostname"), None);
+    assert_eq!(
+        first["capabilities"],
+        json!([
+            {"capability": "security.firewall", "supported": true},
+            {"capability": "system.hostname", "supported": true},
+            {"capability": "time.timezone", "supported": true},
+        ])
+    );
+    let text = first.to_string();
+    for value in ["atlas", "America/New_York"] {
+        assert!(!text.contains(value), "the inventory carries {value}");
+    }
+
+    // The person travels and renames the laptop.
+    let compliance = control_plane.state.compliance.lock().unwrap().len();
+    for (capability, value) in [
+        ("time.timezone", "Europe/Berlin"),
+        ("system.hostname", "atlas-berlin"),
+    ] {
+        daemon.result(
+            "capabilities.set",
+            Some(json!({"capability": capability, "desired_state": value})),
+        );
+    }
+    daemon.result("reconcile", None);
+    assert!(
+        control_plane.state.compliance.lock().unwrap().len() > compliance,
+        "the pass ran and reported compliance"
+    );
+    assert_eq!(
+        control_plane.state.inventory.lock().unwrap().len(),
+        1,
+        "nothing that can leave the device changed"
+    );
+    let lines = control_plane.state.lines.lock().unwrap().join("");
+    for value in ["atlas", "Berlin", "America/New_York"] {
+        assert!(!lines.contains(value), "{value} reached the control plane");
+    }
+}
+
 /// A local, signed stable channel whose head (2026.08.27.1) is newer than
 /// the running release (2026.08.20.1), so a person's `update check` finds an
 /// update and caches the verified document.
@@ -1982,7 +2046,6 @@ fn an_organization_owned_enrollment_adds_the_serial_and_system_apps() {
             "applications",
             "capabilities",
             "hardware",
-            "hostname",
             "identifiers",
             "kernel",
             "os",
@@ -2615,13 +2678,11 @@ fn the_organization_view_changes_only_when_a_send_succeeds() {
                 )
             })
             .collect();
-        // The mock keeps punard's own inventory, hostname and capability
-        // states included, and the person is told so.
+        // The mock keeps punard's own inventory, and the person is told
+        // what is in it: which capabilities exist, never a hostname or a
+        // capability's value, because the body carries none.
         assert_eq!(categories[0].0, "device");
-        assert_eq!(
-            categories[0].1,
-            ["applications", "capabilities", "hostname", "kernel"]
-        );
+        assert_eq!(categories[0].1, ["applications", "capabilities", "kernel"]);
         assert_eq!(
             view["categories"][0]["counts"],
             json!({"applications": 2, "capabilities": 1})

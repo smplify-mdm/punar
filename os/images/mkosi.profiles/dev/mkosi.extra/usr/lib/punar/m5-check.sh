@@ -329,17 +329,17 @@ tail -n 1 "${RI_FILE}" > "${RUN_DIR}/m5-received-inventory-last.json" 2>/dev/nul
 # The personal tier (no organization-owned term exists yet): device facts,
 # posture states and the image's own applications — no identifiers section,
 # and no application a person installed.
-jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key allowlists (device info + capability and posture states, image applications only, no identifiers)" \
+jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key allowlists (device info + supported capabilities + posture states, image applications only, no identifiers, no hostname, no capability values)" \
     "${RUN_DIR}/m5-received-inventory-last.json" \
     "(keys | sort) == [\"device_id\", \"inventory\", \"received_at\"]
      and .device_id == \"${DEVICE_ID}\"
-     and (.inventory | keys | sort) == [\"applications\", \"capabilities\", \"hardware\", \"hostname\", \"kernel\", \"os\", \"posture\"]
+     and (.inventory | keys | sort) == [\"applications\", \"capabilities\", \"hardware\", \"kernel\", \"os\", \"posture\"]
      and (.inventory.os | keys | sort) == [\"architecture\", \"id\", \"image_id\", \"image_version\", \"pretty_name\", \"version_id\"]
      and (.inventory.os.id | length) > 0
      and (.inventory.os.architecture == \"x86_64\" or .inventory.os.architecture == \"aarch64\")
      and (.inventory.kernel | length) > 0
      and (.inventory.capabilities | length) == 6
-     and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"current_state\", \"supported\"]))
+     and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"supported\"]))
      and (.inventory.posture | keys | sort) == [\"disk_encryption_enabled\", \"firewall\", \"firewall_enabled\", \"is_virtual\", \"os_patch_status\", \"reboot_required\", \"secure_boot\", \"tpm_present\", \"tpm_version\", \"uefi\", \"virtualization\"]
      and (.inventory.posture.os_patch_status == \"up-to-date\" or .inventory.posture.os_patch_status == \"updates-available\" or .inventory.posture.os_patch_status == \"unknown\")
      and .inventory.posture.firewall == \"nftables\"
@@ -400,12 +400,12 @@ else
     FAILED=1
 fi
 "${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-view.json" 2>&1
-jq_check "enroll status: organization view names the sent sections, never values" \
+jq_check "enroll status: organization view names the sent sections, never values, never a hostname" \
     "${RUN_DIR}/m5-enroll-status-view.json" \
     "(.organization_view.sent_at | type) == \"string\"
      and ([.organization_view.categories[].category] == [\"device\", \"hardware\", \"os\", \"posture\"])
      and (.organization_view.categories | all((keys - [\"counts\"] | sort) == [\"category\", \"fields\"]))
-     and (.organization_view.categories[0].fields | index(\"hostname\")) != null"
+     and .organization_view.categories[0].fields == [\"applications\", \"capabilities\", \"kernel\"]"
 "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-b.json" 2>&1
 rc_count_b="$(line_count "${RC_FILE}")"
 if [ "${rc_count_b}" -gt "${rc_count_a}" ]; then

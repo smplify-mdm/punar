@@ -449,12 +449,13 @@ fn compliance_report_requires_a_valid_token_and_object_report() {
 fn inventory_reports_append_to_their_own_log() {
     let mock = TestMock::start("inventory");
     let token = mock.enroll();
+    // punard's shape: no hostname and no capability value, which never
+    // leave the device (docs/development/milestone-5.md section 6).
     let inventory = json!({
         "os": {"id": "punar", "version_id": "0.5"},
         "kernel": "6.12.0",
-        "hostname": "punar-m5",
         "capabilities": [
-            {"capability": "security.firewall", "supported": true, "current_state": "enabled"},
+            {"capability": "security.firewall", "supported": true},
         ],
     });
     let result = mock.call_ok(
